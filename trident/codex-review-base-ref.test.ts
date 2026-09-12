@@ -60,12 +60,18 @@ function promotionBlock(): string {
   return block
 }
 
-/** What the shipped block leaves `BASE_REF` as, for `arg`, in `repo`. */
-async function promote(repo: string, arg: string): Promise<string> {
+/** The shipped block's raw outcome for `arg` in `repo` — exit code and streams. */
+async function runBlock(repo: string, arg: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const script = `set -uo pipefail\nset -- ${JSON.stringify(arg)}\n${promotionBlock()}\nprintf %s "$BASE_REF"\n`
   const res = await spawnCapture(['bash', '-c', script], repo)
+  return { ok: res.ok, stdout: res.stdout.trim(), stderr: res.stderr }
+}
+
+/** What the shipped block leaves `BASE_REF` as, for `arg`, in `repo`. */
+async function promote(repo: string, arg: string): Promise<string> {
+  const res = await runBlock(repo, arg)
   if (!res.ok) throw new Error(`promotion block failed: ${res.stderr}`)
-  return res.stdout.trim()
+  return res.stdout
 }
 
 interface World {
@@ -154,11 +160,26 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     expect(await git(w.repo, 'rev-parse', 'release')).toBe(w.local)
   })
 
-  test('an AMBIGUOUS name — both a branch and a tag — is left alone', async () => {
-    // git itself refuses to guess between `refs/heads/x` and `refs/tags/x`; so does this.
+  test('an AMBIGUOUS name — both a branch and a tag — is REFUSED, not passed through', async () => {
+    // THIS USED TO BE "left alone", on the reasoning that promoting would be a guess.
+    // Leaving it alone is also a guess — GIT's — and git prefers `refs/tags/` over
+    // `refs/heads/`, so the review would have run against the TAG with only a
+    // `warning: refname … is ambiguous` on a stderr this wrapper sends to /dev/null.
     const w = await seedWorld()
     await git(w.repo, 'update-ref', 'refs/heads/release', w.local)
-    expect(await promote(w.repo, 'release')).toBe('release')
+    // The ambiguity is real in this repo, and the two refs disagree about the commit —
+    // otherwise the refusal would be protecting nothing.
+    expect(await git(w.repo, 'rev-parse', 'refs/tags/release')).toBe(w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/heads/release')).toBe(w.local)
+    const res = await runBlock(w.repo, 'release')
+    expect({ ok: res.ok, stdout: res.stdout }).toEqual({ ok: false, stdout: '' })
+    // The message has to name BOTH refs and the way out, or the operator is left with an
+    // exit code and a guess of their own.
+    expect(res.stderr).toContain('refs/heads/release')
+    expect(res.stderr).toContain('refs/tags/release')
+    expect(res.stderr).toContain('AMBIGUOUS')
+    // …and the unambiguous sibling still passes, so the refusal is not "refuse everything".
+    expect(await promote(w.repo, 'main')).toBe('refs/remotes/origin/main')
   })
 
   test('every other kind of argument is kept VERBATIM', async () => {
@@ -173,17 +194,36 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     }
   })
 
-  test('a local branch with NO remote counterpart is kept — there is nothing to promote to', async () => {
+  test('a local branch with NO remote counterpart is QUALIFIED — the fallback, same rigour', async () => {
+    // It used to be "kept" — the bare word, which is exactly what a tag of that name would
+    // capture later. There is nothing to promote TO, but there is still a ref to NAME.
     const w = await seedWorld()
     await git(w.repo, 'branch', 'solo', w.local)
-    expect(await promote(w.repo, 'solo')).toBe('solo')
+    expect(await promote(w.repo, 'solo')).toBe('refs/heads/solo')
+    expect(await git(w.repo, 'rev-parse', await promote(w.repo, 'solo'))).toBe(w.local)
   })
 
-  test('a repository with no remote-tracking refs at all promotes nothing', async () => {
+  test('a repository with no remote-tracking refs at all still names the local branch in full', async () => {
     const w = await seedWorld()
     for (const ref of ['refs/remotes/origin/main', 'refs/remotes/origin/release']) {
       await git(w.repo, 'update-ref', '-d', ref)
     }
-    expect(await promote(w.repo, 'main')).toBe('main')
+    expect(await promote(w.repo, 'main')).toBe('refs/heads/main')
+  })
+
+  test('A TAG PLANTED LATER CANNOT CAPTURE THE FALLBACK — the degraded world, measured', async () => {
+    // The fallback runs when the environment is already unusual, which is where a stray tag
+    // is likeliest. With `refs/heads/solo` qualified, a tag `solo` appearing afterwards
+    // changes nothing about what the review diffs against — the bare word would have moved.
+    const w = await seedWorld()
+    await git(w.repo, 'branch', 'solo', w.local)
+    await git(w.repo, 'tag', 'solo-tag-target', w.remote)
+    const qualified = await promote(w.repo, 'solo')
+    expect(qualified).toBe('refs/heads/solo')
+    // git resolves the QUALIFIED name to the branch even with a same-named tag present…
+    await git(w.repo, 'update-ref', 'refs/tags/solo', w.remote)
+    expect(await git(w.repo, 'rev-parse', qualified)).toBe(w.local)
+    // …while the bare word it used to hand back now resolves to the TAG: a different commit.
+    expect(await git(w.repo, 'rev-parse', 'solo')).toBe(w.remote)
   })
 })

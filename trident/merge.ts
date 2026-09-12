@@ -280,7 +280,7 @@ export async function detectBaseBranch(
 export async function diffBaseRef(
   base_branch: string,
   base_sha: string | null | undefined,
-  origin_base_resolves: () => Promise<boolean>,
+  ref_resolves: (ref: string) => Promise<boolean>,
 ): Promise<string> {
   if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
@@ -381,7 +381,15 @@ export async function diffBaseRef(
   }
   // THE PROBE IS INVOKED HERE AND NOWHERE ELSE — after the pin, after both refusals, on
   // the one arm whose answer depends on it.
-  // THE FULLY QUALIFIED REF, because that is the one `originBaseResolves` verified.
+  // THE FULLY QUALIFIED REF AT BOTH ARMS, because that is what was verified — and because
+  // the FALLBACK deserves the same rigour as the primary path, not less. It is reached
+  // precisely when the environment is unusual (a fresh clone, no remote, a detached CI
+  // checkout), which is also when a stray tag is most likely to exist and least likely to be
+  // noticed: `refs/heads/main` and `refs/tags/main` can coexist, and `main..HEAD` then
+  // resolves to the TAG, exit 0, warning on a stderr the wrappers send to /dev/null.
+  //
+  // Round seventeen fixed the resolving arm and left this one — the degraded path is the one
+  // that runs when things are already wrong.
   //
   // This returned the shorthand `origin/<name>` for sixteen rounds while verifying
   // `refs/remotes/origin/<name>^{commit}` — a value verified in one form and returned in
@@ -396,7 +404,15 @@ export async function diffBaseRef(
   // which is #546's own defect arriving through the RETURN FORM. The warning goes to stderr,
   // which both wrappers send to /dev/null. Same shape as `fstat` on a path instead of on the
   // descriptor you hold.
-  return (await origin_base_resolves()) ? `refs/remotes/origin/${name}` : name
+  if (await ref_resolves(`refs/remotes/origin/${name}`)) return `refs/remotes/origin/${name}`
+  // THE FALLBACK, QUALIFIED. `refs/heads/<name>` is the base of record when no
+  // remote-tracking ref resolves, and naming it in full is the difference between "the local
+  // branch" and "whatever git picks for that word".
+  if (await ref_resolves(`refs/heads/${name}`)) return `refs/heads/${name}`
+  // THE LAST RESORT: neither ref exists. There is nothing better to name — git will say so
+  // when the range runs, loudly, because an unknown revision is a real error rather than a
+  // silently-resolved wrong one.
+  return name
 }
 
 /**
@@ -454,21 +470,26 @@ export class TridentOptionShapedBaseError extends Error {
 }
 
 /**
- * Does `refs/remotes/origin/<base>` name a commit in this repository?
+ * Does `<ref>` name a commit in this repository?
  *
- * The one input `diffBaseRef` cannot derive from what a caller already holds, split out
- * so `diffBaseRef` holds only the ORDER and never the I/O — it invokes this through a thunk
- * on the one arm that needs an answer. Fail-closed toward the BARE NAME: a probe that cannot run
- * answers false, which yields the behaviour this repository had before #546 rather than a
- * range against a ref that may not exist — an unresolvable base makes `git diff` fail and
- * the caller reports "could not be read", which is louder but wrong more often.
+ * The one input `diffBaseRef` cannot derive from what a caller already holds, split out so
+ * `diffBaseRef` holds only the ORDER and never the I/O — it invokes this through a thunk, on
+ * the arms that need an answer. Fail-closed toward the LESS QUALIFIED form: a probe that
+ * cannot run answers false, which yields the behaviour this repository had before #546 rather
+ * than a range against a ref that may not exist.
+ *
+ * IT TAKES A WHOLE REF, not a base branch name, since round eighteen: `diffBaseRef` now asks
+ * it twice — `refs/remotes/origin/<base>` first, then `refs/heads/<base>` — because the
+ * FALLBACK had the same ambiguity the primary path had just been fixed for. It was
+ * `originBaseResolves(run_host, repo, base)` and composed the origin ref itself, which meant
+ * the second question could not be asked through it at all.
  */
-export async function originBaseResolves(
+export async function refResolves(
   run_host: RunHostCommand,
   repo_path: string,
-  base_branch: string,
+  ref: string,
 ): Promise<boolean> {
-  const name = base_branch.trim()
+  const name = ref.trim()
   // Still declines to probe an option-shaped name — `git rev-parse ... "-x^{commit}"`
   // is its own argv hazard — but that is no longer load-bearing for SAFETY: `diffBaseRef`
   // now REFUSES such a name outright rather than falling through to it. See the argument
@@ -476,7 +497,7 @@ export async function originBaseResolves(
   if (name.length === 0 || name.startsWith('-')) return false
   try {
     const res = await run_host(
-      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${name}^{commit}`],
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`],
       repo_path,
     )
     return res.ok && /^[0-9a-f]{40}$/.test(res.stdout.trim().toLowerCase())

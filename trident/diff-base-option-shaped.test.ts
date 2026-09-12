@@ -2,7 +2,7 @@
  * AN OPTION-SHAPED BASE REF, at the binding and at every consumer (#546).
  *
  * ── THE DEFECT, AND WHY IT WAS SELF-INFLICTED ─────────────────────────
- * `originBaseResolves` declined to PROBE a name beginning with `-`. That read as a safety
+ * `refResolves` (then `originBaseResolves`) declined to PROBE a name beginning with `-`. That read as a safety
  * measure and was the opposite: declining to probe returns false, false selected the
  * bare-name branch, and the bare name is the one that reaches git unguarded. A base of
  * `--output=<path>` produced the operand `--output=<path>..<head>`, which git parses as
@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnCapture } from './git-mode.ts'
 import {
   diffBaseRef,
-  originBaseResolves,
+  refResolves,
   TridentEmptyBaseError,
   TridentOptionShapedBaseError,
   TridentPaddedBaseError,
@@ -122,15 +122,28 @@ async function workflowDiffBase(args: {
 
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
 
-/** A probe thunk that answers `value`, and records whether it was ever invoked. */
-function probe(value: boolean): (() => Promise<boolean>) & { calls: number } {
-  const fn = async (): Promise<boolean> => {
+/**
+ * A probe that answers for a REF and records what it was asked.
+ *
+ * `boolean` answers everything the same way — which is what the whole suite meant while the
+ * probe took no argument. A predicate answers per ref, which is what the FALLBACK arm needs:
+ * `refs/remotes/origin/<base>` missing and `refs/heads/<base>` present is a different world
+ * from both missing, and until round eighteen the binding could not tell them apart.
+ */
+function probe(
+  value: boolean | ((ref: string) => boolean),
+): ((ref: string) => Promise<boolean>) & { calls: number; asked: string[] } {
+  const fn = async (ref: string): Promise<boolean> => {
     fn.calls += 1
-    return value
+    fn.asked.push(ref)
+    return typeof value === 'boolean' ? value : value(ref)
   }
   fn.calls = 0
+  fn.asked = [] as string[]
   return fn
 }
+/** Answers only for the local branch — the no-remote world. */
+const headsOnly = (base: string) => (ref: string): boolean => ref === `refs/heads/${base}`
 const created: string[] = []
 afterAll(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true })
@@ -258,13 +271,26 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
 
   test('THE COMPLEMENT: an ordinary name is unaffected in both directions', async () => {
     expect(await diffBaseRef('main', null, probe(true))).toBe('refs/remotes/origin/main')
+    // THE FALLBACK IS QUALIFIED TOO: no remote-tracking ref, but the local branch exists.
+    expect(await diffBaseRef('main', null, probe(headsOnly('main')))).toBe('refs/heads/main')
+    // …and only when NEITHER resolves is the bare name the answer — there is nothing better
+    // to name, and git errors loudly on an unknown revision rather than resolving it wrongly.
     expect(await diffBaseRef('main', null, probe(false))).toBe('main')
     expect(await diffBaseRef('release/1.x', null, probe(true))).toBe('refs/remotes/origin/release/1.x')
+    expect(await diffBaseRef('release/1.x', null, probe(headsOnly('release/1.x')))).toBe('refs/heads/release/1.x')
+    // THE ORDER OF THE TWO QUESTIONS, asserted as the sequence asked: the remote-tracking ref
+    // first, the local branch only when that one says no.
+    const asked = probe(false)
+    await diffBaseRef('main', null, asked)
+    expect(asked.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
+    const stops = probe(true)
+    await diffBaseRef('main', null, stops)
+    expect(stops.asked).toEqual(['refs/remotes/origin/main'])
   })
 
   test('THE PROBE IS NOT EVEN CALLED when the pin is valid — asserted as an ABSENT side effect', async () => {
     // THE ROUND-ELEVEN DEFECT, one layer out from round eight's. The third parameter was a
-    // `boolean`, so every caller wrote `diffBaseRef(base, sha, await originBaseResolves(…))`
+    // `boolean`, so every caller wrote `diffBaseRef(base, sha, await refResolves(…))`
     // and JavaScript evaluated that BEFORE the function could return the pin: the probe
     // fired on every pinned dispatch, and a pinned dispatch failed whenever the probe did —
     // having already held everything it needed.
@@ -284,10 +310,17 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
       expect({ bad, calls: skipped.calls }).toEqual({ bad, calls: 0 })
     }
 
-    // THE COMPLEMENT: with no pin and a usable name, the probe IS issued — exactly once.
-    const used = probe(false)
-    expect(await diffBaseRef('main', null, used)).toBe('main')
-    expect(used.calls).toBe(1)
+    // THE COMPLEMENT: with no pin and a usable name, the probe IS issued — once for the
+    // remote-tracking ref, and a second time for the local branch only because the first
+    // said no. Asserted as the SEQUENCE, not a count: "one call" stopped being the right
+    // shape when the fallback gained its own question, and a count would have hidden which
+    // question was asked.
+    const resolving = probe(true)
+    expect(await diffBaseRef('main', null, resolving)).toBe('refs/remotes/origin/main')
+    expect(resolving.asked).toEqual(['refs/remotes/origin/main'])
+    const falling = probe(false)
+    expect(await diffBaseRef('main', null, falling)).toBe('main')
+    expect(falling.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
   })
 
   test('the probe still declines to spend a subprocess on such a name', async () => {
@@ -298,7 +331,7 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
       calls += 1
       throw new Error('should not be reached')
     }
-    expect(await originBaseResolves(spy, '/repo', '--output=/tmp/x')).toBe(false)
+    expect(await refResolves(spy, '/repo', '--output=/tmp/x')).toBe(false)
     expect(calls).toBe(0)
   })
 })
@@ -319,9 +352,15 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
    */
   async function bothAgree(
     w: World,
-    row: { baseBranch: string; baseSha?: string; originResolves: boolean; mergeMode?: 'pr' | 'local' },
+    row: {
+      baseBranch: string
+      baseSha?: string
+      /** What the FIXTURE answers, per ref — the `.mjs` word asks the repository itself. */
+      resolves: boolean | ((ref: string) => boolean)
+      mergeMode?: 'pr' | 'local'
+    },
   ): Promise<{ ts: string; mjs: string }> {
-    const ts = await diffBaseRef(row.baseBranch, row.baseSha ?? null, probe(row.originResolves))
+    const ts = await diffBaseRef(row.baseBranch, row.baseSha ?? null, probe(row.resolves))
     const composed = await workflowDiffBase({
       baseBranch: row.baseBranch,
       repoPath: w.repo,
@@ -339,7 +378,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
     const sha = 'c'.repeat(40)
     for (const baseBranch of ['main', 'release/1.x', '--output=/tmp/x']) {
-      const got = await bothAgree(w, { baseBranch, baseSha: sha, originResolves: true })
+      const got = await bothAgree(w, { baseBranch, baseSha: sha, resolves: true })
       expect({ baseBranch, ...got }).toEqual({ baseBranch, ts: sha, mjs: sha })
     }
   })
@@ -352,16 +391,37 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     const w = await seedWorld('parity-origin')
     await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
     for (const mergeMode of ['pr', 'local'] as const) {
-      const got = await bothAgree(w, { baseBranch: 'main', originResolves: true, mergeMode })
+      const got = await bothAgree(w, { baseBranch: 'main', resolves: (ref) => ref === 'refs/remotes/origin/main', mergeMode })
       expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'refs/remotes/origin/main', mjs: 'refs/remotes/origin/main' })
     }
   })
 
-  test('unpinned, origin/<base> MISSING: both fall back to the bare name, in either mode', async () => {
+  test('unpinned, origin/<base> MISSING: both fall back to refs/heads/<base>, in either mode', async () => {
+    // THE FALLBACK ARM, and it used to answer the BARE name on both sides. `refs/heads/main`
+    // and `refs/tags/main` can coexist and git prefers the tag, so the bare name named
+    // something nobody checked — in the arm that runs when the environment is already
+    // degraded. Both implementations now name the local branch in full.
     const w = await seedWorld('parity-no-origin')
-    // No `refs/remotes/origin/main` in this fixture at all.
+    // No `refs/remotes/origin/main` in this fixture at all, and `refs/heads/main` is real —
+    // asserted, because the row is about which of the two the code picks.
+    expect(await git(w.repo, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).toBe('')
+    expect((await git(w.repo, 'rev-parse', 'refs/heads/main')).length).toBe(40)
     for (const mergeMode of ['pr', 'local'] as const) {
-      const got = await bothAgree(w, { baseBranch: 'main', originResolves: false, mergeMode })
+      const got = await bothAgree(w, { baseBranch: 'main', resolves: headsOnly('main'), mergeMode })
+      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'refs/heads/main', mjs: 'refs/heads/main' })
+    }
+  })
+
+  test('unpinned, NEITHER ref resolves: both answer the bare name — the last resort', async () => {
+    // The third world, which the row above used to stand in for. With no `refs/heads/<base>`
+    // either there is nothing better to name, and git errors loudly on an unknown revision
+    // rather than resolving it to something wrong — which is the whole reason this arm is
+    // allowed to hand back an unqualified word.
+    const w = await seedWorld('parity-no-refs')
+    await git(w.repo, 'branch', '-m', 'main', 'trunk')
+    expect(await git(w.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/main')).toBe('')
+    for (const mergeMode of ['pr', 'local'] as const) {
+      const got = await bothAgree(w, { baseBranch: 'main', resolves: false, mergeMode })
       expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'main', mjs: 'main' })
     }
   })
@@ -407,7 +467,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     }
     // THE COMPLEMENT, so this is not just "everything throws": the same name unpadded is
     // answered, identically, by both — in the same fixture, where `origin/main` resolves.
-    const got = await bothAgree(w, { baseBranch: 'main', originResolves: true })
+    const got = await bothAgree(w, { baseBranch: 'main', resolves: (ref) => ref === 'refs/remotes/origin/main' })
     expect(got).toEqual({ ts: 'refs/remotes/origin/main', mjs: 'refs/remotes/origin/main' })
     // …and a PIN still wins over a padded name in both, because the pin is read first.
     const sha = 'f'.repeat(40)
@@ -514,12 +574,12 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1578, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2312, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2424, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5261, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1588, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2322, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2434, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5271, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 819, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 304, why: 'shell: the standalone reviewer builds its own diff' },
+    { file: 'codex-review.sh', line: 321, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {

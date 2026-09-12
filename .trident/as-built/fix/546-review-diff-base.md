@@ -1,4 +1,4 @@
-## 2026-09-12 — Rev-range base: pinned sha, origin/<base> when it resolves, else bare (#546)
+## 2026-09-12 — Rev-range base: pinned sha, else the ref verified, never a shorthand (#546)
 
 `git diff main..<head>` in a shared build checkout diffs against whatever
 `refs/heads/main` happens to hold, and that ref is only as fresh as the last time
@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5428` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5438` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -217,6 +217,55 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round eighteen: the degraded path is the one that runs when things are already wrong
+
+Round seventeen qualified the RESOLVING arm and left the FALLBACK unqualified — `diffBaseRef`
+returned the bare `name`, the workflow printed the bare `${baseBranch}`, and
+`codex-review.sh` deliberately left an ambiguous branch/tag argument alone. The same defect,
+in the arm that is reached precisely when something is already unusual.
+
+**That is the general shape and it is worth stating plainly: a fallback executes in worse
+conditions than the primary path, so it deserves the same rigour, not less.** A fresh clone, a
+missing remote, a detached CI checkout — the worlds that reach a fallback are the worlds where
+a stray tag is most likely to exist and least likely to be noticed. `refs/heads/main` and
+`refs/tags/main` coexist happily, git prefers the tag, and `main..HEAD` then resolves to it —
+exit 0, warning on a stderr both wrappers send to `/dev/null`.
+
+Three fixes, one rule — **name the ref you verified, at every arm**:
+
+| site | was | is |
+|---|---|---|
+| `diffBaseRef` | `name` | `refs/heads/<name>` when it resolves, `name` only when neither ref does |
+| the `.mjs` substitution | `printf %s '<base>'` | a THREE-arm word: remote → `refs/heads/` → bare |
+| `codex-review.sh` | ambiguous name passed through; a branch with no remote "kept" | ambiguous **REFUSED** (exit 3, its DEFERRED); branch-only → `refs/heads/<x>` |
+
+**The probe had to grow a parameter for this.** `originBaseResolves(host, repo, base)` composed
+the origin ref itself, so the second question could not be asked through it at all; it is now
+`refResolves(host, repo, ref)` and `diffBaseRef` asks it twice, in order, still never at all
+when the pin is valid. The order is asserted as the SEQUENCE of refs asked
+(`['refs/remotes/origin/main', 'refs/heads/main']`) rather than as a call count — "exactly one
+call" stopped being the right shape the moment the fallback gained its own question, and a
+count would have hidden which question was asked.
+
+**Leaving the ambiguous argument alone was also a guess.** The wrapper refused to promote it on
+the reasoning that promotion would guess — but not promoting hands the guess to git, which
+picks the tag. Exit 3 is this wrapper's DEFERRED ("configured, but the review could not run"),
+which is never a silent APPROVE, and the message names both refs and the way out.
+
+**Coverage**, each pinning the ref NAMED rather than a file count, because in the collision the
+two names can agree on the commit: a real-git fallback fixture with `refs/heads/main` and
+`refs/tags/main` both present; a parity row for origin-missing/branch-present on both
+implementations; a new third row for the world where NEITHER resolves; and a wrapper fixture
+where a tag planted AFTER the qualification changes nothing, while the bare word it used to
+return now resolves to a different commit. Mutations: dropping the TS fallback arm reds 3,
+dropping the `.mjs` arm reds 4, letting the wrapper pass an ambiguous name through reds 1.
+
+**Unexplained, and noted rather than buried:** `trident/publish-rebase-realgit.test.ts`'s
+blank-line-context case failed ONCE during round seventeen's full-suite run and passed in
+isolation and on the immediate re-run. This branch does not touch that file, so it is not
+chased here — but "it passed on re-run" is a weaker claim than it sounds, and the next person
+who sees it deserves to know it happened here once.
 
 ### Round seventeen: the resolution was correct and then discarded at the return statement
 
@@ -972,7 +1021,7 @@ fallback (the bare name is kept when `origin/<base>` does not resolve — prefix
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5261`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5271`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

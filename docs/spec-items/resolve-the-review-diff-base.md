@@ -1,5 +1,5 @@
 ---
-title: "Rev-range base: pinned sha, origin/<base> when it resolves, else bare"
+title: "Rev-range base: pinned sha, else the ref verified, never a shorthand"
 group: trident
 status: open
 priority: P0
@@ -7,14 +7,18 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**Every rev-range base resolves to the launch-pinned sha; else to `origin/<base>` when
-`refs/remotes/origin/<base>` resolves to a commit; else to a bare local branch name** — which is
-stated, tested, and the one case this change cannot improve on.
+**Every rev-range base resolves to the launch-pinned sha; else to `refs/remotes/origin/<base>`
+when that ref resolves to a commit; else to `refs/heads/<base>` when THAT resolves; else to the
+bare name** — the last of which is stated, tested, and the one case this change cannot improve
+on. Every arm names the ref it verified: a shorthand is a different thing from the ref it looks
+like, because git permits `refs/tags/origin/main` and `refs/tags/main` and prefers tags when
+disambiguating.
 
 That last condition is **"the ref does not resolve"**, not "the repository has no remote". They are
 different states and the second is wider than what the code establishes: a repository can have
 `origin` configured while `refs/remotes/origin/<base>` is missing, deleted or never fetched, and
-there the bare name is taken. The probe is a single `git rev-parse --verify`, so it also answers
+there `refs/heads/<base>` is taken — the local branch, named in full. The probe is a single
+`git rev-parse --verify`, so it also answers
 "no" when it cannot run at all — fail-closed toward the behaviour this repository had before #546.
 Deliberately **no fetch**: a build worktree should not be reaching the network to answer a
 diff-base question.
@@ -133,10 +137,21 @@ The resolution order is evidence-first, and is the same at every site:
    ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
    refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
    as launch; in local mode it is preferred too, whenever the repository has one;
-3. the **bare name whenever `refs/remotes/origin/<base>` does not resolve to a commit** — a
-   repository with no remote, one whose `origin` is configured but whose base ref is missing,
-   deleted or unfetched, and one where the probe itself could not run. In all of those
-   `refs/heads/<base>` is the best available base and there is no better answer without a fetch,
+3. **`refs/heads/<base>` whenever `refs/remotes/origin/<base>` does not resolve but the local
+   branch does** — qualified for the same reason arm 2 is, and it matters MORE here, not less:
+   the fallback runs when the environment is already unusual (a fresh clone, a missing remote,
+   a detached CI checkout), which is where a stray `refs/tags/<base>` is likeliest and least
+   noticed. `refs/heads/main` and `refs/tags/main` coexist happily and git prefers the tag, so
+   the bare word named something nobody had checked. **A fallback deserves the same rigour as
+   the primary path, not less, because it executes in worse conditions.**
+4. the **bare name only when NEITHER ref resolves** — no remote-tracking ref AND no local
+   branch of that name, or a probe that could not run at all. Nothing better exists to name
+   there, and git errors loudly on an unknown revision rather than resolving it to something
+   wrong, so this arm is allowed to hand back an unqualified word.
+
+   Arm 3 is what a repository with no remote gets, what a worktree whose `origin` is configured
+   but whose base ref is missing, deleted or unfetched gets, and what a fresh clone gets: the
+   local branch IS the base of record there, and there is no better answer without a fetch,
    which this deliberately does not do.
 
    This step used to read "the bare name in **local mode** only — the one world where it is right

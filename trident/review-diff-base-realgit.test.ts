@@ -394,7 +394,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect((await filesInRange(w.consumer, `main..${w.head}`)).length).toBe(STALE_COMMITS + 1)
   })
 
-  test('NO REMOTE: the bare name is the fallback — one of the two worlds that reach it', async () => {
+  test('NO REMOTE: the fallback is refs/heads/<base> — one of the two worlds that reach it', async () => {
     // The genuine no-remote world. This name said "the only case left" and the comment
     // said "the ONLY case the bare name is used in" — contradicted by the test TWENTY LINES
     // BELOW, which reaches the same fallback with `origin` configured and only the base ref
@@ -411,15 +411,18 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect(await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).toBe('')
 
     const out = await runResumeDiff(w, { pr: false })
-    // The substitution asked, git said no such ref, and the bare name is what is left.
-    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('main')
+    // The substitution asked, git said no such remote-tracking ref, and the LOCAL BRANCH —
+    // named in full — is what is left. It used to compose the bare `main`, which a tag of
+    // that name captures; the fallback runs in the degraded world, where a stray tag is
+    // likeliest and least noticed.
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/heads/main')
     // And it still produces a real diff rather than failing closed — in a repo with no
     // origin, `refs/heads/main` IS the base of record and there is no better answer.
     expect(out.bytes).toBeGreaterThan(0)
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 
-  test('CONFIGURED ORIGIN, MISSING BASE REF: still the bare name — the condition is the REF', async () => {
+  test('CONFIGURED ORIGIN, MISSING BASE REF: still refs/heads/<base> — the condition is the REF', async () => {
     // THE SIXTH OVERCLAIM ON THIS BRANCH, and the one the no-remote fixture steps over.
     // The spec said the bare name is taken "only when the repository has no remote"; the
     // code tests whether ONE REF RESOLVES. Those are different states, and this is the
@@ -440,7 +443,34 @@ describe('the review diff is taken against the resolved base, not the stale loca
     ).toBe(false)
 
     const out = await runResumeDiff(w, { pr: false })
-    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('main')
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/heads/main')
+    expect(out.bytes).toBeGreaterThan(0)
+    expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
+  })
+
+  test('A TAG NAMED `main` DOES NOT CAPTURE THE FALLBACK — the degraded path, same rigour', async () => {
+    // THE FALLBACK'S OWN COLLISION. Round seventeen qualified the RESOLVING arm and left
+    // this one, and the fallback is the arm that runs when the environment is ALREADY
+    // unusual — a fresh clone, a missing remote, a detached CI checkout — which is exactly
+    // where a stray tag is most likely to exist and least likely to be noticed.
+    //
+    // The tag is planted at the BRANCH tip here, so the two names agree on the commit and a
+    // file-count assertion could not tell them apart. What distinguishes them is WHICH REF
+    // THE COMMAND NAMES, so that is what is asserted — plus the git-level proof below that
+    // the bare word really is the tag's.
+    const w = await seedWorld('fallback-tag-collision')
+    await git(w.consumer, 'remote', 'remove', 'origin')
+    for (const ref of (await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).split('\n').filter((r) => r !== '')) {
+      await git(w.consumer, 'update-ref', '-d', ref)
+    }
+    await git(w.consumer, 'tag', 'main', w.staleBase)
+    // The collision is real: `main` names a tag AND a branch, and git prefers the tag.
+    expect(await git(w.consumer, 'rev-parse', 'refs/tags/main')).toBe(w.staleBase)
+    expect(await git(w.consumer, 'rev-parse', 'refs/heads/main')).toBe(w.staleBase)
+
+    const out = await runResumeDiff(w, { pr: false })
+    // THE REF THE COMMAND NAMES — the local branch, in full, not the word both refs answer to.
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/heads/main')
     expect(out.bytes).toBeGreaterThan(0)
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })

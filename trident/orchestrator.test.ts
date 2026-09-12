@@ -35,7 +35,7 @@ import {
   type MutationGateOutcome,
 } from './mutation-prover.ts'
 import { mutationClaimArtifactPath } from './mutation-claim-artifact.ts'
-import { diffBaseRef, MAX_CONFLICT_ROUNDS, originBaseResolves, runWorktreePath } from './merge.ts'
+import { diffBaseRef, MAX_CONFLICT_ROUNDS, refResolves, runWorktreePath } from './merge.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -3140,7 +3140,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
    * THE ORDERING, SEEN FROM OUTSIDE `diffBaseRef` (#546 round eleven).
    *
    * `resolvedDiffBase` used to compute the origin-ref probe in the ARGUMENT POSITION —
-   * `diffBaseRef(base, run.base_sha, await originBaseResolves(…))` — and JavaScript
+   * `diffBaseRef(base, run.base_sha, await refResolves(…))` — and JavaScript
    * evaluates that before the function can return the pin. So the probe ran on every
    * pinned dispatch, and a pinned dispatch failed whenever the probe did, having already
    * held everything it needed.
@@ -3170,7 +3170,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     // NO_DRIFT_SHA), and every consumer took it — so the probe was never needed.
     const joined = h.hostCalls.map((c) => c.join(' '))
     expect(joined.filter((c) => c === ORIGIN_PROBE('main'))).toEqual([])
-    // POSITIVE CONTROL that the argv shape above is the one `originBaseResolves` builds —
+    // POSITIVE CONTROL that the argv shape above is the one `refResolves` builds —
     // otherwise the assertion is about a string nothing ever emits. Asserted by calling
     // the real probe against the same recording host.
     const calls: string[][] = []
@@ -3178,14 +3178,14 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       calls.push(argv)
       return ok(NO_DRIFT_SHA)
     }
-    expect(await originBaseResolves(recording, '/repo', 'main')).toBe(true)
+    expect(await refResolves(recording, '/repo', 'refs/remotes/origin/main')).toBe(true)
     expect(calls.map((c) => c.join(' '))).toEqual([ORIGIN_PROBE('main')])
   })
 
   test('an UNPINNED dispatch issues EXACTLY ONE origin-ref probe — the complement, through the orchestrator', async () => {
     // THE COMPLEMENT THAT WAS MISSING, and the shortcut it replaces is the lesson. The test
     // above asserts the ABSENCE of the probe on a pinned run and then "complemented" it by
-    // calling `originBaseResolves` DIRECTLY. That is a positive control for the ARGV SHAPE —
+    // calling `refResolves` DIRECTLY. That is a positive control for the ARGV SHAPE —
     // worth having, and kept above — but it reaches past the orchestrator to the helper it
     // wanted to observe, so it could not have failed on an orchestrator that skips the probe,
     // issues it twice, or computes it eagerly. The criterion is about the dispatch boundary,

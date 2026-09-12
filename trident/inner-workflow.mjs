@@ -1496,7 +1496,17 @@ function unpinnedDiffBase() {
   // over `refs/remotes/` when disambiguating, so the shorthand silently resolves to the TAG —
   // measured on git 2.43 as two files where the qualified form gives one, with only a stderr
   // warning and exit 0, and this command's stderr goes to /dev/null.
-  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
+  // THREE ARMS, EACH PRINTING THE REF IT VERIFIED. The fallback used to print the bare
+  // `${baseBranch}` — and the fallback is the arm that runs when the environment is already
+  // unusual (a fresh clone, no remote, a detached CI checkout), which is exactly when a stray
+  // tag is most likely to exist and least likely to be noticed. `refs/heads/main` and
+  // `refs/tags/main` can coexist and git prefers the TAG, so the bare name silently named
+  // something nobody checked. MEASURED on git 2.43, the three worlds this composes:
+  //   remote resolves            → refs/remotes/origin/main
+  //   no remote, branch+tag      → refs/heads/main   (the tag no longer captures it)
+  //   neither ref exists         → main              (nothing better to name; git errors loudly)
+  // The `{ …; }` grouping is load-bearing: `A && B || C && D` without it binds wrongly.
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)} || { git rev-parse --verify -q ${shSingleQuote(`refs/heads/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)}; })"`
 }
 
 const diffBase =

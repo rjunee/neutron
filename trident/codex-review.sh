@@ -63,22 +63,39 @@ BASE_REF="${1:-main}"
 # what makes trident blind to the tag case is the KIND of value it passes, not that the
 # value is always resolved.)
 #
-# SO THE PROMOTION NOW REQUIRES PROOF THAT THE ARGUMENT IS A LOCAL BRANCH NAME:
-#   * `refs/heads/<x>` must resolve — the only evidence available here that `<x>` NAMES
-#     A BRANCH rather than a tag, a sha, or an already-qualified remote ref;
-#   * `refs/tags/<x>` must NOT resolve — when both exist the name is ambiguous, git says
-#     so itself, and guessing is what this whole block exists to stop;
-#   * `refs/remotes/origin/<x>` must resolve — there has to be something to promote to.
-# Anything else is kept VERBATIM: a 40-hex sha, `origin/<x>`, `HEAD~1`, a tag, a branch
-# with no remote counterpart, and a repository with no origin at all.
+# SO THE BLOCK BELOW DECIDES BY KIND, and every arm names a ref IN FULL:
+#   * branch AND tag of the same name → AMBIGUOUS: REFUSED (exit 3). Leaving it alone was
+#     also a guess — git's, and git picks the TAG.
+#   * branch, no tag, with `refs/remotes/origin/<x>` → `refs/remotes/origin/<x>`.
+#   * branch, no tag, no remote counterpart → `refs/heads/<x>`. The FALLBACK gets the same
+#     treatment as the primary arm: it runs in the degraded world (fresh clone, no remote,
+#     detached CI checkout), which is where a stray tag is likeliest and least noticed.
+# Anything else is kept VERBATIM: a 40-hex sha, `origin/<x>`, `HEAD~1`, a tag with no branch
+# of that name, and a repository with no origin at all.
 if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
-  && ! git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1 \
+  && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
+  # AMBIGUOUS — REFUSED, not passed through. This case was "left alone" until round
+  # eighteen, on the reasoning that promoting would be a guess. Leaving it alone is also a
+  # guess, and a worse one: it is GIT's, it prefers refs/tags/ over refs/heads/, and the
+  # review would then run against the TAG with only a `warning: refname is ambiguous` on a
+  # stderr this script sends to /dev/null. Exit 3 is this wrapper's DEFERRED — "configured,
+  # but the review could not run" — which is the honest answer and is never a silent APPROVE.
+  printf '%s\n' "codex-review.sh: base ref '${BASE_REF}' is AMBIGUOUS — both refs/heads/${BASE_REF} and refs/tags/${BASE_REF} exist, and git would resolve the bare name to the TAG. Pass refs/heads/${BASE_REF} or refs/tags/${BASE_REF} explicitly." >&2
+  exit 3
+elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
   # THE REF THAT WAS VERIFIED, fully qualified. Storing `origin/${BASE_REF}` after verifying
   # `refs/remotes/origin/${BASE_REF}` left a gap a tag named `origin/main` walks straight
   # into: git prefers refs/tags/ over refs/remotes/ and resolves the shorthand to the TAG,
   # with a stderr warning this script sends to /dev/null and exit 0.
   BASE_REF="refs/remotes/origin/${BASE_REF}"
+elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+  # THE LOCAL BRANCH, QUALIFIED — the fallback, held to the same standard as the arm above.
+  # A branch with no remote counterpart used to be "kept verbatim", which is the same
+  # unqualified name the tag would capture. There is no tag of this name here (the first arm
+  # refused that case), so this is not a behaviour change for any existing repository; it
+  # removes the case where one appears LATER and the review quietly moves.
+  BASE_REF="refs/heads/${BASE_REF}"
 fi
 : "${CODEX_HOME:=}"
 # How many lines of diff to hand codex — mirror Argus's oversized-diff guard so a
