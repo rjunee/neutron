@@ -735,7 +735,7 @@ export function buildCoreModules(
         }
         // #541 — THE ARBITER TIER, above the resolver. A rebase conflict the bounded
         // resolver escalated gets one read-only Fable turn before the run terminates
-        // in chat; it can only ask for one better-directed retry, never approve,
+        // in chat; it can only ask for one retry — carrying nothing it wrote — never approve,
         // merge, waive review or block. Absent, or `unavailable`, → the escalation
         // reaches the owner exactly as it did before this line existed.
         if (tridentWiring.arbitrate !== undefined) {

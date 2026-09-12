@@ -194,7 +194,7 @@ export interface MiscCompositionInput {
      * and never constructed; this key is what gives it a production call site. The
      * orchestrator threads it into the merge deps, where a LOCAL-mode rebase
      * conflict the bounded resolver ESCALATED gets ONE read-only Fable turn that
-     * either asks for a better-directed retry or lets the escalation stand.
+     * either asks for a retry, carrying nothing it wrote, or lets the escalation stand.
      * DECLARED HERE because a wiring key this type does not carry is silently
      * dropped and the seam ships inert (the `resolve_phase_models` lesson). The
      * composer wires this to `buildFableArbiter` over the ephemeral substrate

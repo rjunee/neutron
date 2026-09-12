@@ -2776,8 +2776,10 @@ async function arbitrateConflict(
     question:
       `A rebase hit a conflict and the bounded resolver gave up rather than resolve it. ` +
       `The two branches, the conflicting regions and each side's history are in the evidence ` +
-      `below. Does a correct resolution exist that one more, better-directed resolver round ` +
-      `could reach, or do the two sides change the same behaviour incompatibly?`,
+      `below. Does a correct resolution exist that one more resolver round could reach, or do ` +
+      `the two sides change the same behaviour incompatibly? The extra round carries NOTHING ` +
+      `you write — the resolver is non-deterministic, so what your choice buys is one more ` +
+      `attempt, not a more informed one.`,
     evidence,
     options: [...CONFLICT_ARBITRATION_OPTIONS],
   }
@@ -2923,6 +2925,38 @@ async function rebaseBranchOntoBase(
   // back. It exists only to make the bet measurable: the one number that says whether
   // this mechanism earns its cost is how often a granted retry actually RESOLVED.
   let awaitingRetryOutcome = false
+  /**
+   * CLOSE THE ARBITER'S BET, ONCE, AT A POINT GIT HAS CONFIRMED (#541 round 29).
+   *
+   * This used to fire the moment the RESOLVER returned, which is before the rebase has agreed.
+   * Two shapes were mis-recorded, and the second is the common one rather than the edge case:
+   *
+   *   - a resolver that declares success whose `git rebase --continue` then fails — it staged
+   *     nothing, or "No changes", or the conflict came straight back — was already on the books
+   *     as `resolved`;
+   *   - and because the flag was CLEARED there, a retry whose `--continue` surfaced the NEXT
+   *     conflicting commit could never have the eventual escalation attributed to it. The
+   *     arbiter is consulted precisely on multi-commit rebases, so that is exactly where this
+   *     tier will be judged.
+   *
+   * `SPEC.md` names this ratio as the kill criterion, so a biased numerator is not a telemetry
+   * nit — it is the instrument deciding whether the feature lives, reporting better than
+   * reality. The bet is therefore closed at the REBASE's terminal states, never the resolver's,
+   * and the three outcomes are distinct facts rather than one blurred pair.
+   */
+  const closeRetryBet = (outcome: 'resolved' | 'escalated' | 'rebase-failed'): void => {
+    if (!awaitingRetryOutcome) return
+    awaitingRetryOutcome = false
+    log.info('merge_conflict_arbiter_retry_outcome', {
+      run: run.id,
+      branch,
+      base,
+      outcome,
+      // CARRIED ON THIS LINE TOO, not only on the arbitration line, so the ratio can be
+      // sliced by conflict size without joining two events per run.
+      ...retrySize,
+    })
+  }
   // The size of the conflict the granted retry was about, held until that round reports.
   let retrySize: Record<string, number | string> = {}
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
@@ -2938,6 +2972,7 @@ async function rebaseBranchOntoBase(
     // or raising the cap for retries, would hand a resolver/arbiter pair an
     // unbounded loop of 8-minute model turns inside the serial tick sweep.
     if (rounds >= MAX_CONFLICT_ROUNDS) {
+      closeRetryBet('escalated')
       await abortRebase(run_host, repo, base)
       // Say which of the two shapes actually happened. "Conflicts across more than
       // 12 commits — needs a manual rebase" is the right remedy for a long history
@@ -2966,6 +3001,7 @@ async function rebaseBranchOntoBase(
       }
     }
     if (resolver === undefined) {
+      closeRetryBet('escalated')
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(
         `\`${branch}\` conflicts with \`${base}\` in ${conflicted.join(', ') || 'the branch'} and I have no way to auto-resolve it here — it needs a manual merge.`,
@@ -2978,26 +3014,10 @@ async function rebaseBranchOntoBase(
       run,
       conflicted_files: conflicted,
     })
-    // DID THE ARBITER'S BET PAY? Logged here, the moment the round it bought reports
-    // back, because this is the only point where both halves are known. Without it
-    // "ship and measure" is just "ship" — and the decision to keep or drop this whole
-    // tier rests on the resolved/escalated ratio this line produces. No model-authored
-    // text: the outcome is one of two words this file chooses.
-    if (awaitingRetryOutcome) {
-      log.info('merge_conflict_arbiter_retry_outcome', {
-        run: run.id,
-        branch,
-        base,
-        outcome: outcome.resolved ? 'resolved' : 'escalated',
-        // CARRIED ON THIS LINE TOO, not only on the arbitration line, so the ratio can be
-        // sliced by conflict size without joining two events per run.
-        ...retrySize,
-      })
-      awaitingRetryOutcome = false
-    }
     if (!outcome.resolved) {
       // ARBITER TIER (#541). The resolver gave up; ask the arbiter whether a
-      // second, better-directed round can finish it. ONE bounded read-only turn,
+      // second round can finish it — NOT a better-directed one: nothing the arbiter writes
+      // reaches the resolver, and what the decision buys is the attempt. ONE read-only turn,
       // capped per run by the arbiter itself.
       //
       // EVERY WAY THIS CAN GO WRONG LANDS ON THE LINE BELOW. `unavailable` (no
@@ -3214,6 +3234,7 @@ async function rebaseBranchOntoBase(
         continue
         }
       }
+      closeRetryBet('escalated')
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(outcome.question)
     }
@@ -3226,6 +3247,10 @@ async function rebaseBranchOntoBase(
     )
   }
   if (!res.ok) {
+    // THE SHAPE THAT USED TO COUNT AS RESOLVED: the resolver declared success and git did not
+    // agree. Named apart from `escalated` because "the resolver was wrong" and "the conflict
+    // genuinely needs the owner" are different facts about this tier.
+    closeRetryBet('rebase-failed')
     // A non-conflict rebase failure (or the resolver staged nothing so
     // `--continue` had no changes) — abort + fail loudly.
     await abortRebase(run_host, repo, base)
@@ -3235,6 +3260,8 @@ async function rebaseBranchOntoBase(
       res,
     )
   }
+  // THE ONLY PLACE `resolved` IS EARNED: the rebase ran to completion.
+  closeRetryBet('resolved')
   return conflictedAll
 }
 

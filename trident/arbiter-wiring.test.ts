@@ -1236,6 +1236,159 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(quoted[2]).toContain('aaa2 two')
   })
 
+  test('THE JUDGE IS NOT PROMISED DIRECTION IT WILL NOT GET', async () => {
+    // FOURTH APPEARANCE OF ONE CLAUSE IN ONE BRANCH, and this copy was the one that mattered:
+    // it sat INSIDE THE TEXT SENT TO THE ARBITER, asking whether a correct resolution exists
+    // that "one more, better-directed resolver round" could reach. The judge was being told
+    // the round it can grant carries direction that this PR deliberately ensures it does not
+    // carry — a misdescription on the arbiter's own input, not a prose nit.
+    //
+    // The other three copies were prose and were swept. This is the detector, because a sweep
+    // finds today's copies and a test refuses tomorrow's: the phrase now has somewhere to fail.
+    const run = localRun('feat-nodirection')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, specs } = capturingArbiter('stop')
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+
+    expect(specs.length, 'the judge was asked').toBe(1)
+    const prompt = specs[0]?.prompt ?? ''
+    // The prompt must not promise the retry is better-directed, better-briefed, or guided.
+    for (const promise of ['better-directed', 'better directed', 'better-briefed', 'with guidance']) {
+      expect(prompt.toLowerCase().includes(promise), `prompt promises "${promise}"`).toBe(false)
+    }
+    // AND IT SAYS SO POSITIVELY, rather than merely omitting the claim — a judge told nothing
+    // about the channel may still assume one exists.
+    expect(prompt).toContain('carries NOTHING you write')
+  })
+
+  test('A RESOLVER THAT SAYS RESOLVED AND A REBASE THAT DISAGREES IS NOT `resolved`', async () => {
+    // THE OUTCOME USED TO BE RECORDED THE MOMENT THE RESOLVER RETURNED — before
+    // `git rebase --continue` had agreed. A resolver that stages nothing, or whose continue
+    // reports "No changes", was already on the books as `resolved`. `SPEC.md` names this ratio
+    // as the tier's kill criterion, so a biased numerator is the instrument deciding whether
+    // the feature lives, reporting better than reality.
+    const run = localRun('feat-badcontinue')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    let attempts = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      // The resolver claims success; git refuses the continue.
+      if (cmd.includes('rebase') && cmd.includes('--continue')) return fail('No changes - did you forget to use git add?')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'additive',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome')) ?? ''
+    expect(outcome, 'the bet is still closed').not.toBe('')
+    expect(outcome).toContain('outcome=rebase-failed')
+    expect(outcome, 'and never as resolved').not.toContain('outcome=resolved')
+    // The retry really was granted, so this is not passing by never arbitrating.
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration')) ?? '').toContain('decision=retry')
+  })
+
+  test('A RETRY WHOSE ROUND LANDS BUT WHOSE MERGE LATER ESCALATES IS ATTRIBUTED', async () => {
+    // THE COMMON SHAPE, not the edge case. `--continue` succeeds and surfaces the NEXT
+    // conflicting commit; the run eventually escalates. The flag used to be CLEARED when the
+    // resolver reported, so that escalation could never be attributed to the retry — it was on
+    // the books as resolved and nothing could take it off. The arbiter is consulted precisely
+    // on multi-commit rebases, so this is exactly where the tier gets judged.
+    const run = localRun('feat-latereject')
+    const wt = wtOf('/shared', run)
+    let rebaseCalls = 0
+    let attempts = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      // The retry's own commit lands, and the NEXT commit conflicts.
+      if (cmd.includes('rebase') && cmd.includes('--continue')) {
+        return fail('CONFLICT (content): Merge conflict in other.ts')
+      }
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own) {
+        rebaseCalls++
+        if (rebaseCalls <= 1) return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        // 1: escalate (buys the retry). 2: the retry's round resolves. 3+: escalate for good.
+        if (attempts === 2) return { resolved: true }
+        return { resolved: false, question: RESOLVER_QUESTION }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'additive',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    expect(attempts, 'the retry round really ran and a later round followed it').toBeGreaterThan(2)
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome')) ?? ''
+    expect(outcome, 'the bet is closed exactly once, at the end').not.toBe('')
+    expect(outcome).toContain('outcome=escalated')
+    expect(outcome, 'the premature `resolved` is gone').not.toContain('outcome=resolved')
+    expect(
+      lines.filter((l) => l.includes('merge_conflict_arbiter_retry_outcome')).length,
+      'and only once',
+    ).toBe(1)
+  })
+
   test('A RETRY REFUSED BY THE INTEGRITY GATE IS STILL REPORTED — the ratio keeps its failures', async () => {
     // THE ARBITRATION LINE ALREADY SAID `decision=retry`. The retry is only ACCEPTED after the
     // worktree fingerprint is compared, and a refusal used to leave NO outcome event at all —

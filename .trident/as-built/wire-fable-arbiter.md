@@ -1543,6 +1543,52 @@ for N. It now serves exactly the ids it is given.
 **Three mutations, all red:** the read returning to the mutable range; a non-oid line dropped;
 the detection id weighed and read rather than held back.
 
+### ROUND 29 — the kill criterion counted a bet before git had paid it
+
+The retry outcome fired **the moment the resolver returned**, which is before
+`git rebase --continue` has agreed. Two shapes were mis-recorded:
+
+- a resolver that declares success whose `--continue` then FAILS — staged nothing, "No changes",
+  the conflict straight back — was already on the books as **`resolved`**;
+- and because the flag was CLEARED there, a retry whose `--continue` surfaced the **next**
+  conflicting commit could never have the eventual escalation attributed to it. It was recorded
+  resolved and nothing could take it off.
+
+**The second is the common shape, not the edge case.** The arbiter is consulted precisely on
+multi-commit rebases, so that is exactly where the tier gets judged — and `SPEC.md` names this
+ratio as the kill criterion, which makes a biased numerator **the instrument deciding whether
+the feature lives, reporting better than reality**.
+
+The bet is now closed by one owner at the REBASE's terminal states, never the resolver's, with
+three distinct outcomes rather than one blurred pair: `resolved` only when the rebase ran to
+completion, `escalated` at every escalation exit, and **`rebase-failed`** named apart because
+"the resolver was wrong" and "the conflict genuinely needs the owner" are different facts about
+this tier. Both boundaries the finding named are driven, and the second asserts the event fires
+**exactly once**.
+
+### The removed guidance channel, fourth appearance — and this time on the judge's own input
+
+`git grep 'better-directed'` returned four hits. Three were prose. **The fourth was inside the
+text sent TO the arbiter**, asking whether a correct resolution exists that "one more,
+better-directed resolver round" could reach — so the judge was being told the round it can grant
+carries direction this PR deliberately ensures it does not carry. That is a misdescription on
+the arbiter's own input, and it belonged in the code fix rather than a prose sweep.
+
+`SPEC.md` already recorded this class two rounds earlier — *surviving where it asserts rather
+than where it describes*. **A sweep finds today's copies; only a test refuses tomorrow's.** So
+the prompt now states the absence POSITIVELY — a judge told nothing about the channel may still
+assume one exists — and a test asserts against the captured `AgentSpec.prompt` that it promises
+neither direction nor a briefing. **Sweep on the phrase, not on the file list**, and then give
+the phrase somewhere to fail.
+
+One wrinkle worth keeping: my first wording said "not a better-briefed one", which a substring
+detector cannot tell from a promise. I reworded the prompt rather than weakening the check —
+**a negation is not a safe place to put the phrase you are banning.**
+
+**Five mutations, all red:** the bet closing on the resolver's word; a failed `--continue`
+counted as escalated rather than named; the landed rebase not closing the bet; the late
+escalation not closing it; the prompt promising a better-directed round again.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1739,7 +1785,7 @@ applies to it: state where it came from, and re-take it at the end.
 `trident/arbiter-wiring.test.ts` drives the composed merge path: the qualifying
 hold reaches the arbiter and its selection lands the run; `stop`/`owner-only`/
 `unavailable`/an unwired arbiter/a throwing arbiter/an unoffered option all reach the
-owner unchanged and neither block nor resolve; guidance is scoped to its commit; the
+owner unchanged and neither block nor resolve; the retry carries NOTHING the arbiter wrote (the guidance channel was removed, not scoped); the
 real `buildFableArbiter` refuses the (cap+1)th call naming the cap, and that refusal is
 an `unavailable` the merge falls through on; the option set is non-empty and passes
 `assertArbitrableOptions`. The two non-qualifying holds assert the arbiter is called
@@ -1806,7 +1852,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and twenty-eight mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and thirty-three mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
