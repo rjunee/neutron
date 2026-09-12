@@ -8032,15 +8032,55 @@ ${task}${reflectionGuidance}`,
   // the gate would have refused.
   let rePlanWhatIsMissing = ''
   const recordRoundForEscalation = (roundNumber, s) => {
-    if (s === null || typeof s !== 'object' || s.blockKind !== 'code') return
-    eligibleHistory.push(eligibleFixFindings(s.findings))
-    blockingCounts.push(blockingFindingCount(s.findings))
+    if (s === null || typeof s !== 'object') return
+    // THE LEDGER RECORDS ONLY A ROUND THAT JUDGED THE CODE AND REJECTED IT. An infra-only
+    // or advisory-only round says nothing about whether FIXING is working, and folding one
+    // in would let a dead review seat look like a finding that failed to converge.
+    //
+    // AND AN `APPROVE` ROUND IS NOT A FAILURE TO CONVERGE — IT IS CONVERGENCE. This half
+    // was missing, and it was generating a bogus `not-converging` stop that only stayed
+    // invisible because the terminal result read `finalVerdict === 'APPROVE'` first and
+    // reported `blockKind: 'none'`, discarding it. Surfaced the moment an escalation was
+    // made to force the verdict (a run that stopped did not approve): a round 1 that
+    // rejected with NO blocker/major findings records a count of 0, the approving round 2
+    // recorded another 0, and `[0,0]` read as "the count stopped falling" — the fix
+    // rounds reported as not converging on the round they converged. The ledger measures
+    // whether REJECTIONS are getting smaller; an approval is the successful terminus and
+    // has no place in that series.
+    const judgedCode = s.blockKind === 'code' && normalizeVerdict(s.verdict) === 'REQUEST_CHANGES'
+    if (judgedCode) {
+      eligibleHistory.push(eligibleFixFindings(s.findings))
+      blockingCounts.push(blockingFindingCount(s.findings))
+    }
+    // …BUT A DECLARATION IS NOT LEDGER ARITHMETIC, AND GATING IT ON `blockKind` WAS A
+    // CATEGORY ERROR. A reviewer's `escalate` is a claim about the WORK'S VIABILITY —
+    // the plan is wrong, or the dependency is not there yet. `blockKind` and severity are
+    // claims about the CODE'S QUALITY. Routing the first through a gate built for the
+    // second made this loop DEAFEST exactly when the reviewer was CLEAREST.
+    //
+    // THE CANONICAL CASE IT SILENTLY DROPPED: "the code is fine, the dependency isn't
+    // there yet" — one `minor` finding plus `escalate: {kind: 'missing-dependency'}`.
+    // `enforceSeverityGate` turns an all-non-blocking REQUEST_CHANGES into APPROVE and
+    // `classifyBlock` calls that list `advisory-only`, so the declaration never reached
+    // `decideEscalation` and the run proceeded AS APPROVED — merging work a reviewer had
+    // just said could not be built yet. The spec item is explicit that a run escalates
+    // when ANY trigger fires, and the declaration is the FAST one: it is the only trigger
+    // that can fire at round 1, before any arithmetic has two rounds to compare.
+    const claim = s.escalationClaim ?? null
+    // Nothing to decide on a round that neither judged the code nor declared anything;
+    // returning keeps the audit log free of a "continue" line per advisory round.
+    if (!judgedCode && claim === null) return
     const decision = decideEscalation({
       round: roundNumber,
-      previousFindings: eligibleHistory.length >= 2 ? eligibleHistory[eligibleHistory.length - 2] : null,
-      currentFindings: eligibleHistory[eligibleHistory.length - 1],
-      blockingCounts,
-      claim: s.escalationClaim ?? null,
+      // THE ARITHMETIC IS NEUTRALISED ON A ROUND THE LEDGER DID NOT RECORD, so consulting
+      // the declaration cannot re-fire the repeat/no-progress triggers over the PREVIOUS
+      // two code rounds — which were already decided on their own call. Both verdicts
+      // read `undecidable` from these, and only the claim can fire.
+      previousFindings:
+        judgedCode && eligibleHistory.length >= 2 ? eligibleHistory[eligibleHistory.length - 2] : null,
+      currentFindings: judgedCode ? eligibleHistory[eligibleHistory.length - 1] : null,
+      blockingCounts: judgedCode ? blockingCounts : [],
+      claim,
       replansUsed,
     })
     // A REFUSED DECLARATION IS REPORTED, NOT SWALLOWED. It is the one outcome an
@@ -8399,6 +8439,23 @@ ${task}${rePlanNote}${reflectionGuidance}`,
       round,
     }
     log(`trident-v2 escalation: STOP at round ${round} kind=design-gap — ${escalation.evidence}`)
+  }
+
+  // A RUN THAT STOPPED DID NOT APPROVE. Reached only by a declaration on a round whose
+  // findings were all non-blocking: `enforceSeverityGate` had already turned that verdict
+  // into APPROVE, and the fix loop never runs, so `finalVerdict` is still APPROVE while
+  // `escalation` says the work cannot proceed. Left alone the terminal result below reads
+  // `finalVerdict === 'APPROVE'` FIRST and reports `blockKind: 'none'` — the escalation
+  // would vanish AND the outer loop would MERGE the branch, which is the worst available
+  // outcome: shipping work a reviewer just declared unbuildable, silently.
+  //
+  // For every pre-existing escalation path this is a no-op — they can only fire from
+  // inside the fix loop, which runs only while the verdict is REQUEST_CHANGES — so it
+  // closes the new door without touching the old ones, and makes the invariant explicit
+  // rather than incidental.
+  if (escalation !== null && finalVerdict === 'APPROVE') {
+    finalVerdict = 'REQUEST_CHANGES'
+    log(`trident-v2 escalation: verdict APPROVE → REQUEST_CHANGES (the run stopped at round ${escalation.round} kind=${escalation.kind})`)
   }
 
   // The MEASURED cause of an infra-only stop, computed once: it goes into the audit

@@ -71,6 +71,44 @@ RED: restoring the strip, a narrower positional strip, an identity that never ma
 that stops normalising case, one that makes a moved line escalate, and one that drops the
 instruction.
 
+**A DECLARATION IS NOT LEDGER ARITHMETIC, and gating it on `blockKind` was a category
+error.** A reviewer's `escalate` is a claim about the WORK'S VIABILITY — the plan is
+wrong, or the dependency is not there yet. `blockKind` and severity are claims about the
+CODE'S QUALITY. Routing the first through a gate built for the second made this loop
+DEAFEST exactly when the reviewer was CLEAREST.
+
+The canonical case it silently dropped is not exotic: "the code is fine, the dependency
+isn't there yet" — one `minor` finding plus `escalate: {kind: 'missing-dependency'}`.
+`enforceSeverityGate` turns an all-non-blocking `REQUEST_CHANGES` into `APPROVE` and
+`classifyBlock` calls that list `advisory-only`, so the declaration never reached
+`decideEscalation` and the run proceeded AS APPROVED — merging work a reviewer had just
+said could not be built yet. The spec item is explicit that a run escalates when ANY
+trigger fires, and the declaration is the FAST one: the only trigger that can fire at
+round 1, before any arithmetic has two rounds to compare. Both declared kinds are now
+covered paired with minor/nit-only findings.
+
+A RUN THAT STOPPED DID NOT APPROVE, and that had to be said in code. The terminal result
+reads `finalVerdict === 'APPROVE'` BEFORE it reads the escalation, so an
+approved-and-escalated run reported `blockKind: 'none'` — the escalation would have
+vanished AND the outer loop would have MERGED the branch, which is the worst available
+outcome. The verdict is now forced to `REQUEST_CHANGES` when an escalation fired; for
+every pre-existing path it is a no-op (they can only fire inside the fix loop, which runs
+only while the verdict is `REQUEST_CHANGES`), so it closes the new door without touching
+the old ones.
+
+**AND THAT FORCING SURFACED A LATENT BUG RATHER THAN CAUSING ONE — worth recording because
+of how it was found.** A cross-model test went red, and the honest first question was
+whether the change had broken it. It had not: the ledger was also recording the round that
+APPROVED. A round 1 that rejects with no blocker/major findings records a count of 0, the
+approving round 2 recorded another 0, and `[0,0]` read as "the count stopped falling" —
+the fix rounds reported as NOT CONVERGING on the very round they converged. It had been
+invisible for exactly one reason: the terminal result discarded the escalation under the
+`APPROVE` branch. Forcing the verdict made a silently-discarded decision readable, and the
+bogus stop fell out immediately. The ledger measures whether REJECTIONS are getting
+smaller; an approval is the successful terminus and has no place in that series. A
+decision that is computed and then thrown away is worth removing even while it is
+harmless, because it is one edit away from being read.
+
 **The hard gate is arithmetic.** `repeatVerdict` is a set intersection over two rounds'
 identities and needs no agent to be honest. It is three-valued and that is deliberate:
 `'none'` requires both lists readable AND every finding keyed; anything less is

@@ -34,6 +34,11 @@ interface ScriptedRound {
   findings: Finding[]
   /** The seat's self-declared escalation, verbatim (including malformed ones). */
   escalate?: unknown
+  /** Force this round's synthesis verdict. Default: REQUEST_CHANGES. Needed because the
+   *  only other way to reach APPROVE here is the severity gate downgrading an
+   *  all-non-blocking rejection, which cannot produce a round that REJECTED and was then
+   *  followed by an approval — the shape the convergence ledger got wrong. */
+  verdict?: 'APPROVE'
 }
 
 interface RunOpts {
@@ -141,6 +146,10 @@ async function runWorkflow(
     if (label === 'argus:synthesis') {
       synthCount += 1
       const r = roundFor(synthCount)
+      // An EXPLICIT approval. Without it the only way to reach APPROVE in this harness is
+      // the severity gate downgrading an all-non-blocking rejection, which cannot produce
+      // a round that REJECTED first and then approved — the shape the ledger got wrong.
+      if (r.verdict === 'APPROVE') return { verdict: 'APPROVE', findings: r.findings }
       if (r.findings.length === 0) return { verdict: 'REQUEST_CHANGES', findings: [] }
       return {
         verdict: 'REQUEST_CHANGES',
@@ -489,6 +498,133 @@ describe('the routing the re-plan performs, executed rather than grepped', () =>
   // behaviour the tag can change is the `mechanical` downgrade, and that is exactly what
   // the test above asserts. (Mutation-checked: a production change that never adopts the
   // tag leaves every assertion here green, because there is nothing to see.)
+})
+
+describe('a DECLARATION is heard even when the code is fine — the fast trigger', () => {
+  // "The code is fine, the dependency isn't there yet" is close to the canonical
+  // missing-dependency, and it arrives precisely with SMALL findings. That combination
+  // used to be the one the loop could not hear: `enforceSeverityGate` turns an
+  // all-non-blocking REQUEST_CHANGES into APPROVE, `classifyBlock` calls the list
+  // `advisory-only`, and the ledger recorder returned unless the round was `code` — so
+  // the declaration never reached `decideEscalation` and the run proceeded AS APPROVED.
+  //
+  // A declaration is a claim about the WORK'S VIABILITY; severity is a claim about the
+  // CODE'S QUALITY. Routing the first through a gate built for the second made the loop
+  // deafest exactly when the reviewer was clearest.
+
+  test.each([
+    ['missing-dependency', 'card X must land before this can be built'],
+    ['design-gap', 'the plan assumes an API that does not exist'],
+  ] as const)(
+    'HEADLINE: `%s` declared with ONLY non-blocking findings STOPS the run at round 1',
+    async (kind, whatIsMissing) => {
+      const { captured, result } = await runWorkflow({
+        maxRounds: 6,
+        rounds: [
+          {
+            // Nothing a fix round could act on — which is the point. The reviewer is not
+            // saying the code is bad; it is saying the work cannot proceed.
+            findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')],
+            escalate: { kind, whatIsMissing },
+          },
+        ],
+      })
+
+      expect(result.blockKind).toBe(kind)
+      const escalation = result.escalation as Record<string, unknown>
+      expect(escalation).toBeDefined()
+      expect(escalation.triggers).toContain(kind)
+      expect(String(escalation.whatIsMissing)).toBe(whatIsMissing)
+      expect(escalation.round).toBe(1)
+
+      // AND IT MUST NOT ALSO MERGE. The terminal result reads `finalVerdict === 'APPROVE'`
+      // BEFORE it reads the escalation, so an approved-and-escalated run would report
+      // `blockKind: 'none'` and the outer loop would ship the branch — work a reviewer had
+      // just declared unbuildable, silently. This is the assertion that closes that.
+      expect(result.verdict).not.toBe('APPROVE')
+      expect(result.checkpoint).not.toBe('argus-approved')
+
+      // …and it stopped at round 1 without buying a fix round, which is what "the FAST
+      // trigger" means: no arithmetic has two rounds to compare yet.
+      expect(labels(captured, 'forge:fix-round-')).toEqual([])
+      expect(result.round).toBe(1)
+    },
+  )
+
+  test('the stop does NOT attribute an arithmetic reading to a round that measured none', async () => {
+    // The declaration arrives on round 3, AFTER two rounds that did judge the code. The
+    // ledger already holds their counts — and re-reading it here would print
+    // `blocker+major counts [2,1] → progress` in the evidence of a stop decided by a
+    // round that never judged the code at all. The outcome is unchanged either way (the
+    // ledger is identical to what it was when round 2 last decided on it, and that
+    // decision was "continue"), so this is the ONLY place the neutralised inputs are
+    // visible — and it is the place that matters, because the evidence is what the
+    // operator reads to understand why the run stopped.
+    const { result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        { findings: [finding('a:b:c'), finding('d:e:f')] },
+        { findings: [finding('g:h:i')] },
+        {
+          findings: [finding('j:k:l', 'nit')],
+          escalate: { kind: 'missing-dependency', whatIsMissing: 'card X must land first' },
+        },
+      ],
+    })
+    expect(result.blockKind).toBe('missing-dependency')
+    const evidence = String((result.escalation as Record<string, unknown>).evidence)
+    expect(evidence).toContain('counts [] → undecidable')
+    // The arithmetic from the earlier rounds must not be quoted as this round's reading.
+    expect(evidence).not.toContain('[2,1]')
+    expect(evidence).toContain('reviewer declared missing-dependency')
+  })
+
+  test('CONTROL: the SAME non-blocking findings with NO declaration still approve', async () => {
+    // Without this, a version that simply stopped honouring the severity gate — treating
+    // every minor finding as a rejection — would pass both rows above.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [{ findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')] }],
+    })
+    expect(result.verdict).toBe('APPROVE')
+    expect(result.escalation).toBeUndefined()
+    expect(result.blockKind).toBe('none')
+    expect(labels(captured, 'forge:fix-round-')).toEqual([])
+  })
+})
+
+describe('an APPROVE round is CONVERGENCE, not a failure to converge', () => {
+  test('HEADLINE: a rejection with no blocker/major followed by an APPROVE does NOT escalate', async () => {
+    // A LATENT BUG THIS BRANCH SURFACED RATHER THAN INTRODUCED. The ledger measures
+    // whether REJECTIONS are getting smaller. It was also recording the round that
+    // APPROVED: round 1 rejects with no blocker/major findings and records a count of 0,
+    // the approving round 2 records another 0, and `[0,0]` reads as "the count stopped
+    // falling" — the fix rounds reported as not converging on the very round they
+    // converged.
+    //
+    // It stayed invisible because the terminal result reads `finalVerdict === 'APPROVE'`
+    // BEFORE it reads the escalation and reported `blockKind: 'none'`, discarding the
+    // stop. It became visible the moment an escalation was made to force the verdict
+    // (a run that stopped did not approve) — which is why a silently-discarded decision
+    // is worth removing even while it is harmless: it is one edit away from being read.
+    const { result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        // A severity outside the four the schema names. `isNonBlockingFinding` is false
+        // for it, so the severity gate leaves the REQUEST_CHANGES standing and a fix
+        // round IS bought; `blockingFindingCount` does not count it, so the round records
+        // a count of 0. That combination is what produces the `[0,0]` series — an
+        // all-minor round would simply have been approved at round 1 and never reached it.
+        { findings: [{ severity: 'weird', title: 't', evidence: 'e', key: 'a:b:c' } as never] },
+        { findings: [], verdict: 'APPROVE' },
+      ],
+    })
+    expect(result.verdict).toBe('APPROVE')
+    expect(result.escalation).toBeUndefined()
+    expect(result.blockKind).toBe('none')
+    // Specifically NOT the arithmetic kind, which is what `[0,0]` produced.
+    expect(result.blockKind).not.toBe('not-converging')
+  })
 })
 
 describe('a round that did NOT judge the code is kept out of the ledger', () => {
