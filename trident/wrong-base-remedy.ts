@@ -558,7 +558,7 @@ function defang(s: string): string {
       // column, so folding each to a space cannot hide anything a reader could otherwise see,
       // and it puts the forged token back in front of the command folder that exists to catch it.
       .replace(
-        /[\u0000-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g,
+        /[\u0000-\u001f\u007f-\u009f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g,
         ' ',
       )
       .replace(/"/g, "'")
@@ -696,9 +696,42 @@ export function foldEvidenceTo(s: string, max: number): string {
  *
  * Splitting them is what lets the evidence path keep the bytes a judge needs while still being
  * unable to forge prompt structure (#541 round 22).
+ *
+ * THE RANGES THIS INTENDS TO COVER, enumerated so a test can walk them rather than sample:
+ *   - C0 EXCEPT TAB (`\\u0000-\\u0008`, `\\u000a-\\u001f`). Tab is deliberately OUT: it cannot
+ *     forge a line, and it IS the disputed content in a Makefile conflict (round 20).
+ *   - DEL AND C1 (`\\u007f-\\u009f`). C1 was missing until round 23, which left `\\u0085` NEL —
+ *     the THIRD member of the "not LF but treated as a line break by some parsers" set whose
+ *     other two, `\\u2028` and `\\u2029`, this class already stripped. The omission was internal
+ *     inconsistency rather than a judgement call: `foldRefName`, in this same file, has covered
+ *     `\\u007f-\\u009f` all along.
+ *   - The invisible and bidi set: `\\u180e`, `\\u200b-\\u200f`, `\\u2028`, `\\u2029`,
+ *     `\\u202a-\\u202e`, `\\u2060`, `\\u2066-\\u2069`, `\\ufeff`.
+ *
+ * A SANITISER TESTED BY SAMPLING IS TESTED AGAINST THE CHARACTERS SOMEONE THOUGHT OF, which is
+ * how a whole 32-codepoint block sat in the gap between two lists that each looked complete.
+ * `FORGERY_RANGES` below is the machine-readable form of this list, and the test walks every
+ * codepoint in it.
  */
+/**
+ * The same intent as `FORGERY_CODEPOINTS`, as DATA. Exported so the test can assert the whole of
+ * each range instead of representatives — and so the list and the class are read from one place.
+ */
+export const FORGERY_RANGES: readonly (readonly [number, number])[] = [
+  [0x0000, 0x0008],
+  [0x000a, 0x001f],
+  [0x007f, 0x009f],
+  [0x180e, 0x180e],
+  [0x200b, 0x200f],
+  [0x2028, 0x2029],
+  [0x202a, 0x202e],
+  [0x2060, 0x2060],
+  [0x2066, 0x2069],
+  [0xfeff, 0xfeff],
+]
+
 export const FORGERY_CODEPOINTS =
-  /[\u0000-\u0008\u000a-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
+  /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
 
 /**
  * Fold for a MODEL PROMPT: remove only what can forge a line, and report what was dropped.

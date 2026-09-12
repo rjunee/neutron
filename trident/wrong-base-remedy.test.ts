@@ -8,6 +8,7 @@ import {
   foldEvidence,
   foldEvidenceReporting,
   foldPreservingBytes,
+  FORGERY_RANGES,
   probePidLiveness,
   probeTreeOccupancy,
   TOTAL_BUDGET_MS,
@@ -2800,6 +2801,35 @@ describe('#541 round 21 — the fold reports what it dropped', () => {
 })
 
 describe('#541 round 22 — the prompt sanitiser keeps the bytes a judge is ruling on', () => {
+  test('EVERY codepoint in EVERY intended range is removed — walked, not sampled', () => {
+    // A SANITISER TESTED BY SAMPLING IS TESTED AGAINST THE CHARACTERS SOMEONE THOUGHT OF. The
+    // previous version of this test named six representatives and passed while the entire C1
+    // block (32 codepoints) leaked, including `\u0085` NEL — the third member of the "not LF but
+    // treated as a line break" set whose other two were already covered. Two lists that each
+    // looked complete had a whole block in the gap between them.
+    //
+    // So the ranges are DATA, exported beside the class, and this walks all of them.
+    const leaks: string[] = []
+    for (const [lo, hi] of FORGERY_RANGES) {
+      for (let c = lo; c <= hi; c++) {
+        const ch = String.fromCodePoint(c)
+        if (foldPreservingBytes(`a${ch}b`, 1000).text.includes(ch)) {
+          leaks.push(`U+${c.toString(16).toUpperCase().padStart(4, '0')}`)
+        }
+      }
+    }
+    expect(leaks, 'codepoints the class intends to remove but does not').toEqual([])
+
+    // NOT VACUOUS: the ranges really do cover the characters this exists for.
+    const covered = (c: number): boolean => FORGERY_RANGES.some(([lo, hi]) => c >= lo && c <= hi)
+    for (const c of [0x0085, 0x2028, 0x2029, 0x202e, 0x000a, 0x001b, 0x200b, 0xfeff]) {
+      expect(covered(c), `U+${c.toString(16)} must be in the declared ranges`).toBe(true)
+    }
+    // AND TAB IS DELIBERATELY OUT — the fidelity fix from round 20, which must stay.
+    expect(covered(0x0009), 'tab must NOT be in the class').toBe(false)
+    expect(foldPreservingBytes('a\tb', 1000).text).toBe('a\tb')
+  })
+
   test('it removes ONLY what can forge a line', () => {
     // `defang` does two jobs under one name. This is the security half on its own: what can END
     // or REORDER a line has to go, because the quoted-evidence boundary rests on it. Everything

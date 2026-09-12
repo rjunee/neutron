@@ -1244,6 +1244,48 @@ and the hostile-fields property still fires when it does. M105 survived because 
 one layer up drives `merge.ts`'s own quoting, so the new sanitiser's run behaviour had no
 detector of its own — the same shape as every other survivor on this branch.
 
+### ROUND 23 — the class omitted a whole block, and sampling could not see it
+
+`FORGERY_CODEPOINTS` covered C0-except-tab, `U+007F`, and the bidi/invisible set. It did **not**
+cover `U+0080-U+009F`. So `U+0085` NEL survived, and repository-controlled evidence could put a
+line break into a prompt whose entire framing assumes a line cannot be forged.
+
+**The tell is internal inconsistency, not taste.** The class already stripped `U+2028` LINE
+SEPARATOR and `U+2029` PARAGRAPH SEPARATOR — and NEL is the **third member of exactly that set**:
+not LF, but treated as a line break by some parsers. And `foldRefName`, in the same file, has
+covered `U+007F-U+009F` all along. Two lists that each looked complete, with a 32-codepoint block
+in the gap between them. `defang` carried the identical gap and is fixed with it.
+
+**A SANITISER TESTED BY SAMPLING IS TESTED AGAINST THE CHARACTERS SOMEONE THOUGHT OF.** The old
+test named six representatives and passed while the whole block leaked — the same failure as a
+scanner keyed to one spelling. So:
+
+- the intended ranges are **data** (`FORGERY_RANGES`), exported beside the class so the list and
+  the regex are read from one place;
+- one test **walks every codepoint in every range** and reports the leaks by name;
+- one test pushes **every one of them** through the whole seam and asserts against the captured
+  `AgentSpec.prompt` — not the sanitiser in isolation, which is the stage that could not see the
+  round-22 defect either.
+
+**Tab stays out, deliberately.** It cannot forge a line, and it IS the disputed content in a
+Makefile conflict. The mutation that puts it back is red in three tests, which is the guard that
+keeps round 20's fidelity fix from being undone by a later tidy-up of this class.
+
+**One correction to my own assertion, worth recording because it is the same class of error.**
+My first end-to-end check asserted that no forgery codepoint survived **anywhere** in the prompt,
+and it failed on `U+000A`. The prompt is line-structured: LF must exist *between* lines. The
+property is that untrusted content cannot introduce one **inside** a line — assert the looser
+thing and you have asserted that the prompt has no lines. **State the property, not the
+convenient approximation of it.**
+
+**Three mutations, all red:**
+
+| # | mutation | result |
+|---|---|---|
+| M108 | C1 dropped from the class (the defect restored) | **red**, 2 tests |
+| M109 | a range removed from the declared list | **red** |
+| M110 | tab put back into the class | **red**, 3 tests |
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1498,7 +1540,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and seven mutations reverted one at a time, each proved a test red. Eight survived a
+One hundred and ten mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
