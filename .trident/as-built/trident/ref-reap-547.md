@@ -75,6 +75,11 @@ terminal", which is the answer that authorises the delete.
    keeps them reachable — outside `refs/heads` so it can never re-enter a launch, outside
    `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
    `git branch <name> <sha>`. Salvage failing refuses the delete.
+9a. Nothing CLAIMS the ref as of now — holders and live owners re-measured, not remembered,
+   immediately before the delete.
+9b. And nothing claimed it DURING the delete: the same measurement again afterwards, with a
+   create-only restore at the unchanged sha if one did. See "THE CAS PROTECTS THE REF'S VALUE"
+   below for why both, and what each of the three possible restore outcomes means.
 10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP — `git update-ref -d <ref> <expected-sha>`, which
     checks the old value and unlinks the ref under one ref lock. A branch that advanced since the
     enumeration cannot be deleted at all, because there is no read-then-delete window: there is no
@@ -118,8 +123,18 @@ SO THE OUTCOME IS MADE CORRECT INSTEAD OF THE WINDOW MADE SMALL, which is the pr
 The repair is lossless, which is what makes it an answer and not a hedge: the sha is unchanged by
 construction (the CAS proved it, and the salvage ref already holds it), so the claimant's worktree
 HEAD symref resolves to the same commit it did before, and no commit, working tree or index is
-touched. The restore is CREATE-ONLY, so a claimant that has meanwhile made its own branch at a
-different sha keeps it and this reports rather than clobbers. The residue is a sub-second window in
+touched. The restore is CREATE-ONLY, and its result is read as THREE outcomes rather than two —
+which is the round-4 correction, and it was this file's own doctrine broken in its newest code. The
+first cut read ANY failure of the restore as "the claimant recreated the branch, so ours losing is
+correct" and counted a restore unconditionally, so a lock failure, a permission error or a transient
+host fault left the ref ABSENT — the claimant's symbolic HEAD dangling, the one outcome gate 9b
+exists to prevent — while the summary said it had been put back. Now: SUCCESS is counted as a
+restore; an EEXIST refusal (`reference already exists` AND exit 128, both required, matched on git's
+own words) means the claimant owns its own ref and nothing was put back or needed to be; and EVERY
+OTHER failure is `refs_restore_failed` — not counted as a restore, logged at error, breaking the
+summary's silence, and carrying the one-line `git branch <name> <sha>` recovery, which works because
+the salvage ref still holds the tip. A command that failed establishes that it did not succeed and
+nothing else. The residue is a sub-second window in
 which the ref does not resolve, which can fail a `git switch` in the claiming run's first step — a
 retryable error in a run that has just started, weighed against silently deleting a live lane's
 branch. Both halves refuse on an unreadable measurement, git side and store side alike.
@@ -193,7 +208,8 @@ the ref half records that it is waiting. The no-rescue branch of the composition
 explicitly, so a latch only ever lifted on the other branch cannot disable half the reaper here.
 
 **The 79 are swept by this change rather than left to age out**, because the same guard answers
-them: measured against the live rows, 73 pass gates 5-7 and 6 are refused for unknown ownership.
+them: measured against the live rows, 73 pass gates 5-6 and 6 are refused for unknown ownership.
+Gates 7 and 8 contribute nothing to that count, which is consistent with their being inert (above).
 Ref retention is deliberately ZERO where a worktree gets 24 h — a worktree can hold work no probe
 can read intent out of, whereas gate 10 has already copied a ref's commits elsewhere, and the
 failure being fixed is a NEXT launch that can be seconds away. `MAX_REF_DELETIONS_PER_SWEEP = 50`
@@ -201,9 +217,14 @@ bounds one sweep, so the backlog drains over two.
 
 **One existing invariant changed, and it is the one #547 ordered reversed.** The source assertion
 "the reaper can never force, delete a branch, or kill" kept its force and kill bans and traded the
-branch-delete ban for something stricter than zero: there is EXACTLY ONE `-D` in the file, and it
-is the guarded one. Hiding the delete in a sibling module to keep the old assertion green would
-have left a test asserting the opposite of what the module does.
+branch-delete ban for something stricter. Hiding the delete in a sibling module to keep the old
+assertion green would have left a test asserting the opposite of what the module does.
+
+CORRECTED (round 4 — this paragraph had drifted): it said "there is EXACTLY ONE `-D` in the file",
+which was true for the one round in which `git branch -D` was still the primitive. Since the
+atomicity fix there are ZERO occurrences of `'-D'`: the delete is lowercase `git update-ref -d`, and
+the source assertions ban `'branch', '-D'` and the bare `'-D'` flag outright while requiring exactly
+one `'update-ref', '-d'`. A record that describes the round before last is worse than no record.
 
 ### Coverage
 
@@ -211,8 +232,20 @@ Every terminal and non-terminal phase is enumerated by parsing the shipped
 `migrations/expected-schema.txt` phase CHECK and splitting it with the module's own
 `TERMINAL_PHASES`, so the table cannot drift from the schema or be guessed. Each of the three
 terminal phases deletes; each of the five active phases keeps. Every refusal above has its own
-test, and each gate was mutation-checked by reverting it and proving the suite reds — including the
-boot-rescue latch, in both halves (dropping it inside the reaper reds the reaper suite; dropping its
-wiring in the composition reds the stranded-sweep test) and the atomicity of the delete, where
-restoring the exact pre-review primitive reddens the boundary test by REPORTING SUCCESS while the
-arriving commit is gone.
+test, and each gate was mutation-checked by reverting it and proving the suite reds. That includes
+every gate added under review: the boot-rescue latch in both halves (dropping it inside the reaper
+reds the reaper suite; dropping its wiring in the composition reds the stranded-sweep test); the
+atomicity of the delete, where restoring the exact pre-review primitive reddens the boundary test by
+REPORTING SUCCESS while the arriving commit is gone; gate 4c, where removing it deletes a preserved
+dirty tree's ref on sweep 2; the claim probe, each of whose six witnesses and both of whose
+unreadable-measurement refusals have their own case; and the restore classification, including an
+adversarial shape for EACH half of the EEXIST predicate — a fatal exit carrying a different message,
+and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
+half alone would classify the real case correctly while mis-classifying a failure.
+
+SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a test rather than a
+note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable
+rebase state reading as clear, the owners read failure, the restore's create-only-ness, and the
+`!confirmed.ok` half of the salvage verify. One guard is documented as NOT reddenable and kept
+anyway with the reason stated (gate 4c's `existsSync`), rather than given a test that pretends
+otherwise.

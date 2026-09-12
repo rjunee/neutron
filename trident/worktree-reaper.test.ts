@@ -1395,13 +1395,135 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(theirSha)
     expect(
       report.refs_kept.some(
-        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('restore declined'),
+        (k) =>
+          k.ref === `refs/heads/${branch}` && k.reason.includes('the claimant holds its own ref'),
       ),
       JSON.stringify(report.refs_kept),
     ).toBe(true)
+    // NEITHER counter claims anything: we did not put a ref back, and nothing failed in a
+    // way that left one absent. This is the benign create-only refusal and only that.
+    expect(report.refs_restored).toEqual([])
+    expect(report.refs_restore_failed).toEqual([])
     // And our tip is still reachable, because the salvage was written before any of this.
     expect(await git(repo, 'rev-parse', `refs/trident-reaped/claimant-remade-it/${sha}`)).toBe(sha)
   }, 60_000)
+
+  test('A RESTORE THAT SIMPLY FAILED is loud and is NOT reported as restored', async () => {
+    // THE ROUND-4 BLOCKER, and it is this file's own doctrine broken in the newest code: ANY
+    // failure of the create-only restore was read as "the claimant recreated the branch, so
+    // ours losing is correct", and `refs_restored` was pushed unconditionally. A lock
+    // failure, a permission error or a transient host fault therefore left the ref ABSENT —
+    // the claimant's symbolic HEAD dangling, which is the one outcome gate 9b exists to
+    // prevent — while the summary said it had been put back.
+    //
+    // A command that failed establishes that it did not succeed and nothing else. Only an
+    // EEXIST refusal proves the ref is there; everything else is loud and unrestored.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/restore-cannot-land'
+    const sha = await seedRef(repo, branch, 'norestore')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_claimed-then-stuck')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        // A claimant appears during the delete, exactly as in the ownership-race test: the
+        // worktree is added BEFORE the ref is unlinked, because `worktree add <path>
+        // <branch>` needs the branch to still exist — which is the real ordering anyway.
+        if (!deleted && cmd.includes('update-ref') && cmd.includes('-d')) {
+          deleted = true
+          const added = await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          expect(added.ok, added.stderr).toBe(true)
+          return spawnCapture(cmd, cwd)
+        }
+        // ...and ONLY the restore that follows fails, for a reason that is not EEXIST.
+        if (deleted && cmd.includes('update-ref') && cmd.includes(`refs/heads/${branch}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: cannot lock ref: lock failure', exit_code: 1 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(deleted).toBe(true)
+    // THE REPORT MUST NOT CLAIM A RESTORE.
+    expect(report.refs_restored).toEqual([])
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_restore_failed).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+    const record = report.refs_kept.find((k) => k.ref === `refs/heads/${branch}`)
+    expect(record?.reason, JSON.stringify(report.refs_kept)).toContain('RESTORE FAILED')
+    expect(record?.reason).toContain('is ABSENT')
+    // The recovery command names the branch and the exact sha, because nothing else will.
+    expect(record?.reason).toContain(`git branch ${branch} ${sha}`)
+    // THE GROUND TRUTH: the ref really is gone, which is why this must be loud.
+    expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
+    // And the tip is still reachable, so the recovery line above actually works.
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/restore-cannot-land/${sha}`)).toBe(sha)
+  }, 60_000)
+
+  // ONLY BOTH HALVES TOGETHER MEAN "THE REF IS ALREADY THERE". Real git answers exit 128 AND
+  // "reference already exists", so either half alone classifies the real case correctly — which
+  // is precisely why each half needs an adversarial shape to be worth having. The claim in the
+  // predicate's comment is that a tighter match is the safe direction; these two pin it.
+  for (const shape of [
+    {
+      what: 'exit 128 with some OTHER fatal message',
+      why: 'a fatal that is not an existing-ref conflict leaves the ref absent',
+      result: { ok: false, stdout: '', stderr: 'fatal: cannot lock ref: permission denied', exit_code: 128 },
+    },
+    {
+      what: "a non-fatal exit that happens to SAY 'reference already exists'",
+      why: 'the message alone is not the outcome; a host that exits 1 established nothing',
+      result: { ok: false, stdout: 'reference already exists', stderr: '', exit_code: 1 },
+    },
+  ]) {
+    test(`a restore failing with ${shape.what} is LOUD, not benign`, async () => {
+      const { root, repo } = await makeRepo()
+      const branch = 'trident/restore-shape-probe'
+      const sha = await seedRef(repo, branch, 'shapeprobe')
+      const claimant = join(repo, '.claude', 'worktrees', 'wf_shape-claimant')
+      mkdirSync(dirname(claimant), { recursive: true })
+      let deleted = false
+
+      const report = await sweepTridentWorktrees({
+        store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+        run_host: async (cmd, cwd) => {
+          if (!deleted && cmd.includes('update-ref') && cmd.includes('-d')) {
+            deleted = true
+            await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+            return spawnCapture(cmd, cwd)
+          }
+          if (deleted && cmd.includes('update-ref') && cmd.includes(`refs/heads/${branch}`)) {
+            return shape.result
+          }
+          return spawnCapture(cmd, cwd)
+        },
+        proc_root: makeProc(root),
+      })
+
+      expect(deleted).toBe(true)
+      expect(report.refs_restored, shape.why).toEqual([])
+      expect(report.refs_restore_failed, shape.why).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+      expect(
+        report.refs_kept.some((k) => k.reason.startsWith('RESTORE FAILED')),
+        JSON.stringify(report.refs_kept),
+      ).toBe(true)
+      expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
+    }, 60_000)
+  }
+
+  test('a restore failure breaks the summary log silence', () => {
+    // A sweep whose only event was a failed restore must not be indistinguishable from a
+    // sweep with nothing to do — same argument as `refs_stood_down`, and the reason this has
+    // its own counter rather than being folded into that one: the name has to say what
+    // happened, because the operator reading it has a dangling HEAD to fix.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    const guard = source.slice(source.indexOf('function logSummaryIfActed'))
+    const condition = guard.slice(0, guard.indexOf('return'))
+    expect(condition).toContain('report.refs_restore_failed.length === 0')
+    expect(guard).toContain('refs_restore_failed: report.refs_restore_failed.length')
+  })
 
   test('a DETACHED worktree appearing on the tip mid-sweep stops the reap', async () => {
     // A claimant need not check the branch out by name to be standing on it: `merge.ts` and

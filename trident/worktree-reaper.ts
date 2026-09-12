@@ -256,6 +256,15 @@ export interface WorktreeReapReport {
    * signal that a dispatch and a reap collided, so it is counted and logged.
    */
   refs_restored: { ref: string; sha: string }[]
+  /**
+   * Refs this sweep DELETED, then found a claim for, and then COULD NOT PUT BACK for any
+   * reason other than the claimant already owning the name. The ref is absent and a live
+   * claimant's HEAD is dangling, so this is the loudest thing this module can report: it is
+   * counted apart from `refs_restored` (which claims success), it breaks the summary log's
+   * silence the way a whole-repo stand-down does, and the `refs_kept` reason carries the
+   * one-line `git branch` recovery. The tip itself is still reachable via the salvage ref.
+   */
+  refs_restore_failed: { ref: string; sha: string }[]
 }
 
 interface WorktreeEntry {
@@ -290,6 +299,7 @@ function emptyReport(): WorktreeReapReport {
     refs_kept: [],
     refs_stood_down: 0,
     refs_restored: [],
+    refs_restore_failed: [],
   }
 }
 
@@ -633,6 +643,21 @@ function ownerProcessLive(owner: TridentBranchOwner, processCwds: string[]): boo
   const generation = owner.workflow_run_id
   if (generation === null || generation === '') return false
   return processCwds.some((cwd) => cwd.includes(generation))
+}
+
+/**
+ * DID `update-ref <ref> <new> ''` REFUSE BECAUSE THE REF ALREADY EXISTS? That is the one
+ * failure of a create-only write which proves something useful: the ref is THERE, so a
+ * claimant has made its own and nothing is dangling.
+ *
+ * Matched on git's own words AND its fatal exit code, both required. Measured on git 2.43:
+ * `fatal: update_ref failed for ref '<ref>': cannot lock ref '<ref>': reference already
+ * exists`, exit 128. A tighter match than necessary is the safe direction here — a benign
+ * case misread as unknown is merely reported loudly, while an unknown failure misread as
+ * benign leaves a live claimant's HEAD dangling and says nothing.
+ */
+function refAlreadyExists(result: { stdout: string; stderr: string; exit_code: number }): boolean {
+  return result.exit_code === 128 && /reference already exists/i.test(`${result.stderr}${result.stdout}`)
 }
 
 /**
@@ -1024,21 +1049,50 @@ async function reapBranchRefs(
       } catch (error) {
         restored = { ok: false, stdout: '', stderr: errText(error), exit_code: 1 }
       }
-      report.refs_restored.push({ ref, sha })
-      report.refs_kept.push({
-        ref,
-        reason: restored.ok
-          ? `raced-a-new-claim: ${claimedDuring} — the ref was put back at ${sha}`
-          : `raced-a-new-claim: ${claimedDuring} — restore declined (${hostText(restored)}), the claimant holds its own ref`,
-      })
-      log.warn('worktree_reaper_ref_restored', {
-        repo,
-        ref,
-        sha,
-        salvage,
-        claim: claimedDuring,
-        restored: restored.ok,
-      })
+      if (restored.ok) {
+        report.refs_restored.push({ ref, sha })
+        report.refs_kept.push({
+          ref,
+          reason: `raced-a-new-claim: ${claimedDuring} — the ref was put back at ${sha}`,
+        })
+        log.warn('worktree_reaper_ref_restored', { repo, ref, sha, salvage, claim: claimedDuring })
+      } else if (refAlreadyExists(restored)) {
+        // THE BENIGN FAILURE, AND THE ONLY ONE. Create-only refused because the ref is
+        // already there, so the claimant made its own branch — which is the outcome we
+        // want and the reason the write is create-only. Not counted as a restore: we
+        // did not put anything back.
+        report.refs_kept.push({
+          ref,
+          reason: `raced-a-new-claim: ${claimedDuring} — the claimant holds its own ref, ours was not forced back over it`,
+        })
+        log.warn('worktree_reaper_ref_claimant_owns', { repo, ref, sha, salvage, claim: claimedDuring })
+      } else {
+        // EVERY OTHER FAILURE MEANS THE REF IS ABSENT, and this is the one outcome gate 9b
+        // exists to prevent — the claimant's symbolic HEAD is dangling right now.
+        //
+        // THIS BRANCH IS HERE BECAUSE THE FIRST CUT DID NOT HAVE IT (#547 round 4). It read
+        // ANY failure as "the claimant recreated the branch, so ours losing is correct", and
+        // counted `refs_restored` unconditionally — so a lock failure, a permission error or
+        // a transient host fault left the ref gone while the summary said it had been put
+        // back. That is the same mistake this file corrects everywhere else: a command that
+        // failed establishes that it did not succeed and NOTHING ELSE. Create-only is what
+        // makes the benign case precisely checkable, so it is matched on rather than assumed.
+        report.refs_restore_failed.push({ ref, sha })
+        report.refs_kept.push({
+          ref,
+          reason:
+            `RESTORE FAILED: ${claimedDuring} — the ref is ABSENT and could not be put back ` +
+            `(${hostText(restored)}); recover with: git branch ${short} ${sha}`,
+        })
+        log.error('worktree_reaper_ref_restore_failed', {
+          repo,
+          ref,
+          sha,
+          salvage,
+          claim: claimedDuring,
+          error: hostText(restored),
+        })
+      }
       continue
     }
 
@@ -1060,7 +1114,8 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     report.removed.length === 0 &&
     report.refs_deleted.length === 0 &&
     report.refs_stood_down === 0 &&
-    report.refs_restored.length === 0
+    report.refs_restored.length === 0 &&
+    report.refs_restore_failed.length === 0
   ) {
     return
   }
@@ -1078,6 +1133,7 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     refs_kept: report.refs_kept.length,
     refs_stood_down: report.refs_stood_down,
     refs_restored: report.refs_restored.length,
+    refs_restore_failed: report.refs_restore_failed.length,
   })
 }
 
