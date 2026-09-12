@@ -837,9 +837,13 @@ describe('#541 — a HOSTILE REF NAME cannot forge the prompt either', () => {
   })
 
   test('an ORDINARY branch name still reads — the fold is not a mangle', async () => {
+    // The name is asserted in the EVIDENCE only. It deliberately no longer appears in the
+    // QUESTION: that string is screened by `isOwnerOnlyQuestion`, so nothing caller-controlled
+    // may enter it (#541 round 17) — a branch called `feat-budget-flush` was otherwise enough
+    // to disable the whole tier before any model call.
     const { evidence, question } = await promptFor('trident/flush-fix')
-    expect(question).toContain('trident/flush-fix')
     expect(evidence).toContain('trident/flush-fix')
+    expect(question).not.toContain('trident/flush-fix')
   })
 })
 
@@ -1109,11 +1113,29 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       conflicted: string
       onIndex?: () => HostCommandResult | never
       onDiff?: () => HostCommandResult | never
+      onBlob?: () => HostCommandResult | never
       stages?: readonly number[]
     }
     const shapes: Shape[] = [
       { name: 'ordinary two-sided conflict', conflicted: 'a.ts', onDiff: () => ok('diff\n-x\n+y\n') },
       { name: 'genuinely one-sided (stage 3 only)', conflicted: 'a.ts', stages: [1, 3] },
+      {
+        // A ONE-SIDED CONFLICT WHOSE SURVIVING BLOB CANNOT BE READ. The index established the
+        // shape, but the content is what the judge weighs — so failing to read it is unknown,
+        // not "a one-sided conflict with nothing in it".
+        name: 'one-sided, surviving blob unreadable',
+        conflicted: 'a.ts',
+        stages: [1, 3],
+        onBlob: () => fail('fatal: bad object'),
+      },
+      {
+        name: 'one-sided, surviving blob read throws',
+        conflicted: 'a.ts',
+        stages: [1, 3],
+        onBlob: () => {
+          throw new Error('spawn failed')
+        },
+      },
       { name: 'two stages, identical content', conflicted: 'a.ts', onDiff: () => ok('') },
       { name: 'diff exits non-zero', conflicted: 'a.ts', onDiff: () => fail('fatal: bad object') },
       {
@@ -1203,6 +1225,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
           return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
         }
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(shape.conflicted)
+        if (cmd.includes('cat-file')) {
+          return shape.onBlob === undefined ? ok('the surviving side\n') : shape.onBlob()
+        }
         if (cmd.some((a) => a.startsWith(':2:'))) {
           return shape.onDiff === undefined ? ok('diff\n-x\n+y\n') : shape.onDiff()
         }
@@ -1257,12 +1282,15 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'index has an empty path beside valid records',
       'index lists a DIFFERENT path',
       'index lists no paths at all',
+      'one-sided, surviving blob unreadable',
+      'one-sided, surviving blob read throws',
       'enormous diff',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
     }
     // And every refusal names itself, so `unreadable` and `over-budget` never blur together.
     expect(kinds['diff exits non-zero']).toBe('unreadable')
+    expect(kinds['one-sided, surviving blob unreadable']).toBe('unreadable')
     expect(kinds['enormous diff']).toBe('over-budget')
   })
 
@@ -1767,24 +1795,20 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     expect(arbitration).not.toContain('genuinely ambiguous')
   })
 
-  test('AN OWNER-ONLY VERDICT STARTS NO SUBSTRATE, AND REPORTS NO PROMPT SIZE', async () => {
-    // `buildFableArbiter` returns for an owner-only question BEFORE any `AgentSpec` exists —
-    // the check sits above the spec, alongside the unusable-options and invocation-cap
-    // returns. The seam had already computed the prompt it WOULD send, and logged that length
-    // as `prompt_bytes` on a turn where the substrate received nothing at all. `SPEC.md` calls
-    // that field "the byte length of the exact prompt string the arbiter received", so the
-    // line asserted a delivery that never happened.
+  test('AN ORDINARY BRANCH NAME CANNOT SILENTLY DISABLE THE ARBITER', async () => {
+    // THE OFF SWITCH THIS TEST USED TO PIN AS CORRECT. `buildFableArbiter` screens the WHOLE
+    // question with `isOwnerOnlyQuestion` and returns `owner-only` without starting a
+    // substrate; the seam was interpolating the branch name into that question; so a branch
+    // called `feat-budget-flush` matched the money pattern and disabled the entire tier before
+    // any model call, on ordinary repository-local work.
     //
-    // THE FIX IS ABSENCE, NOT ZERO. Zero bytes and no prompt are different facts, and a metric
-    // that spells them the same way is the overclaim this lane keeps deleting — the round-12
-    // defect in one field. The key is omitted entirely, so a reader sees "not reported" rather
-    // than a number that looks measured.
+    // I FOUND THAT ROUTE AND WROTE A TEST ASSERTING ZERO SUBSTRATE STARTS — pinning as correct
+    // the thing that makes #541's premise reproduce itself: an arbiter with no production
+    // reach, this time because a ref name turned it off. The symptom is the arbiter QUIETLY
+    // NOT RUNNING, which is the failure nobody notices.
     //
-    // AND THE ROUTE IN IS REAL, not a contrived question. The seam builds its question from a
-    // fixed template with the BRANCH NAME folded into it, so an ordinary branch name can make
-    // that question match `isOwnerOnlyQuestion`: `feat-budget-flush` puts the word `budget`
-    // — one of the money patterns — into the text, bounded by hyphens, which `\b` matches.
-    // Nothing here is contrived; this is a branch someone would really push.
+    // The fix is structural, so this is the COMPLEMENT: nothing caller-controlled enters the
+    // screened string, and a `budget` branch therefore reaches the model like any other.
     const run = localRun('feat-budget-flush')
     const wt = wtOf('/shared', run)
     let reported = 0
@@ -1800,35 +1824,67 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       }
       return ok()
     }
-    // THE REAL ARBITER over a substrate that records every start, so "no prompt was sent" is
-    // observed rather than assumed from the outcome kind.
-    const { arbitrate, specs } = capturingArbiter(CONFLICT_ARBITER_RETRY_OPTION)
+    const { arbitrate, specs } = capturingArbiter('stop')
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
       resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
       arbitrate,
     })
     const lines = await captureLogs(async () => {
-      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
-        name: 'TridentMergeConflictEscalation',
-        question: RESOLVER_QUESTION,
-      })
+      await cleanupAfterMerge(run, deps).catch(() => {})
     })
-    // 1. NOTHING WAS SENT. The substrate was never started, so no prompt existed.
-    expect(specs.length, 'an owner-only question must not start a substrate').toBe(0)
-    // 2. The tier still records the consultation and its verdict — the denominator is real.
+    // THE MODEL WAS REACHED. Driven through the REAL `buildFableArbiter`, so the screen it
+    // applies is the production one.
+    expect(specs.length, 'an ordinary branch name must not suppress the arbiter').toBe(1)
     const line = lines.find((l) => l.includes('merge_conflict_arbitration')) ?? ''
-    expect(line, 'the arbitration is still recorded').not.toBe('')
-    expect(line).toContain('verdict=owner-only')
-    // 3. AND IT CLAIMS NO PROMPT SIZE. Absent, not zero: asserting `prompt_bytes=0` would pass
-    //    for an implementation that reported a measurement of nothing.
-    expect(line, 'no prompt reached the model, so no size may be reported').not.toContain('prompt_bytes')
-    // 4. Not vacuous — the field IS emitted when a decision proves a turn happened. Without
-    //    this, deleting the field entirely would satisfy assertion 3.
-    expect(
-      (lines.find((l) => l.includes('merge_conflict_arbitration')) ?? '').includes('conflict_files='),
-      'the other size fields still ride the line',
-    ).toBe(true)
+    expect(line).toContain('verdict=decision')
+    expect(line, 'a real turn happened, so its size is reported').toMatch(/prompt_bytes=\d+/)
+  })
+
+  test('NO CALLER-CONTROLLED TEXT REACHES THE OWNER-ONLY SCREEN', async () => {
+    // THE PROPERTY BEHIND THE FIX, stated so a future edit that re-interpolates a value into
+    // the question fails here rather than in production. A denylist tweak would not have been
+    // a fix: the next ref name spelling `deploy … prod`, or containing `$1`, does the same
+    // thing, and the screen cannot tell a word the caller wrote from a word that arrived
+    // inside a value. So the assertion is that the QUESTION carries no caller-controlled text
+    // at all — the names live in the evidence, which is not screened.
+    const run = localRun('feat-deploy-to-production-$1')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+    const asked = seen[0]
+    expect(asked, 'the arbiter was consulted').toBeDefined()
+    const question = asked?.question ?? ''
+    // Neither ref name is anywhere in the screened string.
+    expect(question).not.toContain('feat-deploy-to-production')
+    expect(question).not.toContain('main')
+    // NOR the resolver's own model-authored text, which is untrusted for the same reason.
+    expect(question).not.toContain(RESOLVER_QUESTION)
+    // AND THE JUDGE STILL LEARNS WHICH BRANCHES THESE ARE — one block lower, in the evidence
+    // that is framed as quoted data. The fix moves the names; it does not withhold them.
+    const evidence = asked?.evidence ?? ''
+    expect(evidence).toContain('feat-deploy-to-production')
+    expect(evidence).toContain('Rebasing')
+    // Not vacuous: the question is still a real question.
+    expect(question.length).toBeGreaterThan(80)
   })
 
   test('no arbitration is logged when the arbiter is never consulted', async () => {
@@ -1943,6 +1999,25 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     // leading horizontal ellipsis, so its absence is the direct evidence of no truncation.
     expect(prompt.includes('…'), 'no line was shortened on the way to the model').toBe(false)
     expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
+  })
+
+  test('A QUESTION PAST THE 300-CHARACTER PROSE CAP ARRIVES WHOLE', async () => {
+    // `foldEvidence`'s 300-character ceiling is right for a sentence rendered into chat and
+    // wrong for a prompt: a question a few characters over it came back as `…` plus its tail,
+    // inside a prompt telling the model nothing had been left out. I INTRODUCED THAT MYSELF
+    // this round by lengthening the question, and caught it only because an unrelated test
+    // asserts no `…` reaches the model. Every scalar now folds at the prompt budget, where the
+    // arithmetic makes a cut impossible without forcing an escalation.
+    const question = `Does ${'q'.repeat(600)} hold?`
+    const prompt = arbiterPrompt({
+      question,
+      evidence: 'e',
+      options: [...CONFLICT_ARBITRATION_OPTIONS],
+      run: { task: `T${'t'.repeat(600)}` },
+    })
+    expect(prompt).toContain(question)
+    expect(prompt).toContain(`T${'t'.repeat(600)}`)
+    expect(prompt.includes('…'), 'nothing was shortened').toBe(false)
   })
 
   test('THE FIXED TEMPLATE CANNOT QUIETLY EAT THE EVIDENCE ALLOWANCE', async () => {

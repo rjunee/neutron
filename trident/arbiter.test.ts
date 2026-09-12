@@ -238,6 +238,26 @@ describe('buildFableArbiter', () => {
     expect(f.cancels.count).toBe(1)
   })
 
+  test('an owner-only question does NOT spend an invocation — the cap bounds MODEL TURNS', async () => {
+    // The counter used to increment above the owner-only screen, so a question that never
+    // reached a model still charged the run's budget — and enough of them exhausted the cap
+    // without one turn happening. The cap exists to bound pathological loops of MODEL WORK;
+    // it still counts attempts rather than successes (a crash on start spends it), but the
+    // first line past which a turn is certain is below this screen, not above it.
+    const f = scriptedFactory('DECISION: retry-resolution\nREASONING: fine.')
+    const arbitrate = buildFableArbiter({ build_substrate: f.build, max_invocations_per_run: 1 })
+    const ownerOnly = 'Should we spend $500 on this?'
+    // Three owner-only questions on a cap of ONE.
+    for (let i = 0; i < 3; i++) {
+      expect((await arbitrate(input({ question: ownerOnly }))).kind).toBe('owner-only')
+    }
+    expect(f.starts.count, 'no substrate was started for any of them').toBe(0)
+    // The run's single invocation is still available for a real question.
+    const real = await arbitrate(input({ question: 'Do these two edits conflict irreconcilably?' }))
+    expect(real.kind, 'the budget was not consumed by the screened questions').toBe('decision')
+    expect(f.starts.count).toBe(1)
+  })
+
   test('owner-only pre-guard catches spend, production deploy, and external send without a turn', async () => {
     const questions = [
       'Should I spend $40/month on a hosted runner for this?',

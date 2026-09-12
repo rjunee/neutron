@@ -33,7 +33,7 @@
  * neither of those files depends on the other: the prompt's final form is a thing they SHARE,
  * not a thing one of them owns and the other reaches into.
  */
-import { foldEvidence, foldEvidenceTo } from './wrong-base-remedy.ts'
+import { foldEvidenceTo } from './wrong-base-remedy.ts'
 import { NO_INTERACTIVE_RULE } from './conflict-resolver.ts'
 
 /**
@@ -131,14 +131,27 @@ export interface ArbiterPromptInput {
  * away.
  */
 export function arbiterPrompt(input: ArbiterPromptInput): string {
-  const question = foldEvidence(input.question)
+  // EVERY SCALAR FOLDS AT THE PROMPT BUDGET, NOT AT `foldEvidence`'s 300-CHARACTER PROSE CAP
+  // (#541 round 17). That cap is right for a sentence rendered into chat and wrong here, and
+  // it was silently shortening what reached the judge: a question a few characters over 300
+  // came back as `…` plus its tail, inside a prompt that tells the model nothing has been left
+  // out. I introduced that myself this round by lengthening the question, and it is the same
+  // defect the round-13/14 deletions exist to prevent — a bound smaller than the budget it
+  // sits behind is a truncation.
+  //
+  // At the budget it cannot cut silently: `foldEvidenceTo` returns `…` plus the last `max`
+  // characters, so a cut value is alone at least `max + 3` bytes and forces the caller's
+  // over-budget branch. The fold still runs on every one of them, because defanging is not
+  // optional — only the LENGTH stops being a display bound.
+  const fold = (value: string): string => foldEvidenceTo(value, ARBITER_PROMPT_BYTES_MAX)
+  const question = fold(input.question)
   const evidence = input.evidence
     .split('\n')
-    .map((line) => foldEvidenceTo(line, ARBITER_PROMPT_BYTES_MAX))
+    .map((line) => fold(line))
     .join('\n')
-  const task = foldEvidence(input.run.task)
+  const task = fold(input.run.task)
   const options = input.options
-    .map((option) => `- ${foldEvidence(option.id)}: ${foldEvidence(option.description)}`)
+    .map((option) => `- ${fold(option.id)}: ${fold(option.description)}`)
     .join('\n')
 
   return `You are a FABLE ARBITER — Neutron's build-escalation judge. ${NO_INTERACTIVE_RULE}

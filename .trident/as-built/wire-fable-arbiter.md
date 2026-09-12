@@ -844,6 +844,89 @@ and the correction has to live where the claim is. And while checking it I swept
 "as this branch found it". **A citation is a claim, and deleting code invalidates claims
 about line numbers exactly as it invalidates claims about behaviour.**
 
+### ROUND 17 — the off switch I found and pinned as correct
+
+**This is the worst finding in the lane, and it is mine twice over.** Building a fixture for
+the `prompt_bytes` blocker, I needed a question that would reach the arbiter's owner-only
+screen. I discovered that the seam interpolated the BRANCH NAME into the screened question, so
+an ordinary branch — `feat-budget-flush` — matched the money pattern in
+`isOwnerOnlyQuestion`, returned `owner-only`, and **started no substrate at all**. I wrote:
+*"the fixture is a real route, not a contrived question"*, and then **asserted zero substrate
+starts as the expected behaviour.**
+
+The framing was right about the mechanism and exactly wrong about what to do with it. **I had
+found a way to silently disable the production tier this entire PR exists to wire, and turned
+it into a passing test.** #541's premise is an arbiter with zero production call sites;
+shipping a name-triggered off switch reproduces that in the form nobody notices, because the
+symptom is *the arbiter quietly not running* — no error, no log line, a merge that escalates to
+the owner exactly as it did before the feature existed.
+
+**A denylist tweak would not have been a fix.** The next ref name spelling `deploy … prod`, or
+containing `$1`, does the same thing. The screen cannot distinguish a word the caller wrote
+from a word that arrived inside an interpolated value, because by the time it runs they are the
+same string.
+
+**So the boundary is structural: NOTHING CALLER-CONTROLLED ENTERS THE SCREENED STRING.** The
+question is now repo-authored end to end, with no interpolation of any kind. The ref names, the
+conflicted paths, the resolver's own model-authored text and both histories live in `evidence`,
+which is not screened and is already framed to the judge as quoted data it adjudicates. The
+judge loses nothing — it is told which branches these are one block lower — and the screen now
+reads only text this repository wrote, which is the only text it can meaningfully judge.
+
+The complement is what makes it checkable: **a `budget` branch must now reach the substrate**,
+driven through the real `buildFableArbiter`. And the property behind it is asserted directly —
+a hostile branch `feat-deploy-to-production-$1` appears in the evidence and **nowhere in the
+question** — so a future edit that re-interpolates a value fails here rather than in
+production.
+
+**The invocation counter moved too.** It incremented above the owner-only screen, so a question
+that never reached a model still charged the run's budget, and enough of them exhausted the cap
+without a single turn. The cap exists to bound pathological loops of MODEL WORK; it still
+counts attempts rather than successes — a crash on start spends it — but the first line past
+which a turn is certain is below the screen, not above it.
+
+### ROUND 17, second finding — `complete` evidence that showed nothing
+
+The modify/delete branch named the surviving side and stopped:
+
+> `(no two-sided diff: only the BRANCH's version of this path exists — the base deleted or never added it)`
+
+…and returned `{kind: 'complete'}`, under a prompt that says **THE EVIDENCE BELOW IS COMPLETE**.
+So the judge could grant a retry on a modify/delete conflict **having never seen the change**,
+which is the one case where the whole question is "is this addition worth keeping against that
+deletion". **A one-sided conflict has less content than a two-sided one; it does not have
+none.**
+
+**And my test protected it.** `a REAL modify/delete conflict is complete evidence` asserted the
+descriptive marker — a sentence that is true whether or not the content is shown, and therefore
+worthless as a detector. It now asserts a distinctive token written into the surviving version,
+and mutation-checking proves the assertion bites.
+
+The fix reads the surviving stage's blob **by object id**, taken from the `ls-files --unmerged`
+record this round already parses, so an untrusted path never becomes a git pathspec. A blob the
+index promised but git will not return is `unreadable`, not an empty side — the same rule as
+everywhere else: a read we could not perform is unknown, never a fact.
+
+**A defect I introduced this round, caught by an unrelated assertion.** Lengthening the question
+pushed it past `foldEvidence`'s 300-CHARACTER prose cap, so the prompt carried `…` plus its
+tail — a silently shortened question inside a prompt promising nothing had been left out. Only
+the round-14 test asserting no `…` reaches the model caught it. Every scalar in `arbiterPrompt`
+now folds at the PROMPT BUDGET rather than the prose cap, where the arithmetic makes a silent
+cut impossible; the fold still runs on all of them, because defanging is not optional — only
+the length stops being a display bound. **A bound smaller than the budget it sits behind is a
+truncation**, which is the same sentence round 14 wrote about a per-line cap, in a different
+field.
+
+**Five mutations, all red:**
+
+| # | mutation | result |
+|---|---|---|
+| M82 | one-sided emits only the sentence, no surviving content | **red** |
+| M83 | an unreadable surviving blob becomes an empty side | **red** |
+| M84 | the branch name goes back into the screened question | **red, 3 tests** |
+| M85 | the invocation counter moves back above the owner-only screen | **red** |
+| M86 | scalars fold at the 300-character prose cap again | **red, 2 tests** |
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -1084,7 +1167,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Eighty-one mutations reverted one at a time, each proved a test red. Eight survived a
+Eighty-six mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

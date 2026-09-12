@@ -221,13 +221,19 @@ export function buildFableArbiter(opts: BuildFableArbiterOptions): TridentArbite
         reason: `arbiter invocation cap (${maxInvocations}) reached for this run`,
       }
     }
-    // The cap bounds pathological loops, so it counts ATTEMPTS, not successes:
-    // a turn that crashes or cannot start still spends its budget.
-    invocations.set(input.run.id, count + 1)
 
     if (isOwnerOnlyQuestion(input.question)) {
       return { kind: 'owner-only', question: input.question }
     }
+
+    // SPENT HERE, BELOW THE SCREENS THAT NEVER CALL A MODEL (#541 round 17). The cap bounds
+    // pathological loops by counting ATTEMPTS rather than successes — a turn that crashes or
+    // cannot start still spends its budget, which is why this sits ABOVE `start()` and not
+    // below it. But an owner-only question returns without building a spec, so counting it
+    // charged a budget entry for work that never happened, and a caller could exhaust the
+    // run's arbitrations without one model turn taking place. What the cap exists to bound is
+    // model turns; this is the first line past which one is certain to be attempted.
+    invocations.set(input.run.id, count + 1)
 
     const spec: AgentSpec = {
       prompt: arbiterPrompt(input),

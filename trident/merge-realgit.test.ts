@@ -998,7 +998,10 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'branch', 'feat', 'main')
     const fwt = join(repo, '.one-sided')
     await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
-    writeFileSync(join(fwt, 'README.md'), 'the branch still wants this file\n')
+    // A DISTINCTIVE TOKEN IN THE SURVIVING SIDE, so the assertion is about CONTENT rather
+    // than about the descriptive sentence — which is true whether or not the content is
+    // shown, and is therefore worthless as a detector.
+    writeFileSync(join(fwt, 'README.md'), 'the branch still wants this file\nKEEP-THE-FLUSH-GUARD\n')
     await git(fwt, 'add', '.')
     await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edits README')
     await git(repo, 'worktree', 'remove', '--force', fwt)
@@ -1020,10 +1023,16 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     expect(body).toContain('no two-sided diff')
-    // AND IT SAYS WHICH SIDE. The sentence this replaces could not, because it did not know
+    // IT SAYS WHICH SIDE. The sentence this replaces could not, because it did not know
     // whether it was describing a fact or an error.
     expect(body).toMatch(/only the (BASE|BRANCH)'s version of this path exists/)
     expect(body).not.toContain('could not read')
+    // AND IT SHOWS THAT SIDE — the load-bearing assertion (#541 round 17). Labelling the
+    // evidence `complete` while emitting only a sentence meant the judge could grant a retry
+    // on a modify/delete conflict WITHOUT SEEING THE CHANGE, under a prompt that tells it
+    // nothing has been left out. The earlier version of this test asserted the marker and
+    // never the blob, so it protected exactly that.
+    expect(body).toContain('KEEP-THE-FLUSH-GUARD')
     // Still quoted, still not a crash, still not silence.
     expect(body.split('\n').every((l) => l.startsWith('| '))).toBe(true)
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)

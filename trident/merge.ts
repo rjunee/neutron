@@ -1937,12 +1937,12 @@ function quoteAll(text: string): string {
  * NO PAYLOAD ON THE TWO REFUSAL ARMS beyond a fixed reason literal. `over-budget` carries no
  * byte figure — the loop stops fetching once it knows the answer, so any number would mean "at
  * least this much" while reading as a total, which is verbatim the round-12 defect — and
- * `unreadable`'s `why` is one of three repo-authored words, never a path or a git message.
+ * `unreadable`'s `why` is one of four repo-authored words, never a path or a git message.
  */
 export type ConflictEvidence =
   | { kind: 'complete'; body: string }
   | { kind: 'over-budget' }
-  | { kind: 'unreadable'; why: 'index' | 'not-in-index' | 'diff' }
+  | { kind: 'unreadable'; why: 'index' | 'not-in-index' | 'diff' | 'blob' }
 
 /**
  * WHICH CONFLICT STAGES EXIST, per path — the positive evidence that separates a one-sided
@@ -1962,7 +1962,7 @@ export type ConflictEvidence =
 async function unmergedStages(
   run_host: RunHostCommand,
   repo: string,
-): Promise<Map<string, Set<number>> | null> {
+): Promise<Map<string, Map<number, string>> | null> {
   let res: HostCommandResult
   try {
     res = await run_host(['git', '-C', repo, 'ls-files', '--unmerged', '-z'], repo)
@@ -1970,19 +1970,24 @@ async function unmergedStages(
     return null
   }
   if (!res.ok) return null
-  const stages = new Map<string, Set<number>>()
+  const stages = new Map<string, Map<number, string>>()
   for (const record of res.stdout.split('\u0000')) {
     if (record.length === 0) continue
     const tab = record.indexOf('\t')
     if (tab === -1) return null
     const meta = record.slice(0, tab).split(' ')
     const stage = Number(meta[2])
+    const blob = meta[1] ?? ''
     const path = record.slice(tab + 1)
     if (meta.length !== 3 || !Number.isInteger(stage) || stage < 1 || stage > 3) return null
     if (path.length === 0) return null
+    // THE BLOB SHA IS KEPT, not just the stage number (#541 round 17), because a one-sided
+    // conflict still has to SHOW the side that survives. Addressing the content by its object
+    // id also means the untrusted path never becomes a git pathspec.
+    if (!/^[0-9a-f]{40,64}$/.test(blob)) return null
     const seen = stages.get(path)
-    if (seen === undefined) stages.set(path, new Set([stage]))
-    else seen.add(stage)
+    if (seen === undefined) stages.set(path, new Map([[stage, blob]]))
+    else seen.set(stage, blob)
   }
   return stages
 }
@@ -2034,14 +2039,36 @@ export async function conflictEvidence(
     if (stage === undefined) return { kind: 'unreadable', why: 'not-in-index' }
     let body: string
     if (!stage.has(2) || !stage.has(3)) {
-      // GENUINELY ONE-SIDED, established from the index rather than inferred from a diff
-      // that failed — and it can now say WHICH side, which the sentence this replaces could
-      // not, because it did not know whether it was looking at a fact or an error.
-      body = stage.has(2)
-        ? `${QUOTE}(no two-sided diff: only the BASE's version of this path exists — the branch deleted or never added it)`
-        : stage.has(3)
-          ? `${QUOTE}(no two-sided diff: only the BRANCH's version of this path exists — the base deleted or never added it)`
-          : `${QUOTE}(no two-sided diff: neither side has a version of this path)`
+      // GENUINELY ONE-SIDED, established from the index rather than inferred from a diff that
+      // failed — so it can say WHICH side, which the sentence this replaces could not.
+      //
+      // AND IT SHOWS THAT SIDE (#541 round 17). Naming the surviving side and stopping there
+      // was `complete` in the type and incomplete in fact: a modify/delete conflict is
+      // precisely the case where the judge must weigh a real change against a deletion, and
+      // it was being asked to do that having seen neither. A ONE-SIDED CONFLICT HAS LESS
+      // CONTENT THAN A TWO-SIDED ONE; IT DOES NOT HAVE NONE. The sentence alone is true
+      // either way, which is exactly why asserting it proved nothing.
+      const side = stage.has(2) ? 'BASE' : stage.has(3) ? 'BRANCH' : null
+      if (side === null) {
+        // Only the merge base survives — nothing either side wrote is in the index. A complete
+        // statement with genuinely nothing to show.
+        body = `${QUOTE}(no two-sided diff: neither side has a version of this path)`
+      } else {
+        const blob = stage.get(side === 'BASE' ? 2 : 3) ?? ''
+        let res: HostCommandResult
+        try {
+          res = await run_host(['git', '-C', repo, 'cat-file', 'blob', blob], repo)
+        } catch {
+          return { kind: 'unreadable', why: 'blob' }
+        }
+        // The index says this object exists, so a failure to read it means we did not
+        // establish the conflict — not that the side is empty.
+        if (!res.ok) return { kind: 'unreadable', why: 'blob' }
+        const other = side === 'BASE' ? 'branch' : 'base'
+        body =
+          `${QUOTE}(no two-sided diff: only the ${side}'s version of this path exists — the ` +
+          `${other} deleted or never added it. Its full content follows.)\n${quoteAll(res.stdout)}`
+      }
     } else {
       let res: HostCommandResult
       try {
@@ -2259,6 +2286,10 @@ async function arbitrateConflict(
   const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`)
   const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`)
   const evidence =
+    // THE REF NAMES LIVE HERE, NOT IN THE QUESTION (#541 round 17) — see the invariant on
+    // `input` below. Both are already folded through `foldRefName`, and everything in this
+    // block is framed to the judge as quoted data.
+    `Rebasing \`${safeBranch}\` onto \`${safeBase}\`. ` +
     `Conflicted files (markers still present in your cwd): ${files}. The resolver was ` +
     `asked to keep both intents and stage the result; it reported instead: ` +
     `"${foldEvidence(ctx.resolver_question)}".\n\n` +
@@ -2290,11 +2321,33 @@ async function arbitrateConflict(
   const input = {
     run: ctx.run,
     repo_path: ctx.repo,
+    // THE QUESTION IS REPO-AUTHORED, END TO END, WITH NO INTERPOLATION (#541 round 17).
+    //
+    // WHY THIS IS A RULE AND NOT A STYLE. `buildFableArbiter` runs `isOwnerOnlyQuestion` over
+    // the WHOLE question string and returns `owner-only` — without starting a substrate — when
+    // it matches. That screen exists to catch a question genuinely about money or the owner's
+    // authority. It was being handed a sentence with two REF NAMES interpolated into it, and a
+    // ref name is caller-controlled text that merely happens to be nearby: a branch called
+    // `feat-budget-flush` put the word `budget` into the screened text and silently disabled
+    // the entire tier before any model call. On ordinary repository-local work.
+    //
+    // That is #541's own premise — an arbiter with no production call sites — reproduced in a
+    // form nobody would notice, because the symptom is the arbiter QUIETLY NOT RUNNING. A
+    // denylist tweak would not have fixed it either; the next ref name spelling `deploy … prod`
+    // or containing `$1` does the same thing, and the screen cannot tell a word the caller
+    // wrote from a word that arrived inside a value.
+    //
+    // So the boundary is structural: NOTHING CALLER-CONTROLLED ENTERS THE SCREENED STRING. The
+    // names, the paths, the resolver's own text and both histories are all in `evidence`,
+    // which is not screened and is already framed as quoted data the judge adjudicates. The
+    // judge loses nothing — it is told which branches these are, one block lower — and the
+    // screen now reads only text this repository wrote, which is the only text it can
+    // meaningfully judge.
     question:
-      `Rebasing \`${safeBranch}\` onto \`${safeBase}\` hit a conflict and the bounded ` +
-      `resolver gave up rather than resolve it. Does a correct resolution exist that one ` +
-      `more, better-directed resolver round could reach, or do the two sides change the ` +
-      `same behaviour incompatibly?`,
+      `A rebase hit a conflict and the bounded resolver gave up rather than resolve it. ` +
+      `The two branches, the conflicting regions and each side's history are in the evidence ` +
+      `below. Does a correct resolution exist that one more, better-directed resolver round ` +
+      `could reach, or do the two sides change the same behaviour incompatibly?`,
     evidence,
     options: [...CONFLICT_ARBITRATION_OPTIONS],
   }
