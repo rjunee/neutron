@@ -514,10 +514,10 @@ measured it"**.
 SO EVERY GATE NOW CARRIES A FRESHNESS CLASSIFICATION, in the module header beside the three-route
 `.ok` classification, because the two answer the same kind of question about different axes: that one
 says which decisions need three values, this one says which gates are CURRENT and which are merely
-HISTORICAL. Four are mutable and re-measured (4, 5, 8, 10); two are mutable and deliberately not, with
-the reason written down (9, whose remaining case is an empty unregistered directory holding no work;
-11, which is itself a write); four are immutable for a candidate's life (2, 6, 7, and the sha, pinned
-by the CAS); and two are global (1 and 3, now refused per-ref at delete time as well). A gate that is
+HISTORICAL. Five are mutable and re-measured (4, 5, 7, 8, 10); two are mutable and deliberately not,
+with the reason written down (9, whose remaining case is an empty unregistered directory holding no
+work; 11, which is itself a write); three are immutable for a candidate's life (2, 6 and the sha,
+pinned by the CAS); and two are global and now re-asked per ref as well (1 and 3). A gate that is
 merely historical is a gate that was true once, and the person enabling deletion is entitled to know
 which is which without re-deriving it.
 
@@ -530,6 +530,54 @@ WHAT THE ALTERNATIVE WOULD HAVE BOUGHT, and why it was not taken: making candida
 inseparable from a liveness snapshot. A snapshot bound to the candidate is still a snapshot — it
 narrows the window between measurement and delete rather than closing it, and it would have encoded
 the wrong model, that a candidate is a promise about the world rather than a record of a check.
+
+### EVERY CELL OF A CLASSIFICATION IS A CLAIM NEEDING ITS OWN EVIDENCE
+
+The freshness audit above was the right structure — the right question, asked of all fourteen gates,
+on the right axis, laid out so a reader can check it. **One cell's answer was wrong, and it was the
+cell that mattered.** Gate 7 (at least one row names the branch) sat under IMMUTABLE with the
+justification *"rows are not deleted by the dispatch path"*. They are: `store.ts`'s `delete(id)` is
+`/trident stop`'s hard delete, `DELETE FROM code_trident_runs WHERE id = ?`. So the row that proved
+ownership can be gone by delete time, both `find` calls miss on the empty list, `refClaimedNow` falls
+through to `null`, and the ref is deleted with NO ownership evidence — the exact condition the sweep
+itself refuses as `owner-unknown`. With the new check removed the suite prints
+`event=worktree_reaper_ref_deleted` for precisely that case.
+
+THE FAILURE IS A STATEMENT ABOUT CODE I DO NOT OWN, BELIEVED BECAUSE IT IS THE KIND OF THING THAT IS
+USUALLY TRUE. It is the same shape as #638's *"the caller will fail loudly"* (a claim about git's
+behaviour that was never run) and #636's *"citing a validator is not reading it"* — three lanes, three
+subsystems, one habit. The grep that would have settled it is four characters long.
+
+AND THE TABLE MADE IT WORSE, which is the part worth carrying: **a classification makes every cell
+look equally established.** An asserted cell sits in the same column, in the same typeface, under the
+same heading as the measured ones, and inherits their credibility. Prose hedges — "probably", "I
+believe" — survive into a paragraph and warn the reader; a table cell has no room for them, so the
+uniformity silently promotes a guess to a finding. The fix is not to distrust tables but to hold each
+cell to the standard the table implies: every entry now names a MECHANISM that can be pointed at, and
+where the argument is still "this cannot happen", it says which code makes it so. Re-checking the other
+thirteen on that basis moved gate 2 from "a ref does not change its own name" to "the candidate's
+`ref` is a frozen string on a frozen object", and gate 6 from "a fact about this sweep" to "its subject
+is in the past, and gate 5 holds the line anyway" — same verdicts, but now for reasons that are checkable.
+
+THE PAIRING GAP WAS THE SAME BELIEF, EXPRESSED AS COVERAGE. Round 15's cases pair on the process axis
+(a process appearing stops the delete; an owner that stays dead still deletes) and did not pair on the
+owner-existence axis: an owner APPEARING was covered, an owner VANISHING was not. That is exactly
+consistent with the classification — I tested the axis I believed could move. **A missing pair is a
+belief about mutability, made visible.** Both halves now exist, and the hard-delete path the gate
+defends against is itself asserted in a test, so a soft-delete replacement announces itself instead of
+letting the classification go quietly stale.
+
+A SECOND FINDING CAME OUT OF THE FIX, and it is the reason the round-13 field is no longer
+canonicalised. Adding the fresh gate-7 read broke four cases, and the reason was that
+`listBranchOwners(repo_path)` is keyed by the path STRING it is handed: a store configured with a
+symlinked spelling answers NOTHING for the resolved one. So canonicalising the ROUTING key turned
+"which repository do I act on" into "which repository does the store think I mean", and a repo reached
+by a link would have had every ref refused — fail-closed, thanks to the new gate, but silently never
+reaped. The candidate now carries the sweep's own spelling, because that is the key to both `git -C`
+and the store, while the ATTESTATION stays canonical, because that comparison must not turn on how a
+path was written. Two spellings, and each is load-bearing in the opposite direction: canonicalising
+the routing key reds the sweep-through-a-link case, and de-canonicalising the comparison reds the
+mint-here-act-there case.
 
 ### An extraction for testability can create an unguarded destructive primitive
 
@@ -723,15 +771,20 @@ adversarial shape for EACH half of the EEXIST predicate — a fatal exit carryin
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
 
-FRESHNESS HAS FIVE CASES OF ITS OWN, paired as always: a process appearing after minting stops the
+FRESHNESS HAS NINE CASES OF ITS OWN, paired as always: a process appearing after minting stops the
 delete, an owner that stays dead still deletes (or the first is satisfied by a boundary that refuses
 whenever a recorded directory exists), the GENERATION witness is seen at delete time too, a `/proc`
 that becomes unreadable between mint and delete refuses, and the header's freshness audit is pinned —
 including a check that the re-measurement it describes is really inside `refClaimedNow`, with a
-positive control against the slice reaching the sweep's own gate-10 call instead. Three mutations:
-dropping the re-measurement reds four cases and DELETES the ref beneath the live process; reading an
-unreadable `/proc` as "nobody home" reds one; dropping gate 10's generation witness reds three,
-two of them pre-existing.
+positive control against the slice reaching the sweep's own gate-10 call instead. On the owner axis:
+a row that DISAPPEARS after minting stops the delete, a row that stays put still deletes, and the
+hard-delete path the gate defends against is asserted to exist in `store.ts` (with a positive control
+on the read), so the classification cannot go stale in silence. Six mutations: dropping the liveness
+re-measurement reds four cases and DELETES the ref beneath the live process; reading an unreadable
+`/proc` as "nobody home" reds one; dropping gate 10's generation witness reds three, two of them
+pre-existing; dropping the re-measured gate 7 reds one and DELETES the ref with no owner row at all;
+canonicalising the routing key reds the sweep-through-a-link case; de-canonicalising the attestation
+comparison reds two.
 
 THE DESTRUCTIVE BOUNDARY HAS ITS OWN THIRTEEN CASES and its own thirteen mutations, every negative paired with
 a complement so no refusal can be satisfied by a boundary that refuses everything. Within one

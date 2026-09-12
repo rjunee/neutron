@@ -259,9 +259,22 @@
  * Anyone enabling the deletion needs this list, because a gate that is merely historical is
  * a gate that was true once.
  *
+ * EVERY CELL BELOW IS A CLAIM NEEDING ITS OWN EVIDENCE, and a table makes them all look
+ * equally established. Round 16 caught exactly that: gate 7 sat under IMMUTABLE on the
+ * strength of "rows are not deleted by the dispatch path" — a claim about ANOTHER MODULE,
+ * asserted because it is the kind of thing that is usually true. `store.ts`'s `delete(id)` is
+ * `/trident stop`'s hard delete (`DELETE FROM code_trident_runs WHERE id = ?`), so the cell
+ * was wrong and the ref could be deleted with no owner row at all. Each entry here now names
+ * a MECHANISM that can be pointed at, not an absence that was assumed; where the argument is
+ * still "this cannot happen", it says which code makes it so.
+ *
  *   MUTABLE AND RE-MEASURED at delete time, all inside `refClaimedNow`:
  *     · 4 (no worktree holds it by name) — a `git worktree add` can happen at any moment.
  *     · 5 (no detached linked tree on the tip) — same listing, same freshness.
+ *     · 7 (at least one row still names the branch) — RE-MEASURED SINCE ROUND 16. `store.ts`'s
+ *       `delete(id)`, `/trident stop`'s hard-delete path, removes rows outright, so the row that
+ *       proved ownership can be GONE at delete time; an empty owner list is unprovable ownership
+ *       and refuses, exactly as `owner-unknown` does in the sweep.
  *     · 8 (every owner row terminal) — a dispatch's claim is an INSERT of a non-terminal row.
  *     · 10 (no live process in an owning run's tree) — RE-MEASURED SINCE ROUND 15, and the
  *       omission that made this section necessary: a process can start inside an ordinary
@@ -278,15 +291,20 @@
  *     · 11 (the salvage) is not re-measured because it is a WRITE performed at delete time;
  *       there is nothing earlier to go stale.
  *
- *   IMMUTABLE FOR THE LIFE OF A CANDIDATE, so freshness is not a question:
- *     · 2 (the ref is under `refs/heads/trident/`) — a ref does not change its own name.
- *     · 6 (this sweep's own detach memory) — a fact about what this sweep did.
- *     · 7 (at least one row names the branch) — rows are not deleted by the dispatch path,
- *       and a row APPEARING is gate 8's question, which is re-measured.
- *     · the sha — pinned by the CAS itself, which is what makes 13 atomic rather than
- *       merely ordered.
+ *   IMMUTABLE FOR THE LIFE OF A CANDIDATE, so freshness is not a question — and each of these
+ *   rests on a mechanism rather than on nothing having been observed to change it:
+ *     · 2 (the ref is under `refs/heads/trident/`) — the candidate's `ref` is a frozen string
+ *       on a frozen object, so the VALUE this gate examined cannot change. A different ref is
+ *       a different candidate; renaming a branch in git does not mutate this one.
+ *     · 6 (this sweep's own detach memory) — a statement about what THIS sweep did, so its
+ *       subject is in the past. Nothing can make a past action un-happen. It is also only a
+ *       nicer refusal reason; gate 5, which IS re-measured, holds that line.
+ *     · the sha — pinned by the CAS itself: `update-ref -d <ref> <sha>` refuses unless the ref
+ *       is still at that value, so staleness cannot be acted on rather than merely being
+ *       unlikely. This is the strongest cell in the table, and the only one where the
+ *       mechanism is the write itself.
  *
- *   MEASURED ONCE, GLOBALLY, AND NOT PER REF:
+ *   MEASURED GLOBALLY, THEN AGAIN PER REF:
  *     · 1 (`/proc` is readable). The sweep aborts wholesale when it is not. Since round 15
  *       an unreadable `/proc` at DELETE time also refuses, per ref — the same posture
  *       applied at the second measurement rather than only the first.
@@ -365,7 +383,17 @@ export const MAX_REF_DELETIONS_PER_SWEEP = 50
  */
 export interface ReapableCandidate {
   /**
-   * The canonical repository these gates ran against — ROUTING DATA, never the proof.
+   * The repository these gates ran against, SPELLED AS THE SWEEP SPELLED IT — routing data,
+   * never the proof.
+   *
+   * NOT CANONICALISED, and round 16 is why. It was, briefly, and that broke the store read at
+   * delete time: `listBranchOwners(repo_path)` is keyed by the path STRING the caller holds, so
+   * a store configured with one spelling answers nothing for another. Canonicalising the
+   * routing key therefore turned "which repo do I act on" into "which repo does the store think
+   * I mean", and the two stopped agreeing whenever a symlink was involved. The ATTESTATION is
+   * canonical — see `MINTED_CANDIDATES`, which resolves both sides — because that comparison
+   * must be spelling-insensitive. The routing key must instead be FAITHFUL: `git -C` accepts
+   * either spelling, and the store accepts only the one it was given.
    *
    * It is here because the destructive call is `(repo, candidate)` and a sweep covers MANY
    * repositories: a caller holding an inventory of candidates has to know which repository
@@ -440,13 +468,15 @@ function canonicalRepo(repo: string): string {
  * The ONE place a `ReapableCandidate` comes into existence: after gates 1-10 have passed,
  * bound to the repository they ran against.
  * Module-private on purpose — exporting it would hand back the bypass this type removes.
+ *
+ * TWO SPELLINGS, ON PURPOSE, AND THEY ARE NOT REDUNDANT. The FIELD keeps the caller's spelling
+ * because it is the key to both `git -C` and `listBranchOwners`; the MAP holds the resolved one
+ * because the boundary's comparison must not turn on how a path was written. Both come from
+ * this one call, so they cannot drift for a minted candidate.
  */
 function mintReapableCandidate(repo: string, ref: string, sha: string): ReapableCandidate {
-  const canonical = canonicalRepo(repo)
-  // The field and the map's value are set from ONE resolution, so the routing data a caller
-  // reads and the identity the boundary checks can never disagree for a minted candidate.
-  const candidate: ReapableCandidate = Object.freeze({ repo: canonical, ref, sha })
-  MINTED_CANDIDATES.set(candidate, canonical)
+  const candidate: ReapableCandidate = Object.freeze({ repo, ref, sha })
+  MINTED_CANDIDATES.set(candidate, canonicalRepo(repo))
   return candidate
 }
 
@@ -1163,7 +1193,21 @@ async function refClaimedNow(
   } catch (error) {
     return `owners-unreadable: ${errText(error)}`
   }
-  const live = owners.find((owner) => owner.branch === short && !isTerminalPhase(owner.phase))
+  // GATE 7, RE-MEASURED (#547 round 16). AT LEAST ONE ROW MUST STILL NAME THE BRANCH.
+  //
+  // The audit classified this gate as immutable on the grounds that rows are not deleted. They
+  // are: `store.ts`'s `delete(id)` is `/trident stop`'s hard-delete path, `DELETE FROM
+  // code_trident_runs WHERE id = ?`. So the row that proved ownership can be GONE by the time
+  // the delete runs, and without this check both `find` calls below miss, this function falls
+  // through to `null`, and the delete is authorised on an empty owner list — the exact
+  // condition the sweep refuses as `owner-unknown`. A ref with no owner is UNPROVABLE
+  // OWNERSHIP, not a disposable ref, and that rule has to hold at both measurements or it is
+  // not a rule.
+  const named = owners.filter((owner) => owner.branch === short)
+  if (named.length === 0) {
+    return 'ownership-no-longer-provable: no run row names this branch any more'
+  }
+  const live = named.find((owner) => !isTerminalPhase(owner.phase))
   if (live !== undefined) return `a run in phase '${live.phase}' claims it`
 
   // GATE 10, RE-MEASURED. A process can start inside an owning run's recorded worktree between
@@ -1176,7 +1220,7 @@ async function refClaimedNow(
   // anything running in there" has no answer, and an unanswered question is never an absence.
   const processCwds = snapshotProcessCwds(opts.proc_root ?? '/proc')
   if (processCwds === null) return 'liveness-unreadable: /proc could not be read at delete time'
-  const busy = owners.find((owner) => owner.branch === short && ownerProcessLive(owner, processCwds))
+  const busy = named.find((owner) => ownerProcessLive(owner, processCwds))
   if (busy !== undefined) {
     return `a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`
   }
@@ -1555,7 +1599,7 @@ export async function deleteReapableRef(
   // the destructive act is never performed at all.
   const claimedBefore = await refClaimedNow(opts, repo, ref, short, sha)
   if (claimedBefore !== null) {
-    report.refs_kept.push({ ref, reason: `claim-appeared: ${claimedBefore}` })
+    report.refs_kept.push({ ref, reason: `refuses-now: ${claimedBefore}` })
     return
   }
 
@@ -1682,7 +1726,7 @@ export async function deleteReapableRef(
       report.refs_restored.push({ ref, sha })
       report.refs_kept.push({
         ref,
-        reason: `raced-a-new-claim: ${claimedDuring} — the ref was put back at ${sha}`,
+        reason: `raced-a-change: ${claimedDuring} — the ref was put back at ${sha}`,
       })
       log.warn('worktree_reaper_ref_restored', { repo, ref, sha, salvage, claim: claimedDuring })
     } else if (refAlreadyExists(restored)) {
@@ -1692,7 +1736,7 @@ export async function deleteReapableRef(
       // did not put anything back.
       report.refs_kept.push({
         ref,
-        reason: `raced-a-new-claim: ${claimedDuring} — the claimant holds its own ref, ours was not forced back over it`,
+        reason: `raced-a-change: ${claimedDuring} — the claimant holds its own ref, ours was not forced back over it`,
       })
       log.warn('worktree_reaper_ref_claimant_owns', { repo, ref, sha, salvage, claim: claimedDuring })
     } else {

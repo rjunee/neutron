@@ -1418,7 +1418,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(report.refs_restored).toEqual([{ ref: `refs/heads/${branch}`, sha }])
     expect(
       report.refs_kept.some(
-        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('raced-a-new-claim:'),
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('raced-a-change:'),
       ),
       JSON.stringify(report.refs_kept),
     ).toBe(true)
@@ -1457,7 +1457,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(report.refs_deleted).toEqual([])
     expect(
       report.refs_kept.some(
-        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('claim-appeared:'),
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('refuses-now:'),
       ),
       JSON.stringify(report.refs_kept),
     ).toBe(true)
@@ -1494,7 +1494,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       report.refs_kept.some(
         (k) =>
           k.ref === `refs/heads/${branch}` &&
-          k.reason === "claim-appeared: a run in phase 'forge-init' claims it",
+          k.reason === "refuses-now: a run in phase 'forge-init' claims it",
       ),
       JSON.stringify(report.refs_kept),
     ).toBe(true)
@@ -2607,7 +2607,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
 
     // AND THE DRY-RUN INVENTORY IS THE POINT: it says exactly what #635 will unlock.
-    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
     expect(
       report.refs_kept.some(
         (k) => k.ref === ref(branch) && k.reason === DEFERRED_PENDING_CLAIMANT_GUARD,
@@ -2642,7 +2642,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
 
     // THE DRY SWEEP lists it as a candidate, because gates 1-10 all pass.
     const report = await sweepTridentWorktrees(opts)
-    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
     expect(report.refs_deleted).toEqual([])
 
     // AND DELETION TIME REFUSES IT, on the gate the dry run could not evaluate. The candidate
@@ -2650,7 +2650,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
 
     // BOTH FACTS SURVIVE IN THE REPORT, separately: still a candidate, still not deleted.
-    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
     expect(report.refs_deleted).toEqual([])
     expect(
       report.refs_kept.some(
@@ -2694,7 +2694,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     }
 
     const report = await sweepTridentWorktrees(opts)
-    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
     expect(await refExists(repo, ref(branch))).toBe(true)
 
     await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
@@ -2952,8 +2952,17 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
   const emptyReport = emptyReapReport
 
   // `makeProc` creates the directory, so it is called ONCE per repo and the result reused.
-  const opts = (repo: string, proc: string): Parameters<typeof deleteReapableRef>[0] => ({
-    store: stubStore(repo),
+  //
+  // THE OWNER ROWS ARE PASSED AT DELETE TIME TOO (#547 round 16). Gate 7 is re-measured inside
+  // `refClaimedNow`, so a store that answers with NO rows refuses — correctly, since a ref with
+  // no owner is unprovable ownership. These cases are about the BOUNDARY, so they supply the
+  // ownership that would otherwise be the reason for refusal and let the boundary be the reason.
+  const opts = (
+    repo: string,
+    proc: string,
+    owners: TridentBranchOwner[] = [],
+  ): Parameters<typeof deleteReapableRef>[0] => ({
+    store: stubStore(repo, [], owners),
     run_host: spawnCapture,
     proc_root: proc,
   })
@@ -3026,10 +3035,17 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
       proc_root: proc,
     })
     const minted = onlyCandidate(sweep)
-    expect(minted).toEqual({ repo: canonical(repo), ref: ref(branch), sha })
+    expect(minted).toEqual({ repo, ref: ref(branch), sha })
 
+    const owners = [owner(branch, { phase: 'failed' })]
     const report = emptyReport()
-    await deleteReapableRef(opts(repo, proc), repo, { ...minted } as ReapableCandidate, report, budget())
+    await deleteReapableRef(
+      opts(repo, proc, owners),
+      repo,
+      { ...minted } as ReapableCandidate,
+      report,
+      budget(),
+    )
 
     expect(report.refs_deleted).toEqual([])
     expect(report.refs_kept).toEqual([
@@ -3042,7 +3058,7 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
     // everything.
     const real = emptyReport()
     const attempts = budget()
-    await deleteReapableRef(opts(repo, proc), repo, minted, real, attempts)
+    await deleteReapableRef(opts(repo, proc, owners), repo, minted, real, attempts)
 
     expect(real.refs_deleted).toEqual([
       { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}copied/${sha}` },
@@ -3129,7 +3145,11 @@ describe('the attestation covers the repository too, and both object formats (#5
     // THE COMPLEMENT: the same attestation against the repository it was minted for deletes.
     const home = emptyReport()
     await deleteReapableRef(
-      { store: stubStore(a.repo), run_host: spawnCapture, proc_root: procA },
+      {
+        store: stubStore(a.repo, [], [owner(branch, { phase: 'failed' })]),
+        run_host: spawnCapture,
+        proc_root: procA,
+      },
       a.repo,
       mintedForA,
       home,
@@ -3163,7 +3183,7 @@ describe('the attestation covers the repository too, and both object formats (#5
 
     const report = emptyReport()
     await deleteReapableRef(
-      { store: stubStore(alias), run_host: spawnCapture, proc_root: proc },
+      { store: stubStore(alias, [], [owner(branch, { phase: 'failed' })]), run_host: spawnCapture, proc_root: proc },
       alias,
       minted,
       report,
@@ -3353,13 +3373,19 @@ describe('a sweep spanning two repositories reaps in each of them (#547)', () =>
     )
   }, 120_000)
 
-  test('a sweep driven through a SYMLINKED repo path mints the canonical spelling', async () => {
-    // What makes routing by `candidate.repo` safe across spellings: the field is normalised at
-    // mint, so a store configured with a symlinked path still produces a candidate whose repo
-    // matches what the boundary resolves. Without this the field would be one spelling and the
-    // attestation another, and routing by the field would refuse at the boundary.
+  test('a sweep through a SYMLINKED repo path routes by the spelling the STORE is keyed by', async () => {
+    // WHY THE ROUTING KEY IS NOT CANONICALISED (#547 round 16). It was, for one round, and that
+    // broke this: `listBranchOwners(repo_path)` is keyed by the path STRING it is given, so a
+    // store configured with the symlinked spelling answers NOTHING for the resolved one. With a
+    // canonical routing key the delete-time owner read came back empty and the re-measured gate 7
+    // refused every ref in such a repository — fail-closed, but silently never reaping.
+    //
+    // So the candidate carries the sweep's own spelling, which is the key to both `git -C` and
+    // the store, while the ATTESTATION stays canonical (proven by the sibling case in the
+    // boundary suite, where minting and acting use different spellings and the delete still
+    // happens). Faithful for routing, resolved for comparison.
     const { root, repo } = await makeRepo()
-    const branch = 'trident/minted-through-a-link'
+    const branch = 'trident/swept-through-a-link'
     const sha = await seedRef(repo, branch, 'throughlink')
     const alias = join(root, 'via-link')
     symlinkSync(repo, alias, 'dir')
@@ -3370,14 +3396,16 @@ describe('a sweep spanning two repositories reaps in each of them (#547)', () =>
       proc_root: makeProc(root),
     })
 
-    // The candidate names the REAL path, not the link it was swept through.
-    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
-    expect(report.refs_candidates[0]?.repo).not.toBe(alias)
-    // And routing by that field still deletes, which is the point of normalising it.
+    // The candidate names the path the sweep was given — the one the store can answer for.
+    expect(report.refs_candidates).toEqual([{ repo: alias, ref: ref(branch), sha }])
+    // And the delete went through, which it can only do if the delete-time owner read found the
+    // row: gate 7 is re-measured, so an unanswerable store would have refused here.
     expect(report.refs_deleted).toEqual([
-      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}minted-through-a-link/${sha}` },
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}swept-through-a-link/${sha}` },
     ])
     expect(await refExists(repo, ref(branch))).toBe(false)
+    // Same repository either way — the alias is not a second repo that happened to work.
+    expect(canonical(alias)).toBe(canonical(repo))
   }, 60_000)
 
   test('one repository being unreapable does not stop the other', async () => {
@@ -3465,7 +3493,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
 
     expect(report.refs_deleted).toEqual([])
     expect(keptReasonFor(report, ref(m.branch))).toBe(
-      `claim-appeared: a process stands in ${m.tree}`,
+      `refuses-now: a process stands in ${m.tree}`,
     )
     expect(await refExists(m.repo, ref(m.branch))).toBe(true)
     // THE SALVAGE IS ALREADY WRITTEN AT THIS POINT, and that is the real ordering rather than
@@ -3521,7 +3549,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
     await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
 
     expect(report.refs_deleted).toEqual([])
-    expect(keptReasonFor(report, ref(branch))).toBe(`claim-appeared: a process stands in ${generation}`)
+    expect(keptReasonFor(report, ref(branch))).toBe(`refuses-now: a process stands in ${generation}`)
     expect(await refExists(repo, ref(branch))).toBe(true)
   }, 60_000)
 
@@ -3547,7 +3575,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
 
     expect(report.refs_deleted).toEqual([])
     expect(keptReasonFor(report, ref(branch))).toBe(
-      'claim-appeared: liveness-unreadable: /proc could not be read at delete time',
+      'refuses-now: liveness-unreadable: /proc could not be read at delete time',
     )
     expect(await refExists(repo, ref(branch))).toBe(true)
     // Salvage first, claim probe second — see the note in the case above.
@@ -3555,6 +3583,86 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       `${SALVAGE_REF_PREFIX}proc-vanishes/${sha}`,
     )
   }, 60_000)
+
+  test('an owner row that DISAPPEARS after minting stops the delete', async () => {
+    // THE OTHER HALF OF THE OWNER AXIS (#547 round 16). An owner APPEARING was covered from the
+    // start; an owner VANISHING was not, because the audit had classified gate 7 as immutable on
+    // the belief that rows are never deleted. `store.ts`'s `delete(id)` — `/trident stop`'s
+    // hard-delete, `DELETE FROM code_trident_runs WHERE id = ?` — is that path.
+    //
+    // Without the re-measured gate 7 both `find` calls miss on an empty list, `refClaimedNow`
+    // falls through to null, and the ref is deleted on NO ownership evidence at all: the exact
+    // condition the sweep itself refuses as `owner-unknown`.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/owner-vanishes'
+    const sha = await seedRef(repo, branch, 'ownergone')
+
+    // A mutable owner list, so the row can be removed between minting and the delete exactly as
+    // a concurrent `/trident stop` would remove it.
+    let rows: TridentBranchOwner[] = [owner(branch, { phase: 'failed' })]
+    const opts = {
+      store: {
+        listRepoPaths: () => [repo],
+        listNonTerminal: () => [],
+        listBranchOwners: () => rows,
+      },
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+
+    rows = []
+
+    const report = emptyReapReport()
+    await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(keptReasonFor(report, ref(branch))).toBe(
+      'refuses-now: ownership-no-longer-provable: no run row names this branch any more',
+    )
+    expect(await refExists(repo, ref(branch))).toBe(true)
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+  }, 60_000)
+
+  test('THE COMPLEMENT: an owner row that stays put still deletes', async () => {
+    // Same shape, same mutable list, nothing removed — so the case above cannot be satisfied by a
+    // boundary that refuses whenever the store is consulted twice.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/owner-stays'
+    const sha = await seedRef(repo, branch, 'ownerstays')
+    const rows: TridentBranchOwner[] = [owner(branch, { phase: 'done' })]
+    const opts = {
+      store: {
+        listRepoPaths: () => [repo],
+        listNonTerminal: () => [],
+        listBranchOwners: () => rows,
+      },
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+
+    const report = emptyReapReport()
+    await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}owner-stays/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+  }, 60_000)
+
+  test('the hard-delete path this gate defends against really exists', () => {
+    // THE CELL THAT WAS WRONG WAS A CLAIM ABOUT ANOTHER MODULE, believed rather than measured.
+    // So the claim is now measured here, and if `/trident stop`'s hard delete is ever replaced by
+    // a soft one this test says so instead of the classification quietly going stale.
+    const store = readFileSync(new URL('./store.ts', import.meta.url), 'utf8')
+    expect(store).toContain('DELETE FROM code_trident_runs')
+    // POSITIVE CONTROL on the read: a string that must be there, so "not found" cannot mean
+    // "wrong file" or "unreadable".
+    expect(store).toContain('listBranchOwners')
+  })
 
   test('the freshness audit in the header names gate 10 as re-measured', () => {
     // The list the next person reads before enabling deletion. Pinned because its whole value

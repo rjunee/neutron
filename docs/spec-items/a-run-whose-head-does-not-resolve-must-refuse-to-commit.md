@@ -105,7 +105,11 @@ test:
   gates RAN and not that they still HOLD, and this item is what re-enables the write. The module header
   carries a per-gate freshness classification — which gates are re-measured at delete time and which
   are historical — and satisfying this item includes checking that classification is still accurate for
-  every gate the restored call depends on.
+  every gate the restored call depends on. **Check it cell by cell, against a mechanism.** Its first
+  version put gate 7 under "immutable" on the belief that run rows are never deleted; `store.ts`'s
+  `delete(id)` (`/trident stop`'s hard delete) is that path, so the destructive boundary would have
+  deleted a ref with no owner row at all. Gate 7 is re-measured too as of #606, and any entry still
+  justified by "X does not happen" rather than by code you can point at is an entry to re-derive.
 - **(c) The refusal is not inferrable from the index.** A worktree whose HEAD resolves but which has
   nothing staged is a no-op commit, not this condition, and must not be conflated with it — the
   discriminator is `rev-parse --verify HEAD`, not "No commits yet" in `git status` output, which is
