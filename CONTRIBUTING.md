@@ -18,6 +18,19 @@ web app (or Telegram).
 For anything large or architectural, open an issue first to discuss direction
 before writing code, so we do not both build the same thing twice.
 
+## How work is tracked
+
+**[`docs/process/work-tracking.md`](docs/process/work-tracking.md) is the binding
+standard**, shared by every Neutron coding project and shipped with Neutron. Read
+it before starting work and before writing an as-built record. The
+`work-tracking` skill (`skills/work-tracking/`) is the invocable entry point for
+agents; per-directory `AGENTS.md` files carry module rules on top of it.
+
+In short: one queue (`docs/spec-items/`), with GitHub Issues as the **inbox**
+rather than a second queue; never build from a bare title; acceptance criteria
+live in the repo, never in an issue; one as-built record per change, shipped in
+the PR that earns it. No ad-hoc tracking files.
+
 ## Development setup
 
 Requirements:
@@ -121,7 +134,19 @@ place to read it. It has one entry per merged change, headed
 Do not edit `docs/AS_BUILT.md` on a branch or PR, ever. Every build prepending
 at the same offset made any two open PRs conflict by construction, and GitHub
 never runs merge drivers server-side, so no local driver could fix the
-mergeability check. CI fails any PR whose diff touches the file.
+mergeability check.
+
+CI *warns* on a PR whose diff touches the file; it does not fail it. The guard was
+written as a hard failure and downgraded to advisory on 2026-08-19 after the
+premise was measured against the live backlog: of 45 open PRs, 31 touched
+`docs/AS_BUILT.md` and 34 had conflicts, but **zero were blocked solely by this
+file** — every conflicting branch had a real code conflict elsewhere, and the
+`merge=union` attribute this repo ships was doing its job. A hard failure would
+have refused 31 of 45 open PRs to eliminate a conflict class blocking none of
+them. The detection still earns its place (6 of 34 co-conflicted here, and it is
+what will say so if the union attribute ever stops working), but it earns a
+warning, not a veto. See `scripts/ci/as-built-write-guard.sh`, which carries the
+measurement and the one-line change that restores the veto.
 
 Instead, stage exactly one entry as `.trident/as-built/<branch>.md`, mirroring
 the branch name as directories under `.trident/as-built/` just as
