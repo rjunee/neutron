@@ -165,6 +165,30 @@ const TAINT_FROM_FIELD = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[\w.$?[\]
 const TAINT_FROM_SHELL = /^\s*([A-Za-z_][\w]*)=["']?\$\{?base_?branch\b/gim
 
 /**
+ * `const b = base`, `let b = await base`, `const b = base.trim()` — the binding's LHS
+ * and the first identifier on its RHS, captured by ONE STATIC pattern.
+ *
+ * STATIC, AND THAT IS THE WHOLE POINT (CodeQL `js/useless-regexp-character-escape`,
+ * high, found on this file's own first landing). This used to build a regex PER TAINTED
+ * NAME by splicing the name in unescaped:
+ *
+ *     new RegExp(String.raw`…(?:await\s+)?` + name + String.raw`\b`)
+ *
+ * and the names come from `([A-Za-z_$][\w$]*)` captures — a class that INCLUDES `$`. A
+ * source file binding `const $base = await resolveBase(run)` therefore spliced
+ * `…(?:await\s+)?$base\b`, in which `$` is an END-OF-LINE ANCHOR, so the pattern could
+ * never match and the alias hop SILENTLY did nothing: `const alias = $base` followed by
+ * `git diff ${alias}..${head}` returned no hits at all, while the same shape spelled
+ * `zbase` was caught. Measured both ways before the fix.
+ *
+ * That is this PR's own subject reappearing inside its verification: a matcher meaning
+ * something other than its author believed. The fix is not to escape the splice — it is
+ * to have no splice. Membership is a literal Set lookup below, so a `$` in an identifier
+ * is just a character.
+ */
+const BINDING_FROM_IDENTIFIER = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?([A-Za-z_$][\w$]*)/g
+
+/**
  * WHAT SITS BETWEEN THE OPERAND AND ITS DOTS. Three spellings, and the history of this
  * constant is the reason the gate's scope is stated honestly further down:
  *
@@ -231,15 +255,16 @@ export function taintedNames(source) {
   // and a one-pass taint would call it clean. Bounded by the number of bindings, so it
   // terminates; four rounds is far past anything real and stops a pathological file
   // from making the gate the slow part of CI.
+  //
+  // ONE STATIC PATTERN, matched once per round, with the name comparison done as a
+  // literal `Set.has`. See `BINDING_FROM_IDENTIFIER` for what the per-name spliced
+  // regex this replaces got silently wrong.
   for (let round = 0; round < 4; round++) {
     const before = names.size
-    for (const name of [...names]) {
-      const alias = new RegExp(
-        String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?` + name + String.raw`\b`,
-        'g',
-      )
-      let m
-      while ((m = alias.exec(source)) !== null) names.add(m[1])
+    BINDING_FROM_IDENTIFIER.lastIndex = 0
+    let m
+    while ((m = BINDING_FROM_IDENTIFIER.exec(source)) !== null) {
+      if (names.has(m[2])) names.add(m[1])
     }
     if (names.size === before) break
   }

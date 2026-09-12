@@ -117,6 +117,16 @@ The resolution order is evidence-first, and is the same at every site:
       by the four named tests in `scripts/ci/diff-base-check.test.ts`, and by mutation —
       reverting `RANGE_TAIL`, dropping `RANGE_CONCAT`, or disabling the `logicalLines`
       join each reddens the suite (3, 1 and 1 test respectively).
+- [ ] **No regex is BUILT from scanned source.** The alias hop spliced a captured
+      identifier into a `new RegExp` unescaped, and identifiers may contain `$` — an
+      end-of-line anchor — so aliasing through `$base` silently matched nothing and the
+      gate returned no hits for a range it was built to catch (CodeQL
+      `js/useless-regexp-character-escape`, high). Verified by "an identifier containing
+      `$` aliases like any other", asserted against an identical `z`-named control in one
+      comparison because the control passed throughout while the other half was broken;
+      and by "no regex is BUILT from scanned source at all", which pins the gate's only
+      `new RegExp` calls to its two static range constructors so a future splice fails a
+      test rather than going quiet.
 - [ ] **The widening did not merely make the matcher permissive.** A resolved base in each
       of those same positions — quoted boundary, concatenation, line break — is silent, as
       is a non-base operand on the left of a concat and an alias of a *resolved* value.

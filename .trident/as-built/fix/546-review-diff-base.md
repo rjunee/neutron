@@ -90,6 +90,61 @@ unenumerated spelling), and the spec item's criteria say which claim rests on th
 and which on the grep. The positive control carries all real shapes at pinned lines and
 runs before the tree is touched; an empty scan exits 1.
 
+### The gate's own verification had the gate's own bug
+
+CodeQL `js/useless-regexp-character-escape`, HIGH, two alerts, both at
+`scripts/ci/diff-base-check.test.ts:176` — *"The escape sequence `\$` is equivalent to
+just `$`, so the sequence may still represent a meta-character when it is used in a
+regular expression."*
+
+**The escape at that line was harmless, and necessary.** Line 176 is a template literal
+whose `\${` emits a literal `${` so the produced string is source text to be scanned;
+measured, it produces exactly `` const cmd = `git diff ${diffBase}..${head}` ``, and
+removing the escapes does not produce a different string — it fails to evaluate at all.
+
+**CodeQL's dataflow was pointing one hop downstream, and there the defect was real.** That
+`$`-bearing string flows into `taintedNames`, which built a regex PER TAINTED NAME by
+splicing the name in unescaped:
+
+    new RegExp(String.raw`…(?:await\s+)?` + name + String.raw`\b`)
+
+Names come from `([A-Za-z_$][\w$]*)` captures — a class that includes `$`. So a source
+file binding `const $base = await resolveBase(run)` spliced
+`…(?:await\s+)?$base\b`, in which `$` is an END-OF-LINE ANCHOR. Measured before the fix:
+
+| source shape | tainted | hits |
+|---|---|---|
+| `const $base = …` / `const alias = $base` / `` `git diff ${alias}..${head}` `` | `$base` | **none** |
+| the identical shape spelled `zbase` | `alias`, `zbase` | line 3 |
+
+The gate was **blind** to a range it was built to catch, and the control passed throughout
+— which is what made the broken half look intentional. This is the PR's own subject
+reappearing inside its verification: a matcher meaning something other than its author
+believed.
+
+**An assertion of mine was weaker than I stated, and I am recording that rather than
+quietly correcting it.** The test "taint follows ALIASES to a fixpoint" used `base`/`b`/`c`
+— no `$` — so it passed while the claim it stated was false for any `$`-containing name.
+The claim was broader than its input. The three mutation counts reported earlier
+(`RANGE_TAIL` 3, `RANGE_CONCAT` 1, the line join 1) do not run through that path and were
+re-measured after the fix rather than assumed: unchanged, plus a fourth — reverting to the
+spliced per-name regex reddens 2.
+
+**The fix is to have no splice, not a better escape.** One static
+`BINDING_FROM_IDENTIFIER` pattern captures both sides of a binding and membership is a
+literal `Set.has`, so a `$` in an identifier is just a character. A test asserts that the
+only `new RegExp(...)` calls in the gate are its two static range constructors, so a future
+splice reintroduces a failing test rather than a silent blind spot.
+
+### A green workflow is not a green PR
+
+I reported "CI run conclusion: success, 13/13 jobs" and that was true of the `ci.yml`
+workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflow** whose
+`CodeQL` rollup check is not in `ci.yml`'s job list. The count was the visible tell: 13
+against the rollup's 17. The authoritative read is the PR's own rollup —
+`gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
+conclusion.
+
 ### A branded `ResolvedRef` type was considered and rejected
 
 The strongest available fix would be a type only a resolved ref inhabits, so a branch name

@@ -155,6 +155,57 @@ describe('the matcher finds every shape #546 actually shipped in', () => {
     expect(taintedNames(src)).toEqual(new Set(['base', 'b', 'c']))
   })
 
+  test('an identifier containing `$` aliases like any other — no meta-character in sight', () => {
+    // CodeQL `js/useless-regexp-character-escape`, HIGH, on this file's own first
+    // landing. The alias hop used to build a regex per tainted name by splicing the name
+    // in UNESCAPED, and names come from `([A-Za-z_$][\w$]*)` — a class that includes `$`.
+    // So `const $base = await resolveBase(run)` spliced `…(?:await\s+)?$base\b`, where
+    // `$` is an END-OF-LINE ANCHOR: the pattern could never match, the alias hop silently
+    // did nothing, and the gate returned NO HITS for a range it was supposed to catch.
+    //
+    // The assertion is written as `$`-name AGAINST an identical `z`-name control, in one
+    // comparison, because that is the shape the bug had: the control passed throughout
+    // and made the broken half look intentional.
+    const shape = (base: string): string =>
+      [
+        `const ${base} = await resolveBase(run)`,
+        `const alias = ${base}`,
+        'const cmd = `git diff ${alias}..${head}`',
+      ].join('\n')
+
+    const dollar = shape('$base')
+    const control = shape('zbase')
+    expect({
+      dollarTainted: [...taintedNames(dollar)].sort(),
+      dollarHits: findBareBaseRanges(dollar).map((h) => h.line),
+      controlTainted: [...taintedNames(control)].sort(),
+      controlHits: findBareBaseRanges(control).map((h) => h.line),
+    }).toEqual({
+      dollarTainted: ['$base', 'alias'],
+      dollarHits: [3],
+      controlTainted: ['alias', 'zbase'],
+      controlHits: [3],
+    })
+  })
+
+  test('no regex is BUILT from scanned source at all — the splice is gone, not escaped', () => {
+    // The fix is structural rather than a better escape, and this is what keeps it that
+    // way: a future `new RegExp(... + <something from the source> + ...)` reintroduces the
+    // whole question. The gate's three range patterns are static; nothing else may be.
+    const fs = require('node:fs') as typeof import('node:fs')
+    const gate = fs.readFileSync(GATE, 'utf8')
+    const dynamic = gate
+      .split('\n')
+      .map((line, i) => ({ line: i + 1, text: line.trim() }))
+      .filter((l) => l.text.includes('new RegExp(') && !l.text.startsWith('*') && !l.text.startsWith('//'))
+    // Exactly the two static range constructors, each concatenating only String.raw
+    // literals — no identifier from the scanned text.
+    expect(dynamic.map((l) => l.text)).toEqual([
+      'const RANGE_BRACED = new RegExp(String.raw`\\$\\{([^{}]*)\\}` + RANGE_TAIL, \'g\')',
+      'const RANGE_BARE = new RegExp(String.raw`\\$([A-Za-z_][\\w]*)` + RANGE_TAIL, \'g\')',
+    ])
+  })
+
   test('three dots are caught as well as two — the merge-base form has the same defect', () => {
     // `git diff <stale-main>...<branch>` resolves the merge-base, and a stale local
     // `main` IS an ancestor of the branch, so the merge-base is the stale tip and the
