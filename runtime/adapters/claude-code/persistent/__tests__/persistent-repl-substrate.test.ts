@@ -27,6 +27,7 @@ import {
   createPersistentReplSubstrate,
   injectPersistentReplActiveTurn,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
@@ -53,7 +54,7 @@ function makeFakeReplHost(responder: Responder): { host: PtyHost; spawnCount: ()
       spawns += 1
       const pid = 100000 + spawns
       const sid = extractSessionId(argv)
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       const history: string[] = []
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
@@ -164,7 +165,7 @@ describe('PersistentReplSubstrate — conformance', () => {
     const host: PtyHost = {
       spawn(argv): PtyChild {
         const sid = extractSessionId(argv)
-        const { port: sinkPort, token } = getReplSinkInfo()
+        const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
           body: JSON.stringify(body),
@@ -389,7 +390,7 @@ describe('PersistentReplSubstrate — failure + status', () => {
         // delegating to a responder that the server ignores. Instead, just
         // build a minimal silent dev-channel inline.
         const sid = extractSessionId(argv)
-        const { port: sinkPort, token } = getReplSinkInfo()
+        const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
         let exitResolve: (c: number | null) => void = () => {}
         const exited = new Promise<number | null>((r) => {
@@ -462,7 +463,7 @@ describe('PersistentReplSubstrate — per-turn timeout override (AgentSpec.turn_
     const silentHost: PtyHost = {
       spawn(argv) {
         const sid = extractSessionId(argv)
-        const { port: sinkPort, token } = getReplSinkInfo()
+        const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
         let exitResolve: (c: number | null) => void = () => {}
         const exited = new Promise<number | null>((r) => {
@@ -550,7 +551,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
     const host: PtyHost = {
       spawn(argv) {
         sid = extractSessionId(argv)
-        const info = getReplSinkInfo()
+        const info = bakedChildSinkInfo(argv)
         sinkPort = info.port
         token = info.token
         let hasExited = false
@@ -641,7 +642,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
     const host: PtyHost = {
       spawn(argv) {
         sid = extractSessionId(argv)
-        const info = getReplSinkInfo()
+        const info = bakedChildSinkInfo(argv)
         sinkPort = info.port
         token = info.token
         let hasExited = false
@@ -720,7 +721,7 @@ function makeDelayedReplyReplHost(replyDelayMs: number): PtyHost {
     spawn(argv: string[]): PtyChild {
       const sid = extractSessionId(argv)
       const pid = 700000 + Math.floor(performance.now())
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -808,7 +809,7 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
         const i = argv.indexOf('--session-id')
         const r = argv.indexOf('--resume')
         const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : '') as string
-        const { port: sinkPort, token } = getReplSinkInfo()
+        const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
         let exitResolve: (code: number | null) => void = () => {}
         const exited = new Promise<number | null>((res) => {
@@ -908,7 +909,7 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
       spawn(argv, opts) {
         onData = opts.onData
         const sid = extractSessionId(argv)
-        const { port: sinkPort, token } = getReplSinkInfo()
+        const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
         let exitResolve: (c: number | null) => void = () => {}
         const exited = new Promise<number | null>((r) => {

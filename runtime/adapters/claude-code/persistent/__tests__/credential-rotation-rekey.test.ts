@@ -22,6 +22,7 @@ import type { PtyChild, PtyHost } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   poolKeyFor,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
@@ -42,7 +43,7 @@ function makeEchoHost(): { host: PtyHost; spawnCount: () => number; envs: Array<
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {

@@ -254,6 +254,20 @@ export const bootEnvSchema = z.object({
     1,
     Number.MAX_SAFE_INTEGER,
   ),
+  // The reply sink's loopback port (ISSUES #537). CONSUMED by
+  // `composeProductionGraph`, which hands it to the adapter's
+  // `setReplSinkPortOverride` — the sink itself does NOT read this variable, so an
+  // injected BootConfig is authoritative rather than being overruled by whatever the
+  // process environment happens to hold. Deliberately NOT an `intKnob`:
+  // every other numeric knob has a CONSTANT default, and this one's default is
+  // DERIVED per instance from its supervision state dir
+  // (`runtime/adapters/claude-code/persistent/sink-coordinates.ts` —
+  // `deriveSinkPort`), so there is no fallback number to declare. An `intKnob` could
+  // only fake one by treating 0 as "unset", and 0 is the single value this knob must
+  // never accept. Kept RAW here (the same shape as the urls group) and validated at
+  // its read site by `resolveSinkPort`, which is the one chokepoint every source
+  // passes through and which refuses a 0 or a non-port LOUDLY.
+  NEUTRON_REPL_SINK_PORT: optStr,
   // urls / domains (raw kept; read sites normalize at call time)
   NEUTRON_WEB_APP_BASE: optStr,
   VAULT_REDIRECTOR_BASE: optStr,
@@ -377,6 +391,12 @@ export interface BootConfig extends IdentityConfig {
   readonly overnightMaxConcurrent: number
   readonly overnightMaxPerWindow: number
   readonly replKeepaliveMs: number
+  /** Raw `NEUTRON_REPL_SINK_PORT` override, or undefined. Unset means the sink
+   *  DERIVES its port from the instance state dir. Consumed by the composer, which
+   *  coerces + validates it through `parseSinkPortOverride` and wires the result with
+   *  `setReplSinkPortOverride`; nothing downstream re-reads the environment for it.
+   *  Raw rather than coerced here for the reason given at the schema entry. */
+  readonly replSinkPort: string | undefined
 
   // urls / domains (raw, read sites normalize) -----------------------------
   readonly webAppBase: string
@@ -878,6 +898,7 @@ export function resolveBootConfig(env: EnvBag = process.env): BootConfig {
     overnightMaxConcurrent: e.NEUTRON_OVERNIGHT_MAX_CONCURRENT,
     overnightMaxPerWindow: e.NEUTRON_OVERNIGHT_MAX_PER_WINDOW,
     replKeepaliveMs: e.NEUTRON_REPL_KEEPALIVE_MS,
+    replSinkPort: e.NEUTRON_REPL_SINK_PORT,
 
     webAppBase: e.NEUTRON_WEB_APP_BASE ?? DEFAULTS.webAppBase,
     vaultRedirectorBase: e.VAULT_REDIRECTOR_BASE ?? DEFAULTS.vaultRedirectorBase,

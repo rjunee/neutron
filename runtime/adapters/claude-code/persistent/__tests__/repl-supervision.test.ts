@@ -32,6 +32,7 @@ import {
   drainPendingRespawns,
   getReplRegistrySnapshot,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   httpHealth,
   registerSupervisedSubstrate,
   respawnReplSession,
@@ -96,7 +97,7 @@ function makeFakeReplHost(): {
       spawns.push(rec)
       const sid = rec.sessionId
       const pid = 200000 + spawns.length
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -1193,7 +1194,7 @@ describe('S2 supervision — cross-incarnation turnId collision (Argus r6)', () 
         sid = rec.sessionId
         spawnIndex += 1
         const myIndex = spawnIndex
-        const info = getReplSinkInfo()
+        const info = bakedChildSinkInfo(argv)
         sinkPort = info.port
         token = info.token
         let hasExited = false

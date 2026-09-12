@@ -210,6 +210,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'resolveSkillsDir (NEUTRON_HOME) — predicate trims; blank falls back to the documented /srv/neutron rather than the filesystem root.',
   'runtime/adapters/claude-code/index.ts':
     'resolveReplCwdAndHome (NEUTRON_HOME) — predicate trims; blank cwd AND blank home means supervision is off, deliberately, and now says so via repl_supervision_disabled_no_home.',
+  'runtime/adapters/claude-code/persistent/sink-coordinates.ts':
+    'defaultSinkTokenPath (NEUTRON_HOME) — the LAST-RESORT home for the reply sink token when no supervision path was wired; predicate trims and the RETURN keeps its bytes, so a blank falls through to the OS temp dir while a space-padded real home is used as spelled. Pinned in runtime/adapters/claude-code/persistent/__tests__/sink-restart-survival.test.ts.',
   'scripts/email-accounts.ts':
     'main --home guard (OWNER_HOME) — predicate trims; a blank home is REFUSED rather than opened as a directory.',
   'prompts/template.ts':

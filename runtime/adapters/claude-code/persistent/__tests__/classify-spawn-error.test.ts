@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
+import { SUBSTRATE_ERROR_CODES } from '../../../../errors.ts'
 import { classifySpawnError } from '../classify-spawn-error.ts'
 
 describe('classifySpawnError', () => {
@@ -37,6 +38,27 @@ describe('classifySpawnError', () => {
     }
     expect(classifySpawnError('[channel-wedged] REPL sess still unwired')).toBe('channel_wedged')
     expect(classifySpawnError('persistent-repl: channel not ready')).toBe('channel_wedged')
+  })
+
+  test('a reply-sink bind failure → channel_wedged, which is FATAL (ISSUES #537)', () => {
+    // The real producer message, verbatim in shape: a held port is a CONFIGURATION
+    // failure. Unclassified, `pool.ts` stamps the default `retryable: true` with no
+    // code and the credential ladder re-attempts a condition that will never clear —
+    // paying a bind budget per attempt, forever.
+    const message =
+      'repl-sink: could not bind the reply sink on 127.0.0.1:19004 after 5 attempt(s): ' +
+      'Failed to start server. Is port 19004 in use?. The sink port is DERIVED from this ' +
+      "instance's state dir …"
+    expect(classifySpawnError(message)).toBe('channel_wedged')
+    expect(SUBSTRATE_ERROR_CODES.channel_wedged.retryable).toBe(false)
+  })
+
+  test('a message that merely MENTIONS the sink is not classified — the producer prefix is required', () => {
+    // Negative space, same discipline as the `claude`-mention requirement above: a
+    // turn error that happens to name the sink must still reach the composer's own
+    // ladder rather than being declared fatal here.
+    expect(classifySpawnError('posted to repl-sink and got a 500')).toBeUndefined()
+    expect(classifySpawnError('could not bind something else entirely')).toBeUndefined()
   })
 
   test('an ordinary retryable turn error is unclassified (undefined → composer ladder decides)', () => {
