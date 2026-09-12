@@ -901,9 +901,12 @@ const VERDICT_SCHEMA = {
               'different defect must get a different key. NEVER put a line number in a key — a ' +
               'fix round moves lines, so a key carrying one stops matching itself next round ' +
               'and the defect reads as two. The line belongs in `evidence`. Every other ' +
-              'segment is compared EXACTLY, so numbers that identify the defect (a status ' +
-              'code, an error number) are welcome and are what tells two findings apart. This ' +
-              'is machine-read to decide whether a finding survived a fix round.',
+              'segment is compared EXACTLY — including CASE, because `src/Foo.ts` and ' +
+              '`src/foo.ts` can be different files — so write the path and symbol exactly as ' +
+              'they appear in the repo and keep the key byte-identical between rounds. ' +
+              'Numbers that identify the defect (a status code, an error number) are welcome ' +
+              'and are what tells two findings apart. This is machine-read to decide whether ' +
+              'a finding survived a fix round.',
           },
         },
       },
@@ -3263,10 +3266,28 @@ const WHAT_IS_MISSING_MAX = 500
  * and is therefore undecidable by construction — which is honest, because none of
  * them is a reviewer's judgement about the plan.
  *
- * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT: case, surrounding whitespace and a
- * leading './' on the path are the same key written two ways. At least THREE segments are
- * required — a bare word or a `file:line` pair is not a `file:symbol:rule` identity, and
- * accepting one would let a title masquerade as a key.
+ * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT, and the line between the two is
+ * narrower than it looks. What survives: surrounding whitespace (a key is a token, and
+ * whitespace around it is transport noise) and a leading './' on the path (`./a/b.ts` and
+ * `a/b.ts` ARE the same file — a path equivalence, not a discarded difference). At least
+ * THREE segments are required — a bare word or a `file:line` pair is not a
+ * `file:symbol:rule` identity, and accepting one would let a title masquerade as a key.
+ *
+ * CASE IS PRESERVED, and it did not used to be. Lower-casing the whole key was the same
+ * mistake as the numeric strip below, in a different dimension: on a case-sensitive
+ * filesystem `src/Foo.ts:Handler:missing-auth` and `src/foo.ts:handler:missing-auth` can
+ * name genuinely different files and genuinely different symbols, and collapsing them made
+ * `repeatVerdict` report a repeat and escalate a run that was converging — the over-fire
+ * direction, the one way this gate is worse than the cap it replaced. Collapsing internal
+ * whitespace runs went with it, for the same reason: a filename may legitimately contain
+ * two consecutive spaces.
+ *
+ * THE GENERAL RULE, since this file has now got it wrong twice: EVERY NORMALISATION IS A
+ * CLAIM THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and for an identity
+ * derived from free text that claim is almost never safe. The move that works is the
+ * GRAMMAR one — the line number is excluded because it lives in `evidence`, not because
+ * this function subtracts it. What remains above survives only because each is a fact
+ * about the notation rather than about the content it denotes.
  *
  * NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction. This function used to
  * DROP every purely-numeric segment, anywhere in the key, on the theory that a numeric
@@ -3296,10 +3317,9 @@ function findingIdentity(f) {
   if (f === null || typeof f !== 'object' || Array.isArray(f)) return ''
   if (typeof f.key !== 'string') return ''
   const segments = f.key
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
     .split(':')
+    // Per SEGMENT, which also covers whitespace around the whole key — an outer `.trim()`
+    // beside this one is dead work (mutation-checked: removing it changed nothing).
     .map((seg) => seg.trim().replace(/^\.\//, ''))
     .filter((seg) => seg !== '')
   if (segments.length < 3) return ''

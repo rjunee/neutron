@@ -39,6 +39,23 @@ line number — it is whatever the reviewer put there. `api.ts:handler:401:missi
 and escalated a run that was CONVERGING. Status codes, error numbers, CWE ids, ports and
 version segments were all taken the same way.
 
+AND THE SAME MISTAKE WAS IN ANOTHER DIMENSION: the key was LOWER-CASED. On a
+case-sensitive filesystem `src/Foo.ts:Handler:missing-auth` and
+`src/foo.ts:handler:missing-auth` can name genuinely different files and genuinely
+different symbols, and collapsing them produced the same false repeat on a converging run.
+Collapsing internal whitespace runs went with it — a filename may legitimately contain two
+consecutive spaces. Case is now content, so the schema says the key is compared exactly
+INCLUDING case and must stay byte-identical between rounds: the grammar move again, making
+the stable thing explicit rather than subtracting the volatile thing afterwards.
+
+THE GENERAL RULE, since this file got it wrong twice in the same function: EVERY
+NORMALISATION IS A CLAIM THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and
+for an identity derived from free text that claim is almost never safe. What survives is
+only what is a fact about the NOTATION rather than about the content it denotes — a leading
+`./` (the same file by definition) and whitespace around a token (transport noise). An
+outer `.trim()` beside the per-segment one was removed as dead work when mutation showed it
+changed nothing, which is the same standard applied to the guard rather than to the bug.
+
 THE ASYMMETRY IS WHY THIS ONE MATTERED MORE THAN ITS SIZE. Over-firing stops a run that
 was converging and reports `not-converging` about it — the one way this gate can be WORSE
 than the round cap it replaced, since the cap only ever stopped a run that could not

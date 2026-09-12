@@ -70,13 +70,45 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     }
   })
 
-  test('a reviewer-emitted `file:symbol:rule` key IS the identity, normalised', () => {
+  test('a reviewer-emitted `file:symbol:rule` key IS the identity, verbatim', () => {
     const { findingIdentity } = loadEscalationGate()
+    // CASE IS CONTENT, so the key comes back exactly as written. This used to assert the
+    // lower-cased form, which is what made the collision below possible.
     expect(findingIdentity(f('Trident/Inner-Loop.ts:parseInnerResult:Tautological-Test'))).toBe(
-      'trident/inner-loop.ts:parseinnerresult:tautological-test',
+      'Trident/Inner-Loop.ts:parseInnerResult:Tautological-Test',
     )
-    // A leading './' and surrounding whitespace are spellings, not differences.
+    // A leading './' and surrounding whitespace ARE spellings, not differences: `./a/b.ts`
+    // and `a/b.ts` name the same file, and whitespace around a token is transport noise.
     expect(findingIdentity(f('  ./a/b.ts:sym:rule  '))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
+  })
+
+  test('HEADLINE: CASE tells two findings apart — different files, different symbols', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // On a case-sensitive filesystem these are genuinely different FILES, and `Handler`
+    // and `handler` are genuinely different SYMBOLS. Lower-casing the key collapsed both,
+    // so two different defects read as one finding surviving a fix round and the run
+    // escalated while it was CONVERGING — the over-fire direction, which is the one way
+    // this gate is worse than the round cap it replaced.
+    //
+    // It is the numeric strip's mistake in another dimension: normalisation that discards
+    // CONTENT to make matching easier. Every normalisation is a claim that the discarded
+    // difference could not have been meaningful, and for an identity derived from free
+    // text that claim is almost never safe.
+    const upperFile = f('src/Foo.ts:handler:missing-auth')
+    const lowerFile = f('src/foo.ts:handler:missing-auth')
+    expect(findingIdentity(upperFile)).not.toBe(findingIdentity(lowerFile))
+    expect(repeatVerdict([upperFile], [lowerFile]).outcome).not.toBe('repeat')
+
+    const upperSym = f('src/a.ts:Handler:missing-auth')
+    const lowerSym = f('src/a.ts:handler:missing-auth')
+    expect(findingIdentity(upperSym)).not.toBe(findingIdentity(lowerSym))
+    expect(repeatVerdict([upperSym], [lowerSym]).outcome).not.toBe('repeat')
+
+    // Internal whitespace went the same way: a filename may legitimately contain two
+    // consecutive spaces, so collapsing runs was also a content change.
+    expect(findingIdentity(f('src/my  file.ts:sym:rule'))).not.toBe(
+      findingIdentity(f('src/my file.ts:sym:rule')),
+    )
   })
 
   test('HEADLINE: a NUMBER THAT IS NOT A LINE tells two findings apart', () => {
@@ -113,7 +145,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     // Without this, a version that returned a fresh identity for every call — never
     // matching anything — would pass the test above.
     const same = f('api.ts:handler:401:missing-auth')
-    expect(findingIdentity(same)).toBe(findingIdentity(f('API.ts:Handler:401:Missing-Auth')))
+    expect(findingIdentity(same)).toBe(findingIdentity(f('api.ts:handler:401:missing-auth')))
     expect(findingIdentity(f('  ./api.ts:handler:401:missing-auth '))).toBe(findingIdentity(same))
     // …and two rounds reporting it DO read as a repeat, which is the gate still working.
     expect(repeatVerdict([same], [same]).outcome).toBe('repeat')
@@ -202,8 +234,8 @@ describe('the REPEAT gate — arithmetic, and three-valued', () => {
     // The item's own three findings, by the identity the gate reads.
     expect(v.repeated.sort()).toEqual([
       'agent-dispatch/start.ts:research:untouched-path',
-      'app/rail.ts:rowraillockstep:tautological-test',
-      'work-board/store.ts:inlineactive:out-of-spec-proxy',
+      'app/rail.ts:rowRailLockstep:tautological-test',
+      'work-board/store.ts:inlineActive:out-of-spec-proxy',
     ])
   })
 
@@ -515,6 +547,11 @@ describe('what is asserted from the SOURCE, and why only these two things are', 
     // the three prompts. A schema is data handed to the model and is never validated in
     // process, so the literal IS the mechanism here.
     expect(WORKFLOW_SRC).toContain('NEVER put a line number in a key')
+    // Case became content when the lower-casing was removed, so the model has to be told
+    // to keep the key byte-identical between rounds — otherwise a reworded capitalisation
+    // silently stops matching. Same grammar move as the line number: make the stable
+    // thing explicit rather than subtract the volatile thing afterwards.
+    expect(WORKFLOW_SRC).toContain('including CASE')
     // …said to the two panel seats and the synthesis seat as well, not only in the schema:
     // a panelist's key is carried through UNCHANGED, so a line number admitted there
     // reaches the gate no matter what the synthesis schema says.
