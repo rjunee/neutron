@@ -117,6 +117,17 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       skipPermissions: true,
     })
 
+    // CAPTURE STDERR so the readiness handshake can be ASSERTED, not assumed. This is
+    // the only live boundary test that can prove the production wiring order is the one
+    // exercised here; the unit test proves the warning fires when the call is missing,
+    // and this proves the real caller is on the right side of it.
+    const hostErr: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      hostErr.push(String(c))
+      return realWrite(String(c))
+    }) as typeof process.stderr.write
+
     const host = new HerdrHost()
     let dismissed = false
     let child: PtyChild | null = null
@@ -141,6 +152,14 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       },
     })
 
+    // RELEASE THE OUTPUT GATE — the readiness handshake the production caller performs
+    // in `spawn.ts` once its consumers are wired. Without it the host waits out
+    // `HERDR_OUTPUT_GATE_MAX_MS` (5 s), emits its "WIRING BUG" warning, and only then
+    // begins polling: every one of these live proofs was silently taking the fail-open
+    // path and NORMALISING it. The guard is well-tested and its real callers were all
+    // on the wrong side of it.
+    child.beginOutput?.()
+
     try {
       // Wait for the dev-channel to report its port (transport attached).
       for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
@@ -161,7 +180,13 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       for (let i = 0; i < 60 && reply === undefined; i++) await Bun.sleep(500)
       expect(reply).toBeDefined()
       expect(reply).toContain('PONG')
+      // NO FAIL-OPEN WARNING. `beginOutput()` was called, so the gate was released by
+      // the caller and never by the 5 s timer — the timely path, which is the one
+      // production takes. Asserted at the END so the whole run is covered, not just
+      // the moment after spawn.
+      expect(hostErr.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
     } finally {
+      process.stderr.write = realWrite
       child?.kill('SIGTERM')
       sink.stop(true)
     }

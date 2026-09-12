@@ -278,6 +278,29 @@ not-new. That is accepted and recorded here rather than hidden.
       protected by two guards (`beginOutput` clears the timer; the timer checks
       `released`), so only a mutation disabling BOTH shows it discriminates.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **Transport loss never settles a child that may still be running.** A closed
+      socket is not evidence the process exited (`pty-host.ts` says so), yet settlement
+      runs the ordinary death handling in `spawn.ts` — sink unregistered, pool entry
+      dropped, configs deleted — which authorises a replacement `claude` against the
+      same transcript and breaks one-process-per-transcript, an invariant enforced ONLY
+      by killing the old process. So the host must TERMINATE the pid it learned at
+      spawn (adoption is #539 and unbuilt) and settle only on CONFIRMED death, with
+      escalation SIGTERM → SIGKILL. When death cannot be confirmed it must NOT settle,
+      because a stuck session is recoverable and two live processes on one transcript
+      are not. Inject the process primitives: the default probe answers ESRCH for a fake
+      pid, so an uninjected test proves "already dead" trivially and never attempts the
+      kill — the arrangement must not perform the step under test. The liveness probe
+      needs its own direct case: EPERM means the process EXISTS and is not ours, and
+      reading it as dead reports a live child terminated exactly when we have least
+      authority over it.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **Every live caller performs the readiness handshake.** Each converted E2E proof
+      must call `beginOutput()` after wiring its consumers, and at least one live
+      boundary test must assert NO fail-open warning across the whole run. Without it
+      the opt-in proofs wait out the 5 s gate, trip the "WIRING BUG" warning and
+      normalise the fail-open — a guard can be thoroughly unit-tested while every real
+      caller sits on the wrong side of it, and only a live assertion catches that.
+      verify: `grep -c 'beginOutput' runtime/adapters/claude-code/persistent/__tests__/dev-channel-pty-bind.e2e.test.ts runtime/adapters/claude-code/persistent/__tests__/ritual-write-containment.e2e.test.ts reminders/bundled-rituals.e2e.test.ts` — each ≥ 1
 - [ ] **A CLOSED transport accepts nothing.** After `close()`, `onBytes` must neither
       dispatch nor buffer: a post-close frame must not reach a subscription handler
       (`pane_exited` is the one that would re-open a settled exit), and repeated chunks

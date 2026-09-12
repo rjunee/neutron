@@ -1138,6 +1138,71 @@ like strong evidence while being evidence of a different bug entirely, because I
 deleted the assignment instead of moving it. A mutation that changes more than the one
 thing it names cannot tell you which thing the test caught.
 
+### The fifth row, and the sign is flipped: settling on the ABSENCE of evidence
+
+Review r15. The first four rows were a settled state being **rewritten**; this one
+settles on nothing at all.
+
+**Transport loss settled a child that might still be running.** `pollLoop` turned a
+closed socket straight into `settleExit('transport-lost')` — and settlement runs the
+ordinary death handling in `spawn.ts`: session marked dead, sink unregistered, pool
+entry dropped, temp configs deleted. The next request then spawns another `claude`
+against the same session id and the same transcript **while the original is still
+alive**. That breaks one-process-per-transcript, the invariant this substrate is built
+on and which is enforced ONLY by killing the old process, and it leaves a
+credential-bearing process running with nothing managing it.
+
+`pty-host.ts` says transport loss is not evidence the process exited — in the interface,
+twenty lines from the code that conflated them. **"The socket closed" and "the process
+exited" are different facts.** `transport-lost` is an *unknown* disposition being
+consumed as a definite one, which is the `?? {}` row promoted from a field to a
+lifecycle.
+
+**Termination, not adoption — and the reason matters.** Re-attaching to a surviving pane
+across a fresh socket is #539 (a gateway restart bringing REPLs back) and is not built.
+Until it is, the only disposition that preserves the invariant is ending the process. So
+the host now runs the SIGTERM → SIGKILL ladder against the pid it learned at spawn —
+`process.kill` being exactly the right tool precisely *because* it does not need the
+herdr transport that just died — and settles **only on confirmed death**, because this
+branch already has a row for a kill reported as successful when it failed. What it does
+not clean up is the herdr pane, which may survive empty; that is cosmetic, and the
+credential-bearing process is what the invariant is about.
+
+**And when death cannot be confirmed, it does not settle at all.** Settling would
+authorise a replacement against a process we know nothing about. A stuck session is
+recoverable by an operator; two live processes on one transcript are not. Loud,
+deliberately not terminal.
+
+Two survivors made this round better rather than just longer:
+
+- **M101 (a missing pid read as confirmed death) survived because the branch is
+  unreachable** — `spawn` refuses to return a child whose pane never reported a pid. An
+  unreachable defensive branch is untestable by construction, so it was deleted and the
+  parameter tightened to `number` rather than left as belief dressed as caution.
+- **M102 (EPERM counted as dead) survived because my tests inject the probe**, so the
+  real one was never exercised — and its most important case is exactly that EPERM means
+  the process EXISTS and merely is not ours to signal. Reading that as "dead" is the same
+  defect in its most classical form, and it would report a live child terminated
+  precisely when we have least authority over it. The probe is now exported and tested
+  directly against three real outcomes on this host: own pid (alive), pid 1 (EPERM →
+  alive), a bogus pid (ESRCH → gone).
+
+### The guard was well-tested and every real caller was on the wrong side of it
+
+All three live E2E callers awaited `HerdrHost.spawn` and none called `beginOutput()`. So
+each waited out the full 5 s gate, tripped the "WIRING BUG" warning, and only then began
+polling — **the opt-in proofs were silently taking the fail-open path and normalising
+it.** The sharpest part is the timing: I fixed the *unit* test this same round so the
+warning is asserted, while the three tests that would actually trip the wiring bug in
+production were the ones tripping it.
+
+It matters most in `ritual-write-containment`, where the disclaimer and the tool-use
+prompt are both answered from `onScreen` — five seconds of unwatched screens is exactly
+where a prompt goes unanswered. All three now release the gate, and the flagship boundary
+test captures stderr and asserts **no** fail-open warning across the whole run, so the
+unit test proves the warning fires when the call is missing and the live test proves the
+real caller is on the right side of it.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1254,6 +1319,13 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M97 | the fail-open gate releases but says NOTHING | RED 1 |
 | M97b | warn even when `beginOutput()` was called in time | SURVIVED alone — `beginOutput` clears the timer |
 | M97c | M97b **combined** with `clearTimeout` removed (both guards off) | RED 1 (the control) |
+| M98 | restore the bare settle on transport loss (the reported defect) | RED 2 |
+| M98b | PAIR: never settle on transport loss, even when death IS confirmed | RED 4 |
+| M99 | attempt the kill but do not confirm it | RED 1 |
+| M100 | no escalation — SIGTERM only, never SIGKILL | RED 1 |
+| M101 | a missing pid read as confirmed death | SURVIVED — branch unreachable; deleted, type tightened |
+| M102 | EPERM counted as dead | SURVIVED alone → probe exported and tested → RED 1 |
+| M102b | PAIR: every failed probe counted as ALIVE (ESRCH read as running) | RED 3 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

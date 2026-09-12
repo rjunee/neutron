@@ -73,6 +73,31 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
  *  bound on a hung server, not a normal wait. */
 export const HERDR_PID_WAIT_MS = 5000
 
+/**
+ * How long a transport-loss termination waits for each signal to be honoured.
+ *
+ * Two of these back to back (SIGTERM, then SIGKILL) bound the whole confirmation, and
+ * the confirmation is what licenses reporting the child dead — see
+ * {@link HerdrHost.terminateLostChild}. Matches `CHILD_KILL_GRACE_MS` in
+ * `signatures.ts`, which is the same ladder run over a live transport.
+ */
+export const HERDR_PID_KILL_GRACE_MS = 2_000
+
+/**
+ * Is `pid` still running? A `signal 0` probe, mirroring `supervision.ts`: EPERM means
+ * the process EXISTS and is not ours to signal (so: alive), ESRCH means it is gone.
+ * Collapsing those two into "dead" would be this file's recurring defect once more —
+ * an unknown answered as a definite one.
+ */
+export function defaultPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException | undefined)?.code === 'EPERM'
+  }
+}
+
 /** The `label` put on the REPL's pane, so the owner can see what it is when they
  *  attach. */
 export const HERDR_REPL_PANE_LABEL = 'neutron-repl'
@@ -108,6 +133,18 @@ export interface HerdrHostDeps {
   /** How long to wait for herdr to report a pid. Defaults to
    *  {@link HERDR_PID_WAIT_MS}; a test shortens it so the refusal path is fast. */
   pidWaitMs?: number
+
+  /** Send a signal to a pid. Injected so the transport-loss termination path is
+   *  testable without spawning real processes. Defaults to `process.kill`. */
+  killPid?: (pid: number, signal: NodeJS.Signals) => void
+
+  /** True while `pid` is still running. Defaults to a `signal 0` probe, matching
+   *  `supervision.ts` — EPERM means ALIVE (someone else's), ESRCH means gone. */
+  isPidAlive?: (pid: number) => boolean
+
+  /** How long to wait for a SIGTERM to be honoured before escalating, and again
+   *  after SIGKILL before giving up. */
+  pidKillGraceMs?: number
 }
 
 /**
@@ -246,7 +283,7 @@ export class HerdrHost implements PtyHost {
 
     fireAndForget(
       'herdr-host.poll',
-      this.pollLoop(client, paneId, opts, pollMs, sleep, () => exited, settleExit, outputGate),
+      this.pollLoop(client, paneId, opts, pollMs, sleep, () => exited, settleExit, outputGate, pid),
     )
 
     /** Issue a pane call, best-effort. No-op after exit (the interface's
@@ -498,6 +535,7 @@ export class HerdrHost implements PtyHost {
     hasExited: () => boolean,
     settleExit: (cause: PtyExitCause) => void,
     outputGate: Promise<void>,
+    pid: number,
   ): Promise<void> {
     // BEFORE THE FIRST READ, not before the first delivery: polling at all would set
     // `lastDataAt` and mutate the ring behind a consumer that cannot scan yet.
@@ -515,13 +553,47 @@ export class HerdrHost implements PtyHost {
     while (!hasExited()) {
       if (client.isClosed()) {
         // THE FOURTH ROUTE TO A TERMINAL CHILD, and the one that is not a child
-        // event: the transport died. Nothing about the process changed — the
-        // channel we would learn through vanished. Returning quietly here (what an
-        // earlier version did) left `exited` pending forever and `hasExited()`
-        // false, so the pool kept handing out a REPL it could no longer observe or
-        // drive. "I cannot observe the child" has to reach the SAME terminal
-        // handling as "the child exited"; only the CAUSE differs, and `exitCause`
-        // is what keeps the two from being confused.
+        // event: the transport died. NOTHING ABOUT THE PROCESS CHANGED — the channel
+        // we would learn through vanished. `pty-host.ts` says so in the interface,
+        // twenty lines from where this code used to contradict it.
+        //
+        // THE DEFECT THIS REPLACES: `settleExit('transport-lost')`, alone, right
+        // here. Settlement runs the ordinary death handling in `spawn.ts` — session
+        // marked dead, sink unregistered, pool entry dropped, temp configs deleted —
+        // so the next request spawns ANOTHER `claude` against the same session id and
+        // the same transcript while the original is still running. That breaks
+        // one-process-per-transcript, the invariant this substrate is built on and
+        // which is enforced ONLY by killing the old process, and it leaves a
+        // credential-bearing process alive with nothing managing it.
+        //
+        // It is the settled-state rule with the sign flipped: the earlier rows
+        // REWROTE a settled state, this one settled on the ABSENCE OF EVIDENCE.
+        // "The socket closed" and "the process exited" are different facts, and
+        // `transport-lost` is an UNKNOWN disposition being consumed as a definite
+        // one — the `?? {}` defect promoted from a field to a lifecycle.
+        //
+        // WHY TERMINATION RATHER THAN ADOPTION. Re-attaching to a surviving pane
+        // across a new socket is #539 (a gateway restart bringing REPLs back), which
+        // is not built; until it is, the only disposition that preserves the
+        // invariant is ending the process. And it must be CONFIRMED, not attempted,
+        // because this branch already has a row for a kill reported as successful
+        // when it failed. `process.kill` is exactly the right tool here precisely
+        // BECAUSE it does not need the herdr transport that just died.
+        const ended = await this.terminateLostChild(pid, sleep)
+        if (!ended) {
+          // COULD NOT CONFIRM DEATH, so we do not get to claim one. Settling here
+          // would authorise a replacement against a process we know nothing about;
+          // a stuck session is recoverable by an operator, two live processes on one
+          // transcript are not. Loud, and deliberately not terminal.
+          process.stderr.write(
+            `[herdr-host] pane ${paneId}: transport lost and the child could NOT be confirmed ` +
+              `dead (pid ${pid}). NOT settling ` +
+              `the child: reporting an exit would let the pool spawn a second claude against this ` +
+              `session's transcript while the first is still running. This session needs manual ` +
+              `attention.\n`,
+          )
+          return
+        }
         settleExit('transport-lost')
         return
       }
@@ -624,6 +696,50 @@ export class HerdrHost implements PtyHost {
       }
       await sleep(pollMs)
     }
+  }
+
+  /**
+   * End a child whose transport is gone, and report whether death was CONFIRMED.
+   *
+   * SIGTERM, wait, SIGKILL, wait — the same ladder `repl-session.ts` runs, done here
+   * against the pid because the socket that would carry `pane.close` is exactly what
+   * we no longer have. The return value is the whole point: `true` only when the
+   * process is observably gone, never merely because a signal was dispatched.
+   *
+   * Note what this does NOT clean up: the herdr pane itself, which may survive as an
+   * empty pane. That is cosmetic and recoverable by the owner; the credential-bearing
+   * `claude` process is what the one-process-per-transcript invariant is about.
+   */
+  private async terminateLostChild(
+    pid: number,
+    sleep: (ms: number) => Promise<void>,
+  ): Promise<boolean> {
+    // `pid` is always real: `spawn` REFUSES to return a child whose pane never
+    // reported one (see the throw above), so there is no "we never learned a pid"
+    // branch to defend against here. An unreachable defensive branch is untestable by
+    // construction, and this file has already established that unobservable state can
+    // only be believed, not verified — so it is not written.
+    const kill =
+      this.deps.killPid ??
+      ((p: number, sig: NodeJS.Signals): void => {
+        process.kill(p, sig)
+      })
+    const alive = this.deps.isPidAlive ?? defaultPidAlive
+    const grace = this.deps.pidKillGraceMs ?? HERDR_PID_KILL_GRACE_MS
+    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+      if (!alive(pid)) return true
+      try {
+        kill(pid, signal)
+      } catch {
+        // Already gone, or not ours to signal — the probe below decides which.
+      }
+      const deadline = Date.now() + grace
+      while (Date.now() < deadline) {
+        if (!alive(pid)) return true
+        await sleep(Math.min(50, grace))
+      }
+    }
+    return !alive(pid)
   }
 
   /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */

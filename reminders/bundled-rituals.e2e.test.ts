@@ -236,6 +236,14 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     },
   })
 
+  // RELEASE THE OUTPUT GATE — the readiness handshake the production caller performs
+  // in `spawn.ts` once its consumers are wired. Without it the host waits out
+  // `HERDR_OUTPUT_GATE_MAX_MS` (5 s), emits its "WIRING BUG" warning, and only then
+  // begins polling: every one of these live proofs was silently taking the fail-open
+  // path and NORMALISING it. The guard is well-tested and its real callers were all
+  // on the wrong side of it.
+  child.beginOutput?.()
+
   try {
     for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
     expect(channelPort).toBeGreaterThan(0)

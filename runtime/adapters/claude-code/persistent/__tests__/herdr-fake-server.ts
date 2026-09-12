@@ -37,7 +37,10 @@ export class FakeHerdrServer implements HerdrRpc {
   private closed = false
   /** MUTABLE: a pane can be resized at any time, and the bridge must notice. */
   viewportRows: number | null
-  private shellPid: number | null
+  /** The pid `pane.process_info` reports. PUBLIC and mutable like the other levers:
+   *  the transport-loss termination path is driven by this pid, so a test has to be
+   *  able to choose one it can then decide the liveness of. */
+  shellPid: number | null
   /** The pane's current screen, as `pane.read` will report it. */
   screen = ''
   /** When true, every `pane.read` REJECTS (a pane mid-teardown). */

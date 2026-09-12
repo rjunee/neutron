@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { HerdrHost } from '../herdr-host.ts'
+import { HerdrHost, defaultPidAlive } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
@@ -260,6 +260,116 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     // routes apart can; one that cannot is not silently told "the child exited".
     expect(child.exitCause?.()).toBe('transport-lost')
     expect(child.wasKilledByUs?.()).toBe(false)
+  })
+
+  it('a lost transport KILLS the child before settling, and the kill is confirmed', async () => {
+    // THE DEFECT THIS REPLACES. `settleExit('transport-lost')` ran alone, and
+    // settlement runs the ORDINARY DEATH HANDLING in `spawn.ts` — session marked
+    // dead, sink unregistered, pool entry dropped, configs deleted — so the next
+    // request spawned another `claude` against the same transcript while the first was
+    // still running. One-process-per-transcript is enforced ONLY by killing the old
+    // process, so "the socket closed" being treated as "the process exited" breaks it.
+    //
+    // The process primitives are INJECTED because the default probe would decide the
+    // outcome for us: a fake pid does not exist, so `process.kill(pid, 0)` throws
+    // ESRCH, "already dead" is trivially true, and the test would pass without the
+    // kill ever being attempted. The arrangement must not perform the step under test.
+    const server = new FakeHerdrServer({ paneId: 'w9:pLost' })
+    server.shellPid = 424242
+    const signals: Array<{ pid: number; signal: string }> = []
+    let processAlive = true
+    const screens: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 60,
+      killPid: (pid, signal) => {
+        signals.push({ pid, signal })
+        if (signal === 'SIGTERM') processAlive = false // the child honours it
+      },
+      isPidAlive: () => processAlive,
+    })
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (sc) => screens.push(sc),
+    })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+
+    server.close()
+    await child.exited
+
+    // THE KILL HAPPENED, against the pid we learned at spawn, before any settlement.
+    expect(signals).toEqual([{ pid: 424242, signal: 'SIGTERM' }])
+    expect(child.exitCause?.()).toBe('transport-lost')
+    // Still not attributable to a deliberate recycle: we ended it because we lost the
+    // ability to observe it, which is a different fact from having chosen to.
+    expect(child.wasKilledByUs?.()).toBe(false)
+  })
+
+  it('the default liveness probe distinguishes GONE from NOT-OURS', async () => {
+    // The injected probe above lets the tests choose an answer, which means the REAL
+    // probe was never exercised — so its most important case was untested: EPERM means
+    // the process EXISTS and is merely not ours to signal. Reading that as "dead" is
+    // this branch's recurring defect in its most classical form, and it would make a
+    // live child look terminated exactly when we have the least authority over it.
+    expect(defaultPidAlive(process.pid)).toBe(true) // ours, running
+    expect(defaultPidAlive(2_147_480_000)).toBe(false) // ESRCH — really gone
+    // pid 1 exists and is not ours (this process is unprivileged), so the kernel
+    // answers EPERM. ALIVE is the only correct reading.
+    expect(defaultPidAlive(1)).toBe(true)
+  })
+
+  it('an UNCONFIRMABLE kill does NOT settle — no replacement may be authorised', async () => {
+    // The half that matters most. If the process cannot be confirmed dead, settling
+    // would license the pool to start a second claude against this transcript. A stuck
+    // session is recoverable by an operator; two live processes on one transcript are
+    // not. So: escalate, then refuse to claim a death we cannot demonstrate.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
+    let child: PtyChild
+    const signals: string[] = []
+    try {
+      const server = new FakeHerdrServer({ paneId: 'w9:pStuck' })
+      server.shellPid = 515151
+      const host = new HerdrHost({
+        connect: async () => server,
+        pollIntervalMs: 5,
+        sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+        workspaceId: 'w9',
+        pidKillGraceMs: 30,
+        killPid: (_pid, signal) => void signals.push(signal),
+        isPidAlive: () => true, // survives everything
+      })
+      child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+      child.beginOutput?.()
+      await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+      server.close()
+      await until(() => signals.length >= 2, 'escalated to SIGKILL')
+      await Bun.sleep(60)
+    } finally {
+      process.stderr.write = realWrite
+    }
+    // ESCALATED, not merely attempted once.
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    // AND NOT SETTLED. `exited` must still be pending and `hasExited()` false, because
+    // that is what stops `spawn.ts` running the death handling that authorises a
+    // replacement.
+    const sentinel = Symbol('unsettled')
+    expect(await Promise.race([child!.exited, Bun.sleep(30).then(() => sentinel)])).toBe(sentinel)
+    expect(child!.hasExited()).toBe(false)
+    expect(child!.exitCause?.()).toBeUndefined()
+    // Loud, and it says what an operator has to do something about.
+    const said = errs.filter((e) => e.includes('could NOT be confirmed'))
+    expect(said.length).toBe(1)
+    expect(said[0]).toContain('515151')
   })
 
   it('the other three routes keep their own causes — the four are distinguishable', async () => {

@@ -222,6 +222,15 @@ async function runSpike(injectYesOnToolPrompt: boolean): Promise<SpikeResult> {
       }
     },
   })
+  // RELEASE THE OUTPUT GATE — the readiness handshake the production caller performs
+  // in `spawn.ts` once its consumers are wired. Without it the host waits out
+  // `HERDR_OUTPUT_GATE_MAX_MS` (5 s), emits its "WIRING BUG" warning, and only then
+  // begins polling: every one of these live proofs was silently taking the fail-open
+  // path and NORMALISING it. The guard is well-tested and its real callers were all on
+  // the wrong side of it. It matters most HERE, where the disclaimer and the tool-use
+  // prompt are answered from `onScreen` — five seconds of unwatched screens is exactly
+  // where a prompt goes unanswered.
+  child.beginOutput?.()
   child.exited.then(() => {
     childExited = true
   })
