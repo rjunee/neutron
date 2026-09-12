@@ -205,7 +205,10 @@ export async function herdrCall(
     settle = resolve
   })
 
-  const finish = (err: Error | undefined, value?: Record<string, unknown>): void => {
+  /** End the call with `outcome`, once. Private to {@link fail} and {@link succeed}:
+   *  every caller goes through one of those, so there is no signature in which a
+   *  successful settlement can be reached without a result to settle it with. */
+  const done = (outcome: CallOutcome): void => {
     if (settled) return
     settled = true
     if (timer !== undefined) clearTimeout(timer)
@@ -214,39 +217,76 @@ export async function herdrCall(
     } catch {
       /* the server closes its side anyway */
     }
-    settle(err !== undefined ? { ok: false, error: err } : { ok: true, result: value ?? {} })
+    settle(outcome)
+  }
+  const fail = (error: Error): void => {
+    done({ ok: false, error })
+  }
+  /**
+   * Succeed with `result`, which is REQUIRED and has no default.
+   *
+   * The signature is the guard. An earlier shape took an optional value and settled
+   * with `value ?? {}`, which made "there was no result" and "the result was the empty
+   * object" the same state — the exact coercion round 11 removed from the event
+   * envelope, back on the success path because the code around it was rewritten. A
+   * check that catches a defect has to be re-passed by every rewrite; a type that
+   * refuses it does not. So the empty result reaches here only when the reply really
+   * carried `result: {}`, and `classifyReply` is what decides that.
+   */
+  const succeed = (result: Record<string, unknown>): void => {
+    done({ ok: true, result })
+  }
+
+  /** Copy `part` into the single growable buffer. Callers bound the size FIRST. */
+  const append = (part: Uint8Array): void => {
+    if (end + part.length > buf.length) {
+      let capacity = Math.max(buf.length * 2, INITIAL_REPLY_BUFFER_BYTES)
+      while (capacity < end + part.length) capacity *= 2
+      const grown = Buffer.allocUnsafe(capacity)
+      buf.copy(grown, 0, 0, end)
+      buf = grown
+    }
+    buf.set(part, end)
+    end += part.length
   }
 
   const onBytes = (chunk: Uint8Array): void => {
     if (settled) return
-    // BOUND BEFORE COPYING. The limit exists to stop us allocating for a reply we
-    // will not accept, so it cannot run after the allocation it guards.
-    if (end + chunk.length > maxFrameBytes) {
-      finish(
+    // THE BOUND IS PER FRAME, AND IT RUNS BEFORE THE COPY. Those are two requirements
+    // and it is easy to satisfy one by breaking the other. Measuring `end +
+    // chunk.length` is a bound on the DELIVERY: a peer that coalesces a perfectly
+    // legal reply with the first byte of whatever follows it would have its legal
+    // reply rejected, which is a new failure mode rather than a fix. So locate the
+    // first newline in the incoming chunk FIRST — a scan, not an allocation —
+    // because everything already buffered is newline-free (we settle on the first
+    // one), which makes the first frame end at that newline or not have arrived yet.
+    const nl = chunk.indexOf(NEWLINE_BYTE)
+    // Bytes of the FIRST frame this delivery contributes: up to and including its
+    // terminator when it is here, otherwise the whole chunk, since all of it belongs
+    // to a frame still waiting for one.
+    const firstFrameBytes = nl < 0 ? chunk.length : nl + 1
+    if (end + firstFrameBytes > maxFrameBytes) {
+      fail(
         new Error(
           `herdr: reply to '${method}' exceeded ${maxFrameBytes} bytes — refusing to assemble it.`,
         ),
       )
       return
     }
-    if (end + chunk.length > buf.length) {
-      let capacity = Math.max(buf.length * 2, INITIAL_REPLY_BUFFER_BYTES)
-      while (capacity < end + chunk.length) capacity *= 2
-      const grown = Buffer.allocUnsafe(capacity)
-      buf.copy(grown, 0, 0, end)
-      buf = grown
+    if (nl < 0) {
+      append(chunk)
+      return // reply not complete yet
     }
-    buf.set(chunk, end)
-    end += chunk.length
-    const nl = buf.indexOf(NEWLINE_BYTE, 0)
-    if (nl < 0 || nl >= end) return // reply not complete yet
-
-    const line = buf.toString('utf8', 0, nl)
+    // Only the frame's own bytes are copied. Anything the peer coalesced after the
+    // newline is dropped unread: this connection carries ONE reply and is about to be
+    // closed, so there is no next frame to resynchronise to.
+    append(chunk.subarray(0, nl))
+    const line = buf.toString('utf8', 0, end)
     let parsed: unknown
     try {
       parsed = JSON.parse(line)
     } catch {
-      finish(
+      fail(
         new Error(
           `herdr: unparseable reply to '${method}' — the stream position is no longer known: ${line.slice(0, 200)}`,
         ),
@@ -255,7 +295,7 @@ export async function herdrCall(
     }
     const outcome = classifyReply(parsed)
     if (outcome === undefined) {
-      finish(
+      fail(
         new Error(
           `herdr: reply to '${method}' matched no known envelope (an id plus exactly one ` +
             `object-valued result or error): ${line.slice(0, 200)}`,
@@ -265,7 +305,7 @@ export async function herdrCall(
     }
     if (!outcome.ok) {
       const e = outcome.error as { code?: unknown; message?: unknown }
-      finish(
+      fail(
         new HerdrError(
           typeof e.code === 'string' ? e.code : 'unknown',
           typeof e.message === 'string' ? e.message : JSON.stringify(e),
@@ -273,13 +313,13 @@ export async function herdrCall(
       )
       return
     }
-    finish(undefined, outcome.result)
+    succeed(outcome.result)
   }
 
   const onClose = (e?: Error): void => {
     // The server closes after answering, so a close AFTER we have settled is normal
     // and silent. A close BEFORE is the request dying unanswered.
-    finish(
+    fail(
       e ??
         new Error(
           `herdr: connection closed before '${method}' was answered — the server accepted the ` +
@@ -289,7 +329,7 @@ export async function herdrCall(
   }
 
   timer = setTimeout(() => {
-    finish(
+    fail(
       new Error(
         `herdr: '${method}' went unanswered for ${timeoutMs}ms — treating the call as failed ` +
           `rather than waiting forever.`,
@@ -316,7 +356,7 @@ export async function herdrCall(
       // A SHORT OR REFUSED WRITE IS A FAILED CALL, not a partial one: the server
       // frames on newlines, so a truncated request can never be answered.
       if (written < expected) {
-        finish(
+        fail(
           new Error(
             `herdr: short write on '${method}' — the socket accepted ${written} of ${expected} ` +
               `bytes, so this request never fully reached the server.`,
@@ -325,7 +365,7 @@ export async function herdrCall(
       }
     }
   } catch (e) {
-    finish(e instanceof Error ? e : new Error(String(e)))
+    fail(e instanceof Error ? e : new Error(String(e)))
   }
 
   const outcome = await pending

@@ -1513,6 +1513,80 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### A per-frame bound written as a per-delivery bound, and what the survivor means
+
+The bound I built measured `end + chunk.length` — the DELIVERY — and then looked for the
+newline afterwards. A peer is free to coalesce a complete, legal reply with the first
+byte of whatever follows it into one write; against a cap equal to that reply's own
+length, the legal reply is refused. That is a worse failure than the allocation problem
+it replaced, because it rejects valid traffic rather than merely working too hard on
+invalid traffic.
+
+The newline is now located in the incoming chunk FIRST — a scan, not an allocation —
+which is sound because everything already buffered is newline-free by construction (we
+settle on the first one). Only the frame's own bytes are bounded, and only they are
+copied; whatever the peer coalesced after the newline is dropped unread, since this
+connection carries one reply and is about to close.
+
+**My "second reply cannot overwrite the first" test had dodged the boundary.** It forced
+the first frame into its own chunk with `chunkSize: 28`, so the coalesced case — the only
+arrangement that can tell per-frame from per-delivery — was never exercised. It now runs
+both shapes, and they exercise different code: chunked, the second frame reaches an
+already-settled call and is refused by the settlement guards; coalesced, it never arrives
+at all.
+
+**M145 survived, and the honest reading is that the criterion over-claimed.** Moving the
+check back after the copy changes nothing observable: both orders reject, with the same
+message and the same outcome. The ordering is a structural property held by the check
+preceding `append` and by nothing else. Saying that in the criterion is more useful than
+a test that appears to cover it — and it is the second time on this branch that asking
+"what is absorbing this mutation?" produced a correction to the RECORD rather than to the
+code.
+
+### `?? {}` came back, and that is the whole lesson
+
+Round 11 removed a coercion that made an unknown indistinguishable from a legitimate
+empty result, and wrote the criterion against it. Rewriting the transport around that
+criterion put it back — on the success path this time, as an optional `value` settled
+with `value ?? {}`.
+
+A defect removed by a CHECK comes back when the code around it is rewritten. A defect
+removed by a TYPE does not. This branch has now proved that in both directions: the
+buffer, where the guard became the data structure, has not regressed across three
+rewrites; this one, where the guard was a `??`, came back at the first one.
+
+So the success settlement takes a required `Record<string, unknown>` — no optional
+parameter, no default — and the only caller is the branch where `classifyReply` has
+already proved the reply carried an object-valued `result`. The proof is a TYPECHECK
+rather than a test: calling it with no argument is TS2554, "Expected 1 arguments, but got
+0" (M146). There is no runtime mutation to run, which is the point.
+
+### A unit test could switch off the only instrument that can see the real server
+
+Three suites set `HERDR_SOCKET_PATH` to a dead path at module scope, with no teardown.
+They were right to want it — `start()` reaches the real host, and without the guard they
+create real panes on the owner's herdr server and sit out the pid timeout. What was wrong
+is the scope: a process-wide write that is never put back disables the live herdr proofs
+for everything that runs after it, and those proofs are the only tests in this repo that
+can see a real server. They are also precisely the instrument that would have caught the
+transport defect this branch exists to fix.
+
+They now save and restore in `beforeAll`/`afterAll`, both halves (delete when the value
+was absent, restore when it was set). And because "I fixed the three I know about" is not
+an answer to "what else can do this", the rule is now enforced: a guard in
+`tests/integration/pty-e2e-registered.test.ts` walks every `*.test.ts` and fails on any
+suite that ASSIGNS `HERDR_SOCKET_PATH` or `NEUTRON_PTY_E2E` without restoring it. It
+carries a positive control — an empty offender list means nothing if the pattern reaches
+no code — and it needed one immediately: the first pattern matched the `===` of every
+gated suite reading its own flag and reported all three e2e suites as offenders (M147).
+
+That guard file was already the home for two incidents of the same family — a flag that
+never arrived because it was set nowhere, and a flag scrubbed by the test preload. This
+is the third direction on the same hole: a switch turned off by an unrelated suite in the
+same process. A test that can disable the only instrument capable of catching a whole
+defect class is a coverage hole no coverage measurement will show, because the instrument
+reports "skipped", and skipped reads as a decision rather than as damage.
+
 ### One connection per request threw away ordering, and nothing in the tree noticed
 
 A single multiplexed socket ordered our writes for free — frames left in the order we
@@ -1783,6 +1857,11 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M140 | the fake records delivery at INVOCATION time, before the hold | RED 3 |
 | M141 | the queued call skips the post-queue exit check | SURVIVED (no case) → RED 1 |
 | M142 | PAIR: the door-side exit check is dropped | SURVIVED — unobservable; the post-queue check is strictly stronger |
+| M143 | the bound measures the DELIVERY again (`end + chunk.length`) | RED 1 |
+| M144 | PAIR: no bound at all once the frame is complete | RED 1 |
+| M145 | the bound runs AFTER the copy | SURVIVED — both orders reject identically; ordering has no runtime observable here |
+| M146 | settle a SUCCESS with no result | TS2554 at typecheck — refused by the type, not by a test |
+| M147 | the live-proof guard's assignment pattern matches `===` too | RED 1 (it reported all three gated suites as offenders) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

@@ -272,16 +272,41 @@ not-new. That is accepted and recorded here rather than hidden.
       protected by two guards (`beginOutput` clears the timer; the timer checks
       `released`), so only a mutation disabling BOTH shows it discriminates.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **The frame limit is enforced BEFORE the allocation it exists to prevent.** The
-      bound exists to stop us allocating for a reply we will not accept, so it cannot run
-      after the allocation it guards: the check is `end + chunk.length > max` taken on the
-      INCOMING chunk, before the grow-and-copy. The "many valid frames in one delivery"
-      case that used to sit here is gone with the multiplexing client — one connection
-      carries one reply — and what remains needs BOTH directions or either is satisfied
-      alone: an over-cap reply accumulated across deliveries refused with nothing copied,
-      and a reply EXACTLY at the cap accepted, because a bound that rejects a legitimate
-      maximal frame is a new failure mode rather than a fix.
+- [ ] **The frame limit is PER FRAME, and it runs before the copy.** Two requirements,
+      and satisfying one by breaking the other is exactly what happened: `end +
+      chunk.length` is a bound on the DELIVERY, so a peer that coalesces a perfectly
+      legal reply with the first byte of whatever follows has its legal reply refused —
+      a new failure mode, and a worse one than the allocation it replaced. The first
+      newline in the incoming chunk is located FIRST (a scan, not an allocation), which
+      is sound because everything already buffered is newline-free; the frame's own bytes
+      are then bounded, and only they are copied.
+      FOUR cases, because each is satisfied by an implementation that fails the others:
+      an over-cap reply accumulated across deliveries refused; an over-cap frame arriving
+      COMPLETE in one chunk refused (the fragmenting case alone leaves the complete path
+      unbounded); a reply EXACTLY at the cap accepted; and a maximal reply COALESCED with
+      a trailing byte accepted, which is the only case that can tell per-frame from
+      per-delivery.
+      RECORDED, because the criterion used to over-claim: the ORDERING of the check
+      against the copy has no runtime observable in this shape — both orders reject with
+      the same message and the same outcome, so a mutation that moves the check after the
+      copy survives every test. What is observable, and is asserted in both directions,
+      is the per-frame bound. The ordering is a structural property of the code, held by
+      the check preceding `append` and by nothing else, and saying so is more useful than
+      a test that appears to cover it.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **A successful settlement REQUIRES a result — refused by the type, not by a check.**
+      The client must not settle a success with a defaulted `{}`: "there was no result"
+      and "the result was the empty object" are different facts, and the empty object is
+      a legitimate reply. This is the round-11 event-envelope defect, and it CAME BACK on
+      the success path when the transport was rewritten around it — which is the point.
+      A defect removed by a check has to be re-passed by every rewrite; a defect removed
+      by a TYPE does not. So the success settlement takes a required
+      `Record<string, unknown>` with no default and no optional parameter, and the only
+      caller is the branch where `classifyReply` has already proved the reply carried an
+      object-valued `result`.
+      verify: the mutation is a TYPECHECK, not a test — calling the success settlement
+      with no argument must fail `scripts/ci/typecheck-all.sh` with TS2554 ("Expected 1
+      arguments, but got 0"). Verified 2026-09-12.
 - [ ] **One request, one reply, one connection — and no persistent socket anywhere.**
       MEASURED on herdr 0.8.2 / protocol 20: the server answers exactly ONE request per
       connection and then closes it (two pings pipelined in the same tick get one reply,
@@ -302,6 +327,23 @@ not-new. That is accepted and recorded here rather than hidden.
       call would double every operation, and the server's protocol cannot change under a
       running host without restarting herdr, whose panes are its children.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **No test may switch a live proof off.** The live herdr proofs are the only tests
+      in this repo that can see a real server, and they are exactly the instrument that
+      would have caught the transport defect this branch fixed. Three unit suites point
+      `HERDR_SOCKET_PATH` at a dead path to keep themselves hermetic — correctly, since
+      `start()` reaches the real host and would otherwise create real panes on the
+      owner's server — but a module-scope write with no teardown turns "make my own case
+      hermetic" into "disable the instrument for everything that runs after me in this
+      process". Save and restore in a teardown hook, both halves (delete when the value
+      was absent, restore when it was set). And the rule is enforced rather than
+      observed: a guard walks every `*.test.ts` and fails on any suite that ASSIGNS
+      `HERDR_SOCKET_PATH` or `NEUTRON_PTY_E2E` without restoring it, with a positive
+      control that the detector sees the real writers — an empty offender list means
+      nothing if the pattern reaches no code, and the first version of the pattern
+      matched the `===` of every gated suite reading its own flag.
+      A test that can disable the only instrument capable of catching a whole defect
+      class is a coverage hole that no coverage measurement will ever show.
+      verify: `bun test tests/integration/pty-e2e-registered.test.ts`
 - [ ] **Actuations on a pane are ORDERED, and one connection per request is exactly why
       that now takes code.** A single multiplexed socket ordered writes for free: frames
       left in the order they were written, on one stream. Per-connection does not — two

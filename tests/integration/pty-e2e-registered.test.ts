@@ -99,6 +99,47 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     expect(preload).toContain('NEUTRON_PTY_E2E')
   })
 
+  // THE SAME INCIDENT FROM A THIRD DIRECTION. The two above are about the flag not
+  // ARRIVING; this one is about a switch being turned OFF by an unrelated suite in the
+  // same process. A test that sets `HERDR_SOCKET_PATH` to a dead path to keep itself
+  // hermetic — three do, and they are right to — disables the only tests in this repo
+  // that can see a real herdr server if it never puts the value back. That is a
+  // coverage hole no coverage measurement can show: the instrument reports "skipped",
+  // which reads as a decision rather than as damage. It is also not hypothetical — the
+  // transport defect this branch fixed was exactly the class only a live proof could
+  // have caught.
+  test('no suite can silently switch a live proof off — every writer restores', () => {
+    const SWITCHES = ['HERDR_SOCKET_PATH', 'NEUTRON_PTY_E2E']
+    const writers: string[] = []
+    const offenders: string[] = []
+    for (const f of walkTests(REPO_ROOT)) {
+      let src: string
+      try {
+        src = readFileSync(f, 'utf8')
+      } catch {
+        continue
+      }
+      for (const k of SWITCHES) {
+        // ASSIGNMENT ONLY. `\s*=` alone also matches the `=` of `===`, which every
+        // gated suite uses to READ its own flag — the first version of this guard
+        // reported all three e2e suites as offenders for testing the variable they
+        // exist to be gated by.
+        if (!new RegExp(String.raw`process\.env\['${k}'\]\s*=(?!=)`).test(src)) continue
+        writers.push(`${relative(REPO_ROOT, f)}:${k}`)
+        // Restoring means BOTH halves: a teardown hook, and the branch that puts an
+        // absent value back by deleting rather than by writing 'undefined'.
+        const restores =
+          /\b(afterAll|afterEach)\(/.test(src) &&
+          new RegExp(String.raw`delete process\.env\['${k}'\]`).test(src)
+        if (!restores) offenders.push(`${relative(REPO_ROOT, f)} writes ${k} and never restores it`)
+      }
+    }
+    // POSITIVE CONTROL. An empty `offenders` means nothing only if the detector can
+    // see a real write at all — a mistyped pattern would report a clean tree forever.
+    expect(writers.length).toBeGreaterThanOrEqual(3)
+    expect(offenders).toEqual([])
+  })
+
   test('the registry lists no suite that no longer exists', () => {
     // A stale entry makes the runner report a MISSING suite at run time, which is
     // the one moment nobody is watching CI.

@@ -12,7 +12,7 @@
  * path said `cc-adapter:`), and it never spawns a `claude -p` subprocess.
  */
 
-import { describe, expect, test, afterEach } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,7 +25,22 @@ import { shutdownAllPersistentRepls } from '../persistent/persistent-repl-substr
 // PANES on the developer's herdr server and waiting out the pid timeout. Before the
 // transport was fixed these tests were fast by accident: the client could not get past
 // its own protocol ping, so nothing was ever spawned.
-process.env['HERDR_SOCKET_PATH'] = '/nonexistent/herdr-test-must-not-connect.sock'
+//
+// SAVED AND RESTORED, not written at module scope. `HERDR_SOCKET_PATH` is the switch
+// that decides whether the LIVE herdr proofs can reach a server at all, and those are
+// the only tests in this repo that can see the real one — a module-scope write with no
+// teardown turns "make my own case hermetic" into "silently disable the instrument for
+// everything that runs after me in this process". A test may not be able to disable the
+// only thing capable of catching a whole defect class, and no coverage number would
+// ever show it.
+const PRIOR_HERDR_SOCKET = process.env['HERDR_SOCKET_PATH']
+beforeAll(() => {
+  process.env['HERDR_SOCKET_PATH'] = '/nonexistent/herdr-test-must-not-connect.sock'
+})
+afterAll(() => {
+  if (PRIOR_HERDR_SOCKET === undefined) delete process.env['HERDR_SOCKET_PATH']
+  else process.env['HERDR_SOCKET_PATH'] = PRIOR_HERDR_SOCKET
+})
 
 const PRIOR_FLAG = process.env['NEUTRON_PERSISTENT_REPL']
 const PRIOR_SUP = process.env['NEUTRON_PERSISTENT_REPL_SUPERVISION']

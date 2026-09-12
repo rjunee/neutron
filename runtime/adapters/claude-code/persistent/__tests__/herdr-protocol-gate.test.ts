@@ -136,12 +136,18 @@ describe('one request, one reply, one connection', () => {
   // rather than accumulated. Both halves are visible here: the FIRST result stands, and
   // the socket is ended once by the settlement rather than once per delivery.
   it('a settled call accepts nothing further — a second reply cannot overwrite the first', async () => {
-    const r = replying('{"id":"r","result":{"n":1}}\n{"id":"r","result":{"n":2}}\n', {
-      chunkSize: 28, // exactly the first frame, so the second arrives AFTER settlement
-    })
-    const got = await herdrCall('pane.read', {}, { socketPath: '/f', connect: r.connect })
-    expect(got).toEqual({ n: 1 })
-    expect(r.ends()).toBe(1)
+    const two = '{"id":"r","result":{"n":1}}\n{"id":"r","result":{"n":2}}\n'
+    // BOTH arrival shapes, because they exercise different code: chunked, the second
+    // frame arrives at an already-settled call and is refused by the settlement guards;
+    // COALESCED, it never arrives at all — the first frame's newline ends the copy and
+    // the rest of the delivery is dropped unread.
+    for (const chunkSize of [28, undefined]) {
+      const r = replying(two, chunkSize === undefined ? {} : { chunkSize })
+      const got = await herdrCall('pane.read', {}, { socketPath: '/f', connect: r.connect })
+      expect(`${String(chunkSize)}: ${JSON.stringify(got)} ends=${r.ends()}`).toBe(
+        `${String(chunkSize)}: {"n":1} ends=1`,
+      )
+    }
   })
 
   it('reassembles a reply split across many chunks, including mid-character', async () => {
@@ -315,5 +321,34 @@ describe('the frame bound', () => {
       maxFrameBytes: exact,
       connect: replying(`${body}\n`).connect,
     })).toEqual({ type: 'ok' })
+  })
+
+  // THE BOUND IS PER FRAME, NOT PER DELIVERY — and only a COALESCED delivery can tell
+  // the two apart. A peer is free to put a complete, legal reply and the first byte of
+  // whatever follows it into one write; measuring the delivery rejects the legal reply
+  // for something that is not part of it. Cap set to the frame's own exact length, with
+  // one extra byte riding along: a per-delivery bound reads 29 > 28 and fails the call.
+  it('a maximal reply COALESCED with a trailing byte is still accepted', async () => {
+    const frame = '{"id":"r","result":{"n":1}}\n'
+    const exact = Buffer.byteLength(frame, 'utf8')
+    expect(exact).toBe(28)
+    expect(await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      maxFrameBytes: exact,
+      connect: replying(`${frame}x`).connect,
+    })).toEqual({ n: 1 })
+  })
+
+  // The other direction, so "per frame" is not satisfied by having no bound at all: an
+  // over-cap frame delivered in ONE chunk with its newline present must still be
+  // refused. The 16 MiB case above arrives in pieces; this one does not.
+  it('an over-cap frame arriving COMPLETE in one chunk is still refused', async () => {
+    const body = `{"id":"r","result":{"pad":"${'y'.repeat(200)}"}}`
+    const e = await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      maxFrameBytes: 64,
+      connect: replying(`${body}\n`).connect,
+    }).catch((x: unknown) => x as Error)
+    expect((e as Error).message).toContain('exceeded 64 bytes')
   })
 })
