@@ -3776,6 +3776,18 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) {
         return { ok: true, stdout: 'shared.ts', stderr: '', exit_code: 0 }
       }
+      // THE INDEX VIEW, which the arbiter's evidence layer reads to tell a genuinely
+      // one-sided conflict from a read it could not perform (#541 round 15). A stub that
+      // omits it does not under-test that path — it supplies "no unmerged stages", which is
+      // the one-sided branch, so the conflict here would look like a file neither side has.
+      if (cmd.includes('ls-files') && cmd.includes('--unmerged')) {
+        return {
+          ok: true,
+          stdout: [1, 2, 3].map((stage) => `100644 ${'a'.repeat(40)} ${stage}\tshared.ts`).join('\u0000') + '\u0000',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
       return ok()
     }
   }

@@ -32,6 +32,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import {
   MAX_HISTORY_COMMITS_PER_SIDE,
   buildMergeCleanupDeps,
+  conflictEvidence,
   CONFLICT_ARBITER_RETRY_OPTION,
   CONFLICT_ARBITRATION_OPTIONS,
   MAX_ARBITRATIONS_PER_REBASE,
@@ -83,6 +84,30 @@ const wtOf = (repo: string, run: TridentRun): string =>
  * must never be mistaken for one. `conflictRounds` is how many times that rebase
  * (or `rebase --continue`) reports the conflict before going clean.
  */
+/**
+ * The `git ls-files --unmerged -z` output for a set of conflicted paths — the INDEX VIEW the
+ * production code reads to tell a genuinely one-sided conflict from a read it could not
+ * perform (#541 round 15).
+ *
+ * THAT NO STUB HOST MODELLED THIS IS WHY THE DEFECT WAS INVISIBLE. Every host here answered
+ * the conflict LIST and the stage DIFF and nothing else, so a failed diff looked exactly like
+ * a one-sided path, and the code that conflated them had no test that could tell. A stub that
+ * omits a query the production code makes does not merely under-test it — it silently supplies
+ * whatever answer the default branch gives, which here was "no stages", i.e. one-sided.
+ *
+ * Format verified against real git: `<mode> <sha> <stage>\t<path>`, NUL terminated under `-z`.
+ */
+function unmergedIndex(conflicted: string, stages: readonly number[] = [1, 2, 3]): HostCommandResult {
+  const paths = conflicted.split('\u0000').filter((path) => path.length > 0)
+  const sha = 'a'.repeat(40)
+  const records = paths.flatMap((path) => stages.map((stage) => `100644 ${sha} ${stage}\t${path}`))
+  return ok(records.length > 0 ? `${records.join('\u0000')}\u0000` : '')
+}
+
+function isUnmergedQuery(cmd: readonly string[]): boolean {
+  return cmd.includes('ls-files') && cmd.includes('--unmerged')
+}
+
 function conflictingHost(
   wt: string,
   conflictRounds: number,
@@ -98,6 +123,7 @@ function conflictingHost(
       reported++
       return fail('CONFLICT (content): Merge conflict in flush.ts')
     }
+    if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
     if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
     return ok()
   }
@@ -764,6 +790,7 @@ describe('#541 — a HOSTILE REF NAME cannot forge the prompt either', () => {
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {
@@ -902,6 +929,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       // The two-stage blob diff: `:2:<path>` vs `:3:<path>`.
       const stage = cmd.find((a) => a.startsWith(':2:'))
@@ -1020,13 +1048,261 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(outcomes['many small files'], 'an ordinary conflict must still be judged').toBe(true)
   })
 
-  test('a diff git cannot produce degrades to a stated absence, never to silence', async () => {
+  test('A DIFF GIT CANNOT PRODUCE IS UNKNOWN, SO THE JUDGE IS NOT ASKED', async () => {
+    // THIS TEST USED TO CODIFY THE VIOLATION, and that is the part worth recording. It
+    // asserted the arbiter WAS invoked and merely received a "no two-sided diff" sentence —
+    // so it pinned as correct the very behaviour the seam exists to prevent: a judge deciding
+    // a retry having seen neither side of an ordinary conflict, under an assurance that
+    // nothing had been left out. A test written to demonstrate the seam holds is the worst
+    // place for the seam to leak, because from then on it DEFENDS the leak.
+    //
+    // The cause was one sentence doing two jobs: "the path exists on only one side, or git
+    // could not read it" is an OR of a definite fact and a missing one. `ok: false` and a
+    // definite one-sided conflict shared a branch, which is exactly the rule that says false
+    // and unknown must not.
     const run = localRun('feat-nohunk')
     const { host } = hunkHost(wtOf('/shared', run), () => fail('fatal: bad object'))
-    const evidence = await evidenceOf('feat-nohunk', host)
-    expect(evidence).toContain('no two-sided diff')
-    // And the merge still ends on the owner path with the resolver's own question.
-    expect(evidence).toContain('THE CONFLICT')
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        // The resolver's OWN question survives to the owner — the specific thing that makes
+        // escalating worth anything.
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // The stub would have GRANTED a retry, so a non-zero count here is the defect, not a
+    // coincidence of ordering.
+    expect(seen.length, 'the judge must not be asked about a conflict we could not read').toBe(0)
+    const skipped = lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? ''
+    expect(skipped).toContain('why=evidence-unreadable')
+    // And it is not counted as an arbitration: a tier that never ran must stay out of its own
+    // denominator.
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
+  })
+
+  test('THE SEAM PROPERTY: no arbiter call is reachable without COMPLETE evidence', async () => {
+    // THE GENERALISATION OF THIS ROUND, and the reason it is a property rather than a case.
+    // Round 14 removed a per-line cap on the grounds that the guarantee is about the SEAM and
+    // not the particular mechanism, and pinned it with a mutation that added a different
+    // mechanism in the same place. This is the same move for a different seam: the rule is not
+    // "a failed diff must refuse", it is NOTHING REACHES THE JUDGE THAT THE SYSTEM COULD NOT
+    // ESTABLISH. So the assertion is an implication over every shape of failure I can build —
+    // if the judge was asked, `conflictEvidence` said `complete` — which a future refusal path
+    // that forgets to refuse violates without anyone having to think of it.
+    //
+    // The implication runs one way deliberately. `complete` does NOT imply asked: the prompt
+    // budget can still decline afterwards, and the histories are kept tiny here so that only
+    // the shape named 'enormous diff' exercises it.
+    const index = (conflicted: string, stages?: readonly number[]) => unmergedIndex(conflicted, stages)
+    type Shape = {
+      name: string
+      conflicted: string
+      onIndex?: () => HostCommandResult | never
+      onDiff?: () => HostCommandResult | never
+      stages?: readonly number[]
+    }
+    const shapes: Shape[] = [
+      { name: 'ordinary two-sided conflict', conflicted: 'a.ts', onDiff: () => ok('diff\n-x\n+y\n') },
+      { name: 'genuinely one-sided (stage 3 only)', conflicted: 'a.ts', stages: [1, 3] },
+      { name: 'two stages, identical content', conflicted: 'a.ts', onDiff: () => ok('') },
+      { name: 'diff exits non-zero', conflicted: 'a.ts', onDiff: () => fail('fatal: bad object') },
+      {
+        name: 'diff throws',
+        conflicted: 'a.ts',
+        onDiff: () => {
+          throw new Error('spawn failed')
+        },
+      },
+      { name: 'index read exits non-zero', conflicted: 'a.ts', onIndex: () => fail('fatal: not a git repository') },
+      {
+        name: 'index read throws',
+        conflicted: 'a.ts',
+        onIndex: () => {
+          throw new Error('spawn failed')
+        },
+      },
+      { name: 'index record is unparseable', conflicted: 'a.ts', onIndex: () => ok('garbage-with-no-tab\u0000') },
+      {
+        // THE SHAPE A CRUDER FIXTURE MISSES, found by mutation. With garbage ALONE, skipping
+        // the bad record still yields an empty map, so the `not-in-index` guard downstream
+        // refuses anyway and a parser that swallowed the error passed the suite. Here the
+        // garbage sits BESIDE complete, valid stages for the very path being asked about: skip
+        // it and the path parses fine, the evidence reads `complete`, and the judge is asked
+        // about an index we demonstrably failed to read in full.
+        name: 'index is partly unparseable, valid for this path',
+        conflicted: 'a.ts',
+        onIndex: () => {
+          const good = index('a.ts').stdout
+          return ok(`${good}garbage-with-no-tab\u0000`)
+        },
+      },
+      {
+        // A STAGE NUMBER THAT IS NOT A STAGE NUMBER. Every field of the record has to be
+        // validated, not just the tab: drop the numeric check and `Number('X')` is NaN, which
+        // lands in the stage set, satisfies neither `has(2)` nor `has(3)`, and reads as a
+        // genuinely one-sided conflict — "neither side has a version of this path" — asserted
+        // to the judge as a complete fact about a record we could not parse.
+        name: 'index stage is not a number',
+        conflicted: 'a.ts',
+        onIndex: () => ok(`100644 ${'a'.repeat(40)} X\ta.ts\u0000`),
+      },
+      {
+        // TOO MANY FIELDS, and this shape exists because the obvious one could not see the
+        // `meta.length` clause: with too FEW fields `meta[2]` is undefined and the NaN check
+        // refuses anyway, so that clause was untested by construction. Here `meta[2]` is a
+        // perfectly valid `1`, so only the length check can object — verified by mutation.
+        name: 'index record has too many fields',
+        conflicted: 'a.ts',
+        onIndex: () => ok(`100644 ${'a'.repeat(40)} 1 extra\ta.ts\u0000`),
+      },
+      {
+        // A STAGE OUTSIDE 1..3. `Number.isInteger(9)` is true, so only the RANGE clause can
+        // refuse this — the same blind spot one clause over.
+        name: 'index stage is out of range',
+        conflicted: 'a.ts',
+        onIndex: () => ok(`100644 ${'a'.repeat(40)} 9\ta.ts\u0000`),
+      },
+      {
+        // TOO FEW FIELDS, same reasoning for the `meta.length` clause.
+        name: 'index record has too few fields',
+        conflicted: 'a.ts',
+        onIndex: () => ok(`100644 ${'a'.repeat(40)}\ta.ts\u0000`),
+      },
+      {
+        // AN EMPTY PATH beside valid records for the path we care about. Without the guard the
+        // empty key is simply stored, a.ts parses fine, and the judge is asked about an index
+        // containing a record we could not make sense of.
+        name: 'index has an empty path beside valid records',
+        conflicted: 'a.ts',
+        onIndex: () => ok(`${index('a.ts').stdout}100644 ${'a'.repeat(40)} 1\t\u0000`),
+      },
+      { name: 'index lists a DIFFERENT path', conflicted: 'a.ts', onIndex: () => index('other.ts') },
+      { name: 'index lists no paths at all', conflicted: 'a.ts', onIndex: () => ok('') },
+      { name: 'enormous diff', conflicted: 'a.ts', onDiff: () => ok(`diff\n${'-L'.repeat(40_000)}\n`) },
+    ]
+
+    const asked: Record<string, boolean> = {}
+    const kinds: Record<string, string> = {}
+    for (const shape of shapes) {
+      const run = localRun(`feat-seam-${shape.name.replace(/\W+/g, '')}`)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+        if (isUnmergedQuery(cmd)) {
+          return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
+        }
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(shape.conflicted)
+        if (cmd.some((a) => a.startsWith(':2:'))) {
+          return shape.onDiff === undefined ? ok('diff\n-x\n+y\n') : shape.onDiff()
+        }
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      // What the evidence layer concluded, read directly from the same host.
+      const evidence = await conflictEvidence(host, wt, shape.conflicted.split('\u0000'))
+      kinds[shape.name] = evidence.kind
+      // And whether the judge was reached through the real seam.
+      const { arbitrate, seen } = stubArbiter({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'would have granted the retry',
+      })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      await cleanupAfterMerge(run, deps).catch(() => {})
+      asked[shape.name] = seen.length > 0
+
+      // THE PROPERTY.
+      if (asked[shape.name] === true) {
+        expect(kinds[shape.name], `${shape.name}: the judge was asked on ${kinds[shape.name]} evidence`).toBe(
+          'complete',
+        )
+      }
+    }
+
+    // NOT VACUOUS, and specific about which shapes must land where — an implication alone is
+    // satisfied by never asking at all.
+    expect(asked['ordinary two-sided conflict'], 'an ordinary conflict must be judged').toBe(true)
+    expect(asked['genuinely one-sided (stage 3 only)'], 'a one-sided conflict must be judged').toBe(true)
+    expect(asked['two stages, identical content'], 'a zero exit with empty output is a fact').toBe(true)
+    for (const name of [
+      'diff exits non-zero',
+      'diff throws',
+      'index read exits non-zero',
+      'index read throws',
+      'index record is unparseable',
+      'index is partly unparseable, valid for this path',
+      'index stage is not a number',
+      'index record has too few fields',
+      'index record has too many fields',
+      'index stage is out of range',
+      'index has an empty path beside valid records',
+      'index lists a DIFFERENT path',
+      'index lists no paths at all',
+      'enormous diff',
+    ]) {
+      expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
+    }
+    // And every refusal names itself, so `unreadable` and `over-budget` never blur together.
+    expect(kinds['diff exits non-zero']).toBe('unreadable')
+    expect(kinds['enormous diff']).toBe('over-budget')
+  })
+
+  test('A GENUINELY ONE-SIDED CONFLICT IS STILL SHOWN, AND SAYS WHICH SIDE', async () => {
+    // THE OTHER HALF, and it has to be distinguishable FROM SUCCESSFUL GIT EVIDENCE rather
+    // than from the absence of an error. Measured against real git: a modify/delete conflict
+    // carries index stages 1 and 3 only, and `diff :2: :3:` exits 128 on it — the SAME
+    // observable as a broken read. So the index is what separates them, and here only stage 3
+    // exists.
+    const run = localRun('feat-onesided')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('gone.ts', [1, 3])
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('gone.ts')
+      // Exactly what real git does when stage 2 is absent.
+      if (cmd.some((a) => a.startsWith(':2:'))) return fail("fatal: path 'gone.ts' is in the index, but not at stage 2")
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+    // ASKED — a one-sided conflict is a complete fact, and refusing here would make the tier
+    // inert for every modify/delete conflict.
+    expect(seen.length, 'a one-sided conflict is established evidence and must be judged').toBe(1)
+    const evidence = seen[0]?.evidence ?? ''
+    // And it names WHICH side, which the sentence this replaces could not, because it did not
+    // know whether it was describing a fact or an error.
+    expect(evidence).toContain("only the BRANCH's version of this path exists")
+    expect(evidence).not.toContain('could not read')
   })
 
   test('hostile hunk content cannot forge a prompt line — every quoted line is prefixed', async () => {
@@ -1066,6 +1342,7 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {
@@ -1183,6 +1460,7 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
         counts.push(Number(cmd.find((a) => a.startsWith('--max-count'))?.split('=')[1] ?? '-1'))
         return log(cmd[cmd.length - 1] ?? '')
       }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {
@@ -1382,6 +1660,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts\u0000b.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('a.ts\u0000b.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n`)
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -1525,6 +1804,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
         return ok(Array.from({ length: 20 }, (_, k) => `c${k} ${'H'.repeat(600)}`).join('\u0000') + '\u0000')
       }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('small.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('small.ts')
       // A modest diff: the hunk section alone is comfortably inside the budget.
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-one\n+two\n')
@@ -1552,7 +1832,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       })
     })
     expect(seen.length, 'the judge must not be asked when the FULL prompt is over budget').toBe(0)
-    expect(lines.find((l) => l.includes('merge_conflict_arbiter_oversize'))).toBeDefined()
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked'))).toBeDefined()
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
 
@@ -1572,6 +1852,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('long.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('long.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${line}\n+short\n`)
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -1627,7 +1908,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     //   1. the arbiter is NOT invoked — no model turn is spent on a payload we cannot show;
     //   2. the merge ends on the owner path carrying the RESOLVER'S OWN QUESTION, not a
     //      generic message — the specific question is the entire value of escalating;
-    //   3. `merge_conflict_arbiter_oversize` is logged, because the new kill criterion is
+    //   3. `merge_conflict_arbiter_not_asked` is logged, because the new kill criterion is
     //      "how often is a conflict small enough to arbitrate at all" and this line is its
     //      other half;
     //   4. NO `merge_conflict_arbitration` line is emitted — a tier that never ran must not
@@ -1638,6 +1919,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('big.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('big.ts')
       // One file whose two-sided diff is far past the whole evidence budget.
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n${'-L'.repeat(40_000)}\n`)
@@ -1674,10 +1956,13 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       question: RESOLVER_QUESTION,
     })
     // 3. The skip is counted.
-    const oversize = lines.find((l) => l.includes('merge_conflict_arbiter_oversize')) ?? ''
-    expect(oversize, 'the oversize skip must be recorded').not.toBe('')
-    expect(oversize).toContain('conflict_files=1')
-    expect(oversize).toContain(`budget_bytes=${ARBITER_PROMPT_BYTES_MAX}`)
+    const skipped = lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? ''
+    expect(skipped, 'the skip must be recorded').not.toBe('')
+    // WITH THE REASON, not just the fact. "too big to show" and "could not be read" are
+    // different facts about this tier's reach and the criterion has to tell them apart.
+    expect(skipped).toContain('why=over-budget')
+    expect(skipped).toContain('conflict_files=1')
+    expect(skipped).toContain(`budget_bytes=${ARBITER_PROMPT_BYTES_MAX}`)
     // 4. And it is NOT counted as an arbitration.
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
@@ -1865,6 +2150,7 @@ describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge
         )
       }
       if (cmd.includes('status') && cmd.includes('--porcelain')) return ok('UU flush.ts\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {
@@ -2062,6 +2348,7 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
       if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
         return ok('shared.ts')
       }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('shared.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('shared.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < conflictRounds) {
@@ -2140,6 +2427,7 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
         return ok('shared.ts')
       }
       // …but the conflict the resolver saw was in `other.ts`.
+      if (isUnmergedQuery(cmd)) return unmergedIndex('other.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('other.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {

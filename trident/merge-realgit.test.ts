@@ -979,16 +979,64 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 
-  test('a path that exists on only ONE side says so instead of pretending to a diff', async () => {
+  test('a REAL modify/delete conflict is complete evidence, and names which side exists', async () => {
+    // THE FIXTURE THIS REPLACES NEVER MODELLED WHAT IT WAS NAMED FOR: it asked for
+    // `never-existed.ts` in a repo with no conflict at all, so it exercised "a path the index
+    // does not list" while claiming to test "a path on only one side". The two are different
+    // facts — the first is unknown, the second is definite — and the old code returned the
+    // same sentence for both, which is precisely why the fixture could not tell.
+    //
+    // Real git, measured: a modify/delete conflict carries index stages 1 and 3 only, and
+    // `git diff :2:<p> :3:<p>` exits 128 on it with `fatal: path '<p>' is in the index, but
+    // not at stage 2` — THE SAME OBSERVABLE AS A BROKEN READ. So this case can only be
+    // established from the index, and that is what the production code now does.
+    // THE FILE MUST EXIST AT THE BRANCH POINT, or there is nothing to clash: my first
+    // fixture branched BEFORE the path existed, so the rebase applied cleanly and the test
+    // failed on its own premise rather than on the code. Base has README.md; main deletes
+    // it; the branch modifies it.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.one-sided')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'the branch still wants this file\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edits README')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    await git(repo, 'rm', '-q', 'README.md')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main deletes README')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    const conflicted = await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')
+    expect(conflicted).toContain('README.md')
+    // The premise, asserted rather than assumed: stage 2 really is absent, which is what
+    // makes this the one-sided case and not an ordinary content conflict.
+    const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'README.md')
+    expect(stages).not.toContain('\t2\t')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    // ESTABLISHED, so the judge is asked — refusing here would make the tier inert for every
+    // modify/delete conflict.
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(body).toContain('no two-sided diff')
+    // AND IT SAYS WHICH SIDE. The sentence this replaces could not, because it did not know
+    // whether it was describing a fact or an error.
+    expect(body).toMatch(/only the (BASE|BRANCH)'s version of this path exists/)
+    expect(body).not.toContain('could not read')
+    // Still quoted, still not a crash, still not silence.
+    expect(body.split('\n').every((l) => l.startsWith('| '))).toBe(true)
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a path the INDEX does not list as unmerged is UNKNOWN, never complete', async () => {
+    // The old fixture's real subject, now named and asserted correctly. Our own two views of
+    // the tree disagree — the caller says this path is conflicted, the index does not list it
+    // — and a disagreement about our reading is not a fact about the conflict.
     const repo = await makeBaseRepo()
     const evidence = await conflictEvidence(spawnCapture, repo, ['never-existed.ts'])
-    // A COMPLETE STATEMENT OF A FACT, not a partial view of one — so it is `complete`,
-    // and the judge is asked.
-    expect(evidence.kind).toBe('complete')
-    const hunks = evidence.kind === 'complete' ? evidence.body : ''
-    expect(hunks).toContain('no two-sided diff')
-    // Still quoted, still not a crash, still not silence.
-    expect(hunks.split('\n').every((l) => l.startsWith('| '))).toBe(true)
+    expect(evidence.kind).toBe('unreadable')
+    expect(evidence.kind === 'unreadable' ? evidence.why : '').toBe('not-in-index')
   }, 20_000)
 
   test('an ENORMOUS conflict is NOT shown in part — it is over-budget, so the judge is never asked', async () => {

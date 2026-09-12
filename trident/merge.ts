@@ -1904,15 +1904,88 @@ function quoteAll(text: string): string {
 /**
  * The conflict as the judge will see it, or the fact that it will not be shown at all.
  *
- * TWO ARMS, AND THERE IS DELIBERATELY NO THIRD. A "showed N of M" arm is the entire class
- * of defect recorded at `ARBITER_PROMPT_BYTES_MAX`: it requires a count, a notice, and an
- * agreement between them that five rounds could not hold. `over-budget` carries NO byte
- * figure for the same reason — the loop stops fetching once it knows the answer, so any
- * number here would mean "at least this much" while being read as a total, which is
- * verbatim the round-12 defect. What the caller needs is the decision, and the decision is
- * a bit.
+ * THREE ARMS, AND THE THIRD IS THE ROUND-15 FIX. `complete` means the whole conflict was
+ * established and is in `body`. `over-budget` means it was established and is too large to
+ * send. `unreadable` means IT WAS NEVER ESTABLISHED — and it exists because the previous
+ * version reported that state as `complete`.
+ *
+ * WHAT WENT WRONG. A `git diff :2:<path> :3:<path>` that failed and one that succeeded with
+ * empty output were mapped to the SAME sentence — "no two-sided diff — the path exists on
+ * only one side, or git could not read it" — and then returned as `complete`. That sentence
+ * is an OR of a definite fact and a missing one, which is the tell. So a failed read invoked
+ * the arbiter, told it the evidence was complete, and let it grant a retry having seen
+ * neither side of an ordinary conflict. `SPEC.md` says shown COMPLETE or not at all; this was
+ * "not at all", reported as complete.
+ *
+ * THE RULE IT BROKE IS ALREADY WRITTEN DOWN: false and unknown must not share a branch.
+ * `ok: false`, a thrown host error, and an index this code cannot parse are all UNKNOWN, and
+ * none of them may ride the branch that carries a definite answer.
+ *
+ * AND THE DISTINCTION CANNOT COME FROM THE DIFF'S EXIT CODE, which is the part that had to be
+ * measured rather than reasoned about. Against real git mid-rebase: a two-sided conflict's
+ * `diff :2: :3:` exits 0, and a GENUINELY one-sided one (modify/delete — stages 1 and 3 only)
+ * exits 128 with `fatal: path '<p>' is in the index, but not at stage 2`. A one-sided conflict
+ * and a broken read are therefore the SAME OBSERVABLE from the diff alone, so no amount of
+ * care at that call could have separated them.
+ *
+ * The separation comes from POSITIVE EVIDENCE instead: `git ls-files --unmerged` names which
+ * stages exist, exits 0, and is a definite answer. Both stages present means a two-sided
+ * conflict and the diff must succeed; stage 2 or 3 missing means a genuinely one-sided
+ * conflict, which is a complete fact this function can state precisely — including WHICH side
+ * exists, which the old sentence could not say because it did not know.
+ *
+ * NO PAYLOAD ON THE TWO REFUSAL ARMS beyond a fixed reason literal. `over-budget` carries no
+ * byte figure — the loop stops fetching once it knows the answer, so any number would mean "at
+ * least this much" while reading as a total, which is verbatim the round-12 defect — and
+ * `unreadable`'s `why` is one of three repo-authored words, never a path or a git message.
  */
-export type ConflictEvidence = { kind: 'complete'; body: string } | { kind: 'over-budget' }
+export type ConflictEvidence =
+  | { kind: 'complete'; body: string }
+  | { kind: 'over-budget' }
+  | { kind: 'unreadable'; why: 'index' | 'not-in-index' | 'diff' }
+
+/**
+ * WHICH CONFLICT STAGES EXIST, per path — the positive evidence that separates a one-sided
+ * conflict from a read this code could not perform (#541 round 15).
+ *
+ * `null` means UNKNOWN, and every route to it is a route the caller must refuse to arbitrate
+ * on: a throwing host, a non-zero exit, or a record this function cannot parse. The parse
+ * failure matters as much as the others — SKIPPING an unparseable record would silently turn
+ * "I could not read this" into "this path has no stages", which is the one-sided branch, which
+ * is `complete`. That is the same defect one layer down, so it returns `null` instead.
+ *
+ * ONE CALL FOR THE WHOLE INDEX rather than one per path: it avoids passing an untrusted path
+ * to git as a pathspec (where glob magic could match something else) and costs one process
+ * instead of N. Format, verified against real git: `<mode> <sha> <stage>\t<path>`, NUL
+ * terminated under `-z`, so no path can forge a record boundary.
+ */
+async function unmergedStages(
+  run_host: RunHostCommand,
+  repo: string,
+): Promise<Map<string, Set<number>> | null> {
+  let res: HostCommandResult
+  try {
+    res = await run_host(['git', '-C', repo, 'ls-files', '--unmerged', '-z'], repo)
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+  const stages = new Map<string, Set<number>>()
+  for (const record of res.stdout.split('\u0000')) {
+    if (record.length === 0) continue
+    const tab = record.indexOf('\t')
+    if (tab === -1) return null
+    const meta = record.slice(0, tab).split(' ')
+    const stage = Number(meta[2])
+    const path = record.slice(tab + 1)
+    if (meta.length !== 3 || !Number.isInteger(stage) || stage < 1 || stage > 3) return null
+    if (path.length === 0) return null
+    const seen = stages.get(path)
+    if (seen === undefined) stages.set(path, new Set([stage]))
+    else seen.add(stage)
+  }
+  return stages
+}
 
 /**
  * THE CONFLICT ITSELF, collected BY THE CALLER (#541 review round 9).
@@ -1934,6 +2007,9 @@ export type ConflictEvidence = { kind: 'complete'; body: string } | { kind: 'ove
  * BRANCH's. That is the exact question the arbiter is answering — do these two intents
  * conflict irreconcilably — in unified-diff form.
  *
+ * EVERY FAILURE HERE IS A REFUSAL TO ARBITRATE, never a thinner prompt. The judge is asked
+ * only about a conflict this function actually established.
+ *
  * THE RUNNING TOTAL IS A COST BOUND, NOT A DISPLAY BOUND. It stops this function issuing a
  * `git diff` per file for a conflict already known to be unshowable; it never shortens what
  * a complete result contains. Both bounds reach the same decision, and the authoritative
@@ -1945,24 +2021,46 @@ export async function conflictEvidence(
   paths: string[],
 ): Promise<ConflictEvidence> {
   if (paths.length === 0) return { kind: 'complete', body: '(no conflicted paths reported)' }
+  const stages = await unmergedStages(run_host, repo)
+  if (stages === null) return { kind: 'unreadable', why: 'index' }
   const sections: string[] = []
   let used = 0
   for (const path of paths) {
     const label = `${QUOTE.trim()} --- ${foldEvidence(path)} (\`-\` = base, \`+\` = branch)`
+    // A path the caller called conflicted that the INDEX does not list as unmerged. Two
+    // views of the same tree disagreeing is not a fact about the conflict, it is a fact
+    // about our own reading of it — so it is unknown, not one-sided.
+    const stage = stages.get(path)
+    if (stage === undefined) return { kind: 'unreadable', why: 'not-in-index' }
     let body: string
-    try {
-      const res = await run_host(
-        ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--no-color', `:2:${path}`, `:3:${path}`],
-        repo,
-      )
+    if (!stage.has(2) || !stage.has(3)) {
+      // GENUINELY ONE-SIDED, established from the index rather than inferred from a diff
+      // that failed — and it can now say WHICH side, which the sentence this replaces could
+      // not, because it did not know whether it was looking at a fact or an error.
+      body = stage.has(2)
+        ? `${QUOTE}(no two-sided diff: only the BASE's version of this path exists — the branch deleted or never added it)`
+        : stage.has(3)
+          ? `${QUOTE}(no two-sided diff: only the BRANCH's version of this path exists — the base deleted or never added it)`
+          : `${QUOTE}(no two-sided diff: neither side has a version of this path)`
+    } else {
+      let res: HostCommandResult
+      try {
+        res = await run_host(
+          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--no-color', `:2:${path}`, `:3:${path}`],
+          repo,
+        )
+      } catch {
+        return { kind: 'unreadable', why: 'diff' }
+      }
+      // BOTH STAGES EXIST, so git has no reason to fail. If it does, we did not establish
+      // the conflict and must not pretend otherwise.
+      if (!res.ok) return { kind: 'unreadable', why: 'diff' }
       body =
-        res.ok && res.stdout.trim().length > 0
+        res.stdout.trim().length > 0
           ? quoteAll(res.stdout)
-          : // A path added or deleted on only one side has no two stages to diff. This is a
-            // COMPLETE statement of a fact, not a partial view of one.
-            `${QUOTE}(no two-sided diff — the path exists on only one side, or git could not read it)`
-    } catch {
-      body = `${QUOTE}(could not be read)`
+          : // A ZERO EXIT WITH EMPTY OUTPUT is a definite answer, not a missing one: git
+            // compared the two stages and found no textual difference.
+            `${QUOTE}(both sides exist and are textually identical — the conflict is not in this file's content)`
     }
     const section = `${label}\n${body}`
     sections.push(section)
@@ -2067,13 +2165,19 @@ async function sideHistory(
  * `permission_mode`/`sandbox`.
  */
 /**
- * The result of trying to arbitrate. `over-budget` is NOT a verdict and NOT an arbitration:
- * no model turn ran, no per-rebase arbitration was spent, and the caller escalates exactly
- * as it does without an arbiter at all (#541 round 13).
+ * The result of trying to arbitrate. `not-asked` is NOT a verdict and NOT an arbitration: no
+ * model turn ran, no per-rebase arbitration was spent, and the caller escalates exactly as it
+ * does without an arbiter at all (#541 rounds 13/15).
+ *
+ * `why` is carried rather than collapsed, because "too big to show" and "could not be read"
+ * are different facts about this tier's reach and the kill criterion has to tell them apart:
+ * the first says the arbiter's useful range is narrow, the second says something is broken.
+ * One event with a discriminator, not two events and not one blurred count.
  */
+export type ArbiterNotAskedWhy = 'over-budget' | 'evidence-unreadable'
 type ArbitrationAttempt =
   | { kind: 'decided'; outcome: ArbitrationOutcome; prompt_bytes: number }
-  | { kind: 'over-budget' }
+  | { kind: 'not-asked'; why: ArbiterNotAskedWhy }
 
 async function arbitrateConflict(
   arbitrate: TridentArbiter,
@@ -2128,7 +2232,12 @@ async function arbitrateConflict(
   // THE CONFLICT ITSELF — the one thing a toolless judge cannot obtain and must have
   // (round 9). Without it the turn was choosing on filenames alone.
   const hunks = await conflictEvidence(ctx.run_host, ctx.repo, ctx.conflicted)
-  if (hunks.kind === 'over-budget') return { kind: 'over-budget' }
+  // NOT ASKED ON EVIDENCE WE DID NOT ESTABLISH (#541 round 15). `unreadable` used to be
+  // reported as `complete` with a sentence that hedged between "one side only" and "git could
+  // not read it", so a failed read reached the judge under an assurance that nothing had been
+  // left out. Both refusals land on the same escalation as an unwired arbiter.
+  if (hunks.kind === 'unreadable') return { kind: 'not-asked', why: 'evidence-unreadable' }
+  if (hunks.kind === 'over-budget') return { kind: 'not-asked', why: 'over-budget' }
   const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`)
   const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`)
   const evidence =
@@ -2172,7 +2281,7 @@ async function arbitrateConflict(
     options: [...CONFLICT_ARBITRATION_OPTIONS],
   }
   const prompt_bytes = Buffer.byteLength(arbiterPrompt(input), 'utf8')
-  if (prompt_bytes > ARBITER_PROMPT_BYTES_MAX) return { kind: 'over-budget' }
+  if (prompt_bytes > ARBITER_PROMPT_BYTES_MAX) return { kind: 'not-asked', why: 'over-budget' }
   try {
     const outcome: unknown = await arbitrate(input)
     // A MALFORMED OUTCOME IS AN UNAVAILABLE ARBITER, decided here where the catch
@@ -2435,14 +2544,15 @@ async function rebaseBranchOntoBase(
       // never ran, which is the same denominator mistake the unwired-arbiter clause above
       // exists to avoid. If these dominate, the tier is nearly inert and that is the next
       // decision to make — recorded so it can be made on numbers.
-      if (attempt?.kind === 'over-budget') {
-        log.info('merge_conflict_arbiter_oversize', {
+      if (attempt?.kind === 'not-asked') {
+        log.info('merge_conflict_arbiter_not_asked', {
           run: run.id,
           branch,
           base,
+          why: attempt.why,
           conflict_files: conflicted.length,
           budget_bytes: ARBITER_PROMPT_BYTES_MAX,
-          action: 'the conflict could not be shown completely; escalated to the owner without arbitrating',
+          action: 'the conflict could not be shown to the arbiter completely; escalated to the owner without arbitrating',
         })
       }
       const verdict: ArbitrationOutcome =
@@ -2456,10 +2566,13 @@ async function rebaseBranchOntoBase(
                     ? `this rebase has already spent its ${MAX_ARBITRATIONS_PER_REBASE} arbitration(s)`
                     : `no resolver round remains within the cap (${MAX_CONFLICT_ROUNDS})`,
             }
-          : attempt.kind === 'over-budget'
+          : attempt.kind === 'not-asked'
             ? {
                 kind: 'unavailable',
-                reason: `the arbiter's prompt would exceed its ${ARBITER_PROMPT_BYTES_MAX}-byte budget, so the conflict could not be shown completely`,
+                reason:
+                  attempt.why === 'over-budget'
+                    ? `the arbiter's prompt would exceed its ${ARBITER_PROMPT_BYTES_MAX}-byte budget, so the conflict could not be shown completely`
+                    : 'the conflict could not be read, so there was nothing complete to show the arbiter',
               }
             : attempt.outcome
       // THE SIZE DIMENSION OF THE KILL CRITERION (#541 rounds 10 and 13). This tier's

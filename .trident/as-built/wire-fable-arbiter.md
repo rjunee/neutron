@@ -673,6 +673,105 @@ M70 is the one that matters most: it proves the guarantee is about the *seam*, n
 particular cap that was removed. Any future mechanism inserted between the measurement and the
 model fails a test rather than shipping quietly.
 
+### ROUND 15 — a failed read was complete evidence, and the test defended it
+
+**The same sentence as round 14, one layer lower.** `conflictEvidence` mapped a `git diff
+:2: :3:` that FAILED and one that succeeded with empty output onto a single string —
+
+> `(no two-sided diff — the path exists on only one side, or git could not read it)`
+
+— and returned `{ kind: 'complete' }`. **That sentence is an OR of a definite fact and a
+missing one, and the `or` is the tell.** So a failed read invoked the arbiter, told it the
+evidence was complete, and let it grant a retry having seen neither side of an ordinary
+conflict. `SPEC.md` says *shown COMPLETE or not at all*; this was "not at all", reported as
+complete.
+
+**The rule was already written down**: false and unknown must not share a branch. `ok: false`,
+a thrown host error, and an index this code cannot parse are all **unknown**, and none of them
+may ride the branch that carries a definite answer.
+
+**AND MY TEST PINNED THE VIOLATION AS CORRECT.** `a diff git cannot produce degrades to a
+stated absence, never to silence` asserted the arbiter *was* invoked and merely received the
+hedged sentence. It was written to demonstrate the seam holds, which is the worst possible
+place for the seam to leak: from that point on the test **defends** the leak, and anyone fixing
+the code breaks a test whose name says the behaviour is intended. It now asserts **zero**
+arbiter calls and that the resolver's own question reaches the owner.
+
+**THE EXIT CODE CANNOT SEPARATE THE TWO STATES, and this had to be measured rather than
+reasoned about.** Against real git mid-rebase:
+
+| case | index stages | `diff :2: :3:` |
+|---|---|---|
+| ordinary two-sided conflict | 1, 2, 3 | exit **0** |
+| modify/delete (genuinely one-sided) | 1, 3 | exit **128**, `fatal: path '<p>' is in the index, but not at stage 2` |
+| a read that actually failed | — | non-zero |
+
+So a one-sided conflict and a broken read are **the same observable from the diff alone**. No
+amount of care at that call site could have told them apart, which is why the fix is not a
+better branch condition but a different source of evidence.
+
+**The separation comes from POSITIVE EVIDENCE: `git ls-files --unmerged -z`**, which names
+which stages exist and exits 0. Both stages present ⇒ two-sided, and the diff *must* succeed
+(if it does not, that is `unreadable`). Stage 2 or 3 absent ⇒ genuinely one-sided, a complete
+fact — and it can now say **which** side exists, which the sentence it replaces could not,
+because it did not know whether it was describing a fact or an error. A zero exit with empty
+output is also a definite answer ("both sides exist and are textually identical"), not a
+missing one.
+
+`ConflictEvidence` gained a third arm, `unreadable`, with a `why` of `index` / `not-in-index` /
+`diff` — three repo-authored words, never a path or a git message. The caller's refusal
+taxonomy became `not-asked` with `why: 'over-budget' | 'evidence-unreadable'`, carried on one
+event rather than collapsed, because *"too big to show"* and *"could not be read"* are
+different facts about this tier's reach: the first says the useful range is narrow, the second
+says something is broken.
+
+**WHY NO TEST COULD SEE THIS, and it is the reusable lesson.** Every stub host modelled the
+conflict LIST and the stage DIFF and nothing else. When production began reading the index,
+those stubs did not merely under-test it — **a stub that omits a query silently supplies
+whatever the default branch returns**, which here was "no unmerged stages", i.e. one-sided.
+Twelve stub hosts needed the index wired in, and the orchestrator's own conflict host too. A
+missing stub answer is not a gap in coverage; it is a *wrong answer* asserted confidently.
+
+**The seam property, which is the generalisation this round is really for.** Round 14 removed a
+per-line cap on the grounds that the guarantee is about the seam and not the mechanism, and
+pinned it with a mutation that inserted a *different* mechanism in the same place. This is the
+same move for a different seam. The rule is not "a failed diff must refuse", it is **nothing
+reaches the judge that the system could not establish** — asserted as an implication over
+sixteen failure shapes: *if the judge was asked, `conflictEvidence` said `complete`*. The
+implication runs one way deliberately (`complete` does not imply asked — the prompt budget can
+still decline), with explicit per-shape expectations and two non-vacuity anchors, because an
+implication alone is satisfied by never asking at all.
+
+**Nine mutations, four of which survived a first attempt — and every survivor was the same
+shape.**
+
+| # | mutation | result |
+|---|---|---|
+| M71 | a failed diff collapses onto the definite branch (the original defect) | **red**, 3 tests |
+| M72 | a successful-empty diff refuses instead of stating the fact | **red**, 20 tests |
+| M73 | a genuinely one-sided path refuses instead of stating the fact | **red**, 2 tests |
+| M74 | `unmergedStages` skips an unparseable record | survived → **red** |
+| M75 | a path absent from the index is treated as one-sided | **red**, 2 tests |
+| M76 | the stage-is-a-number guard removed | survived → **red** |
+| M77 | the field-count guard removed | survived → **red** |
+| M78 | the empty-path guard removed | **red** |
+| M79 | the stage-range guard removed | survived → **red** |
+
+M71, M72 and M73 killing **three different tests** is the evidence that the three states no
+longer share anything — the coordinator's own criterion, that if only one mutation bites the
+states are still joined.
+
+**All four survivors had one cause: a fixture where a downstream guard reached the same
+verdict for a different reason.** Garbage in the index *alone* still produced an empty map, so
+`not-in-index` refused anyway and a parser that swallowed the error looked correct. The fix in
+each case was a fixture where the malformed record sits **beside valid records for the path
+being asked about**, so skipping it yields `complete` and the mutation has nowhere to hide.
+M77 and M79 needed the same trick one clause over: with too *few* fields `meta[2]` is
+`undefined` and the NaN check refuses regardless, so the field-count clause was untested *by
+construction* — it took a record with too *many* fields, whose `meta[2]` is a valid `1`, to
+make only that clause load-bearing. **A guard that is only ever exercised through a stronger
+neighbouring guard is not tested, and mutation is the only thing that says so.**
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -913,7 +1012,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Seventy mutations reverted one at a time, each proved a test red. Eight survived a
+Seventy-nine mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
