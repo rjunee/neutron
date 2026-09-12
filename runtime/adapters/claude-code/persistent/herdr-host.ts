@@ -47,6 +47,7 @@
  * collapses ENTIRELY onto `wasKilledByUs` — see `pty-host.ts`.
  */
 
+import { readFileSync } from 'node:fs'
 import type { Key } from './keystrokes.ts'
 import type { PtyChild, PtyExitCause, PtyHost, PtySpawnOpts } from './pty-host.ts'
 import {
@@ -84,17 +85,48 @@ export const HERDR_PID_WAIT_MS = 5000
 export const HERDR_PID_KILL_GRACE_MS = 2_000
 
 /**
- * Is `pid` still running? A `signal 0` probe, mirroring `supervision.ts`: EPERM means
- * the process EXISTS and is not ours to signal (so: alive), ESRCH means it is gone.
- * Collapsing those two into "dead" would be this file's recurring defect once more —
- * an unknown answered as a definite one.
+ * The kernel's start time for `pid` (`/proc/<pid>/stat` field 22), or `undefined` when
+ * no such process exists.
+ *
+ * A PID IS AN IDENTIFIER, NOT A HANDLE. It is reused, so "is pid N alive?" is the wrong
+ * question — the right one is "is pid N still the process I started?". Between a pane
+ * dying without a `pane_exited` and the transport closing, the kernel can hand that
+ * number to something else with the same uid, and a liveness probe answers YES about a
+ * process we have never heard of. Signalling on that answer kills a stranger.
+ *
+ * This supersedes the `signal 0` probe that stood here. That probe's EPERM reading was
+ * right — "exists and is not ours to signal" is ALIVE — and the reason it is not enough
+ * is the same insight one turn further: a reused PID is also a process that exists and
+ * is not ours, in a sense a permission check cannot see. Start time answers both, so
+ * one question replaces two.
+ *
+ * Field 22 is read AFTER the last `)` because field 2 (`comm`) is the executable name
+ * and may itself contain spaces and parentheses; everything after that delimiter is
+ * space-separated, and field 3 lands at index 0. The value is kernel-maintained, so the
+ * subject cannot rewrite it to impersonate its predecessor — the same external-handle
+ * rule the codex spike landed on.
  */
-export function defaultPidAlive(pid: number): boolean {
+export function parseProcStatStartTime(stat: string): string | undefined {
+  // Everything up to the LAST `)` is `pid (comm)`, and `comm` is the executable name:
+  // it can contain spaces and parentheses, so splitting the whole line on spaces and
+  // taking index 21 reads a different field for any process whose name has one. The
+  // last `)` is the only reliable delimiter; after it, field 3 lands at index 0, so
+  // field 22 is index 19.
+  const close = stat.lastIndexOf(')')
+  if (close < 0) return undefined
+  const afterComm = stat.slice(close + 2).split(' ')
+  const startTime = afterComm[19]
+  return startTime === undefined || startTime === '' ? undefined : startTime
+}
+
+export function readPidStartTime(pid: number): string | undefined {
   try {
-    process.kill(pid, 0)
-    return true
-  } catch (e) {
-    return (e as NodeJS.ErrnoException | undefined)?.code === 'EPERM'
+    return parseProcStatStartTime(readFileSync(`/proc/${pid}/stat`, 'utf8'))
+  } catch {
+    // ENOENT: no such process. Anything else: we cannot answer, and an unanswerable
+    // question must not be reported as "gone" — the caller treats `undefined` as
+    // "no process with this identity", which is the safe reading for both.
+    return undefined
   }
 }
 
@@ -138,9 +170,10 @@ export interface HerdrHostDeps {
    *  testable without spawning real processes. Defaults to `process.kill`. */
   killPid?: (pid: number, signal: NodeJS.Signals) => void
 
-  /** True while `pid` is still running. Defaults to a `signal 0` probe, matching
-   *  `supervision.ts` — EPERM means ALIVE (someone else's), ESRCH means gone. */
-  isPidAlive?: (pid: number) => boolean
+  /** The kernel start time identifying the process at `pid`, or `undefined` when there
+   *  is no such process. Defaults to {@link readPidStartTime}. Injected so the
+   *  PID-reuse case can be constructed, which no real-process test could stage. */
+  readPidStartTime?: (pid: number) => string | undefined
 
   /** How long to wait for a SIGTERM to be honoured before escalating, and again
    *  after SIGKILL before giving up. */
@@ -177,6 +210,10 @@ export class HerdrHost implements PtyHost {
     // where nobody will ever look for it.
     let paneId: string | undefined
     let pid: number
+    // The process's IDENTITY, captured as close to the spawn as we can get it. The pid
+    // alone is a number the kernel will reuse; this is what makes it refer to one
+    // process for the life of this child. See `readPidStartTime`.
+    let pidStartedAt: string | undefined
     try {
       paneId = await this.applyLayout(client, argv, opts)
       // The pid. Load-bearing above here: `supervision.ts` liveness-probes it with
@@ -195,6 +232,17 @@ export class HerdrHost implements PtyHost {
         )
       }
       pid = found
+      pidStartedAt = (this.deps.readPidStartTime ?? readPidStartTime)(pid)
+      if (pidStartedAt === undefined) {
+        // We have a pid and no way to prove it stays the same process. Signalling it
+        // later would be a guess with a stranger's life on the other end, so the
+        // termination path refuses — said once, here, where the cause is visible.
+        process.stderr.write(
+          `[herdr-host] pane ${paneId}: could not read a start time for pid ${pid}, so its ` +
+            `identity cannot be verified later. A transport loss will refuse to signal it rather ` +
+            `than risk killing a process that merely inherited the number.\n`,
+        )
+      }
     } catch (e) {
       await this.abandonPane(client, paneId)
       throw e instanceof Error ? e : new Error(String(e))
@@ -283,7 +331,18 @@ export class HerdrHost implements PtyHost {
 
     fireAndForget(
       'herdr-host.poll',
-      this.pollLoop(client, paneId, opts, pollMs, sleep, () => exited, settleExit, outputGate, pid),
+      this.pollLoop(
+        client,
+        paneId,
+        opts,
+        pollMs,
+        sleep,
+        () => exited,
+        settleExit,
+        outputGate,
+        pid,
+        pidStartedAt,
+      ),
     )
 
     /** Issue a pane call, best-effort. No-op after exit (the interface's
@@ -536,6 +595,7 @@ export class HerdrHost implements PtyHost {
     settleExit: (cause: PtyExitCause) => void,
     outputGate: Promise<void>,
     pid: number,
+    pidStartedAt: string | undefined,
   ): Promise<void> {
     // BEFORE THE FIRST READ, not before the first delivery: polling at all would set
     // `lastDataAt` and mutate the ring behind a consumer that cannot scan yet.
@@ -579,7 +639,7 @@ export class HerdrHost implements PtyHost {
         // because this branch already has a row for a kill reported as successful
         // when it failed. `process.kill` is exactly the right tool here precisely
         // BECAUSE it does not need the herdr transport that just died.
-        const ended = await this.terminateLostChild(pid, sleep)
+        const ended = await this.terminateLostChild(pid, pidStartedAt, sleep)
         if (!ended) {
           // COULD NOT CONFIRM DEATH, so we do not get to claim one. Settling here
           // would authorise a replacement against a process we know nothing about;
@@ -712,6 +772,7 @@ export class HerdrHost implements PtyHost {
    */
   private async terminateLostChild(
     pid: number,
+    startedAt: string | undefined,
     sleep: (ms: number) => Promise<void>,
   ): Promise<boolean> {
     // `pid` is always real: `spawn` REFUSES to return a child whose pane never
@@ -724,22 +785,36 @@ export class HerdrHost implements PtyHost {
       ((p: number, sig: NodeJS.Signals): void => {
         process.kill(p, sig)
       })
-    const alive = this.deps.isPidAlive ?? defaultPidAlive
+    const startTimeOf = this.deps.readPidStartTime ?? readPidStartTime
     const grace = this.deps.pidKillGraceMs ?? HERDR_PID_KILL_GRACE_MS
+
+    // NO IDENTITY, NO SIGNAL. If we never captured a start time we cannot tell our
+    // process from whatever now holds that number, and the only safe move is to
+    // signal nothing and claim nothing. Unconfirmable, which the caller reports
+    // loudly and does not settle.
+    if (startedAt === undefined) return false
+
+    /** Our process, still running — as opposed to "some process, still running". */
+    const stillOurs = (): boolean => startTimeOf(pid) === startedAt
+
     for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
-      if (!alive(pid)) return true
+      // GONE OR REPLACED both mean OUR process is over, and both are CONFIRMED. The
+      // replaced case is the one that matters: a different start time at the same pid
+      // is proof our child exited, and signalling it would kill a stranger that
+      // merely inherited the number.
+      if (!stillOurs()) return true
       try {
         kill(pid, signal)
       } catch {
-        // Already gone, or not ours to signal — the probe below decides which.
+        // Already gone, or not ours to signal — the identity check decides which.
       }
       const deadline = Date.now() + grace
       while (Date.now() < deadline) {
-        if (!alive(pid)) return true
+        if (!stillOurs()) return true
         await sleep(Math.min(50, grace))
       }
     }
-    return !alive(pid)
+    return !stillOurs()
   }
 
   /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */

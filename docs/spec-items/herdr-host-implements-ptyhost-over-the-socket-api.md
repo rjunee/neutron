@@ -199,14 +199,6 @@ not-new. That is accepted and recorded here rather than hidden.
       the pin AND that the fallback would in fact throw — the pin alone reads as
       arbitrary without it.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
-- [ ] **The transport dying is terminal.** A closed socket with no `pane_exited`
-      must settle the child — `exited` resolves, `hasExited()` flips — so the pool
-      cannot keep handing out a REPL nobody can observe. An implementation that
-      handles the three CHILD routes gets every other exit case right and this one
-      wrong, so the child routes are not a criterion for it. The cause must be
-      reported as `'transport-lost'`, distinct from the other three, or a constant
-      would satisfy it.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **Submitting a slash command is mandatory, and its absence is a refusal.** A
       `PtyChild` with no `submitLine` must make the reset report `{status:'failed'}`,
       never `{status:'reset'}` — and must write nothing rather than leave the command
@@ -278,6 +270,28 @@ not-new. That is accepted and recorded here rather than hidden.
       protected by two guards (`beginOutput` clears the timer; the timer checks
       `released`), so only a mutation disabling BOTH shows it discriminates.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **A PID is verified by IDENTITY before it is signalled.** The kernel reuses PIDs,
+      so "is pid N alive?" is the wrong question and a liveness probe answers YES about a
+      stranger that inherited the number. Capture `/proc/<pid>/stat` field 22 at spawn
+      and require it to match before every signal; a DIFFERENT start time is positive
+      proof our child exited, so it confirms death and signals nothing. No captured
+      identity means no signal and no settle. The stat parser must be tested
+      independently against a `comm` containing spaces and parentheses — `comm` is the
+      executable name and is unescaped, so absolute field indexing reads the wrong field
+      and passes on any host whose process name happens to be one word.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **The inbound buffer holds no per-fragment state at all.** Three bounded
+      quantities in a row (copying, retention, allocation count) is the signal to change
+      the SHAPE rather than add a third measurement: bytes are copied into a single
+      buffer and the delivered chunk dropped, so a fragment cannot be retained
+      individually and there is nothing to count. Growth must be amortised (doubling)
+      and consumption must use a cursor, not a re-slice. Retention must track CURRENT
+      NEED — right-sized when the remainder becomes a small fraction of capacity,
+      released when fully drained — because bounded is not the same as small. And
+      right-sizing must be proven distinct from truncation by a case with a LARGE
+      outstanding partial frame; a one-byte leftover fits in any capacity and cannot
+      tell them apart.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Transport loss never settles a child that may still be running.** A closed
       socket is not evidence the process exited (`pty-host.ts` says so), yet settlement
       runs the ordinary death handling in `spawn.ts` — sink unregistered, pool entry

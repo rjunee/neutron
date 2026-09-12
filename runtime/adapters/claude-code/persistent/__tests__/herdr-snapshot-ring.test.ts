@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { HerdrHost, defaultPidAlive } from '../herdr-host.ts'
+import { HerdrHost, parseProcStatStartTime, readPidStartTime } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
@@ -227,40 +227,15 @@ describe('a failed question is not a negative answer', () => {
 })
 
 describe('herdr bridge — the transport dying is terminal, and is not a child exit', () => {
-  it('a socket close settles the child, instead of leaving it forever alive', async () => {
-    // THE FOURTH ROUTE, and the only one that is not a child event. `pane_exited`,
-    // `pane.close` and a vanished pane all say something about the process; a dead
-    // transport says nothing about it at all — what died is the channel we would
-    // learn through. An earlier version simply returned from the poll loop here, so
-    // `exited` never resolved, `hasExited()` stayed false, and the pool went on
-    // handing out a REPL it could no longer observe or drive.
-    const server = new FakeHerdrServer()
-    server.screen = 'alive'
-    const { child, exits } = await spawnWithFake(server)
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    expect(child.hasExited()).toBe(false)
-
-    // The transport dies. NO `pane_exited` is emitted — the child is, as far as
-    // anyone knows, still running.
-    server.close()
-
-    expect(await child.exited).toBeNull()
-    expect(child.hasExited()).toBe(true)
-    expect(exits).toEqual([null])
-  })
-
-  it('names transport loss as the CAUSE, so it is never read as an observed exit', async () => {
-    const server = new FakeHerdrServer()
-    server.screen = 'alive'
-    const { child } = await spawnWithFake(server)
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
-    await child.exited
-    // Terminal, but NOT evidence the process ended. A caller that needs to tell the
-    // routes apart can; one that cannot is not silently told "the child exited".
-    expect(child.exitCause?.()).toBe('transport-lost')
-    expect(child.wasKilledByUs?.()).toBe(false)
-  })
+  // DELETED, NOT RECONCILED: two tests that asserted a socket close settles the child
+  // immediately. They passed for a reason the second one wrote down in its own
+  // comment — the fake's default pid does not exist, so `process.kill(pid, 0)` throws
+  // ESRCH and "already dead" was trivially true — which means they observed settlement
+  // WITHOUT ever exercising termination. Once transport loss requires confirmed death,
+  // their premise is also simply wrong. A behaviour cannot have two authoritative
+  // descriptions, and a test whose fixture decides the outcome is worse than no test:
+  // it certifies the opposite of the requirement. What replaced them is below, driven
+  // by INJECTED process primitives so the arrangement cannot answer the question.
 
   it('a lost transport KILLS the child before settling, and the kill is confirmed', async () => {
     // THE DEFECT THIS REPLACES. `settleExit('transport-lost')` ran alone, and
@@ -277,7 +252,9 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     const server = new FakeHerdrServer({ paneId: 'w9:pLost' })
     server.shellPid = 424242
     const signals: Array<{ pid: number; signal: string }> = []
-    let processAlive = true
+    // IDENTITY, not a boolean. A stable `processAlive` flag cannot express the case
+    // that matters — the pid outliving the process it named.
+    let startTime: string | undefined = 'start-A'
     const screens: string[] = []
     const host = new HerdrHost({
       connect: async () => server,
@@ -287,9 +264,9 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
       pidKillGraceMs: 60,
       killPid: (pid, signal) => {
         signals.push({ pid, signal })
-        if (signal === 'SIGTERM') processAlive = false // the child honours it
+        if (signal === 'SIGTERM') startTime = undefined // the child honours it and exits
       },
-      isPidAlive: () => processAlive,
+      readPidStartTime: () => startTime,
     })
     const child = await host.spawn(['claude'], {
       cwd: '/tmp',
@@ -310,17 +287,104 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     expect(child.wasKilledByUs?.()).toBe(false)
   })
 
-  it('the default liveness probe distinguishes GONE from NOT-OURS', async () => {
-    // The injected probe above lets the tests choose an answer, which means the REAL
-    // probe was never exercised — so its most important case was untested: EPERM means
-    // the process EXISTS and is merely not ours to signal. Reading that as "dead" is
-    // this branch's recurring defect in its most classical form, and it would make a
-    // live child look terminated exactly when we have the least authority over it.
-    expect(defaultPidAlive(process.pid)).toBe(true) // ours, running
-    expect(defaultPidAlive(2_147_480_000)).toBe(false) // ESRCH — really gone
-    // pid 1 exists and is not ours (this process is unprivileged), so the kernel
-    // answers EPERM. ALIVE is the only correct reading.
-    expect(defaultPidAlive(1)).toBe(true)
+  it('a REUSED pid is not signalled — identity decides, not liveness', async () => {
+    // A PID IS AN IDENTIFIER, NOT A HANDLE. Between a pane dying without a
+    // `pane_exited` and the transport closing, the kernel can hand that number to
+    // another same-uid process — and a liveness probe answers YES about a process we
+    // have never heard of. Signalling on that answer kills a stranger.
+    //
+    // This is the EPERM insight one turn further: "exists and is not ours to signal"
+    // was the right reading, and a reused pid is ALSO a process that exists and is not
+    // ours, in a sense no permission check can see.
+    const server = new FakeHerdrServer({ paneId: 'w9:pReused' })
+    server.shellPid = 606060
+    const signals: string[] = []
+    let calls = 0
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 30,
+      killPid: (_pid, signal) => void signals.push(signal),
+      // Our child started at A; by the time the transport dies the number belongs to a
+      // DIFFERENT, very much alive process.
+      readPidStartTime: () => (calls++ === 0 ? 'start-A' : 'start-B'),
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await child.exited
+
+    // NOTHING was signalled — the stranger is untouched.
+    expect(signals).toEqual([])
+    // And our child is CONFIRMED over: a different start time at the same pid is proof
+    // the process we started has exited, so settling is correct here.
+    expect(child.exitCause?.()).toBe('transport-lost')
+    expect(child.hasExited()).toBe(true)
+  })
+
+  it('the identity probe answers gone, ours, and not-ours-but-real', async () => {
+    // The injected probe lets tests choose an answer, so the REAL one needs its own
+    // case. Field 22 is read AFTER the last `)` because `comm` may contain spaces and
+    // parentheses — parsing by absolute field index silently returns the wrong number
+    // for a process whose name contains one.
+    expect(readPidStartTime(2_147_480_000)).toBeUndefined() // no such process
+    const mine = readPidStartTime(process.pid)
+    expect(mine).toBeDefined()
+    expect(mine).toMatch(/^\d+$/)
+    // pid 1 is not ours and is readable anyway: identity needs no permission to
+    // signal, which is exactly why it sees what a `signal 0` probe cannot.
+    expect(readPidStartTime(1)).toMatch(/^\d+$/)
+    // STABLE across calls — an identity that drifted would make every comparison
+    // built on it meaningless.
+    expect(readPidStartTime(process.pid)).toBe(mine)
+  })
+
+  it('the stat parser survives a comm containing spaces and parentheses', () => {
+    // `comm` is the EXECUTABLE NAME and the kernel does not escape it. Splitting the
+    // whole line on spaces and indexing field 22 works on this host only because
+    // `bun` has no space in it — which is why the real probe's test could not see a
+    // parser that indexes absolutely. The last `)` is the only reliable delimiter.
+    // 19 fields between `)` and the start time: field 3 (state) lands at index 0, so
+    // field 22 lands at index 19. Counted against a real `/proc/self/stat` on this host.
+    const fields = (start: string, comm: string): string =>
+      `4242 (${comm}) S 1 2 3 4 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 ${start} rest here`
+    expect(parseProcStatStartTime(fields('221771148', 'bun'))).toBe('221771148')
+    // A space in the name shifts every absolute index by one.
+    expect(parseProcStatStartTime(fields('900', 'my proc'))).toBe('900')
+    // A parenthesis in the name is why it must be the LAST one, not the first.
+    expect(parseProcStatStartTime(fields('901', 'weird)name'))).toBe('901')
+    expect(parseProcStatStartTime(fields('902', 'two ) parens )'))).toBe('902')
+    // Malformed input yields no identity rather than a wrong one.
+    expect(parseProcStatStartTime('nonsense with no paren')).toBeUndefined()
+    expect(parseProcStatStartTime('4242 (bun) S 1')).toBeUndefined()
+  })
+
+  it('NO captured identity means NO signal and NO settle', async () => {
+    // Without a start time we cannot tell our process from whatever now holds the
+    // number: signalling would be a guess with a stranger on the other end, and
+    // settling would authorise a replacement. So neither.
+    const server = new FakeHerdrServer({ paneId: 'w9:pNoId' })
+    server.shellPid = 707070
+    const signals: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 30,
+      killPid: (_pid, signal) => void signals.push(signal),
+      readPidStartTime: () => undefined, // /proc unavailable
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await Bun.sleep(60)
+    expect(signals).toEqual([])
+    expect(child.hasExited()).toBe(false)
   })
 
   it('an UNCONFIRMABLE kill does NOT settle — no replacement may be authorised', async () => {
@@ -346,7 +410,7 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
         workspaceId: 'w9',
         pidKillGraceMs: 30,
         killPid: (_pid, signal) => void signals.push(signal),
-        isPidAlive: () => true, // survives everything
+        readPidStartTime: () => 'start-A', // same process, survives everything
       })
       child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
       child.beginOutput?.()

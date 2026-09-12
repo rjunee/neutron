@@ -1203,6 +1203,90 @@ test captures stderr and asserts **no** fail-open warning across the whole run, 
 unit test proves the warning fires when the call is missing and the live test proves the
 real caller is on the right side of it.
 
+### A PID is an identifier, not a handle
+
+Review r16, and it is the direct consequence of the previous round's fix — which is the
+honest shape of that decision, not a reason to undo it. Deciding to *signal* a process
+created an obligation the previous design never had: to be sure which process it is.
+
+The host kept only the number, probed it with `signal 0`, and signalled it. Sequence:
+the pane process exits without delivering `pane_exited`; the kernel reuses its PID for
+another same-uid process; the transport closes; the probe reports the replacement alive;
+`terminateLostChild` **kills a stranger**.
+
+The EPERM reasoning was right and is exactly why this bites. "Exists and is not ours to
+signal" was the correct reading of EPERM — and a reused PID is *also* a process that
+exists and is not ours, in a sense no permission check can see. So the probe became an
+**identity** question rather than a liveness one: `/proc/<pid>/stat` field 22, the
+kernel-maintained start time, captured at spawn and compared before every signal. One
+question replaces two, and a different start time at the same PID is *positive proof*
+our child exited — confirmed death, with nothing signalled.
+
+`defaultPidAlive` is gone rather than kept beside it. An unused function with a test that
+documents superseded reasoning is decoration, and the EPERM insight survives where it
+belongs: in the comment explaining why liveness was not enough.
+
+Two survivors, both worth the detour:
+
+- **M106** — parsing by absolute field index — survived because `comm` on this host is
+  `bun`, with no space in it. `comm` is the executable NAME and the kernel does not
+  escape it, so an absolute index reads a different field for any process whose name
+  contains a space or a parenthesis. The parser is now extracted and tested against
+  exactly those shapes. *The fixture's own tidiness was hiding the hazard.*
+- **M107** — retaining the delivered chunk in an extra field — survived, and is invalid
+  by construction: it adds state the class does not have. The guarantee is that no such
+  state exists, and that is enforced by the shape rather than by a check, which is the
+  entire point of the section below.
+
+### Three rounds on one buffer, so the property was made structural
+
+Copying, then retention, then allocation count. Each fix bounded the quantity the
+previous one had missed — which is a pattern that ends only when the quantity cannot
+exist. Asked directly whether there was a shape in which a fragment cannot be retained
+individually at all, the answer was yes, and it was the right move:
+
+| round | what was bounded | what was missed |
+|---|---|---|
+| copying | — | cost grew with the NUMBER of deliveries (~35 TB at the cap) |
+| retention | copying | a `subarray` tail pinned its whole parent |
+| allocation | retention | one `Buffer` object per fragment — ~8 million at the cap |
+
+**One buffer.** Incoming bytes are copied into it and the delivered chunk is dropped
+immediately, so there is no fragment to retain, nothing to count, and no per-fragment
+overhead to bound. Growth is amortised doubling (so N fragments still cost O(bytes)), a
+cursor replaces re-slicing, and consumed prefixes are reclaimed in place. **The guard is
+the data structure, not a check** — which is why M107 could only survive by inventing a
+field that does not exist.
+
+Two things the rewrite then had to earn back, both caught by my own mutations rather than
+by reasoning:
+
+- **Bounded is not the same as small.** A high-water buffer kept 2 MB alive after one
+  large frame. It now right-sizes when the remainder becomes a small fraction of
+  capacity, and releases outright when fully drained — retention tracks *current need*.
+- **Right-sizing is not truncation.** M108b (shrink always to the initial capacity)
+  survived until a case existed with a LARGE outstanding partial frame; the earlier
+  leftovers were one byte and fit in any capacity. A 300 KB remainder after a 2 MB frame
+  is what separates right-sizing from silently dropping data.
+
+And one ordering mistake of my own: I moved the unterminated bound ahead of the frame
+loop, which made a complete oversized frame report "no newline" about bytes that contain
+one. The per-frame check belongs inside the loop ahead of the decode; the leftover check
+belongs after it. Five tests caught it immediately, which is the system working.
+
+### One authoritative behaviour, not two reconciled ones
+
+The transport-loss criteria had come to contradict each other — every socket close
+settles, and settlement requires confirmed death. Both cannot hold. The obsolete
+criterion and its two tests are **deleted rather than reworded**, because those tests
+passed for a reason the second one had written down in its own comment: the fake's
+default PID does not exist, so `signal 0` throws ESRCH and "already dead" was trivially
+true. They observed settlement without ever exercising termination.
+
+A test whose fixture decides the outcome is worse than no test — it certifies the
+opposite of the requirement — and one whose comment *names* the false-positive mechanism
+makes keeping it the more expensive choice.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1326,6 +1410,15 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M101 | a missing pid read as confirmed death | SURVIVED — branch unreachable; deleted, type tightened |
 | M102 | EPERM counted as dead | SURVIVED alone → probe exported and tested → RED 1 |
 | M102b | PAIR: every failed probe counted as ALIVE (ESRCH read as running) | RED 3 |
+| M103 | signal without checking identity (the PID-reuse defect) | RED 1 |
+| M103b | PAIR: never signal — treat every transport loss as already dead | RED 2 |
+| M104 | no captured identity treated as confirmed death | RED 1 |
+| M105 | identity compares existence only, ignoring the start time | RED 1 |
+| M106 | start time parsed by absolute field index | SURVIVED (comm had no space) → parser extracted and tested → RED 1 |
+| M107 | retain the delivered chunk in an extra field | SURVIVED — invalid: adds state the shape forbids |
+| M108 | never shrink — keep the buffer at its high-water mark | RED 1 |
+| M108b | PAIR: shrink always to the initial capacity (truncation) | SURVIVED until a large remainder existed → RED 1 |
+| M109 | linear growth instead of doubling | RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

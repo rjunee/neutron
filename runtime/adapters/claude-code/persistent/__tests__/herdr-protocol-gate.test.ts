@@ -734,24 +734,69 @@ describe('herdr client framing', () => {
     expect(reassembly.isClosed()).toBe(false)
   })
 
-  it('the leftover tail is COPIED, not a view that pins the whole delivery', async () => {
-    // `subarray` returns a VIEW, so a 1-byte remainder of a 2 MB delivery keeps the
-    // entire 2 MB alive while `bufferedBytes()` truthfully reports 1. Watching the
-    // logical length would say the buffer is empty and the memory would still be held
-    // — the same shape as the defect above, where the byte cap looked like it bounded
-    // the cost and bounded only half of it. So retention gets its own observable.
+  it('retention tracks CURRENT NEED, not the size of the largest delivery', async () => {
+    // THIRD QUANTITY, and the reason the shape changed rather than gaining a third
+    // guard. `subarray` views pinned their parent; then a queue of fragments bounded
+    // payload bytes while holding one Buffer object per fragment. Both were fixed by
+    // measuring something new. A single buffer removes the quantity instead: there is
+    // one allocation, so there is no fragment to retain and nothing to count.
+    //
+    // What remains assertable is that the one allocation does not stay at its
+    // high-water mark. A 2 MB frame followed by a 1-byte remainder must not leave 2 MB
+    // pinned for the life of the connection — bounded is not the same as small.
     const client = new HerdrClient(60_000, 8 << 20)
     client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
     const ok = client.call('pane.get', {})
-    // One delivery: a ~2 MB VALID frame, then a single trailing byte.
     const big = `{"id":"n1","result":{"x":"${'z'.repeat(2_000_000)}"}}\n`
     client.onBytes(Buffer.from(`${big}a`))
     expect(Object.keys(await ok)).toEqual(['x']) // the frame really was processed
 
-    expect(client.bufferedBytes()).toBe(1) // logical: one byte outstanding
-    // ...and the allocation matches it. A view would report ~2,000,030 here, so the
-    // two numbers agreeing is the whole assertion.
-    expect(client.retainedBytes()).toBe(1)
+    expect(client.bufferedBytes()).toBe(1) // one byte outstanding, logically
+    // The allocation is proportional to what is still needed, not to the 2 MB that
+    // passed through. A view would report ~2,000,030 here; a high-water buffer would
+    // report ≥ 2,000,000.
+    expect(client.retainedBytes()).toBeLessThan(64 * 1024)
+
+    // ...and once fully drained it is released outright.
+    client.onBytes(Buffer.from('\n'))
+    expect(client.bufferedBytes()).toBe(0)
+    expect(client.retainedBytes()).toBe(0)
+  })
+
+  it('the buffer GROWS when it must — retention shrinking is not the same as dropping data', async () => {
+    // Without this, "retained is small" is satisfied by a buffer that never keeps
+    // anything, which would lose every partial frame.
+    const client = new HerdrClient(60_000, 8 << 20)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const half = 'q'.repeat(200_000)
+    client.onBytes(Buffer.from(half))
+    expect(client.bufferedBytes()).toBe(200_000)
+    // It is HOLDING those bytes: capacity must be at least what it is storing.
+    expect(client.retainedBytes()).toBeGreaterThanOrEqual(200_000)
+    expect(client.isClosed()).toBe(false)
+  })
+
+  it('shrinking never discards capacity a partial frame still needs', async () => {
+    // The shrink must be RIGHT-SIZING, not truncation. This is the case that separates
+    // them: a 2 MB frame is consumed (so the buffer is large and mostly idle) while a
+    // sizeable partial frame is still outstanding. Shrinking to a fixed small capacity
+    // here would silently drop the remainder — and the earlier tests cannot see it,
+    // because their leftovers are one byte and fit in any capacity.
+    const client = new HerdrClient(60_000, 8 << 20)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const first = client.call('pane.get', {})
+    const big = `{"id":"n1","result":{"x":"${'z'.repeat(2_000_000)}"}}\n`
+    const partial = `{"id":"n2","result":{"y":"${'w'.repeat(300_000)}`
+    client.onBytes(Buffer.from(big + partial))
+    expect(Object.keys(await first)).toEqual(['x'])
+
+    // The remainder is intact — every byte of it.
+    expect(client.bufferedBytes()).toBe(Buffer.byteLength(partial, 'utf8'))
+    const second = client.call('pane.read', {})
+    client.onBytes(Buffer.from(`"}}\n`))
+    const got = (await second) as { y: string }
+    expect(got.y.length).toBe(300_000) // reassembled whole, not truncated
+    expect(client.isClosed()).toBe(false)
   })
 
   it('a fragmented UNTERMINATED frame still trips the cap, at the same boundary', async () => {
