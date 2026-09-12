@@ -22,6 +22,8 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
@@ -103,6 +105,56 @@ describe('the matcher finds every shape #546 actually shipped in', () => {
     }
   })
 
+  /**
+   * THE REVIEW-GATE FINDING ON THIS FILE'S OWN FIRST LANDING (P1).
+   *
+   * The matcher required the dots to follow the interpolation IMMEDIATELY, so
+   * `git diff "${BASE_BRANCH}"..HEAD` — which the shell evaluates as exactly the
+   * forbidden `main..HEAD` — returned []. That is the SAME failure as the
+   * `shSingleQuote(...)` one a few tests up: a spelling I had not enumerated. These
+   * tests pin the three spellings that were named, and the block below pins the
+   * complement, so the fix cannot be "make the matcher permissive".
+   */
+  test('A CLOSING QUOTE between the operand and its dots does not hide it', () => {
+    for (const src of [
+      'git diff "${BASE_BRANCH}"..HEAD > "$f"',
+      "git diff '${BASE_BRANCH}'..HEAD",
+      'const r = `git diff ${baseBranch}`..${head}`',
+    ]) {
+      expect({ src, hits: findBareBaseRanges(src).map((h) => h.line) }).toEqual({ src, hits: [1] })
+    }
+  })
+
+  test('a CONCATENATION with no interpolation at all is caught', () => {
+    // `'git diff ' + base + '..HEAD'` reaches git as the identical range and contains
+    // no `${…}` anywhere, so every interpolation-shaped rule was blind to it.
+    const src = ["const base = await resolveBase(run)", "const cmd = 'git diff ' + base + '..HEAD'"].join('\n')
+    expect(findBareBaseRanges(src).map((h) => ({ line: h.line, name: h.name }))).toEqual([
+      { line: 2, name: 'base' },
+    ])
+    expect(findBareBaseRanges("run_host(['git','diff', baseBranch + '..' + head])").map((h) => h.line)).toEqual([1])
+  })
+
+  test('a range SPLIT OVER TWO LINES is caught, and reported at its first line', () => {
+    // Which is where a formatter puts it as soon as the line gets long, so this is
+    // not an exotic shape — it is the shape the next long range will have.
+    const src = ['const r = `git diff ${baseBranch}` +', '  `..${head}`'].join('\n')
+    expect(findBareBaseRanges(src).map((h) => ({ line: h.line, name: h.name }))).toEqual([
+      { line: 1, name: 'baseBranch' },
+    ])
+  })
+
+  test('taint follows ALIASES to a fixpoint, not just one hop', () => {
+    const src = [
+      'const base = await resolveBase(run)',
+      'const b = base',
+      'const c = b',
+      'const cmd = `git diff ${c}..${head}`',
+    ].join('\n')
+    expect(findBareBaseRanges(src).map((h) => h.line)).toEqual([4])
+    expect(taintedNames(src)).toEqual(new Set(['base', 'b', 'c']))
+  })
+
   test('three dots are caught as well as two — the merge-base form has the same defect', () => {
     // `git diff <stale-main>...<branch>` resolves the merge-base, and a stale local
     // `main` IS an ancestor of the branch, so the merge-base is the stale tip and the
@@ -135,6 +187,28 @@ describe('the matcher stays silent on every near-miss', () => {
       'const behind = `rev-list --count refs/heads/${base_branch}..${remoteRef}`',
       'const cmd = `git diff refs/remotes/origin/${baseBranch}..${head}`',
       'const cmd = `git diff origin/${baseBranch}..${head}`',
+    ]) {
+      expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
+    }
+  })
+
+  test('THE COMPLEMENT of the quote/concat/line-break widening: a RESOLVED base in each of those exact positions is silent', () => {
+    // Without this, the fix for the review-gate finding could have been "loosen the
+    // regex until it matches", which would trade a blind spot for a muted gate.
+    for (const src of [
+      'git diff "${BASE_DIFF_REF}"..HEAD',
+      'git diff "origin/${baseBranch}"..HEAD',
+      "const cmd = 'git diff ' + baseRef + '..HEAD'",
+      "const cmd = 'git diff ' + base_sha + '..HEAD'",
+      'const r = `git diff ${diffBase}` +\n  `..${head}`',
+      // A non-base operand on the left of a concat — `head..HEAD` is a different
+      // question and none of this gate's business.
+      "const cmd = 'git log ' + head + '..HEAD'",
+      // An alias of a RESOLVED value is not tainted, so the fixpoint above cannot
+      // spread taint to everything a file assigns.
+      'const b = diffBase\nconst r = `git diff ${b}..${head}`',
+      // Ordinary prose that happens to name the variable and use an ellipsis.
+      '// the base branch ${baseBranch} … and more prose',
     ]) {
       expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
     }
@@ -198,6 +272,42 @@ describe('the gate as CI runs it', () => {
       expect(res.stderr).toContain('[baseBranch]')
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('MUTATION: reverting the quote-boundary handling reddens the suite', async () => {
+    // The gate's own history is that a matcher which cannot fail on the bug reports
+    // success exactly as a fixed tree does — twice. So the guard on the fix is the fix
+    // being REMOVED: rewrite RANGE_TAIL back to a bare `\.{2,3}` in a copy of the gate
+    // and the quoted-boundary case must stop being found.
+    const fs = require('node:fs') as typeof import('node:fs')
+    const src = fs.readFileSync(GATE, 'utf8')
+    const TAIL = 'const RANGE_TAIL = '
+    expect(src).toContain(TAIL)
+    const reverted = src.replace(
+      /const RANGE_TAIL = String\.raw`[^`]*`/,
+      'const RANGE_TAIL = String.raw`\\.{2,3}`',
+    )
+    expect(reverted).not.toBe(src)
+
+    // Written OUTSIDE the repository, for two reasons: `scripts/` is a SCAN_ROOT and
+    // this copy carries the gate's own controls, so a copy left behind by a crashed
+    // test would redden CI for a file nobody shipped; and nothing here can then be
+    // mistaken for a second gate.
+    const copy = join(mkdtempSync(join(tmpdir(), 'diff-base-mutation-')), 'mutated.mjs')
+    fs.writeFileSync(copy, reverted)
+    try {
+      // AWAITED inside the try, so the import completes before the file is removed.
+      const mutated = (await import(copy)) as { findBareBaseRanges: typeof findBareBaseRanges }
+      // BLIND, as the shipped matcher was when the review gate found it…
+      expect(mutated.findBareBaseRanges('git diff "${BASE_BRANCH}"..HEAD')).toEqual([])
+      // …while the unquoted form it never lost still lands, so the mutation is narrow
+      // and this is not merely a broken import returning nothing for everything.
+      expect(mutated.findBareBaseRanges('git diff ${BASE_BRANCH}..HEAD').map((h) => h.line)).toEqual([1])
+      // And the SHIPPED matcher does see it.
+      expect(findBareBaseRanges('git diff "${BASE_BRANCH}"..HEAD').map((h) => h.line)).toEqual([1])
+    } finally {
+      fs.rmSync(copy, { force: true })
     }
   })
 

@@ -8,4 +8,6 @@ export const NEGATIVE_CONTROL: string
 
 export function taintedNames(source: string): Set<string>
 
+export function logicalLines(lines: string[]): { text: string; line: number }[]
+
 export function findBareBaseRanges(source: string): { line: number; name: string; text: string }[]

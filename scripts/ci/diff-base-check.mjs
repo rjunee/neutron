@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
-// DIFF-BASE gate — a base BRANCH NAME may never be a rev-range operand (#546).
+// DIFF-BASE gate — a REGRESSION ALARM for #546's class, not a proof of its absence.
 //
-// ── THE BUG THIS MAKES PERMANENT ──────────────────────────────────────
+// The INVARIANT is "a base BRANCH NAME may never be a rev-range operand". This file
+// does not establish that; it makes a relapse loud. What establishes it is structural
+// and is described two sections down — read that before trusting a green run.
+//
+// ── THE BUG THIS GUARDS AGAINST ───────────────────────────────────────
 // `git diff main..<head>` in a shared build checkout diffs against whatever
 // `refs/heads/main` happens to hold, and that ref is only as fresh as the last
 // time something on this box pulled it. Every commit merged into the base since
@@ -18,14 +22,64 @@
 //     diff itself.
 //   * #546 — reviewers read 149 files where the branch changed 30.
 //
-// ── WHY A GATE AND NOT THREE CORRECT CALL SITES ───────────────────────
-// Because that is exactly what was tried. When #546 was opened, `probeCiBase`
+// ── WHAT ACTUALLY GUARANTEES THE INVARIANT — AND IT IS NOT THIS FILE ──
+// The invariant is "no code path composes a rev-range from a base BRANCH NAME",
+// and what enforces it is STRUCTURAL, not textual:
+//
+//   * ONE BINDING PER BOUNDARY. `diffBase` in `trident/inner-workflow.mjs` and the
+//     exported `diffBaseRef()` in `trident/merge.ts` are the only producers of a
+//     range base. There is no second spelling to drift from.
+//   * AN ARGV BOUNDARY THAT CARRIES ONLY RESOLVED REFS. `trident/codex-build.sh`
+//     and `trident/codex-review.sh` receive an already-resolved ref as argv, so
+//     NO VARIABLE HOLDING A BASE BRANCH NAME EXISTS IN THEIR SCOPE. In those two
+//     files a bare-base range is not "detected" — it is unconstructable, which is
+//     a different and much stronger thing.
+//
+// THIS GATE IS DEFENCE IN DEPTH. It exists to make a regression LOUD, not to prove
+// absence. Read the scope note below before relying on it for the latter.
+//
+// ── WHY A GATE AT ALL, AND NOT JUST CORRECT CALL SITES ────────────────
+// Because call sites is exactly what was tried. When #546 was opened, `probeCiBase`
 // and the plan-probe branch log in `trident/inner-workflow.mjs` were ALREADY
 // resolving the base correctly, thirty and three thousand lines away from two
 // sites in the same file that still composed the bare name — the fix had landed
 // as a call site and not as a rule, and the next author had no way to know the
 // rule existed. `docs/agent-legible-architecture.md` §1 names a boundary that
 // depends on the next author remembering as the failure mode to design out.
+//
+// ── SCOPE: WHAT THIS GATE CANNOT CATCH ────────────────────────────────
+// A TEXTUAL MATCHER OVER SOURCE CANNOT ENFORCE "EVERY REV-RANGE". It can only
+// enforce "every rev-range whose spelling I enumerated". This file has been wrong
+// about that twice, in the same shape both times, and both times it reported
+// success while the defect was present:
+//
+//   1. the first draft required `${baseBranch}..` and could not see
+//      `${shSingleQuote(baseBranch)}..` — the literal #546 line. Found by mutating
+//      the fix and watching the gate stay green.
+//   2. the second draft required the dots to follow the brace IMMEDIATELY and could
+//      not see `"${BASE_BRANCH}"..HEAD`, which the shell evaluates as exactly
+//      `main..HEAD`. Found by the review gate on the PR that added this file.
+//
+// Both are now matched (`RANGE_TAIL`, `RANGE_CONCAT`, `logicalLines`). What is
+// STILL invisible, stated so a reader does not mistake a pass for a proof:
+//
+//   * A RANGE ASSEMBLED ACROSS STATEMENTS. `const r = base + '..'` on one line and
+//     `` `${r}${head}` `` further down: the taint follows ALIASES to a fixpoint but
+//     not arbitrary dataflow, so a partially-built range escapes.
+//   * A COMPUTED OR INDIRECT NAME — `cfg[key]`, `args['base' + 'Branch']`, a value
+//     read from JSON or the database at runtime. Nothing in the source says
+//     "branch name".
+//   * A HELPER THAT TAKES THE BASE AS A `string` PARAMETER and builds the range
+//     inside itself. The range there is correct-by-parameter; the defect moves to
+//     whatever the caller passes, which this gate only sees if the caller's own
+//     expression happens to match.
+//   * ANY SPELLING NOT ENUMERATED ABOVE. That set is open, and the next member of
+//     it will be found the same way the last two were — by mutating the fix and
+//     checking the gate reddens, never by reading this list and feeling covered.
+//
+// The durable fix is not a better regex: it is to keep narrowing the SCOPE in which
+// a base branch name exists at all, as the two shell wrappers already do. See the
+// as-built record for why a branded `ResolvedRef` type was considered and rejected.
 //
 // ── WHAT IT FLAGS ─────────────────────────────────────────────────────
 // A two- or three-dot rev-range whose LEFT operand is an interpolation of an
@@ -68,6 +122,8 @@
 // proves nothing until the same matcher has been shown finding something.
 //
 // EXIT: 0 = clean, 1 = at least one unexcused hit (printed), or a broken matcher.
+// A 0 means "none of the enumerated spellings is present", NEVER "no bare-base range
+// exists". The structural half of the change is what licenses the stronger claim.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -109,6 +165,23 @@ const TAINT_FROM_FIELD = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[\w.$?[\]
 const TAINT_FROM_SHELL = /^\s*([A-Za-z_][\w]*)=["']?\$\{?base_?branch\b/gim
 
 /**
+ * WHAT SITS BETWEEN THE OPERAND AND ITS DOTS. Three spellings, and the history of this
+ * constant is the reason the gate's scope is stated honestly further down:
+ *
+ *   `${base}..`            nothing
+ *   `${base}"..`           a CLOSING QUOTE — the shell evaluates `"${BASE}"..HEAD` as
+ *                          exactly `main..HEAD`, and the first two drafts of this
+ *                          matcher returned [] for it
+ *   `` ${base}` + `.. ``   a CONCATENATION across the quote, which is also what a range
+ *                          split over two source lines looks like once the continuation
+ *                          is joined (see `logicalLines`)
+ *
+ * Deliberately NOT `[\s"'`+]*`: allowing bare whitespace would make `${baseBranch} …`
+ * in ordinary prose a hit, and a gate that cries wolf gets muted.
+ */
+const RANGE_TAIL = String.raw`(?:["'\x60]\s*\+\s*["'\x60]|["'\x60])?\.{2,3}`
+
+/**
  * `${…}..`, `${…}...` — the JS/TS template form and the braced shell form.
  *
  * THE WHOLE INTERPOLATED EXPRESSION, not a bare identifier, and that is not a
@@ -117,15 +190,23 @@ const TAINT_FROM_SHELL = /^\s*([A-Za-z_][\w]*)=["']?\$\{?base_?branch\b/gim
  * the name. A matcher that required `${baseBranch}..` could not have failed on the
  * actual bug, which is the "a test that cannot fail on the bug proves nothing" failure
  * wearing a gate's clothes. Caught in review of this very gate, by mutating the fix and
- * watching the gate stay green.
+ * watching the gate stay green — and then caught AGAIN, one spelling later, by the
+ * review gate. That is the evidence for the scope note in the header.
  *
  * `[^{}]*` rather than a balanced-brace parse: every real site here is one call or one
  * ternary deep, and the identifier extraction below is what decides the verdict.
  */
-const RANGE_BRACED = /\$\{([^{}]*)\}\.{2,3}/g
+const RANGE_BRACED = new RegExp(String.raw`\$\{([^{}]*)\}` + RANGE_TAIL, 'g')
 
-/** `$NAME..` — the unbraced shell form. */
-const RANGE_BARE = /\$([A-Za-z_][\w]*)\.{2,3}/g
+/** `$NAME..`, `"$NAME"..` — the unbraced shell form. */
+const RANGE_BARE = new RegExp(String.raw`\$([A-Za-z_][\w]*)` + RANGE_TAIL, 'g')
+
+/**
+ * `baseBranch + '..HEAD'` — the operand as a VALUE concatenated onto a literal that
+ * opens with the dots, with no interpolation anywhere. `'git diff ' + base + '..' + head`
+ * reaches git as the identical range and no `${…}` appears in the source at all.
+ */
+const RANGE_CONCAT = /([A-Za-z_$][\w$]*)\s*\+\s*["'\x60]\s*\.{2,3}/g
 
 /** Every identifier mentioned in an interpolated expression. */
 const IDENTIFIER = /[A-Za-z_$][\w$]*/g
@@ -145,7 +226,48 @@ export function taintedNames(source) {
     let m
     while ((m = rx.exec(source)) !== null) names.add(m[1])
   }
+  // AND THROUGH ALIASES, to a fixpoint. `const base = await resolveBase(run)` followed
+  // by `const b = base` and then `${b}..${head}` is the same defect with one more hop,
+  // and a one-pass taint would call it clean. Bounded by the number of bindings, so it
+  // terminates; four rounds is far past anything real and stops a pathological file
+  // from making the gate the slow part of CI.
+  for (let round = 0; round < 4; round++) {
+    const before = names.size
+    for (const name of [...names]) {
+      const alias = new RegExp(
+        String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?` + name + String.raw`\b`,
+        'g',
+      )
+      let m
+      while ((m = alias.exec(source)) !== null) names.add(m[1])
+    }
+    if (names.size === before) break
+  }
   return names
+}
+
+/**
+ * Source lines, with a `+`-continuation joined onto the line it continues into.
+ *
+ * A rev-range can straddle two source lines — `` `git diff ${base}` + `` then
+ * `` `..${head}` `` on the next — and prettier will PUT it there for you as soon as the
+ * line gets long. Matching per physical line returned [] for that, so the range is
+ * matched against the joined text and reported at the FIRST of its lines.
+ */
+export function logicalLines(lines) {
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    let text = lines[i]
+    const start = i
+    // Bounded: a chain longer than this is not a range being formatted, and an
+    // unbounded join would let one runaway line swallow the file.
+    for (let joins = 0; joins < 4 && /\+\s*$/.test(text) && i + 1 < lines.length; joins++) {
+      i += 1
+      text += ' ' + lines[i].trim()
+    }
+    out.push({ text, line: start + 1 })
+  }
+  return out
 }
 
 /** Is this offence argued for, on its own line or the one above it? */
@@ -175,9 +297,9 @@ export function findBareBaseRanges(source) {
   const tainted = taintedNames(source)
   const lines = source.split('\n')
   const out = []
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    for (const rx of [RANGE_BRACED, RANGE_BARE]) {
+  const seen = new Set()
+  for (const { text: line, line: lineNo } of logicalLines(lines)) {
+    for (const rx of [RANGE_BRACED, RANGE_BARE, RANGE_CONCAT]) {
       rx.lastIndex = 0
       let m
       while ((m = rx.exec(line)) !== null) {
@@ -189,8 +311,13 @@ export function findBareBaseRanges(source) {
         if (name === undefined) continue
         const before = line.slice(0, m.index)
         if (QUALIFIERS.some((q) => before.endsWith(q))) continue
-        if (isExempt(lines, i)) continue
-        out.push({ line: i + 1, name, text: line.trim().slice(0, 160) })
+        if (isExempt(lines, lineNo - 1)) continue
+        // One report per (line, name): a joined continuation is scanned as part of the
+        // line above it AND on its own, so a range can otherwise be counted twice.
+        const key = `${lineNo}:${name}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push({ line: lineNo, name, text: line.trim().slice(0, 160) })
       }
     }
   }

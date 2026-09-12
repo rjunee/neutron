@@ -30,6 +30,24 @@ boundary that depends on the next author noticing the right form thirty lines aw
 mode `docs/agent-legible-architecture.md` §1 names explicitly. So the unit of the fix is the
 **rule**, not the call sites.
 
+**What enforces this is structural, not a grep.** The invariant is *no code path
+composes a rev-range from a base branch NAME*, and it is carried by two things:
+
+- **one binding per boundary** — `diffBase` in `trident/inner-workflow.mjs` and the
+  exported `diffBaseRef()` in `trident/merge.ts` are the only producers of a range base,
+  so there is no second spelling to drift from;
+- **an argv boundary that carries only resolved refs** — `trident/codex-build.sh` and
+  `trident/codex-review.sh` receive an already-resolved ref as argv, so **no variable
+  holding a base branch name exists in their scope**. There a bare-base range is not
+  detected, it is *unconstructable*, which is a different and stronger thing.
+
+`scripts/ci/diff-base-check.mjs` is **defence in depth on top of that** — it exists to
+make a regression loud, not to prove absence. A textual matcher over source cannot
+enforce "every rev-range"; it can only enforce "every rev-range whose spelling was
+enumerated", and this one has been wrong about that twice in the same shape. Its scope
+and its blind spots are stated in its own header, and the criteria below say which claim
+rests on which instrument.
+
 The resolution order is evidence-first, and is the same at every site:
 
 1. the **launch-pinned base sha** — the commit `origin/<base>` held when the launcher observed it
@@ -71,21 +89,43 @@ The resolution order is evidence-first, and is the same at every site:
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
       4 of 7 tests fail, and the two agreement/complement tests stay green.
-- [ ] **The class is closed as a rule, not as call sites.** `scripts/ci/diff-base-check.mjs`
-      fails CI on a rev-range in `trident/` or `tools/` whose left operand names a base
-      BRANCH — by spelling (`baseBranch`, `base_branch`, `BASE_BRANCH`) or by the binding it
-      came from (`resolveBase()`, `detectBaseBranch()`, a `base_branch` field). Wired as
-      CHECK 8 of `scripts/ci/lint.sh`.
-- [ ] **The gate can fail on the REAL shape.** The site #546 was filed against is
-      `git diff ${shSingleQuote(baseBranch)}..${shSingleQuote(headOid)}` — the name inside a
-      call. A matcher that only knew `${baseBranch}..` would report success on the actual bug.
-      Verified by `scripts/ci/diff-base-check.test.ts` — "THE NAME INSIDE A CALL is caught",
-      plus a mutation test that plants an offending file under a scan root and asserts the
-      gate exits 1.
+- [ ] **No base branch NAME is in scope where a rev-range is built, at the boundaries
+      where that is achievable.** This is the criterion that carries the invariant, and it
+      is structural: `diffBase` and `diffBaseRef()` are the only producers, and both shell
+      wrappers take a resolved ref as argv so the name is absent from their scope entirely.
+      Verified by `trident/inner-workflow.test.ts` and
+      `trident/__tests__/cross-model-dispatch.test.ts` (the wrapper argv carries the
+      resolved ref, per merge mode) and by `grep -n 'BASE_DIFF_REF\|BASE_REF'` over the two
+      scripts showing no base-branch-name binding. A criterion that said only "CHECK 8 is
+      green" would be satisfied by a tree whose bare-base range is merely spelled in a way
+      the matcher does not enumerate.
+- [ ] **CHECK 8 makes a regression LOUD, with an honest scope.**
+      `scripts/ci/diff-base-check.mjs` (CHECK 8 of `scripts/ci/lint.sh`) fails on a
+      rev-range in `trident/`, `tools/` or `scripts/` whose left operand names a base
+      BRANCH — by spelling (`baseBranch`, `base_branch`, `BASE_BRANCH`), by the binding it
+      came from (`resolveBase()`, `detectBaseBranch()`, a `base_branch` field), or through
+      an alias chain to a fixpoint. **This criterion does NOT claim every rev-range**, and
+      the gate's header enumerates what it cannot see (a range assembled across statements,
+      a computed name, a helper taking the base as a `string` parameter, any unenumerated
+      spelling). A pass means "none of the enumerated spellings is present".
+- [ ] **Every spelling the gate has been caught missing is now matched, and each fix is
+      independently load-bearing.** The four known ones: the name inside a call
+      (`${shSingleQuote(baseBranch)}..`, the literal #546 line); a closing quote between
+      the operand and its dots (`"${BASE_BRANCH}"..HEAD`, which the shell evaluates as
+      exactly `main..HEAD`); a concatenation with no interpolation at all
+      (`'git diff ' + base + '..HEAD'`); and a range split over two source lines. Verified
+      by the four named tests in `scripts/ci/diff-base-check.test.ts`, and by mutation —
+      reverting `RANGE_TAIL`, dropping `RANGE_CONCAT`, or disabling the `logicalLines`
+      join each reddens the suite (3, 1 and 1 test respectively).
+- [ ] **The widening did not merely make the matcher permissive.** A resolved base in each
+      of those same positions — quoted boundary, concatenation, line break — is silent, as
+      is a non-base operand on the left of a concat and an alias of a *resolved* value.
+      Verified by "THE COMPLEMENT of the quote/concat/line-break widening". Without this,
+      the fix for a blind spot trades it for a muted gate.
 - [ ] **The gate has a positive control and refuses an empty scan.** A grep that finds nothing
       proves nothing until the same grep has been shown finding something. Verified by the
       gate's own `runControls()` (5 pinned offenses at pinned lines, plus a negative control
       whose only hit is an un-argued exemption), which runs before the tree is touched, and by
-      "an empty scan set is a FAILURE, not a pass".
+      "an empty scan set is a FAILURE, not a pass" and by the planted-offender mutation test.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.

@@ -135,9 +135,13 @@ fi
 # `refs/heads/main` holds, so every commit merged into the base since the last
 # pull is presented as this branch's own work — measured at 149 files where the
 # branch changed 30 (#546) and at ~100 files where it changed 20 (run 25b2327d).
-# The class had already been fixed twice as a CALL SITE, thirty lines from two
-# sites that still composed the bare name; this is the same fix as a RULE.
-# See diff-base-check.mjs.
+#
+# DEFENCE IN DEPTH, NOT THE GUARANTEE. What enforces the invariant is structural:
+# one binding per boundary (`diffBase`, `diffBaseRef()`) and an argv boundary that
+# hands the shell wrappers an already-resolved ref, so no variable holding a base
+# branch NAME exists in their scope at all. This check makes a regression LOUD; a
+# pass means "none of the enumerated spellings is present", never "no bare-base
+# range exists". diff-base-check.mjs lists what it cannot see, and why.
 if ! bun "$HERE/diff-base-check.mjs"; then
   fail=1
 fi

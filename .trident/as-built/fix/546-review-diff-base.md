@@ -22,6 +22,23 @@ still composed the bare name. The issue's line numbers matched the box's *stale*
 
 So the unit of this change is the rule.
 
+### What actually guarantees the invariant
+
+The invariant is **no code path composes a rev-range from a base branch NAME**, and it is
+carried by the STRUCTURE, not by the gate. Stated in the order of how much it proves:
+
+1. **The shell wrappers: unconstructable.** `codex-build.sh` and `codex-review.sh` receive
+   an already-resolved ref as argv (`BASE_DIFF_REF="${2:-}"`, `BASE_REF="${1:-main}"`) and
+   no variable holding a base branch name exists in either file — `grep -nE
+   'BASE_BRANCH|base_branch|baseBranch'` over both returns nothing. A bare-base range there
+   is not detected; there is nothing to build one from.
+2. **One binding per boundary.** `diffBase` (`inner-workflow.mjs`) and the exported
+   `diffBaseRef()` (`merge.ts`) are the only producers of a range base, so there is no
+   second spelling to drift from. The branch NAME is still in scope in both files for
+   prose, so this is a narrowed surface rather than an impossibility.
+3. **CHECK 8 is defence in depth.** It makes a regression loud. It does not prove absence,
+   and the gate's own header now says so in as many words.
+
 ### One binding per language boundary
 
 - `trident/inner-workflow.mjs` — `diffBase`, declared once beside `pinnedBase`, read by
@@ -45,12 +62,59 @@ in `trident/` or `tools/` whose left operand names a base BRANCH — by spelling
 (`refs/heads/${base}..`, which the launch path's staleness *measurement* needs), a
 resolved one, a test, or an argued `DIFF-BASE-OK: <reason>`.
 
-**Its first draft was green against the actual bug.** The #546 line is
-`git diff ${shSingleQuote(baseBranch)}..${shSingleQuote(headOid)}` — the name inside a
-call — and a matcher requiring `${baseBranch}..` cannot see it. Found by mutating the fix
-and watching the gate not care. It now matches the whole interpolated expression and
-condemns any base-branch name mentioned in it; the positive control carries all five real
-shapes, at pinned lines, and runs before the tree is touched. An empty scan exits 1.
+**It has now been caught missing the bug twice, in the same shape, and that is the
+finding worth keeping.**
+
+1. The first draft required `${baseBranch}..` and could not see
+   `${shSingleQuote(baseBranch)}..` — the literal #546 line. Found by mutating the fix and
+   watching the gate stay green.
+2. The second draft required the dots to follow the brace IMMEDIATELY and could not see
+   `"${BASE_BRANCH}"..HEAD`, which the shell evaluates as exactly `main..HEAD`. Found by
+   the review gate on this PR (P1). Probing for siblings turned up four more: single-quoted
+   boundary, a concatenation with no interpolation at all (`'git diff ' + base + '..HEAD'`),
+   a range split over two source lines, and an argv-array element.
+
+All are matched now (`RANGE_TAIL`, `RANGE_CONCAT`, `logicalLines`), taint follows aliases
+to a fixpoint, and each of the three fixes is independently load-bearing under mutation
+(reverting `RANGE_TAIL` reddens 3 tests; dropping `RANGE_CONCAT` 1; disabling the line
+join 1). The complement is asserted too, so the widening is not permissiveness: a resolved
+base in each of those same positions stays silent.
+
+**The generalisation, because fixing the instance twice is the lesson.** A textual matcher
+over source cannot enforce "every X"; it can only enforce "every X I enumerated". Each
+time, the instance was fixed and the *claim* was left universal — so the gate went on
+implying a proof it could not give. The claim is now narrowed to match the instrument: the
+gate's header enumerates what it cannot see (a range assembled across statements, a
+computed or runtime-supplied name, a helper taking the base as a `string` parameter, any
+unenumerated spelling), and the spec item's criteria say which claim rests on the structure
+and which on the grep. The positive control carries all real shapes at pinned lines and
+runs before the tree is touched; an empty scan exits 1.
+
+### A branded `ResolvedRef` type was considered and rejected
+
+The strongest available fix would be a type only a resolved ref inhabits, so a branch name
+could not reach a range operand at all. It is not reachable here, and the reason is
+specific rather than a matter of effort:
+
+- **TypeScript cannot forbid template-string assembly.** A brand on `diffBaseRef()`'s
+  return plus a `revRange(base: ResolvedRef, head)` constructor would make the *sanctioned*
+  constructor reject a branch name at compile time — real, and cheap at the 14 range-operand
+  sites across `orchestrator.ts`, `mutation-prover.ts`, `merge.ts` and
+  `mutation-claim-artifact.ts`. But nothing forces the next site to call `revRange` instead
+  of writing `` `${x}..${head}` `` directly, so the universal claim is no better off.
+- **The raw-sha sources need an unchecked constructor anyway.** `rebased.baseSha` comes
+  from `ls-remote` stdout and `run.base_sha` from a `string | null` database column, so both
+  would enter the brand through an `asResolvedRef(...)` escape hatch — reachable by exactly
+  the author the type exists to stop. A brand with a public escape hatch is a convention
+  with extra types.
+- **Making it genuinely impossible means typing the argv boundary**: every git invocation
+  in trident would have to go through a builder that only accepts branded operands. That is
+  hundreds of call sites, i.e. a large refactor, and out of scope here.
+
+**The durable fix is the shell wrappers' shape, generalised**: keep narrowing the scope in
+which a base branch NAME exists, rather than improving the matcher that hunts for it. Where
+the resolved ref is the only thing that crosses a boundary, the defect is unconstructable
+and needs no gate at all.
 
 ### Dispositions for the rest of the class
 
