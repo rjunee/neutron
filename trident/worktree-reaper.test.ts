@@ -86,12 +86,18 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return result.stdout.trim()
 }
 
-async function makeRepo(): Promise<{ root: string; repo: string }> {
+async function makeRepo(
+  objectFormat?: 'sha1' | 'sha256',
+): Promise<{ root: string; repo: string }> {
   const root = mkdtempSync(join(tmpdir(), 'trident-worktree-reaper-'))
   roots.push(root)
   const repo = join(root, 'repo')
   mkdirSync(repo)
-  await git(repo, 'init', '-b', 'main')
+  // The default spelling stays EXACTLY as it was, so every existing case is untouched; the
+  // sha256 path is opt-in and exists because this module composes a ref NAME out of an object
+  // name and so has to know how long one is.
+  if (objectFormat === undefined) await git(repo, 'init', '-b', 'main')
+  else await git(repo, 'init', '-b', 'main', `--object-format=${objectFormat}`)
   await git(repo, 'config', 'user.email', 'trident@example.test')
   await git(repo, 'config', 'user.name', 'Trident Test')
   writeFileSync(join(repo, 'README.md'), 'base\n')
@@ -3023,4 +3029,205 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
     ])
     expect(await refExists(repo, ref(branch))).toBe(true)
   }, 30_000)
+})
+
+/**
+ * THE ATTESTATION'S COVERAGE — every input the destructive operation consumes (#547 round 13).
+ *
+ * The first boundary bound `(ref, sha)` while `deleteReapableRef` took `repo` separately and
+ * aimed the delete at it, and the tests only ever forged within ONE repository, so the free
+ * axis was never crossed. These cases cross it, and pin the object-name check in the direction
+ * that breaks users rather than only the direction that rejects.
+ */
+describe('the attestation covers the repository too, and both object formats (#547)', () => {
+  const emptyReport = (): WorktreeReapReport => ({
+    repos_swept: 0,
+    candidates: 0,
+    live_skipped: 0,
+    detached: [],
+    removed: [],
+    preserved: [],
+    protected_nonterminal: [],
+    skipped_no_liveness: false,
+    refs_examined: 0,
+    refs_deleted: [],
+    refs_kept: [],
+    refs_stood_down: 0,
+    refs_restored: [],
+    refs_restore_failed: [],
+    refs_candidates: [],
+  })
+
+  test('a candidate minted in one repo cannot delete the same ref in another', async () => {
+    const branch = 'trident/same-name-same-sha'
+    // REPO A: gates run here, so this is where the candidate is minted.
+    const a = await makeRepo()
+    const procA = makeProc(a.root)
+    const sha = await seedRef(a.repo, branch, 'shared')
+
+    // REPO B: a clone, so it carries the SAME ref at the SAME commit — the sha check, the
+    // namespace check and `refExists` all agree with A, and only the repository differs.
+    const b = { root: a.root, repo: join(a.root, 'clone') }
+    await git(a.root, 'clone', '--no-local', a.repo, b.repo)
+    await git(b.repo, 'fetch', 'origin', `${branch}:${branch}`)
+    expect(await git(b.repo, 'rev-parse', ref(branch))).toBe(sha)
+
+    const sweepA = await sweepTridentWorktrees({
+      store: stubStore(a.repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: procA,
+    })
+    const mintedForA = onlyCandidate(sweepA)
+
+    // THE CROSS-REPOSITORY CALL: A's attestation, B's repository. B's gates never ran.
+    const report = emptyReport()
+    await deleteReapableRef(
+      { store: stubStore(b.repo), run_host: spawnCapture, proc_root: procA },
+      b.repo,
+      mintedForA,
+      report,
+      { attempts: 0 },
+    )
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toHaveLength(1)
+    expect(report.refs_kept[0]?.reason).toStartWith('not-a-reapable-candidate: its gates ran against ')
+    // B's ref survives, and nothing was written into B at all — not even a salvage.
+    expect(await refExists(b.repo, ref(branch))).toBe(true)
+    expect(await git(b.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
+
+    // THE COMPLEMENT: the same attestation against the repository it was minted for deletes.
+    const home = emptyReport()
+    await deleteReapableRef(
+      { store: stubStore(a.repo), run_host: spawnCapture, proc_root: procA },
+      a.repo,
+      mintedForA,
+      home,
+      { attempts: 0 },
+    )
+    expect(home.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}same-name-same-sha/${sha}` },
+    ])
+    expect(await refExists(a.repo, ref(branch))).toBe(false)
+    // And B is STILL untouched after A's delete succeeded.
+    expect(await refExists(b.repo, ref(branch))).toBe(true)
+  }, 120_000)
+
+  test('a symlinked spelling of the SAME repo still deletes — canonical, not literal', async () => {
+    // The mismatch check must not fire on two names for one repository, or an operator path
+    // with a symlink in it would silently stop the reap while reporting a refusal.
+    const branch = 'trident/symlinked-spelling'
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const sha = await seedRef(repo, branch, 'symlinked')
+    const alias = join(root, 'alias')
+    symlinkSync(repo, alias, 'dir')
+
+    // Minted under the REAL path, acted on under the SYMLINKED one.
+    const sweep = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    })
+    const minted = onlyCandidate(sweep)
+
+    const report = emptyReport()
+    await deleteReapableRef(
+      { store: stubStore(alias), run_host: spawnCapture, proc_root: proc },
+      alias,
+      minted,
+      report,
+      { attempts: 0 },
+    )
+
+    expect(report.refs_kept.map((k) => k.reason)).not.toContainEqual(
+      expect.stringContaining('not-a-reapable-candidate'),
+    )
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}symlinked-spelling/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+  }, 60_000)
+
+  test('REAL GIT, SHA-256: a 64-character object name is reaped, not refused as malformed', async () => {
+    // `trident/codex-build.sh`'s `sha_or_empty` already warned that hard-coding 40 collapses
+    // every measured sha on a sha256 repository. The first cut of the boundary hard-coded 40,
+    // so the destructive half refused its OWN minted candidate here and the reap did nothing.
+    const { root, repo } = await makeRepo('sha256')
+    const branch = 'trident/wide-object-name'
+    const sha = await seedRef(repo, branch, 'wide')
+    expect(sha).toHaveLength(64)
+    expect(await git(repo, 'rev-parse', '--show-object-format')).toBe('sha256')
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}wide-object-name/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+    // The salvage names the full 64-character tip and still resolves to it.
+    expect(await git(repo, 'rev-parse', `${SALVAGE_REF_PREFIX}wide-object-name/${sha}`)).toBe(sha)
+  }, 60_000)
+
+  test('REAL GIT, SHA-1: the 40-character positive case, asserted on the WIDTH', async () => {
+    // The complement of the case above, so "both widths" is proven and not assumed from one.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/narrow-object-name'
+    const sha = await seedRef(repo, branch, 'narrow')
+    expect(sha).toHaveLength(40)
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}narrow-object-name/${sha}` },
+    ])
+  }, 60_000)
+
+  test('the widths BETWEEN and BEYOND the two are still refused', async () => {
+    // Widening to "40 or 64" must not become "40 or more" or "anything hex": the salvage ref
+    // embeds this value in its NAME, so a malformed sha composes a salvage that names something
+    // other than the tip it claims to keep.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/malformed-widths'
+    const sha = await seedRef(repo, branch, 'malformed')
+    const opts = { store: stubStore(repo), run_host: spawnCapture, proc_root: proc }
+
+    const malformed = [
+      sha.slice(0, 39), // one short of sha1
+      `${sha}0`, // one long
+      `${sha}${sha.slice(0, 23)}`, // 63, one short of sha256
+      `${sha}${sha.slice(0, 25)}`, // 65, one long
+      sha.toUpperCase(), // right width, wrong charset
+    ]
+    for (const candidate of malformed) {
+      const report = emptyReport()
+      await deleteReapableRef(
+        opts,
+        repo,
+        { ref: ref(branch), sha: candidate } as ReapableCandidate,
+        report,
+        { attempts: 0 },
+      )
+      expect(report.refs_kept, candidate).toEqual([
+        {
+          ref: ref(branch),
+          reason: `not-a-reapable-candidate: ${candidate} is not a full object name`,
+        },
+      ])
+    }
+    // POSITIVE CONTROL on the loop: the real 40-character sha is NOT in that list, and the
+    // two accepted widths are exactly 40 and 64.
+    expect(malformed.map((m) => m.length)).toEqual([39, 41, 63, 65, 40])
+    expect(malformed).not.toContain(sha)
+    expect(await refExists(repo, ref(branch))).toBe(true)
+  }, 60_000)
 })

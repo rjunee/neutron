@@ -132,10 +132,11 @@
  *
  * Safer than the 2026-09-01 incident, and the fourteen sit behind a gate 0 that refuses any
  * ref the chain did not itself produce: the destructive half takes a `ReapableCandidate`,
- * which only `reapBranchRefs` can mint. Gates 1-10 are therefore not advice to a caller —
- * they are the thing the argument attests to, and there is no expression outside this module
- * that fabricates the attestation. See `ReapableCandidate` for why the proof is runtime
- * identity rather than a phantom type.
+ * which only `reapBranchRefs` can mint, bound to the canonical repository its gates ran
+ * against — the attestation covers every input the delete consumes, `repo` included. Gates
+ * 1-10 are therefore not advice to a caller: they are the thing the arguments attest to, and
+ * there is no expression outside this module that fabricates the attestation. See
+ * `ReapableCandidate` for why the proof is runtime identity rather than a phantom type.
  *
  * `docs/as-built/wrong-base-guard-prints-a-destructi.md` records a guard that
  * composed an unconditional `git branch -D` from NOTHING and pointed it at a branch
@@ -292,14 +293,20 @@ export const MAX_REF_DELETIONS_PER_SWEEP = 50
  *
  * So the preconditions became a VALUE. A candidate is minted at exactly one place — the end
  * of the gate chain in `reapBranchRefs` — and `mintReapableCandidate` is module-private, so
- * nothing outside this file can produce one. The proof is a WeakSet membership rather than a
- * phantom type, deliberately: a type-level brand is erased at runtime, so `as` and plain
- * JavaScript both walk straight through it, and the negative test cannot even construct the
- * forged input it needs to prove the refusal. Identity in a private WeakSet is unforgeable in
- * both — there is no expression outside this module that adds to it.
+ * nothing outside this file can produce one. The proof is membership of a private `WeakMap`
+ * rather than a phantom type, deliberately: a type-level brand is erased at runtime, so `as`
+ * and plain JavaScript both walk straight through it, and the negative test cannot even
+ * construct the forged input it needs to prove the refusal. Identity in a private `WeakMap` is
+ * unforgeable in both — there is no expression outside this module that writes to it — and its
+ * VALUE carries the repository the gates ran against, which a `WeakSet` had no room for.
  *
  * The tests obtain a candidate the way production will: run the sweep, take what the gates
  * minted, pass it back. That is the same object, not a reconstruction — which is the point.
+ *
+ * WHAT THE ATTESTATION COVERS is `(repo, ref, sha)`, not `(ref, sha)` — see `MINTED_CANDIDATES`
+ * for the cross-repository hole that taught it. The repository is held in the mint's own map
+ * rather than on this interface, because a field the caller can write cannot be the thing that
+ * proves anything.
  */
 export interface ReapableCandidate {
   readonly ref: string
@@ -307,22 +314,67 @@ export interface ReapableCandidate {
 }
 
 /**
- * Minted candidates, by IDENTITY. A `WeakSet` so a report that is dropped takes its
- * candidates with it, and so a serialised-and-revived candidate — which is a copy carrying no
- * evidence — is correctly not one.
+ * Minted candidates, by IDENTITY, each mapped to THE CANONICAL REPOSITORY ITS GATES RAN
+ * AGAINST. A `WeakMap` so a report that is dropped takes its candidates with it, and so a
+ * serialised-and-revived candidate — which is a copy carrying no evidence — is correctly not
+ * one.
+ *
+ * WHY THE REPO IS IN THE ATTESTATION AND NOT A FIELD ON THE CANDIDATE (#547 round 13). The
+ * first cut attested to `(ref, sha)` while `deleteReapableRef` took `repo` as a SEPARATE
+ * argument and aimed the destructive command at it. Mint in repo A, create the same ref at the
+ * same commit in repo B, and a call with B's repo and A's candidate passed the membership test
+ * and deleted B's ref — a repository whose gates never ran. The one input the attestation did
+ * not cover was the one free to vary, and the boundary tests only ever forged within a single
+ * repository, so the axis was never crossed.
+ *
+ * AN ATTESTATION MUST COVER EVERY INPUT THE ATTESTED OPERATION CONSUMES. A token proving
+ * "these gates ran" is only as strong as the tuple it names; anything outside that tuple is
+ * unattested by construction however carefully the rest is checked. A PUBLIC FIELD would not
+ * fix it either — a forger sets fields freely, so the comparison has to be against something
+ * the caller cannot write, which is what the map's value is.
  */
-const MINTED_CANDIDATES = new WeakSet<ReapableCandidate>()
-
-/** A full object name. `update-ref` would refuse anything else; this refuses it first. */
-const FULL_OBJECT_NAME = /^[0-9a-f]{40}$/
+const MINTED_CANDIDATES = new WeakMap<ReapableCandidate, string>()
 
 /**
- * The ONE place a `ReapableCandidate` comes into existence: after gates 1-10 have passed.
+ * A full object name, BOTH OBJECT FORMATS: 40 hex for sha1, 64 for sha256.
+ *
+ * HARD-CODING 40 BREAKS SHA-256 REPOSITORIES, and this tree had already written that down:
+ * `trident/codex-build.sh`'s `sha_or_empty` carries the warning in as many words ("Both object
+ * formats count: 40 for sha1, 64 for sha256 — hard-coding 40 would collapse every measured sha
+ * on a sha256 repo"). The first cut of this check hard-coded 40 anyway, so on a repository
+ * created with `--object-format=sha256` the destructive half refused ITS OWN minted candidate
+ * as "not a full object name" and the reap silently did nothing.
+ *
+ * Length AND charset, because `update-ref` is not the only consumer: the salvage ref embeds
+ * this value in its NAME, so an abbreviated or malformed sha would compose a salvage that
+ * names something other than the tip it claims to preserve.
+ */
+const FULL_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+/**
+ * Canonical repository identity, so two spellings of one path cannot mint under one name and
+ * be checked under another. Symlinked, relative and trailing-slash spellings all resolve here.
+ *
+ * A FAILURE FALLS BACK TO THE RAW STRING, and that direction is safe: an unresolvable path
+ * compares equal only to the identical spelling, so the worst outcome is a candidate refused
+ * for a repository that has just disappeared — never a candidate accepted for the wrong one.
+ */
+function canonicalRepo(repo: string): string {
+  try {
+    return realpathSync(repo)
+  } catch {
+    return repo
+  }
+}
+
+/**
+ * The ONE place a `ReapableCandidate` comes into existence: after gates 1-10 have passed,
+ * bound to the repository they ran against.
  * Module-private on purpose — exporting it would hand back the bypass this type removes.
  */
-function mintReapableCandidate(ref: string, sha: string): ReapableCandidate {
+function mintReapableCandidate(repo: string, ref: string, sha: string): ReapableCandidate {
   const candidate: ReapableCandidate = Object.freeze({ ref, sha })
-  MINTED_CANDIDATES.add(candidate)
+  MINTED_CANDIDATES.set(candidate, canonicalRepo(repo))
   return candidate
 }
 
@@ -338,15 +390,24 @@ function mintReapableCandidate(ref: string, sha: string): ReapableCandidate {
  * the delete: "unreachable in this tree" has been the wrong answer more than once here.
  * Ordering them this way also makes each independently reddenable.
  */
-function candidateRefusal(candidate: ReapableCandidate): string | null {
+function candidateRefusal(repo: string, candidate: ReapableCandidate): string | null {
   if (!candidate.ref.startsWith(TRIDENT_REF_PREFIX)) {
     return `${candidate.ref} is outside ${TRIDENT_REF_PREFIX}`
   }
   if (!FULL_OBJECT_NAME.test(candidate.sha)) {
     return `${candidate.sha} is not a full object name`
   }
-  if (!MINTED_CANDIDATES.has(candidate)) {
+  const mintedFor = MINTED_CANDIDATES.get(candidate)
+  if (mintedFor === undefined) {
     return 'it was not minted by the gate chain'
+  }
+  // THE ATTESTED REPOSITORY AND THE OPERATED-ON REPOSITORY MUST BE THE SAME ONE. Checked
+  // last so the two cheap shape checks stay independently reddenable above it, and compared
+  // on canonical form at BOTH ends so a symlinked or relative spelling cannot be the thing
+  // that decides it.
+  const acting = canonicalRepo(repo)
+  if (mintedFor !== acting) {
+    return `its gates ran against ${mintedFor}, not ${acting}`
   }
   return null
 }
@@ -1267,7 +1328,7 @@ async function reapBranchRefs(
     // A CANDIDATE, not a decision: gates 1-10 passed. Gates 11-14 are evaluated only at
     // deletion time (see the field's own note), so a ref listed here can still be refused by
     // the salvage or by the claim probe when #635 turns this branch into a call.
-    report.refs_candidates.push(mintReapableCandidate(ref, sha))
+    report.refs_candidates.push(mintReapableCandidate(repo, ref, sha))
     report.refs_kept.push({ ref, reason: DEFERRED_PENDING_CLAIMANT_GUARD })
     continue
     // ───────────────────────────────────────────────────────────────────────────────
@@ -1283,11 +1344,12 @@ async function reapBranchRefs(
  * under test so the code #635 re-enables is code whose coverage never lapsed. There is no
  * flag here and no second path — production reaches this function from nowhere.
  *
- * THE PRECONDITIONS ARE CARRIED BY THE ARGUMENT, NOT BY THE CALLER'S DISCIPLINE. Gates 1-10
+ * THE PRECONDITIONS ARE CARRIED BY THE ARGUMENTS, NOT BY THE CALLER'S DISCIPLINE. Gates 1-10
  * — the ref is in trident's namespace, no worktree holds it by name or by commit, every
  * owning run row is terminal, no recorded worktree survives, no process stands in one — are
  * what `mintReapableCandidate` attests to, and only `reapBranchRefs` can mint. Gate 0 here
- * refuses anything else before a byte is written; gates 11-14 below are the four checks that
+ * refuses anything else before a byte is written — including a candidate minted against a
+ * DIFFERENT repository than the one `repo` names; gates 11-14 below are the four checks that
  * can only be made at the moment of the write.
  *
  * This used to read "preconditions, all fourteen of them, are the caller's", which was an
@@ -1302,11 +1364,12 @@ export async function deleteReapableRef(
 ): Promise<void> {
   const { ref, sha } = candidate
 
-  // GATE 0 — THE BOUNDARY. Nothing below runs for a value the gate chain did not produce.
+  // GATE 0 — THE BOUNDARY. Nothing below runs for a value the gate chain did not produce
+  // FOR THIS REPOSITORY.
   // This is the difference between preconditions that are DOCUMENTED and preconditions that
   // are ENFORCED, and it is checked before the budget so that a forged value cannot even
   // consume a sweep's deletion allowance.
-  const refused = candidateRefusal(candidate)
+  const refused = candidateRefusal(repo, candidate)
   if (refused !== null) {
     report.refs_kept.push({ ref, reason: `not-a-reapable-candidate: ${refused}` })
     log.error('worktree_reaper_ref_boundary_refused', { repo, ref, sha, reason: refused })

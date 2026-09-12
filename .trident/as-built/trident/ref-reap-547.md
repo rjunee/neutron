@@ -498,10 +498,15 @@ reconstruction, and that is the point.
 WHY THE PROOF IS RUNTIME IDENTITY AND NOT A PHANTOM TYPE. A type-level brand is erased at runtime, so
 `as` and plain JavaScript both walk straight through it — and, decisively, the negative test cannot
 CONSTRUCT the forged input it needs in order to prove the refusal, so the guard ships untested.
-Membership of a module-private `WeakSet` is unforgeable in both, because there is no expression outside
-the module that adds to it. A `WeakSet` also gets two things right for free: a dropped report takes its
+Membership of a module-private `WeakMap` is unforgeable in both, because there is no expression outside
+the module that writes to it. It also gets two things right for free: a dropped report takes its
 candidates with it, and a candidate that has been serialised and revived is a copy carrying no
 evidence, which is correctly not a candidate.
+
+(CORRECTED, round 13. This section first said the resulting bypass was *unconstructible*. It was not:
+the attestation covered `(ref, sha)` and the delete also consumed `repo`, which was free to vary. The
+map — a `WeakSet` at first — now carries the canonical repository the gates ran against. See the next
+section, which is the finding rather than a footnote to it.)
 
 THE FALLBACK WAS TAKEN AS WELL, NOT INSTEAD. The namespace and object-name checks are re-asserted
 INSIDE the destructive boundary, so the checks travel with the operation rather than living only at the
@@ -515,7 +520,59 @@ the namespace string as the only barrier, and the in-namespace forgery is then D
 mint's attestation reds 47 tests — the boundary is on the production path, not decoration bolted to the
 side of it.
 
-### The pattern both of this round's findings share
+### AN ATTESTATION MUST COVER EVERY INPUT THE ATTESTED OPERATION CONSUMES
+
+The round-12 boundary attested to `(ref, sha)`. The destructive operation consumes `(repo, ref, sha)`:
+`deleteReapableRef` receives the repository as a SEPARATE argument and every git command it issues is
+`git -C <repo>`. So the guard was complete along the axes it named and absent along the one it did not.
+
+THE REPRO, and it is not exotic. Mint in repo A; create the same `trident/*` ref at the same commit in
+repo B — a clone does it in one command; call `deleteReapableRef` with B's repo and A's candidate.
+Membership passes, the namespace passes, the sha matches B's real tip, and B's ref is salvaged and
+DELETED although B's gates never ran. Reproduced, then closed: with the repo check removed the suite
+emits `event=worktree_reaper_ref_deleted repo=.../clone` and the cross-repository test reds.
+
+WHY THE TESTS DID NOT FIND IT. Every forgery case built its bad value out of `ref` and `sha` — the two
+fields the type has — inside a single repository. A test suite written against an attestation naturally
+varies what the attestation TALKS ABOUT, so the input it is silent about is the one that stays fixed in
+every case. The negative space of a guard is not a list of malformed values; it is **the set of inputs
+the operation reads that the proof does not name**, and that set is invisible from the type.
+
+**A token proving "these gates ran" is only as strong as the tuple it names.** Anything outside the
+tuple is unattested by construction, however carefully the rest is checked. Applied here: the
+repository identity lives in the mint's map, not as a field on the candidate, because a field the
+caller can write cannot be the thing that proves anything — a forger sets `repo` as readily as `ref`.
+
+CANONICAL, NOT LITERAL, and both directions matter. Two spellings of one repository (a symlinked path,
+a relative one, a trailing slash) must not mint under one name and be refused under another — that
+failure is silent, since a refusal reads like a gate doing its job. So both ends resolve through
+`realpathSync`. The fallback when resolution fails is the raw string, which compares equal only to the
+identical spelling: the worst outcome is a refusal for a repository that has just disappeared, never an
+acceptance for the wrong one. There is a test for the symlinked spelling still deleting, and it reds
+under two separate mutations — attesting the raw path, and canonicalising nothing.
+
+### A GUARD ADDED FROM FIRST PRINCIPLES CAN CONTRADICT SOMETHING THE TREE ALREADY KNEW
+
+The same round's object-name check accepted exactly 40 hex characters. This tree supports SHA-256
+repositories, and `trident/codex-build.sh`'s `sha_or_empty` carries the warning in as many words:
+*"Both object formats count: 40 for sha1, 64 for sha256 — hard-coding 40 would collapse every measured
+sha on a sha256 repo."* On a repository created with `--object-format=sha256` the destructive half
+refused ITS OWN minted candidate as "not a full object name", and the reap silently did nothing.
+
+This is the stale-assertion class inverted. Every other instance in this change was a COMMENT that had
+stopped being true; here the tree held a LIVE warning and the new code contradicted it. Both are the
+same failure to ask what already exists — and the live-warning direction is worse, because the warning
+was written by someone who had already paid for the lesson.
+
+AND THE COVERAGE WAS ONE-SIDED, which is why the widening needed its own tests rather than just a
+wider regex. The original case proved only that a TRUNCATED sha is rejected: it established that the
+check rejects something, never that it accepts what it must. A guard tested only in the rejecting
+direction is untested in the direction that breaks users. There are now positive cases at both widths
+against real git — a sha1 repository asserted at length 40, a sha256 one asserted at 64 and reaped end
+to end, salvage name included — alongside negatives at 39, 41, 63, 65 and right-width-wrong-charset, so
+"40 or 64" cannot quietly become "40 or more".
+
+### The pattern all four of these findings share
 
 A decision made correctly, whose consequences were not propagated to the things that DEPEND on it.
 The deferral was right and the PR's claim still said the opposite. The extraction was right and the
@@ -529,6 +586,14 @@ that was true before I decided, and is not true after"** — an issue link, a ti
 contract, an acceptance clause. Each of those was written by someone who had no reason to expect the
 decision. It caught this PR twice in one round, on a review that was explicitly watching for it
 elsewhere.
+
+AND THEN TWICE MORE, ONE ROUND LATER, in the two directions that question has to be asked in. Deciding
+the primitive takes an attested candidate did not prompt anyone to ask **what else that primitive
+reads** — `repo`, which the attestation then did not cover. Deciding it should re-check the object name
+did not prompt anyone to ask **what this tree considers an object name** — a question `codex-build.sh`
+had already answered. Neither is in the diff; both were one grep away. So the question has a second
+half: after asking what my decision has made false, ask **what my decision assumes that something else
+here has already decided** — the inputs the new rule reads, and the conventions it re-states.
 
 ### The transferable pattern
 
@@ -567,12 +632,16 @@ adversarial shape for EACH half of the EEXIST predicate — a fatal exit carryin
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
 
-THE DESTRUCTIVE BOUNDARY HAS ITS OWN FOUR CASES and its own five mutations, paired as a negative and
-a complement on the same ref in the same repo: an out-of-namespace forgery, an in-namespace forgery, a
-COPY of a genuinely minted candidate (which pins that the proof is identity and not field equality),
-and a truncated object name — each refused with nothing written, not even the salvage, and without
-spending the sweep's deletion allowance; against a minted candidate that still deletes, so the
-refusals cannot be satisfied by a boundary that refuses everything.
+THE DESTRUCTIVE BOUNDARY HAS ITS OWN NINE CASES and its own ten mutations, every negative paired with
+a complement so no refusal can be satisfied by a boundary that refuses everything. Within one
+repository: an out-of-namespace forgery, an in-namespace forgery, a COPY of a genuinely minted
+candidate (which pins that the proof is identity, not field equality), and malformed object names at
+39, 41, 63, 65 and right-width-wrong-charset — each refused with nothing written, not even the
+salvage, and without spending the sweep's deletion allowance. Across repositories: a candidate minted
+in one repo refused against another holding the same ref at the same commit, and the same candidate
+still deleting in the repo it was minted for. Across spellings: a symlinked path to the SAME
+repository still deletes. Across object formats: real-git positives at both widths, a sha1 repo
+asserted at 40 and a sha256 repo asserted at 64 and reaped end to end.
 
 SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a test rather than a
 note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable
