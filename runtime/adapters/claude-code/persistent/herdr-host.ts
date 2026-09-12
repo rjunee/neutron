@@ -119,15 +119,42 @@ export function parseProcStatStartTime(stat: string): string | undefined {
   return startTime === undefined || startTime === '' ? undefined : startTime
 }
 
-export function readPidStartTime(pid: number): string | undefined {
+/**
+ * What the kernel says about `pid`. THREE states, not two.
+ *
+ * `gone` is POSITIVE ABSENCE — `/proc/<pid>/stat` answered ENOENT, which is proof
+ * there is no such process. `unknown` is a question that could not be asked: a
+ * permissions change, an EINTR, a namespace boundary, an unparseable line. Collapsing
+ * the two is the defect this branch has now met six times — **"could not read" is not
+ * "absent"** — and it would arrive here inside the very check added to enforce it.
+ */
+export type PidIdentity =
+  | { readonly kind: 'gone' }
+  | { readonly kind: 'running'; readonly startedAt: string }
+  | { readonly kind: 'unknown' }
+
+export function readPidIdentity(
+  pid: number,
+  /** Injected ONLY so the errno mapping below is reachable from a test. A real
+   *  unreadable `/proc` entry cannot be staged on a box where the tests can read
+   *  everything — and the mapping is the part that decides whether an unanswerable
+   *  question is allowed to confirm a death. */
+  readStat: (pid: number) => string = (p) => readFileSync(`/proc/${p}/stat`, 'utf8'),
+): PidIdentity {
+  let stat: string
   try {
-    return parseProcStatStartTime(readFileSync(`/proc/${pid}/stat`, 'utf8'))
-  } catch {
-    // ENOENT: no such process. Anything else: we cannot answer, and an unanswerable
-    // question must not be reported as "gone" — the caller treats `undefined` as
-    // "no process with this identity", which is the safe reading for both.
-    return undefined
+    stat = readStat(pid)
+  } catch (e) {
+    // ONLY ENOENT is evidence. Every other errno means the question failed, and a
+    // failed question is not a negative answer.
+    return (e as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      ? { kind: 'gone' }
+      : { kind: 'unknown' }
   }
+  const startedAt = parseProcStatStartTime(stat)
+  // The entry exists but does not parse: the process is there and we cannot identify
+  // it, which is the definition of unknown rather than gone.
+  return startedAt === undefined ? { kind: 'unknown' } : { kind: 'running', startedAt }
 }
 
 /** The `label` put on the REPL's pane, so the owner can see what it is when they
@@ -170,10 +197,10 @@ export interface HerdrHostDeps {
    *  testable without spawning real processes. Defaults to `process.kill`. */
   killPid?: (pid: number, signal: NodeJS.Signals) => void
 
-  /** The kernel start time identifying the process at `pid`, or `undefined` when there
-   *  is no such process. Defaults to {@link readPidStartTime}. Injected so the
-   *  PID-reuse case can be constructed, which no real-process test could stage. */
-  readPidStartTime?: (pid: number) => string | undefined
+  /** What the kernel says about the process at `pid` — see {@link PidIdentity}.
+   *  Defaults to {@link readPidIdentity}. Injected so PID reuse and an unreadable
+   *  `/proc` can be constructed, neither of which a real-process test could stage. */
+  readPidIdentity?: (pid: number) => PidIdentity
 
   /** How long to wait for a SIGTERM to be honoured before escalating, and again
    *  after SIGKILL before giving up. */
@@ -232,7 +259,8 @@ export class HerdrHost implements PtyHost {
         )
       }
       pid = found
-      pidStartedAt = (this.deps.readPidStartTime ?? readPidStartTime)(pid)
+      const spawnIdentity = (this.deps.readPidIdentity ?? readPidIdentity)(pid)
+      pidStartedAt = spawnIdentity.kind === 'running' ? spawnIdentity.startedAt : undefined
       if (pidStartedAt === undefined) {
         // We have a pid and no way to prove it stays the same process. Signalling it
         // later would be a guess with a stranger's life on the other end, so the
@@ -785,7 +813,7 @@ export class HerdrHost implements PtyHost {
       ((p: number, sig: NodeJS.Signals): void => {
         process.kill(p, sig)
       })
-    const startTimeOf = this.deps.readPidStartTime ?? readPidStartTime
+    const identityOf = this.deps.readPidIdentity ?? readPidIdentity
     const grace = this.deps.pidKillGraceMs ?? HERDR_PID_KILL_GRACE_MS
 
     // NO IDENTITY, NO SIGNAL. If we never captured a start time we cannot tell our
@@ -794,15 +822,28 @@ export class HerdrHost implements PtyHost {
     // loudly and does not settle.
     if (startedAt === undefined) return false
 
-    /** Our process, still running — as opposed to "some process, still running". */
-    const stillOurs = (): boolean => startTimeOf(pid) === startedAt
+    /**
+     * Three answers, and only ONE of them confirms a death:
+     *  • `ours`    — running, same start time: still there, keep escalating.
+     *  • `over`    — positively absent, or a DIFFERENT start time at the same pid.
+     *                Both are proof our child exited; the second is also the reason
+     *                not to signal, since the number now belongs to a stranger.
+     *  • `unknown` — the question failed. Proves nothing, so it confirms nothing.
+     */
+    const check = (): 'ours' | 'over' | 'unknown' => {
+      const id = identityOf(pid)
+      if (id.kind === 'unknown') return 'unknown'
+      if (id.kind === 'gone') return 'over'
+      return id.startedAt === startedAt ? 'ours' : 'over'
+    }
 
     for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
-      // GONE OR REPLACED both mean OUR process is over, and both are CONFIRMED. The
-      // replaced case is the one that matters: a different start time at the same pid
-      // is proof our child exited, and signalling it would kill a stranger that
-      // merely inherited the number.
-      if (!stillOurs()) return true
+      const before = check()
+      if (before === 'over') return true
+      // UNKNOWN MUST NOT SETTLE, exactly as when death cannot be confirmed by the
+      // ladder: we neither signal a process we cannot identify nor report an exit we
+      // cannot demonstrate.
+      if (before === 'unknown') return false
       try {
         kill(pid, signal)
       } catch {
@@ -810,11 +851,13 @@ export class HerdrHost implements PtyHost {
       }
       const deadline = Date.now() + grace
       while (Date.now() < deadline) {
-        if (!stillOurs()) return true
+        const during = check()
+        if (during === 'over') return true
+        if (during === 'unknown') return false
         await sleep(Math.min(50, grace))
       }
     }
-    return !stillOurs()
+    return check() === 'over'
   }
 
   /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */

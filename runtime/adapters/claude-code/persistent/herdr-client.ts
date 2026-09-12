@@ -290,68 +290,102 @@ export class HerdrClient implements HerdrRpc {
     if (this.closed) return
     if (chunk.length === 0) return
 
-    // ABSORB INTO THE ONE BUFFER, then drop the fragment. This is the whole fix: the
-    // caller's chunk is never stored, so the number of fragments is not a quantity
-    // this class holds and therefore not a quantity it has to bound.
-    this.append(chunk)
+    // A VIEW, never a copy — used only to scan and to decode complete frames that lie
+    // entirely inside this delivery.
+    const view = Buffer.isBuffer(chunk)
+      ? chunk
+      : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length)
+    const cap = this.maxFrameBytes
+    const pending = this.end - this.start // buffered, and newline-free by construction
 
-    // THE ORDER BELOW IS THE POINT, and it was wrong. A guard must run BEFORE the
-    // thing it guards. The size bound lived after the loop, checking only what was
-    // left UNTERMINATED — so a complete oversized frame was decoded, parsed and
-    // dispatched, and by the time the check ran the buffer was empty.
+    // ── PASS 1: VALIDATE BEFORE ALLOCATING ──────────────────────────────────────
     //
-    // Deliberate order, once per frame:
-    //   1. SIZE, on bytes, before anything reads the frame's content.
-    //   2. decode the complete line (one decode, at a known character boundary).
-    //   3. parse, then validate the envelope — necessarily after the decode.
+    // THE DEFECT THIS REPLACES. `append(chunk)` ran FIRST and grew capacity by
+    // doubling until it could hold the whole delivery, so the frame limit was enforced
+    // after the allocation it exists to prevent: with a 64-byte cap,
+    // `onBytes(Buffer.alloc(1 << 30))` attempted a ~1 GiB allocation and only then
+    // tore down. The single-buffer rewrite solved FRAGMENTATION, and one huge delivery
+    // is precisely the case fragmentation never covered — a guard that is the data
+    // structure has to include the door.
+    //
+    // This scan is O(chunk) and allocates nothing. It rejects only what is genuinely
+    // unacceptable: a multi-frame delivery of any total size is fine, because each
+    // FRAME is measured, not the delivery.
+    let scan = 0
+    let carried = pending // bytes already buffered that belong to this delivery's first frame
     for (;;) {
-      const nl = this.buf.indexOf(NEWLINE_BYTE, this.start)
-      if (nl < 0 || nl >= this.end) break
-      const frameBytes = nl - this.start
-      if (frameBytes > this.maxFrameBytes) {
-        this.teardown(
-          new Error(
-            `herdr: inbound frame of ${frameBytes} bytes exceeds the ${this.maxFrameBytes}-byte limit — ` +
-              `refusing to decode or dispatch it. Treating the transport as failed rather than ` +
-              `processing a frame this client will not accept.`,
-          ),
-        )
+      const nl = view.indexOf(NEWLINE_BYTE, scan)
+      if (nl < 0) {
+        // The tail is unterminated: it must still be able to BECOME a legal frame.
+        const trailing = carried + (view.length - scan)
+        if (trailing > cap) {
+          this.failUnterminated(trailing)
+          return
+        }
+        break
+      }
+      const frameBytes = carried + (nl - scan)
+      if (frameBytes > cap) {
+        this.failOversizedFrame(frameBytes)
         return
       }
-      const line = this.buf.toString('utf8', this.start, nl)
-      this.start = nl + 1
+      carried = 0
+      scan = nl + 1
+    }
+
+    // ── PASS 2: CONSUME ─────────────────────────────────────────────────────────
+    //
+    // Every frame is now known to be acceptable, so nothing here can allocate beyond
+    // the cap. Complete frames that lie wholly inside the delivery are decoded STRAIGHT
+    // FROM IT — only a frame spanning the buffer boundary, or a trailing remainder,
+    // ever touches `this.buf`.
+    scan = 0
+    if (pending > 0) {
+      const nl = view.indexOf(NEWLINE_BYTE, 0)
+      if (nl < 0) {
+        this.append(view, 0, view.length) // still unterminated; bounded by pass 1
+        return
+      }
+      this.append(view, 0, nl) // join across the delivery boundary
+      const line = this.buf.toString('utf8', this.start, this.end)
+      this.start = 0
+      this.end = 0
+      scan = nl + 1
+      if (line.trim() !== '') {
+        this.dispatch(line)
+        if (this.closed) return
+      }
+    }
+    for (;;) {
+      const nl = view.indexOf(NEWLINE_BYTE, scan)
+      if (nl < 0) break
+      const line = view.toString('utf8', scan, nl)
+      scan = nl + 1
       if (line.trim() === '') continue
       this.dispatch(line)
       if (this.closed) return // a frame tore the transport down
     }
-
-    // Reclaim the consumed prefix. No new allocation and no view of an old one: the
-    // remainder moves to the front of the SAME buffer, which is why a tiny leftover
-    // can never pin a large parent the way a `subarray` tail did.
+    // The leftover, already proven ≤ cap by pass 1.
+    if (scan < view.length) this.append(view, scan, view.length)
     this.compact()
-
-    // WHAT REMAINS IS UNTERMINATED, and this check belongs AFTER the loop rather than
-    // before it — a complete oversized frame is the loop's business (it has its own
-    // check, ahead of the decode), and answering it here would report "no newline"
-    // about bytes that contain one. `>` not `>=`: a frame exactly at the limit is
-    // legitimate.
-    if (this.end - this.start > this.maxFrameBytes) this.failUnterminated()
   }
 
   /** Copy `chunk` onto the end of the single buffer, growing by doubling. */
-  private append(chunk: Uint8Array): void {
-    const needed = this.end + chunk.length
+  private append(chunk: Buffer, from: number, to: number): void {
+    const length = to - from
+    if (length <= 0) return
+    const needed = this.end + length
     if (needed > this.buf.length) {
       // Compaction first: if the consumed prefix already covers the shortfall, no
       // growth is needed at all.
       if (this.start > 0) this.compact()
-      if (this.end + chunk.length > this.buf.length) {
+      if (this.end + length > this.buf.length) {
         // Amortised doubling. The ceiling is the frame cap plus one delivery, because
         // anything past the cap is torn down on the very next check — so capacity is
         // bounded by the SAME number the protocol advertises, rather than by how the
         // peer chose to slice its bytes.
         let capacity = Math.max(this.buf.length * 2, INITIAL_FRAME_BUFFER_BYTES)
-        while (capacity < this.end + chunk.length) capacity *= 2
+        while (capacity < this.end + length) capacity *= 2
         const grown = Buffer.allocUnsafe(capacity)
         this.buf.copy(grown, 0, this.start, this.end)
         this.end -= this.start
@@ -359,8 +393,8 @@ export class HerdrClient implements HerdrRpc {
         this.buf = grown
       }
     }
-    this.buf.set(chunk, this.end)
-    this.end += chunk.length
+    chunk.copy(this.buf, this.end, from, to)
+    this.end += length
   }
 
   /** Slide the unconsumed remainder to offset 0. */
@@ -392,13 +426,26 @@ export class HerdrClient implements HerdrRpc {
     }
   }
 
-  /** The unterminated-frame bound, shared by both paths that can reach it. */
-  private failUnterminated(): void {
+  /** The unterminated-frame bound. Reported with the size that would have been held,
+   *  because the bytes are deliberately NOT buffered before this fires. */
+  private failUnterminated(bytes: number): void {
     this.teardown(
       new Error(
         `herdr: inbound frame exceeded ${this.maxFrameBytes} bytes with no newline ` +
-          `(${this.end - this.start} buffered) — the peer is not speaking this framing. Treating the ` +
+          `(${bytes} offered) — the peer is not speaking this framing. Treating the ` +
           `transport as failed rather than buffering until exhaustion.`,
+      ),
+    )
+  }
+
+  /** A COMPLETE frame larger than the cap — refused before it is decoded, dispatched,
+   *  or copied anywhere. */
+  private failOversizedFrame(bytes: number): void {
+    this.teardown(
+      new Error(
+        `herdr: inbound frame of ${bytes} bytes exceeds the ${this.maxFrameBytes}-byte limit — ` +
+          `refusing to decode or dispatch it. Treating the transport as failed rather than ` +
+          `processing a frame this client will not accept.`,
       ),
     )
   }

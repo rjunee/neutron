@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { HerdrHost, parseProcStatStartTime, readPidStartTime } from '../herdr-host.ts'
+import { HerdrHost, parseProcStatStartTime, readPidIdentity } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
@@ -266,7 +266,8 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
         signals.push({ pid, signal })
         if (signal === 'SIGTERM') startTime = undefined // the child honours it and exits
       },
-      readPidStartTime: () => startTime,
+      readPidIdentity: () =>
+        startTime === undefined ? { kind: 'gone' } : { kind: 'running', startedAt: startTime },
     })
     const child = await host.spawn(['claude'], {
       cwd: '/tmp',
@@ -309,7 +310,7 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
       killPid: (_pid, signal) => void signals.push(signal),
       // Our child started at A; by the time the transport dies the number belongs to a
       // DIFFERENT, very much alive process.
-      readPidStartTime: () => (calls++ === 0 ? 'start-A' : 'start-B'),
+      readPidIdentity: () => ({ kind: 'running', startedAt: calls++ === 0 ? 'start-A' : 'start-B' }),
     })
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
     child.beginOutput?.()
@@ -325,21 +326,145 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     expect(child.hasExited()).toBe(true)
   })
 
+  it('an UNREADABLE /proc after a good capture settles nothing — could-not-read is not absent', async () => {
+    // THE DEFECT THIS REPLACES, and it arrived INSIDE the check added to enforce the
+    // rule. The probe mapped every filesystem error to `undefined`, and `undefined`
+    // compared unequal to the captured start time — so a permissions change, an EINTR
+    // or a namespace boundary read as "a different process holds this pid", which the
+    // code treats as PROOF our child exited. It settled the child, signalled nothing,
+    // and the process may well have been alive.
+    //
+    // A different start time is positive proof. An unreadable entry proves nothing.
+    const server = new FakeHerdrServer({ paneId: 'w9:pUnreadable' })
+    server.shellPid = 808080
+    const signals: string[] = []
+    let calls = 0
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 30,
+      killPid: (_pid, signal) => void signals.push(signal),
+      // Readable at spawn, unreadable afterwards — EACCES, not ENOENT.
+      readPidIdentity: () =>
+        calls++ === 0 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'unknown' },
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await Bun.sleep(80)
+
+    // Nothing signalled — we cannot identify what we would be signalling.
+    expect(signals).toEqual([])
+    // AND NOT SETTLED. This is the half that would have leaked: settling authorises a
+    // replacement against a process whose state we do not know.
+    expect(child.hasExited()).toBe(false)
+    expect(child.exitCause?.()).toBeUndefined()
+  })
+
+  it('CONTROL — a positively ABSENT process does confirm death', async () => {
+    // Without this, "unknown does not settle" is satisfied by never settling, which
+    // would re-break the transport-loss requirement from the other side. ENOENT is the
+    // one reading that IS evidence.
+    const server = new FakeHerdrServer({ paneId: 'w9:pGoneForReal' })
+    server.shellPid = 909090
+    const signals: string[] = []
+    let calls = 0
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 30,
+      killPid: (_pid, signal) => void signals.push(signal),
+      readPidIdentity: () =>
+        calls++ === 0 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'gone' },
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await child.exited
+    expect(signals).toEqual([]) // already gone: nothing to signal
+    expect(child.exitCause?.()).toBe('transport-lost')
+    expect(child.hasExited()).toBe(true)
+  })
+
+  it('ONLY ENOENT is absence — every other errno is unknown', () => {
+    // The errno mapping is the part that decides whether an unanswerable question may
+    // confirm a death, and injecting the probe everywhere else left it unexercised.
+    const err = (code: string): (() => never) => {
+      return () => {
+        const e = new Error(code) as NodeJS.ErrnoException
+        e.code = code
+        throw e
+      }
+    }
+    // Positive absence.
+    expect(readPidIdentity(1, err('ENOENT'))).toEqual({ kind: 'gone' })
+    // Questions that FAILED — a permissions change, an interrupted read, a namespace
+    // boundary. None of them is evidence the process is gone.
+    expect(readPidIdentity(1, err('EACCES'))).toEqual({ kind: 'unknown' })
+    expect(readPidIdentity(1, err('EPERM'))).toEqual({ kind: 'unknown' })
+    expect(readPidIdentity(1, err('EINTR'))).toEqual({ kind: 'unknown' })
+    expect(readPidIdentity(1, err('EIO'))).toEqual({ kind: 'unknown' })
+    // An entry that EXISTS and does not parse: the process is there and we cannot
+    // identify it, which is unknown rather than gone.
+    expect(readPidIdentity(1, () => 'nonsense with no paren')).toEqual({ kind: 'unknown' })
+    expect(readPidIdentity(1, () => '4242 (bun) S 1')).toEqual({ kind: 'unknown' })
+  })
+
+  it('identity going UNKNOWN mid-ladder stops it — a signal sent is not a death observed', async () => {
+    // The grace window has its own check, and it needed its own case: an identity that
+    // is ours when the ladder starts and unreadable while we wait for the signal to be
+    // honoured. Confirming there would report a death on the strength of having sent a
+    // signal, which is the "settlement is not confirmation" row all over again.
+    const server = new FakeHerdrServer({ paneId: 'w9:pMidLadder' })
+    server.shellPid = 111222
+    const signals: string[] = []
+    let calls = 0
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+      pidKillGraceMs: 60,
+      killPid: (_pid, signal) => void signals.push(signal),
+      // Ours at spawn and at the ladder's first check, then unreadable.
+      readPidIdentity: () =>
+        calls++ < 2 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'unknown' },
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await until(() => signals.length >= 1, 'SIGTERM sent')
+    await Bun.sleep(120)
+
+    // It signalled — identity was still ours at that moment — and then STOPPED rather
+    // than escalating blindly or claiming a death it could no longer observe.
+    expect(signals).toEqual(['SIGTERM'])
+    expect(child.hasExited()).toBe(false)
+  })
+
   it('the identity probe answers gone, ours, and not-ours-but-real', async () => {
     // The injected probe lets tests choose an answer, so the REAL one needs its own
     // case. Field 22 is read AFTER the last `)` because `comm` may contain spaces and
     // parentheses — parsing by absolute field index silently returns the wrong number
     // for a process whose name contains one.
-    expect(readPidStartTime(2_147_480_000)).toBeUndefined() // no such process
-    const mine = readPidStartTime(process.pid)
-    expect(mine).toBeDefined()
-    expect(mine).toMatch(/^\d+$/)
+    // POSITIVE ABSENCE, not merely "no answer": ENOENT is proof.
+    expect(readPidIdentity(2_147_480_000)).toEqual({ kind: 'gone' })
+    const mine = readPidIdentity(process.pid)
+    expect(mine.kind).toBe('running')
+    expect(mine.kind === 'running' && mine.startedAt).toMatch(/^\d+$/)
     // pid 1 is not ours and is readable anyway: identity needs no permission to
     // signal, which is exactly why it sees what a `signal 0` probe cannot.
-    expect(readPidStartTime(1)).toMatch(/^\d+$/)
+    expect(readPidIdentity(1).kind).toBe('running')
     // STABLE across calls — an identity that drifted would make every comparison
     // built on it meaningless.
-    expect(readPidStartTime(process.pid)).toBe(mine)
+    expect(readPidIdentity(process.pid)).toEqual(mine)
   })
 
   it('the stat parser survives a comm containing spaces and parentheses', () => {
@@ -376,7 +501,7 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
       workspaceId: 'w9',
       pidKillGraceMs: 30,
       killPid: (_pid, signal) => void signals.push(signal),
-      readPidStartTime: () => undefined, // /proc unavailable
+      readPidIdentity: () => ({ kind: 'unknown' }), // /proc unreadable at spawn
     })
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
     child.beginOutput?.()
@@ -410,7 +535,7 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
         workspaceId: 'w9',
         pidKillGraceMs: 30,
         killPid: (_pid, signal) => void signals.push(signal),
-        readPidStartTime: () => 'start-A', // same process, survives everything
+        readPidIdentity: () => ({ kind: 'running', startedAt: 'start-A' }), // survives all
       })
       child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
       child.beginOutput?.()

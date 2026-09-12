@@ -799,6 +799,82 @@ describe('herdr client framing', () => {
     expect(client.isClosed()).toBe(false)
   })
 
+  it('ONE huge delivery is refused BEFORE it is allocated, not after', async () => {
+    // THE CASE FRAGMENTATION NEVER COVERED. The single-buffer rewrite made absorption
+    // linear, and then enforced the frame limit AFTER `append` had already doubled
+    // capacity to hold the whole delivery — so the guard ran after the allocation it
+    // exists to prevent. With a 64-byte cap, a 1 GiB chunk attempted a ~1 GiB
+    // allocation and only then tore down.
+    //
+    // The other cases here are one-byte-over and fragmented accumulation; neither is
+    // one huge chunk, which is why this needed its own.
+    const client = new HerdrClient(60_000, 64) // 64-byte cap
+    let ends = 0
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => void (ends += 1) })
+    const pending = client.call('pane.read', {}).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    )
+    // 16 MiB in ONE delivery against a 64-byte cap. Kept well under a gigabyte so the
+    // test cannot itself become the resource problem it is describing.
+    client.onBytes(Buffer.alloc(16 * 1024 * 1024, 0x78))
+
+    expect(client.isClosed()).toBe(true)
+    expect(ends).toBe(1)
+    // NOTHING was retained: the delivery was rejected before a byte was copied.
+    expect(client.retainedBytes()).toBe(0)
+    expect(client.bufferedBytes()).toBe(0)
+    expect((await pending)!.message).toMatch(/no newline/)
+  })
+
+  it('a huge delivery of MANY VALID frames is accepted — the cap measures frames, not deliveries', async () => {
+    // The control the rejection must not swallow. A delivery may legitimately be far
+    // larger than the frame cap as long as every FRAME inside it fits; rejecting on
+    // total delivery size would break ordinary batched traffic.
+    const client = new HerdrClient(60_000, 4096)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const seen: Record<string, unknown>[] = []
+    const sub = client.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
+      seen.push(d)
+    })
+    client.onBytes(Buffer.from('{"id":"n1","result":{"type":"ok"}}\n'))
+    await sub
+
+    // 20,000 small frames in ONE delivery — ~700 KB, far past the 4 KiB frame cap.
+    const many = Array.from(
+      { length: 20_000 },
+      (_, i) => `{"event":"pane_exited","data":{"pane_id":"w1:p${i}"}}`,
+    ).join('\n')
+    client.onBytes(Buffer.from(`${many}\n`))
+
+    expect(client.isClosed()).toBe(false) // not mistaken for an oversized frame
+    expect(seen.length).toBe(20_000)
+    expect(seen[0]).toEqual({ pane_id: 'w1:p0' })
+    expect(seen.at(-1)).toEqual({ pane_id: 'w1:p19999' })
+    // And none of it was retained: every frame was complete.
+    expect(client.bufferedBytes()).toBe(0)
+  })
+
+  it('a frame SPANNING deliveries is still measured against the cap before allocating', async () => {
+    // The boundary case between the two above: bytes already buffered count toward the
+    // first frame of the next delivery. Ignoring the carry would let a peer exceed the
+    // cap by splitting one oversized frame across two deliveries.
+    const client = new HerdrClient(60_000, 1000)
+    let ends = 0
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => void (ends += 1) })
+    const pending = client.call('pane.read', {}).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    )
+    client.onBytes(Buffer.from('a'.repeat(900))) // under the cap on its own
+    expect(client.isClosed()).toBe(false)
+    // 900 carried + 200 more, then a newline: a 1100-byte FRAME against a 1000 cap.
+    client.onBytes(Buffer.from(`${'b'.repeat(200)}\n`))
+    expect(client.isClosed()).toBe(true)
+    expect(ends).toBe(1)
+    expect((await pending)!.message).toMatch(/1100 bytes exceeds/)
+  })
+
   it('a fragmented UNTERMINATED frame still trips the cap, at the same boundary', async () => {
     // The bound must survive the rewrite: enforcing it on a running total rather than
     // on a concatenated buffer must not move where it fires. Without this pair, the

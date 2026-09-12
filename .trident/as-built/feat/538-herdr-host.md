@@ -1287,6 +1287,62 @@ A test whose fixture decides the outcome is worse than no test — it certifies 
 opposite of the requirement — and one whose comment *names* the false-positive mechanism
 makes keeping it the more expensive choice.
 
+### Each fix created a new obligation, and the new obligation's failure path inherited the old defect
+
+Review r17, and this is the pattern worth naming above either specific — both defects
+sat *inside* the two fixes from the previous round.
+
+**The frame limit was enforced after the allocation it exists to prevent.** `onBytes`
+called `append` first, and `append` doubles capacity until it can hold the whole
+delivery — so with a 64-byte cap, one 1 GiB chunk attempted a ~1 GiB allocation and only
+then tore down. The single-buffer rewrite genuinely solved fragmentation, and **a single
+oversized delivery is exactly the case fragmentation never covered**: the earlier tests
+were one-byte-over and fragmented accumulation, neither of which is one huge chunk.
+"The guard is the data structure" was the right move and it has to include the door.
+
+Validation now runs as a scan of the incoming chunk before a byte is copied: O(chunk),
+allocating nothing, measuring each FRAME rather than the delivery — so a 700 KB batch of
+20,000 small frames is still accepted while a 16 MiB single frame is refused with an
+empty buffer. Complete frames lying wholly inside a delivery are now decoded straight
+from it; only a frame spanning the boundary, or a trailing remainder, ever touches the
+buffer at all.
+
+**And a failed identity read was treated as confirmed death** — inside the very check
+added to enforce "could not read is not absent". `readPidStartTime` mapped *every*
+filesystem error to `undefined`, and `undefined` compared unequal to the captured start
+time, so an EACCES, an EINTR or a namespace boundary read as "a different process holds
+this pid" — which the code treats as proof our child exited. It settled the child, sent
+no signal, and the process may have been alive.
+
+The probe now has **three** states, and only one of them confirms:
+
+| answer | meaning | may confirm death? |
+|---|---|---|
+| `running`, same start time | still ours | no — keep escalating |
+| `running`, different start time | PID reused: our child is over | **yes** |
+| `gone` (ENOENT) | positive absence | **yes** |
+| `unknown` (any other errno, or unparseable) | the question failed | **no** |
+
+A different start time is positive proof. An unreadable entry proves nothing. Unknown
+must not settle — exactly as already decided for the case where death cannot be
+confirmed, now applied to the case where it cannot be *asked*.
+
+Three survivors, all the same shape as M102 and all resolved rather than excused: the
+probe is injected everywhere it is used, so its own error mapping was never exercised.
+It now takes an injectable reader purely so that mapping is reachable, and is tested
+against ENOENT, EACCES, EPERM, EINTR, EIO and two unparseable lines. The third, M116,
+was the grace-window check having no case of its own — an identity that is ours when the
+ladder starts and unreadable while we wait. Confirming there would report a death on the
+strength of having *sent* a signal, which is the settlement-is-not-confirmation row
+again, one loop further in.
+
+### Two sentences that had to move with the code
+
+The spec item and this record both claimed buffering was bounded and settlement required
+confirmed death. Both were inaccurate while the defects stood, so the claims moved with
+the fixes rather than being left as aspirations — the same discipline as deleting a
+criterion that contradicted its sibling rather than reconciling the wording.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1419,6 +1475,16 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M108 | never shrink — keep the buffer at its high-water mark | RED 1 |
 | M108b | PAIR: shrink always to the initial capacity (truncation) | SURVIVED until a large remainder existed → RED 1 |
 | M109 | linear growth instead of doubling | RED 1 |
+| M110 | allocate first, validate after (the reported defect) | RED 17 |
+| M110b | PAIR: reject on TOTAL delivery size instead of per frame | RED 3 |
+| M111 | ignore the carried prefix when measuring the first frame | RED 3 |
+| M112 | unterminated tail not measured before buffering | RED 4 |
+| M113 | unknown identity treated as confirmed death (the reported defect) | RED 1 |
+| M113b | PAIR: positively-absent treated as unknown (never confirms) | RED 2 |
+| M114 | every errno read as gone | SURVIVED (probe injected everywhere) → reader injectable → RED 1 |
+| M114b | PAIR: ENOENT read as unknown | RED 2 |
+| M115 | an unparseable stat line read as gone | SURVIVED → RED 1 with the mapping test |
+| M116 | unknown DURING the grace loop still confirms | SURVIVED (no case for that window) → RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

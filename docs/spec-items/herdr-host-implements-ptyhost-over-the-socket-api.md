@@ -270,13 +270,28 @@ not-new. That is accepted and recorded here rather than hidden.
       protected by two guards (`beginOutput` clears the timer; the timer checks
       `released`), so only a mutation disabling BOTH shows it discriminates.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **The frame limit is enforced BEFORE the allocation it exists to prevent.** A
+      single oversized delivery must be refused without copying a byte — validation is a
+      scan of the incoming chunk, measuring each FRAME (including bytes already buffered
+      that belong to its first one), never the delivery's total size. Needs three cases,
+      because each is satisfied by an implementation that fails the others: one huge
+      chunk against a small cap refused with an EMPTY buffer; a delivery far larger than
+      the cap made of many valid frames ACCEPTED; and an oversized frame SPLIT across two
+      deliveries still refused. Fragmented accumulation and one-byte-over cannot see any
+      of this.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **A PID is verified by IDENTITY before it is signalled.** The kernel reuses PIDs,
       so "is pid N alive?" is the wrong question and a liveness probe answers YES about a
       stranger that inherited the number. Capture `/proc/<pid>/stat` field 22 at spawn
       and require it to match before every signal; a DIFFERENT start time is positive
       proof our child exited, so it confirms death and signals nothing. No captured
-      identity means no signal and no settle. The stat parser must be tested
-      independently against a `comm` containing spaces and parentheses — `comm` is the
+      identity means no signal and no settle. The probe has THREE answers, not two:
+      only ENOENT is absence, and any other errno — or an unparseable entry — is
+      UNKNOWN, which may never confirm a death, including when it appears partway
+      through the kill ladder's grace window. The errno mapping needs its own case with
+      an injectable reader, because a probe injected at every call site is never itself
+      exercised. The stat parser must be tested independently against a `comm`
+      containing spaces and parentheses — `comm` is the
       executable name and is unescaped, so absolute field indexing reads the wrong field
       and passes on any host whose process name happens to be one word.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
