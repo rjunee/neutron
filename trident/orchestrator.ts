@@ -92,8 +92,10 @@ import {
   type MutationGateOutcome,
 } from './mutation-prover.ts'
 import {
+  ESCALATION_KINDS,
   parseCheckpointFindings,
   parseInnerResult,
+  type EscalationKind,
   type FireOutcome,
   type InnerResult,
   type TridentWorkflowFirer,
@@ -1040,23 +1042,53 @@ export function classifyInnerFailure(
  * changes, because the verdict is the part that was untrue.
  */
 export function recordedTerminalVerdict(
-  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint'>,
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint' | 'escalation'>,
   rowFindings: string | null,
 ): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
-  // THE ESCALATION KINDS ARE REVIEWED VERDICTS TOO. A run only reaches one from a round a
-  // full panel judged (the escalation ledger records nothing for an infra-only or
-  // advisory-only round), and it carries that panel's findings — so recording
-  // REVIEW_NOT_RUN over it would assert the one thing that is false about this stop: that
-  // nobody read the code. The rest of the gate is unchanged, and still does the work —
-  // Argus provenance plus findings on the row.
+  if (result.verdict !== 'REQUEST_CHANGES') return 'REVIEW_NOT_RUN'
+  // ARGUS PROVENANCE IS REQUIRED OF EVERY KIND, and it is the condition the paragraphs
+  // above are about. Nothing below weakens it.
+  if (!hasArgusProvenance(result.checkpoint)) return 'REVIEW_NOT_RUN'
+
+  // AN ESCALATION IS A REVIEWED VERDICT, AND ITS FINDINGS LIST MAY BE EMPTY. That second
+  // half was missing, and it discarded the CLEANEST possible escalation: a panel that
+  // concludes the PLAN is wrong often has no individual code finding to write, because the
+  // code is a faithful implementation of a bad plan. `VERDICT_SCHEMA` has no `minItems` on
+  // `findings`, so `{verdict:'REQUEST_CHANGES', block_kind:'design-gap', findings:[]}` is
+  // schema-valid — and it was being recorded as REVIEW_NOT_RUN, which is how a resume
+  // re-Forges a whole round against the same wrong plan with no finding to answer. That is
+  // the precise behaviour this card exists to stop, reproduced by the card's own remedy.
+  //
+  // WHY DROPPING THE FINDINGS CHECK IS SAFE HERE, AND ONLY HERE. The argument above — that
+  // findings do not prove a reviewer ran — is an argument about FINDINGS: the suite gate
+  // writes its own `blocker` on a build that never reached a reviewer, and that build
+  // carries `block_kind: 'code'`. It does not transfer to an escalation, because the suite
+  // gate cannot produce one. An escalation requires `kind` AND `whatIsMissing`, only a
+  // reviewer's own reply can carry it (`synthesisRaw.escalate`, never the merged findings),
+  // and `hasArgusProvenance` is still required above. So for these kinds the declaration
+  // IS the proof, and findings are evidence of a different question.
+  //
+  // NOT "≥1 finding whenever an escalation is present", which was the other available fix:
+  // that would make a reviewer invent a code finding to be allowed to say the plan is
+  // wrong, and a schema that forces a model to fabricate an artifact it does not have is
+  // worse than the bug.
+  //
+  // VALIDATED STRUCTURALLY, not by the kind alone: `escalationKindAgrees` is the SAME
+  // function the reader and the writer of the block already share, so a row whose routing
+  // kind and payload disagree is a half-written escalation here too, and falls through to
+  // the findings requirement below rather than being taken on the strength of its label.
   if (
-    result.verdict === 'REQUEST_CHANGES' &&
-    (result.block_kind === 'code' ||
-      result.block_kind === 'advisory-only' ||
-      result.block_kind === 'design-gap' ||
-      result.block_kind === 'missing-dependency' ||
-      result.block_kind === 'not-converging') &&
-    hasArgusProvenance(result.checkpoint) &&
+    ESCALATION_KINDS.includes(result.block_kind as EscalationKind) &&
+    escalationKindAgrees(result)
+  ) {
+    return 'REQUEST_CHANGES'
+  }
+
+  // `code` and `advisory-only` KEEP the findings requirement, unchanged. Nothing above
+  // touches them, and the measurement that motivated it (18 of 160 terminal rows carrying
+  // an Argus checkpoint) is about exactly these.
+  if (
+    (result.block_kind === 'code' || result.block_kind === 'advisory-only') &&
     parseCheckpointFindings(rowFindings).length > 0
   ) {
     return 'REQUEST_CHANGES'

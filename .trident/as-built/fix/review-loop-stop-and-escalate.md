@@ -484,6 +484,43 @@ type guard, so widening the set is one edit that necessarily moves both, and
 against the CHECK constraint in the committed schema snapshot — the one statement of the
 set a database will actually enforce.
 
+### THE CLEANEST ESCALATION WAS THE ONE THE RECORDING GATE THREW AWAY
+
+`recordedTerminalVerdict` decides whether a terminal row is recorded as a real rejection or
+as `REVIEW_NOT_RUN`. The three escalation kinds were added to its block-kind list — and the
+conjunction they were added to was left unexamined. It still required
+`parseCheckpointFindings(rowFindings).length > 0`, and `VERDICT_SCHEMA` has no `minItems`
+on `findings`, so `{verdict:'REQUEST_CHANGES', block_kind:'design-gap', findings:[]}` is
+schema-valid and was recorded as never-reviewed.
+
+That is not an exotic input. It is the NATURAL shape of a design-gap escalation: a panel
+that concludes the plan is wrong often has no individual code finding to write, because the
+code is a faithful implementation of a bad plan. And the consequence is the one this card
+exists to remove — a row recorded `REVIEW_NOT_RUN` gets re-dispatched into another Forge
+round against the same wrong plan with no finding to answer. The remedy reopened the loop on
+its own headline case.
+
+WHY THE FINDINGS CHECK COULD BE DROPPED FOR THESE KINDS AND ONLY THESE. The argument that
+justifies it elsewhere — findings do not prove a reviewer ran, because the suite gate writes
+its own `blocker` on a build that never reached one, carrying `block_kind: 'code'` — is an
+argument about FINDINGS. It does not transfer to an escalation, because the suite gate
+cannot produce one: `escalate` requires `kind` and `whatIsMissing`, only the reviewer's own
+reply can carry it, and Argus provenance is still required of every kind. So the declaration
+IS the proof, and it is validated STRUCTURALLY through `escalationKindAgrees` — the same
+function the block's reader and writer already share — so a half-written escalation falls
+back to the findings requirement instead of being believed on the strength of its label.
+
+THE OTHER AVAILABLE FIX WAS REFUSED: requiring at least one finding whenever `escalate` is
+present would make a reviewer invent a code finding in order to be allowed to say the plan
+is wrong. A schema that forces a model to fabricate an artifact it does not have is worse
+than the bug it closes.
+
+THE SHAPE, which is the same one as the summary sentence two sections up: a condition
+written for one case and inherited by a case it was never reasoned about. Extending the
+block-kind list was the visible edit; the conjunction it sits in was the one that needed
+re-reading. Adding a value to a disjunction silently re-uses every other clause as a claim
+about the new value too.
+
 ### A SOURCE-TEXT ASSERTION BREAKS WHEN THE BEHAVIOUR IS CORRECTLY IMPROVED
 
 (Instances two, three and four arrived while finishing this branch, and one of them had

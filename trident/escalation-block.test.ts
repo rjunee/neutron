@@ -258,15 +258,64 @@ describe('the OWNER sees two different words', () => {
     expect(innerTerminalFailureReason(whole, wholeResult)).toContain('BLOCKED')
   })
 
-  test('an escalation is a REVIEWED verdict — never REVIEW_NOT_RUN', () => {
-    // A run only reaches an escalation from a round a full panel judged, and it carries
-    // that panel's findings. Recording REVIEW_NOT_RUN would assert the one thing that is
-    // false about this stop: that nobody read the code.
-    const findings = JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', key: 'a:b:c' }])
+  test('HEADLINE: an escalation is a REVIEWED verdict — with findings OR WITHOUT', () => {
+    // A run only reaches an escalation from a round a full panel judged. Recording
+    // REVIEW_NOT_RUN would assert the one thing that is false about this stop: that
+    // nobody read the code.
+    //
+    // THE EMPTY LIST IS THE CASE THAT WAS BROKEN, and it is the CLEANEST escalation
+    // rather than an exotic one: a panel that concludes the PLAN is wrong often has no
+    // individual code finding to write, because the code is a faithful implementation of
+    // a bad plan. `VERDICT_SCHEMA` has no `minItems` on `findings`, so that row is
+    // schema-valid — and it was recorded as REVIEW_NOT_RUN, which is how a resume
+    // re-Forges a whole round against the same wrong plan with no finding to answer. The
+    // card's own headline case, reopened by the card's own remedy.
+    const withFindings = JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', key: 'a:b:c' }])
     for (const kind of ['design-gap', 'missing-dependency', 'not-converging'] as const) {
       const result = parseInnerResult(escalatingResult({ blockKind: kind, escalation: { kind, whatIsMissing: 'x', triggers: [], evidence: '', round: 2 } }))!
-      expect(recordedTerminalVerdict(result, findings)).toBe('REQUEST_CHANGES')
+      expect(recordedTerminalVerdict(result, withFindings)).toBe('REQUEST_CHANGES')
+      // …and each of the three with NO findings at all, in every empty spelling a row
+      // can actually carry.
+      for (const empty of [null, '[]', '']) {
+        expect(recordedTerminalVerdict(result, empty)).toBe('REQUEST_CHANGES')
+      }
     }
+  })
+
+  test('CONTROL: `code` with NO findings is still REVIEW_NOT_RUN', () => {
+    // Without this, "escalations are exempt from the findings requirement" is satisfied
+    // by an implementation that exempts EVERYTHING — which would undo the measurement
+    // that motivated the gate (of 160 terminal REQUEST_CHANGES rows only 18 carried an
+    // Argus checkpoint, and the suite gate writes its own blocker on a build that never
+    // reached a reviewer).
+    const codeResult = parseInnerResult(
+      JSON.stringify({ ok: true, prNumber: 12, branch: 'trident/x', verdict: 'REQUEST_CHANGES', round: 2, checkpoint: 'argus-request-changes', blockKind: 'code' }),
+    )!
+    expect(recordedTerminalVerdict(codeResult, null)).toBe('REVIEW_NOT_RUN')
+    expect(recordedTerminalVerdict(codeResult, '[]')).toBe('REVIEW_NOT_RUN')
+    // …and the same row WITH findings is a rejection, so the control is not vacuous.
+    expect(
+      recordedTerminalVerdict(codeResult, JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', key: 'a:b:c' }])),
+    ).toBe('REQUEST_CHANGES')
+  })
+
+  test('a HALF-WRITTEN escalation is not taken on the strength of its label', () => {
+    // The exemption is granted on the STRUCTURALLY VALID escalation (`escalationKindAgrees`,
+    // the same function the reader and the writer of the block already share), not on the
+    // block kind alone. A row whose routing kind and payload disagree falls back to the
+    // findings requirement rather than being believed.
+    const half = parseInnerResult(escalatingResult({ blockKind: 'design-gap' }))!
+    expect(escalationKindAgrees(half)).toBe(false)
+    expect(recordedTerminalVerdict(half, null)).toBe('REVIEW_NOT_RUN')
+  })
+
+  test('ARGUS PROVENANCE is still required of an escalation', () => {
+    // Nothing about the findings exemption weakens the condition the gate was built for:
+    // a row that never reached a reviewer is not a rejection, whatever it claims.
+    const noArgus = parseInnerResult(
+      escalatingResult({ checkpoint: 'forge-done', escalation: { kind: 'not-converging', whatIsMissing: 'x', triggers: [], evidence: '', round: 2 } }),
+    )!
+    expect(recordedTerminalVerdict(noArgus, null)).toBe('REVIEW_NOT_RUN')
   })
 })
 
