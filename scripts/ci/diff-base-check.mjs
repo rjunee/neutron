@@ -162,7 +162,8 @@
 // exists". The structural half of the change is what licenses the stronger claim.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * The git-range surface. `trident/` owns every range that decides what a reviewer
@@ -175,14 +176,27 @@ export const SCAN_ROOTS = ['trident', 'tools', 'scripts']
 const EXTENSIONS = ['.ts', '.mts', '.mjs', '.js', '.sh']
 
 /**
- * THIS FILE, excluded from its own scan. Its controls ARE the offending shapes —
- * twelve of them, deliberately, because that is what makes the matcher provable — so
- * scanning itself would be a permanent self-report. The same exemption the console gate
- * gives the logger package whose sink IS `console.*`. The controls still run on every
- * invocation of the gate, so excluding this file from the SCAN does not leave its own
- * matcher unchecked.
+ * THIS FILE — by ABSOLUTE PATH, not by basename.
+ *
+ * It is excluded from its own scan because its controls ARE the offending shapes, a dozen
+ * of them, deliberately: that is what makes the matcher provable, and scanning itself
+ * would be a permanent self-report. The same exemption the console gate gives the logger
+ * package whose sink IS `console.*`. The controls still run on every invocation, so
+ * excluding this file from the SCAN does not leave its own matcher unchecked.
+ *
+ * THE COMPARISON USED TO BE `entry === 'diff-base-check.mjs'`, A BASENAME, and that is a
+ * hole a gate cannot afford: an offender placed at `trident/diff-base-check.mjs` or
+ * `tools/diff-base-check.mjs` was never scanned and the gate reported CLEAN. Measured.
+ *
+ * The test that was supposed to pin this exclusion could not catch it, and the reason is
+ * worth keeping: it planted a DIFFERENTLY NAMED sibling and asserted that file was
+ * caught. That proves other names are scanned; it says nothing about a file with the SAME
+ * basename elsewhere, which is the actual property and was the actual bug. The test had
+ * been written from the implementation's premise — "the exclusion is by basename" — so it
+ * could not falsify that premise. A test that shares the code's mental model tests the
+ * model, not the code.
  */
-const SELF = 'diff-base-check.mjs'
+const SELF_PATH = resolve(fileURLToPath(import.meta.url))
 
 /** Characters of reason an exemption must carry. A bare marker is not an argument. */
 export const MIN_JUSTIFICATION_CHARS = 20
@@ -512,7 +526,7 @@ function walk(dir, out) {
     }
     if (!EXTENSIONS.some((e) => entry.endsWith(e))) continue
     if (/\.test\.(ts|mts|mjs|js)$/.test(entry)) continue
-    if (entry === SELF) continue
+    if (resolve(abs) === SELF_PATH) continue
     out.push(abs)
   }
   return out

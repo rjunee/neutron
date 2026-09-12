@@ -399,21 +399,63 @@ describe('the gate as CI runs it', () => {
     expect(SCAN_ROOTS).toEqual(['trident', 'tools', 'scripts'])
   })
 
-  test('the gate excludes ITSELF, and only itself, from the scan', () => {
-    // Its controls are the offending shapes by design, so scanning itself would be a
-    // permanent self-report. The exclusion is by BASENAME, so it cannot silently widen
-    // to a sibling: a planted offender in the same directory is still caught.
+  /**
+   * THE SELF-EXCLUSION, AND THE TEST THAT COULD NOT CATCH ITS BUG.
+   *
+   * The previous version of this test planted a DIFFERENTLY NAMED sibling and asserted it
+   * was caught, under a comment stating "the exclusion is by BASENAME, so it cannot
+   * silently widen to a sibling". Both the code and the test treated by-basename as the
+   * DESIGN. It was the defect: an offender at `trident/diff-base-check.mjs` was skipped
+   * and the gate reported clean — measured before the fix.
+   *
+   * A differently named file can never test that property. The exclusion is a claim about
+   * ONE PATH, so the falsifying input is the SAME BASENAME SOMEWHERE ELSE, which is what
+   * the first case below plants. A test written from the implementation's premise tests
+   * the premise.
+   */
+  const planted = (relDir: string, name: string, body: string): { path: string; clean: () => void } => {
     const fs = require('node:fs') as typeof import('node:fs')
-    const sibling = join(import.meta.dir, 'diff-base-check-mutation-sibling.mjs')
-    fs.writeFileSync(sibling, 'const cmd = `git diff ${baseBranch}..${headOid}`\n')
+    const dir = join(ROOT, relDir)
+    fs.mkdirSync(dir, { recursive: true })
+    const path = join(dir, name)
+    fs.writeFileSync(path, body)
+    return { path, clean: () => fs.rmSync(path, { force: true }) }
+  }
+  const OFFENDER = 'const cmd = `git diff ${baseBranch}..${headOid}`\n'
+
+  test('a file with the gate OWN BASENAME, in another directory, IS scanned and caught', () => {
+    // The case the old test could not express, and the bug it therefore missed. Both scan
+    // roots, because `trident/` and `tools/` are separate walks and one could be fixed
+    // while the other is not.
+    for (const relDir of ['trident', 'tools']) {
+      const f = planted(relDir, 'diff-base-check.mjs', OFFENDER)
+      try {
+        const res = spawnSync('bun', [GATE], { cwd: ROOT, encoding: 'utf8' })
+        expect({ relDir, status: res.status }).toEqual({ relDir, status: 1 })
+        expect(res.stderr).toContain(`${relDir}/diff-base-check.mjs:1`)
+      } finally {
+        f.clean()
+      }
+    }
+  })
+
+  test('…while the gate itself stays excluded, and a differently named sibling is caught', () => {
+    // The two halves of the original claim, kept: the exclusion still works for the one
+    // path it is for, and it has not widened to any other name in the same directory.
+    const f = planted('scripts/ci', 'diff-base-check-mutation-sibling.mjs', OFFENDER)
     try {
       const res = spawnSync('bun', [GATE], { cwd: ROOT, encoding: 'utf8' })
       expect(res.status).toBe(1)
       expect(res.stderr).toContain('diff-base-check-mutation-sibling.mjs:1')
-      // …and the gate's own file is NOT in the report, which is what the exclusion buys.
-      expect(res.stderr).not.toContain('ci/diff-base-check.mjs:')
+      // The gate's own file is NOT in the report — what the exclusion buys.
+      expect(res.stderr).not.toContain('scripts/ci/diff-base-check.mjs:')
     } finally {
-      fs.rmSync(sibling, { force: true })
+      f.clean()
     }
+  })
+
+  test('and with nothing planted, the gate is clean — so the cases above are not vacuous', () => {
+    const res = spawnSync('bun', [GATE], { cwd: ROOT, encoding: 'utf8' })
+    expect({ status: res.status, stderr: res.stderr }).toEqual({ status: 0, stderr: '' })
   })
 })

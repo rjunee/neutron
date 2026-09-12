@@ -2328,15 +2328,25 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 // bounded window.
 //
 // DELIBERATELY NOT `diffBase` (#546), and this is the one site in the file that is not.
-// `diffBase` answers "what did this branch change relative to the base it will merge
-// into", so in LOCAL mode it correctly names the LOCAL ref — which is the base the outer
-// loop merges the branch into there. This asks a different question: "which commits are
-// this branch's own, for a BOUNDED synthesis window", and the answer wants the widest
-// exclusion available in either mode, which is the remote-tracking ref step 2 refreshes
-// independently just above. The command tolerates its own failure (`|| true`, and an
-// empty `branchLog` is a documented normal answer), so a repo with no origin degrades the
-// log rather than breaking it. Pinned by `inner-workflow-plan-next.test.ts` — "local mode
-// probes the local ref, which is the authority there" asserts BOTH halves of this split.
+// The difference is NOT the merge mode — an earlier draft of this comment said `diffBase`
+// "in LOCAL mode names the LOCAL ref", which stopped being true when the fallback stopped
+// being keyed on merge mode. `diffBase` prefers `origin/<base>` in BOTH modes whenever
+// that ref resolves, and reaches the bare name only when it does not. Saying otherwise
+// here was the worst possible placement for that stale claim: it sits beside the one
+// operand whose local/pr distinction is real, so a reader comparing the two was told the
+// difference is the merge mode when it is not.
+//
+// THE REAL DIFFERENCE IS THE QUESTION ASKED. `diffBase` answers "what did this branch
+// change relative to the base it will merge into", so it must be able to fall back to
+// whatever base actually exists. This asks "which commits are this branch's OWN, for a
+// BOUNDED synthesis window", and wants the widest exclusion available unconditionally —
+// the remote-tracking ref step 2 refreshes independently just above — because a base
+// commit wrongly counted as branch work crowds real commits out of a byte-capped window.
+// The command tolerates its own failure (`|| true`, and an empty `branchLog` is a
+// documented normal answer), so a repo with no origin degrades the log rather than
+// breaking it: that is why this one can be unconditional where `diffBase` cannot.
+// Pinned by `inner-workflow-plan-next.test.ts` — "local mode probes the local ref, which
+// is the authority there" asserts BOTH halves of this split.
 const branchLogBase = `origin/${baseBranch}`
 
 function planProbePrompt() {

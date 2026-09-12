@@ -1,10 +1,18 @@
-## 2026-09-12 — Every rev-range base resolves to the pinned sha or origin/<base> (#546)
+## 2026-09-12 — Rev-range base: pinned sha, origin/<base> when it resolves, else bare (#546)
 
 `git diff main..<head>` in a shared build checkout diffs against whatever
 `refs/heads/main` happens to hold, and that ref is only as fresh as the last time
 something on the box pulled it. Every commit merged into the base since then is
 presented as this branch's own work. Git exits 0, the extra files are real code, and
 nothing downstream can tell the inflated diff from a genuinely large one.
+
+> **RECONCILED AGAINST THE FINAL CODE IN A SINGLE PASS (round nine),** after three
+> separate rounds found this file lagging a correction: a stale `diffBaseRef` signature, a
+> superseded title, and a superseded fallback condition. The pattern was consistent — each
+> round fixed the artefact the finding pointed at, and this file was never the artefact
+> pointed at. The narrative sections below are kept in round order because the sequence is
+> the point; where a round's text asserted something a later round replaced, the correction
+> is marked inline rather than silently rewritten.
 
 Measured twice on this repo: Argus r4 / run `25b2327d` — local `main` 8 merges behind
 `origin/main`, a 15,154-line / ~100-file review artifact for a branch whose own work was
@@ -13,7 +21,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5371` as merged — this record outlives the branch, so both are given)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -27,10 +35,14 @@ So the unit of this change is the rule.
 The invariant is **no code path composes a rev-range from a base branch NAME**, and it is
 carried by the STRUCTURE, not by the gate. Stated in the order of how much it proves:
 
-0. **The bare name is reached only with no remote.** `diffBase`'s unpinned arm asks git
-   whether `refs/remotes/origin/<base>` resolves, in either merge mode. Where it does not,
-   `refs/heads/<base>` IS the base of record and there is no better answer — that case is
-   legitimate, tested, and the only one left.
+0. **The bare name is reached whenever `refs/remotes/origin/<base>` does not resolve to a
+   commit** — NOT "only with no remote", which is the round-six framing and is wider than
+   the probe. `origin` can be configured while that ref is missing, deleted or never
+   fetched, and the probe also answers no when it cannot run at all. `diffBase`'s unpinned
+   arm asks git, in either merge mode; where the answer is no, `refs/heads/<base>` is the
+   best available base and there is no better one without a fetch, which is deliberately
+   not attempted. That case is legitimate, tested by two fixtures (no remote at all, and a
+   configured origin with the base ref deleted), and the only one left.
 1. **`codex-build.sh`: unconstructable.** It takes the base as argv `$2`
    (`BASE_DIFF_REF="${2:-}"`), its default is EMPTY, and an empty value skips the
    last-resort diff entirely — so no base branch name can reach a range there at all.
@@ -443,13 +455,25 @@ the workflow composed and runs it with bash, then reads the diff file git produc
 The complements, because a fix that always preferred something else would pass the stale
 case: the fresh case (both answers agree, stated without reference to the composed
 command so it stays green under the mutation); a pin that IS the stale sha (still
-honoured — the order is over real inputs, not a preference for `origin/<base>`); and local
-mode (the bare name is kept — prefixing `origin/` unconditionally would break every run in
-a repo with no remote).
+honoured — the order is over real inputs, not a preference for `origin/<base>`); and the
+fallback (the bare name is kept when `origin/<base>` does not resolve — prefixing
+`origin/` unconditionally would break every repository that has no such ref).
 
-**Mutation:** restoring `${shSingleQuote(baseBranch)}` at `writeResumeDiff` fails 4 of the
-7 tests in that file, and the gate reports it at `inner-workflow.mjs:5119`. The two
-agreement/complement tests stay green, which is what they are for.
+> **As first written that last clause said "local mode (the bare name is kept)".** The
+> fallback was keyed on merge mode for the first five rounds; round six replaced it with a
+> per-repository probe. Corrected here in the round-nine reconciliation pass rather than
+> left as a third superseded framing in the permanent record.
+
+**Mutation, re-measured in the round-nine pass:** restoring `${shSingleQuote(baseBranch)}`
+at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
+`inner-workflow.mjs:5202`. The agreement/complement tests stay green, which is what they
+are for.
+
+> Written at the time as "4 of the 7 … at `:5119`". Both numbers were true then and neither
+> is now: later rounds added two fixtures to that file and moved the line. **A count and a
+> line number are claims about the code like any other** — which is exactly how this record
+> came to hold a stale signature, a stale title and a stale fallback condition, so they are
+> re-measured here rather than trusted.
 
 Four existing tests pinned the buggy value and were repointed with their new value stated
 as a value: `inner-workflow-assembly.test.ts` (split into a local/pr pair),
