@@ -12,11 +12,12 @@ import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respa
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
 import {
-  confirmShutdownKill,
+  confirmShutdownExits,
   deliverShutdownKillReports,
   recordGatewayShutdownKill,
   sampleLivenessBeforeShutdownKill,
   type PendingShutdownKillReport,
+  type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
@@ -928,6 +929,8 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // The live reports owed once every child is marked and killed — delivered in a
   // bounded phase at the end, never inline. See `gateway-shutdown-kill.ts`.
   const owedReports: PendingShutdownKillReport[] = []
+  // Children that have been signalled and whose exit is not yet confirmed.
+  const awaitingExit: ShutdownExitWatch[] = []
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
     // The report owed for THIS child, so the kill's outcome can be attached to it.
@@ -979,18 +982,18 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
           `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,
         )
       }
-      // THE KILL'S OUTCOME IS WHAT ATTRIBUTES IT, not the sample taken before it. A
-      // throw here used to be swallowed while the queued report still published
-      // `gateway-shutdown`, so the sink crashed a build that was still running. The
-      // shutdown still continues past a failed kill — that part was always right — but
-      // this child's disposition is now recorded as UNDETERMINED rather than leaving an
-      // earlier optimistic claim standing.
+      // SIGNAL ONLY — the confirmation is a SHARED pass after every child has been
+      // signalled (`confirmShutdownExits`). `kill()` returns void and only REQUESTS
+      // termination; a child that ignores or delays SIGTERM returns normally from it, so
+      // "the signal did not throw" is the absence of one failure mode, not evidence of
+      // death. Waiting per child here would also put one child's grace period in front
+      // of the next child's signal, which is the phase rule this module already obeys.
       try {
         session.child.kill()
-        confirmShutdownKill(owedForThisChild, { killed: true })
       } catch {
-        confirmShutdownKill(owedForThisChild, { killed: false })
+        /* the signal failed; the shared pass sees it never exited and records that */
       }
+      if (owedForThisChild !== null) awaitingExit.push({ report: owedForThisChild, child: session.child })
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
     } catch {
@@ -1001,7 +1004,14 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // them quarantined), so the loop above cannot see them. At teardown the hosted
   // work they were being kept alive for is going away anyway — kill them, or the
   // process is orphaned.
-  owedReports.push(...shutdownQuarantinedChildren(shutdownAt))
+  const quarantined = shutdownQuarantinedChildren(shutdownAt)
+  owedReports.push(...quarantined.reports)
+  awaitingExit.push(...quarantined.awaitingExit)
+
+  // PHASE 2b — CONFIRM THE KILLS, once, with one shared budget. Only a child that is
+  // actually gone is recorded as killed by this shutdown; one that outlives the
+  // escalation records an undetermined disposition instead.
+  await confirmShutdownExits(awaitingExit)
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs.

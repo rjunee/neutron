@@ -421,14 +421,25 @@ export function confirmShutdownKill(
     return
   }
   report.observed = 'alive-and-killed'
-  if (report.options.replRegistryPath !== undefined) {
-    promoteGatewayShutdownObservation(
-      report.options.replRegistryPath,
-      report.sessionKey,
-      report.childGeneration,
-      'alive-and-killed',
+  if (report.options.replRegistryPath === undefined) return
+  // THE DISK CLAIM IS RE-ESTABLISHED, not assumed to have followed. A promotion that
+  // cannot fail visibly cannot support a promise about recovery.
+  const promoted = promoteGatewayShutdownObservation(
+    report.options.replRegistryPath,
+    report.sessionKey,
+    report.childGeneration,
+    'alive-and-killed',
+  )
+  if (!promoted) {
+    process.stderr.write(
+      `[repl] gateway shutdown could not promote the durable record for generation=` +
+        `${report.childGeneration.slice(0, 8)} to a confirmed kill — the row still says ` +
+        `"${report.durablyRecorded ?? 'nothing'}", so a lost live report is recovered as ` +
+        `cause-not-established rather than as a deploy\n`,
     )
+    return
   }
+  report.durablyRecorded = 'alive-and-killed'
 }
 
 /** Move an existing entry's observation forward. Only ever called with the post-kill
@@ -438,20 +449,83 @@ function promoteGatewayShutdownObservation(
   sessionKey: string,
   childGeneration: string,
   observed: GatewayShutdownObservation,
-): void {
+): boolean {
   try {
     const record = getRecord(registryPath, sessionKey)
     const entries = record?.killed_by_gateway_shutdown
-    if (!Array.isArray(entries)) return
-    if (!entries.some((e) => e?.generation === childGeneration)) return
+    if (!Array.isArray(entries)) return false
+    if (!entries.some((e) => e?.generation === childGeneration)) return false
     patchRecord(registryPath, sessionKey, {
       killed_by_gateway_shutdown: entries.map((e) =>
         e?.generation === childGeneration ? { ...e, observed } : e,
       ),
     })
+    // READ BACK, because `patchRecord` is a silent no-op for an absent row and
+    // `withRegistry` skips the save on a whole-file read error. "The call did not throw"
+    // is not evidence the promotion landed.
+    return observationOf(gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration)) === observed
   } catch {
     /* a registry write must never brick a shutdown */
+    return false
   }
+}
+
+/** A signalled child whose exit has not yet been confirmed. The handle is narrowed to
+ *  what confirmation needs, so this module still knows nothing about a PTY. */
+export interface ShutdownExitWatch {
+  report: PendingShutdownKillReport
+  child: { readonly exited: Promise<number | null>; hasExited: () => boolean; kill: (signal?: never) => void }
+}
+
+/** How long every signalled child together gets to exit before the escalation, and
+ *  again after it. Mirrors `CHILD_KILL_GRACE_MS`, which is what the tree's own safe
+ *  termination helper waits — shared across the phase rather than spent per child,
+ *  because the shutdown's deadline is shared too. */
+export const SHUTDOWN_EXIT_GRACE_MS = 2_000
+
+/**
+ * PHASE 2b — establish which signalled children actually died, and confirm each report
+ * from THAT rather than from the signal returning.
+ *
+ * `PtyChild.kill()` only REQUESTS termination and returns void; termination itself shows
+ * up on `exited` / `hasExited()`. An earlier revision confirmed a kill as soon as signal
+ * delivery did not throw, so a child that ignores or delays SIGTERM — the case that
+ * exists in production, because SIGTERM is a request — was recorded as
+ * `alive-and-killed` and its build was marked crashed while it was still running.
+ * "The signal did not throw" is the absence of one failure mode, not confirmation.
+ *
+ * Follows the escalation the tree's own `terminateChild` uses (await, then SIGKILL, then
+ * await again) but spends the grace ONCE for the whole phase instead of per child: every
+ * child has already been signalled, so their exits overlap, and the shutdown's deadline
+ * is shared. A child still alive after the escalation records an UNDETERMINED
+ * disposition — never a kill.
+ */
+export async function confirmShutdownExits(
+  watches: readonly ShutdownExitWatch[],
+  opts: { graceMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<void> {
+  if (watches.length === 0) return
+  const graceMs = opts.graceMs ?? SHUTDOWN_EXIT_GRACE_MS
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms))
+  const settle = async (): Promise<void> => {
+    const pending = watches.filter((w) => !w.child.hasExited())
+    if (pending.length === 0) return
+    await Promise.race([
+      Promise.all(pending.map((w) => w.child.exited.catch(() => undefined))),
+      sleep(graceMs),
+    ]).catch(() => undefined)
+  }
+  await settle()
+  for (const w of watches) {
+    if (w.child.hasExited()) continue
+    try {
+      w.child.kill('SIGKILL' as never)
+    } catch {
+      /* already gone, or unsignallable — the recheck below decides either way */
+    }
+  }
+  await settle()
+  for (const w of watches) confirmShutdownKill(w.report, { killed: w.child.hasExited() })
 }
 
 export function recordGatewayShutdownOutcome(
@@ -568,11 +642,21 @@ export interface PendingShutdownKillReport {
    */
   observed: GatewayShutdownObservation
   liveness: ShutdownLivenessSample
-  /** Whether a DURABLE record of this kill is on disk. The delivery phase says the
-   *  next boot will recover an undelivered report, and that promise is only true when
-   *  this is true — a promise that quietly does not apply to a subset is worse than a
-   *  narrower promise, so the subset is carried here rather than assumed away. */
-  durablyRecorded: boolean
+  /**
+   * WHAT IS ON DISK for this generation, or `null` when nothing is — not "did a write
+   * happen". The delivery phase tells the operator whether the next boot can recover an
+   * undelivered report, and that promise is only as good as the record behind it.
+   *
+   * IT IS RECOMPUTED WHENEVER THE DISK CHANGES, which is the point. It used to be a
+   * boolean set after persisting the PRE-KILL observation; `confirmShutdownKill` then
+   * promoted the in-memory report to `alive-and-killed` with a disk write that returned
+   * no status and swallowed every failure. So a failed promotion plus a timed-out
+   * delivery told the operator the next boot would recover the report, while the next
+   * boot would read `alive-when-reached` and report the cause undetermined. A claim
+   * about what is on disk has to be re-established when what is on disk changes — the
+   * same reason `attributed` was deleted.
+   */
+  durablyRecorded: GatewayShutdownObservation | null
 }
 
 /**
@@ -602,7 +686,7 @@ export function recordGatewayShutdownKill(
   // reachable only from `confirmShutdownKill`, after `kill()` returns.
   const observed: GatewayShutdownObservation =
     liveness === 'alive' ? 'alive-when-reached' : liveness === 'already-gone' ? 'already-gone' : 'could-not-sample'
-  let durablyRecorded = false
+  let durablyRecorded: GatewayShutdownObservation | null = null
   if (options.replRegistryPath !== undefined) {
     // AN ENTRY IS WRITTEN FOR EVERY OUTCOME, not only for a kill — and that is the
     // correction to an earlier revision, which wrote nothing unless we had killed the
@@ -612,7 +696,7 @@ export function recordGatewayShutdownKill(
     // excuses nothing, it records that the shutdown reached a child that had already
     // died. Writing nothing left `undetermined` sharing its representation with an
     // ordinary crash, so a retry reported the honest uncertainty as a confident crash.
-    durablyRecorded = recordGatewayShutdownOutcome(
+    const wrote = recordGatewayShutdownOutcome(
       options.replRegistryPath,
       sessionKey,
       childGeneration,
@@ -634,7 +718,8 @@ export function recordGatewayShutdownKill(
             }
           },
     )
-    if (!durablyRecorded) {
+    durablyRecorded = wrote ? observed : null
+    if (!wrote) {
       // The row is gone, or unwritable. A best-effort write that quietly did nothing is
       // the silence this module exists to remove, so it is said out loud — AND carried
       // on the report, so the delivery phase cannot promise a recovery that has nothing
@@ -691,9 +776,15 @@ export function recordGatewayShutdownKill(
  * instead of repeating the reassurance that applies to its neighbours.
  */
 function recoveryConsequence(report: PendingShutdownKillReport): string {
-  return report.durablyRecorded
-    ? 'the next boot reports it from the durable record'
-    : 'and NOTHING durable records this death — it is lost'
+  if (report.durablyRecorded === null) return 'and NOTHING durable records this death — it is lost'
+  if (report.durablyRecorded === report.observed) return 'the next boot reports it from the durable record'
+  // A record exists but says LESS than this report does — the post-kill promotion did not
+  // land. The death is still reported next boot, with a weaker cause. Saying "recovered"
+  // here would promise the attribution and deliver the undetermined one.
+  return (
+    `the next boot reports it as "${report.durablyRecorded}" — WEAKER than this report, ` +
+    `because the durable record could not be promoted`
+  )
 }
 
 export async function deliverShutdownKillReports(

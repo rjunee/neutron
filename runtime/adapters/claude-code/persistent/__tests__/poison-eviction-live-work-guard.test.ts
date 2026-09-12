@@ -1008,7 +1008,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
     at: 1_000,
     observed: 'alive-and-killed',
     liveness: 'alive',
-    durablyRecorded: true,
+    durablyRecorded: 'alive-and-killed',
   })
 
   it('one hung sink is abandoned and the NEXT report still goes out', async () => {
@@ -1195,8 +1195,8 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
     const { lines } = await captureStderr(() =>
       deliverShutdownKillReports(
         [
-          { ...base, sessionKey: 'k1', childGeneration: 'gen-durable', durablyRecorded: true },
-          { ...base, sessionKey: 'k2', childGeneration: 'gen-lost', durablyRecorded: false },
+          { ...base, sessionKey: 'k1', childGeneration: 'gen-durable', durablyRecorded: 'alive-and-killed' as const },
+          { ...base, sessionKey: 'k2', childGeneration: 'gen-lost', durablyRecorded: null },
         ],
         { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, sleep: clock.sleep },
       ),
@@ -1211,6 +1211,38 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
     const lostLine = lines.find((l) => l.includes('gen-lost')) ?? ''
     expect(lostLine).toContain('NOTHING durable records this death')
     expect(lostLine).not.toContain('the next boot reports it from the durable record')
+  })
+
+  it('a record WEAKER than the report promises the weaker recovery, not this one', async () => {
+    // THE THIRD ARM, and it is the one the post-kill promotion can produce: the row holds
+    // the pre-kill `alive-when-reached` because the promotion failed, while the report
+    // says `alive-and-killed`. Telling the operator "recovered" would promise the deploy
+    // attribution and deliver the undetermined one.
+    //
+    // RED-mutation: compare `durablyRecorded` as a boolean again (`report.durablyRecorded
+    // ? recovered : lost`) — this line then claims a recovery that does not match.
+    const clock = fakeClock()
+    const { lines } = await captureStderr(() =>
+      deliverShutdownKillReports(
+        [
+          {
+            options: { substrate_instance_id: 'x', cwd: '/x', onChildCrash: () => new Promise<void>(() => {}) } as PersistentReplSubstrateOptions,
+            sessionKey: 'k',
+            childGeneration: 'gen-weaker',
+            at: 1_000,
+            observed: 'alive-and-killed' as const,
+            liveness: 'alive' as const,
+            durablyRecorded: 'alive-when-reached' as const,
+          },
+        ],
+        { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, sleep: clock.sleep },
+      ),
+    )
+    const line = lines.find((l) => l.includes('gen-weak')) ?? ''
+    expect(line).toContain('WEAKER than this report')
+    expect(line).toContain('alive-when-reached')
+    expect(line).not.toContain('the next boot reports it from the durable record')
+    expect(line).not.toContain('NOTHING durable records this death')
   })
 })
 

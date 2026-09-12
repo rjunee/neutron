@@ -33,6 +33,11 @@ import {
   wasKilledByGatewayShutdown,
 } from '../gateway-shutdown-kill.ts'
 import {
+  confirmShutdownExits,
+  type PendingShutdownKillReport,
+  type ShutdownExitWatch,
+} from '../gateway-shutdown-kill.ts'
+import {
   GATEWAY_SHUTDOWN_KILL_HISTORY,
   GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
@@ -663,5 +668,107 @@ describe('an entry that cannot say what was observed is evidence of nothing', ()
       expect(observationOf(gatewayShutdownKillEntryFor(record, 'gen-live'))).toBe(observed)
       expect(wasKilledByGatewayShutdown(record)).toBe(observed === 'alive-and-killed')
     }
+  })
+})
+
+/**
+ * #518 — SIGTERM IS A REQUEST. `PtyChild.kill()` returns void and only ASKS a child to
+ * stop; termination shows up on `exited` / `hasExited()`. An earlier revision confirmed
+ * the kill as soon as signal delivery did not throw, so a child that ignores or delays
+ * SIGTERM was recorded `alive-and-killed` and its build was marked crashed while it was
+ * still running.
+ *
+ * The existing cases covered the two ENDS — a kill that throws, and a fake that
+ * terminates instantly. This is the middle, which is the case that exists in production.
+ */
+describe('only a child that actually exited is recorded as killed (#518)', () => {
+  function watchFor(
+    report: PendingShutdownKillReport,
+    behaviour: { exitsOnSigterm: boolean; exitsOnSigkill: boolean },
+  ): { watch: ShutdownExitWatch; signals: string[] } {
+    const signals: string[] = []
+    let exited = false
+    let resolveExit: () => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      resolveExit = () => res(0)
+    })
+    const child = {
+      exited: exitedPromise,
+      hasExited: () => exited,
+      kill: (signal?: never) => {
+        const name = (signal as unknown as string) ?? 'SIGTERM'
+        signals.push(name)
+        if (name === 'SIGTERM' ? behaviour.exitsOnSigterm : behaviour.exitsOnSigkill) {
+          exited = true
+          resolveExit()
+        }
+      },
+    }
+    return { watch: { report, child }, signals }
+  }
+
+  const pendingFor = (path: string, generation: string): PendingShutdownKillReport =>
+    recordGatewayShutdownKill(
+      {
+        substrate_instance_id: 'x',
+        cwd: '/repo',
+        replRegistryPath: path,
+        onChildCrash: () => {},
+      } as PersistentReplSubstrateOptions,
+      KEY,
+      generation,
+      1_000,
+      'alive',
+      4242,
+    )
+
+  it('a child that IGNORES both signals is UNDETERMINED, never a kill', async () => {
+    // RED-mutation: confirm from signal delivery again
+    // (`confirmShutdownKill(report, { killed: true })` right after `child.kill()`). The
+    // still-running child is then recorded `alive-and-killed` and its build is crashed.
+    const path = registryPath()
+    seed(path)
+    const report = pendingFor(path, 'gen-live')
+    const { watch, signals } = watchFor(report, { exitsOnSigterm: false, exitsOnSigkill: false })
+
+    // The signal was already sent by the shutdown loop; this pass escalates and confirms.
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+
+    // It escalated, exactly as the tree's own safe termination helper does...
+    expect(signals).toContain('SIGKILL')
+    // ...and, the child having outlived the escalation, claims nothing.
+    expect(report.observed).toBe('alive-when-reached')
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(false)
+    expect(report.durablyRecorded).toBe('alive-when-reached')
+  })
+
+  it('a child that ignores SIGTERM but dies to SIGKILL IS a kill', async () => {
+    // The escalation has to actually work, or the case above would pass by never killing
+    // anything. RED-mutation: drop the SIGKILL escalation from `confirmShutdownExits`.
+    const path = registryPath()
+    seed(path)
+    const report = pendingFor(path, 'gen-live')
+    const { watch, signals } = watchFor(report, { exitsOnSigterm: false, exitsOnSigkill: true })
+
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+
+    expect(signals).toContain('SIGKILL')
+    expect(report.observed).toBe('alive-and-killed')
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
+    expect(report.durablyRecorded).toBe('alive-and-killed')
+  })
+
+  it('a child that exits on SIGTERM is a kill, and is NOT escalated', async () => {
+    // The ordinary path: no SIGKILL for a child that complied.
+    const path = registryPath()
+    seed(path)
+    const report = pendingFor(path, 'gen-live')
+    const { watch, signals } = watchFor(report, { exitsOnSigterm: true, exitsOnSigkill: true })
+    watch.child.kill()
+
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+
+    expect(signals).toEqual(['SIGTERM'])
+    expect(report.observed).toBe('alive-and-killed')
   })
 })

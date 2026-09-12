@@ -27,10 +27,10 @@ import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './r
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
 import {
-  confirmShutdownKill,
   recordGatewayShutdownKill,
   sampleLivenessBeforeShutdownKill,
   type PendingShutdownKillReport,
+  type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
@@ -947,8 +947,11 @@ export async function sweepQuarantinedChildren(): Promise<number> {
  *  `quarantineChild` installs returns early when the entry is already gone from
  *  the map, and the delete below happens first. So each kill is now reported as
  *  the gateway shutdown it is, before it happens. */
-export function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): PendingShutdownKillReport[] {
+export function shutdownQuarantinedChildren(
+  shutdownAt: number = Date.now(),
+): { reports: PendingShutdownKillReport[]; awaitingExit: ShutdownExitWatch[] } {
   const owed: PendingShutdownKillReport[] = []
+  const awaitingExit: ShutdownExitWatch[] = []
   for (const [generation, entry] of [...quarantinedChildren]) {
     quarantinedChildren.delete(generation)
     // MARK, THEN KILL. Both are cheap and local; neither may sit behind a sink. The
@@ -971,16 +974,17 @@ export function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): Pe
       // own pid belongs to the replacement child that spawned over it.
       entry.session.child.pid,
     )
-    if (report !== null) owed.push(report)
-    // Same rule as the pooled path: only a kill that RETURNED attributes the death.
+    owed.push(report)
+    // Same rule as the pooled path: SIGNAL here, and let the caller's shared pass
+    // establish whether it actually died. Only an observed exit attributes the kill.
     try {
       entry.session.child.kill()
-      confirmShutdownKill(report, { killed: true })
     } catch {
-      confirmShutdownKill(report, { killed: false })
+      /* the signal failed; the shared pass sees it never exited and records that */
     }
+    awaitingExit.push({ report, child: entry.session.child })
   }
-  return owed
+  return { reports: owed, awaitingExit }
 }
 
 /** Test/diagnostic seam: how many children are quarantined right now. */
