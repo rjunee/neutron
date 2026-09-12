@@ -1032,7 +1032,9 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     const sha = 'a'.repeat(40)
     const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
     expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
-    expect(prompt).toContain(`git diff '${sha}'..HEAD`)
+    // `--end-of-options` so an operand beginning with `-` cannot be reparsed as a flag
+    // (#546 round 7); asserted here because this prompt is what the build copies.
+    expect(prompt).toContain(`git diff --end-of-options '${sha}'..HEAD`)
   })
 
   test('falls back to the unpinned create-or-re-enter branch and diff when baseSha is absent', async () => {

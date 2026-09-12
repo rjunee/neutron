@@ -803,7 +803,10 @@ emit_trailer() {
     # `..`, not `...`, to match the diff the brief asks the build for — and because a
     # shallow clone's grafted base has no merge-base to resolve. Failure leaves the
     # file empty and the trailer says so.
-    git diff "${BASE_DIFF_REF}..HEAD" > "${NEUTRON_CODEX_BUILD_DIFF_FILE}" 2>/dev/null || true
+    # `--end-of-options` so an operand beginning with `-` cannot be reparsed as a flag:
+    # `git diff "--output=<path>..HEAD"` writes that file and exits 0 without it (measured,
+    # git 2.43). The composing side refuses such a base already; this is the shield.
+    git diff --end-of-options "${BASE_DIFF_REF}..HEAD" > "${NEUTRON_CODEX_BUILD_DIFF_FILE}" 2>/dev/null || true
   fi
   diff_path=''
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ]; then

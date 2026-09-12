@@ -22,9 +22,14 @@ diff-base question.
 **Three narrower conditions, found by reading the code for states that would falsify the sentence
 above rather than by re-reading the sentence.** Each is small; each would have made it wrong:
 
-- an **option-shaped** base name (`-x`) — `originBaseResolves` answers false *without probing*, so
-  the bare name is taken even where `origin/-x` would resolve. That is deliberate: an operand
-  beginning with `-` is the injection vector `changedFilesWithStatus` already refuses;
+- an **option-shaped** base name (`-x`) — **REFUSED at the binding**, and the round that merely
+  noted it here had a live file-write. `originBaseResolves` answers false without probing, and
+  false selects the *bare name*, which reached git unguarded: measured on git 2.43, a base of
+  `--output=<path>` made `git diff --name-only` exit 0 and write the file, the artifact diff
+  honour both `--output`s, and `git rev-list --count` write it despite exiting 129. `diffBaseRef`
+  now throws `TridentOptionShapedBaseError`, and every consumer carries `--end-of-options` as
+  defence in depth. Verified by `trident/diff-base-option-shaped.test.ts` per command family,
+  with three mutations;
 - an **empty** base name — `diffBaseRef` returns the input untouched ahead of the flag entirely,
   so the "resolves / does not resolve" framing does not apply to it at all;
 - `codex-review.sh`'s **standalone** promotion is *stricter still*: it additionally requires
@@ -143,6 +148,16 @@ The resolution order is evidence-first, and is the same at every site:
       the same repo — the previous version of this test asserted the command *shape* and could
       not see the bug in the fixture it ran against. Mutating the fallback back to the bare name
       reddens it.
+- [ ] **An option-shaped base is refused at the binding, and every consumer is shielded.**
+      A name beginning with `-` is read by git as a FLAG, not a revision: `--output=<path>..<head>`
+      writes that file, and two of the four consumers exit 0 while doing it. `diffBaseRef` throws
+      rather than returning such a name — refusing to *probe* it (the previous round's mitigation)
+      only routed it to the unguarded branch. Verified by
+      `trident/diff-base-option-shaped.test.ts`: the binding refuses under both probe answers; the
+      shipped consumers each carry `--end-of-options` (extraction with pinned counts, so one added
+      later fails); and per command family, against real git, the marker is shown to be what stops
+      the write while ordinary ranges still work. Mutations: remove the throw, strip the marker
+      from the orchestrator sites, strip it from the wrappers — one test reds for each.
 - [ ] **The wrapper promotes BY KIND, not by string shape.** `codex-review.sh` takes a general
       `[base-ref]`. Promoting whenever `origin/<x>` resolved meant a **tag** `release` was
       silently rewritten to the remote branch `origin/release` — a different commit — because

@@ -350,7 +350,7 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
       await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true, baseSha: pinned }),
       'resume-diff',
     )
-    expect(pinnedCmd).toContain(`git diff '${pinned}'..'${RECORDED}'`)
+    expect(pinnedCmd).toContain(`git diff --end-of-options '${pinned}'..'${RECORDED}'`)
   })
 
   test("'argus-approved' + unchanged head → NO build and NO review at all", async () => {

@@ -257,7 +257,49 @@ export function diffBaseRef(
   // a different question with a plausible-looking answer. Hand it back untouched and
   // let the caller's own diff fail loudly instead.
   if (name.length === 0) return base_branch
+  // AN OPTION-SHAPED NAME IS REFUSED HERE, NOT ROUTED PAST HERE.
+  //
+  // `originBaseResolves` already declined to PROBE such a name, and for one round that
+  // read as the safety measure. It was the opposite: declining to probe returns false,
+  // false selects the bare-name branch, and the bare name is the one that reaches git
+  // unguarded. MEASURED on git 2.43 at all four consumers — a base of
+  // `--output=<path>` yields the operand `--output=<path>..<head>`, which git parses as
+  // the `--output` OPTION and writes the file. `git diff --name-only` and the grouped
+  // `--output` diff both exit 0 while doing it; `git rev-list --count` exits 129 and
+  // writes it anyway.
+  //
+  // REFUSING TO EXAMINE A DANGEROUS INPUT IS NOT REFUSING THE INPUT. The guard's intent
+  // was right and its placement inverted the outcome, which is a different failure from
+  // inferring "no remote" from "merges locally" or "branch" from "resolves" — there the
+  // signal was wrong, here the signal was fine and sat on the wrong side of the branch.
+  //
+  // So the refusal is at the BINDING, once, rather than at each consumer: a name git
+  // cannot read as a revision has no business becoming a rev-range operand at all, which
+  // is this branch's own principle — narrow the scope in which the value can exist.
+  // Nothing legitimate is lost: `git check-ref-format --branch` rejects a leading `-`,
+  // so no branch can be named this way. Callers that must not throw already catch
+  // (`reconcile_stranded` answers null; the launch path degrades to no test strategy).
+  if (name.startsWith('-')) {
+    throw new TridentOptionShapedBaseError(name)
+  }
   return origin_base_resolves ? `origin/${name}` : name
+}
+
+/**
+ * A base name git would read as an OPTION rather than a revision. Thrown by
+ * `diffBaseRef` so the value cannot reach a rev-range operand; see the argument there.
+ */
+export class TridentOptionShapedBaseError extends Error {
+  constructor(readonly base: string) {
+    // The name is FOLDED into the message by the caller where one is persisted; this
+    // text is for logs and exists to say which input was refused and why.
+    super(
+      `refusing a base ref that git would read as an option, not a revision: ${JSON.stringify(base)}. ` +
+        'A rev-range operand beginning with `-` is parsed as a flag (measured: `--output=<path>..<head>` ' +
+        'writes the file), and no branch can legitimately be named this way.',
+    )
+    this.name = 'TridentOptionShapedBaseError'
+  }
 }
 
 /**
@@ -275,6 +317,10 @@ export async function originBaseResolves(
   base_branch: string,
 ): Promise<boolean> {
   const name = base_branch.trim()
+  // Still declines to probe an option-shaped name — `git rev-parse ... "-x^{commit}"`
+  // is its own argv hazard — but that is no longer load-bearing for SAFETY: `diffBaseRef`
+  // now REFUSES such a name outright rather than falling through to it. See the argument
+  // there; this check is now only about not spending a subprocess on a doomed lookup.
   if (name.length === 0 || name.startsWith('-')) return false
   try {
     const res = await run_host(

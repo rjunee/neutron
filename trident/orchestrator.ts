@@ -2724,7 +2724,12 @@ export function buildTridentOrchestrator(
       // not fix that: a path absent from this list is never handed to any group.
       // `core.quotePath=false` for the same reason one line down: a C-quoted token
       // fed back as a pathspec matches nothing and drops that file's hunks.
-      ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', `${baseRef}..${headToPublish}`],
+      // `--end-of-options` — DEFENCE IN DEPTH behind `diffBaseRef`'s refusal. Measured on
+      // git 2.43: without it this exact argv with a base of `--output=<path>` EXITS 0 and
+      // writes the file; with it git refuses (128) and writes nothing, and a legitimate
+      // range is unaffected. The binding is what makes the value unconstructable; this is
+      // what makes the command safe for any value that ever reaches it.
+      ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', '--end-of-options', `${baseRef}..${headToPublish}`],
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
@@ -2847,7 +2852,9 @@ export function buildTridentOrchestrator(
     }
     if (groups === null) {
       const diff = await opts.run_host(
-        ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${baseRef}..${headToPublish}`],
+        // `--end-of-options`: without it a second `--output=` arrives from the operand and
+        // git honours BOTH (measured, exit 0, two files written).
+        ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, '--end-of-options', `${baseRef}..${headToPublish}`],
         run.repo_path,
       )
       if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
@@ -2866,7 +2873,7 @@ export function buildTridentOrchestrator(
         const partDiff = await opts.run_host(
           [
             'git', '-C', run.repo_path, 'diff', '--no-renames',
-            `--output=${part}`, `${baseRef}..${headToPublish}`, '--', ...group.map((f) => `:(literal)${f}`),
+            `--output=${part}`, '--end-of-options', `${baseRef}..${headToPublish}`, '--', ...group.map((f) => `:(literal)${f}`),
           ],
           run.repo_path,
         )
@@ -3269,7 +3276,9 @@ export function buildTridentOrchestrator(
       // anything worth salvaging.
       const baseRef = await resolvedDiffBase(run)
       const ahead = await opts.run_host(
-        ['git', '-C', run.repo_path, 'rev-list', '--count', `${baseRef}..${localHead}`],
+        // `--end-of-options`: `rev-list` exits 129 on an option-shaped operand and writes
+        // the file anyway (measured); the marker stops it reaching the option parser.
+        ['git', '-C', run.repo_path, 'rev-list', '--count', '--end-of-options', `${baseRef}..${localHead}`],
         run.repo_path,
       )
       const aheadText = ahead.stdout.trim()

@@ -290,7 +290,10 @@ if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; t
   FULL_DIFF=$(<"$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
-  FULL_DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null)
+  # `--end-of-options`: this wrapper takes an operator-supplied `[base-ref]`, so an
+  # option-shaped value can genuinely arrive here. Without the marker
+  # `git diff "--output=<path>..HEAD"` writes that file and exits 0 (measured, git 2.43).
+  FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD" 2>/dev/null)
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
 DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")

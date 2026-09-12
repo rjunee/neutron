@@ -1411,6 +1411,19 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
  * here, so the next site cannot re-introduce the class by forgetting.
  */
+// AN OPTION-SHAPED BASE IS REFUSED BEFORE IT CAN BE COMPOSED, the same refusal
+// `diffBaseRef` makes on the TS side and for the same measured reason: a rev-range
+// operand beginning with `-` is parsed by git as a FLAG, and `--output=<path>..<head>`
+// writes the file (git 2.43, exit 0 for `git diff --name-only`). No branch can be named
+// this way — `git check-ref-format --branch` rejects a leading `-` — so nothing
+// legitimate is lost, and failing the run loudly beats composing a command that writes
+// somewhere nobody asked for.
+if (typeof baseBranch === 'string' && baseBranch.trim().startsWith('-')) {
+  throw new Error(
+    `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,
+  )
+}
+
 const diffBase =
   pinnedBase !== null
     ? shSingleQuote(pinnedBase)
@@ -1487,7 +1500,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='deferred', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${diffBase}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+5. Write the branch diff to a file (e.g. \`git diff --end-of-options ${diffBase}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed, mutationClaim (see MUTATION NOMINATION below)${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='deferred', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
@@ -2221,7 +2234,7 @@ function planFablePrompt(resuming) {
   // redo/overwrite that work (Codex [P2]). Before this split the fused in-Forge
   // planner ran inside the re-entered worktree and saw branch state for free.
   const resumeNote = resuming
-    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${diffBase}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
+    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff --end-of-options ${diffBase}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
   const stampCommand = workflowStageStampCommand('plan-start')
   const stampInstruction = stampCommand === null
@@ -5150,7 +5163,10 @@ async function writeResumeDiff(headOid) {
   const fetchStep = isPr
     ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
     : ''
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${diffBase}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
+  // `--end-of-options` behind the refusal above, for the same reason the orchestrator's
+  // four consumers carry it: the binding makes the value unconstructable, the marker makes
+  // the command safe for whatever ever reaches it.
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff --end-of-options ${diffBase}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
   const res = await agent(
     `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.
 ${cmd}`,

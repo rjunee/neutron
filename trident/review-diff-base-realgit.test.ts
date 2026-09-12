@@ -160,7 +160,7 @@ async function resolvedBase(repo: string, command: string): Promise<string> {
   const at = command.indexOf('"$(')
   if (at === -1) {
     // A pinned base is a literal, not a substitution: read it straight out of the range.
-    const lit = /git diff '([^']+)'\.\./.exec(command)
+    const lit = /git diff (?:--end-of-options )?'([^']+)'\.\./.exec(command)
     return lit?.[1] ?? ''
   }
   const end = command.indexOf(')"', at)
@@ -307,7 +307,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
   test('PINNED: the launch-observed base sha wins over every ref, and still gives ONE file', async () => {
     const w = await seedWorld('pinned')
     const out = await runResumeDiff(w, { pr: true, baseSha: w.currentBase })
-    expect(out.resumeDiffCommand).toContain(`git diff '${w.currentBase}'..'${w.head}'`)
+    expect(out.resumeDiffCommand).toContain(`git diff --end-of-options '${w.currentBase}'..'${w.head}'`)
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
   })
 
@@ -319,7 +319,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
     // and silently ignore the launcher's own observation.
     const w = await seedWorld('pinned-stale')
     const out = await runResumeDiff(w, { pr: true, baseSha: w.staleBase })
-    expect(out.resumeDiffCommand).toContain(`git diff '${w.staleBase}'..'${w.head}'`)
+    expect(out.resumeDiffCommand).toContain(`git diff --end-of-options '${w.staleBase}'..'${w.head}'`)
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 

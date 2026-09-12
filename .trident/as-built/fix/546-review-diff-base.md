@@ -56,7 +56,7 @@ carried by the STRUCTURE, not by the gate. Stated in the order of how much it pr
   the forge contract's reviewer diff, the planner's resume inspection hint, the resume
   diff, and the base argv of both codex wrappers. Order: the launch-pinned sha, else
   `origin/<base>` in pr mode, else the bare name in local mode.
-- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, merge_mode)`, exported and
+- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, origin_base_resolves)`, exported and
   pure, next to `detectBaseBranch` which produces the name it refuses to let through.
   Used at every `resolveBase()`-fed range in `trident/orchestrator.ts`.
 - the shell wrappers compose **no** base at all: `trident/codex-build.sh` and
@@ -155,6 +155,55 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round seven: the mitigation opened a file-write, and a stale signature
+
+**`originBaseResolves` declined to PROBE a name beginning with `-`, and declining to probe
+returns `false` — which selects the bare-name branch, the one that reaches git unguarded.**
+The option-shaped case was one of the three falsifying states found in round six, before
+the gate; it was handled at the wrong end. MEASURED on git 2.43 at every consumer, with a
+base of `--output=<path>`:
+
+| consumer | exit | wrote the smuggled file |
+|---|---|---|
+| `git diff --name-only --no-renames` (publish listing) | **0** | **yes** |
+| `git diff --output=<file>` (review artifact) | **0** | **yes — both outputs honoured** |
+| `git diff --output=<part> … -- :(literal)…` (grouped) | **0** | **yes** |
+| `git rev-list --count` (stranded salvage) | 129 | **yes, despite the error** |
+
+The `rev-list` row is the one worth keeping: checking the exit code and not the filesystem
+would have called it safe.
+
+**REFUSING TO EXAMINE A DANGEROUS INPUT IS NOT REFUSING THE INPUT.** That is a third
+distinct failure beside the two this branch already names — inferring "no remote" from
+"merges locally" and "branch" from "resolves". In those the *signal* was wrong; here the
+signal was fine and the guard's **placement** inverted the outcome. A check that reads as a
+safety measure and functions as a fast path into the unsafe branch.
+
+**Fixed at the binding, once:** `diffBaseRef` now throws `TridentOptionShapedBaseError`
+rather than returning such a name, so it cannot become a rev-range operand at all — the
+same principle as narrowing the scope in which a base branch name exists. Nothing
+legitimate is lost: `git check-ref-format --branch` rejects a leading `-`. The `.mjs`
+binding refuses identically. **Defence in depth:** `--end-of-options` at every consumer —
+four in `orchestrator.ts`, three in `inner-workflow.mjs` (the executed resume diff and both
+prompt sites), and both shell wrappers. Measured: with the marker every family refuses and
+writes nothing to the smuggled path, and ordinary ranges are unaffected.
+
+`trident/diff-base-option-shaped.test.ts` asserts the binding's refusal, that every shipped
+consumer carries the marker (extraction with a pinned count, so a consumer added later
+fails), and — per command family, against real git — that the marker is what does it.
+Three mutations: removing the throw reds the binding test; stripping the marker from the
+four orchestrator sites reds one; stripping it from the wrappers reds another.
+
+**The falsification pass, run on the NEW sentences this time.** "Every consumer carries the
+marker" was false when written: the two `.mjs` prompt sites did not. Rather than narrow the
+claim to "every consumer except two, which are protected by the binding" — the shape this
+branch has been wrong in six times — the marker was added there too, so the simple sentence
+is the true one.
+
+**P2, same round:** this record documented `diffBaseRef(base_branch, base_sha, merge_mode)`
+— the **pre-fix** signature, replaced in round six. The document was written when the claim
+was true and nothing re-read it when the code moved. Corrected to `origin_base_resolves`.
 
 ### Round six: a regression from round five, and the title one notch wide again
 
