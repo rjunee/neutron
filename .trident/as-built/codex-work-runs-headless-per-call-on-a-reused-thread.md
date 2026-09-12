@@ -263,6 +263,7 @@ learned:
 3. What does this criterion assume about how the system behaves, and have I measured it? — *true only in an environment that does not exist*
 4. What does this criterion assume that the surrounding prose has already contradicted? — *the document disagrees with itself*
 5. Does this assertion's strength depend on something the test does not control? — *the comparison cannot fail for the reason it exists*
+6. Can the instrument actually observe what this criterion asserts? — *the test sees nothing, though property, criterion and mutant are all correct*
 
 ### Two rules about instruments and about the tree
 
@@ -281,6 +282,47 @@ way — behavioural primary, grep secondary. Another lane reached this independe
 basename comparison): **narrowing a claim to fit a textual instrument encodes the gap
 permanently; raising the instrument deletes it** — and raising it is available whenever the
 property is observable at runtime, which here it was.
+
+**Observe the resulting state, not the act that produced it.** This one criterion was
+defeated four times, and every version watched a *mechanism*: equal contents (a copy
+passed), inode equality (a hard link passed), a symlink (a rotation through the secondary
+path destroyed it), and then a write-observer — which `ln` walks straight through, because
+`linkat(2)` carries no content, as does `symlinkat(2)`. Each was an enumeration of ways the
+credential could arrive, and each fell to a way not enumerated. The write-observer also
+*overclaimed its reach*: an in-process fs spy sees the adapter's own calls and structurally
+cannot see a child's syscalls, while the criterion asserted coverage of the whole process
+tree.
+
+The fix is the sibling of "scope by location, not by act", applied to the observation rather
+than the exclusion: **check the state afterwards.** No path outside the selected home may
+contain the credential's contents, be a hard link to its inode, or be a symlink resolving
+into it. That is instrument-independent — copy, link, symlink, rename, shell redirect or a
+grandchild's syscall all land in the same state — and it fixes the reach problem for free,
+because the filesystem is the only observer that sees every process. Demonstrated rather
+than argued: four routes, one scan, 4/4 caught.
+
+**And the state check's own scoping repeated the lesson one more time.** The first scan
+excluded any path whose `realpath` landed inside the home — which excludes precisely the
+symlink *pointing at* the credential, catching 3 of 4. Exclusion must be lexical, on the
+path itself (`lstat`), never on its resolved target. Three rounds after "the escape lives in
+the exclusion rule", the escape was in the exclusion rule again.
+
+**An instrument's claimed reach is a claim like any other**, and it was asserted rather than
+measured. That is question 3 pointed at the tool instead of the environment, and it is the
+one failure mode where the property, the criterion and the mutant can all be correct while
+the test still sees nothing:
+
+6. Can the instrument actually observe what this criterion asserts, and has that been checked?
+
+Swept over the other nine immediately, and it caught one: the no-long-lived-process
+criterion claimed to cover "any detached or **re-parented** descendant" while asserting
+*"no codex process remains in the adapter's process group"* — and a `setsid`/double-forked
+child is re-parented to init, leaving both the process group and any tracked-pid list. The
+instrument would have reported success in exactly the case the criterion existed to catch.
+Replaced with a whole-process-table scan attributed by a **unique `CODEX_HOME`** per test,
+which needs no parentage to be sound. Two of the ten criteria named an instrument narrower
+than their claim, which suggests this question earns a standing place rather than a
+one-off.
 
 **Raising an instrument has a cost, and it is question 2.** Both over-strict criteria on
 this PR arrived *immediately after* a widening, and that is not coincidence. A grep sees

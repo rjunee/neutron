@@ -286,38 +286,37 @@ form; the "kills:" note names what the earlier form let through.
       grandchild that actually runs.**
 
 - [ ] **An account's credentials are never materialised anywhere outside the selected
-      existing home.** verify **behaviourally, not by grep**: run a full call cycle with
-      filesystem writes observed or intercepted — a spy over the fs module, or an
-      `strace`/audit trace of the process tree — and assert **no write whose path lies
-      outside the selected `CODEX_HOME` carries the credential's contents** (match on the
-      token value seeded for the test).
-      **Writes *inside* that home are expressly permitted and must not fail the test**,
-      including replacement of its own `auth.json`: codex rotates the refresh token when
-      it refreshes (`trident/codex-credential.ts:396-399`), so a correct implementation
-      produces exactly that write. Scoping the observation to *outside the home* is the
-      whole point — the instrument sees the entire process tree, and the property is
-      about location, not about writing.
-      Positive control that the scope is real, not just asserted: force a rotation inside
-      the selected home and assert the test still **passes**; then have a stub write the
-      same token to a path outside it and assert the test **fails**. A check that cannot
-      demonstrate both is not measuring location.
-      Grepping source for `copyFile`/`link`/`symlink` is **not** acceptable as the
-      primary check: it enumerates the mechanisms someone thought of, and a mutant that
-      reads the credential and `writeFile`s it to `/tmp/auth.json` violates the property
-      while matching none of those names and leaving the credential root's file count
-      unchanged. Observing writes asserts the **outcome**, so it covers `writeFile`,
-      `writeFileSync`, a stream, a shell redirect and whatever the next API is called.
-      *Cheap secondary checks, labelled as such and not sufficient alone:* the count of
-      `auth.json` files under the credential root is unchanged, and the three API names
-      are absent from the adapter's sources.
-      Bidirectional half: the adapter **does** still resolve the right home when a
-      per-project override or a non-default rotation seat is selected — so the criterion
-      is satisfied by correct selection, not by refusing to support multiple homes.
-      *kills:* an adapter that provisions a second home for an account that has one, by
-      any means — copy, hard link or symlink. Each was specified and each failed under
-      a rotation it had not modelled; the as-built records that arc. The rule here is
-      the simpler one those failures pointed at: production never puts one account in
-      two homes, so there is no sharing mechanism to get right.
+      existing home.** verify by **checking the resulting state, not the act that produced
+      it**: after a full call cycle, walk the filesystem and assert that **no path outside
+      the selected `CODEX_HOME`**
+      (a) contains the credential's contents — match on a token value seeded for the test;
+      (b) is a **hard link to the canonical `auth.json`'s inode**; or
+      (c) is a **symlink resolving into that home**.
+      This is instrument-independent: it does not care whether the path arrived by
+      `copyFile`, `link`, `symlink`, `rename`, a shell redirect, or a syscall from a
+      grandchild — and the filesystem is the only observer that sees **every** process,
+      which no in-process spy can.
+      **Exclude a path by the path itself (`lstat`), never by its resolved target.**
+      Measured while building this: a scan that skips anything whose `realpath` lands
+      inside the home excludes precisely the symlink pointing at the credential, and
+      catches 3 of 4 routes. With lexical exclusion it catches 4 of 4. The escape lives in
+      the exclusion rule, not the detection rule.
+      Permitted and required not to fail: everything **inside** the selected home,
+      including replacement of its own `auth.json` — codex rotates the refresh token there
+      (`trident/codex-credential.ts:396-399`). Positive control that the scope is real:
+      force a rotation inside the home and the test still passes; have a stub materialise
+      the token outside it by **each** of copy, hard link, symlink and rename, and the
+      test fails on each.
+      *Diagnostic secondaries, not the check:* an fs spy or `strace` localising which call
+      did it, the `auth.json` count under the credential root, and the absence of
+      `copyFile`/`link`/`symlink` from the adapter's sources.
+      *kills:* every previous version of this criterion, and none of them by a mechanism
+      the next one anticipated — equal contents passed a copy; inode equality passed a
+      hard link; a symlink passed one rotation direction; a **content-bearing-write
+      observer passed `ln`**, because `linkat(2)` writes no content, and passed
+      `symlinkat(2)` for the same reason. Each fix was correct about the mechanism it had
+      just met. A state check is the first version that does not depend on having met the
+      mechanism.
 
 - [ ] **In-process overlap on one thread id waits under a configured bound;
       cross-process overlap returns the typed conflict inside a fixed latency ceiling;
@@ -414,13 +413,20 @@ form; the "kills:" note names what the earlier form let through.
       closed on this machine today for a reason unrelated to the CLI contract**, whose
       first victim would disable the gate rather than fix the config.
 
-- [ ] **No long-lived codex process is created.** verify: every codex process the
-      adapter starts — **including any detached or re-parented descendant**, not only
-      direct children — has exited by the time the call returns; no codex process
-      remains in the adapter's process group; and the adapter exposes no
-      start/stop/health surface for a server and opens no listening socket.
-      *kills:* the persistent shape returning by the back door; and **a detached
-      grandchild**, which "every child has exited" does not cover.
+- [ ] **No long-lived codex process is created.** verify by **state, on an instrument
+      that can see a re-parented process**: give the test its own unique `CODEX_HOME`, and
+      after the call returns scan the **whole process table** for any process whose
+      executable is codex and whose environment names that home — asserting none remains.
+      **Not by process group, and not by tracked child pids:** a `setsid`/double-forked
+      descendant is re-parented to init and leaves both, so either instrument would report
+      success precisely in the case the criterion exists to catch. The unique home is what
+      makes a full-table scan attributable without parentage.
+      Also assert the adapter exposes no start/stop/health surface for a server and opens
+      no listening socket.
+      *kills:* the persistent shape returning by the back door; a detached grandchild,
+      which "every child has exited" does not cover; and **the earlier process-group
+      instrument**, which claimed to cover re-parented descendants while structurally
+      unable to observe one.
 
 ## Telemetry, deliberately not acceptance
 
