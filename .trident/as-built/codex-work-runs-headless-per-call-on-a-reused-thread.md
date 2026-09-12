@@ -348,6 +348,7 @@ pass; six were not:
 | overlapping calls | a single global lock — "B waited" passes while every unrelated call serializes too |
 | approvals (found) | never escalating at all, satisfying the "not requested" branch |
 | startup probe (found) | a stub that accepts `resume` but rejects `sandbox_mode`, failing mid-turn |
+| startup probe, again | **no negative case for a missing `resume` subcommand** — the one capability with a measured in-tree breakage was the one the negatives skipped |
 
 Fixes, respectively: a decoy thread created *after* the recorded one so newest ≠
 recorded; a behavioural half beside the grep; the bypass-flag exclusion moved to where
@@ -355,6 +356,43 @@ sandbox is asserted; an assertion that codex is exec'd directly, not through a l
 shell; a rotation through both paths with `islink` re-checked; a different-thread-ids
 half asserting overlap; driving a real escalation to completion; and per-key negative
 cases proving no turn spawned.
+
+### The one criterion that could not be satisfied at all
+
+Nine of the corrections on this PR made a criterion stricter. One was the opposite
+failure and is worth separating: the durable-recall control required the nonce to be
+absent from **every file the run can read**, while the nonce must be *persisted* to be
+recalled. codex appends each session to a rollout at
+`<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl` — measured in this tree, and written
+even for an unauthenticated run (`trident/codex-rotation-io.ts:6-19`) — and that file is
+exactly what `resume` rehydrates from, as this spike observed directly when an
+app-server was SIGTERM'd and a new one resumed the thread from disk. So the criterion
+demanded the nonce be simultaneously persisted and absent from anything readable.
+**Nothing could have passed it.**
+
+The substance of the control was right; its *shape* was wrong. "Absent from every file"
+is not the claim worth making. The claim is **recall arrives through codex's own
+persistence and through no other path** — which means the thread store must be excluded
+as the mechanism under test, and the nonce must be asserted *present* there, while
+absent from the worktree, the spec items, any adapter-owned state file, and the prompt.
+Excluding the store and requiring presence in it is stronger than a blanket ban, because
+it pins which mechanism was exercised instead of merely forbidding one alternative.
+
+Worth separating from the other nine because the failure mode is different and less
+visible: an over-strict criterion cannot be discovered by asking *what is the weakest
+implementation that passes this?* — the answer is "none", and the question does not flag
+that as wrong. It needs the companion question, **what would the correct implementation
+necessarily do that this criterion forbids?**
+
+Run over the remaining nine, that question caught one more, unprompted. The credential
+criterion said the adapter must exec `codex` directly "rather than through a login
+shell" — sound for the adapter's own spawn, and impossible if read as a property of the
+run, because **codex executes the model's commands through `/bin/bash -lc` itself**,
+observed repeatedly in this spike's approval tests. An implementation cannot avoid that
+and should not try. Now scoped explicitly to the adapter's own spawn, with the reason
+recorded so nobody tightens it back. The two questions are a pair: one finds criteria
+that permit too much, the other finds criteria that permit too little, and a section
+audited with only the first can still contain a rule no one can obey.
 
 ### Two measurements that simplified the result
 

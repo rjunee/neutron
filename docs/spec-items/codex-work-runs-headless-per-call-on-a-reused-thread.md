@@ -187,10 +187,26 @@ form; the "kills:" note names what the earlier form let through.
       — never a substring sniff or a model-judged "mentions it".
       Controls: a call with the byte-identical prompt and no `thread_id` must not
       return the nonce; and the nonce must be absent from call 2's prompt and from
-      every file the run can read.
+      every readable file **outside codex's own thread store**.
+      **The thread store is excluded because it is the mechanism under test, not a
+      leak.** codex appends every session to a rollout at
+      `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl` — measured in this tree, and
+      written even for an unauthenticated run (`trident/codex-rotation-io.ts:6-19`) —
+      so that file **necessarily contains the planted nonce**; it is what `resume`
+      rehydrates from. A blanket "absent from every readable file" is therefore not
+      merely strict, it is **unsatisfiable**: the nonce must be persisted to be
+      recalled. The claim the control actually needs to make is narrower and more
+      useful — *recall arrives through codex's own persistence and through no other
+      path*. So: assert the nonce is absent from the worktree, from `AGENTS.md` and the
+      spec items, from any adapter-owned state file, and from the prompt; assert it
+      **is** present in the recorded thread's rollout, which pins that the mechanism
+      being exercised is the one claimed. Alternatively run the control under a
+      filesystem policy that cannot read the rollout at all.
       *kills:* a memory-only `Map` (dies at step 3); a guessable fact (the control
-      passes by inference); **and "resume the most recent thread"** — without the
-      decoy at step 2, `resume --last` recalls the nonce and passes.
+      passes by inference); **"resume the most recent thread"** — without the decoy at
+      step 2, `resume --last` recalls the nonce and passes; **an adapter that smuggles
+      the nonce through its own state file or the prompt** (the narrowed absence list);
+      and the earlier blanket wording, which no implementation could satisfy.
 
 - [ ] **The follow-up call is built as a resume of the recorded id, and of no other.**
       verify: the argv is exactly `exec resume <the recorded id> …` — the `resume`
@@ -232,8 +248,12 @@ form; the "kills:" note names what the earlier form let through.
       assert **not one** reaches the process that execs codex. Read the child's
       environment (the env handed to the spawn, or `/proc/<pid>/environ`), never the
       config: the file being correct is what the broken implementation gets right.
-      (iii) assert the adapter **execs `codex` directly** rather than through a login
-      shell.
+      (iii) assert **the adapter's own spawn execs `codex` directly**, not through a
+      login shell (`bash -lc`), whose profile sourcing can re-export a scrubbed key.
+      Scoped to the adapter's spawn deliberately: codex runs the *model's* commands
+      through `/bin/bash -lc` itself — observed in this spike — and that is not the
+      adapter's to change, so a criterion forbidding every login shell in the tree would
+      forbid what a correct implementation cannot avoid.
       Bidirectional: `PATH` and a benign marker (`NEUTRON_SCRUB_CONTROL=1`) must still
       be present in the child.
       *kills:* validating the file and leaking an ambient key (the CLI prefers it —
@@ -299,9 +319,18 @@ form; the "kills:" note names what the earlier form let through.
       **before any model call** — 0.06 s, zero tokens — while a misspelled real key is
       named **instead of** the sentinel.
       Positive case: the probe passes and the recorded `codex --version` reaches the
-      run's record. Negative cases, **one per relied-upon key**: a stub rejecting that
-      key yields a **distinct typed unsupported-version outcome** and the test asserts
-      **no turn was spawned** — not merely that the run failed.
+      run's record. Negative cases, each asserting a **distinct typed
+      unsupported-version outcome** and **zero turns spawned** — not merely that the run
+      failed:
+      (i) **the `resume` subcommand is absent or its `--help` fails.** This case is
+      mandatory and is the one with a known in-tree breakage:
+      `runtime/adapters/codex-cli/exec.ts:67` emits the obsolete `codex exec --resume
+      <id>` form, which 0.149.1 rejects at **exit 2**. The capability that actually
+      broke must not be the one the negatives skip.
+      (ii) **one per relied-upon config key** — `sandbox_mode`, `approval_policy`,
+      `approvals_reviewer` — a stub rejecting that key.
+      (iii) **the sentinel is not named** though the probe ran, standing in for a CLI
+      that stopped validating unknown keys.
       **Day-one case, and it is a real machine's state (#647):** with a user
       `config.toml` containing an unrecognised field, the probe must still **pass**.
       `--ignore-user-config` is why, and it is the chosen mechanism rather than parsing
