@@ -259,7 +259,9 @@ export async function detectBaseBranch(
  * This is the round-eight ordering defect one layer out: there the `.mjs` binding
  * validated the name before consulting the pin; here the CALLER computed the probe before
  * the pin could be consulted. A function cannot enforce an ordering over inputs it is
- * handed already-computed — so the ordering is now a property of the SIGNATURE. The thunk
+ * handed already-computed — so the third parameter is now a THUNK. NOT "the ordering is a
+ * property of the signature", which is how this read and which the next four lines
+ * contradict: the type prevents one spelling, not the class. The thunk
  * is invoked on exactly the arm that needs it, and the eager-boolean form no longer TYPE
  * CHECKS — that is the mechanism, and it is worth stating its limit rather than calling the
  * defect unconstructable. A caller determined to precompute can still write

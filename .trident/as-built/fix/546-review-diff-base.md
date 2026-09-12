@@ -217,10 +217,10 @@ closed with a sweep instead of an edit.
 **The sweep, and its result.** Mechanical scope: every line this branch ADDS across its 22
 touched files, grepped for `always|never|every|all|only|cannot|impossible|unconstructab|no
 code path`. **467 lines carry one.** Discarding retractions that quote a superseded claim,
-general principles that are not about this code, and test-design prose leaves **38 claims
+general principles that are not about this code, and test-design prose leaves **41 claims
 about what this code does.** Each was read against the code it sits above:
 
-- **20 corrected.** `merge.ts`'s "ALWAYS"; four "the refused value cannot become a rev-range
+- **23 corrected.** `merge.ts`'s "ALWAYS"; four "the refused value cannot become a rev-range
   operand **at all**" (`merge.ts` ×2, this record, the option-shaped test) — true only
   *through that binding*, which is why every consumer also carries `--end-of-options`; two
   gate-reach claims ("the next site cannot re-introduce the class by forgetting", "fails CI
@@ -233,7 +233,12 @@ about what this code does.** Each was read against the code it sits above:
   "a change to either alone cannot land" — **falsified by the very round that added the
   whitespace axis**, so it now reads "along an axis the table varies"; and a test NAME,
   `'NO REMOTE: … it is the only case left'`, contradicted by the test twenty lines below it
-  that reaches the same fallback with `origin` configured.
+  that reaches the same fallback with `origin` configured. And three sites still called the
+  probe ordering **"a property of the signature"** — the claim the coordinator and I had
+  already agreed was wrong (the type prevents one spelling; `() => Promise.resolve(r)` still
+  slips through), including one in `merge.ts` contradicted by its own next four lines and one
+  in the PR body. **A correction agreed in conversation is not a correction made in the
+  tree.**
 - **18 held**, and they are what make the sweep worth trusting: a sha cannot go stale;
   `refs/heads/<base>` is the best available base in every no-resolving-ref state; the only
   source of a padded name is configuration (`detectBaseBranch` trims its own output at
@@ -310,9 +315,12 @@ This is round eight's ordering defect one layer out: there the `.mjs` binding va
 name before consulting the pin; here the CALLER computed the probe before the pin could be
 consulted. **A function cannot enforce an ordering over inputs it is handed
 already-computed** — so the third parameter is now a THUNK, invoked on exactly the arm that
-needs it, and the eager-boolean form no longer type-checks. The rule stopped being something
-each caller must remember and became a property of the signature, which is this branch's
-principle applied to an ordering rather than to a value.
+needs it, and the eager-boolean form no longer type-checks. The rule stopped being the
+NATURAL spelling for a caller to get wrong — but **not a property of the signature**, which
+is how this paragraph read until the round-thirteen sweep: a caller can still hand over
+`() => Promise.resolve(r)` around an already-awaited value, and the type cannot see inside a
+thunk. What actually holds the ordering is the pair of absent-side-effect tests below. The
+branch's principle applies to the SPELLING here, not to the value.
 
 **The test gap is the instructive half.** The result was correct throughout, so no value
 assertion could see it — and the parity tests call `diffBaseRef` directly, so the caller's
