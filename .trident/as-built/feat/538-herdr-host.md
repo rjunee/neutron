@@ -1513,6 +1513,52 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The restored backend reintroduced the race `beginOutput()` exists to prevent
+
+`BunTerminalHost` had the byte stream from the instant the child was spawned, so it
+forwarded straight through and returned an empty `beginOutput`. I wrote the comment "no
+gate to release" and it was wrong: `spawn.ts` cannot assign `scanChild` until
+`await ptyHost.spawn(...)` RETURNS, and with an injectable `createTerminal` the `data`
+callback can fire synchronously INSIDE `spawn` — so a startup trust or approval prompt is
+recorded into a ring with no detector attached, and because the ring is snapshot-replace
+it is never re-delivered. The keystroke never fires and the REPL waits forever on a
+dialog nobody saw. That is the wedge class this substrate was built to avoid, restored by
+the act of restoring the backend.
+
+The gate now holds the CALL and never the bytes: output accumulates throughout and the
+latest screen is delivered the moment the consumer exists. It fails open loudly on the
+same window as herdr — the constant moved to `pty-host.ts` as part of the shared
+contract, so the two cannot drift — and it releases on child exit rather than merely
+cancelling, because a dead child's last screen is the only record of what it printed and
+withholding it for a caller still wiring up loses it entirely.
+
+**Four existing Bun tests started failing, and that is the finding.** They never called
+`beginOutput()`, because there was nothing to call. They now do what production does.
+
+### A per-backend suite can only prove what its own author remembered
+
+No test noticed the missing gate, and the reason is structural rather than an oversight:
+the requirement belongs to the INTERFACE, and each backend had its own suite. So an
+interface requirement was asserted in the one place that happened to implement it first.
+
+`__tests__/pty-host-conformance.test.ts` runs the readiness boundary against both hosts
+from one table. M179 is the proof that it is genuinely shared: removing the HERDR gate
+reddens the same suite that M176 reddens for Bun.
+
+Three things in it are easy to omit and each was deliberate. A SETTLE step before the
+"nothing delivered yet" assertion — without it the claim is vacuous for a host whose
+producer is asynchronous, and passes against no gate at all. An assertion that the held
+screen IS delivered after the release, because a host that drops what it held is as
+broken as one that delivers too early, just silently (M177). And a CONTROL that the table
+holds two DISTINCT hosts, since a conformance suite that lists one backend twice conforms
+an implementation to itself — the same shape as the divergence it exists to catch.
+
+Kept narrow on purpose: this is the readiness boundary only. A full conformance suite
+over the whole `PtyChild` contract is worth having and is its own item — each remaining
+property has backend-specific evidence requirements that would have to be modelled before
+they could be shared honestly. Adding cases is the cheap part; agreeing what "the same
+case" means for two substrates with different observables is not.
+
 ### A shared interface that encodes one backend's behaviour is the dual-path outcome
 
 `PtyChild.write` said "DOES NOT SUBMIT, AND REFUSES TO PRETEND IT DOES" and described
@@ -1629,11 +1675,21 @@ the same too-narrow walk.
 
 This item began as a hard delete — "`bun-terminal-host.ts` is deleted, not left beside
 the new one; no feature flag, no dual code path" — and sixteen commits on this branch
-are that change. The owner has since decided to keep the in-process backend selectable,
-and #540 is being rewritten from "delete the in-process PTY host" to "make the substrate
-selectable". **Recorded prominently because it reverses a stated hard rule of this
-tree**, and because the next reader will otherwise find a file the earlier half of this
-record says was deleted.
+are that change. The owner reversed it. **The governing record is SPEC.md's Decisions Log
+entry of 2026-09-12, "THE REPL SUBSTRATE BECOMES SELECTABLE"**; this file cites it and
+does not assert the reversal on its own authority. #540 is rewritten from "delete the
+in-process PTY host" to "make the REPL substrate selectable".
+
+That entry had to be written a round late, and the gap is the lesson: for one round the
+reversal existed only in a spec item and in this file, while `AGENTS.md`'s "no feature
+flags and no dual code paths" and the 2026-09-11 pivot entry's "the opaque PTY host goes"
+both still stood as absolutes. **A work item cannot override an authority.** The
+authorities are now amended in the shape they themselves prescribe — a new dated entry at
+the top of the immutable log, the body marker edited in place, and the `AGENTS.md` rule
+SCOPED rather than dropped, because a standing absolute the tree contradicts teaches the
+next reader to ignore it. Note what was NOT done: the 2026-09-11 clause is inside a log
+entry, and that log is immutable, so it stays verbatim and the new entry supersedes it —
+the same treatment the 2026-09-12 codex entry gave the same pivot entry's outcome rule.
 
 What was NOT done, deliberately: no user-facing chooser. herdr stays the only wired
 default (`spawn.ts`: `options.ptyHost ?? herdrHost`), and the Bun host is reached by
@@ -2184,6 +2240,10 @@ Run against the named suites.
 | M173 | a REFUSED text still sends the Enter — a blind submit | RED 1 |
 | M174 | the injected terminal is ignored | RED 3 |
 | M175 | the shared `write()` contract keeps herdr's "DOES NOT SUBMIT" clause | prose — no test; the defect is a FALSE STATEMENT to callers, and the check is that the interface names no backend-specific rule |
+| M176 | the Bun readiness gate is removed (deliver straight through) | RED 1 (the SHARED suite) |
+| M177 | the Bun gate holds but never delivers what it held | RED 1 |
+| M178 | the Bun release is not once-only — it re-delivers on every call | RED 1 |
+| M179 | the HERDR poll loop stops awaiting its gate | RED 1 — the same shared suite, which is the proof it runs against both |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

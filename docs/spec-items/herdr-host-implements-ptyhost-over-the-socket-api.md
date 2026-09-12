@@ -10,16 +10,21 @@ legacy_ref: "GitHub issue #538 (herdr step 2b)"
 A `HerdrHost` implements the `PtyHost` interface over herdr's unix-socket API and
 becomes the **only wired backend**: `spawn.ts` resolves `options.ptyHost ?? herdrHost`.
 
-**SCOPE CHANGE, 2026-09-12, and it reverses the original framing of this item.** This
-item first required `bun-terminal-host.ts` to be DELETED — no flag, no dual path — and
-that is what the first sixteen commits on the branch did. The owner has since decided to
-keep the in-process backend as a selectable option, and #540 is being rewritten from
-"delete the in-process PTY host" to "make the substrate selectable". So the file is
-restored, adapted to the interface as it now stands, and kept tested — but **not wired to
-a chooser**, because a switch between a proven path and an unproven one hides which is
-which. The option is preserved at near-zero cost; it is not exercised. A user-facing
-selector is explicitly OUT of scope here and waits on the herdr path being verified live
-on the instance.
+**SCOPE CHANGE, and this item does not carry it on its own authority — see SPEC.md
+Decisions Log 2026-09-12, "THE REPL SUBSTRATE BECOMES SELECTABLE".** This item first
+required `bun-terminal-host.ts` to be DELETED — no flag, no dual path — and that is what
+the first sixteen commits on the branch did. The owner reversed it; the decision entry
+records his words, what it supersedes (the "the opaque PTY host goes" clause of the
+2026-09-11 pivot entry, which stays verbatim as that log requires), and the scoping of
+`AGENTS.md`'s no-dual-code-paths rule. #540 is rewritten from "delete the in-process PTY
+host" to "make the REPL substrate selectable".
+
+A WORK ITEM CANNOT OVERRIDE AN AUTHORITY, which is why that entry exists: for one round
+the reversal lived only here and in the as-built while `AGENTS.md` and the pivot entry
+both still read as absolutes. The file is restored, adapted to the interface as it now
+stands, and kept tested — but **not wired to a chooser**, because a switch between a
+proven path and an unproven one hides which is which. A user-facing selector is
+explicitly OUT of scope here and waits on the herdr path being verified live.
 
 **THE TWO BACKENDS ARE NOT INTERCHANGEABLE**, and that is the real cost of keeping both.
 Stated here, at the selection seam (`types.ts`'s `ptyHost`), in `pty-host.ts` and in
@@ -211,6 +216,33 @@ not-new. That is accepted and recorded here rather than hidden.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
       and `rg -n "ptyHost \?\?" runtime/adapters/claude-code/persistent/spawn.ts` shows
       `herdrHost` as the sole default.
+- [ ] **A SHARED requirement is asserted from ONE suite, run against every backend.**
+      The readiness gate (`beginOutput`) belongs to the interface: `spawn.ts` cannot
+      assign `scanChild` until `await spawn(...)` returns and releases output only after
+      wiring completes. herdr honoured it; the restored PTY host delivered straight from
+      its terminal callback and returned an EMPTY `beginOutput`, so a startup trust or
+      approval prompt could be recorded into a ring with no detector attached — and
+      because the ring is snapshot-replace it is never re-delivered, so the keystroke
+      never fires and the REPL waits forever on a dialog nobody saw. NO TEST NOTICED,
+      and the reason is structural: each backend had its own suite, so an INTERFACE
+      requirement was asserted only where it happened to be implemented first. A
+      per-backend suite can prove one backend does what its own author remembered.
+      THE CASE RUNS AGAINST BOTH HOSTS FROM ONE TABLE, with three things that are easy
+      to omit: a SETTLE step before the "nothing yet" assertion (without it the claim is
+      vacuous for a host whose producer is asynchronous, and passes against no gate at
+      all); the held screen must be DELIVERED after the release, not dropped — a host
+      that loses what it held is as broken as one that delivers too early, just silently;
+      and a CONTROL that the table really holds two distinct hosts, or a "conformance"
+      suite can conform one implementation to itself. Both hosts fail-open loudly on the
+      SAME shared constant, so their windows cannot drift.
+      SCOPE, deliberately: the readiness boundary only — the case the divergence was
+      found on. A full conformance suite over the whole `PtyChild` contract (exit
+      classification, the kill ladder, write ordering, `submitLine`'s acknowledgement) is
+      its own item, because each of those has backend-specific evidence requirements that
+      must be modelled before they can be shared honestly. Adding cases is the cheap part;
+      agreeing what "the same case" means for two substrates with different observables
+      is not.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
 - [ ] **The shared interface describes BOTH backends, or it describes neither.** A
       contract that encodes one implementation's behaviour is the "two diverging code
       paths" outcome that keeping a second backend was supposed to avoid — and it is

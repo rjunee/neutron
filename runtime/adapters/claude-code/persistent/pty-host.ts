@@ -56,6 +56,18 @@
 import type { Key } from './keystrokes.ts'
 
 /**
+ * How long a host waits for its caller to call {@link PtyChild.beginOutput} before
+ * releasing screens anyway, with a warning.
+ *
+ * PART OF THE SHARED CONTRACT, not of one backend. The gate is an ORDERING device, not
+ * a permission: withholding output forever is worse than delivering it late, because a
+ * REPL whose screens never reach the detectors is wedged silently. So a caller that
+ * forgets is told loudly and the screens flow — late, but they flow. Lives here, and
+ * both hosts default to it, so the two cannot drift into different fail-open windows.
+ */
+export const PTY_OUTPUT_GATE_MAX_MS = 5000
+
+/**
  * WHY a child became terminal, IN HERDR'S TERMS. herdr reports no exit status (see
  * {@link PtyChild.exited}), so this is the only thing that distinguishes its routes.
  *

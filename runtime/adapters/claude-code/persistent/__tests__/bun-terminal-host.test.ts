@@ -40,6 +40,10 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
       env: {},
       onScreen: (s) => screens.push(s),
     })
+    // AS PRODUCTION DOES. `spawn.ts` calls this once its consumers are wired; without
+    // it the host holds screens for the fail-open window. These tests used to pass
+    // without it because this backend had no gate — which was the defect.
+    child.beginOutput?.()
     // `spawn` is async for herdr's sake; here the pid exists immediately and must be
     // real — `supervision.ts` liveness-probes it.
     expect(child.pid).toBeGreaterThan(0)
@@ -63,6 +67,10 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
       env: {},
       onScreen: (s) => screens.push(s),
     })
+    // AS PRODUCTION DOES. `spawn.ts` calls this once its consumers are wired; without
+    // it the host holds screens for the fail-open window. These tests used to pass
+    // without it because this backend had no gate — which was the defect.
+    child.beginOutput?.()
     await child.submitLine!('first-line')
     await until(() => screens.some((s) => s.includes('first-line')), 'the first line')
     await child.submitLine!('second-line')
@@ -87,6 +95,7 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
       ['/bin/sh', '-c', 'while IFS= read -r line; do echo "GOT:$line"; done'],
       { cwd: '/tmp', env: {}, onScreen: (s) => screens.push(s) },
     )
+    child.beginOutput?.() // as production does, once its consumers are wired
     await child.submitLine!('alpha')
     await until(() => screens.some((s) => s.includes('GOT:alpha')), 'the first line')
     await child.submitLine!('beta')
@@ -110,6 +119,7 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
       ['/bin/sh', '-c', 'while IFS= read -r line; do echo "GOT:$line"; done'],
       { cwd: '/tmp', env: {}, onScreen: (s) => screens.push(s) },
     )
+    child.beginOutput?.() // as production does, once its consumers are wired
     await child.submitLine!('acknowledged-line')
     await until(
       () => screens.some((s) => s.includes('GOT:acknowledged-line')),

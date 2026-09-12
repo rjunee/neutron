@@ -11,6 +11,8 @@
  * `{ id, method, params }`, a reply is `{ id, result }` or `{ id, error }`.
  */
 
+import { PTY_OUTPUT_GATE_MAX_MS } from './pty-host.ts'
+
 import type { Key, NamedKey } from './keystrokes.ts'
 
 /**
@@ -89,7 +91,7 @@ export const HERDR_VIEWPORT_ROWS_FALLBACK = 120
  * detectors is wedged silently. So a caller that forgets is told loudly and the
  * screens flow — late, but they flow.
  */
-export const HERDR_OUTPUT_GATE_MAX_MS = 5000
+export const HERDR_OUTPUT_GATE_MAX_MS = PTY_OUTPUT_GATE_MAX_MS
 
 /**
  * The largest UNTERMINATED inbound frame the client will buffer before declaring the

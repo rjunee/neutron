@@ -39,7 +39,7 @@
 import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
 import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
 import { clampLeadingLines, DEFAULT_RING_MAX_BYTES } from './pty-ring.ts'
-import type { PtyChild, PtyHost, PtySpawnOpts } from './pty-host.ts'
+import { PTY_OUTPUT_GATE_MAX_MS, type PtyChild, type PtyHost, type PtySpawnOpts } from './pty-host.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
@@ -204,6 +204,10 @@ export interface BunTerminalHostDeps {
   }) => BunTerminalLike
   /** Spawn the child attached to that pty. Defaults to `Bun.spawn`. */
   spawn?: (opts: Record<string, unknown>) => BunSpawnedLike
+  /** How long to wait for `beginOutput()` before releasing screens anyway, with a
+   *  warning. Defaults to the SHARED {@link PTY_OUTPUT_GATE_MAX_MS}; a test shortens it
+   *  so the fail-open path is fast. Mirrors `HerdrHostDeps.outputGateMaxMs`. */
+  outputGateMaxMs?: number
 }
 
 export class BunTerminalHost implements PtyHost {
@@ -246,6 +250,48 @@ export class BunTerminalHost implements PtyHost {
     // all previous output — the exact inverse of the old `onData` contract, and
     // silently: the ring would look alive and hold only the last few bytes.
     const accumulator = newScreenAccumulator()
+
+    // THE READINESS GATE, AND IT IS NOT A NO-OP HERE EITHER.
+    //
+    // This host has the byte stream from the instant the child is spawned, so it was
+    // written to forward straight through and return an empty `beginOutput`. That
+    // reintroduces exactly the race the gate exists to prevent, and the shared contract
+    // is where the requirement lives — not in the backend that happened to need it
+    // first. `spawn.ts` cannot assign `scanChild` until `await ptyHost.spawn(...)`
+    // RETURNS, and it releases output only after the rest of its wiring completes. A
+    // child that writes before then — a startup trust prompt, an approval dialog — is
+    // recorded into a ring with no detector attached, and because the ring is
+    // snapshot-replace the screen is never re-delivered: the prompt's keystroke never
+    // fires and the REPL waits forever on a dialog nobody saw.
+    //
+    // The gate holds the CALL, never the bytes: output accumulates throughout and the
+    // latest screen is delivered the moment the consumer exists.
+    let outputReleased = false
+    let heldScreen: string | undefined
+    let gateTimer: ReturnType<typeof setTimeout> | undefined
+    const gateMaxMs = this.deps.outputGateMaxMs ?? PTY_OUTPUT_GATE_MAX_MS
+    let spawnedPid: number | undefined
+    const releaseOutput = (): void => {
+      if (outputReleased) return
+      outputReleased = true
+      const held = heldScreen
+      heldScreen = undefined
+      if (held !== undefined && opts.onScreen !== undefined) opts.onScreen(held)
+    }
+    // FAIL OPEN, LOUDLY — the same policy as the herdr host, for the same reason.
+    // Withholding output forever is worse than delivering it late: a REPL whose screens
+    // never reach the detectors is wedged silently and looks idle. The gate orders
+    // delivery; it does not authorise it.
+    gateTimer = setTimeout(() => {
+      if (outputReleased) return
+      process.stderr.write(
+        `[bun-terminal-host] pid ${String(spawnedPid ?? 'pending')}: beginOutput() was not ` +
+          `called within ${gateMaxMs}ms — releasing screens anyway. This is a WIRING BUG in the ` +
+          `caller: screens delivered before its consumer exists cannot be scanned, and a ` +
+          `snapshot-replace ring never re-delivers an unchanged screen.\n`,
+      )
+      releaseOutput()
+    }, gateMaxMs)
     // A STREAMING decoder. `stripPtyNoise` removes escape sequences at the BYTE level,
     // so a stripped chunk can end mid-character; decoding each chunk independently
     // turns that into U+FFFD pairs while everything downstream still looks like text.
@@ -262,7 +308,15 @@ export class BunTerminalHost implements PtyHost {
         if (clean.length === 0) return
         const text = decoder.decode(clean, { stream: true })
         if (text === '') return // the chunk was a partial character; wait for the rest
-        opts.onScreen(accumulator.push(text))
+        // ACCUMULATE ALWAYS, DELIVER ONLY ONCE RELEASED. The bytes are never dropped;
+        // what the gate holds back is the CALL, so a screen produced before the
+        // consumer exists is delivered the moment it does.
+        const screen = accumulator.push(text)
+        if (!outputReleased) {
+          heldScreen = screen
+          return
+        }
+        opts.onScreen(screen)
       },
     })
 
@@ -272,6 +326,7 @@ export class BunTerminalHost implements PtyHost {
       env: compactEnv(opts.env),
       terminal,
     })
+    spawnedPid = proc.pid
 
     // Surface the real subprocess exit (the Terminal `exit` cb reports PTY
     // lifecycle, not the child exit code — per Bun docs we use proc.exited).
@@ -279,6 +334,14 @@ export class BunTerminalHost implements PtyHost {
       'bun-terminal-host.exit',
       proc.exited.then((code) => {
         exited = true
+        // RELEASE, DO NOT JUST CANCEL. The child is gone, so nothing more will be
+        // produced and the last screen is the only record of what it printed —
+        // withholding it because the caller has not finished wiring loses a dead REPL's
+        // final output entirely, which is the failure `onScreen`'s "a failed read is not
+        // an empty screen" rule exists to prevent one layer up. Runs on a later tick
+        // than `spawn()` returning, so it cannot pre-empt the caller's `await`.
+        clearTimeout(gateTimer)
+        releaseOutput()
         try {
           terminal.close()
         } catch {
@@ -361,10 +424,10 @@ export class BunTerminalHost implements PtyHost {
       hasExited: () => exited,
       wasKilledByUs: () => killedByUs,
       wasInterruptedByUs: () => interruptedByUs,
-      /** No gate to release: this host has the byte stream from the moment the child
-       *  is spawned, and nothing is polled. Present so a caller can call it
-       *  unconditionally on either backend. */
-      beginOutput: () => {},
+      beginOutput: () => {
+        clearTimeout(gateTimer)
+        releaseOutput()
+      },
     }
     return child
   }
