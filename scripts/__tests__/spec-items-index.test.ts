@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   GROUPS,
+  escapeCell,
   INDEX_FILENAME,
   PRIORITIES,
   SPEC_ITEMS_DIR,
@@ -134,6 +135,17 @@ describe('the validator rejects what it should', () => {
       writeFileSync(join(dir, INDEX_FILENAME), 'not an item, has no frontmatter')
       expect(readSpecItems(dir).map((i) => i.slug)).toEqual(['fine'])
     })
+  })
+
+  // A title with a backslash before a pipe is the case that breaks pipe-only escaping:
+  // `\|` becomes `\\|`, an escaped BACKSLASH plus a LIVE separator, so the text
+  // escapes its own column. Order of replacement is the fix, so pin the order.
+  test('a cell escapes backslashes before pipes, so nothing breaks out of its column', () => {
+    expect(escapeCell('a|b')).toBe('a\\|b')
+    expect(escapeCell('a\\|b')).toBe('a\\\\\\|b')
+    expect(escapeCell('a\\b')).toBe('a\\\\b')
+    // The bug this pins: pipe-only escaping would yield 'a\\\\|b' — a live separator.
+    expect(escapeCell('a\\|b').endsWith('\\\\|b')).toBe(true)
   })
 
   test('quoted frontmatter values are unquoted', () => {

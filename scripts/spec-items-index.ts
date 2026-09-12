@@ -123,8 +123,12 @@ export function readSpecItems(dir: string): SpecItem[] {
   )
 }
 
-function escapeCell(s: string): string {
-  return s.replace(/\|/g, '\\|')
+/** Markdown table-cell escaping. BACKSLASHES FIRST, then pipes — escaping the pipe
+ *  alone is incomplete: a title containing a literal `\|` would become `\\|`, which
+ *  renders as an escaped BACKSLASH followed by a live cell separator, so the text
+ *  would break out of its own column. Order is the whole correctness argument here. */
+export function escapeCell(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 }
 
 /** Pure: the same items always render the same bytes. That is what makes the test a
