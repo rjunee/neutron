@@ -25,6 +25,25 @@ the workflow's own process is alive. A run reaped by the hang watchdog, cancelle
 that already fires on every path, was built to never delete a branch: the ref WAS the rescue copy
 of a failed run's commits (`.trident/plans/trident/nothing-ever-reaps-a-trident-worktr.md`).
 
+### The third route, and why the deferral was not what made it safe
+
+`refClaimedNow` checked only command FAILURE, then parsed the output and proceeded — so a probe that
+returned `{ok: true, stdout: '', exit_code: 0}` while a claimant worktree existed read as "no
+claimants" and permitted the delete. The module already got this right 280 lines up, where the
+worktree pass treats an empty initial listing as unprovable *because git must report the main
+worktree*: one site knew that and the other did not. It also falsified this record's own claim that
+unreadable holder measurements refuse.
+
+TWO THINGS ABOUT IT ARE WORTH KEEPING. First, the guard belongs on the PARSE RESULT and not on the
+string: measured against `parseHoldersZ`, an empty string, bare NULs, records carrying no `worktree`
+field, and arbitrary non-porcelain text ALL parse to zero records, so a `stdout === ''` check would
+have caught one shape of four — the malformed payload is the same defect wearing a different coat.
+Second, and more important: **the deferral is what made this survivable, not the probe's
+correctness.** #606 deletes nothing, so the bug could not fire; but #635 is designed to re-enable
+deletion with one call, and it would have re-enabled this too. A guard that is only safe because the
+thing it guards is switched off is not a guard yet — which is why #635's acceptance now requires the
+probe to refuse on an unreadable listing, proven BEFORE deletion is re-enabled.
+
 ### WHAT THIS SHIPS, AND WHAT IT DELIBERATELY DOES NOT
 
 **IT PERFORMS NO DELETIONS.** Every gate, the salvage, the atomic compare-and-swap, the claim probe,
@@ -73,9 +92,25 @@ for the refactor. Three things fell out of it that the short-circuit would not h
 
 ### The generalisation, which outlived the specific fixes
 
-**ON A DESTRUCTIVE PATH, "FALSE" AND "UNKNOWN" MUST NEVER SHARE A BRANCH — AND A BOOLEAN RESULT TYPE
-IS WHAT MAKES THEM SHARE ONE.** This is stated first because it is the transferable part; everything
-below it is one module's instances of it.
+**`false`, `threw`, AND `succeeded-with-impossible-output` ARE ALL "UNKNOWN", AND ON A DESTRUCTIVE
+PATH NONE OF THEM MAY SHARE A BRANCH WITH "NO".** This is stated first because it is the transferable
+part; everything below it is one module's instances of it.
+
+There are exactly three routes by which a host call can fail to answer, and this module shipped a bug
+down each one in turn — each found only after the previous had been audited and closed:
+
+| route | how it presents | why the previous audit missed it |
+|---|---|---|
+| a non-`ok` result | `ok: false` | — (the first audit; 11 `.ok` decisions classified) |
+| a **throw** | an exception, after the command may already have taken effect | a `catch` is not an `.ok` decision |
+| a **success whose output is impossible** | `ok: true`, no exception, no error string | nothing failed; the signal is purely semantic |
+
+The third is the least visible and the most dangerous to reason about, because the knowledge that
+makes it detectable — *`git worktree list` always reports the main working tree, so zero records is
+impossible* — is per-command and cannot be derived from any type. It has to be written down. The
+module header now carries all three classifications side by side: every `.ok` decision, every `catch`
+by whether its command mutates, and every parsed payload by what output is impossible for that
+command.
 
 Three review rounds produced three versions of a single mistake, each time a boolean `ok` deciding a
 question git answers with an exit code:

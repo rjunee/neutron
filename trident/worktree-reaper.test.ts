@@ -2140,6 +2140,174 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
   }, 60_000)
 
+  // A COMMAND THAT SUCCEEDED WHOSE OUTPUT CANNOT BE WHAT IT SAYS — the third route into the
+  // same mistake, and the least visible: `ok` is true, nothing threw, there is no error string.
+  // `git worktree list` ALWAYS reports the main working tree, so a listing that parses to zero
+  // records is not an empty repository — it is an answer that did not arrive. Reading "no
+  // claimants" out of it is what permits a delete.
+  //
+  // THE SHAPES ARE MEASURED, not assumed: `parseHoldersZ` yields zero records from an empty
+  // string, from bare NULs, from records carrying no `worktree` field, and from arbitrary
+  // non-porcelain text. A `stdout === ''` check would have caught one of the four, which is why
+  // the guard is on the parse result.
+  for (const shape of [
+    { what: 'empty stdout', stdout: '' },
+    { what: 'bare NULs', stdout: '\0\0\0' },
+    { what: 'records with no worktree field', stdout: 'HEAD abc\0branch refs/heads/x\0\0' },
+    { what: 'non-porcelain text', stdout: 'fatal: not a git repository\n' },
+  ]) {
+    test(`a holder listing of ${shape.what} refuses BEFORE the delete`, async () => {
+      // The pre-delete probe. The gate named both probes, so both are pinned.
+      const { root, repo } = await makeRepo()
+      const branch = 'trident/impossible-listing-pre'
+      const sha = await seedRef(repo, branch, 'imposspre')
+      let listings = 0
+      let deleteAttempted = false
+
+      const report = await sweepAndReap({
+        store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+        run_host: async (cmd, cwd) => {
+          if (/update-ref (--no-deref )?-d/.test(cmd.join(' '))) deleteAttempted = true
+          if (cmd.includes('-z') && cmd.includes('list')) {
+            listings += 1
+            // The FIRST listing is the holder map's; later ones are the probe's. Let the map
+            // through so the refusal below is unambiguously the PROBE's.
+            if (listings > 1) return { ok: true, stdout: shape.stdout, stderr: '', exit_code: 0 }
+          }
+          return spawnCapture(cmd, cwd)
+        },
+        proc_root: makeProc(root),
+      })
+
+      expect(listings).toBeGreaterThan(1)
+      expect(deleteAttempted, 'a delete must never be attempted on an unreadable listing').toBe(false)
+      expect(report.refs_deleted).toEqual([])
+      expect(
+        report.refs_kept.some((k) => k.reason.includes('holders-unreadable')),
+        JSON.stringify(report.refs_kept),
+      ).toBe(true)
+      expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    }, 60_000)
+  }
+
+  test('an impossible HOLDER MAP listing stands the whole repo down', async () => {
+    // The other listing. The holder map is built once per repo and feeds gates 4 and 5, so an
+    // impossible payload there means nothing is known about who holds what — and unlike the
+    // probe's, this refusal covers EVERY ref in the repository rather than one.
+    const { root, repo } = await makeRepo()
+    const a = await seedRef(repo, 'trident/map-dark-a', 'mapdarka')
+    const b = await seedRef(repo, 'trident/map-dark-b', 'mapdarkb')
+    let listings = 0
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [
+        owner('trident/map-dark-a', { phase: 'failed' }),
+        owner('trident/map-dark-b', { phase: 'done' }),
+      ]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('-z') && cmd.includes('list')) {
+          listings += 1
+          // The FIRST `-z` listing is the holder map's — succeed, but say something impossible.
+          if (listings === 1) return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(listings).toBeGreaterThan(0)
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_reapable).toEqual([])
+    expect(report.refs_stood_down).toBe(1)
+    expect(
+      report.refs_kept.some((k) => k.reason.includes('holders-unenumerable')),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    // BOTH refs survive, which is what "the whole repo" means.
+    expect(await git(repo, 'rev-parse', 'refs/heads/trident/map-dark-a')).toBe(a)
+    expect(await git(repo, 'rev-parse', 'refs/heads/trident/map-dark-b')).toBe(b)
+  }, 60_000)
+
+  test('a holder listing that becomes impossible AFTER the delete refuses, and repairs', async () => {
+    // The post-delete probe. The ref really is gone by the time the listing goes bad, so the
+    // only safe reading of an unreadable listing is "something claims it" — which routes to the
+    // repair and puts the ref back.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/impossible-listing-post'
+    const sha = await seedRef(repo, branch, 'imposspost')
+    let deleted = false
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          return spawnCapture(cmd, cwd)
+        }
+        // Only the listings AFTER the delete go bad.
+        if (deleted && cmd.includes('-z') && cmd.includes('list')) {
+          return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(deleted).toBe(true)
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_restored).toEqual([{ ref: ref(branch), sha }])
+    // THE REF IS BACK, because an unreadable listing answers "claimed" rather than "clear".
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+  }, 60_000)
+
+  test('THE COMPLEMENT: a well-formed listing with a claimant still restores', async () => {
+    // Without this and the next, a probe that refused on EVERY listing would pass the four
+    // above. This is the real-claimant path, unchanged.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/wellformed-with-claimant'
+    const sha = await seedRef(repo, branch, 'wfclaim')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_wellformed-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          return spawnCapture(cmd, cwd)
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_restored).toEqual([{ ref: ref(branch), sha }])
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    expect(await git(claimant, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(branch)
+  }, 60_000)
+
+  test('THE COMPLEMENT: a well-formed listing with NO claimant still permits the reap', async () => {
+    // The other half. A guard that refuses everything satisfies all five refusals above on its
+    // own; this is what stops that.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/wellformed-no-claimant'
+    const sha = await seedRef(repo, branch, 'wfnoclaim')
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `refs/trident-reaped/wellformed-no-claimant/${sha}` },
+    ])
+    expect(report.refs_restored).toEqual([])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+  }, 60_000)
+
   test('a salvage that cannot be written blocks the delete', async () => {
     // Only the salvage WRITE is broken, not the delete: a stub that broke both would let
     // the ref survive for the wrong reason and prove nothing about the ordering.

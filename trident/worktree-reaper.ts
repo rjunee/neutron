@@ -44,7 +44,9 @@
  * false" with "I could not find out", and on a destructive path those must take different
  * branches.
  *
- * THE TEST FOR WHETHER TWO VALUES ARE ENOUGH: does every failure class take the SAME branch,
+ * THE TEST FOR WHETHER TWO VALUES ARE ENOUGH — and "failure class" means all THREE routes: a
+ * non-ok result, a throw after the command had its chance, and a success whose output is
+ * impossible. Does every failure class take the SAME branch,
  * and is that branch the REFUSING one? If yes, `ok` is fine and collapsing costs nothing. If
  * the branches differ — or if one of them is the destructive one — the decision must be keyed
  * on the value git actually returned. Every `.ok` in this module, classified:
@@ -98,6 +100,33 @@
  *       threw, this sweep's memory of it is lost, but gate 5 is commit-keyed and catches the
  *       tree anyway; the recovery is that gate, not this catch.
  *     · `worktree prune` — administrative only; a throw either way changes nothing.
+ *
+ * AND A COMMAND CAN SUCCEED WHILE SAYING SOMETHING IMPOSSIBLE — the third route, and the
+ * least visible of the three. Nothing fails: `ok` is true, nothing throws, there is no error
+ * string, so neither of the audits above can see it. The signal is entirely SEMANTIC, and it
+ * is per-command knowledge that cannot be derived from any type — which is exactly why it has
+ * to be written down. For every host command whose output is parsed here: what output is
+ * impossible, and does impossible take the refusing branch?
+ *
+ *   `git worktree list` (both the plain and the `-z` forms) — ZERO RECORDS IS IMPOSSIBLE. git
+ *     always reports the main working tree, so a listing that parses to nothing is an answer
+ *     that did not arrive. All three call sites now refuse on it: the worktree pass stands the
+ *     repo down, the holder map stands the repo down, and the claim probe answers CLAIMED.
+ *     THE GUARD IS ON THE PARSE RESULT, NOT THE STRING: measured against `parseHoldersZ`, an
+ *     empty string, bare NULs, records with no `worktree` field, and arbitrary non-porcelain
+ *     text all parse to zero records, so a `stdout === ''` check would catch one shape of four.
+ *
+ *   `git for-each-ref` scoped to `refs/heads/trident/` — ZERO RECORDS IS LEGITIMATE. A
+ *     repository may genuinely have no trident refs. Nothing is impossible about that output,
+ *     and the sweep correctly returns having done nothing rather than standing down.
+ *
+ *   `git rev-parse --verify --quiet <ref>` — EXIT 0 WITH EMPTY STDOUT IS IMPOSSIBLE. A ref
+ *     that verified prints its sha. The presence read keys on the exit code and treats
+ *     anything that is not 0-or-1 as unknown; the salvage verify compares the sha, so an empty
+ *     stdout can never equal the tip and refuses.
+ *
+ *   `git update-ref` (all forms) — produces no stdout to parse; its outcome is the exit code,
+ *     which the two classifications above already cover.
  *
  * ── THE EVIDENCE GUARD — FOURTEEN CHECKS, SAFER THAN THE 2026-09-01 INCIDENT ──────
  *
@@ -735,6 +764,29 @@ function parseHoldersZ(stdout: string): ZHolder[] {
 }
 
 /**
+ * A HOLDER LISTING, OR NOTHING — and "nothing" means UNREADABLE, never "no worktrees".
+ *
+ * THE THIRD ROUTE INTO THE SAME MISTAKE (#547 round 9), and the least visible: a command that
+ * SUCCEEDED, whose output cannot be what it says. Nothing failed — `ok` is true, no exception,
+ * no error string — so neither the `.ok` audit nor the `catch` audit could see it. The signal
+ * is purely semantic: `git worktree list` ALWAYS reports the main working tree, so a listing
+ * that parses to zero records is not an empty repository, it is an answer that did not arrive.
+ *
+ * THE GUARD IS ON THE PARSE RESULT, NOT ON THE STRING, because empty stdout is only one of the
+ * shapes. Measured against `parseHoldersZ`: `''`, a run of bare NULs, records carrying no
+ * `worktree` field, and arbitrary non-porcelain text (`fatal: not a git repository`) ALL parse
+ * to zero records. A check for `stdout === ''` would have caught one of four.
+ *
+ * The worktree pass has always got this right for its own listing; this is the same rule,
+ * applied to the two `-z` listings that did not have it — the holder map and, critically, the
+ * claim probe, where reading "no claimants" out of an unreadable listing permits a delete.
+ */
+function readHolders(stdout: string): ZHolder[] | null {
+  const holders = parseHoldersZ(stdout)
+  return holders.length === 0 ? null : holders
+}
+
+/**
  * `<full ref>\0<sha>` per line. A ref name cannot contain an ASCII control character —
  * `git check-ref-format` rejects one — so newline-delimited RECORDS are safe here in a
  * way they are not for worktree paths; the NUL only separates the two fields, so a
@@ -845,7 +897,13 @@ async function refClaimedNow(
   }
   if (!listed.ok) return `holders-unreadable: ${hostText(listed)}`
   const readRebase = opts.rebase_head ?? readRebaseHead
-  const entries = parseHoldersZ(listed.stdout)
+  const entries = readHolders(listed.stdout)
+  if (entries === null) {
+    // A SUCCESSFUL COMMAND WHOSE OUTPUT IS IMPOSSIBLE. Reading "no claimants" out of this is
+    // what would permit the delete, so it answers CLAIMED — the refusing direction, like every
+    // other unreadable measurement in this module.
+    return 'holders-unreadable: the listing named no worktrees at all, not even the main one'
+  }
   for (const [index, holder] of entries.entries()) {
     if (holder.branch === ref) return `checked out at ${holder.path}`
     // The commit-keyed witness, linked trees only, for the same reasons as gate 5.
@@ -934,7 +992,17 @@ async function reapBranchRefs(
   // holds one, and `readRebaseHead` reads exactly the four places git itself looks:
   // the HEAD symref, `rebase-merge/head-name`, `rebase-apply/head-name`, `BISECT_START`.
   const readRebase = opts.rebase_head ?? readRebaseHead
-  const holders = parseHoldersZ(holderList.stdout)
+  const holders = readHolders(holderList.stdout)
+  if (holders === null) {
+    // Same rule, same reason: git must report the main worktree, so zero records is an answer
+    // that did not arrive and no ref in this repo may be touched on the strength of it.
+    report.refs_kept.push({
+      ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+      reason: 'holders-unenumerable: the listing named no worktrees at all, not even the main one',
+    })
+    report.refs_stood_down += 1
+    return
+  }
   const held = new Map<string, string>()
   // GATE 5 — DURABLE HOLDER-BY-HEAD. Keyed on the COMMIT, and it is what makes the
   // preservation of a detached tree outlive the sweep that detached it.

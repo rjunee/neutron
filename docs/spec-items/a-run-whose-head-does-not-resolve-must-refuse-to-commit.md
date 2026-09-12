@@ -79,6 +79,13 @@ test:
   that deferral and restoring the single call, and proving the sweep deletes again. Until then the
   sweep records what it *would* reap in `refs_reapable`: **72 of 80 refs on the repo of record** as of
   2026-09-12 (see the issue comment), which is the exposure this sequencing exists to hold back.
+- **(e) THE CLAIM PROBE REFUSES ON AN UNREADABLE HOLDER LISTING, proven before deletion is
+  re-enabled.** #606's probe had a hole — a `worktree list` that succeeded with impossible output
+  (zero records, which git cannot produce) read as "no claimants" and would have permitted a delete.
+  It is fixed there, but the fix was only ever *survivable* because #606 deletes nothing; re-enabling
+  deletion re-enables everything the probe decides. So this item's change must re-run those refusals
+  as part of its own acceptance rather than trusting them: a guard that is safe only because the
+  thing it guards is switched off is not yet a guard.
 - **(c) The refusal is not inferrable from the index.** A worktree whose HEAD resolves but which has
   nothing staged is a no-op commit, not this condition, and must not be conflated with it — the
   discriminator is `rev-parse --verify HEAD`, not "No commits yet" in `git status` output, which is
