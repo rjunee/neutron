@@ -938,7 +938,10 @@ async function commitsTouching(
   path: string,
 ): Promise<string[] | null> {
   const res = await run_host(
-    ['git', '-C', repo, 'log', '--format=%H', `${base_sha}..${head_sha}`, '--', path],
+    // `--end-of-options` (#546), before the operand and before the `--` pathspec
+    // separator — measured on git 2.43: `git log --format=%H --end-of-options A..B -- <path>`
+    // parses exactly as it did without the marker.
+    ['git', '-C', repo, 'log', '--format=%H', '--end-of-options', `${base_sha}..${head_sha}`, '--', path],
     repo,
   )
   if (!res.ok) return null

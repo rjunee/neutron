@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  commentOpenerIndex,
   EXEMPT_MARKER,
   MIN_JUSTIFICATION_CHARS,
   NEGATIVE_CONTROL,
@@ -314,6 +315,39 @@ describe('the matcher stays silent on every near-miss', () => {
     expect(
       findBareBaseRanges([`const note = "${EXEMPT_MARKER} ${reason}"`, bad].join('\n')).map((h) => h.line),
     ).toEqual([2])
+
+    // THE ADVERSARIAL HALF, and the case the line above could not fail on. The opener test
+    // used to be "is there a `//` anywhere to the left of the marker", which never asked
+    // whether that opener was itself inside a string — so ONE LINE could carry a fake
+    // comment in data AND the real offence, and report nothing.
+    const smuggled = `const note = " ${EXEMPT_MARKER} ${reason}"; ${bad}`
+    expect(findBareBaseRanges(smuggled).map((h) => h.line)).toEqual([1])
+    // Every quote flavour, because the scanner tracks three of them and a test that only
+    // tried double quotes would leave two live.
+    for (const q of ['"', "'", '`']) {
+      const src = `const note = ${q} // ${EXEMPT_MARKER} ${reason}${q}; ${bad}`
+      expect({ q, hits: findBareBaseRanges(src).map((h) => h.line) }).toEqual({ q, hits: [1] })
+    }
+    // A `#` smuggled the same way — the shell files are scanned with the same matcher.
+    expect(
+      findBareBaseRanges(`MSG="# ${EXEMPT_MARKER} ${reason}"; git diff "\${BASE_BRANCH}..HEAD"`).map((h) => h.line),
+    ).toEqual([1])
+
+    // THE COMPLEMENT: a REAL trailing comment still exempts even when the same line holds a
+    // string containing quote characters, so the fix is not "stop honouring exemptions".
+    const withString = `const label = "a // b"; ${bad} // ${EXEMPT_MARKER} ${reason}`
+    expect(findBareBaseRanges(withString)).toEqual([])
+    // …and a jsdoc continuation line above the offence still exempts it.
+    expect(findBareBaseRanges([` * ${EXEMPT_MARKER} ${reason}`, bad].join('\n'))).toEqual([])
+    // …as does a block comment on the offence's own line.
+    expect(findBareBaseRanges(`${bad} /* ${EXEMPT_MARKER} ${reason} */`)).toEqual([])
+
+    // The helper itself, since the cases above rest on it: an opener inside a string is not
+    // an opener, and one outside a string is.
+    expect(commentOpenerIndex('const note = " // x"')).toBe(-1)
+    expect(commentOpenerIndex('const note = "x" // y')).toBe(17)
+    expect(commentOpenerIndex(' * jsdoc')).toBe(1)
+    expect(commentOpenerIndex('const url = "http://x"')).toBe(-1)
 
     // And it does not reach two lines down — an exemption covers its own site only.
     expect(

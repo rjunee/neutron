@@ -641,7 +641,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('gh pr list')) return ok('42')
         // What the REVIEWER already saw ends at `reviewed`; only z-new.ts is new.
-        if (joined.includes(`--name-only ${reviewed}..${head}`)) return ok('z-new.ts\n')
+        // `--end-of-options` sits between the flags and the operand since round fourteen of
+        // #546 (this is the ALREADY-SEEN listing, taken against the reviewed pin).
+        if (joined.includes(`--name-only --end-of-options ${reviewed}..${head}`)) return ok('z-new.ts\n')
         if (joined.includes('diff --name-only')) return ok(`${ALL.join('\n')}\n`)
         const out = cmd.find((c) => c.startsWith('--output='))
         if (out !== undefined) {
@@ -716,7 +718,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return ok()
         if (joined.includes('gh pr list')) return ok('42')
-        if (joined.includes(`--name-only ${reviewed}..${head}`)) return ok('z-new.ts\n')
+        // `--end-of-options` sits between the flags and the operand since round fourteen of
+        // #546 (this is the ALREADY-SEEN listing, taken against the reviewed pin).
+        if (joined.includes(`--name-only --end-of-options ${reviewed}..${head}`)) return ok('z-new.ts\n')
         if (joined.includes('diff --name-only')) return ok(`${ALL.join('\n')}\n`)
         const out = cmd.find((c) => c.startsWith('--output='))
         if (out !== undefined) {
@@ -3084,7 +3088,9 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
   // is the sha the run carries in `base_sha` by the time the gate runs. Spelling it as
   // the CONSTANT rather than as `main` is what makes this leg fail if the resolution is
   // reverted: the mock serves only this one argv.
-  const DIFF_ARTIFACT = `git -C /repo -c core.quotePath=false diff -z --no-renames --name-status ${NO_DRIFT_SHA}...${SIM_REVIEWED_HEAD}`
+  // `--end-of-options` is part of this argv since round fourteen of #546 — the blast-radius
+  // diff was the last interpolated git range in trident without it.
+  const DIFF_ARTIFACT = `git -C /repo -c core.quotePath=false diff -z --no-renames --name-status --end-of-options ${NO_DRIFT_SHA}...${SIM_REVIEWED_HEAD}`
   /** The diff leg's WIRE FORMAT — `-z --name-status`, i.e. `<status>NUL<path>NUL`
    *  records. Tests spell a newline listing and this puts the shape around it. */
   const diffListing = (listing: string): string =>
@@ -7329,7 +7335,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
-        if (joined.includes('rev-list --count refs/heads/main..refs/remotes/origin/main')) return ok('16')
+        if (joined.includes('rev-list --count --end-of-options refs/heads/main..refs/remotes/origin/main')) return ok('16')
         return ok()
       },
     })
@@ -7366,7 +7372,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
-        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        if (joined.includes(`rev-list --count --end-of-options ${BASE}..${TIP}`)) return ok('3')
         // The remedy resolves its own evidence: git enumerates the repo's own checkout and
         // NOTHING holds the branch, and origin carries the very same tip — the one shape where
         // a delete is genuinely safe. The listing is spelled in git's real `-z` shape (every
@@ -7427,7 +7433,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
             return { ok: false, stdout: '', stderr: '', exit_code: 1 }
           }
-          if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+          if (joined.includes(`rev-list --count --end-of-options ${BASE}..${TIP}`)) return ok('3')
           if (joined.includes('worktree list --porcelain')) {
             return ok(['worktree /repo', `HEAD ${BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0')
           }
@@ -7526,7 +7532,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
       if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
       if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
-      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes(`rev-list --count --end-of-options ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
       if (joined.includes('worktree list --porcelain')) {
         return ok(
           ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
@@ -7599,7 +7605,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       if (joined.includes('rev-parse --is-shallow-repository')) return depth()
       if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
       if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
-      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes(`rev-list --count --end-of-options ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
       if (joined.includes('worktree list --porcelain')) {
         return ok(
           ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
@@ -7880,7 +7886,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
-        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        if (joined.includes(`rev-list --count --end-of-options ${BASE}..${TIP}`)) return ok('3')
         return ok()
       },
     })
@@ -7944,7 +7950,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${TIP}`)) {
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
-        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${TIP}`)) return ok('3')
+        if (joined.includes(`rev-list --count --end-of-options ${PRIOR_BASE}..${TIP}`)) return ok('3')
         return ok()
       },
     })
@@ -7992,7 +7998,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${TIP}`)) {
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
-        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${TIP}`)) return ok('3')
+        if (joined.includes(`rev-list --count --end-of-options ${PRIOR_BASE}..${TIP}`)) return ok('3')
         return ok()
       },
     })
@@ -8182,7 +8188,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         if (joined.includes(`merge-base --is-ancestor ${HEAD} ${SIBLING_TIP}`)) {
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
-        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${SIBLING_TIP}`)) return ok('3')
+        if (joined.includes(`rev-list --count --end-of-options ${PRIOR_BASE}..${SIBLING_TIP}`)) return ok('3')
         return ok()
       },
     })

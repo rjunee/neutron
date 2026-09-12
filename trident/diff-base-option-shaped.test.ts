@@ -425,50 +425,217 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
   })
 })
 
-describe('every consumer of the resolved base carries --end-of-options', () => {
-  /** Lines of `file` that build a git rev-range from the resolved base. */
-  function rangeLines(file: string, pattern: RegExp): string[] {
-    const src = readFileSync(join(import.meta.dir, file), 'utf8')
-    return src
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => !l.startsWith('*') && !l.startsWith('//') && !l.startsWith('#'))
-      .filter((l) => pattern.test(l))
+describe('EVERY interpolated git rev-range in the shipped modules carries --end-of-options', () => {
+  /**
+   * ── WHY THIS IS KEYED TO BEHAVIOUR AND NOT TO A NAME ──────────────────
+   * The version of this block that shipped for thirteen rounds searched `orchestrator.ts`
+   * for `${baseRef}..` and pinned FOUR call sites. `computeDiffLineCount` spells the same
+   * value `base_ref`, so it was invisible to the coverage test that existed to find it —
+   * and it went to review with no `--end-of-options`, which means an operand of
+   * `--output=/tmp/pwn` made git write that file and exit 0, the exact behaviour the
+   * real-git tests below measure for the sites that WERE shielded. `mutation-prover.ts`
+   * escaped twice over: a THREE-dot range, spread across its own argv lines.
+   *
+   * A coverage test keyed to one spelling of an identifier proves nothing about the others,
+   * and would have missed the next consumer for whatever third spelling it used. **A
+   * completeness claim is only as wide as the instrument that checks it** — and the
+   * absolute that was actually load-bearing on this branch lived in a test's search string,
+   * not in any of the 467 lines of prose the round-thirteen sweep read.
+   *
+   * So the rule is now: a `..`/`...` RANGE OPERATOR adjacent to an INTERPOLATION, in any of
+   * the shipped modules, with no reference to what the operand is called. Every hit must
+   * either carry the marker in its statement, or be listed below as not an invocation —
+   * which makes a new consumer a hard failure whatever its author names the variable.
+   */
+  const MODULES = [
+    'orchestrator.ts',
+    'inner-workflow.mjs',
+    'merge.ts',
+    'mutation-prover.ts',
+    'mutation-claim-artifact.ts',
+    'codex-build.sh',
+    'codex-review.sh',
+  ] as const
+
+  /**
+   * An interpolated operand touching the range operator: `` `${x}..` `` or `` `..${x}` ``.
+   * Spelling-independent by construction — it cannot see identifier names at all. It also
+   * matches `...`, since `}..` is a prefix of `}...` (which is how `mutation-prover.ts`
+   * spells its blast-radius range).
+   */
+  const RANGE = /\}\.\.|\.\.\$\{/
+
+  /**
+   * Hits that are NOT git invocations, each argued. A hit that is neither shielded nor
+   * listed here fails, so adding prose about a range is also a deliberate act.
+   */
+  const NON_INVOCATIONS: ReadonlyArray<{ file: string; needle: string; why: string }> = [
+    {
+      file: 'mutation-claim-artifact.ts',
+      needle: 'could not be read',
+      why: 'an operator-facing note naming the range that failed; never argv',
+    },
+    {
+      file: 'mutation-claim-artifact.ts',
+      needle: 'is empty — this branch changes no file',
+      why: 'the same note for the empty-diff answer',
+    },
+    {
+      file: 'mutation-claim-artifact.ts',
+      needle: 'is not in the diff',
+      why: 'the same note for a path outside the diff',
+    },
+    {
+      file: 'codex-review.sh',
+      needle: 'DIFF_SRC=',
+      why: 'a label recorded for the trailer; the invocation is the line above it',
+    },
+  ]
+
+  interface Hit {
+    file: string
+    line: number
+    text: string
+    shielded: boolean
+    excused: string | null
   }
 
-  test('orchestrator.ts — all four, and the extraction proves it found them', () => {
-    const lines = rangeLines('orchestrator.ts', /\$\{baseRef\}\.\./)
-    // POSITIVE CONTROL: the gate named four call sites across two commands. If a refactor
-    // moves or renames them this count changes and the assertion below stops meaning
-    // anything, so the count is pinned rather than assumed.
-    expect(lines.length).toBe(4)
-    for (const line of lines) expect({ line, guarded: line.includes('--end-of-options') }).toEqual({ line, guarded: true })
-  })
+  /**
+   * `line` with its comment removed — and this is not cosmetic. The first version of this
+   * block searched the raw statement window for the marker, and EVERY MUTATION PASSED:
+   * the comments this round added above each shielded site say the word
+   * `--end-of-options`, so removing the argv token left the window still containing it.
+   * An instrument that reads its own documentation as evidence measures nothing. Found by
+   * mutating the fix, which is the only reason it is not still true.
+   *
+   * A `//` inside a string literal is not a comment opener, so quotes are tracked — the
+   * same hazard `scripts/ci/diff-base-check.mjs` has for its exemption marker.
+   */
+  function codeOnly(line: string): string {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) return ''
+    let quote: string | null = null
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i] as string
+      if (c === '\\') {
+        i += 1
+        continue
+      }
+      if (quote !== null) {
+        if (c === quote) quote = null
+        continue
+      }
+      if (c === "'" || c === '"' || c === '`') {
+        quote = c
+        continue
+      }
+      if (c === '/' && line[i + 1] === '/') return line.slice(0, i)
+    }
+    return line
+  }
 
-  test('inner-workflow.mjs — EVERY site that composes a range from diffBase, prompts included', () => {
-    // Three: the executed resume diff, and the two PROMPT sites (the forge contract's
-    // example and the planner's resume hint). The binding refuses an option-shaped base
-    // so the prompts could not carry one — but "every consumer carries the marker" is a
-    // simpler claim to keep true than "every consumer except two, protected by something
-    // else", and the second shape is how this branch has been wrong six times.
-    const lines = rangeLines('inner-workflow.mjs', /git diff [^\n]*\$\{diffBase\}\.\./)
-    expect(lines.length).toBe(3)
-    for (const line of lines) {
-      expect({ line: line.slice(0, 90), guarded: line.includes('--end-of-options') }).toEqual({
-        line: line.slice(0, 90),
-        guarded: true,
+  /** Every interpolated range in `MODULES`, with whether its statement carries the marker. */
+  function rangeHits(): Hit[] {
+    const hits: Hit[] = []
+    for (const file of MODULES) {
+      const lines = readFileSync(join(import.meta.dir, file), 'utf8').split('\n')
+      lines.forEach((raw, i) => {
+        const text = raw.trim()
+        // Comment lines describe ranges; they do not run them.
+        if (text.startsWith('*') || text.startsWith('//') || text.startsWith('#')) return
+        if (!RANGE.test(text)) return
+        // THE STATEMENT, not the line: an argv array can put the marker and the operand on
+        // separate lines (`mutation-prover.ts` does), so a per-line check would have called
+        // that one unshielded after it was fixed.
+        const statement = lines
+          .slice(Math.max(0, i - 12), i + 1)
+          .map(codeOnly)
+          .join(' ')
+        hits.push({
+          file,
+          line: i + 1,
+          text,
+          shielded: statement.includes('--end-of-options'),
+          excused: NON_INVOCATIONS.find((n) => n.file === file && text.includes(n.needle))?.why ?? null,
+        })
+      })
+    }
+    return hits
+  }
+
+  test('every hit is either shielded or an argued non-invocation — and the population is pinned', () => {
+    const hits = rangeHits()
+    // PINNED COUNTS, per file, because "all of them are shielded" is vacuous if the matcher
+    // found none. The old block pinned 4 in one file; this is the whole surface.
+    const perFile: Record<string, number> = {}
+    for (const h of hits) perFile[h.file] = (perFile[h.file] ?? 0) + 1
+    expect(perFile).toEqual({
+      'orchestrator.ts': 9,
+      'inner-workflow.mjs': 4,
+      'merge.ts': 1,
+      'mutation-prover.ts': 1,
+      'mutation-claim-artifact.ts': 3,
+      'codex-build.sh': 1,
+      'codex-review.sh': 2,
+    })
+    // THE RULE. Reported as a list so a failure names the site rather than a count.
+    const offenders = hits
+      .filter((h) => !h.shielded && h.excused === null)
+      .map((h) => `${h.file}:${h.line} ${h.text.slice(0, 80)}`)
+    expect(offenders).toEqual([])
+    // …and every excused hit is excused for a stated reason, so the escape hatch cannot be
+    // used silently.
+    for (const h of hits.filter((x) => x.excused !== null)) {
+      expect({ site: `${h.file}:${h.line}`, why: (h.excused ?? '').length > 20 }).toEqual({
+        site: `${h.file}:${h.line}`,
+        why: true,
       })
     }
   })
 
-  test('the two wrappers — each takes the base as argv and diffs with it', () => {
-    for (const [file, pattern] of [
-      ['codex-build.sh', /git diff .*BASE_DIFF_REF/],
-      ['codex-review.sh', /FULL_DIFF=\$\(git diff/],
+  test('POSITIVE CONTROL: a new consumer with a THIRD spelling is caught', () => {
+    // The control the old block did not have. `theBase`/`tipOid` appear nowhere in the
+    // codebase, so this is exactly the case that defeated the previous instrument: a
+    // consumer whose operand is named something nobody thought of.
+    const planted = [
+      "const res = await run_host(",
+      "  ['git', '-C', repo, 'diff', '--numstat', `${theBase}..${tipOid}`],",
+      '  repo,',
+      ')',
+    ]
+    const offending = planted.filter((l) => RANGE.test(l.trim()) && !l.includes('--end-of-options'))
+    expect(offending.length).toBe(1)
+    // COMPLEMENT: the same consumer with the marker is silent, so the control is not just
+    // "the matcher flags everything".
+    const fixed = planted.map((l) => l.replace("'--numstat',", "'--numstat', '--end-of-options',"))
+    expect(fixed.filter((l) => RANGE.test(l.trim()) && !l.includes('--end-of-options')).length).toBe(0)
+    // And a THREE-dot range, split across argv lines, which is how `mutation-prover.ts`
+    // escaped: the matcher sees the operand line on its own.
+    expect(RANGE.test('`${someOtherName}...${revision}`,')).toBe(true)
+  })
+
+  test('the population really does span several spellings — the proof the name is irrelevant', () => {
+    const texts = rangeHits().map((h) => h.text)
+    // Each of these is the SAME KIND of value under a different name. A matcher keyed to
+    // any one of them would report a clean tree while the others went unshielded, which is
+    // the defect this test replaces rather than the defect it looks for.
+    for (const spelling of ['base_ref', 'baseRef', 'BASE_DIFF_REF', 'BASE_REF', 'seenPin', 'base_sha', 'diffBase']) {
+      expect({ spelling, present: texts.some((t) => t.includes(spelling)) }).toEqual({
+        spelling,
+        present: true,
+      })
+    }
+  })
+
+  test('the two wrappers each take the base as argv and diff with it', () => {
+    // Kept from the previous block: the wrappers are single-line shell, so the per-file
+    // assertion is still worth stating in its own terms.
+    for (const [file, needle] of [
+      ['codex-build.sh', 'git diff --end-of-options "${BASE_DIFF_REF}..HEAD"'],
+      ['codex-review.sh', 'FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD"'],
     ] as const) {
-      const lines = rangeLines(file, pattern)
-      expect({ file, found: lines.length }).toEqual({ file, found: 1 })
-      expect({ file, guarded: lines[0]?.includes('--end-of-options') }).toEqual({ file, guarded: true })
+      const src = readFileSync(join(import.meta.dir, file), 'utf8')
+      expect({ file, present: src.includes(needle) }).toEqual({ file, present: true })
     }
   })
 })

@@ -78,6 +78,12 @@ function diffArgv(base: string, rev: string): string[] {
     '-z',
     '--no-renames',
     '--name-status',
+    // `--end-of-options` (#546, round fourteen): this argv is the blast-radius diff, and it
+    // was the last interpolated git range in trident without the marker — invisible to the
+    // coverage test because that test searched for one identifier spelling and this range is
+    // a THREE-dot one spread over its own argv lines. Pinned here as a VALUE so the marker
+    // cannot be dropped again without a red test.
+    '--end-of-options',
     `${base}...${rev}`,
   ]
 }

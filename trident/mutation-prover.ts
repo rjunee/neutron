@@ -3927,6 +3927,10 @@ export async function changedFilesWithStatus(
       '-z',
       '--no-renames',
       '--name-status',
+      // `--end-of-options` (#546). A THREE-dot range, which is why the first coverage test
+      // did not think of it: that test matched `..` after a specific identifier spelling and
+      // this argv is spread over its own lines, so neither half of the pattern reached it.
+      '--end-of-options',
       `${baseRef}...${ref}`,
     ],
     repo_path,

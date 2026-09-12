@@ -202,6 +202,72 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round fourteen: the sweep turned on the instruments — and both were wrong
+
+Round thirteen read 467 added lines of prose for absolutes. **The absolute that was actually
+load-bearing lived in a test's search string**, and no amount of reading prose would have
+found it. Two P1s, one shape: *a completeness claim is only as wide as the instrument that
+checks it.*
+
+**1 · An exported consumer was still option-injectable.** `computeDiffLineCount`
+(`orchestrator.ts`) passed `${base_ref}..HEAD` with no `--end-of-options`, so an operand of
+`--output=/tmp/pwn` made git write that file and exit 0 — the behaviour this branch's own
+real-git tests measure for the sites it *did* shield. The spec's "every consumer carries the
+marker" was therefore false at that head.
+
+**Why it survived thirteen rounds of review: the coverage test searched for `${baseRef}` and
+pinned four call sites.** This consumer spells the same value `base_ref`.
+`mutation-prover.ts`'s blast-radius range escaped twice over — a THREE-dot range, spread
+across its own argv lines, so neither half of the pattern reached it. A coverage test keyed
+to one spelling of an identifier proves nothing about the others, and would have missed the
+next consumer for whatever third spelling it used.
+
+Fixed by shielding every remaining range — `computeDiffLineCount`, the publish fork-point
+diff, the `seenPin` unseen-files diff, the launch `base_behind` count, the stranded ahead
+count, `merge.ts`'s `commitsTouching`, `mutation-prover.ts`'s three-dot range and the
+planner's branch-log prompt — so the rule has **no exceptions left to reason about**: 18
+shielded ranges, 3 operator-facing notes and 1 shell label, all enumerated. And by replacing
+the instrument with one keyed to BEHAVIOUR: every hit of `/\}\.\.|\.\.\$\{/` — an
+interpolation adjacent to the range operator, which cannot see identifier names at all —
+across seven shipped modules, with per-file counts pinned and every non-invocation argued.
+Controls: a planted consumer named `whicheverNameIFeelLike` (a spelling that appears nowhere
+in the tree) reds the test; removing it goes clean again.
+
+**And the first version of that fix passed every mutation.** The statement window it searched
+for the marker included the COMMENTS this round added above each shielded site, and those
+comments say `--end-of-options`. **An instrument that reads its own documentation as evidence
+measures nothing.** Found by mutating, not by reading; the window now strips comments,
+string-aware.
+
+**2 · The gate's exemption marker could be smuggled inside a string.** `isExempt` tested
+`/(^|\s)(\/\/|#|\*)/` against the text before the marker — "is there a comment opener
+anywhere to the left", never "is that opener itself data". So one line could carry a fake
+comment in a string AND the real offence, and report nothing:
+
+    const note = " // DIFF-BASE-OK: <twenty characters>"; const cmd = `git diff ${baseBranch}..${head}`
+
+The gate's own test covered a marker inside a string *without* a comment token — the easy
+half of the same idea, a near-miss control that could not fail on the adversarial case.
+Fixed with `commentOpenerIndex`, a quote-tracking scanner (`'`, `"`, backtick, `\` escapes,
+`//`/`#` at a boundary, `/*`, and a leading `*` for jsdoc). Tested on all three quote
+flavours, on `#` in a shell line, with complements (a real trailing comment beside a string
+containing `//` still exempts; jsdoc and block comments still exempt) and a mutation:
+restoring the naive search reds the exemption test.
+
+**Nineteen existing assertions pinned the old argv and were repointed with the new value
+stated as a value** — `mutation-claim-artifact.test.ts`'s shared `diffArgv` builder,
+`mutation-prover.test.ts`'s pinned blast-radius argv, and `orchestrator.test.ts`'s
+`DIFF_ARTIFACT` constant plus eleven harness matchers (`rev-list --count …`, the already-seen
+`--name-only …` listing). That is a side benefit worth naming: those matchers now require the
+marker to be present for the mock to answer at all, so dropping it in production reds them
+too — a second, independent alarm that nobody had to design.
+
+**The lesson, one level out from round thirteen.** Four sweeps had looked at prose — rules,
+numbers, completeness words, absolutes. None looked at the *checkers*. A search pattern is a
+claim too, and it is the one claim that silently narrows everything built on top of it:
+"every consumer" meant "every consumer spelled the way I typed it", and the spec, the
+as-built and the PR body all inherited that boundary without naming it.
+
 ### Round thirteen: the fourth sweep — absolutes, checked against the code they introduce
 
 `merge.ts` said a bare local branch name is the wrong answer **"ALWAYS"** twenty lines above

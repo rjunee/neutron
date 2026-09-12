@@ -152,7 +152,11 @@
 //   * An ARGUED exemption: `DIFF-BASE-OK:` plus at least
 //     MIN_JUSTIFICATION_CHARS characters of reason, in a comment on the offending
 //     line or the line directly above it. A bare `DIFF-BASE-OK` with no argument
-//     is its own failure, so an exemption stays an argued exception.
+//     is its own failure, so an exemption stays an argued exception. The comment
+//     opener must be OUTSIDE a string literal, which took a scanner rather than a
+//     regex: the first version asked only "is there a `//` to the left of the
+//     marker", so `const note = " // DIFF-BASE-OK: …"; git diff ${baseBranch}..`
+//     exempted its own offence on one line. See `commentOpenerIndex`.
 //
 // ── WHY THE CONTROLS AND THE TRIPWIRE ─────────────────────────────────
 // This repo has been bitten by a check that matched nothing and reported success.
@@ -376,17 +380,62 @@ export function logicalLines(lines) {
   return out
 }
 
+/**
+ * The index of the first COMMENT OPENER in `line` that is not itself inside a string
+ * literal, or -1.
+ *
+ * WHY THIS IS A SCANNER AND NOT A REGEX. `isExempt` used to test
+ * `/(^|\s)(\/\/|#|\*)/` against the text before the marker, which asks "is there a comment
+ * opener anywhere to the left" and never asks whether that opener is DATA. So this line
+ * exempted itself, with the real offence on it, unreported:
+ *
+ *     const note = " // DIFF-BASE-OK: <twenty characters>"; const cmd = `git diff ${baseBranch}..${head}`
+ *
+ * The `" //` satisfied the regex. The gate's own test covered a marker inside a string
+ * WITHOUT a comment token, which is the easy half of the same idea — a near-miss control
+ * that cannot fail on the adversarial case. An exemption is an argument a human made; an
+ * argument that can be smuggled in a string is not one.
+ *
+ * Quote tracking handles `'`, `"` and a template backtick, with `\` escapes. Openers in
+ * scope: `//` and `#` (at line start or after whitespace, so `http://` inside code is not
+ * one), `/*`, and a leading `*` for a jsdoc continuation line.
+ */
+export function commentOpenerIndex(line) {
+  if (/^\s*\*/.test(line)) return line.indexOf('*')
+  let quote = null
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (c === '\\') {
+      i += 1
+      continue
+    }
+    if (quote !== null) {
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      quote = c
+      continue
+    }
+    const atBoundary = i === 0 || /\s/.test(line[i - 1])
+    if (c === '/' && line[i + 1] === '/' && atBoundary) return i
+    if (c === '/' && line[i + 1] === '*') return i
+    if (c === '#' && atBoundary) return i
+  }
+  return -1
+}
+
 /** Is this offence argued for, on its own line or the one above it? */
 function isExempt(lines, index) {
   for (const candidate of [lines[index], lines[index - 1]]) {
     if (typeof candidate !== 'string') continue
     const at = candidate.indexOf(EXEMPT_MARKER)
     if (at === -1) continue
-    // The marker must be in a COMMENT, not in data: a marker inside a string
-    // literal the code goes on to use is text, not an argument. `//`, `#` and
-    // `*` (a jsdoc continuation line) are the three comment openers in scope.
-    const before = candidate.slice(0, at)
-    if (!/(^|\s)(\/\/|#|\*)/.test(before) && !/^\s*(\/\/|#|\*)/.test(candidate)) continue
+    // The marker must be in a COMMENT, not in data: a marker inside a string literal the
+    // code goes on to use is text, not an argument. The opener must therefore be OUTSIDE a
+    // string and BEFORE the marker — see `commentOpenerIndex` for the smuggle this closes.
+    const opener = commentOpenerIndex(candidate)
+    if (opener === -1 || opener > at) continue
     if (candidate.slice(at + EXEMPT_MARKER.length).trim().length >= MIN_JUSTIFICATION_CHARS) return true
   }
   return false

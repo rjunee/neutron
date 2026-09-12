@@ -27,9 +27,14 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   false selects the *bare name*, which reached git unguarded: measured on git 2.43, a base of
   `--output=<path>` made `git diff --name-only` exit 0 and write the file, the artifact diff
   honour both `--output`s, and `git rev-list --count` write it despite exiting 129. `diffBaseRef`
-  now throws `TridentOptionShapedBaseError`, and every consumer carries `--end-of-options` as
-  defence in depth. Verified by `trident/diff-base-option-shaped.test.ts` per command family,
-  with three mutations;
+  now throws `TridentOptionShapedBaseError`, and **every interpolated git rev-range in the
+  shipped modules** carries `--end-of-options` as defence in depth — 18 of them, not the four
+  the first version of that claim meant. Verified by `trident/diff-base-option-shaped.test.ts`
+  per command family, with three mutations. This bullet was FALSE at one head: the coverage
+  test searched for `${baseRef}`, `computeDiffLineCount` spells it `base_ref`, and it shipped
+  unshielded — **a completeness claim is only as wide as the instrument that checks it**, and
+  that instrument is now keyed to the `..` operator next to an interpolation rather than to
+  anybody's choice of identifier;
 - an **empty** base name — **REFUSED** (`TridentEmptyBaseError`), so the
   "resolves / does not resolve" framing does not apply to it at all. This bullet said
   "returns the input untouched" for two rounds while the acceptance below required refusal;
@@ -210,16 +215,32 @@ The resolution order is evidence-first, and is the same at every site:
       implementations; plus an EMPTY row in the parity table — an axis the option-shaped
       rows held constant. Mutations: restoring the untouched return, or removing the `.mjs`
       check, each reds two tests.
-- [ ] **An option-shaped base is refused at the binding, and every consumer is shielded.**
-      A name beginning with `-` is read by git as a FLAG, not a revision: `--output=<path>..<head>`
-      writes that file, and two of the four consumers exit 0 while doing it. `diffBaseRef` throws
-      rather than returning such a name — refusing to *probe* it (the previous round's mitigation)
-      only routed it to the unguarded branch. Verified by
-      `trident/diff-base-option-shaped.test.ts`: the binding refuses under both probe answers; the
-      shipped consumers each carry `--end-of-options` (extraction with pinned counts, so one added
-      later fails); and per command family, against real git, the marker is shown to be what stops
-      the write while ordinary ranges still work. Mutations: remove the throw, strip the marker
-      from the orchestrator sites, strip it from the wrappers — one test reds for each.
+- [ ] **An option-shaped base is refused at the binding, and EVERY interpolated git rev-range
+      in the shipped modules is shielded — enumerated by the `..` operator, not by a variable
+      name.** A name beginning with `-` is read by git as a FLAG, not a revision:
+      `--output=<path>..<head>` writes that file, and two of the four command families exit 0
+      while doing it. `diffBaseRef` throws rather than returning such a name — refusing to
+      *probe* it (an earlier round's mitigation) only routed it to the unguarded branch.
+      Verified by `trident/diff-base-option-shaped.test.ts`: the binding refuses under both
+      probe answers; **every hit of `/\}\.\.|\.\.\$\{/` across `orchestrator.ts`,
+      `inner-workflow.mjs`, `merge.ts`, `mutation-prover.ts`, `mutation-claim-artifact.ts` and
+      both wrappers either carries the marker in its statement or is listed as an argued
+      non-invocation** (21 hits, 18 shielded, 3 operator-facing notes plus one shell label),
+      with the per-file counts pinned; and per command family, against real git, the marker is
+      shown to be what stops the write while ordinary ranges still work.
+      **The instrument this replaces was keyed to `${baseRef}` and therefore blind to
+      `computeDiffLineCount`'s `base_ref` and to `mutation-prover.ts`'s three-dot range spread
+      over its own argv lines — both of which shipped unshielded.** Mutations, each measured:
+      unshield `computeDiffLineCount`, unshield the three-dot argv, drop the marker from a
+      prompt-string range, or plant a consumer under a name that appears nowhere in the tree —
+      each reds this criterion. A first attempt at the fixed instrument passed all of them,
+      because the statement window included the COMMENTS that name the marker; it now strips
+      comments, string-aware.
+      **Residual gap, stated rather than left implicit:** a range assembled without an
+      interpolation adjacent to the operator (a fully computed operand string, or `..` reached
+      by concatenation across statements) is outside this matcher, as is any module not in the
+      list above. Adding a module is a one-line change to `MODULES`; the list is pinned by the
+      per-file counts so a new consumer inside those files is a hard failure.
 - [ ] **The wrapper promotes BY KIND, not by string shape.** `codex-review.sh` takes a general
       `[base-ref]`. Promoting whenever `origin/<x>` resolved meant a **tag** `release` was
       silently rewritten to the remote branch `origin/release` — a different commit — because

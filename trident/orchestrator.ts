@@ -801,7 +801,11 @@ export async function computeDiffLineCount(
   let res
   try {
     res = await run_host(
-      ['git', '-C', repo_path, 'diff', '--numstat', `${base_ref}..HEAD`],
+      // `--end-of-options` (#546). This consumer was UNSHIELDED until round fourteen and
+      // the coverage test could not see it: that test searched for `${baseRef}`, and this
+      // one spells the same value `base_ref`. Called with `--output=/tmp/pwn` this argv
+      // writes that file and exits 0, exactly as the shielded sites were measured doing.
+      ['git', '-C', repo_path, 'diff', '--numstat', '--end-of-options', `${base_ref}..HEAD`],
       repo_path,
     )
   } catch {
@@ -1657,7 +1661,11 @@ export async function rebaseOntoObservedBase(
     // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
     // reconstruction. Do not "simplify" this back to reading stdout.
     const written = await run_host(
-      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, `${await localForkPoint()}..refs/heads/${branch}`],
+      // `--end-of-options` after every option and before the operand: `localForkPoint()`
+      // answers a sha today, but a range operand is a range operand and the marker costs
+      // nothing. Uniform across every git range in this module (#546) so the claim is
+      // "all of them" rather than "the ones whose value I reasoned about".
+      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, '--end-of-options', `${await localForkPoint()}..refs/heads/${branch}`],
       repoPath,
     )
     if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
@@ -2843,7 +2851,10 @@ export function buildTridentOrchestrator(
     const padded = changedLines.some((l) => l !== l.trim())
     if (/^[0-9a-f]{40}$/.test(seenPin) && !quoted && !padded && changedFiles.length <= 500) {
       const unseenRes = await opts.run_host(
-        ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', `${seenPin}..${headToPublish}`],
+        // `--end-of-options` (#546): `seenPin` is 40-hex-checked one line above, so this is
+        // belt-and-braces — kept anyway so EVERY range in this module carries it and the
+        // coverage test needs no per-site exemption to reason about.
+        ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', '--end-of-options', `${seenPin}..${headToPublish}`],
         run.repo_path,
       )
       if (unseenRes.ok) {
@@ -3990,7 +4001,10 @@ export function buildTridentOrchestrator(
       }
       base_sha = oid
       const behind = await opts.run_host(
-        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        // `--end-of-options` (#546). The `refs/heads/` prefix already makes an option-shaped
+        // base non-option-shaped, so this is the least exposed range here; it carries the
+        // marker so the module's rule has no exceptions to remember.
+        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', '--end-of-options', `refs/heads/${base}..${remoteRef}`],
         launchRun.repo_path,
       )
       const count = Number.parseInt(behind.stdout.trim(), 10)
@@ -4325,7 +4339,10 @@ export function buildTridentOrchestrator(
         }
         if (contained === 'no' && !ownCrashLeftover) {
           const ahead = await opts.run_host(
-            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
+            // `--end-of-options` (#546): `base_sha` is the launcher's own resolved oid, and
+            // `rev-list` is the family measured to write the smuggled file even while
+            // exiting 129, so the marker goes here too.
+            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', '--end-of-options', `${base_sha}..${branchTip}`],
             launchRun.repo_path,
           )
           const rawAheadCount = ahead.stdout.trim()
