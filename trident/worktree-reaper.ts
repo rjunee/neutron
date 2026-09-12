@@ -1,10 +1,89 @@
 /**
- * Proactive backstop for Trident worktrees leaked by runs that never reached
- * merge. It NEVER deletes a branch, NEVER forces removal, NEVER kills a process,
- * and skips the entire sweep when liveness cannot be proven because `/proc` is
- * absent. This mirrors `codex-build.sh`'s `holder_is_live` prior art: unreadable
- * entries owned by other uids are skipped per pid, because every lane in one
- * instance shares the gateway's uid.
+ * Proactive backstop for the two things a Trident run leaks when it ends anywhere
+ * other than the merge path: its WORKTREE, and its BRANCH REF.
+ *
+ * It NEVER forces removal and NEVER kills a process, and it skips the entire sweep
+ * when liveness cannot be proven because `/proc` is absent. This mirrors
+ * `codex-build.sh`'s `holder_is_live` prior art: unreadable entries owned by other
+ * uids are skipped per pid, because every lane in one instance shares the gateway's
+ * uid.
+ *
+ * ── WHY THIS MODULE NOW DELETES A BRANCH REF (ISSUES #547) ───────────────────────
+ *
+ * It used to delete none, deliberately: a failed run's committed work lived only on
+ * its `trident/*` branch, so the branch was the rescue copy. The consequence was
+ * measured on the repo of record on 2026-09-12: 79 `refs/heads/trident/*` refs, 78
+ * of them held by no worktree at all, every one of them a ref whose run had ended.
+ * A surviving ref is not inert — the next launch of the same card re-enters it
+ * (`inner-workflow.mjs`: "RE-ENTER it rather than failing"), so the card's next
+ * build starts on a stale base instead of on a fresh branch cut from origin.
+ *
+ * `worktree-cleanup.sh` tears the ref down too, but only in `delete-branch` mode
+ * and only from the inner workflow's `finally{}` — so it never runs for a run whose
+ * process died, was cancelled, or was reaped by the hang watchdog, which is every
+ * path in the 79.
+ *
+ * ── WHY A STATE-DRIVEN SWEEP RATHER THAN A HOOK ON EACH TERMINAL PATH ────────────
+ *
+ * The ref reap is keyed on what the STORE says (every run owning the ref is in a
+ * terminal phase), not on being called at the moment of the transition. That covers
+ * every terminal path by construction — including the paths that run no code at all
+ * (a gateway killed mid-run, whose row is only reaped on the next boot). The tick
+ * loop's terminal chain already wakes this loop (`build-core-modules.ts`), so an
+ * in-band terminal transition reaps within a tick; everything else reaps within the
+ * 15-minute cadence or at the next boot (`immediate: true`).
+ *
+ * ── THE EVIDENCE GUARD, AND WHY IT IS STRICTLY SAFER THAN THE 2026-09-01 INCIDENT ─
+ *
+ * `docs/as-built/wrong-base-guard-prints-a-destructi.md` records a guard that
+ * composed an unconditional `git branch -D` from NOTHING and pointed it at a branch
+ * a LIVE locked worktree was holding. A deleted ref under a live lane destroys work;
+ * an orphaned ref is a nuisance. So UNPROVABLE REFUSES, everywhere, and a ref is
+ * deleted only when ALL of the following are established:
+ *
+ *   1. `/proc` is readable at all. It is not → the WHOLE sweep does nothing
+ *      (`skipped_no_liveness`), worktrees and refs alike. This is the one global gate.
+ *   2. The ref is under `refs/heads/trident/` — the namespace trident itself creates
+ *      (`board-dispatch.ts`: `trident/${slug}`). A member-mode run builds on a PINNED
+ *      branch outside it, and a person's branch is never in it.
+ *   3. `git for-each-ref` and `git worktree list --porcelain -z` both answered for
+ *      this repo. Either failing is the ABSENCE of a holder measurement, never the
+ *      measurement that there is no holder — so no ref in that repo is touched.
+ *   4. No worktree holds the ref. `worktree list` alone is not enough: git reports a
+ *      worktree mid-rebase or mid-bisect as DETACHED and prints no `branch`
+ *      attribute, so every detached entry is asked directly (`readRebaseHead`, the
+ *      prior art this reuses rather than re-derives). That read answering 'unknown'
+ *      refuses every ref in the repo, because what it could not read may name any of
+ *      them.
+ *   5. At least one run row in this repo names the branch. NO row is not evidence the
+ *      ref is disposable — it is the absence of an owner, so it is kept. That single
+ *      rule is what protects a hand-made branch and, measured against the 79, it is
+ *      what keeps 6 of them.
+ *   6. EVERY run row naming it is in a terminal phase. One non-terminal owner keeps
+ *      the ref (`listBranchOwners` is unbounded for exactly this reason — see there).
+ *   7. No owning run's recorded worktree still EXISTS on disk. A surviving worktree
+ *      is where uncommitted and untracked work lives, and its history is the ref
+ *      underneath it; `worktree-cleanup.sh`'s preservation of a dirty tree is
+ *      therefore also a preservation of its ref.
+ *   8. No live process is standing in an owning run's worktree path, and none is
+ *      standing in a path bearing its `workflow_run_id`. This is the gate for the
+ *      real race the DB cannot see: the row went terminal (hang watchdog, cancel,
+ *      crash latch) while the detached workflow is still running.
+ *   9. The ref still points at the sha the enumeration read. A ref that MOVED in
+ *      between is a ref something just wrote to — the delete is compare-and-swapped
+ *      against it and refuses.
+ *  10. A salvage ref was created AND verified first. 67 of the 79 measured refs carry
+ *      commits origin does not have, so the delete would otherwise be the only copy's
+ *      last reference. `refs/trident-reaped/<slug>/<sha>` keeps them reachable —
+ *      outside `refs/heads` so it can never re-enter a launch, and outside `refs/tags`
+ *      so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
+ *      `git branch <name> <sha>`. Salvage failing REFUSES the delete.
+ *  11. `git branch -D` itself agrees. It is used rather than `git update-ref -d`
+ *      precisely because it carries git's own independent refusal for a branch a
+ *      worktree, rebase or bisect holds (measured on git 2.43: `branch -D` exits 1
+ *      with "cannot delete branch 'feat' used by worktree at ...", while
+ *      `update-ref -d` deletes it without a word). Gate 4 should already have
+ *      refused; this is the gate that does not depend on gate 4 being right.
  */
 
 import {
@@ -21,17 +100,53 @@ import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop'
 
 import { removeWorktreePath, type RunHostCommand } from './merge.ts'
-import type { TridentRun } from './store.ts'
+import { isTerminalPhase } from './state-machine.ts'
+import type { TridentBranchOwner, TridentRun } from './store.ts'
+import { readRebaseHead, type RebaseHead } from './wrong-base-remedy.ts'
 
 export const DEFAULT_WORKTREE_RETENTION_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_REAP_INTERVAL_MS = 15 * 60 * 1000
 export const MAX_REMOVALS_PER_SWEEP = 50
+
+/**
+ * The ONLY namespace a ref delete may touch (gate 2). `board-dispatch.ts` composes
+ * `trident/${slug}`; a member-mode run builds on a pinned branch outside it, and a
+ * person's branch is never in it.
+ */
+export const TRIDENT_REF_PREFIX = 'refs/heads/trident/'
+
+/** Where a reaped tip is kept so its commits stay reachable (gate 10). */
+export const SALVAGE_REF_PREFIX = 'refs/trident-reaped/'
+
+/**
+ * Deletions attempted per sweep, bounded for the same reason as
+ * `MAX_REMOVALS_PER_SWEEP`: one sweep's work stays finite on a repo that has
+ * accumulated hundreds. The measured backlog (79) therefore drains over two sweeps.
+ */
+export const MAX_REF_DELETIONS_PER_SWEEP = 50
+
+/**
+ * REF RETENTION IS DELIBERATELY ZERO, unlike the 24 h a worktree gets. A worktree can
+ * hold work that exists nowhere else and no probe can read intent out of it, so age is
+ * a stand-in for "somebody may still want this". A ref holds commits, which gate 10
+ * copies elsewhere before the delete — and the whole point of #547 is that the ref
+ * refuses the card's NEXT launch, which can be seconds away. A retention window here
+ * would preserve exactly the failure being fixed.
+ */
 
 export interface WorktreeReaperStore {
   listRepoPaths(): string[]
   listNonTerminal(
     limit?: number,
   ): Pick<TridentRun, 'worktree' | 'branch' | 'repo_path' | 'workflow_run_id'>[]
+  /**
+   * Every run row in ONE repo that names a branch (#547, gates 5-8). REQUIRED rather
+   * than optional: an optional seam would mean an unwired composition silently runs a
+   * ref sweep with no ownership evidence, and "no owner" is the answer that keeps a
+   * ref — so the sweep would be inert in exactly the boot where it matters, and the
+   * inertness would be invisible. `TridentRunStore.listBranchOwners` satisfies it.
+   */
+  listBranchOwners(repo_path: string): TridentBranchOwner[]
 }
 
 export interface WorktreeReaperOptions {
@@ -40,6 +155,12 @@ export interface WorktreeReaperOptions {
   now?: () => number
   retention_ms?: number
   proc_root?: string
+  /**
+   * Reads what a DETACHED worktree's in-progress rebase or bisect is standing on
+   * (gate 4). Defaults to the prior art in `wrong-base-remedy.ts`; injectable so the
+   * 'unknown' refusal is testable without corrupting a real rebase state directory.
+   */
+  rebase_head?: (worktree: string) => RebaseHead
 }
 
 export interface WorktreeReapReport {
@@ -51,6 +172,12 @@ export interface WorktreeReapReport {
   preserved: { path: string; reason: string }[]
   protected_nonterminal: string[]
   skipped_no_liveness: boolean
+  /** How many `refs/heads/trident/*` refs the sweep looked at. */
+  refs_examined: number
+  /** Deleted refs with the sha each pointed at — the recovery handle, in the log. */
+  refs_deleted: { ref: string; sha: string; salvage: string }[]
+  /** Every ref the sweep declined to delete, and the gate that declined it. */
+  refs_kept: { ref: string; reason: string }[]
 }
 
 interface WorktreeEntry {
@@ -80,6 +207,9 @@ function emptyReport(): WorktreeReapReport {
     preserved: [],
     protected_nonterminal: [],
     skipped_no_liveness: false,
+    refs_examined: 0,
+    refs_deleted: [],
+    refs_kept: [],
   }
 }
 
@@ -178,6 +308,15 @@ function claimedByNonTerminalRun(
   })
 }
 
+/** git's own words for a refusal, in the order the rest of this module reads them. */
+function hostText(result: { stderr: string; stdout: string; exit_code: number }): string {
+  return result.stderr || result.stdout || `exit ${result.exit_code}`
+}
+
+function errText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function candidateAgeMs(path: string, now: number): number | null {
   try {
     const newestMtime = Math.max(lstatSync(path).mtimeMs, statSync(join(path, '.git')).mtimeMs)
@@ -202,6 +341,8 @@ export async function sweepTridentWorktrees(
   const retentionMs = opts.retention_ms ?? DEFAULT_WORKTREE_RETENTION_MS
   const now = opts.now ?? (() => Date.now())
   let removalAttempts = 0
+  // Shared across repos so one sweep's total destructive work stays bounded.
+  const refDeletions = { attempts: 0 }
 
   for (const repo of new Set(opts.store.listRepoPaths())) {
     if (!existsSync(repo)) continue
@@ -217,6 +358,8 @@ export async function sweepTridentWorktrees(
     const entries = parseWorktrees(listed.stdout)
     if (entries.length === 0) continue
     report.repos_swept += 1
+    /** `refs/heads/trident/*` → the worktree this sweep detached it from. */
+    const detachedThisSweep = new Map<string, string>()
 
     const candidates = entries.slice(1).filter(
       (entry) =>
@@ -253,6 +396,13 @@ export async function sweepTridentWorktrees(
           continue
         }
         report.detached.push(entry.path)
+        // THE DETACH THIS SWEEP JUST PERFORMED FREED THIS REF, and that is not the same
+        // thing as the ref having been free (#547). A worktree can be detached here and
+        // then PRESERVED below — dirty, or inside the retention window — and its ref is
+        // the history its uncommitted work sits on top of. Recorded so the ref reap can
+        // refuse it for as long as the tree it belongs to is still on disk; the sweep
+        // that finally removes the tree is the sweep that may take the ref.
+        detachedThisSweep.set(entry.branch, entry.path)
       }
 
       const ageMs = candidateAgeMs(entry.path, now())
@@ -285,16 +435,303 @@ export async function sweepTridentWorktrees(
     } catch {
       // A failed administrative prune must not abort cleanup in another repo.
     }
+
+    // THE BRANCH-REF REAP (#547), last in the repo so it reads the world the worktree
+    // pass and the prune just left: a tree that was removed is no longer a holder, and
+    // a tree that was PRESERVED still is. One try/catch for the same reason the prune
+    // has one — a ref sweep that throws in one repo must not abandon the next.
+    try {
+      await reapBranchRefs(opts, repo, processCwds, report, refDeletions, detachedThisSweep)
+    } catch (error) {
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: `sweep-failed: ${errText(error)}`,
+      })
+    }
   }
 
   return report
+}
+
+// ── THE BRANCH-REF REAP (#547) ────────────────────────────────────────────────
+
+interface ZHolder {
+  path: string
+  branch: string | null
+  detached: boolean
+}
+
+/**
+ * Parse `git worktree list --porcelain -z`. The NUL form, not the newline form
+ * `parseWorktrees` above reads, and the difference is load-bearing HERE in a way it is
+ * not there: a worktree path may legally contain a newline, such a path splits its own
+ * record, and the branch it holds then reads as UNHELD — which in this half of the
+ * module is the answer that reaches a delete. `wrong-base-remedy.ts` reaches for the
+ * same form for the same reason. Each attribute is NUL-terminated; an EMPTY attribute
+ * (a second NUL) ends the record.
+ */
+function parseHoldersZ(stdout: string): ZHolder[] {
+  const holders: ZHolder[] = []
+  let holder: ZHolder | null = null
+  const close = (): void => {
+    if (holder !== null && holder.path !== '') holders.push(holder)
+    holder = null
+  }
+  for (const field of stdout.split('\0')) {
+    if (field === '') {
+      close()
+      continue
+    }
+    holder ??= { path: '', branch: null, detached: false }
+    if (field.startsWith('worktree ')) holder.path = field.slice('worktree '.length)
+    else if (field.startsWith('branch ')) holder.branch = field.slice('branch '.length)
+    else if (field === 'detached') holder.detached = true
+  }
+  close()
+  return holders
+}
+
+/**
+ * `<full ref>\0<sha>` per line. A ref name cannot contain an ASCII control character —
+ * `git check-ref-format` rejects one — so newline-delimited RECORDS are safe here in a
+ * way they are not for worktree paths; the NUL only separates the two fields, so a
+ * `%(refname)` is never confused with a sha.
+ */
+function parseRefLines(stdout: string): { ref: string; sha: string }[] {
+  const refs: { ref: string; sha: string }[] = []
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line === '') continue
+    const nul = line.indexOf('\0')
+    if (nul <= 0) continue
+    const ref = line.slice(0, nul)
+    const sha = line.slice(nul + 1).trim()
+    if (ref === '' || sha === '') continue
+    refs.push({ ref, sha })
+  }
+  return refs
+}
+
+/**
+ * Is a process standing anywhere that belongs to this run (gate 8)? Two independent
+ * witnesses, because a terminal row proves only what the STORE believes: a cwd inside
+ * the worktree the run recorded, and a cwd under a path bearing the run's launcher
+ * generation key — the same `workflow_run_id` basename match `claimedByNonTerminalRun`
+ * uses, which is what catches a build whose worktree the row never recorded.
+ */
+function ownerProcessLive(owner: TridentBranchOwner, processCwds: string[]): boolean {
+  if (owner.worktree !== null && owner.worktree !== '' && isLive(owner.worktree, processCwds)) {
+    return true
+  }
+  const generation = owner.workflow_run_id
+  if (generation === null || generation === '') return false
+  return processCwds.some((cwd) => cwd.includes(generation))
+}
+
+/**
+ * Sweep ONE repository's `refs/heads/trident/*` refs. Every gate refuses by RECORDING
+ * why and moving on; nothing here throws, and nothing here is reached at all when
+ * `/proc` could not be read (gate 1, enforced by the caller).
+ */
+async function reapBranchRefs(
+  opts: WorktreeReaperOptions,
+  repo: string,
+  processCwds: string[],
+  report: WorktreeReapReport,
+  deletionBudget: { attempts: number },
+  detachedThisSweep: Map<string, string>,
+): Promise<void> {
+  let listed
+  try {
+    listed = await opts.run_host(
+      ['git', '-C', repo, 'for-each-ref', `--format=%(refname)%00%(objectname)`, TRIDENT_REF_PREFIX],
+      repo,
+    )
+  } catch (error) {
+    report.refs_kept.push({ ref: `${TRIDENT_REF_PREFIX}* in ${repo}`, reason: `refs-unenumerable: ${errText(error)}` })
+    return
+  }
+  if (!listed.ok) {
+    report.refs_kept.push({
+      ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+      reason: `refs-unenumerable: ${hostText(listed)}`,
+    })
+    return
+  }
+  const refs = parseRefLines(listed.stdout)
+  if (refs.length === 0) return
+
+  // GATE 3 — a FRESH holder listing, read AFTER the worktree pass above, so a tree that
+  // pass removed no longer counts as a holder and a tree it PRESERVED still does.
+  let holderList
+  try {
+    holderList = await opts.run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain', '-z'], repo)
+  } catch (error) {
+    report.refs_kept.push({
+      ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+      reason: `holders-unenumerable: ${errText(error)}`,
+    })
+    return
+  }
+  if (!holderList.ok) {
+    report.refs_kept.push({
+      ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+      reason: `holders-unenumerable: ${hostText(holderList)}`,
+    })
+    return
+  }
+
+  // GATE 4 — who holds what. A detached entry is asked directly, because git prints no
+  // `branch` attribute for a worktree mid-rebase or mid-bisect even though it holds one.
+  const readRebase = opts.rebase_head ?? readRebaseHead
+  const held = new Map<string, string>()
+  for (const holder of parseHoldersZ(holderList.stdout)) {
+    if (holder.branch !== null) {
+      held.set(holder.branch, holder.path)
+      continue
+    }
+    const rebasing = readRebase(holder.path)
+    if (rebasing.kind === 'unknown') {
+      // What could not be read may name ANY of these refs, so none of them is touched.
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: `holder-unprovable: cannot read rebase/bisect state in ${holder.path}`,
+      })
+      return
+    }
+    if (rebasing.kind === 'branch') held.set(rebasing.ref, holder.path)
+  }
+  // A ref THIS sweep freed by detaching its worktree is held for as long as that
+  // worktree survives — see the detach site. The tree is asked for again rather than
+  // assumed, so the refs of trees the pass went on to remove are genuinely free.
+  for (const [ref, path] of detachedThisSweep) {
+    if (!held.has(ref) && existsSync(path)) held.set(ref, path)
+  }
+
+  // GATES 5-6 — ownership, keyed by the branch SHORT name the store records.
+  const owners = new Map<string, TridentBranchOwner[]>()
+  for (const owner of opts.store.listBranchOwners(repo)) {
+    const list = owners.get(owner.branch)
+    if (list === undefined) owners.set(owner.branch, [owner])
+    else list.push(owner)
+  }
+
+  for (const { ref, sha } of refs) {
+    report.refs_examined += 1
+    // GATE 2 — belt and braces on the namespace `for-each-ref` was already scoped to.
+    if (!ref.startsWith(TRIDENT_REF_PREFIX)) {
+      report.refs_kept.push({ ref, reason: 'out-of-namespace' })
+      continue
+    }
+    const short = ref.slice('refs/heads/'.length)
+
+    const holder = held.get(ref)
+    if (holder !== undefined) {
+      const freedHere = detachedThisSweep.get(ref) === holder
+      report.refs_kept.push({
+        ref,
+        reason: `${freedHere ? 'held-by-preserved-worktree' : 'held-by-worktree'}: ${holder}`,
+      })
+      continue
+    }
+
+    const claimants = owners.get(short)
+    if (claimants === undefined || claimants.length === 0) {
+      report.refs_kept.push({ ref, reason: 'owner-unknown: no run row names this branch' })
+      continue
+    }
+    const live = claimants.find((owner) => !isTerminalPhase(owner.phase))
+    if (live !== undefined) {
+      report.refs_kept.push({ ref, reason: `owner-not-terminal: a run is in phase '${live.phase}'` })
+      continue
+    }
+    const standing = claimants.find(
+      (owner) => owner.worktree !== null && owner.worktree !== '' && existsSync(owner.worktree),
+    )
+    if (standing !== undefined) {
+      report.refs_kept.push({ ref, reason: `run-worktree-present: ${standing.worktree ?? ''}` })
+      continue
+    }
+    const busy = claimants.find((owner) => ownerProcessLive(owner, processCwds))
+    if (busy !== undefined) {
+      report.refs_kept.push({
+        ref,
+        reason: `run-process-live: a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`,
+      })
+      continue
+    }
+
+    if (deletionBudget.attempts >= MAX_REF_DELETIONS_PER_SWEEP) {
+      report.refs_kept.push({ ref, reason: 'deletion limit reached' })
+      continue
+    }
+
+    // GATE 9 — compare-and-swap. `git branch -D` has no old-value check of its own, so
+    // the sha is re-read here: a ref that moved since the enumeration is a ref something
+    // just wrote to, and that is evidence of life the store never saw.
+    let current
+    try {
+      current = await opts.run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', ref], repo)
+    } catch (error) {
+      report.refs_kept.push({ ref, reason: `sha-unreadable: ${errText(error)}` })
+      continue
+    }
+    if (!current.ok || current.stdout.trim() !== sha) {
+      report.refs_kept.push({ ref, reason: 'ref-moved: it no longer points at the sha enumerated' })
+      continue
+    }
+
+    // GATE 10 — salvage FIRST, and prove it landed. `update-ref` is exact: a re-reap of
+    // the same tip writes the same ref, and a reap at a new tip adds a sibling rather
+    // than overwriting the older one.
+    const salvage = `${SALVAGE_REF_PREFIX}${short.slice('trident/'.length)}/${sha}`
+    let saved
+    try {
+      saved = await opts.run_host(['git', '-C', repo, 'update-ref', salvage, sha], repo)
+    } catch (error) {
+      report.refs_kept.push({ ref, reason: `salvage-failed: ${errText(error)}` })
+      continue
+    }
+    if (!saved.ok) {
+      report.refs_kept.push({ ref, reason: `salvage-failed: ${hostText(saved)}` })
+      continue
+    }
+    let confirmed
+    try {
+      confirmed = await opts.run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', salvage], repo)
+    } catch (error) {
+      report.refs_kept.push({ ref, reason: `salvage-unverified: ${errText(error)}` })
+      continue
+    }
+    if (!confirmed.ok || confirmed.stdout.trim() !== sha) {
+      report.refs_kept.push({ ref, reason: 'salvage-unverified: the salvage ref does not carry the tip' })
+      continue
+    }
+
+    // GATE 11 — git's own independent refusal for a branch a worktree, rebase or bisect
+    // holds. `update-ref -d` would delete it silently; `branch -D` will not.
+    deletionBudget.attempts += 1
+    let deleted
+    try {
+      deleted = await opts.run_host(['git', '-C', repo, 'branch', '-D', short], repo)
+    } catch (error) {
+      report.refs_kept.push({ ref, reason: `git-refused: ${errText(error)}` })
+      continue
+    }
+    if (!deleted.ok) {
+      report.refs_kept.push({ ref, reason: `git-refused: ${hostText(deleted)}` })
+      continue
+    }
+    report.refs_deleted.push({ ref, sha, salvage })
+    log.info('worktree_reaper_ref_deleted', { repo, ref, sha, salvage })
+  }
 }
 
 function logSummaryIfActed(report: WorktreeReapReport): void {
   if (
     !report.skipped_no_liveness &&
     report.detached.length === 0 &&
-    report.removed.length === 0
+    report.removed.length === 0 &&
+    report.refs_deleted.length === 0
   ) {
     return
   }
@@ -307,6 +744,9 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     preserved: report.preserved.length,
     protected_nonterminal: report.protected_nonterminal.length,
     skipped_no_liveness: report.skipped_no_liveness,
+    refs_examined: report.refs_examined,
+    refs_deleted: report.refs_deleted.length,
+    refs_kept: report.refs_kept.length,
   })
 }
 

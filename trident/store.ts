@@ -260,6 +260,21 @@ export interface TridentRun {
   wave_task_id: string | null
 }
 
+/**
+ * ONE run row's claim on ONE branch (#547) — the four columns the branch-ref reaper needs
+ * to decide whether a `refs/heads/trident/*` ref is owned, finished, and unoccupied. A
+ * projection rather than a `TridentRun` because the reaper must never be able to act on
+ * anything else about the run.
+ */
+export interface TridentBranchOwner {
+  branch: string
+  phase: TridentPhase
+  /** The worktree the run recorded, if any. Its continued EXISTENCE keeps the ref. */
+  worktree: string | null
+  /** The launcher generation key; a live process standing in a path bearing it keeps the ref. */
+  workflow_run_id: string | null
+}
+
 export interface TridentStageEvent {
   id: number
   run_id: string
@@ -977,6 +992,44 @@ export class TridentRunStore {
       )
       .all(limit)
       .map(rowToRun)
+  }
+
+  /**
+   * BRANCH OWNERSHIP IN ONE REPO — every run row that names a branch there, with the
+   * phase and the worktree path it recorded (#547). The branch-ref reaper reads this
+   * to answer two separate questions about one `refs/heads/trident/*` ref: is it OWNED
+   * by a run at all, and is EVERY run that owns it terminal.
+   *
+   * DELIBERATELY UNBOUNDED, and that is a safety property rather than an oversight. A
+   * `LIMIT` here would silently drop rows, and the one row a truncation is most likely
+   * to drop — an old, rarely-advanced one — is exactly the row that can turn "a
+   * non-terminal run still owns this branch" into "every owner is terminal", which is
+   * the answer that authorises the delete. The row set is one per run ever launched in
+   * one repository (measured on the repo of record: 243 rows, 79 distinct branches),
+   * and it is projected to four columns, so the cost is a scan the reaper pays once
+   * per repo per sweep.
+   *
+   * Rows with a NULL or empty branch are excluded because they name no ref, so they can
+   * neither prove nor deny ownership of one.
+   */
+  listBranchOwners(repo_path: string): TridentBranchOwner[] {
+    return this.db
+      .prepare<
+        Pick<TridentRunDbRow, 'branch' | 'phase' | 'worktree' | 'workflow_run_id'>,
+        [string]
+      >(
+        `SELECT branch, phase, worktree, workflow_run_id
+           FROM code_trident_runs
+          WHERE repo_path = ? AND branch IS NOT NULL AND branch <> ''
+          ORDER BY started_at ASC`,
+      )
+      .all(repo_path)
+      .map((row) => ({
+        branch: row.branch as string,
+        phase: row.phase as TridentPhase,
+        worktree: row.worktree ?? null,
+        workflow_run_id: row.workflow_run_id ?? null,
+      }))
   }
 
   /** Failed PR-mode rows eligible for startup git-truth reconciliation,
