@@ -325,6 +325,13 @@ if [ "$NO_BUNDLE_LANE" != "1" ]; then
   # browser bundle in this process". Derived from the call, not from a marker
   # comment, for the same reason the device lane greps `installNativeHarness`:
   # a new test that constructs one joins the lane without anyone remembering to.
+  #
+  # THIS LANE IS A MITIGATION, NOT A FIX — tracked as issue #656. The underlying bug is
+  # fd-table corruption by an EARLIER, UNRELATED test file: the bundler is merely the
+  # first thing afterwards that needs a fresh descriptor, so the landing-server test that
+  # reports EBADF is the victim and not the culprit. Which file trips it depends only on
+  # how the chunker packs processes, which is why it moves whenever the file list changes.
+  # Reproduce on unmodified main with NEUTRON_TEST_NO_BUNDLE_LANE=1.
   BUNDLE_MATCH="$(LC_ALL=C grep -lE 'createLandingServer' "${FILES[@]}" 2>/dev/null || true)"
 fi
 for f in "${FILES[@]}"; do

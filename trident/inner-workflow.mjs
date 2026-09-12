@@ -898,9 +898,12 @@ const VERDICT_SCHEMA = {
               'STABLE IDENTITY for this finding, as `file:symbol:rule` — e.g. ' +
               '`trident/inner-loop.ts:parseInnerResult:tautological-test`. The SAME defect must ' +
               'get the SAME key on every round, even if you word the title differently; a ' +
-              'different defect must get a different key. Line numbers are ignored, so do not ' +
-              'rely on them to tell two findings apart. This is machine-read to decide whether a ' +
-              'finding survived a fix round.',
+              'different defect must get a different key. NEVER put a line number in a key — a ' +
+              'fix round moves lines, so a key carrying one stops matching itself next round ' +
+              'and the defect reads as two. The line belongs in `evidence`. Every other ' +
+              'segment is compared EXACTLY, so numbers that identify the defect (a status ' +
+              'code, an error number) are welcome and are what tells two findings apart. This ' +
+              'is machine-read to decide whether a finding survived a fix round.',
           },
         },
       },
@@ -3260,12 +3263,34 @@ const WHAT_IS_MISSING_MAX = 500
  * and is therefore undecidable by construction — which is honest, because none of
  * them is a reviewer's judgement about the plan.
  *
- * NORMALISED, because two spellings of one key must not read as two findings:
- * case, surrounding whitespace, a leading './' on the path, and LINE NUMBERS (a
- * fix round moves lines without changing the defect) are all dropped. At least
- * THREE surviving segments are required — a bare word or a `file:line` pair is not
- * a `file:symbol:rule` identity, and accepting one would let a title masquerade as
- * a key.
+ * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT: case, surrounding whitespace and a
+ * leading './' on the path are the same key written two ways. At least THREE segments are
+ * required — a bare word or a `file:line` pair is not a `file:symbol:rule` identity, and
+ * accepting one would let a title masquerade as a key.
+ *
+ * NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction. This function used to
+ * DROP every purely-numeric segment, anywhere in the key, on the theory that a numeric
+ * segment is a line number a fix round would move. But a numeric segment is not a line
+ * number — it is whatever the reviewer put there. `api.ts:handler:401:missing-auth` and
+ * `api.ts:handler:403:missing-auth` are two DIFFERENT defects that both normalised to
+ * `api.ts:handler:missing-auth`, so the gate read them as ONE finding surviving a fix
+ * round and escalated a run that was converging. Status codes, error numbers, exit codes,
+ * CWE ids and ports are all ordinary content in the `rule` slot.
+ *
+ * THE ASYMMETRY IS THE WHOLE ARGUMENT, and it decides which way to fail when a reviewer
+ * disobeys the format and puts a line number in a key anyway:
+ *
+ *   - OVER-FIRING (two different findings read as one) STOPS A RUN THAT WAS CONVERGING,
+ *     and reports `not-converging` about it. That is the one way this gate can be WORSE
+ *     than the round cap it replaced — the cap only ever stopped a run that could not
+ *     converge — and the two are indistinguishable to an operator reading the escalation.
+ *   - UNDER-FIRING (one finding at a moved line read as two) merely fails to prove a
+ *     repeat. The run keeps going, the no-progress arithmetic still watches it, and the
+ *     round cap is still behind that.
+ *
+ * So the line number is excluded by the GRAMMAR rather than by subtraction: `VERDICT_SCHEMA`
+ * and all three prompts specify `file:symbol:rule` and say the line belongs in `evidence`.
+ * A key that carries one anyway simply fails to match next round, which is the safe half.
  */
 function findingIdentity(f) {
   if (f === null || typeof f !== 'object' || Array.isArray(f)) return ''
@@ -3276,7 +3301,7 @@ function findingIdentity(f) {
     .replace(/\s+/g, ' ')
     .split(':')
     .map((seg) => seg.trim().replace(/^\.\//, ''))
-    .filter((seg) => seg !== '' && !/^\d+(-\d+)?$/.test(seg))
+    .filter((seg) => seg !== '')
   if (segments.length < 3) return ''
   return segments.join(':')
 }
@@ -6521,7 +6546,7 @@ function codexReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`.
+- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
 - EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>, key:'codex:review:deferred'}. NEVER report APPROVE for a deferred codex.
@@ -6545,7 +6570,7 @@ function kimiReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"; if grep -q ${shSingleQuote(KIMI_RATE_LIMIT_TOKEN)} ${shSingleQuote(errFile)}; then echo "KIMI_RATE_LIMITED=1"; else echo "KIMI_RATE_LIMITED=0"; fi
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`.
+- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
 - EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major', key='kimi:review:deferred'. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
 - kimiRateLimited: copy the KIMI_RATE_LIMITED line VERBATIM — 1 → true, 0 → false. It is a grep result, NOT your judgement call and NOT something to infer from the error text: it says whether the provider REFUSED the call with HTTP 429 rather than the call failing. It says nothing about WHY it was refused and you must not guess. The status still blocks either way; this only decides whether the run reports a refusal or a transport fault, so reporting it wrongly sends the operator to the wrong place.

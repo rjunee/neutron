@@ -79,12 +79,68 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(findingIdentity(f('  ./a/b.ts:sym:rule  '))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
   })
 
-  test('LINE NUMBERS are dropped — a fix round moves lines without fixing the defect', () => {
-    const { findingIdentity } = loadEscalationGate()
-    // This is the concrete way a repeat gate stops detecting repeats: round 1 reports the
-    // finding at line 12, the fix round shifts the file, and round 2 reports line 40.
-    expect(findingIdentity(f('a/b.ts:12:sym:rule'))).toBe(findingIdentity(f('a/b.ts:40:sym:rule')))
-    expect(findingIdentity(f('a/b.ts:12-18:sym:rule'))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
+  test('HEADLINE: a NUMBER THAT IS NOT A LINE tells two findings apart', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // THE COLLISION THAT MADE THIS GATE WORSE THAN THE CAP IT REPLACED. Identity used to
+    // DROP every purely-numeric segment anywhere in the key, on the theory that a numeric
+    // segment is a line number. It is not — it is whatever the reviewer put there. These
+    // two are DIFFERENT defects and both normalised to `api.ts:handler:missing-auth`, so
+    // the gate read them as one finding surviving a fix round and escalated a run that
+    // was CONVERGING.
+    const a = f('api.ts:handler:401:missing-auth')
+    const b = f('api.ts:handler:403:missing-auth')
+    expect(findingIdentity(a)).not.toBe(findingIdentity(b))
+
+    // …and the consequence, at the gate rather than at the helper: two rounds reporting
+    // these two must NOT read as a repeat.
+    expect(repeatVerdict([a], [b]).outcome).not.toBe('repeat')
+
+    // Every shape of number-as-content, since the old filter took all of them: a status
+    // code, an error number, a CWE id, a port, a version segment.
+    for (const [x, y] of [
+      ['svc.ts:fetch:500:retry-storm', 'svc.ts:fetch:502:retry-storm'],
+      ['a.ts:s:cwe-79', 'a.ts:s:cwe-89'],
+      ['net.ts:bind:8080:in-use', 'net.ts:bind:9090:in-use'],
+      ['api.ts:v1:deprecated-call', 'api.ts:v2:deprecated-call'],
+      ['a.ts:sym:12', 'a.ts:sym:40'],
+    ] as const) {
+      expect(findingIdentity(f(x))).not.toBe(findingIdentity(f(y)))
+    }
+  })
+
+  test('CONTROL: the SAME key is still the same finding, and spelling still normalises', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // Without this, a version that returned a fresh identity for every call — never
+    // matching anything — would pass the test above.
+    const same = f('api.ts:handler:401:missing-auth')
+    expect(findingIdentity(same)).toBe(findingIdentity(f('API.ts:Handler:401:Missing-Auth')))
+    expect(findingIdentity(f('  ./api.ts:handler:401:missing-auth '))).toBe(findingIdentity(same))
+    // …and two rounds reporting it DO read as a repeat, which is the gate still working.
+    expect(repeatVerdict([same], [same]).outcome).toBe('repeat')
+  })
+
+  test('a line number in a key fails SAFE — it under-fires, it does not escalate', () => {
+    // The format forbids a line number in a key (`VERDICT_SCHEMA` and all three prompts
+    // say so, and say the line belongs in `evidence`), but a model can disobey. This pins
+    // which way that breaks, because the two directions are not equally bad:
+    //
+    //   OVER-FIRING stops a run that was CONVERGING and reports `not-converging` about
+    //   it — the one way this gate is worse than the round cap it replaced, and
+    //   indistinguishable to an operator reading the escalation.
+    //   UNDER-FIRING merely fails to prove a repeat: the run continues, the no-progress
+    //   arithmetic still watches it, and the cap is still behind that.
+    //
+    // So a moved line now reads as two findings rather than one, and NOTHING escalates.
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    const r1 = f('a/b.ts:12:sym:rule')
+    const r2 = f('a/b.ts:40:sym:rule')
+    expect(findingIdentity(r1)).not.toBe(findingIdentity(r2))
+    const verdict = repeatVerdict([r1], [r2])
+    expect(verdict.outcome).not.toBe('repeat')
+    // Specifically NOT the undecidable answer either — both keys were perfectly readable,
+    // they just describe two things. Saying "I could not tell" would be a second lie, and
+    // `undecidable` is the answer that keeps a finding out of BOTH definite buckets.
+    expect(verdict.outcome).toBe('none')
   })
 
   test('IDENTITY IS NOT THE TITLE — the same words are NOT the same finding', () => {
@@ -452,6 +508,18 @@ describe('what is asserted from the SOURCE, and why only these two things are', 
     expect(WORKFLOW_SRC).toContain("required: ['severity', 'title', 'evidence', 'key'],")
     expect(WORKFLOW_SRC).toContain("required: ['kind', 'whatIsMissing'],")
     expect(WORKFLOW_SRC).toContain("enum: ['design-gap', 'missing-dependency'],")
+    // AND THE KEY'S GRAMMAR, which became load-bearing when identity stopped subtracting.
+    // Nothing in the code removes a line number from a key any more — deliberately, since
+    // doing so collided two different defects and escalated a converging run — so the ONLY
+    // thing keeping line numbers out of keys is this instruction and the matching ones in
+    // the three prompts. A schema is data handed to the model and is never validated in
+    // process, so the literal IS the mechanism here.
+    expect(WORKFLOW_SRC).toContain('NEVER put a line number in a key')
+    // …said to the two panel seats and the synthesis seat as well, not only in the schema:
+    // a panelist's key is carried through UNCHANGED, so a line number admitted there
+    // reaches the gate no matter what the synthesis schema says.
+    expect(WORKFLOW_SRC.match(/NEVER put a line number in a key/g) ?? []).toHaveLength(3)
+    expect(WORKFLOW_SRC).toContain('Do NOT put a line number in a key')
   })
 
   test('the claim is read off the SEAT’s own reply, not off the merged findings', () => {

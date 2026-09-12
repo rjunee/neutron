@@ -26,10 +26,38 @@ load-bearing part.
 REQUIRE a `key` — `file:symbol:rule`, machine-read. `findingIdentity` reads that field
 and nothing else; a title-derived fingerprint is exactly what the item rules out, since a
 model that rewords its own sentence between rounds defeats it while the gate reports
-green. Normalisation drops case, whitespace, a leading `./` and LINE NUMBERS (a fix round
-moves lines without fixing the defect), and requires three surviving segments so a bare
-title cannot masquerade as a key. A finding with no usable key is `''` — UNDECIDABLE, and
-never a fresh identity.
+green. Normalisation drops case, whitespace and a leading `./` — SPELLING ONLY, never content —
+and requires three segments so a bare title cannot masquerade as a key. A finding with no
+usable key is `''` — UNDECIDABLE, and never a fresh identity.
+
+NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction to an earlier cut of this
+branch. Identity used to drop every purely-numeric segment anywhere in the key, reasoning
+that a numeric segment is a line number a fix round would move. A numeric segment is not a
+line number — it is whatever the reviewer put there. `api.ts:handler:401:missing-auth` and
+`api.ts:handler:403:missing-auth` are two DIFFERENT defects that both normalised to
+`api.ts:handler:missing-auth`, so the gate read them as one finding surviving a fix round
+and escalated a run that was CONVERGING. Status codes, error numbers, CWE ids, ports and
+version segments were all taken the same way.
+
+THE ASYMMETRY IS WHY THIS ONE MATTERED MORE THAN ITS SIZE. Over-firing stops a run that
+was converging and reports `not-converging` about it — the one way this gate can be WORSE
+than the round cap it replaced, since the cap only ever stopped a run that could not
+converge, and the two are indistinguishable to an operator reading the escalation.
+Under-firing merely fails to prove a repeat: the run continues, the no-progress arithmetic
+still watches it, and the cap is still behind that. So the line number is excluded by the
+GRAMMAR rather than by subtraction — `VERDICT_SCHEMA` and all three prompts specify
+`file:symbol:rule` and say the line belongs in `evidence` — and a key that carries one
+anyway simply fails to match next round, which is the safe half. That moved the rule from
+"I removed the parts I think are volatile" to "I used the parts that are stable": a
+subtraction can collide, a construction cannot.
+
+The instruction became load-bearing in the process, because nothing in the code removes a
+line number any more, so it is pinned in all four places it is said (the schema and the
+three prompts) — the legitimate kind of source assertion, since a schema is data handed to
+the model and has no behaviour to execute. Six mutations, each applied individually, all
+RED: restoring the strip, a narrower positional strip, an identity that never matches, one
+that stops normalising case, one that makes a moved line escalate, and one that drops the
+instruction.
 
 **The hard gate is arithmetic.** `repeatVerdict` is a set intersection over two rounds'
 identities and needs no agent to be honest. It is three-valued and that is deliberate:
@@ -315,8 +343,12 @@ build throws `AggregateError: Bundle failed` whose messages are `EBADF reading f
 …/react/index.js` — a BAD FILE DESCRIPTOR, closed by some earlier file in the chunk and
 reused under the bundler's reads. Reproduced on an UNMODIFIED main with the same file
 list, so any PR that adds a test file can step on it. The fd owner is worth finding and is
-not this card; until it is, those files run in their own process, as a third lane beside
-the PGLite and device lanes the runner already has for exactly this class of problem.
+not this card — FILED AS ISSUE #656 with the reproduction (`NEUTRON_TEST_NO_BUNDLE_LANE=1`)
+and a suggested next step, so it is not rediscovered from scratch: bisect WITHIN a failing
+chunk against one appended landing-server file, rather than reasoning about which file looks
+like it leaks descriptors, which has not worked. Until then those files run in their own
+process, as a third lane beside the PGLite and device lanes the runner already has for
+exactly this class of problem.
 Membership is content-derived from `createLandingServer`, so a new landing-server test
 joins without anyone remembering to.
 
