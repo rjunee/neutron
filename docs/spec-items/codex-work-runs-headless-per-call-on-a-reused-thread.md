@@ -41,7 +41,7 @@ that is a reasoned position, not an omission:
   *gate* around a build. Two implementations of **different** paths is not the dual
   path the tree forbids; two implementations of the **same** path would be.
 - **It could not host this work as it stands.** Its resume is built as
-  `codex exec --resume <id>` (`runtime/adapters/codex-cli/exec.ts:67`), and that
+  `codex exec --resume <id>` (`runtime/adapters/codex-cli/exec.ts:68`), and that
   option **does not exist** on the CLI measured here, 0.149.1 — and nothing pins that
   version, which is why the probe below is a capability check: `codex exec --resume <id>`
   returns
@@ -111,7 +111,13 @@ the adapter's.
    a silently metered bill. #645 unifies the lists; this contract does not depend on
    it landing first.
 5. **One account, one `CODEX_HOME`.** The adapter uses the `CODEX_HOME` the wrappers
-   resolve and never materialises an account's `auth.json` a second time anywhere.
+   resolve and never materialises an account's `auth.json` **in any location it can write**
+   — the selected home aside. Deliberately *not* "anywhere on the filesystem": that is
+   unprovable without an enforced filesystem boundary, and an unenforceable broad claim is
+   worth less than a true narrow one. **The gap, stated rather than implied:** a location
+   the adapter is never given — `/dev/shm`, another user's tree — is outside both the
+   property and the test. Closing it needs a sandbox with an enforced boundary, which is
+   larger machinery than this item carries.
    Multiple homes exist in production but hold **different** credentials — one per
    rotation seat (`slotHome`, `trident/codex-credential.ts:401`), one per project
    override (`codexProjectHome`, `trident/codex-auth.ts:191`) — and selecting among them
@@ -129,7 +135,10 @@ the adapter's.
    — the spike did not establish that it ever denies. Therefore: work that needs an
    approval *decision* does not run on headless codex, and an approval that must
    reach the **owner** never does — owner questions flow from the orchestrator
-   (Decisions Log 2026-09-11). Today neither consumer needs one: the build runs
+   (Decisions Log 2026-09-11). **Work declares this need in its request**, and the adapter
+   rejects such work up front with a typed outcome rather than dispatching it — the refusal
+   lives at the input, because the adapter builds no approval configuration at all.
+   Today neither consumer needs one: the build runs
    `--sandbox danger-full-access` on record (`trident/codex-build.sh:181-200`) so it
    never escalates, and review reads a diff.
 7. **The CLI's contract is probed at startup, not assumed.** Before the first turn,
@@ -284,13 +293,17 @@ form; the "kills:" note names what the earlier form let through.
       which re-sources the user's profile and can re-export a scrubbed key into the
       grandchild that actually runs.**
 
-- [ ] **An account's credentials are never materialised anywhere outside the selected
-      existing home.** verify by **checking the resulting state, not the act that produced
-      it**. The scan must be **finite and owned by the test**: give the test a controlled
-      root it creates — containing the selected `CODEX_HOME`, the worktree, the adapter's
-      state dir and a writable temp dir the adapter is given — and walk **that root**, not
-      the filesystem. An unbounded walk is not implementable, and a negative over an
-      undefined set means nothing.
+- [ ] **An account's credentials are never materialised in any location the adapter can
+      write, the selected home aside.** verify by **checking the resulting state, not the
+      act that produced it**. The scan's root is **exactly the set of locations the adapter
+      is given**, enumerated and justified in the test: the selected `CODEX_HOME`, the
+      worktree it is told to run in, its own state directory, and the temp dir passed to it.
+      That set is the property's scope, not a convenient subset of it — the criterion and
+      the instrument are deliberately the same size.
+      An unbounded walk would be unimplementable and its negative would assert nothing; a
+      location the adapter is never handed is outside the claim, and the contract says so.
+      If the test grants the adapter a new writable location, that location joins this root
+      in the same change.
       After a full call cycle, assert that **no path inside the controlled root but outside
       the selected `CODEX_HOME`**
       (a) contains the credential's contents — match on a token value seeded for the test;
@@ -370,11 +383,18 @@ form; the "kills:" note names what the earlier form let through.
       `approvals_reviewer`, no `--approve-for-me` — matching what ships today, where the
       build runs `--sandbox danger-full-access` (`trident/codex-build.sh:1402`) so nothing
       escalates and review reads a diff.
-      Negative half, which is the reason this criterion exists: a call built with
-      `approval_policy=on-request` and **no** reviewer must be **refused by the adapter
-      before dispatch**. Measured, that combination makes codex refuse the escalation with
-      **exit 0** and no approval event, so the work is silently not done and the wrapper
-      sees success — the failure this forecloses.
+      Negative half, which is the reason this criterion exists, and it acts **on the
+      input, not on the argv**: work declares whether it needs an approval decision through
+      an explicit request field, and the adapter **rejects such work before argv
+      construction** — a distinct typed outcome, **zero codex spawns**, no approval
+      configuration ever built. Asserting instead that "a call built with
+      `approval_policy=on-request` must be refused" would be incoherent: if the adapter
+      cannot build that call there is nothing to refuse, and if it can, the no-routing
+      clause above is false. The refusal has to be reachable from a real input.
+      Why refuse rather than serve: measured, `approval_policy=on-request` with no reviewer
+      makes codex refuse the escalation at **exit 0** with no approval event, so the work is
+      silently not done while the wrapper sees success. Refusing at the input is the only
+      outcome that is both honest and inside what this item ships.
       Also assert `--dangerously-bypass-approvals-and-sandbox` appears in no argv.
       **Deliberately absent: any requirement that work complete an escalation.** The
       capability exists and was measured on both call shapes — that is the answer to the
@@ -385,7 +405,8 @@ form; the "kills:" note names what the earlier form let through.
       gets used. Nothing in scope needs one. A future consumer that does is a new item
       with a real authorization design, not a clause inherited from a spike's
       completeness check.
-      *kills:* an adapter that silently drops an escalating task (the negative half);
+      *kills:* an adapter that accepts approval-needing work and silently drops it (the
+      negative half, driven from a real input rather than a forbidden output);
       `--dangerously-bypass-approvals-and-sandbox`; and — by deletion rather than by
       assertion — **an implementation certified to let codex approve its own escalations.**
 
@@ -395,17 +416,25 @@ form; the "kills:" note names what the earlier form let through.
       and (b) **every config key the adapter passes** — which, now that no approval
       routing ships, is `sandbox_mode` alone — is recognised, by a single
       `codex exec --strict-config --ignore-user-config` invocation carrying all of them
-      plus a deliberately bogus **sentinel** key. Measured: codex reports
-      `unknown configuration field <sentinel> in -c/--config override` and exits
-      **before any model call** — 0.06 s, zero tokens — while a misspelled real key is
-      named **instead of** the sentinel.
+      plus a deliberately bogus **sentinel** key **placed last**. Measured: codex reports
+      `unknown configuration field <name> in -c/--config override` and exits **before any
+      model call** — 0.06 s, zero tokens.
+      **The order is load-bearing, and this is a claim about codex with a measurement
+      beside it: codex names only the FIRST unrecognised field, not all of them.** With
+      the sentinel last, a misspelled real key is named *instead of* the sentinel and the
+      probe catches it. With the sentinel **first**, codex names the sentinel and the
+      misspelling passes — measured both ways. The sentinel must therefore be last, and a
+      test must assert the probe's argv builder **places it last**; asserting only that
+      the happy path reports the sentinel would pass a builder that has it first and is
+      blind to every real key. Pairing each real key with the sentinel in one invocation
+      is what keeps the probe free; the ordering is the price of that.
       Positive case: the probe passes and the recorded `codex --version` reaches the
       run's record. Negative cases, each asserting a **distinct typed
       unsupported-version outcome** and **zero turns spawned** — not merely that the run
       failed:
       (i) **the `resume` subcommand is absent or its `--help` fails.** This case is
       mandatory and is the one with a known in-tree breakage:
-      `runtime/adapters/codex-cli/exec.ts:67` emits the obsolete `codex exec --resume
+      `runtime/adapters/codex-cli/exec.ts:68` emits the obsolete `codex exec --resume
       <id>` form, which 0.149.1 rejects at **exit 2**. The capability that actually
       broke must not be the one the negatives skip.
       (ii) **one per relied-upon config key** — currently `sandbox_mode` — a stub
@@ -414,6 +443,9 @@ form; the "kills:" note names what the earlier form let through.
       the build for a capability we do not use.
       (iii) **the sentinel is not named** though the probe ran, standing in for a CLI
       that stopped validating unknown keys.
+      (iv) **the sentinel is not last in the argv the builder produced** — a structural
+      assertion on the builder, because a sentinel placed first silently disables the
+      whole key check.
       **Day-one case, and it is a real machine's state (#647):** with a user
       `config.toml` containing an unrecognised field, the probe must still **pass**.
       `--ignore-user-config` is why, and it is the chosen mechanism rather than parsing

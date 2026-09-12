@@ -324,6 +324,28 @@ which needs no parentage to be sound. Two of the ten criteria named an instrumen
 than their claim, which suggests this question earns a standing place rather than a
 one-off.
 
+**When raising the instrument is out of scope, the claim must come down — and the gap
+named rather than implied.** The rule this record had been applying was *match the claim to
+the instrument, preferring to raise the instrument.* It has a third case. The credential
+property said "anywhere outside the selected home" while the test walked four known
+locations, so `/dev/shm/auth.json` escaped both the scan and every positive control. Raising
+the instrument here would mean a sandbox with an enforced filesystem boundary — larger
+machinery than this item should carry. So the claim came down to **"any location the adapter
+can write"**, with the scan's root defined as *exactly* that set, enumerated and justified,
+and the uncovered case written into the contract in as many words. A true narrow claim beats
+an unenforceable broad one, and the difference between the two is only visible if the gap is
+stated.
+
+**A refusal must be reachable from an input.** Deleting the escalation route left the
+negative half asserting that a call built with `approval_policy=on-request` be *refused* —
+incoherent beside a clause forbidding the adapter to build such a call at all: if it cannot
+build one there is nothing to refuse, and if it can, the prohibition is false. The refusal
+now lives at the **input**: work declares that it needs an approval decision through an
+explicit request field, and the adapter rejects it before argv construction, with zero
+spawns. That is testable by driving a real request rather than by constructing a forbidden
+output — and it is the general form, since a criterion phrased against an artefact the
+design forbids can never be satisfied by a correct implementation.
+
 **Widen, then scope BOTH sides — the instrument and the violation.** Every over-strict
 criterion on this PR arrived immediately after a widening, and the fourth instance showed
 why the procedure as first written was incomplete. Having fixed the state check's
@@ -420,7 +442,7 @@ There is one: `runtime/adapters/codex-cli/`, registered as the
 do about it rather than a judgement call:
 
 - **Its resume is dead on the CLI measured here (0.149.1; nothing pins it — see below).** It builds `codex exec --resume <id>`
-  (`exec.ts:67`); on 0.149.1 that is `error: unexpected argument '--resume' found`,
+  (`exec.ts:68`); on 0.149.1 that is `error: unexpected argument '--resume' found`,
   **exit 2** — `resume` is a subcommand, not a flag. Same dead end this spike hit
   with `-s` on `codex exec resume`, from the other direction. So it could not host
   thread reuse as it stands.
@@ -479,7 +501,7 @@ search for the version literal finds it only in this item's own prose. The accep
 suite could pass against mocked argv while deployment ran a different contract.
 
 That is not speculative, and the proof was already in this record: the existing
-adapter builds `codex exec --resume <id>` (`exec.ts:67`) and 0.149.1 answers
+adapter builds `codex exec --resume <id>` (`exec.ts:68`) and 0.149.1 answers
 `error: unexpected argument '--resume' found`, exit 2, because `resume` became a
 subcommand. **A caller in this tree has already been broken by exactly this drift,
 and the symptom was an exit code nobody read.** The item now requires a startup
@@ -590,6 +612,19 @@ anywhere we depend on another tool's config surface:
   silent pass is ambiguous — it could mean every key was accepted, or that the tool
   stopped validating. With it, a pass *must* produce the sentinel's name; anything else,
   including silence, is treated as unsupported. The check fails closed.
+- **It is ORDER-DEPENDENT, and the first write-up of this technique did not say so.**
+  Measured afterwards, in both directions: **codex names only the FIRST unrecognised
+  field, not all of them.** Sentinel **last** → a misspelled real key is named instead of
+  the sentinel and the probe catches it. Sentinel **first** → codex names the sentinel,
+  the misspelling passes, and the key check is silently disabled while still looking
+  green. So the technique is sound only with the sentinel last, and a probe must have a
+  structural test that its argv builder places it there — asserting only that the happy
+  path reports the sentinel passes a builder that is blind to every real key.
+  **"The tool reports every unknown field" was an assumption, not a measurement**, and it
+  was the load-bearing one. Anyone reusing this pattern against another tool must measure
+  that tool's reporting cardinality first: one-of-N reporting makes a batched sentinel
+  probe order-sensitive, and all-of-N makes it order-free. The technique survives the
+  correction; the version that did not state the ordering did not.
 - **It costs nothing, so "verify the contract at startup" stops being a trade-off.**
   The usual argument against a startup probe is latency or spend; at 0.06 s and zero
   tokens there is nothing to weigh against catching a drift like `--resume` → `resume`
