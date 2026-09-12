@@ -107,7 +107,12 @@ interface Peer {
 
 interface Real {
   deferredCrossModelPeers: (statuses: unknown, routes?: unknown, exhausted?: unknown) => Peer[]
-  rateLimitedPeer: (name: string) => Peer
+  // TWO PARAMETERS, and the drift between this and the implementation is why CI went
+  // red: the stutter fix added `label` to `rateLimitedPeer` and this declaration was
+  // left at one argument, so every call site here was a TS2554. The root `tsconfig.json`
+  // does not include `trident/**`, so `bunx tsc --noEmit` never looked at this file —
+  // `bunx tsc -p trident/tsconfig.json --noEmit` is the command that matches CI.
+  rateLimitedPeer: (name: string, label: string) => Peer
   crossModelRateLimited: (slot: number | null, verdicts: unknown[], key: string | null) => boolean
   seatRateLimitKey: (group: string) => string | null
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
@@ -196,13 +201,23 @@ function infraRun(cause: string, overrides: Partial<TridentRun> = {}): TridentRu
  * gate). This is the ONLY fixture on which `delivery.ts`'s bare-token arm is
  * reachable at all, which makes it the only one where asserting "not a review
  * outcome" can fail. See the ordering tests.
+ *
+ * THE PHASE IS `'argus'`, NOT `'running'`. The first draft wrote `'running'`, which is
+ * not a member of `TridentPhase` at all (`trident/store.ts:33` — the vocabulary is
+ * forge-init / ralph-plan / ralph-task / argus / forge-fix / done / failed / stopped,
+ * and the table's CHECK constraint is built from exactly that list). A fixture
+ * describing a state the schema forbids cannot stand in for a real row, and the type
+ * error was the schema saying so. `'argus'` is both legal and the honest choice: it is
+ * the review phase, which is precisely when a cross-model seat gets refused. It is
+ * non-terminal (`TERMINAL_PHASES` is `['done','failed','stopped']`), which is the
+ * property this fixture needs.
  */
 function inFlightRun(cause: string): TridentRun {
   return makeTridentRun({
     id: 'run-2',
     slug: 'add-flag',
     project_slug: 'proj-1',
-    phase: 'running',
+    phase: 'argus',
     branch: 'trident/add-flag',
     repo_path: '/repo',
     task: 'add a feature flag',
@@ -339,6 +354,21 @@ describe('#542 the CLI — RUN as a subprocess: the marker means 429 and nothing
    * replaces could not do — they asserted a substring existed in the source file and
    * executed nothing, which left the dangerous mutation alive.
    */
+  /**
+   * The child's environment, with `KIMI_API_KEY` PRESENT or PROVABLY ABSENT.
+   *
+   * `delete`ing the key off a copy is what makes "absent" mean absent regardless of what
+   * the parent carries, so the not_connected boundary is a property of this function
+   * rather than of the machine the suite happens to run on.
+   */
+  function childEnv(apiKey: string | null, port: number): Record<string, string> {
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) }
+    env['KIMI_BASE_URL'] = `http://127.0.0.1:${port}`
+    if (apiKey === null) delete env['KIMI_API_KEY']
+    else env['KIMI_API_KEY'] = apiKey
+    return env
+  }
+
   async function runCli(opts: {
     status?: number
     body?: string
@@ -356,6 +386,14 @@ describe('#542 the CLI — RUN as a subprocess: the marker means 429 and nothing
         })
       },
     })
+    // `server.port` is `number | undefined` in Bun's types, and a bound port we cannot
+    // read is a test that cannot address its own server — so it fails here, loudly,
+    // rather than interpolating `undefined` into the URL and timing out mysteriously.
+    const { port } = server
+    if (port === undefined) {
+      server.stop(true)
+      throw new Error('the local review server reported no port')
+    }
     if (opts.refuseConnection === true) server.stop(true)
     const diff = `${Bun.env['TMPDIR'] ?? '/tmp'}/kimi-cli-${Bun.nanoseconds()}.diff`
     await Bun.write(diff, DIFF)
@@ -364,12 +402,15 @@ describe('#542 the CLI — RUN as a subprocess: the marker means 429 and nothing
         ['bun', 'run', new URL('../kimi-review-cli.ts', import.meta.url).pathname, diff, 'bump a'],
         {
           cwd: new URL('../..', import.meta.url).pathname,
-          env: {
-            ...process.env,
-            KIMI_BASE_URL: `http://127.0.0.1:${server.port}`,
-            // `null` means "unset", which is the not_connected path.
-            ...(opts.apiKey === null ? {} : { KIMI_API_KEY: opts.apiKey ?? KEY }),
-          },
+          // BUILT BY EXCLUSION, NOT BY OMISSION — and that distinction is the whole
+          // correctness of the exit-10 case. Spreading `process.env` and then simply not
+          // ADDING `KIMI_API_KEY` leaves the parent's value in place if the parent has
+          // one: the child would then find a credential, reach the local server, and
+          // exit 3 instead of 10. The test would still pass on a box with no
+          // `KIMI_API_KEY` — passing for the wrong reason, which is the exact defect
+          // shape this file exists to catch twice over. Reproducible with
+          // `KIMI_API_KEY=parent-secret bun test …`, which is now a case below.
+          env: childEnv(opts.apiKey === null ? null : (opts.apiKey ?? KEY), port),
           stdout: 'pipe',
           stderr: 'pipe',
         },
@@ -427,10 +468,41 @@ describe('#542 the CLI — RUN as a subprocess: the marker means 429 and nothing
     expect(dropped.stderr).not.toContain(MARKER)
 
     // No credential is exit 10, the graceful reduced-panel path, and never a rate limit.
+    // The server would answer 429 if it were ever reached, so this ALSO proves the child
+    // never called out: a leaked credential would exit 3 with the marker.
     const noKey = await runCli({ apiKey: null, status: 429 })
     expect(noKey.exitCode).toBe(10)
     expect(noKey.stderr).not.toContain(MARKER)
   }, 20_000)
+
+  test('HEADLINE: the missing-credential case holds even when the PARENT has a key set', async () => {
+    // THE DEFECT THIS PINS, and it is the third instance in this PR of one shape: a test
+    // that passes for the wrong reason. The child env was built by spreading
+    // `process.env` and then simply NOT ADDING `KIMI_API_KEY` — so on a box where the
+    // parent HAS one, the child inherits it, reaches the server, and exits 3. The
+    // exit-10 boundary above was a property of this machine rather than of the code.
+    //
+    // `childEnv` now DELETES the key instead of declining to set it, and this test
+    // proves the difference by putting a value in the parent's own environment first.
+    const saved = process.env['KIMI_API_KEY']
+    process.env['KIMI_API_KEY'] = 'parent-secret-must-not-be-inherited'
+    try {
+      const noKey = await runCli({ apiKey: null, status: 429 })
+      expect(noKey.exitCode).toBe(10)
+      expect(noKey.stderr).not.toContain(MARKER)
+      // ...and the parent's value never reached the child in any form.
+      expect(noKey.stderr).not.toContain('parent-secret')
+      expect(noKey.stdout).not.toContain('parent-secret')
+      // The same run WITH a key explicitly supplied does reach the 429 server, so the
+      // assertion above is measuring the deletion rather than a server that never answers.
+      const withKey = await runCli({ apiKey: KEY, status: 429 })
+      expect(withKey.exitCode).toBe(3)
+      expect(withKey.stderr).toContain(MARKER)
+    } finally {
+      if (saved === undefined) delete process.env['KIMI_API_KEY']
+      else process.env['KIMI_API_KEY'] = saved
+    }
+  }, 30_000)
 
   test('a real 200 review exits CONNECTED with the review on stdout and no marker', async () => {
     const r = await runCli({
@@ -694,7 +766,18 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
   test('HEADLINE: the stored reason quotes the 429 cause and licenses no review claim', () => {
     const reason = innerTerminalFailureReason(
       makeTridentRun({ round: 1, max_rounds: 10 }),
-      { verdict: 'REQUEST_CHANGES', block_kind: 'infra-only', terminal_cause: title(), round: 1, checkpoint: null },
+      // The parameter is a `Pick<InnerResult, …>` that includes `ok` and
+      // `findings_present`; omitting them was a TS2345, and supplying them is also the
+      // honest shape — an infra-only stop is not `ok` and carries no findings of its own.
+      {
+        ok: false,
+        verdict: 'REQUEST_CHANGES',
+        block_kind: 'infra-only',
+        terminal_cause: title(),
+        round: 1,
+        checkpoint: null,
+        findings_present: false,
+      },
     )
     expect(reason).toContain('HTTP 429')
     expect(reason).toContain('no review was performed')
@@ -778,7 +861,8 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
         id: 'r3',
         slug: 's',
         project_slug: 'p',
-        phase: 'running',
+        // Non-terminal and legal, for the same reason as `inFlightRun` above.
+        phase: 'argus',
         repo_path: '/repo',
         task: 't',
         failure_reason: 'retries exhausted while doing something unrelated',

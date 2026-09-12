@@ -118,7 +118,11 @@ const load = <T>(name: string, isAsync = false): T =>
 
 type Verdict = Record<string, unknown>
 type RetryFn = (input: {
-  verdicts: Verdict[]
+  // `Verdict | null`, because a DEAD SEAT really is null — that is the case
+  // `retryDeferredPeers` treats as "configured, dispatched, produced nothing" and
+  // retries. Declaring it `Verdict[]` made the honest fixture a type error (TS2322),
+  // which is the type lying about the function rather than the fixture being wrong.
+  verdicts: Array<Verdict | null>
   slots: Array<{ name: string; slot: number | null; statusKey: string; rateLimitKey?: string | null }>
   invoke: (name: string) => Promise<Verdict | null>
   attempts?: number

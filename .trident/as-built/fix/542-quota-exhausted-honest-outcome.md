@@ -177,6 +177,63 @@ generic deferral row, which blocks identically and claims less.
 test green, because JS indexing already answers both cases — so they were removed
 rather than kept as reassurance.
 
+### `bunx tsc --noEmit` DOES NOT TYPECHECK `trident/`, and this branch proved it
+
+Worth recording because it cost a red CI run here and hit a sibling lane the same
+day. The root `tsconfig.json`'s `include` list names ~30 directories and
+**`trident/` is not among them**, so `bunx tsc --noEmit` silently typechecks none
+of this change. It reported clean while `trident/__tests__/` carried seven real
+errors.
+
+`scripts/ci/typecheck-all.sh` is the command that matches CI — its own header
+already documents this trap ("`tsc --noEmit`, whose include list never reached
+`trident/`, `app/`") — and it runs `tsc -p` over every tsconfig in the repo,
+**51** of them, so a directory cannot silently escape the gate. Expect
+`TYPECHECK MATRIX: ALL PASS`.
+
+The seven errors, none of them environmental:
+
+- **`rateLimitedPeer` declared with one parameter, called with two** (×3). The
+  stutter fix added the `label` argument and the test's own type declaration was
+  left behind — the fix and the type drifted apart in the same commit.
+- **`phase: 'running'` is not a `TridentPhase`** (×2). The vocabulary is
+  `forge-init / ralph-plan / ralph-task / argus / forge-fix / done / failed /
+  stopped` (`trident/store.ts:33`), and the table's CHECK constraint is built from
+  exactly that list — so the fixture was describing a state the schema forbids, and
+  the type error was the schema saying so. Now `'argus'`, which is legal,
+  non-terminal (the property the fixture needs) and the honest choice: the review
+  phase is when a cross-model seat actually gets refused.
+- **`innerTerminalFailureReason`'s `Pick<InnerResult, …>` needs `ok` and
+  `findings_present`.** Supplying them is also the truthful shape — an infra-only
+  stop is not `ok` and carries no findings of its own.
+- **`verdicts: Verdict[]` in `lane-retry.test.ts`** rejected the `null` a DEAD SEAT
+  really is — the type lying about the function rather than the fixture being
+  wrong. Widened to `Array<Verdict | null>`. Neither CI nor the review reported
+  this one; the matrix found it.
+- **`server.port` is `number | undefined`.** Narrowed with a throw, so a bound port
+  that cannot be read fails loudly instead of interpolating `undefined` into a URL
+  and timing out mysteriously.
+
+### A third test that passed for the wrong reason
+
+The subprocess harness built the child's environment by spreading `process.env` and
+then **not adding** `KIMI_API_KEY` when the case wanted none. On a box where the
+parent has one, the child inherits it, reaches the local server and exits 3 — so
+the asserted exit-10 not_connected boundary was a property of this machine, not of
+the code. `childEnv` now **deletes** the key rather than declining to set it, and a
+test sets a value in the parent's own environment first to prove the difference.
+
+Measured, because "it passes now" was exactly the problem: with the omission
+restored, the suite reds **1 test on a box with no `KIMI_API_KEY` and 2 with one**.
+The pre-existing assertion only failed in the second case; the new one fails in
+both, which is what makes it a guard rather than a coincidence.
+
+This is the third instance in this one change of a single shape — a test that
+passes for the wrong reason — after the unfalsifiable ordering assertion and the
+two source-substring CLI tests. The common cause is worth naming: each one was
+written to describe an intention rather than to discriminate between the world
+where the code is right and the world where it is not.
+
 ### Tests
 
 `trident/__tests__/cross-model-rate-limited.test.ts` (34) plus two in
