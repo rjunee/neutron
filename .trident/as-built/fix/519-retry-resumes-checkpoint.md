@@ -77,6 +77,37 @@ the `ralph-task-built` row exhaustion parks on) and a spec-doc edit — which cl
 when a commit is refused has no checkpoint, and the CARD has still spent those
 iterations.
 
+**AN EDGE VALUE IS NOT AN UNSET VALUE — the third defect of that shape in this lane.**
+`carriedRalphCap` required a cap `>= 1`, treated everything else as absent, and
+substituted `DEFAULT_MAX_RALPH_ROUNDS`. Measured: `carriedRalphCap(30, 0)` answered
+**20**, so a dispatch asking for ZERO iterations wrote a resumed run at `5 / 20` and
+authorised fifteen more. The helper's own docblock claimed it was "fail-closed on either
+value being unreadable" while substituting the most permissive number in the file, which
+is the definition of failing open. Nothing in this repo establishes a positive-only
+contract for the field, so "non-positive means absent" was an assumption.
+
+The rule now: **only `undefined`/`null` are ABSENT**, and only they get a default —
+which is right, because that is exactly what `create` writes for a row whose creator
+named no cap. A PRESENT value is honoured as given, zero included: a card capped at zero
+gets no Ralph iterations, which is a coherent request that `computeTransition` /
+`refireNextRalphTask` refuse loudly on their own terms. A PRESENT-but-unreadable value
+(negative, fractional, `NaN`, `±Infinity`, past 2^53, a non-number) carries NOTHING, and
+the raw value then reaches `create`, which REFUSES it by name
+(`TridentInvalidRalphCapError`) rather than choosing a number on the caller's behalf.
+`NaN` is the one that mattered most: `ralph_round + 1 > NaN` is false forever, so a
+config typo produced an UNBOUNDED Ralph loop — the exact opposite of a cap.
+
+All three defects in this lane were the same mistake: the at-cap reset, the
+cap-not-carried, and zero-becomes-default each treated an edge value as "unset" and
+reached for the permissive default. So every numeric fallback in the files this lane
+touches was audited rather than just this one:
+
+| site | verdict |
+|---|---|
+| `store.ts` `input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS` | FIXED — validated above |
+| `store.ts` `input.max_rounds ?? 10` | Same SHAPE, opposite failure DIRECTION, left alone. An unchecked `max_rounds` is compared as `round < maxRounds`, so `NaN` makes it FALSE and the fix loop ends early — it under-authorises. The ralph comparison is `+1 > cap`, where `NaN` false means unbounded. Worth its own change, not this one; noted here so the asymmetry is on the record rather than rediscovered. |
+| `store.ts` `checkpointRound(...) ?? 0`, `crash_recoveries ?? 0`, `infra_retries ?? 0` | Not this class. Nullish-only coalescing on genuinely nullable columns, where `0` IS the correct absent value and no permissive default is involved. |
+
 **WHAT IS STILL NOT TRUE, and `#629` holds it.** `max_ralph_rounds` is not a bound on
 the CARD. The spend rides `linked_run_id`, so any dispatch without one starts at zero:
 `onboarding/overnight/register.ts` creates governed runs with no card, and an owner who

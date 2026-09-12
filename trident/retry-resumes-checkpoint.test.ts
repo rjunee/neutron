@@ -47,12 +47,13 @@ import {
 } from './board-dispatch.ts'
 import {
   TridentRunStore,
+  TridentInvalidRalphCapError,
   TridentUnboundedCarriedRoundError,
   TridentUngovernedRalphRoundError,
   type MergeMode,
   type TridentRun,
 } from './store.ts'
-import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
+import { carriedRalphCap, DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 import { computeTransition } from './state-machine.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -641,6 +642,121 @@ describe('THE CAP TRAVELS WITH THE ROUND — a re-dispatch may tighten the budge
       round: 0,
       cap: 7,
     })
+  })
+})
+
+describe('AN EDGE-VALUE CAP IS NOT AN UNSET CAP', () => {
+  /**
+   * THE THIRD BOUNDARY DEFECT IN THIS LANE IN THE SAME SHAPE — after the at-cap reset
+   * and the cap-not-carried — and all three were the code mistaking an EDGE value for an
+   * UNSET one and reaching for the permissive default. Measured here:
+   * `carriedRalphCap(30, 0)` answered 20, so a dispatch asking for ZERO iterations
+   * authorised fifteen more on a run already at round 5.
+   *
+   * The rule now: only `undefined`/`null` are ABSENT and only they get a default. A
+   * present value is honoured as given, zero included. A present-but-unreadable value
+   * carries nothing and is REFUSED by name at the write site rather than replaced.
+   */
+  test('UNIT: every edge value, on both sides, and the absent case as the control', () => {
+    // RED-mutation: restore `usable = v >= 1` plus the DEFAULT substitution and the
+    // zero rows below come back 20 — the measured defect, exactly.
+    // ZERO IS PRESERVED, not defaulted, from either side.
+    expect(carriedRalphCap(30, 0)).toBe(0)
+    expect(carriedRalphCap(0, 30)).toBe(0)
+    expect(carriedRalphCap(0, 0)).toBe(0)
+    // ABSENT is the ONLY case that gets the default — the control that stops this test
+    // from passing by refusing everything.
+    expect(carriedRalphCap(30, undefined)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(carriedRalphCap(30, null)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(carriedRalphCap(5, undefined)).toBe(5) // …and min() still applies to it
+    // ORDINARY POSITIVES still take the tighter side, in both orders.
+    expect(carriedRalphCap(30, 7)).toBe(7)
+    expect(carriedRalphCap(7, 30)).toBe(7)
+    // PRESENT BUT UNREADABLE carries NOTHING — never a substituted default. A `NaN` cap
+    // is the worst of these: `round + 1 > NaN` is false forever, i.e. an unbounded loop.
+    for (const bad of [-1, -20, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53, '5', {}]) {
+      expect({ bad, cap: carriedRalphCap(30, bad) }).toEqual({ bad, cap: null })
+    }
+    // …and an unreadable PRIOR cap carries nothing either: a round without the bound it
+    // was spent against is the 5/20 shape this pair rule exists to prevent.
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, undefined, null, '5']) {
+      expect({ bad, cap: carriedRalphCap(bad, 10) }).toEqual({ bad, cap: null })
+    }
+  })
+
+  test('DISPATCH: an explicit cap of ZERO is written as zero, and the loop refuses the first iteration', async () => {
+    // The dispatch-level half of the row above. A card capped at zero gets no Ralph
+    // iterations — a coherent request — and it must not be quietly re-read as twenty.
+    // RED-mutation: the same as the unit test's; the row comes back at cap 20 and the
+    // `computeTransition` assertion flips to `ralph-plan`.
+    await priorRun({ ralph_round: 5, max_ralph_rounds: 30 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { max_ralph_rounds: 0 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 5,
+      cap: 0,
+    })
+    expect(store.get(result.run.id)!.max_ralph_rounds).toBe(0)
+    const next = computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {})
+    expect(next.phase).toBe('failed')
+    expect(next.failure_reason).toContain('max_ralph_rounds')
+  })
+
+  test('DISPATCH: a prior capped at ZERO keeps that cap under a permissive dispatch', async () => {
+    // The other side: the tighter value is the prior row's, and `min` must take it.
+    // RED-mutation: return the dispatch ceiling instead of `min()` and the cap is 30.
+    await priorRun({ ralph_round: 0, max_ralph_rounds: 0 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { max_ralph_rounds: 30 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.max_ralph_rounds).toBe(0)
+  })
+
+  test('DISPATCH: an INVALID cap is refused by name, never replaced with the default', async () => {
+    // A config typo must not become the most permissive number in the file. `NaN` is the
+    // one that matters most: `ralph_round + 1 > NaN` is false forever, so the loop would
+    // be unbounded — the exact opposite of what a cap is for.
+    // RED-mutation: delete the `isRalphCap` check in `create` and each of these
+    // dispatches succeeds, writing an unchecked number into an INTEGER column.
+    for (const bad of [Number.NaN, -5, 2.5, Number.POSITIVE_INFINITY]) {
+      cardLink = null
+      const task = `invalid cap ${String(bad)} — rebuild the importer`
+      await priorRun({ task, ralph_round: 4 })
+      const { result } = await dispatchRecording(async () => HEAD, { task, max_ralph_rounds: bad })
+      expect({ bad, ok: result.ok }).toEqual({ bad, ok: false })
+      if (result.ok) return
+      expect({ bad, code: result.code }).toEqual({ bad, code: 'backend_error' })
+      expect(result.message).toContain('max_ralph_rounds')
+    }
+  })
+
+  test('STORE: zero is accepted, an unreadable cap is refused by name', async () => {
+    // "Do not put the check only in the caller." The producer carries nothing for an
+    // unreadable cap; this is the write site refusing the raw value it then sees.
+    // RED-mutation: delete the `isRalphCap` guard and the rejections below stop.
+    const zero = await store.create({
+      slug: 'cap-zero', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, max_ralph_rounds: 0,
+    })
+    expect(zero.max_ralph_rounds).toBe(0)
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      await expect(
+        store.create({
+          slug: `cap-bad-${String(bad)}`, project_slug: 'proj-1', repo_path: tmp, task: 'x',
+          ralph: true, max_ralph_rounds: bad,
+        }),
+      ).rejects.toThrow(TridentInvalidRalphCapError)
+    }
+    // ABSENT still takes the default — the control.
+    const absent = await store.create({
+      slug: 'cap-absent', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
+    })
+    expect(absent.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
   })
 })
 

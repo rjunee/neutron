@@ -23,7 +23,7 @@ import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
-import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
+import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -143,6 +143,29 @@ export class TridentUngovernedRalphRoundError extends Error {
   constructor(ralph_round: number) {
     super(`refusing to create a NON-ralph trident run carrying ralph_round=${ralph_round}: a count of Ralph iterations is meaningless on a row that will not run a Ralph loop, and buildWorkflowArgs threads it to the inner workflow regardless — set ralph:true or carry no round`)
     this.name = 'TridentUngovernedRalphRoundError'
+  }
+}
+
+/**
+ * A `max_ralph_rounds` that is present but is not a cap (#519, final review round).
+ *
+ * `create` resolved the field with `input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS`,
+ * which is correct for ABSENT and silently wrong for INVALID: a `NaN`, a negative or a
+ * fractional cap is not nullish, so it was written straight into an INTEGER column and
+ * every later `ralph_round + 1 > max_ralph_rounds` comparison was decided against a
+ * value nothing had checked. A `NaN` cap makes that comparison FALSE forever, which is
+ * an unbounded Ralph loop produced by a config typo.
+ *
+ * Zero is NOT invalid and is not refused here: a card capped at zero gets no
+ * iterations, which is a coherent thing to ask for and which the loop refuses loudly on
+ * its own terms. Only a present-and-unreadable cap throws — loudly, at the write site,
+ * because the alternative is choosing a number on the caller's behalf and the most
+ * permissive one is always available.
+ */
+export class TridentInvalidRalphCapError extends Error {
+  constructor(value: unknown) {
+    super(`refusing to create a trident run with max_ralph_rounds=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Ralph cap must be a non-negative safe integer (0 is allowed and means "no iterations"). ABSENT gets the default; a value that is PRESENT but unreadable is refused rather than replaced, because every ralph_round + 1 > max_ralph_rounds comparison would otherwise be decided against an unchecked number — and NaN makes that comparison false forever, i.e. an unbounded loop from a config typo`)
+    this.name = 'TridentInvalidRalphCapError'
   }
 }
 
@@ -659,6 +682,16 @@ export class TridentRunStore {
     // `undefined` is the shape every existing caller passes, and a garbled number is
     // the fresh-budget case, not a reason to lose a build. `carryableRalphRound` is
     // the same normaliser the producer applies — one predicate, both places.
+    // ABSENT GETS THE DEFAULT; PRESENT-BUT-UNREADABLE IS REFUSED (final review round).
+    // The `??` alone was correct for `undefined` and silently wrong for every other
+    // non-cap: `NaN`, a negative and a fractional value are not nullish, so they were
+    // written into an INTEGER column and then decided every
+    // `ralph_round + 1 > max_ralph_rounds` comparison — and `NaN` makes that comparison
+    // false forever, which is an unbounded Ralph loop produced by a config typo. Zero is
+    // a VALID cap (no iterations) and passes through untouched.
+    if (input.max_ralph_rounds !== undefined && !isRalphCap(input.max_ralph_rounds)) {
+      throw new TridentInvalidRalphCapError(input.max_ralph_rounds)
+    }
     const maxRalphRounds = input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
     const carriedRalphRound = carryableRalphRound(input.ralph_round)
     if (carriedRalphRound > 0) {
