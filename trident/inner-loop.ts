@@ -61,6 +61,7 @@ import { FIRE_SETTLE_TIMEOUT_ERROR } from './fire-evidence.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import { parseTerminalCause, type TerminalCause } from './terminal-cause.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -245,6 +246,27 @@ export interface InnerResult {
    * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
+  /**
+   * WHY THE LOOP STOPPED (#520) — one of the closed {@link TerminalCause} members, or
+   * `null` on a row whose terminal result carried no recognisable kind.
+   *
+   * THE SIBLING OF `terminal_cause`, NOT ITS REPLACEMENT. That field holds the probe's /
+   * lane's / thrown error's own WORDS: open text, quotable, and unroutable by
+   * construction. This one holds WHICH of the known exits happened: closed, routable,
+   * and carrying nothing the vocabulary does not already define. `checkpoint` answers
+   * neither question — it records the PHASE reached, and deducing a cause from it is
+   * exactly what `innerTerminalFailureReason` records being wrong about, twice.
+   *
+   * `null` AND `'unknown'` ARE DIFFERENT FACTS AND DECODE SEPARATELY. `null` means the
+   * field did not arrive (a legacy row, a truncated result, a value from a future
+   * writer) and every reader answers it by keeping the behaviour it had before this
+   * field existed. `'unknown'` means the workflow ran, looked at its own exit
+   * conditions, and could not say which one it was — an assertion this run made. A
+   * decoder that folded the two together would put "could not find out" and "found out
+   * that nothing happened" on one branch, which is the shape of the defect this whole
+   * field is against.
+   */
+  terminal_cause_kind: TerminalCause | null
   /**
    * True iff the raw terminal result carried a NON-EMPTY `findings` array.
    * Fail-closed: absent / non-array / empty decodes false. Distinguishes an
@@ -809,6 +831,12 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
       typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
         ? p.terminalCause.trim().slice(0, TERMINAL_CAUSE_MAX)
         : null,
+    // WHY IT STOPPED, AS A KIND (#520) — decoded FAIL-CLOSED by the one owner of the
+    // vocabulary, so an unrecognised value can never be read as a determinate cause and
+    // in particular can never be read as `'unknown'`, which is a claim the workflow
+    // makes rather than a hole in the data. Same rule as `block_kind` two fields up, and
+    // for the same reason: the orchestrator and the delivery both ROUTE on this.
+    terminal_cause_kind: parseTerminalCause(p.terminalCauseKind),
     // T4 — DID A REVIEWER ACTUALLY SAY ANYTHING? Decoded FAIL-CLOSED: only a non-empty
     // array counts, so absent/garbled/`[]` all read false. The orchestrator uses this to
     // tell an infrastructure death (`inner-error` with `findings: []` — run f384460d, the

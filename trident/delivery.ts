@@ -38,7 +38,8 @@
 
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
-import { deriveInfraBlock } from './infra-block.ts'
+import { deriveInfraBlock, deriveTerminalCause } from './infra-block.ts'
+import type { TerminalCause } from './terminal-cause.ts'
 import { isPublishedUnreviewedReason } from './fire-evidence.ts'
 import { terminalRunDisposition } from './run-disposition.ts'
 import {
@@ -144,6 +145,17 @@ export type FailureClass =
    * class where the cause is entirely outside the work.
    */
   | 'deploy-restart'
+  /**
+   * A FIX ROUND WAS LOST, SO THE CODE WAS NOT RE-JUDGED (#520). Either the round's
+   * work never reached the branch, or it committed and left the reviewed code
+   * unchanged. Its own class because it sits exactly between the two classes it
+   * would otherwise be forced into and is neither: nothing about the machine
+   * broke (`infra`), and no reviewer rejected anything (`review-unresolved`) — the
+   * round simply produced nothing to review. Before this class the whole family
+   * was delivered as "The build ended without an approved review", the one
+   * sentence this card exists to split.
+   */
+  | 'round-lost'
   | 'unknown'
 
 export interface FailureInterpretation {
@@ -619,12 +631,147 @@ function salvageRecoveryTrail(run: TridentRun): string {
  * runs FIRST, ahead of every string branch including `isToolsNotEnabled`: a fact beats a
  * keyword, and a deferral must never be told as a rejection.
  */
+/** The two advice clauses every class composes from. Hoisted out of
+ *  `interpretFailure` only so the shared interpretations below can reach them —
+ *  the wording is unchanged. */
+const RETRY_ADVICE = 'Reply to retry the build, or take it from here manually.'
+const PROGRESS_SAVED = 'Your progress is saved.'
+
+/**
+ * THE ONE INTERPRETATION OF AN INFRASTRUCTURE DEATH, reached by two routes.
+ *
+ * The string route (`build infrastructure failed` / `review never ran (infra-only)` /
+ * `inner workflow failed at round`, below) predates #520 and still runs. The structured
+ * route is the measured `terminal_cause_kind` — `'workflow-threw'` and the two bounded
+ * stops — which arrives on rows whose reason a later reword might stop matching.
+ *
+ * ONE COMPOSER, SO THEY CANNOT DRIFT. Two copies of this copy would be exactly the
+ * "reworded out from under its classifier" failure the branches around it keep warning
+ * about, and a test asserts both routes return the same value.
+ *
+ * A FUNCTION RATHER THAN A SHARED CONSTANT, deliberately. `interpretFailure` returns its
+ * interpretation BY REFERENCE, and every other arm hands the caller a fresh literal. A
+ * module-level object returned from two arms would be one caller's field assignment away
+ * from rewriting the copy every future call receives — a whole class of bug none of the
+ * other arms can have. The cost is one allocation on a path that posts a chat message.
+ */
+function infraDeathInterpretation(): FailureInterpretation {
+  return {
+    klass: 'infra',
+    summary:
+      'The build hit an internal error and stopped without a review verdict — this is not a rejection of the work.',
+    input_needed: `${PROGRESS_SAVED} ${RETRY_ADVICE}`,
+  }
+}
+
+/**
+ * THE OWNER-FACING STORY FOR A MEASURED TERMINAL CAUSE (#520) — or `null` where this
+ * vocabulary licenses none and the caller must keep the story it already had.
+ *
+ * THIS IS THE HALF THE CARD IS ABOUT. `delivery.ts` had ZERO reads of the terminal
+ * cause, so every exit that was not a recognised string landed on one sentence — "The
+ * build ended without an approved review, so I did not merge it." — for a fix round
+ * whose work vanished, a fix round that changed nothing, a panel that ran and raised
+ * only advisory findings, and a genuine round-budget exhaustion. Four different next
+ * actions, one sentence.
+ *
+ * WHAT EACH ARM MAY CLAIM IS BOUNDED BY WHAT THE CAUSE ACTUALLY ESTABLISHES, and two
+ * arms turn on `disposition` for that reason rather than for convenience:
+ *
+ *  - `'round-budget-exhausted'` does NOT contradict a recorded rejection. The budget
+ *    running out and the reviewer holding blocking findings are both true of the same
+ *    run, and the review branch below tells the richer of the two stories. So on a
+ *    `reviewed-rejected` row this arm stands aside — the same deferral the two
+ *    `disposition !== 'reviewed-rejected'` branches below already make, for the same
+ *    reason.
+ *  - `'review-advisory-only'` DOES contradict it, and wins. `recordedTerminalVerdict`
+ *    records an advisory-only exit as a real REQUEST_CHANGES (a panel ran and spoke),
+ *    so such a row reaches the review branch and is told the reviewer "still had
+ *    blocking findings" — which is the one thing an advisory-only exit means did NOT
+ *    happen. A measured cause outranks prose whenever it contradicts it.
+ *
+ * AND SEVEN MEMBERS RETURN `null` ON PURPOSE. `'unknown'` buys silence by definition.
+ * The success and handoff exits (`review-approved`, `pr-already-merged`,
+ * `resume-approved-unchanged`, `wave-member-built`, `handoff-publish`,
+ * `ralph-task-built`) are not failures at all: a FAILED row carrying one of them failed
+ * downstream of that exit, at the merge or the publish, of something this cause did not
+ * measure — and the branches below, which read the reason that death actually wrote,
+ * are the ones that know. Naming the exit as the failure would be a confident sentence
+ * about an unmeasured cause, which is the whole defect.
+ */
+function interpretTerminalCause(
+  cause: TerminalCause,
+  disposition: ReturnType<typeof terminalRunDisposition>,
+): FailureInterpretation | null {
+  switch (cause) {
+    case 'round-lost-work':
+      return {
+        klass: 'round-lost',
+        summary:
+          "A fix round's work never reached the branch, so the code was never re-judged — nothing about it was rejected.",
+        input_needed: `${PROGRESS_SAVED} ${RETRY_ADVICE} The round that went missing has to be rebuilt; the work before it is still on the branch.`,
+      }
+    case 'round-lost-no-diff':
+      return {
+        klass: 'round-lost',
+        summary:
+          'A fix round ran but left the reviewed code exactly as it was, so there was nothing new to review — nothing about the work was rejected.',
+        input_needed: `${PROGRESS_SAVED} ${RETRY_ADVICE}`,
+      }
+    case 'review-advisory-only':
+      return {
+        klass: 'review-unresolved',
+        summary:
+          'The reviewers ran and everything they raised was advisory rather than blocking, so the build stopped with no approval to merge on.',
+        input_needed: `${PROGRESS_SAVED} Reply to send it back for another pass, or take it over and merge it yourself.`,
+      }
+    case 'round-budget-exhausted':
+      // See the docblock: a recorded rejection is the better story and this does not
+      // contradict it.
+      if (disposition === 'reviewed-rejected') return null
+      return {
+        klass: 'unknown',
+        // WORD FOR WORD THE SENTENCE THE `reached max_rounds` BRANCH BELOW ALREADY
+        // GIVES THIS EXACT RUN. It arrives here by the measured kind instead of by a
+        // string the state machine happens to write, so the two routes must agree —
+        // and a test pins that they do.
+        summary: 'The build used up its rounds without ever getting an approved review, so I did not merge it.',
+        input_needed: `${PROGRESS_SAVED} ${RETRY_ADVICE}`,
+      }
+    case 'workflow-threw':
+    // AND THE THREE INFRA-ONLY EXITS, WHICH THIS ARM SHOULD NEVER ACTUALLY SEE — said
+    // plainly rather than left for a reader to work out. All three carry
+    // `block_kind: 'infra-only'`, so `deriveInfraBlock` (same gate, first branch of
+    // `interpretFailure`) has already returned `infra-blocked` for them and this
+    // function was never called. What reaches here is only a result whose kind and
+    // whose block kind DISAGREE — a corrupted or partially-decoded row.
+    //
+    // WHICH IS EXACTLY WHY IT IS `infra` AND NOT `infra-blocked`. That class asserts a
+    // MEASURED block and composes under 🚧; a row whose two fields contradict each
+    // other has measured nothing this function can trust. The generic-and-true class is
+    // the honest answer to a disagreement, and it is the one arm here reachable only by
+    // a row that is already wrong about itself.
+    case 'review-infra-only':
+    case 'resume-head-unreadable':
+    case 'built-head-unverified':
+      return infraDeathInterpretation()
+    case 'review-approved':
+    case 'pr-already-merged':
+    case 'resume-approved-unchanged':
+    case 'wave-member-built':
+    case 'handoff-publish':
+    case 'ralph-task-built':
+    case 'unknown':
+      return null
+  }
+}
+
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = authoredFailureReason((run.failure_reason ?? '').trim())
   const r = reason.toLowerCase()
   const disposition = terminalRunDisposition(run)
-  const retry = 'Reply to retry the build, or take it from here manually.'
-  const saved = 'Your progress is saved.'
+  const retry = RETRY_ADVICE
+  const saved = PROGRESS_SAVED
 
   // THE MACHINE WAS BROKEN, NOT THE CODE. Checked FIRST — see the docblock: this is the
   // one MEASURED class, and the measured cause is prose that a keyword branch below
@@ -770,6 +917,31 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // WHY THE INNER LOOP STOPPED, AS THE WORKFLOW MEASURED IT (#520). Read STRUCTURALLY
+  // off the harvested terminal result, the same way `deriveInfraBlock` above is — not
+  // from the reason prose, which is why this survives a reword of the reason and why it
+  // is the only branch in this function that cannot be fooled by a quoted substring.
+  //
+  // PLACED HERE, AND EVERY LINE OF THAT ORDERING IS LOAD-BEARING. It sits BELOW the
+  // infra-block, launch-guard, undetermined-launcher-death and deploy-restart branches
+  // because each of those describes something that happened OUTSIDE the inner workflow,
+  // which the workflow's own terminal cause cannot know about and must not overrule — a
+  // build whose launcher a deploy killed mid-flight never wrote a terminal result at
+  // all. It sits ABOVE every string branch because a measured kind beats a keyword
+  // match over prose; that is the same precedence `deriveInfraBlock` already has.
+  //
+  // FAIL-CLOSED IN THE ONE DIRECTION THAT MATTERS. `deriveTerminalCause` returns null
+  // for a run that is not terminally failed, one whose result was never harvested (a
+  // stale `inner_result` from an earlier iteration is not this ending), and one whose
+  // kind does not decode — and `interpretTerminalCause` returns null for every member
+  // that licenses no specific claim. Both nulls land on exactly the behaviour this
+  // function had before this card, byte for byte.
+  const terminalCause = deriveTerminalCause(run)
+  if (terminalCause !== null) {
+    const byCause = interpretTerminalCause(terminalCause, disposition)
+    if (byCause !== null) return byCause
+  }
+
   // THE PRE-LAUNCH CHECKS REFUSED, AND NO BUILD EVER RAN. Sibling of the branch above and
   // checked in the same place, for the same reason: these reasons QUOTE git — the probe's exit
   // code, its stderr, the repo path — and every keyword branch below is a bare `includes()`
@@ -889,12 +1061,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     r.includes('review never ran (infra-only)') ||
     r.includes('inner workflow failed at round')
   ) {
-    return {
-      klass: 'infra',
-      summary:
-        'The build hit an internal error and stopped without a review verdict — this is not a rejection of the work.',
-      input_needed: `${saved} ${retry}`,
-    }
+    return infraDeathInterpretation()
   }
 
   // Suspected agent hang / stalled inner workflow — already a plain reason.

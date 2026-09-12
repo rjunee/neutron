@@ -1,7 +1,7 @@
 ---
 title: Emit a terminal cause on every terminal path, and report it
 group: trident
-status: open
+status: done
 priority: P0
 cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
@@ -20,6 +20,35 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > `delivery.ts` a specific summary per cause instead of one summary for all of them.
 > The history below is kept because it is the argument for why a cause must be
 > MEASURED and not inferred from `(round, checkpoint)`.
+>
+> **RESOLVED 2026-09-12 (#520).** Both halves shipped, and not as a third specific
+> message bolted onto the prose cause: the workflow now emits a SECOND, TYPED field,
+> `terminalCauseKind`, on **all twelve** of its terminal paths. The vocabulary is a
+> closed union owned by `trident/terminal-cause.ts`, mirrored into the .mjs (which
+> imports nothing) with the mirror pinned by a test, and decoded fail-closed by
+> `parseInnerResult`. `'unknown'` is a MEMBER, so "could not be established" and
+> "established that nothing happened" can never arrive at a reader as one value —
+> and `null` (the field did not arrive) decodes separately from it, so a legacy row
+> and a run that answered "cannot tell" stay distinguishable.
+>
+> The kind for the review loop is read off the loop's **own exit guards at the
+> exit** — `finalVerdict`, `round >= maxRounds`, `synthesis.blockKind`,
+> `roundLostItsWork`, `roundLostItsDiff` — which is what makes it a measurement
+> rather than the inference R1 and R2 killed: those read `(round, checkpoint)`,
+> values equally consistent with four endings; these ARE the conditions the loop
+> stopped on. Where they match nothing the answer is `'unknown'`, never the nearest
+> plausible member.
+>
+> Two notes on the file:line evidence above, checked against `main` at `3633ff62`:
+> the two shipped emit sites have MOVED (`inner-workflow.mjs:7470` → `:7851`,
+> `:7524` → `:7905` before this change) but the substance held — and the narrowing
+> UNDERCOUNTED the silent paths. It named the three review-verdict block kinds;
+> the actual enumeration of `writeTerminalResult` call sites is **twelve**, of which
+> **eight** emitted nothing: the two resume shortcuts, the wave-member build, both
+> publish handoffs, both mid-run merge exits, and the Ralph re-fire, on top of the
+> review-verdict exit itself. `.../inner-workflow-terminal-cause.test.ts` enumerates
+> them from source with a positive control, so a thirteenth cannot be added silently
+> — which is the drift this item's HOW IT GOT THIS WAY paragraph describes.
 
 **A terminal `failure_reason` must name what actually happened — today it always says "exhausted 10
 rounds"** (owner-asked 2026-08-13: *"why does the failure reason keep saying the old 10 rounds
@@ -80,18 +109,39 @@ the next early-exit path cannot silently inherit the same wrong sentence.
 
 ## Acceptance
 
-- [ ] The inner workflow emits an explicit terminal cause on EVERY terminal path. The three
+- [x] The inner workflow emits an explicit terminal cause on EVERY terminal path. The three
       review-verdict paths (`'code'`, `'round-lost'`, `'none'`) emit one today's code does
       not — assert each separately, since the two shipped paths (`trident/inner-workflow.mjs:7470`,
       `:7524`) already pass any test written against them.
-- [ ] The orchestrator reports THAT cause, not an inference from `(round, checkpoint)`.
-- [ ] `trident/delivery.ts` regains a specific summary per cause. It has zero reads of
+      verify: `bun test trident/inner-workflow-terminal-cause.test.ts` — enumerates all twelve
+      `writeTerminalResult` call sites from source, with a positive control that deletes one
+      stamp and requires the scan to find it. The three block kinds are asserted one by one in
+      `trident/terminal-cause.test.ts`.
+- [x] The orchestrator reports THAT cause, not an inference from `(round, checkpoint)`.
+      `innerTerminalFailureReason` reads `terminal_cause_kind` and composes through
+      `terminalCauseReason`; the mutation test removes the kind and shows all four exits
+      collapsing back to one sentence.
+- [x] `trident/delivery.ts` regains a specific summary per cause. It has zero reads of
       `terminalCause` today, so a search finding none means this is not built.
-      verify: `rg -n "terminal_cause|terminalCause" trident/delivery.ts`
-- [ ] A run that never reached a review round does NOT say it exhausted rounds. A test
+      verify: `rg -n "terminal_cause|terminalCause" trident/delivery.ts` — now non-empty
+      (`deriveTerminalCause` + `interpretTerminalCause`). It reads the cause STRUCTURALLY off
+      the harvested result, behind the same staleness gate as `deriveInfraBlock`, not off the
+      reason prose.
+- [x] A run that never reached a review round does NOT say it exhausted rounds. A test
       asserts an `inner-error` at round 1 produces neither the word "exhausted" nor the
-      number `max_rounds`.
-- [ ] The test pins the SHAPE, not the sentence: a non-round-exhaustion exit must not claim
+      number `max_rounds`. Held since #240 and re-asserted here WITH a measured kind present,
+      since that is the new input. `'round-budget-exhausted'` is the only member licensed to
+      say the rounds ran out, and it is emitted only where `round >= maxRounds` was true.
+- [x] The test pins the SHAPE, not the sentence: a non-round-exhaustion exit must not claim
       exhaustion, so the NEXT early-exit path added cannot silently inherit a wrong message.
-- [ ] `delivery.ts`'s matcher moves WITH the reason. Assert what the owner is told does not
-      silently change — the two have to land together.
+      Two mechanisms, because prose is advice: the source-level enumeration above REFUSES a new
+      terminal path that names no cause, and `stampTerminalCause` answers one at runtime with
+      `'unknown'` and writes the gap to the run log rather than papering over it.
+- [x] `delivery.ts`'s matcher moves WITH the reason. Assert what the owner is told does not
+      silently change — the two have to land together. Asserted as EQUALITIES rather than
+      maintained in parallel: the structured budget route must return what the `reached
+      max_rounds` string route returns, and the structured infra-death route must return the
+      string route's object itself. And every sentence `terminalCauseReason` can produce must,
+      on a row whose structured cause cannot be read, degrade to the honest verbatim fallback
+      in every disposition where the prose decides — never to a review, hang or
+      merge-mechanics class that did not happen (positive control included).
