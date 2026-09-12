@@ -239,6 +239,40 @@ failure, no 429, no session conflict, no `auth.json` rotation divergence (one fi
 shared by reference). The thread writer lock is per-thread within one `CODEX_HOME`
 and never crossed over. A persistent REPL would not have collided with the gates.
 
+### The spike never asked what already existed
+
+Neither the brief nor this record checked for a codex adapter before specifying one.
+There is one: `runtime/adapters/codex-cli/`, registered as the
+`'openai-codex-cli'` provider and constructed in production at
+`gateway/wiring/build-llm-call-substrate.ts:1353`. Two measurements settled what to
+do about it rather than a judgement call:
+
+- **Its resume is dead on the pinned CLI.** It builds `codex exec --resume <id>`
+  (`exec.ts:67`); on 0.149.1 that is `error: unexpected argument '--resume' found`,
+  **exit 2** — `resume` is a subcommand, not a flag. Same dead end this spike hit
+  with `-s` on `codex exec resume`, from the other direction. So it could not host
+  thread reuse as it stands.
+- **The billing conflict is not one.** Its `auth.ts:86` documents `OPENAI_API_KEY`
+  precedence, which reads as contradicting the HARD BILLING CONTRACT — until you read
+  what it does: `resolveCodexAuth` seeds the spawn env with each auth variant set to
+  `undefined` (`auth.ts:77-83`) and the merge loop **deletes** them from the child
+  (`exec.ts:82-91`), with the substrate env defaulting to `{}` rather than
+  `process.env` (`index.ts:30-43`). Ambient keys are dropped on both surfaces. What
+  differs is whether a *deliberately passed* instance credential is allowed — yes for
+  a self-hoster's own gateway turns, no here, because this surface spends the owner's
+  subscription seat.
+
+One real discrepancy found and left alone: the two scrub lists are not supersets of
+each other — the adapter covers `OPENAI_API_KEY`/`OPENAI_AUTH_TOKEN`/`OPENAI_API_TOKEN`
+(`auth.ts:37-41`), the wrapper unsets `OPENAI_API_KEY`/`OPENAI_KEY`
+(`trident/codex-review.sh:152`).
+
+**The lesson is about the brief, not the tree.** "Specify an adapter" was taken as a
+greenfield instruction by both the briefing and the spike, and the question *what is
+already here?* was never asked — the same discipline that caught `codex-build.sh`
+being a second codex caller, simply not applied a second time. A spec item that names
+no implementation surface will grow one by default, and the default is a duplicate.
+
 ### Not established
 
 - Whether `codex app-server proxy` and the unix control socket work at all. Twenty

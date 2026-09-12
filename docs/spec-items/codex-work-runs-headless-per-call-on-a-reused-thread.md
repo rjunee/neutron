@@ -24,6 +24,57 @@ process startup time (~1.3–2.5 s) and nothing else, while adding a supervised
 long-lived process, an exclusive per-thread writer lock that strands a
 conversation when that process wedges, and a daemon mode this install cannot run.
 
+## Where this lands, and the codex adapter that already exists
+
+**The surface is trident's cross-model path** — `trident/codex-review.sh`,
+`trident/codex-build.sh`, and the thread-id bookkeeping the trident inner loop needs
+to pass an id from one call to the next. It is **not** a new `Substrate`.
+
+**`runtime/adapters/codex-cli/` is neither replaced nor extended by this item**, and
+that is a reasoned position, not an omission:
+
+- **It is a different seam with a different consumer.** It implements `Substrate` for
+  the gateway's LLM-call path, constructed at
+  `gateway/wiring/build-llm-call-substrate.ts:1353` via
+  `selectSubstrateFactory('openai-codex-cli')` — that is "dispatch a Neutron
+  *judgment turn* to codex instead of Claude". This item is trident's cross-model
+  *gate* around a build. Two implementations of **different** paths is not the dual
+  path the tree forbids; two implementations of the **same** path would be.
+- **It could not host this work as it stands.** Its resume is built as
+  `codex exec --resume <id>` (`runtime/adapters/codex-cli/exec.ts:67`), and that
+  option **does not exist** on the pinned CLI: `codex exec --resume <id>` returns
+  `error: unexpected argument '--resume' found`, **exit 2**. `resume` is a
+  subcommand, not a flag. So its resume path is dead against 0.149.1 regardless of
+  this item.
+- **If it is ever repaired, this item's thread contract governs it too** — one owner
+  per thread id, per-lane fan-out, the conflict outcome — so the rule is one rule in
+  two places, not two rules.
+
+**The billing rule is one position, not two.** The apparent conflict — this item
+forbidding a metered key while `runtime/adapters/codex-cli/auth.ts:86` documents
+`OPENAI_API_KEY` precedence — dissolves on reading what the adapter actually does:
+
+- It **drops ambient inherited keys**. `resolveCodexAuth` seeds the spawn env with
+  each auth variant set to `undefined` (`auth.ts:77-83`) and the merge loop deletes
+  those keys from the child's environment (`exec.ts:82-91`). The substrate's `env`
+  defaults to `{}`, explicitly **not** `process.env` (`index.ts:30-43`).
+- What it permits is an **explicitly-passed instance credential**: a self-hoster who
+  wants BYO opts in by passing `env: { OPENAI_API_KEY: … }` (`index.ts:42-43`), and
+  pays for it knowingly, for their own gateway's turns.
+
+So both surfaces forbid the same thing — an **ambient** key silently billing — and
+differ only on whether a **deliberately configured** one is allowed. It is allowed for
+a self-hoster's own gateway turns; it is forbidden here, because this surface spends
+the owner's subscription seat, which is what `trident/codex-review.sh:145-152` states
+in capitals. The criteria below are scoped to this surface and assert nothing about
+the adapter's.
+
+> **One real discrepancy, named and not chased.** The two scrub lists disagree:
+> `CODEX_CLI_AUTH_ENV_VARS` covers `OPENAI_API_KEY`, `OPENAI_AUTH_TOKEN`,
+> `OPENAI_API_TOKEN` (`auth.ts:37-41`), while `trident/codex-review.sh:152` unsets
+> `OPENAI_API_KEY` and `OPENAI_KEY`. Neither list is a superset. Reconciling them is
+> its own change against the adapter, not this one.
+
 ## What the adapter owns
 
 1. **Thread identity is Neutron's state, not codex's.** The adapter records the
@@ -117,11 +168,17 @@ conversation when that process wedges, and a daemon mode this install cannot run
       implementation pass the control by inference, which is one of the two wrong
       implementations this criterion exists to catch; the memory-only map is the
       other.
-- [ ] The resumed call's `turn.completed.usage.cached_input_tokens` is at least
-      90% of its `input_tokens`. verify: the same test reads the JSONL usage
-      event. This is the whole cost case for thread reuse; an adapter that
-      re-establishes context by re-sending a prompt instead of resuming the
-      thread fails this while still passing the recall assertion above.
+- [ ] The resumed call is built as a **resume of the recorded id**, asserted
+      deterministically on the argv. verify: a test asserts the argv for a
+      follow-up call is exactly `exec resume <the recorded thread_id> …` — the
+      `resume` **subcommand**, not a `--resume` flag (which does not exist on the
+      pinned CLI: `codex exec --resume <id>` returns `error: unexpected argument
+      '--resume' found`, exit 2) — and that the id equals the one read back from
+      durable state. Negative half: an adapter that re-establishes context by
+      re-sending prompt text must fail, which this catches because its argv carries
+      no `resume` subcommand and no id.
+      **This, plus the restart-crossing test above, is the proof that the thread was
+      reused.** The cache ratio is not: see the telemetry note below.
 - [ ] Every `resume` call applies the **caller's** sandbox mode and cwd, exactly.
       verify: a test builds resume argv for **two different** caller-requested
       modes (e.g. `read-only` and `workspace-write`) and asserts, for each, that
@@ -208,3 +265,23 @@ conversation when that process wedges, and a daemon mode this install cannot run
       and that the adapter exposes no start/stop/health surface for a server.
       This is the criterion that fails if the persistent shape is reintroduced by
       the back door.
+
+## Telemetry, deliberately not acceptance
+
+Record `turn.completed.usage.{input_tokens,cached_input_tokens}` per call and
+surface the ratio. **It is observational and must not gate anything.** Cache warmth
+is *why* this shape was chosen — the spike measured 97–99% cached on resumed turns —
+but it does not prove the recorded thread id was used, and it fails in both
+directions if used as a criterion:
+
+- a **correct** implementation can drop below any threshold through server-side
+  eviction, an eligibility change, a changed system prompt or a service policy
+  change — none of which are this adapter's behaviour;
+- the **mutant** it would be aimed at, re-sending context, passes whenever it
+  reproduces an identical prefix.
+
+The behaviour is proved by the argv/thread-id assertion and the
+restart-crossing recall test. The ratio's real job is watching, in production,
+whether the premise behind the decision still holds — if resumed turns stop being
+cache-warm, the cost argument that retired the persistent REPL has changed and the
+decision deserves re-examination. That is a signal to read, not a build to fail.
