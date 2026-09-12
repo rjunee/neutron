@@ -1981,6 +1981,12 @@ export async function conflictHunks(
   if (paths.length === 0) {
     return { body: '(no conflicted paths reported)', raw_bytes: 0, truncated: false, files_shown: 0, files_omitted: 0 }
   }
+  const fileTruncatedMarker = `${QUOTE}(… this file's diff was truncated)`
+  const filesOmittedMarker = (n: number): string =>
+    `${QUOTE}(+${n} further conflicted file(s) omitted for length)`
+  const overflowNotice = `${QUOTE}(… this evidence was truncated — you are seeing only part of the conflict)`
+  // Reserved up front so admitting a section can never make the omission line unaffordable.
+  const omissionReserve = Buffer.byteLength(`\n${filesOmittedMarker(paths.length)}`, 'utf8')
   let rawBytes = 0
   let anyTruncated = false
   const sections: string[] = []
@@ -1988,9 +1994,14 @@ export async function conflictHunks(
   let filesOmitted = 0
   for (const path of paths) {
     const label = `${QUOTE.trim()} --- ${foldEvidence(path)} (\`-\` = base, \`+\` = branch)`
-    // Reserve the total-omission marker before admitting another file's section.
-    const remaining = ARBITER_HUNK_BYTES_TOTAL - used - 64
-    if (remaining < 128) {
+    // EVERY BYTE A SECTION EMITS IS BUDGETED, not just its body (#541 review round 11).
+    // Budgeting the body alone let a long LABEL plus a near-cap diff plus the per-file
+    // truncation marker push the joined result past the total — the third time this cap
+    // has been wrong by not counting something it emits. The label and the marker are
+    // part of what a section costs, so they are subtracted before the body budget.
+    const overhead = Buffer.byteLength(`${label}\n`, 'utf8') + Buffer.byteLength(`\n${fileTruncatedMarker}`, 'utf8')
+    const remaining = ARBITER_HUNK_BYTES_TOTAL - used - omissionReserve
+    if (remaining <= overhead + 64) {
       filesOmitted = paths.length - sections.length
       break
     }
@@ -2001,42 +2012,56 @@ export async function conflictHunks(
         repo,
       )
     } catch {
-      sections.push(`${label}\n${QUOTE}(could not be read)`)
-      used += Buffer.byteLength(label, 'utf8') + 32
+      const section = `${label}\n${QUOTE}(could not be read)`
+      sections.push(section)
+      used += Buffer.byteLength(`${section}\n`, 'utf8')
       continue
     }
     if (!res.ok || res.stdout.trim().length === 0) {
       // A path added or deleted on only one side has no two stages to diff.
-      sections.push(`${label}\n${QUOTE}(no two-sided diff — the path exists on only one side, or git could not read it)`)
-      used += Buffer.byteLength(label, 'utf8') + 96
+      const section = `${label}\n${QUOTE}(no two-sided diff — the path exists on only one side, or git could not read it)`
+      sections.push(section)
+      used += Buffer.byteLength(`${section}\n`, 'utf8')
       continue
     }
     rawBytes += Buffer.byteLength(res.stdout, 'utf8')
-    const budget = Math.min(ARBITER_HUNK_BYTES_PER_FILE, remaining)
+    const budget = Math.min(ARBITER_HUNK_BYTES_PER_FILE, remaining - overhead)
     const { body, truncated } = quoteBounded(res.stdout, budget)
     if (truncated) anyTruncated = true
-    const section = truncated ? `${label}\n${body}\n${QUOTE}(… this file's diff was truncated)` : `${label}\n${body}`
+    const section = truncated ? `${label}\n${body}\n${fileTruncatedMarker}` : `${label}\n${body}`
     sections.push(section)
-    used += Buffer.byteLength(section, 'utf8')
+    used += Buffer.byteLength(`${section}\n`, 'utf8')
   }
   if (filesOmitted > 0) {
-    sections.push(`${QUOTE}(+${filesOmitted} further conflicted file(s) omitted for length)`)
+    sections.push(filesOmittedMarker(filesOmitted))
     anyTruncated = true
   }
   const joined = sections.join('\n')
-  // AN UNCONDITIONAL BACKSTOP, and honestly labelled as one: the per-file loop above
-  // already keeps `used` inside the total, so for every input reachable today this line
-  // changes nothing — removing it leaves the suite green, which is the correct outcome for
-  // a redundant guard rather than a gap in coverage. It stays because the loop's byte
-  // accounting is exactly the kind of arithmetic that drifts when a branch is added, and
-  // this cap is two tokens; the property that the RETURN VALUE never exceeds the budget is
-  // asserted directly (`arbiter-wiring.test.ts`) so it holds whichever layer enforces it.
-  // Truncation here would cut mid-line and strip a quote prefix, so the loop — not this —
-  // is what must do the real work.
+  if (Buffer.byteLength(joined, 'utf8') <= ARBITER_HUNK_BYTES_TOTAL) {
+    return {
+      body: joined,
+      raw_bytes: rawBytes,
+      truncated: anyTruncated,
+      files_shown: paths.length - filesOmitted,
+      files_omitted: filesOmitted,
+    }
+  }
+  // THE BACKSTOP, AND IT REPORTS (#541 review round 11). Keeping a redundant bound on
+  // arithmetic that has drifted three times is right; what neither review nor I asked was
+  // what happens when it FIRES. The answer was that it silently dropped bytes the loop
+  // believed it had placed — including the per-file marker that would have said the judge
+  // was looking at a fragment — while `truncated` stayed false because it was derived only
+  // from `quoteBounded`. A judge that knows it saw part of a conflict escalates; one that
+  // believes it saw all of it rules on a fragment. So ANY path that removes bytes sets
+  // `truncated`, this one included, and it makes room for a notice rather than cutting
+  // blind. Whole lines only, so a cut can never leave a line without its quote prefix.
+  const room = ARBITER_HUNK_BYTES_TOTAL - Buffer.byteLength(`\n${overflowNotice}`, 'utf8')
+  const cut = headBytes(joined, Math.max(0, room))
+  const wholeLines = cut.includes('\n') ? cut.slice(0, cut.lastIndexOf('\n')) : ''
   return {
-    body: headBytes(joined, ARBITER_HUNK_BYTES_TOTAL),
+    body: `${wholeLines}\n${overflowNotice}`,
     raw_bytes: rawBytes,
-    truncated: anyTruncated,
+    truncated: true,
     files_shown: paths.length - filesOmitted,
     files_omitted: filesOmitted,
   }

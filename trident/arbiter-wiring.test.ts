@@ -918,6 +918,61 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(evidence).toContain('further conflicted file(s) omitted')
   })
 
+  test('LONG NAMES **AND** NEAR-CAP DIFFS TOGETHER: bounded, every section keeps its notice, and the backstop is not needed', async () => {
+    // THE PAIRING IS THE TEST, and its absence is why the invariant case below missed a
+    // real defect. That case has a "very long filenames" shape, but the long label makes
+    // the diff HEADER exceed the per-file budget, so the body comes out empty and the
+    // section stays small — the adversarial fixture constructed conditions that AVOIDED
+    // the interaction it was written to exercise. Either half alone passes; only both
+    // together drive a section whose label + body + per-file marker overflows the total.
+    //
+    // AND THE ASSERTION THAT SEPARATES THEM IS NOT THE BYTE BOUND. Budgeting only the body
+    // still produces a bounded result, because the backstop rescues it — so a size check
+    // alone cannot tell a correct loop from a rescued one. What distinguishes them is what
+    // SURVIVES: with every section's overhead budgeted, each shown file keeps its own
+    // "diff was truncated" notice and the backstop never fires. Budget the body alone and
+    // the joined result overflows, the final section's notice is cut off, and the judge is
+    // handed a fragment of that file with no per-file disclosure (measured: 2 notices
+    // instead of 3, plus a whole-evidence notice standing in for the one that was lost).
+    const longName = `${'d/'.repeat(140)}f.ts`
+    // FOUR paths, not three: at three this fixture sat within a few bytes of the overflow
+    // threshold and landed on either side depending on where truncation fell — a knife-edge
+    // fixture that would flake into uselessness. Four overflows the body-only budget
+    // robustly while the correct budget still fits three sections plus an omission line.
+    const paths = [`${longName}1`, `${longName}2`, `${longName}3`, `${longName}4`]
+    const nearCapDiff = `diff --git a/x b/x\n@@ -1,60 +1,60 @@\n${Array.from({ length: 60 }, (_, k) => `-old line ${k} ${'B'.repeat(12)}\n+new line ${k} ${'F'.repeat(12)}`).join('\n')}\n`
+    const run = localRun('feat-pairing')
+    const { host } = hunkHost(wtOf('/shared', run), () => ok(nearCapDiff), paths.join('\u0000'))
+    const evidence = await evidenceOf('feat-pairing', host)
+    const section = evidence.slice(
+      evidence.indexOf('THE CONFLICT'),
+      evidence.indexOf('COMMITS ON') === -1 ? undefined : evidence.indexOf('COMMITS ON'),
+    )
+
+    // BOUNDED — necessary, and on its own not sufficient to catch the defect.
+    expect(Buffer.byteLength(section, 'utf8')).toBeLessThanOrEqual(4_096 + 256)
+    // EVERY SHOWN FILE KEEPS ITS OWN NOTICE. Losing one means a file was silently cut.
+    // THREE sections fit and the fourth is reported omitted; each of the three keeps its
+    // own notice. Budget the body alone and the third section's notice is cut off.
+    expect(
+      (section.match(/diff was truncated/g) ?? []).length,
+      'a per-file truncation notice was cut off — that file reads as complete',
+    ).toBe(3)
+    expect(section).toContain('further conflicted file(s) omitted')
+    // AND THE BACKSTOP WAS NOT NEEDED: the loop's own accounting kept the total inside the
+    // budget, which is the property the overhead reservation buys. The backstop is
+    // insurance against drift, not the mechanism.
+    expect(
+      section.includes('only part of the conflict'),
+      'the backstop had to rescue the bound — the loop under-budgeted a section',
+    ).toBe(false)
+    // Every surviving line still carries its quote prefix — a cut never strips one.
+    for (const line of section.split('\n').slice(1)) {
+      if (line.trim().length === 0) continue
+      expect(line.startsWith('| '), `unprefixed: ${JSON.stringify(line.slice(0, 40))}`).toBe(true)
+    }
+  })
+
   test('THE INVARIANT: the hunk payload never exceeds its total budget, for any shape', async () => {
     // A PROPERTY, not a single case — and stated as one deliberately. The per-file loop and
     // the final `headBytes` both bound this, so no single mutation makes it red; what must
@@ -1528,6 +1583,49 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome'))
     expect(outcome).toBeDefined()
     expect(outcome).toContain('outcome=escalated')
+  })
+
+  test('when the BACKSTOP fires it reports — `truncated` is never false after bytes are dropped', async () => {
+    // The rule this round settled: any path that removes bytes sets `truncated`. The
+    // backstop used to be the exception, deriving nothing and reporting nothing.
+    const longName = `${'e/'.repeat(140)}g.ts`
+    const paths = [`${longName}1`, `${longName}2`, `${longName}3`, `${longName}4`]
+    const bigDiff = `diff\n${Array.from({ length: 80 }, (_, k) => `-l${k} ${'B'.repeat(14)}\n+r${k} ${'F'.repeat(14)}`).join('\n')}\n`
+    const run = localRun('feat-backstop')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(paths.join('\u0000'))
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok(bigDiff)
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'x',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps)
+    })
+    // THE INSTRUMENTATION AGREES WITH THE EVIDENCE. If bytes were dropped anywhere, the
+    // logged size dimension says so — otherwise the kill criterion would be sliced by a
+    // field that lies about which conflicts the judge actually saw in full.
+    const arbitration = lines.find((l) => l.includes('merge_conflict_arbitration')) ?? ''
+    expect(arbitration).toContain('hunk_truncated=true')
   })
 
   test('an arbitration that says STOP is recorded too, so the ratio has a denominator', async () => {

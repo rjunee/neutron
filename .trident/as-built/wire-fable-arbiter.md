@@ -262,6 +262,63 @@ of the only measurement that matters. That defect was in the first cut of the
 instrumentation and was caught by the control test asserting nothing is logged when no
 arbiter is consulted.
 
+**RULE — WHEREVER A BACKSTOP EXISTS, ASSERTING THE OUTCOME IT GUARANTEES CANNOT DETECT A
+BROKEN PRIMARY PATH.** The test must assert something the backstop does not provide. This
+cap has a per-file budgeting loop and a final `headBytes` behind it; budgeting only the body
+still produced a result inside the cap, *because the backstop rescued it*, so every size
+assertion stayed green while the primary path was wrong. What distinguished a correct loop
+from a rescued one was what SURVIVED — three per-file truncation notices rather than two,
+and the backstop never having to fire. That is a rule about testing any defence-in-depth
+arrangement, not about this cap: the redundant guard masks precisely the failure it exists
+to absorb, and a test aimed at the guaranteed outcome is aimed at the wrong thing.
+
+**RULE — A BOUND THAT BUDGETS ITS CONTENT WHILE ITS FRAMING RIDES FREE IS WRONG BY
+CONSTRUCTION.** This cap has now been wrong three times in exactly that way: it reserved
+nothing for the omission marker, then nothing for the per-file label and truncation marker,
+then let the backstop's own cut go unreported. The framing is easy to overlook because it
+reads as presentation rather than payload — but every byte emitted is payload to a byte
+budget, and the marker announcing truncation is the one whose loss does the most damage.
+
+**RULE — A FIXTURE THAT PASSES BY ARITHMETIC COINCIDENCE FAILS BY ARITHMETIC COINCIDENCE.**
+Two of the three attempts at the test for this fix were bad fixtures rather than bad
+assertions: the first did not overflow at all (three sections fit with bytes to spare, so
+the interaction under test never occurred), and the second sat within a few bytes of the
+threshold, landing on either side depending on where truncation fell — a knife-edge fixture
+is a flake in waiting. The fix is to widen the shape until it overflows robustly, never to
+tune the byte counts until the test happens to go red.
+
+**A BACKSTOP THAT DOES NOT REPORT IS NOT A BACKSTOP.** The hunk budget was wrong a third
+time, and in the most instructive way yet: `remaining` budgeted only the diff BODY, not the
+filename label or the per-file truncation marker, so three long paths with near-cap diffs
+overflowed the total. The final `headBytes` then cut the last section BEFORE its "diff was
+truncated" notice, while `truncated` stayed false because it was derived only from
+`quoteBounded`. The judge was handed a fragment with no disclosure that it was one — which
+is exactly the property that justifies letting a toolless judge decide at all. A judge that
+knows it saw part of a conflict escalates; one that believes it saw all of it rules on the
+fragment.
+
+Two rules came out of it. **Every byte a section emits is budgeted**, label and marker
+included — budgeting a subset is the same error as the earlier version that reserved nothing
+for the omission marker, which is why this cap has now been wrong three times by not
+counting something it emits. And **any path that removes bytes sets `truncated`**, the
+backstop included: it now makes room for a whole-evidence notice and returns whole lines, so
+a cut can never strip a quote prefix. Keeping the redundant backstop was right; nobody had
+asked what happens when it FIRES.
+
+**THE FIXTURE THAT MISSED IT IS THE LESSON.** The property test's "very long filenames"
+shape made the diff HEADER exceed the per-file budget, so the body came out empty and the
+section stayed small — an adversarial case that constructed conditions AVOIDING the
+interaction it was written to exercise. Only long names *and* near-cap diffs together drive
+it. And the first replacement fixture sat within a few bytes of the threshold, landing on
+either side depending on where truncation fell; a knife-edge fixture is a flake in waiting,
+so it was widened until it overflows robustly.
+
+**The byte bound alone could not have caught this.** Budgeting the body still yields a
+bounded result, because the backstop rescues it — so a size assertion cannot distinguish a
+correct loop from a rescued one. What separates them is what SURVIVES: each shown file
+keeping its own notice, and the backstop never having to fire. That is what the test asserts
+now.
+
 **THE RESIDUAL THAT NARROWS IT FURTHER, AND IS NOW MEASURED.** The hunk payload is bounded
 at 4 KiB total, so for a large conflict the arbiter sees a fraction and the prompt tells it
 to escalate. That is the right failure direction, but it means the mechanism's useful range
