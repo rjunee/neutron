@@ -32,8 +32,26 @@ import {
   reportGatewayShutdownKill,
   wasKilledByGatewayShutdown,
 } from '../gateway-shutdown-kill.ts'
+import { detectReplWedged } from '../dead-repl-detector.ts'
+
+/** Capture `[repl] …` stderr for the duration of `fn`. */
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = []
+  const original = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
+    return true
+  }) as typeof process.stderr.write
+  try {
+    return { result: await fn(), lines }
+  } finally {
+    process.stderr.write = original
+  }
+}
 import {
   confirmShutdownExits,
+  confirmShutdownKill,
+  deliverShutdownKillReports,
   type PendingShutdownKillReport,
   type ShutdownExitWatch,
 } from '../gateway-shutdown-kill.ts'
@@ -41,6 +59,7 @@ import {
   GATEWAY_SHUTDOWN_KILL_HISTORY,
   GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
+  removeRecord,
   patchRecord,
   upsertRecord,
   type ReplRegistryRecord,
@@ -770,5 +789,137 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
 
     expect(signals).toEqual(['SIGTERM'])
     expect(report.observed).toBe('alive-and-killed')
+  })
+})
+
+/**
+ * #518 — THE DEGRADED PATH, DRIVEN AS A SEQUENCE.
+ *
+ * The acceptance criterion said a deploy-caused death is never reported without naming
+ * the deploy. That is not a guarantee this process can make: both channels can fail, and
+ * neither is under its control. Until now the only coverage was the diagnostic WORDING
+ * for a hand-built weaker record — a fixture standing in for a sequence, which is the
+ * fixture deciding the outcome.
+ *
+ * These drive the real order — durable write lost, then live report lost, then the next
+ * boot — and assert what the owner ACTUALLY gets. The criterion is unticked to match.
+ */
+describe('what the owner gets when BOTH channels fail', () => {
+  it('durable record lost + live report lost → the next boot reports a bare crash', async () => {
+    // THE RESIDUAL, PINNED. It is why the criterion is no longer ticked: with no record
+    // and no delivery, the next boot has nothing that says "deploy" and reports what it
+    // can see — a dead pid. Asserting it here means the spec item's degraded guarantee is
+    // a check rather than a paragraph.
+    const path = registryPath()
+    seed(path)
+    const delivered: string[] = []
+    const options = {
+      substrate_instance_id: 'x',
+      cwd: '/repo',
+      replRegistryPath: path,
+      onChildCrash: () => {
+        throw new Error('sqlite busy')
+      },
+    } as PersistentReplSubstrateOptions
+
+    const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', 4242)
+    expect(report.durablyRecorded).toBe('alive-when-reached')
+
+    // The registry row is lost before the kill can be confirmed — the one way the
+    // authoritative write still fails now that it no longer depends on the journal entry.
+    removeRecord(path, KEY)
+    confirmShutdownKill(report, { killed: true })
+
+    // The report knows the truth; the DISK does not, and it says so rather than promising.
+    expect(report.observed).toBe('alive-and-killed')
+    expect(report.durablyRecorded).toBe('alive-when-reached')
+
+    // And the live channel fails too.
+    const { lines } = await captureStderr(() =>
+      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, sleep: async () => {} }),
+    )
+    expect(delivered).toEqual([])
+    // The operator is told the recovery is WEAKER than the report, not that it is fine.
+    expect(lines.join('')).toContain('WEAKER than this report')
+
+    // THE NEXT BOOT: nothing on disk names this generation, so the honest report is a
+    // bare crash. This is the guarantee the spec item now states, rather than the one it
+    // used to claim.
+    expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')).toBeUndefined()
+    expect(detectReplWedged({ hasChild: true, childAlive: false, healthOk: false, ccReady: true })).toMatchObject({
+      wedged: true,
+      reason: 'pid-dead',
+      detail: 'pooled child exited',
+    })
+  })
+
+  it('durable record KEPT + live report lost → the next boot names the deploy', async () => {
+    // The complement, and the reason the residual is narrow: the ONLY channel that has to
+    // survive is the durable one, and it survives everything except losing the row. With
+    // it, a lost live report costs nothing.
+    //
+    // RED-mutation: make the confirmed write depend on the journal entry again (bail when
+    // it is missing) — the record then stays `alive-when-reached` and this reddens.
+    const path = registryPath()
+    seed(path)
+    const options = {
+      substrate_instance_id: 'x',
+      cwd: '/repo',
+      replRegistryPath: path,
+      onChildCrash: () => {
+        throw new Error('sqlite busy')
+      },
+    } as PersistentReplSubstrateOptions
+
+    const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', 4242)
+    // The journal entry is lost, but the row survives — the authoritative write stands on
+    // its own now, so the confirmed outcome still lands.
+    patchRecord(path, KEY, { killed_by_gateway_shutdown: [] })
+    confirmShutdownKill(report, { killed: true })
+
+    expect(report.durablyRecorded).toBe('alive-and-killed')
+    await captureStderr(() =>
+      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, sleep: async () => {} }),
+    )
+    // The next boot reads the record and names the deploy, with no live report at all.
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
+    expect(
+      detectReplWedged({
+        hasChild: true,
+        childAlive: false,
+        healthOk: false,
+        ccReady: true,
+        shutdownObserved: 'alive-and-killed',
+      }),
+    ).toMatchObject({ wedged: true, reason: 'pid-dead-gateway-shutdown' })
+  })
+
+  it('an UNBACKED report is attempted before a backed one — the only channel it has left', async () => {
+    // Ordering, not extra waiting: when the budget is scarce it is spent first on the
+    // report that cannot be recovered without it. RED-mutation: drop the sort.
+    const attempted: string[] = []
+    const mk = (generation: string, backing: 'alive-and-killed' | 'alive-when-reached'): PendingShutdownKillReport => ({
+      options: {
+        substrate_instance_id: 'x',
+        cwd: '/repo',
+        onChildCrash: (i) => {
+          attempted.push(i.generationKey)
+        },
+      } as PersistentReplSubstrateOptions,
+      sessionKey: KEY,
+      childGeneration: generation,
+      at: 1_000,
+      observed: 'alive-and-killed',
+      liveness: 'alive',
+      durablyRecorded: backing,
+    })
+    await captureStderr(() =>
+      deliverShutdownKillReports([mk('gen-backed', 'alive-and-killed'), mk('gen-unbacked', 'alive-when-reached')], {
+        perSinkMs: 5,
+        phaseBudgetMs: 5_000,
+        sleep: async () => {},
+      }),
+    )
+    expect(attempted[0]).toBe('gen-unbacked')
   })
 })

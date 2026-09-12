@@ -412,6 +412,47 @@ attributed/reported conflation in one pass instead of three rounds.
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
 
+### The ticked box was a claim the code could not falsify
+
+A successful kill is persisted as `alive-when-reached` before the act and promoted to
+`alive-and-killed` after it. When the promotion failed the record was deliberately left
+weaker and said so — but if the bounded live sink then failed too, the next boot could not
+name the deploy, while a **ticked** acceptance criterion said a deploy-caused death is
+never reported without naming it.
+
+**Measured before choosing between the two honest resolutions**, because the measurement
+decided it: when the PRE-kill write fails there is no entry at all, so the next boot's
+detector returns `pid-dead` / `pooled child exited` — a bare crash, on a path that exists
+independently of the promotion split and which the box was already ticked over. Making the
+durable operation atomic cannot fix that: both channels are stores this process does not
+control, and an absolute guarantee about a write it cannot force is unfalsifiable by the
+code beneath it. That is the `attributed` defect one layer up, at the specification.
+
+So: **both halves.** Strengthen what is actually mine, and untick.
+
+**Strengthened.** The confirmed write is now an independent upsert rather than a map over
+an entry that must still be there. It previously bailed when the pre-kill entry was missing
+or the array malformed, which made the CONFIRMED outcome depend on the PROVISIONAL one
+surviving — two ways to lose a record where the act justifies one. The journal is a
+journal; the post-exit write is authoritative and stands alone.
+
+**And the live channel stops being interchangeable when it is the only one.** A report
+whose durable record does not match it is delivered FIRST. That costs nothing — no extra
+waiting, the same bounds — and spends a scarce budget on the reports that cannot be
+recovered without it.
+
+**Unticked, with the guarantee stated precisely** on the spec item: what survives (either
+channel alone suffices, and they fail independently), what is reported when attribution
+cannot be established (*cause not established* — never an unobserved crash, never an
+unperformed deploy), and the exact residual (the row is lost or unwritable AND the sink
+fails, same generation, same shutdown).
+
+**Pinned as a sequence, not as wording.** The previous coverage checked the diagnostic
+sentence for a hand-built weaker record — a fixture standing in for a sequence, which is
+the fixture deciding the outcome. It now drives durable-write-lost → live-report-lost →
+next boot and asserts the bare-crash outcome the owner actually gets, with the complement
+that a surviving durable record names the deploy with no live report at all.
+
 ### A kill that failed is not a kill
 
 The purest form of the shape this change kept hitting: **`attributed` was sampled before the
@@ -587,6 +628,23 @@ sentence if the arrangement changes.
 unordered pairs over the five verdicts plus the singletons, both orderings asserted, and the
 test fails if a pair has no declared expectation or if a declared row is unreachable. Each new
 rule is mutation-checked on its own.
+
+### Two rules the tooling earned this round
+
+**A helper that finds a line is not a helper that finds the right line.** The content-check
+verifier exists because citations drift; automating the re-derivation then introduced its
+own false positives. The helper took the first `grep` match, which for
+`session.child.kill()` is a *comment mentioning the call* and for the store guard is a
+different statement with identical text. Both were caught by the content check — the
+automation was wrong and the assertion about the automation was right, which is the only
+reason the drift did not ship.
+
+**A read-back with no reachable failure is unfalsifiable, so the mutation moves to the
+property it owns.** M74 (and M8 before it) survived because the read-back's failure needs
+fault injection the tree has no seam for. Retargeted at what the read-back is actually
+for: with the write turned into a no-op, the function must report false rather than claim
+success. Counting an unkillable mutation as coverage would have been the mutation table
+lying the way the tests it polices can.
 
 ### Auditing fields was the wrong denominator; the readers are
 

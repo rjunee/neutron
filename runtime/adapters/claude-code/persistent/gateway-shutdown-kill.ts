@@ -429,6 +429,18 @@ export function confirmShutdownKill(
     report.sessionKey,
     report.childGeneration,
     'alive-and-killed',
+    report.at,
+    report.pid,
+    // The same reference probe the record path uses, so both writes ask the same question.
+    report.options.hostsLiveWork === undefined
+      ? undefined
+      : (generation) => {
+          try {
+            return report.options.hostsLiveWork!(generation) > 0
+          } catch {
+            return false
+          }
+        },
   )
   if (!promoted) {
     process.stderr.write(
@@ -449,20 +461,38 @@ function promoteGatewayShutdownObservation(
   sessionKey: string,
   childGeneration: string,
   observed: GatewayShutdownObservation,
+  at: number,
+  pid?: number,
+  stillReferenced?: (generation: string) => boolean,
 ): boolean {
   try {
     const record = getRecord(registryPath, sessionKey)
-    const entries = record?.killed_by_gateway_shutdown
-    if (!Array.isArray(entries)) return false
-    if (!entries.some((e) => e?.generation === childGeneration)) return false
-    patchRecord(registryPath, sessionKey, {
-      killed_by_gateway_shutdown: entries.map((e) =>
-        e?.generation === childGeneration ? { ...e, observed } : e,
-      ),
-    })
+    if (record === undefined) return false
+    const prior = Array.isArray(record.killed_by_gateway_shutdown) ? record.killed_by_gateway_shutdown : []
+    // AN INDEPENDENT WRITE OF THE CONFIRMED OUTCOME, not a map over an entry that must
+    // still be there. An earlier revision bailed when the pre-kill entry was missing or
+    // the array was malformed, which made the confirmed outcome depend on the PROVISIONAL
+    // one surviving — two ways to lose a record where the act only justifies one. The
+    // pre-kill entry is a journal; this is the authoritative write, and it stands on its
+    // own.
+    const confirmed: GatewayShutdownKillEntry = {
+      generation: childGeneration,
+      at,
+      observed,
+      ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
+    }
+    const seen = prior.some((e) => e?.generation === childGeneration)
+    // ONE RETENTION RULE, applied wherever entries are written. The append branch used to
+    // apply only the count cap, so a confirmed write could resurrect an entry retention
+    // had just released — two writes obeying two rules, which is also what let a mutation
+    // that collapsed retention survive: the second write put back what the first dropped.
+    const entries = seen
+      ? prior.map((e) => (e?.generation === childGeneration ? { ...e, observed } : e))
+      : pruneGatewayShutdownKills([...prior, confirmed], at, stillReferenced)
+    patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
     // READ BACK, because `patchRecord` is a silent no-op for an absent row and
     // `withRegistry` skips the save on a whole-file read error. "The call did not throw"
-    // is not evidence the promotion landed.
+    // is not evidence the write landed.
     return observationOf(gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration)) === observed
   } catch {
     /* a registry write must never brick a shutdown */
@@ -808,7 +838,19 @@ export async function deliverShutdownKillReports(
   const phaseDeadline = now() + phaseBudgetMs
   const tally = { delivered: 0, timedOut: 0, failed: 0, skipped: 0 }
 
-  for (const report of reports) {
+  // UNBACKED REPORTS GO FIRST. Delivery is best-effort BECAUSE a durable record sits
+  // behind it — but that is a property of the individual report, and for one whose record
+  // is missing or weaker than the report, this live attempt is the ONLY channel. Ordering
+  // costs nothing (no extra waiting, the same bounds) and it spends a scarce budget on the
+  // reports that cannot be recovered without it. It narrows the residual rather than
+  // removing it: a death whose registry write failed AND whose sink fails is still lost,
+  // which is why the spec item no longer claims otherwise.
+  const ordered = [...reports].sort((a, b) => {
+    const unbacked = (r: PendingShutdownKillReport): number => (r.durablyRecorded === r.observed ? 1 : 0)
+    return unbacked(a) - unbacked(b)
+  })
+
+  for (const report of ordered) {
     const remaining = phaseDeadline - now()
     if (remaining <= 0) {
       // The phase is spent. Everything left is already marked and killed, so the

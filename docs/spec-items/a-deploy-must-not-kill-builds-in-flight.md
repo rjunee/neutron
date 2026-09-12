@@ -45,9 +45,38 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
         herdr pane outside this process tree; #539 is explicitly "gating the shutdown kill"
         plus the adopt arm and the boot reconciliation pass. Building a drain here would be
         a mechanism #539 obsoletes, in a tree that forbids dual code paths.
-- [x] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
+- [ ] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
       as a bare "child crashed" / "pooled child exited" — assert the stored reason names
-      the deploy.** The dying gateway records the kill before it makes it
+      the deploy.**
+      UNTICKED DELIBERATELY (round 14). As written this is an ABSOLUTE guarantee, and no
+      mechanism inside this process can make it: both channels that carry the attribution
+      — the durable registry record and the live sink — are stores this process does not
+      control, and if BOTH fail the next boot has nothing that says "deploy" and honestly
+      reports a dead pid. Measured rather than assumed: when the PRE-kill write fails there
+      is no entry at all, so `detectReplWedged` returns `pid-dead` / `pooled child exited`
+      — a path that exists independently of anything this change added, and which the box
+      was ticked over. A ticked criterion that the code beneath it cannot falsify is the
+      same defect as the `attributed` boolean, one layer up.
+
+      WHAT IS GUARANTEED, and it is most of it:
+      - A deploy-caused death is **never** reported as a bare crash **when either channel
+        survives** — and they fail independently. The durable record is written before the
+        kill and no longer depends on the journal entry surviving, so the confirmed outcome
+        lands even if the pre-kill entry is gone; the live report is attempted for every
+        child; and a report whose durable record does NOT match it is attempted FIRST,
+        because that live attempt is then its only channel.
+      - Where the attribution cannot be established, the death is reported as **cause not
+        established** — never as a crash the system did not observe, and never as a deploy
+        it did not perform.
+      - The residual is exactly: the registry row is lost or unwritable AND the sink fails
+        or times out, for the same generation, in the same shutdown. Then the owner is told
+        the launcher died, without the deploy being named.
+
+      PINNED AS A SEQUENCE, not as wording: `__tests__/gateway-shutdown-kill.test.ts` →
+      "what the owner gets when BOTH channels fail" drives durable-write-lost →
+      live-report-lost → next boot and asserts the bare-crash outcome, with the complement
+      that a surviving durable record still names the deploy with no live report at all.
+      The rest of this criterion's machinery:  The dying gateway records the kill before it makes it
       (`gateway-shutdown-kill.ts` → `recordGatewayShutdownKill`, called synchronously from
       `pool.ts:shutdownAllPersistentRepls` and `spawn.ts:shutdownQuarantinedChildren`), and
       the live report it returns is delivered afterwards in a bounded phase
