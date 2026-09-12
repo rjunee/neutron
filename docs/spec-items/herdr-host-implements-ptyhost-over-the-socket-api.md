@@ -280,33 +280,23 @@ not-new. That is accepted and recorded here rather than hidden.
       deliveries still refused. Fragmented accumulation and one-byte-over cannot see any
       of this.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
-- [ ] **A PID is verified by IDENTITY before it is signalled.** The kernel reuses PIDs,
-      so "is pid N alive?" is the wrong question and a liveness probe answers YES about a
-      stranger that inherited the number. Capture `/proc/<pid>/stat` field 22 at spawn
-      and require it to match before every signal; a DIFFERENT start time is positive
-      proof our child exited, so it confirms death and signals nothing. No captured
-      identity means no signal and no settle. The probe has THREE answers, not two:
-      only ENOENT is absence, and any other errno — or an unparseable entry — is
-      UNKNOWN, which may never confirm a death, including when it appears partway
-      through the kill ladder's grace window. The errno mapping needs its own case with
-      an injectable reader, because a probe injected at every call site is never itself
-      exercised. The stat parser must be tested independently against a `comm`
-      containing spaces and parentheses — `comm` is the
-      executable name and is unescaped, so absolute field indexing reads the wrong field
-      and passes on any host whose process name happens to be one word.
+- [ ] **Transport loss closes the pane BY ID over a fresh connection — it never signals
+      a PID.** Of the three defensible dispositions, THIS is the one implemented, and
+      the reasons are measured on the live server (0.8.2, protocol 20), not assumed:
+      the server answers exactly ONE request per connection and then closes it (two
+      pipelined pings get one reply, socket gone 1 ms later), so a fresh connection is
+      always available while the server lives and `pane.close` by id on one returns
+      `ok`; and `pane.process_info` carries no start time or identity token, so binding
+      an identity to the PID inside the protocol is not available at this version.
+      Direct PID signalling is DELETED rather than narrowed: the reuse window sits
+      between `process_info` returning the integer and anything the host can read about
+      it, so no re-read closes it. A pane id is an identity herdr maintains atomically.
+      Only `ok` or `pane_not_found` confirms closure; an unreachable server or a refused
+      close is UNKNOWN and must settle nothing, because a pane's process may be
+      reparented and survive its server. The fake must REJECT `pane.close` on a pane it
+      reports as gone, as the real server does — otherwise the `pane_not_found` branch
+      is never reached and its mutation survives.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **The inbound buffer holds no per-fragment state at all.** Three bounded
-      quantities in a row (copying, retention, allocation count) is the signal to change
-      the SHAPE rather than add a third measurement: bytes are copied into a single
-      buffer and the delivered chunk dropped, so a fragment cannot be retained
-      individually and there is nothing to count. Growth must be amortised (doubling)
-      and consumption must use a cursor, not a re-slice. Retention must track CURRENT
-      NEED — right-sized when the remainder becomes a small fraction of capacity,
-      released when fully drained — because bounded is not the same as small. And
-      right-sizing must be proven distinct from truncation by a case with a LARGE
-      outstanding partial frame; a one-byte leftover fits in any capacity and cannot
-      tell them apart.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Transport loss never settles a child that may still be running.** A closed
       socket is not evidence the process exited (`pty-host.ts` says so), yet settlement
       runs the ordinary death handling in `spawn.ts` — sink unregistered, pool entry

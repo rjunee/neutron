@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { HerdrHost, parseProcStatStartTime, readPidIdentity } from '../herdr-host.ts'
+import { HerdrHost } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
@@ -237,286 +237,76 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
   // it certifies the opposite of the requirement. What replaced them is below, driven
   // by INJECTED process primitives so the arrangement cannot answer the question.
 
-  it('a lost transport KILLS the child before settling, and the kill is confirmed', async () => {
-    // THE DEFECT THIS REPLACES. `settleExit('transport-lost')` ran alone, and
-    // settlement runs the ORDINARY DEATH HANDLING in `spawn.ts` — session marked
-    // dead, sink unregistered, pool entry dropped, configs deleted — so the next
-    // request spawned another `claude` against the same transcript while the first was
-    // still running. One-process-per-transcript is enforced ONLY by killing the old
-    // process, so "the socket closed" being treated as "the process exited" breaks it.
+  it('a lost transport CLOSES THE PANE BY ID on a fresh connection, then settles', async () => {
+    // WHY NOT SIGNAL THE PID, which is what this used to do. A pid is an identifier the
+    // kernel reuses, and the reuse window sits between `pane.process_info` handing us
+    // the number and anything we read about it — so no amount of re-reading binds the
+    // two, and losing that race kills an unrelated process.
     //
-    // The process primitives are INJECTED because the default probe would decide the
-    // outcome for us: a fake pid does not exist, so `process.kill(pid, 0)` throws
-    // ESRCH, "already dead" is trivially true, and the test would pass without the
-    // kill ever being attempted. The arrangement must not perform the step under test.
-    const server = new FakeHerdrServer({ paneId: 'w9:pLost' })
-    server.shellPid = 424242
-    const signals: Array<{ pid: number; signal: string }> = []
-    // IDENTITY, not a boolean. A stable `processAlive` flag cannot express the case
-    // that matters — the pid outliving the process it named.
-    let startTime: string | undefined = 'start-A'
-    const screens: string[] = []
+    // MEASURED on the live server (0.8.2/protocol 20): it answers exactly ONE request
+    // per connection and then closes, so a "lost transport" is the normal end of every
+    // exchange and says nothing about the pane. A fresh connection is always available
+    // while the server lives, and `pane.close` BY PANE ID on one succeeds. A pane id is
+    // an identity herdr maintains atomically, so this removes the reuse class outright.
+    const first = new FakeHerdrServer({ paneId: 'w9:pLost' })
+    const second = new FakeHerdrServer({ paneId: 'w9:pLost' })
+    let connects = 0
     const host = new HerdrHost({
-      connect: async () => server,
+      connect: async () => {
+        connects += 1
+        return connects === 1 ? first : second
+      },
       pollIntervalMs: 5,
       sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
       workspaceId: 'w9',
-      pidKillGraceMs: 60,
-      killPid: (pid, signal) => {
-        signals.push({ pid, signal })
-        if (signal === 'SIGTERM') startTime = undefined // the child honours it and exits
-      },
-      readPidIdentity: () =>
-        startTime === undefined ? { kind: 'gone' } : { kind: 'running', startedAt: startTime },
     })
-    const child = await host.spawn(['claude'], {
-      cwd: '/tmp',
-      env: {},
-      onScreen: (sc) => screens.push(sc),
-    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
     child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
 
-    server.close()
+    first.close() // our CLIENT connection dies; the server is fine
     await child.exited
 
-    // THE KILL HAPPENED, against the pid we learned at spawn, before any settlement.
-    expect(signals).toEqual([{ pid: 424242, signal: 'SIGTERM' }])
+    // It reconnected and closed the pane BY ID — no signal, no pid, nothing to reuse.
+    expect(connects).toBe(2)
+    expect(second.callsTo('pane.close').map((c) => c.params['pane_id'])).toEqual(['w9:pLost'])
+    expect(second.paneClosed).toBe(true)
     expect(child.exitCause?.()).toBe('transport-lost')
-    // Still not attributable to a deliberate recycle: we ended it because we lost the
-    // ability to observe it, which is a different fact from having chosen to.
+    // Still not a deliberate recycle: we ended it because we lost the ability to
+    // observe it, which is a different fact from having chosen to.
     expect(child.wasKilledByUs?.()).toBe(false)
   })
 
-  it('a REUSED pid is not signalled — identity decides, not liveness', async () => {
-    // A PID IS AN IDENTIFIER, NOT A HANDLE. Between a pane dying without a
-    // `pane_exited` and the transport closing, the kernel can hand that number to
-    // another same-uid process — and a liveness probe answers YES about a process we
-    // have never heard of. Signalling on that answer kills a stranger.
-    //
-    // This is the EPERM insight one turn further: "exists and is not ours to signal"
-    // was the right reading, and a reused pid is ALSO a process that exists and is not
-    // ours, in a sense no permission check can see.
-    const server = new FakeHerdrServer({ paneId: 'w9:pReused' })
-    server.shellPid = 606060
-    const signals: string[] = []
-    let calls = 0
+  it('a pane the server says is GONE is confirmed closed — pane_not_found is evidence', async () => {
+    // The positive-absence case, and the only rejection here that proves anything. It
+    // is the same distinction as ENOENT versus an unreadable entry, one layer up.
+    const first = new FakeHerdrServer({ paneId: 'w9:pAlreadyGone' })
+    const second = new FakeHerdrServer({ paneId: 'w9:pAlreadyGone' })
+    second.paneGone = true // the server positively reports it does not exist
+    let connects = 0
     const host = new HerdrHost({
-      connect: async () => server,
+      connect: async () => {
+        connects += 1
+        return connects === 1 ? first : second
+      },
       pollIntervalMs: 5,
       sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
       workspaceId: 'w9',
-      pidKillGraceMs: 30,
-      killPid: (_pid, signal) => void signals.push(signal),
-      // Our child started at A; by the time the transport dies the number belongs to a
-      // DIFFERENT, very much alive process.
-      readPidIdentity: () => ({ kind: 'running', startedAt: calls++ === 0 ? 'start-A' : 'start-B' }),
     })
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
     child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
+    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
+    first.close()
     await child.exited
-
-    // NOTHING was signalled — the stranger is untouched.
-    expect(signals).toEqual([])
-    // And our child is CONFIRMED over: a different start time at the same pid is proof
-    // the process we started has exited, so settling is correct here.
     expect(child.exitCause?.()).toBe('transport-lost')
     expect(child.hasExited()).toBe(true)
   })
 
-  it('an UNREADABLE /proc after a good capture settles nothing — could-not-read is not absent', async () => {
-    // THE DEFECT THIS REPLACES, and it arrived INSIDE the check added to enforce the
-    // rule. The probe mapped every filesystem error to `undefined`, and `undefined`
-    // compared unequal to the captured start time — so a permissions change, an EINTR
-    // or a namespace boundary read as "a different process holds this pid", which the
-    // code treats as PROOF our child exited. It settled the child, signalled nothing,
-    // and the process may well have been alive.
-    //
-    // A different start time is positive proof. An unreadable entry proves nothing.
-    const server = new FakeHerdrServer({ paneId: 'w9:pUnreadable' })
-    server.shellPid = 808080
-    const signals: string[] = []
-    let calls = 0
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-      pidKillGraceMs: 30,
-      killPid: (_pid, signal) => void signals.push(signal),
-      // Readable at spawn, unreadable afterwards — EACCES, not ENOENT.
-      readPidIdentity: () =>
-        calls++ === 0 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'unknown' },
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
-    await Bun.sleep(80)
-
-    // Nothing signalled — we cannot identify what we would be signalling.
-    expect(signals).toEqual([])
-    // AND NOT SETTLED. This is the half that would have leaked: settling authorises a
-    // replacement against a process whose state we do not know.
-    expect(child.hasExited()).toBe(false)
-    expect(child.exitCause?.()).toBeUndefined()
-  })
-
-  it('CONTROL — a positively ABSENT process does confirm death', async () => {
-    // Without this, "unknown does not settle" is satisfied by never settling, which
-    // would re-break the transport-loss requirement from the other side. ENOENT is the
-    // one reading that IS evidence.
-    const server = new FakeHerdrServer({ paneId: 'w9:pGoneForReal' })
-    server.shellPid = 909090
-    const signals: string[] = []
-    let calls = 0
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-      pidKillGraceMs: 30,
-      killPid: (_pid, signal) => void signals.push(signal),
-      readPidIdentity: () =>
-        calls++ === 0 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'gone' },
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
-    await child.exited
-    expect(signals).toEqual([]) // already gone: nothing to signal
-    expect(child.exitCause?.()).toBe('transport-lost')
-    expect(child.hasExited()).toBe(true)
-  })
-
-  it('ONLY ENOENT is absence — every other errno is unknown', () => {
-    // The errno mapping is the part that decides whether an unanswerable question may
-    // confirm a death, and injecting the probe everywhere else left it unexercised.
-    const err = (code: string): (() => never) => {
-      return () => {
-        const e = new Error(code) as NodeJS.ErrnoException
-        e.code = code
-        throw e
-      }
-    }
-    // Positive absence.
-    expect(readPidIdentity(1, err('ENOENT'))).toEqual({ kind: 'gone' })
-    // Questions that FAILED — a permissions change, an interrupted read, a namespace
-    // boundary. None of them is evidence the process is gone.
-    expect(readPidIdentity(1, err('EACCES'))).toEqual({ kind: 'unknown' })
-    expect(readPidIdentity(1, err('EPERM'))).toEqual({ kind: 'unknown' })
-    expect(readPidIdentity(1, err('EINTR'))).toEqual({ kind: 'unknown' })
-    expect(readPidIdentity(1, err('EIO'))).toEqual({ kind: 'unknown' })
-    // An entry that EXISTS and does not parse: the process is there and we cannot
-    // identify it, which is unknown rather than gone.
-    expect(readPidIdentity(1, () => 'nonsense with no paren')).toEqual({ kind: 'unknown' })
-    expect(readPidIdentity(1, () => '4242 (bun) S 1')).toEqual({ kind: 'unknown' })
-  })
-
-  it('identity going UNKNOWN mid-ladder stops it — a signal sent is not a death observed', async () => {
-    // The grace window has its own check, and it needed its own case: an identity that
-    // is ours when the ladder starts and unreadable while we wait for the signal to be
-    // honoured. Confirming there would report a death on the strength of having sent a
-    // signal, which is the "settlement is not confirmation" row all over again.
-    const server = new FakeHerdrServer({ paneId: 'w9:pMidLadder' })
-    server.shellPid = 111222
-    const signals: string[] = []
-    let calls = 0
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-      pidKillGraceMs: 60,
-      killPid: (_pid, signal) => void signals.push(signal),
-      // Ours at spawn and at the ladder's first check, then unreadable.
-      readPidIdentity: () =>
-        calls++ < 2 ? { kind: 'running', startedAt: 'start-A' } : { kind: 'unknown' },
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
-    await until(() => signals.length >= 1, 'SIGTERM sent')
-    await Bun.sleep(120)
-
-    // It signalled — identity was still ours at that moment — and then STOPPED rather
-    // than escalating blindly or claiming a death it could no longer observe.
-    expect(signals).toEqual(['SIGTERM'])
-    expect(child.hasExited()).toBe(false)
-  })
-
-  it('the identity probe answers gone, ours, and not-ours-but-real', async () => {
-    // The injected probe lets tests choose an answer, so the REAL one needs its own
-    // case. Field 22 is read AFTER the last `)` because `comm` may contain spaces and
-    // parentheses — parsing by absolute field index silently returns the wrong number
-    // for a process whose name contains one.
-    // POSITIVE ABSENCE, not merely "no answer": ENOENT is proof.
-    expect(readPidIdentity(2_147_480_000)).toEqual({ kind: 'gone' })
-    const mine = readPidIdentity(process.pid)
-    expect(mine.kind).toBe('running')
-    expect(mine.kind === 'running' && mine.startedAt).toMatch(/^\d+$/)
-    // pid 1 is not ours and is readable anyway: identity needs no permission to
-    // signal, which is exactly why it sees what a `signal 0` probe cannot.
-    expect(readPidIdentity(1).kind).toBe('running')
-    // STABLE across calls — an identity that drifted would make every comparison
-    // built on it meaningless.
-    expect(readPidIdentity(process.pid)).toEqual(mine)
-  })
-
-  it('the stat parser survives a comm containing spaces and parentheses', () => {
-    // `comm` is the EXECUTABLE NAME and the kernel does not escape it. Splitting the
-    // whole line on spaces and indexing field 22 works on this host only because
-    // `bun` has no space in it — which is why the real probe's test could not see a
-    // parser that indexes absolutely. The last `)` is the only reliable delimiter.
-    // 19 fields between `)` and the start time: field 3 (state) lands at index 0, so
-    // field 22 lands at index 19. Counted against a real `/proc/self/stat` on this host.
-    const fields = (start: string, comm: string): string =>
-      `4242 (${comm}) S 1 2 3 4 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 ${start} rest here`
-    expect(parseProcStatStartTime(fields('221771148', 'bun'))).toBe('221771148')
-    // A space in the name shifts every absolute index by one.
-    expect(parseProcStatStartTime(fields('900', 'my proc'))).toBe('900')
-    // A parenthesis in the name is why it must be the LAST one, not the first.
-    expect(parseProcStatStartTime(fields('901', 'weird)name'))).toBe('901')
-    expect(parseProcStatStartTime(fields('902', 'two ) parens )'))).toBe('902')
-    // Malformed input yields no identity rather than a wrong one.
-    expect(parseProcStatStartTime('nonsense with no paren')).toBeUndefined()
-    expect(parseProcStatStartTime('4242 (bun) S 1')).toBeUndefined()
-  })
-
-  it('NO captured identity means NO signal and NO settle', async () => {
-    // Without a start time we cannot tell our process from whatever now holds the
-    // number: signalling would be a guess with a stranger on the other end, and
-    // settling would authorise a replacement. So neither.
-    const server = new FakeHerdrServer({ paneId: 'w9:pNoId' })
-    server.shellPid = 707070
-    const signals: string[] = []
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-      pidKillGraceMs: 30,
-      killPid: (_pid, signal) => void signals.push(signal),
-      readPidIdentity: () => ({ kind: 'unknown' }), // /proc unreadable at spawn
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-    server.close()
-    await Bun.sleep(60)
-    expect(signals).toEqual([])
-    expect(child.hasExited()).toBe(false)
-  })
-
-  it('an UNCONFIRMABLE kill does NOT settle — no replacement may be authorised', async () => {
-    // The half that matters most. If the process cannot be confirmed dead, settling
-    // would license the pool to start a second claude against this transcript. A stuck
-    // session is recoverable by an operator; two live processes on one transcript are
-    // not. So: escalate, then refuse to claim a death we cannot demonstrate.
+  it('an UNREACHABLE server settles NOTHING — a dead connection is not a dead pane', async () => {
+    // If the reconnect fails we know nothing: the server may be gone and its pane's
+    // process reparented and still running. Settling would authorise a replacement
+    // against a transcript that may still have a live claude on it. A stuck session is
+    // recoverable by an operator; two live processes on one transcript are not.
     const errs: string[] = []
     const realWrite = process.stderr.write.bind(process.stderr)
     process.stderr.write = ((c: unknown): boolean => {
@@ -524,41 +314,60 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
       return true
     }) as typeof process.stderr.write
     let child: PtyChild
-    const signals: string[] = []
     try {
-      const server = new FakeHerdrServer({ paneId: 'w9:pStuck' })
-      server.shellPid = 515151
+      const first = new FakeHerdrServer({ paneId: 'w9:pNoServer' })
+      let connects = 0
       const host = new HerdrHost({
-        connect: async () => server,
+        connect: async () => {
+          connects += 1
+          if (connects > 1) throw new Error('ECONNREFUSED: no herdr server')
+          return first
+        },
         pollIntervalMs: 5,
         sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
         workspaceId: 'w9',
-        pidKillGraceMs: 30,
-        killPid: (_pid, signal) => void signals.push(signal),
-        readPidIdentity: () => ({ kind: 'running', startedAt: 'start-A' }), // survives all
       })
       child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
       child.beginOutput?.()
-      await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
-      server.close()
-      await until(() => signals.length >= 2, 'escalated to SIGKILL')
-      await Bun.sleep(60)
+      await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
+      first.close()
+      await Bun.sleep(80)
     } finally {
       process.stderr.write = realWrite
     }
-    // ESCALATED, not merely attempted once.
-    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
-    // AND NOT SETTLED. `exited` must still be pending and `hasExited()` false, because
-    // that is what stops `spawn.ts` running the death handling that authorises a
-    // replacement.
+    // NOT settled — that is what stops `spawn.ts` authorising a replacement.
     const sentinel = Symbol('unsettled')
     expect(await Promise.race([child!.exited, Bun.sleep(30).then(() => sentinel)])).toBe(sentinel)
     expect(child!.hasExited()).toBe(false)
     expect(child!.exitCause?.()).toBeUndefined()
-    // Loud, and it says what an operator has to do something about.
-    const said = errs.filter((e) => e.includes('could NOT be confirmed'))
+    const said = errs.filter((e) => e.includes('could NOT be confirmed closed'))
     expect(said.length).toBe(1)
-    expect(said[0]).toContain('515151')
+  })
+
+  it('a REFUSED pane.close settles nothing either — only ok or pane_not_found is proof', async () => {
+    // The pair for the case above: reaching the server is not the same as closing the
+    // pane. A transient rejection leaves the pane's state unknown, and unknown may not
+    // settle — the same rule the failed `kill()` path already follows.
+    const first = new FakeHerdrServer({ paneId: 'w9:pRefused' })
+    const second = new FakeHerdrServer({ paneId: 'w9:pRefused' })
+    second.failMethod('pane.close', new Error('temporarily unavailable'))
+    let connects = 0
+    const host = new HerdrHost({
+      connect: async () => {
+        connects += 1
+        return connects === 1 ? first : second
+      },
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
+      workspaceId: 'w9',
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
+    child.beginOutput?.()
+    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
+    first.close()
+    await Bun.sleep(80)
+    expect(second.callsTo('pane.close').length).toBe(1) // it did try
+    expect(child.hasExited()).toBe(false) // and claimed nothing
   })
 
   it('the other three routes keep their own causes — the four are distinguishable', async () => {

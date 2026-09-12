@@ -119,44 +119,6 @@ export function parseProcStatStartTime(stat: string): string | undefined {
   return startTime === undefined || startTime === '' ? undefined : startTime
 }
 
-/**
- * What the kernel says about `pid`. THREE states, not two.
- *
- * `gone` is POSITIVE ABSENCE — `/proc/<pid>/stat` answered ENOENT, which is proof
- * there is no such process. `unknown` is a question that could not be asked: a
- * permissions change, an EINTR, a namespace boundary, an unparseable line. Collapsing
- * the two is the defect this branch has now met six times — **"could not read" is not
- * "absent"** — and it would arrive here inside the very check added to enforce it.
- */
-export type PidIdentity =
-  | { readonly kind: 'gone' }
-  | { readonly kind: 'running'; readonly startedAt: string }
-  | { readonly kind: 'unknown' }
-
-export function readPidIdentity(
-  pid: number,
-  /** Injected ONLY so the errno mapping below is reachable from a test. A real
-   *  unreadable `/proc` entry cannot be staged on a box where the tests can read
-   *  everything — and the mapping is the part that decides whether an unanswerable
-   *  question is allowed to confirm a death. */
-  readStat: (pid: number) => string = (p) => readFileSync(`/proc/${p}/stat`, 'utf8'),
-): PidIdentity {
-  let stat: string
-  try {
-    stat = readStat(pid)
-  } catch (e) {
-    // ONLY ENOENT is evidence. Every other errno means the question failed, and a
-    // failed question is not a negative answer.
-    return (e as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
-      ? { kind: 'gone' }
-      : { kind: 'unknown' }
-  }
-  const startedAt = parseProcStatStartTime(stat)
-  // The entry exists but does not parse: the process is there and we cannot identify
-  // it, which is the definition of unknown rather than gone.
-  return startedAt === undefined ? { kind: 'unknown' } : { kind: 'running', startedAt }
-}
-
 /** The `label` put on the REPL's pane, so the owner can see what it is when they
  *  attach. */
 export const HERDR_REPL_PANE_LABEL = 'neutron-repl'
@@ -193,18 +155,9 @@ export interface HerdrHostDeps {
    *  {@link HERDR_PID_WAIT_MS}; a test shortens it so the refusal path is fast. */
   pidWaitMs?: number
 
-  /** Send a signal to a pid. Injected so the transport-loss termination path is
-   *  testable without spawning real processes. Defaults to `process.kill`. */
-  killPid?: (pid: number, signal: NodeJS.Signals) => void
-
-  /** What the kernel says about the process at `pid` — see {@link PidIdentity}.
-   *  Defaults to {@link readPidIdentity}. Injected so PID reuse and an unreadable
-   *  `/proc` can be constructed, neither of which a real-process test could stage. */
-  readPidIdentity?: (pid: number) => PidIdentity
-
-  /** How long to wait for a SIGTERM to be honoured before escalating, and again
-   *  after SIGKILL before giving up. */
-  pidKillGraceMs?: number
+  /** How long a post-transport-loss `pane.close` may take before it counts as
+   *  unconfirmed. */
+  paneCloseTimeoutMs?: number
 }
 
 /**
@@ -237,10 +190,6 @@ export class HerdrHost implements PtyHost {
     // where nobody will ever look for it.
     let paneId: string | undefined
     let pid: number
-    // The process's IDENTITY, captured as close to the spawn as we can get it. The pid
-    // alone is a number the kernel will reuse; this is what makes it refer to one
-    // process for the life of this child. See `readPidStartTime`.
-    let pidStartedAt: string | undefined
     try {
       paneId = await this.applyLayout(client, argv, opts)
       // The pid. Load-bearing above here: `supervision.ts` liveness-probes it with
@@ -259,18 +208,6 @@ export class HerdrHost implements PtyHost {
         )
       }
       pid = found
-      const spawnIdentity = (this.deps.readPidIdentity ?? readPidIdentity)(pid)
-      pidStartedAt = spawnIdentity.kind === 'running' ? spawnIdentity.startedAt : undefined
-      if (pidStartedAt === undefined) {
-        // We have a pid and no way to prove it stays the same process. Signalling it
-        // later would be a guess with a stranger's life on the other end, so the
-        // termination path refuses — said once, here, where the cause is visible.
-        process.stderr.write(
-          `[herdr-host] pane ${paneId}: could not read a start time for pid ${pid}, so its ` +
-            `identity cannot be verified later. A transport loss will refuse to signal it rather ` +
-            `than risk killing a process that merely inherited the number.\n`,
-        )
-      }
     } catch (e) {
       await this.abandonPane(client, paneId)
       throw e instanceof Error ? e : new Error(String(e))
@@ -368,8 +305,6 @@ export class HerdrHost implements PtyHost {
         () => exited,
         settleExit,
         outputGate,
-        pid,
-        pidStartedAt,
       ),
     )
 
@@ -622,8 +557,6 @@ export class HerdrHost implements PtyHost {
     hasExited: () => boolean,
     settleExit: (cause: PtyExitCause) => void,
     outputGate: Promise<void>,
-    pid: number,
-    pidStartedAt: string | undefined,
   ): Promise<void> {
     // BEFORE THE FIRST READ, not before the first delivery: polling at all would set
     // `lastDataAt` and mutate the ring behind a consumer that cannot scan yet.
@@ -667,17 +600,19 @@ export class HerdrHost implements PtyHost {
         // because this branch already has a row for a kill reported as successful
         // when it failed. `process.kill` is exactly the right tool here precisely
         // BECAUSE it does not need the herdr transport that just died.
-        const ended = await this.terminateLostChild(pid, pidStartedAt, sleep)
+        const ended = await this.closeLostPane(paneId)
         if (!ended) {
-          // COULD NOT CONFIRM DEATH, so we do not get to claim one. Settling here
-          // would authorise a replacement against a process we know nothing about;
-          // a stuck session is recoverable by an operator, two live processes on one
-          // transcript are not. Loud, and deliberately not terminal.
+          // COULD NOT CONFIRM CLOSURE, so we do not get to claim one. Either the
+          // server was unreachable — which says nothing about the pane, whose process
+          // may have been reparented and survived — or it refused the close. Settling
+          // would authorise a replacement against a transcript that may still have a
+          // live claude on it; a stuck session is recoverable by an operator, two live
+          // processes on one transcript are not.
           process.stderr.write(
-            `[herdr-host] pane ${paneId}: transport lost and the child could NOT be confirmed ` +
-              `dead (pid ${pid}). NOT settling ` +
-              `the child: reporting an exit would let the pool spawn a second claude against this ` +
-              `session's transcript while the first is still running. This session needs manual ` +
+            `[herdr-host] pane ${paneId}: transport lost and the pane could NOT be confirmed ` +
+              `closed — a reconnect or pane.close did not succeed. NOT settling the child: ` +
+              `reporting an exit would let the pool spawn a second claude against this session's ` +
+              `transcript while the first may still be running. This session needs manual ` +
               `attention.\n`,
           )
           return
@@ -787,77 +722,62 @@ export class HerdrHost implements PtyHost {
   }
 
   /**
-   * End a child whose transport is gone, and report whether death was CONFIRMED.
+   * End a child whose CLIENT transport is gone, and report whether closure was
+   * CONFIRMED — by asking the server to close the pane, on a fresh connection.
    *
-   * SIGTERM, wait, SIGKILL, wait — the same ladder `repl-session.ts` runs, done here
-   * against the pid because the socket that would carry `pane.close` is exactly what
-   * we no longer have. The return value is the whole point: `true` only when the
-   * process is observably gone, never merely because a signal was dispatched.
+   * WHY NOT SIGNAL THE PID, which is what stood here. A pid is an identifier the
+   * kernel reuses, and nothing the host can do after being handed a bare integer binds
+   * it to a process: the reuse window sits between `pane.process_info` returning the
+   * number and anything we read about it. Narrowing that window is not closing it, and
+   * the cost of losing the race is killing an unrelated process.
    *
-   * Note what this does NOT clean up: the herdr pane itself, which may survive as an
-   * empty pane. That is cosmetic and recoverable by the owner; the credential-bearing
-   * `claude` process is what the one-process-per-transcript invariant is about.
+   * MEASURED against the live server (0.8.2, protocol 20) rather than assumed:
+   *
+   *  • The server answers exactly ONE request per connection and then closes it —
+   *    two frames pipelined in the same tick get one reply, and the socket is gone 1 ms
+   *    later. So a "lost transport" is a lost CLIENT CONNECTION, which is the normal
+   *    end of every exchange, and is NOT evidence about the server or the pane.
+   *  • A fresh connection is therefore always available while the server lives, and
+   *    `pane.close` BY PANE ID on one returns `{type:'ok'}`, after which `pane.get`
+   *    answers `pane_not_found`.
+   *  • `pane.process_info` carries `shell_pid`, `foreground_process_group_id` and
+   *    `foreground_processes[]` — and NO start time or identity token. So closing the
+   *    race inside the protocol is not available at this version; it would be a
+   *    protocol change, and this protocol moved 20→22 in nineteen days with no
+   *    server-side version check.
+   *
+   * A pane id is an identity herdr maintains atomically and does not recycle out from
+   * under us, so asking its owner to close it removes the PID-reuse class outright
+   * instead of narrowing it a third time.
+   *
+   * And if the server is gone, a fresh connection fails — which is UNKNOWN, not death:
+   * a pane's process may have been reparented and survived. The caller settles nothing.
    */
-  private async terminateLostChild(
-    pid: number,
-    startedAt: string | undefined,
-    sleep: (ms: number) => Promise<void>,
-  ): Promise<boolean> {
-    // `pid` is always real: `spawn` REFUSES to return a child whose pane never
-    // reported one (see the throw above), so there is no "we never learned a pid"
-    // branch to defend against here. An unreachable defensive branch is untestable by
-    // construction, and this file has already established that unobservable state can
-    // only be believed, not verified — so it is not written.
-    const kill =
-      this.deps.killPid ??
-      ((p: number, sig: NodeJS.Signals): void => {
-        process.kill(p, sig)
-      })
-    const identityOf = this.deps.readPidIdentity ?? readPidIdentity
-    const grace = this.deps.pidKillGraceMs ?? HERDR_PID_KILL_GRACE_MS
-
-    // NO IDENTITY, NO SIGNAL. If we never captured a start time we cannot tell our
-    // process from whatever now holds that number, and the only safe move is to
-    // signal nothing and claim nothing. Unconfirmable, which the caller reports
-    // loudly and does not settle.
-    if (startedAt === undefined) return false
-
-    /**
-     * Three answers, and only ONE of them confirms a death:
-     *  • `ours`    — running, same start time: still there, keep escalating.
-     *  • `over`    — positively absent, or a DIFFERENT start time at the same pid.
-     *                Both are proof our child exited; the second is also the reason
-     *                not to signal, since the number now belongs to a stranger.
-     *  • `unknown` — the question failed. Proves nothing, so it confirms nothing.
-     */
-    const check = (): 'ours' | 'over' | 'unknown' => {
-      const id = identityOf(pid)
-      if (id.kind === 'unknown') return 'unknown'
-      if (id.kind === 'gone') return 'over'
-      return id.startedAt === startedAt ? 'ours' : 'over'
+  private async closeLostPane(paneId: string): Promise<boolean> {
+    const connect = this.deps.connect ?? ((): Promise<HerdrRpc> => connectHerdr())
+    let client: HerdrRpc
+    try {
+      client = await connect()
+    } catch {
+      // The server is unreachable. That is not proof the pane is gone.
+      return false
     }
-
-    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
-      const before = check()
-      if (before === 'over') return true
-      // UNKNOWN MUST NOT SETTLE, exactly as when death cannot be confirmed by the
-      // ladder: we neither signal a process we cannot identify nor report an exit we
-      // cannot demonstrate.
-      if (before === 'unknown') return false
+    try {
+      await client.call('pane.close', { pane_id: paneId })
+      return true
+    } catch (e) {
+      // ALREADY GONE IS CONFIRMED CLOSURE. `pane_not_found` is the server positively
+      // telling us the pane does not exist — the same distinction as ENOENT versus an
+      // unreadable entry, and the only rejection here that is evidence.
+      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) return true
+      return false
+    } finally {
       try {
-        kill(pid, signal)
+        client.close()
       } catch {
-        // Already gone, or not ours to signal — the identity check decides which.
-      }
-      const deadline = Date.now() + grace
-      while (Date.now() < deadline) {
-        const during = check()
-        if (during === 'over') return true
-        if (during === 'unknown') return false
-        await sleep(Math.min(50, grace))
+        /* the connection is single-use anyway */
       }
     }
-    return check() === 'over'
   }
 
   /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */

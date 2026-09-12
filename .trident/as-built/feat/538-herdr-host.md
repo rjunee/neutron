@@ -1343,6 +1343,67 @@ confirmed death. Both were inaccurate while the defects stood, so the claims mov
 the fixes rather than being left as aspirations — the same discipline as deleting a
 criterion that contradicted its sibling rather than reconciling the wording.
 
+### The PID path should not exist — measured, then deleted
+
+Review r18 asked the right question rather than a third narrowing: *does this path need
+to exist?* It does not, and the measurements say so.
+
+**The reuse window cannot be closed from the client side.** It sits between
+`pane.process_info` handing back a bare integer and anything the host reads about it —
+so no amount of re-reading binds the number to a process, and losing that race kills an
+unrelated one. A PID is an identifier; nothing after the fact turns it into a handle.
+
+**What I measured on the live server (0.8.2, protocol 20), rather than reasoned:**
+
+1. **It answers exactly ONE request per connection, then closes.** Two `ping` frames
+   pipelined in the same tick got **one** reply, with the socket gone 1 ms later — so
+   this is not an idle timeout. Every method works as the *first* request on a fresh
+   connection and fails as the second.
+2. **A fresh connection is therefore always available while the server lives**, and
+   `pane.close` BY PANE ID on one returns `{type:'ok'}`, after which `pane.get` answers
+   `pane_not_found`. `pane.close` on a pane that never existed also answers
+   `pane_not_found` — so "already gone" is positively reportable.
+3. **`pane.process_info` carries no identity token.** It has `shell_pid`,
+   `foreground_process_group_id` and `foreground_processes[{pid,name,argv,cmdline,cwd}]`
+   — and no start time. Closing the race inside the protocol is therefore *not
+   available at this version*; it would be a protocol change, and this protocol moved
+   20→22 in nineteen days with no server-side version check.
+
+So the third option was never on the table, and of the remaining two the first is
+strictly better: **a lost transport is a lost CLIENT CONNECTION** — which, on a server
+that closes after every request, is the normal end of every exchange and says nothing
+about the pane. Reconnect and ask the owner to close the pane by an id it maintains
+atomically. PID signalling is deleted outright: no `killPid`, no `readPidIdentity`, no
+`/proc` parsing, no start times, no kill ladder. **The PID-reuse class is gone rather
+than narrowed a third time** — the same prevent-rather-than-measure move as the
+single-buffer rewrite, which is the third time it has been the right answer on this PR.
+
+The unknown case keeps the rule: a failed reconnect proves nothing (the server may be
+gone and its pane's process reparented and still running), and a refused `pane.close`
+proves nothing either. Only `ok` or `pane_not_found` confirms, and anything else settles
+nothing.
+
+**And the fake was unrepresentative in exactly the M106 way.** Its `pane.close` returned
+ok even for a pane it had marked gone, so the branch treating `pane_not_found` as
+confirmed closure was never reached and M120b survived. The real server rejects — I
+measured it — and the fake now rejects too. *A fixture does not have to be permissive to
+hide a defect; it only has to be unrepresentative.*
+
+### One finding that outgrew this PR
+
+The same probe establishes something larger, and I am flagging it rather than acting on
+it: **`HerdrClient` assumes a persistent connection that this server does not offer.**
+`connectHerdr` sends `ping` for the protocol gate — which consumes the connection — and
+every subsequent call then fails on a closed socket. `events.subscribe` answers
+`subscription_started` and the connection closes too, so no event can ever arrive on it.
+
+Against 0.8.2 the host therefore cannot poll, cannot subscribe, and cannot drive a REPL
+at all. Every test here runs against the fake, which models a persistent connection, and
+the live E2E proofs are opt-in and skipped in CI — so nothing in the suite was in a
+position to notice. That is a design question about the transport, not a defect inside
+this round's blocker, and it is worth a decision before the cutover rather than a patch
+inside it.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1485,6 +1546,13 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M114b | PAIR: ENOENT read as unknown | RED 2 |
 | M115 | an unparseable stat line read as gone | SURVIVED → RED 1 with the mapping test |
 | M116 | unknown DURING the grace loop still confirms | SURVIVED (no case for that window) → RED 1 |
+| M117 | settle without closing the pane | RED 3 |
+| M117b | PAIR: never settle even when the close SUCCEEDS | RED 3 |
+| M118 | reuse the dead client instead of reconnecting | RED 3 |
+| M119 | an unreachable server counted as confirmed closure | RED 1 |
+| M120 | any rejection counted as confirmed, not just `pane_not_found` | RED 1 |
+| M120b | PAIR: `pane_not_found` NOT counted as confirmed | SURVIVED (fake returned ok) → fake corrected → RED 1 |
+| M121 | the fake stops rejecting close on a missing pane | RED 4 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

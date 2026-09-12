@@ -226,6 +226,13 @@ export class FakeHerdrServer implements HerdrRpc {
       case 'pane.send_keys':
         return { type: 'ok' }
       case 'pane.close':
+        // ALREADY GONE REJECTS, exactly as the real server does — MEASURED on 0.8.2:
+        // `pane.close` on a missing pane answers
+        // `{"error":{"code":"pane_not_found"}}`, not ok. The fake used to return ok
+        // regardless, so the branch that treats `pane_not_found` as confirmed closure
+        // was never reached and its mutation survived. A fixture does not have to be
+        // permissive to hide a defect; it only has to be unrepresentative.
+        if (this.paneGone) throw new HerdrError(HERDR_PANE_NOT_FOUND, 'pane not found')
         // A CLOSE THAT SUCCEEDS DESTROYS THE PANE, as the real server's does: it is
         // gone and unreadable afterwards, and no `pane_exited` follows. Recording it
         // separately from `paneGone` is what lets a test ask the question that
