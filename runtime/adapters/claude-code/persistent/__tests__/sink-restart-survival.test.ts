@@ -24,7 +24,7 @@ import { basename, dirname, join } from 'node:path'
 import { SUBSTRATE_ERROR_CODES } from '../../../../errors.ts'
 import { deriveReplSupervisionPaths } from '../../index.ts'
 import { classifySpawnError } from '../classify-spawn-error.ts'
-import { flockAvailable } from '../registry-lock.ts'
+import { flockAvailable, setFlockImplForTests } from '../registry-lock.ts'
 import { ReplSink, sink } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
 import { setReplActivityTap, setReplToolBridge } from '../repl-sink.ts'
@@ -1214,6 +1214,32 @@ describe('concurrent first startup — the live token IS the persisted token (#5
     // has to be told rather than protected.
     const unacquirable = defaultSinkTokenLock().run(join(dir, 'probe2.lock'), () => 42)
     expect(unacquirable.value).toBe(42)
+  })
+
+  test('a NONZERO flock reports acquired=false through the production seam, and still runs the body', () => {
+    // The branch a capability check cannot reach. On an FFI-capable host `flock` on a
+    // valid fd essentially only fails on EBADF/EINTR/ENOLCK, so the case above can only
+    // ever observe `acquired === flockAvailable()` — and would pass just as well against
+    // a report hardcoded `true`, which in production would silently suppress the
+    // degraded-concurrency warning. Forcing the syscall's return value is the only way
+    // to drive it, and the assertion is on the REPORT rather than on a proxy for it.
+    const dir = scratch()
+    setFlockImplForTests(() => 1)
+    try {
+      const observed = defaultSinkTokenLock().run(join(dir, 'forced.lock'), () => 'body-ran')
+      expect(observed.acquired).toBe(false)
+      // Unguarded is still better than skipped — `withFlockSync`'s documented choice,
+      // and the reason the caller is TOLD rather than protected.
+      expect(observed.value).toBe('body-ran')
+    } finally {
+      setFlockImplForTests(undefined)
+    }
+
+    // The restore is part of the test: a seam left armed would make every later case in
+    // this process report a failure that never happened.
+    expect(defaultSinkTokenLock().run(join(dir, 'restored.lock'), () => 'ok').acquired).toBe(
+      flockAvailable(),
+    )
   })
 
   test('the create path goes through the flock helper this directory already has', () => {

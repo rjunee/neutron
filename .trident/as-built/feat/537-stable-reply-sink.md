@@ -727,6 +727,32 @@ acceptance kept so the refusal cannot be met by a sink that refuses everything. 
 is the honest statement of #537: durable coordinates make adoption possible; they are
 not adoption. #539 must RE-REGISTER a survivor, not merely reconnect to it.
 
+### The acquisition report was asserted against a proxy, not driven
+
+`withFlockSync` reports `acquired: false` for two states — FFI missing, and `flock`
+returning nonzero — and that report is what raises the degraded-concurrency warning.
+The seam test asserted `observed.acquired === flockAvailable()`, which on any
+FFI-capable host is `true === true`. **Hardcode the production report to `true` and
+that test still passes**, while production would silently stop warning that the lock
+was not held.
+
+The nonzero branch is not reachable by arrangement: on a valid descriptor `flock`
+essentially only fails on EBADF/EINTR/ENOLCK, none of which a test can provoke. So the
+syscall itself is now a settable reference (`setFlockImplForTests`), the same shape as
+`sinkPortOverrideRef` — one reference the boot path never touches, not a second code
+path: production reads the same line either way. The unlock goes through it too, so a
+forced-failure test cannot leave a real lock held.
+
+Mutation: `onOutcome?.(rc === 0)` → `onOutcome?.(true)` now reds exactly the new case,
+52 pass / 1 fail. Before it, that mutation was invisible.
+
+The general shape, and it is the third time on this branch: **an assertion comparing
+the thing under test to a value that is equal to it on this host is not a measurement.**
+`acquired === flockAvailable()` is true by construction wherever the suite runs, the
+same way `second.port === first.port` was true because the fixture supplied both, and
+the same way the acceptance passed because the helper registered a session. Each time
+the fix was to assert against something the code does not get to choose.
+
 ### The lock this change introduced was not held to the standard the token was
 
 `readSinkToken` was given `O_NOFOLLOW` and a same-fd `fstat` because a token path is

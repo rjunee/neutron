@@ -29,6 +29,25 @@ const LOCK_UN = 8
 // Lazy-loaded FFI handle — initialized on first use.
 let _lib: { symbols: { flock: (fd: number, op: number) => number } } | null = null
 
+/**
+ * The `flock(2)` call, as a settable reference so the NONZERO branch is reachable.
+ *
+ * `flock` on a valid descriptor essentially only fails on EBADF/EINTR/ENOLCK, none of
+ * which a test can provoke on an FFI-capable host — so without this the degraded path
+ * below is unreachable and `acquired` always equals `flockAvailable()`. A test that
+ * compares those two therefore passes even if the report is hardcoded `true`, which
+ * would silently suppress the degraded-concurrency warning in production.
+ *
+ * Same shape as `sinkPortOverrideRef`: one reference the boot path never touches and a
+ * test can. It is not a second code path — production reads the same line either way.
+ */
+let flockImpl: ((fd: number, op: number) => number) | undefined
+
+/** Force `flock`'s return value. Pass `undefined` to restore the real syscall. */
+export function setFlockImplForTests(fn: ((fd: number, op: number) => number) | undefined): void {
+  flockImpl = fn
+}
+
 function getFlockLib(): typeof _lib {
   if (_lib) return _lib
   try {
@@ -145,7 +164,7 @@ export function withFlockSync<T>(
     if (!fstatSync(fd).isFile()) {
       throw new Error(`registry-lock: lock path is not a regular file: ${lockPath}`)
     }
-    const rc = lib.symbols.flock(fd, LOCK_EX)
+    const rc = (flockImpl ?? lib.symbols.flock)(fd, LOCK_EX)
     if (rc !== 0) {
       log.error('flock_lock_ex_nonzero', { rc })
       // Fall through — better to run unguarded than to skip the operation. The
@@ -156,7 +175,7 @@ export function withFlockSync<T>(
     return fn()
   } finally {
     try {
-      lib.symbols.flock(fd, LOCK_UN)
+      ;(flockImpl ?? lib.symbols.flock)(fd, LOCK_UN)
     } catch {
       /* best-effort unlock */
     }
