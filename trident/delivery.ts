@@ -531,21 +531,31 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       ? `Rebase or merge the base branch into the PR branch, then retry. ${notRejected}`
       : /required check .* has not run/.test(c)
         ? `Trigger the required check (or re-run CI on the PR), then retry. ${notRejected}`
-        // A CROSS-MODEL PROVIDER REFUSED ON QUOTA (HTTP 429). The generic line below —
+        // A CROSS-MODEL PROVIDER REFUSED THE CALL WITH HTTP 429. The generic line below —
         // "retry once the infrastructure is healthy" — is not merely vague here, it is
-        // WRONG ADVICE: nothing is unhealthy, the account has no allowance left, and a
-        // retry reaches the same refusal until somebody waits or pays. The measured cause
-        // says which provider and how, so the advice can name the two real remedies. The
-        // CLASS is untouched, exactly as this mapping's docblock requires — only the
-        // advice changes, and only over a cause that states the fact.
+        // WRONG ADVICE: nothing is unhealthy, the provider declined to serve the request,
+        // and an immediate retry reaches the same refusal. The measured cause says which
+        // seat and how, so the advice can name what to do. The CLASS is untouched, exactly
+        // as this mapping's docblock requires — only the advice changes, and only over a
+        // cause that states the fact.
         //
-        // BOTH HALVES MUST MOVE TOGETHER: the matched phrase is authored by
-        // `quotaExhaustedPeer` in `trident/inner-workflow.mjs`, whose TITLE becomes this
+        // AND IT NAMES BOTH POSSIBILITIES RATHER THAN PICKING ONE. 429 does not say
+        // whether this is a per-minute rate limit that clears on its own or an account
+        // with no allowance left; `trident/kimi-usage-probe.ts` excludes 429 from
+        // `isPermanentRejection` for exactly that reason. Telling the owner to top up an
+        // account that was merely throttled, or to wait out a balance that is empty, is a
+        // confident sentence about an unmeasured cause — so this says the bounded retry
+        // runs first and names both things to check if the refusal survives it.
+        //
+        // BOTH HALVES MUST MOVE TOGETHER: the matched token is authored by
+        // `rateLimitedPeer` in `trident/inner-workflow.mjs`, whose TITLE becomes this
         // `cause` (`infraTerminalCause` → `terminal_cause` → `deriveInfraBlock`), and
-        // nowhere else. A test asserts the real title matches this predicate, because a
-        // reworded title would silently restore the retry-forever line.
-        : c.includes('quota exhausted')
-          ? `Wait for the provider's rate-limit window to reset, or top the account up — then retry. Retrying before that reaches the same refusal. ${notRejected} ${saved}`
+        // nowhere else. It is matched on the STATUS CODE rather than on English, because
+        // the code is the part that cannot be reworded. A test asserts the real title
+        // matches this predicate, because a drifted title silently restores the
+        // retry-forever line.
+        : c.includes('http 429')
+          ? `The bounded retry runs first — HTTP 429 does not say whether this is a rate limit that clears on its own or an account with no allowance left. If it is still refusing after that, check the provider account's rate limits AND its balance rather than assuming either. ${notRejected} ${saved}`
           : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
     return {
       klass: 'infra-blocked',

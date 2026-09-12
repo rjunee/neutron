@@ -68,27 +68,37 @@ export const KIMI_DEFAULT_MODEL = 'kimi-k3'
 export const KIMI_DEFAULT_MAX_TOKENS = 20_000
 
 /**
- * The HTTP status a provider returns when the account has no allowance left to
- * spend. It covers BOTH a per-minute rate limit and an empty balance, and the
- * response does not reliably say which — so nothing here claims to know. Named
- * rather than written inline because two readers share it (the classifier below
- * and its test) and a bare `429` in a condition is indistinguishable from a typo.
+ * HTTP 429 — the provider refused the call because the caller is over some limit.
+ *
+ * IT DOES NOT SAY WHICH LIMIT, and this module deliberately does not guess. The
+ * same status covers a per-minute rate limit that clears on its own and an account
+ * with no allowance left, and the response body does not reliably distinguish
+ * them. Trident has already settled how to read it: `trident/kimi-usage-probe.ts`
+ * excludes 429 from its permanent-rejection set with the reason spelled out — "a
+ * timeout and a rate limit are the two 4xx codes that mean 'ask again later'
+ * rather than 'this request is wrong'" — and `isPermanentRejection` there returns
+ * false for it. A second part of trident asserting depletion from the identical
+ * code would make the system say two different things about one observation.
+ *
+ * Named rather than written inline because two readers share it (the classifier
+ * below and its test) and a bare `429` in a condition is indistinguishable from a
+ * typo.
  */
-export const QUOTA_EXHAUSTED_HTTP = 429
+export const RATE_LIMIT_HTTP = 429
 
 /**
- * THE MACHINE TOKEN A QUOTA FAILURE CARRIES ON STDERR.
+ * THE MACHINE TOKEN A 429 CARRIES ON STDERR.
  *
- * `status` stays `deferred` for a 429 (see `quotaExhausted` below), so the
- * WORKFLOW needs some way to act on "this was quota" that is not reading prose.
- * It already has the pattern: the codex bridge greps its wrapper's stderr for
- * `CODEX_REVIEW_DIFF_TRUNCATED` rather than asking a model what the review said,
- * because "a disclosure only the model sees is a disclosure the WORKFLOW cannot
- * act on". This is that token for this lane. `kimi-review-cli.ts` writes it to
- * stderr FROM THE FACT FIELD — never from the wording of `reason` — so rewording
- * the human sentence can never silently unhook the grep.
+ * `status` stays `deferred` for a 429 (see `rateLimited` below), so the WORKFLOW
+ * needs some way to act on "the provider refused with 429" that is not reading
+ * prose. It already has the pattern: the codex bridge greps its wrapper's stderr
+ * for `CODEX_REVIEW_DIFF_TRUNCATED` rather than asking a model what the review
+ * said, because "a disclosure only the model sees is a disclosure the WORKFLOW
+ * cannot act on". This is that token for this lane. `kimi-review-cli.ts` writes it
+ * to stderr FROM THE FACT FIELD — never from the wording of `reason` — so
+ * rewording the human sentence can never silently unhook the grep.
  */
-export const KIMI_QUOTA_TOKEN = 'KIMI_REVIEW_QUOTA_EXHAUSTED'
+export const KIMI_RATE_LIMIT_TOKEN = 'KIMI_REVIEW_RATE_LIMITED'
 
 /** Mirrors `codexStatus` so the panel has ONE vocabulary for cross-model peers. */
 export type CrossModelStatus =
@@ -110,8 +120,19 @@ export interface KimiReviewResult {
    */
   reason?: string
   /**
-   * THE ACCOUNT HAD NOTHING LEFT TO SPEND — a FACT about the failure, not a
-   * status of its own.
+   * THE PROVIDER ANSWERED HTTP 429 — the OBSERVATION, not a conclusion about why.
+   *
+   * NAMED AFTER WHAT WAS MEASURED. An earlier draft of this field was called
+   * `quotaExhausted` and its prose said "the account has no allowance left". That
+   * asserted a fact a status code cannot carry: 429 covers a per-minute rate limit
+   * and an empty balance alike, and `trident/kimi-usage-probe.ts` has already
+   * settled the reading for this provider — 429 is excluded from
+   * `isPermanentRejection` precisely because it means "ask again later". Two parts
+   * of trident drawing opposite conclusions from one status code is worse than
+   * either conclusion, and the honest encoding is the one the doctrine prescribes:
+   * where a producer looked and could not tell, the cause is unknown, and unknown
+   * authorises nothing. So this field reports the refusal and says nothing about
+   * the remedy; the remedy is named as two possibilities wherever it is surfaced.
    *
    * DELIBERATELY NOT a fourth member of `CrossModelStatus`. `deferred` already
    * carries the only thing the review panel asks of this result — "a configured
@@ -124,11 +145,11 @@ export interface KimiReviewResult {
    * STATUS BLOCKS and this FIELD NAMES — the same division of labour
    * `codexTruncated` already uses for "this verdict covers only part of the diff".
    *
-   * ABSENT MEANS "not known to be quota", never "known not to be quota". Every
+   * ABSENT MEANS "not known to be a 429", never "known not to be one". Every
    * consumer's fallback for absent is the generic deferral row, which blocks
-   * identically and says less. Unknown authorises nothing.
+   * identically and says less.
    */
-  quotaExhausted?: boolean
+  rateLimited?: boolean
 }
 
 export type KimiFetch = (
@@ -227,37 +248,38 @@ export async function reviewWithKimi(input: KimiReviewInput): Promise<KimiReview
   }
 
   if (!ok) {
-    // 401/403 is a rejected key and 429 is no allowance left. Both are still
+    // 401/403 is a rejected key and 429 is a refusal to serve. Both are still
     // DEFERRED rather than a distinct 'auth' status: the panel's only question is
     // whether a configured reviewer produced a review, and neither of these did.
     // The status code goes in the reason so the operator can tell them apart.
     //
-    // A 429 ALSO GETS A FACT FIELD, because the status alone made quota
-    // exhaustion UNREPORTABLE. Downstream, a deferred cross-model seat becomes a
-    // LANE finding whose TITLE is the run's whole terminal cause
-    // (`inner-workflow.mjs` `infraTerminalCause`), and that title said
-    // "DEFERRED — refusing to silently APPROVE" over an evidence line offering
-    // "the call failed, timed out, or returned no answer text". None of those is
-    // what happened: nothing failed and nothing timed out, the account is simply
-    // out of allowance — so the operator read a transport fault and went looking
-    // at the network instead of at the balance. The field lets the workflow write
-    // the honest row instead. It does NOT relax the block.
+    // A 429 ALSO GETS A FACT FIELD, because the status alone made the refusal
+    // UNREPORTABLE. Downstream, a deferred cross-model seat becomes a LANE finding
+    // whose TITLE is the run's whole terminal cause (`inner-workflow.mjs`
+    // `infraTerminalCause`), and that title said "DEFERRED — refusing to silently
+    // APPROVE" over an evidence line offering "the call failed, timed out, or
+    // returned no answer text". None of those is what happened: nothing failed and
+    // nothing timed out, the provider refused. The field lets the workflow write a
+    // row that says so. It does NOT relax the block.
     //
-    // WHAT THIS DOES NOT CLAIM. The provider uses one code for a per-minute rate
-    // limit and for an empty account, and this code does not inspect the body to
-    // guess which — so the reason says both are possible and says the provider did
-    // not tell us. A confident sentence about an unmeasured cause is the failure
-    // mode this repo has paid for before.
-    if (status === QUOTA_EXHAUSTED_HTTP) {
+    // AND IT NAMES THE OBSERVATION, NOT A CAUSE. 429 does not distinguish a
+    // per-minute rate limit from an account with no allowance left, and this code
+    // does not inspect the body to guess — see `RATE_LIMIT_HTTP` for the reading
+    // `trident/kimi-usage-probe.ts` already fixed for this provider, which is the
+    // reading a second module must not contradict. "wait" and "top up" are
+    // different actions, and a confident sentence about an unmeasured cause is the
+    // failure mode this repo has paid for before.
+    if (status === RATE_LIMIT_HTTP) {
       return {
         status: 'deferred',
         text: '',
-        quotaExhausted: true,
+        rateLimited: true,
         reason:
-          `Kimi API returned HTTP ${status} — the account has no allowance left to spend. ` +
-          'That code covers BOTH a per-minute rate limit and an exhausted balance and the ' +
-          'provider did not say which, so no review was performed and retrying will only ' +
-          'help if it was the rate limit.',
+          `Kimi API returned HTTP ${status} — the provider refused the call, so NO REVIEW WAS ` +
+          'PERFORMED. That code does not say whether this is a per-minute rate limit that ' +
+          'clears on its own or an account with no allowance left, and nothing here inspects ' +
+          'the body to guess; trident reads 429 as transient elsewhere for the same reason ' +
+          '(trident/kimi-usage-probe.ts), which is why the run retries with backoff.',
       }
     }
     return { status: 'deferred', text: '', reason: `Kimi API returned HTTP ${status}` }
