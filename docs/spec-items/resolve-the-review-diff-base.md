@@ -35,6 +35,18 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   "returns the input untouched" for two rounds while the acceptance below required refusal;
   `..<head>` is not an error — `git diff --name-only` exits 0 with no output — so returning
   it produced a plausible wrong answer;
+- a base name with **surrounding whitespace** — **REFUSED** (`TridentPaddedBaseError`), and the
+  reason it is refused rather than trimmed is the point. `diffBaseRef` used to trim before probing
+  and returning; the workflow trimmed only to VALIDATE and composed its probe and its fallback from
+  the value as given, so `" main "` resolved to `origin/main` on one side and to `" main "` on the
+  other — a production input, since `resolveBase()` returns `opts.base_branch` verbatim and hands
+  it to the workflow. Two implementations that each remember to normalise is the shape that has
+  now diverged three times here (merge-mode fallback, pin/validate ORDER, trimming), each time at
+  a different step of one function; with the value refused on both sides, `trim()` is the identity
+  on everything that survives and there is no normalisation left to disagree about. Nothing
+  legitimate is lost — measured on git 2.43, `git check-ref-format --branch ' main '` is fatal
+  (128), and ` main ..HEAD` is a fatal operand that the wrappers' `2>/dev/null || true` turns into
+  an empty diff;
 - `codex-review.sh`'s **standalone** promotion is *stricter still*: it additionally requires
   `refs/heads/<x>` to resolve and `refs/tags/<x>` not to, so it promotes only a proven,
   unambiguous local branch name. The trident path never reaches it (it passes an already-resolved
@@ -80,14 +92,19 @@ things:
   *not* the only producers of a range base and an earlier draft of this said they were:
   `rebased.baseSha`, `localForkPoint()`, `seenPin` and `run.base_sha` all reach a range
   operand directly. Every one of those is a **sha**, which is the property that matters;
-- **an argv boundary that carries a resolved ref** — `trident/codex-build.sh` takes the
-  base as argv `$2` and holds no base-branch-name binding at all (its default is empty,
-  and empty skips the diff), so there a bare-base range is genuinely *unconstructable*.
-  `trident/codex-review.sh` is **weaker**, and an earlier draft overstated it: its argv
-  default is the literal `main`, which it promotes to `origin/main` when that ref
-  resolves and leaves bare when it does not. Unconstructable on the trident path, which
-  always passes a resolved ref; merely demoted in a standalone run against a repo with
-  no `origin/<base>`.
+- **an argv boundary that carries whatever the composing side resolved** —
+  `trident/codex-build.sh` takes the base as argv `$2` and holds no base-branch-name binding at
+  all (its default is empty, and empty skips the diff), so the wrapper cannot *invent* a base.
+  An earlier draft called a bare-base range there *unconstructable*: **that was false.** The
+  legitimate fallback above — no resolving `refs/remotes/origin/<base>` — is a bare NAME, it is
+  passed as that argv, and it reaches `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`
+  (`codex-build.sh:809`), which `trident/codex-wrapper-bare-base.test.ts` now exercises through
+  the shipped line. **If a claim says something cannot be built, it has to name the mechanism
+  that prevents it**; the mechanism here prevents the wrapper *choosing* a base, not a bare name
+  arriving at one. `trident/codex-review.sh` is weaker still: its argv default is the literal
+  `main`, which it promotes to `origin/main` when that ref resolves and leaves bare when it does
+  not — a resolved ref on the trident path, which always passes one, merely demoted in a
+  standalone run against a repo with no `origin/<base>`.
 
 `scripts/ci/diff-base-check.mjs` is **defence in depth on top of that** — it exists to
 make a regression loud, not to prove absence. A textual matcher over source cannot
@@ -220,6 +237,31 @@ The resolution order is evidence-first, and is the same at every site:
       that a real diff is still produced. Without the first the fix would be "always prefer
       `origin/`", which breaks every repository that has none; without the second the spec would
       go on claiming a condition wider than the probe establishes.
+- [ ] **The two implementations do not NORMALISE differently — asserted on the whitespace axis.**
+      `diffBaseRef` trimmed before probing and returning; the `.mjs` trimmed only to validate and
+      built both its probe and its fallback from the value as given, so `" main "` — a value
+      `resolveBase()` passes through verbatim — resolved to `origin/main` on one side and to
+      `" main "` on the other. Refused on both sides rather than trimmed on both, so the axis is
+      removed instead of agreed upon. Verified by the parity table's "unpinned, SURROUNDING
+      WHITESPACE: both REFUSE" row, which drives five padded spellings through both
+      implementations under both probe answers and both merge modes, and asserts the complement
+      (the same name unpadded is answered `origin/main` by both, in the same fixture) and that a
+      pin still wins. Mutations: restoring `const name = base_branch.trim()` in `diffBaseRef`
+      reds it; deleting the `.mjs` guard reds it — 2 tests each, measured. **The table that
+      exists to catch divergence held this axis constant for eleven rounds**, which is the same
+      blind spot as the code it audits.
+- [ ] **The bare name actually reaching a wrapper's range is exercised, not just argued.** The
+      fallback is legitimate, so the bare name does reach `codex-build.sh`'s
+      `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` and `codex-review.sh`'s
+      `FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD")`. Verified by
+      `trident/codex-wrapper-bare-base.test.ts`, which extracts both shipped lines by text and
+      RUNS them: in a no-remote repository the bare name yields the branch's own work (pinned
+      file list and count), and in a repository whose local base is stale the same line handed the
+      bare name yields the inflated answer while the resolved ref yields the correct one — so the
+      argv is shown to be load-bearing at the wrapper, which is the reason the wrapper must never
+      improve or guess it. It also measures what a padded name does there (an empty diff, because
+      `2>/dev/null || true` swallows git's fatal), which is why the binding refuses one.
+      The previous wrapper criteria inspected argv and source text only.
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
       **5 of 9** tests fail, and the agreement/complement tests stay green. (Written as
@@ -236,7 +278,9 @@ The resolution order is evidence-first, and is the same at every site:
       `main`, demoted to `origin/main` when that ref resolves — and this criterion claims
       only that. Verified by `trident/inner-workflow.test.ts` and
       `trident/__tests__/cross-model-dispatch.test.ts` (the wrapper argv carries the
-      resolved ref, per merge mode) and by reading both scripts' base bindings. A criterion
+      resolved ref, per merge mode), by `trident/codex-wrapper-bare-base.test.ts` (what each
+      wrapper's shipped range line does with the value it is handed, including the legitimate
+      bare one) and by reading both scripts' base bindings. A criterion
       that said only "CHECK 8 is
       green" would be satisfied by a tree whose bare-base range is merely spelled in a way
       the matcher does not enumerate.

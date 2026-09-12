@@ -254,9 +254,15 @@ export async function detectBaseBranch(
  * validated the name before consulting the pin; here the CALLER computed the probe before
  * the pin could be consulted. A function cannot enforce an ordering over inputs it is
  * handed already-computed — so the ordering is now a property of the SIGNATURE. The thunk
- * is invoked on exactly the arm that needs it, and the eager-boolean form no longer
- * exists to be written. Same principle as the rest of this branch: make the wrong shape
- * unconstructable rather than remembered.
+ * is invoked on exactly the arm that needs it, and the eager-boolean form no longer TYPE
+ * CHECKS — that is the mechanism, and it is worth stating its limit rather than calling the
+ * defect unconstructable. A caller determined to precompute can still write
+ * `const r = await originBaseResolves(...)` and pass `() => Promise.resolve(r)`; the type
+ * cannot see inside a thunk. What the signature buys is that the eager form is no longer
+ * the natural spelling, and the pinned-dispatch-issues-no-probe assertions in
+ * `diff-base-option-shaped.test.ts` and `orchestrator.test.ts` are what actually hold the
+ * behaviour. A claim that something cannot be built has to name what prevents it; here the
+ * compiler prevents one spelling, not the class.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base bypasses this.
  */
@@ -268,7 +274,6 @@ export async function diffBaseRef(
   if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
   }
-  const name = base_branch.trim()
   // AN EMPTY NAME IS REFUSED HERE, and the sentence this replaces is why.
   //
   // It used to return the value untouched and assert "let the caller's own diff fail
@@ -295,9 +300,40 @@ export async function diffBaseRef(
   // declining to probe an option-shaped name, which routed it to the unguarded branch).
   // An empty base has no legitimate meaning, so it is refused where the option-shaped one
   // is, and for the same reason: it cannot be a rev-range operand at all.
-  if (name.length === 0) {
+  if (base_branch.trim().length === 0) {
     throw new TridentEmptyBaseError(base_branch)
   }
+  // SURROUNDING WHITESPACE IS REFUSED, NOT TRIMMED — and the trim this replaces is why.
+  //
+  // This function used to open with `const name = base_branch.trim()` and use the trimmed
+  // value for the probe and for both returns. `inner-workflow.mjs` trimmed only for
+  // VALIDATION and composed its probe and its fallback from the value AS GIVEN. So the two
+  // implementations of one rule disagreed on `" main "`: this one answered `origin/main`,
+  // the workflow probed `refs/remotes/origin/ main ^{commit}` and fell back to `" main "`.
+  // Reachable from configuration, not only from a test: `resolveBase()` returns
+  // `opts.base_branch` verbatim and hands it to the workflow.
+  //
+  // THE FIX IS NOT A SECOND TRIM. Two implementations that both remember to trim are the
+  // shape that has now diverged three times on this branch — merge-mode fallback, then
+  // ORDER, then this — each time at a different step of the same function. With the padded
+  // value REFUSED in both, `trim()` is the identity on every value that survives, so the
+  // question of where it is applied cannot arise. That is the axis removed rather than
+  // agreed upon.
+  //
+  // Nothing legitimate is lost, measured on git 2.43:
+  //   git check-ref-format --branch ' main '            → fatal, exit 128
+  // so no branch can be named this way; and the padded name is not a usable operand either:
+  //   git diff --name-only --end-of-options ' main '..HEAD  → fatal, exit 128
+  //   git rev-list --count --end-of-options ' main '..HEAD  → fatal, exit 128
+  // Loud at git — but the two wrappers run their range under `2>/dev/null || true`, which
+  // turns that fatal into an EMPTY diff, i.e. the "unbuilt branch" signal. So the padded
+  // name is refused here for the same reason the empty one is: downstream it becomes a
+  // plausible wrong answer rather than a failure.
+  if (base_branch !== base_branch.trim()) {
+    throw new TridentPaddedBaseError(base_branch)
+  }
+  // NO TRIM: the only values that reach here are already their own trimmed form.
+  const name = base_branch
   // AN OPTION-SHAPED NAME IS REFUSED HERE, NOT ROUTED PAST HERE.
   //
   // `originBaseResolves` already declined to PROBE such a name, and for one round that
@@ -340,6 +376,26 @@ export class TridentEmptyBaseError extends Error {
         'so an empty base yields a plausible wrong answer rather than a failure.',
     )
     this.name = 'TridentEmptyBaseError'
+  }
+}
+
+/**
+ * A base name with SURROUNDING WHITESPACE. Refused rather than trimmed, because the trim is
+ * what diverged: `diffBaseRef` trimmed before probing and returning while
+ * `inner-workflow.mjs` trimmed only for validation, so one implementation answered
+ * `origin/main` for `" main "` and the other fell back to `" main "`. Refusing removes the
+ * axis instead of asking both sides to normalise identically forever.
+ */
+export class TridentPaddedBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base ref with surrounding whitespace: ${JSON.stringify(base)}. ` +
+        '`git check-ref-format --branch` rejects such a name (fatal, exit 128), so it is not a branch; ' +
+        'and as a range operand it is fatal too, which the wrappers swallow into an empty diff. ' +
+        'It is refused rather than trimmed so that this implementation and inner-workflow.mjs cannot ' +
+        'normalise it differently.',
+    )
+    this.name = 'TridentPaddedBaseError'
   }
 }
 

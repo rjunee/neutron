@@ -48,17 +48,22 @@
 //     no origin to be behind; `merge_mode: 'local'` means the outer loop merges locally
 //     and says nothing about remotes, and the review-diff fixture measured that mistake
 //     at five files where the branch changed one.
-//   * AN ARGV BOUNDARY THAT CARRIES A RESOLVED REF. `trident/codex-build.sh` takes the
-//     base as argv `$2` and holds no base-branch-name binding at all: its default is
-//     EMPTY (`"${2:-}"`), and an empty value skips the last-resort diff entirely, so
-//     there a bare-base range is genuinely unconstructable.
+//   * AN ARGV BOUNDARY THAT CARRIES WHATEVER THE COMPOSING SIDE RESOLVED. `codex-build.sh`
+//     takes the base as argv `$2` and holds no base-branch-name binding at all: its default
+//     is EMPTY (`"${2:-}"`), and an empty value skips the last-resort diff entirely. So the
+//     wrapper adds no way to INVENT a bare base — but it is not unconstructable there, and
+//     this comment said it was. `diffBase`'s legitimate fallback (no resolving
+//     `refs/remotes/origin/<base>`) is a bare NAME, it is passed as that argv, and it
+//     reaches `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`. Measured through the
+//     shipped line in `codex-wrapper-bare-base.test.ts`. What the wrapper guarantees is
+//     narrower and still worth having: the base it ranges against is exactly what the
+//     composing side decided, never a guess of its own.
 //
-//     `trident/codex-review.sh` IS WEAKER, and this comment used to overstate it too.
-//     Its argv default is the literal `main` (`BASE_REF="${1:-main}"`) — a bare base
-//     branch name, in scope — which the rev-parse below promotes to `origin/main` WHEN
-//     THAT REF RESOLVES and leaves bare when it does not. So: unconstructable on the
-//     trident path, which always passes a resolved ref, and merely DEMOTED in a
-//     standalone invocation against a repo with no `origin/<base>`.
+//     `trident/codex-review.sh` IS WEAKER STILL. Its argv default is the literal `main`
+//     (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which the rev-parse
+//     below promotes to `origin/main` WHEN THAT REF RESOLVES and leaves bare when it does
+//     not. So: a resolved ref on the trident path, which always passes one, and merely
+//     DEMOTED in a standalone invocation against a repo with no `origin/<base>`.
 //
 // THIS GATE IS DEFENCE IN DEPTH. It exists to make a regression LOUD, not to prove
 // absence. Read the scope note below before relying on it for the latter.

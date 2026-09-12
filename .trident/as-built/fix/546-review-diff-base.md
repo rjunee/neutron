@@ -21,7 +21,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5371` as merged — this record outlives the branch, so both are given)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5410` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -32,8 +32,17 @@ So the unit of this change is the rule.
 
 ### What actually guarantees the invariant
 
-The invariant is **no code path composes a rev-range from a base branch NAME**, and it is
-carried by the STRUCTURE, not by the gate. Stated in the order of how much it proves:
+The invariant is **a base branch NAME reaches a rev-range operand only where no
+remote-tracking ref for it exists**, and it is carried by the STRUCTURE, not by the gate.
+
+> **This sentence read "no code path composes a rev-range from a base branch NAME" until
+> round twelve,** with item 0 immediately below it permitting exactly that. Two absolutes and
+> their own exception had already been corrected in the title and in the spec item; the
+> headline invariant of this record, a shell comment in `codex-build.sh` and an
+> "unconstructable" claim below survived, because each earlier round fixed the artefact its
+> finding pointed at. The narrow sentence is the true one and is now stated everywhere.
+
+Stated in the order of how much it proves:
 
 0. **The bare name is reached whenever `refs/remotes/origin/<base>` does not resolve to a
    commit** — NOT "only with no remote", which is the round-six framing and is wider than
@@ -43,15 +52,29 @@ carried by the STRUCTURE, not by the gate. Stated in the order of how much it pr
    best available base and there is no better one without a fetch, which is deliberately
    not attempted. That case is legitimate, tested by two fixtures (no remote at all, and a
    configured origin with the base ref deleted), and the only one left.
-1. **`codex-build.sh`: unconstructable.** It takes the base as argv `$2`
+1. **`codex-build.sh` cannot CHOOSE a base — which is not the same as no bare name
+   reaching its range, and this item claimed the second.** It takes the base as argv `$2`
    (`BASE_DIFF_REF="${2:-}"`), its default is EMPTY, and an empty value skips the
-   last-resort diff entirely — so no base branch name can reach a range there at all.
-   **`codex-review.sh` is weaker, and an earlier draft of this record overstated it by
+   last-resort diff entirely, so the wrapper never invents or improves a base. But item 0
+   above *requires* the bare name when `refs/remotes/origin/<base>` does not resolve, that
+   name is passed as this argv, and it reaches
+   `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:809`). Measured
+   through the shipped line in `trident/codex-wrapper-bare-base.test.ts`: with no remote it
+   yields the branch's own single file, and handed a stale `main` where `origin/main` is 4
+   commits ahead it yields five files — the wrapper is incapable of repairing a bad base,
+   which is exactly why the composing side must not hand it one. **If a claim says something
+   cannot be built, name the mechanism that prevents it**; the mechanism here prevents a
+   choice, not an arrival, and the word "unconstructable" is worth distrusting for that
+   reason — another lane retracted the same word on the same day for the same shape of
+   error.
+   **`codex-review.sh` is weaker still, and an earlier draft of this record overstated it by
    lumping the two together.** Its default is the literal `main`
    (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which it promotes to
-   `origin/main` when that ref resolves and leaves bare when it does not. So:
-   unconstructable on the trident path, which always passes a resolved ref, and merely
-   *demoted* in a standalone run against a repo with no `origin/<base>`.
+   `origin/main` when that ref resolves and leaves bare when it does not. So: a resolved ref
+   on the trident path, which always passes one, and merely *demoted* in a standalone run
+   against a repo with no `origin/<base>`. Its own range line has no opinion either, which
+   the same new test measures: the promotion above it is load-bearing precisely because the
+   range line is not.
 2. **One binding per boundary.** `diffBase` (`inner-workflow.mjs`) and the exported
    `diffBaseRef()` (`merge.ts`) are the only things that turn a base branch NAME into a
    range base, so there is no second spelling to drift from. They are NOT the only
@@ -67,7 +90,11 @@ carried by the STRUCTURE, not by the gate. Stated in the order of how much it pr
 - `trident/inner-workflow.mjs` — `diffBase`, declared once beside `pinnedBase`, read by
   the forge contract's reviewer diff, the planner's resume inspection hint, the resume
   diff, and the base argv of both codex wrappers. Order: the launch-pinned sha, else
-  `origin/<base>` in pr mode, else the bare name in local mode.
+  `origin/<base>` whenever `refs/remotes/origin/<base>` resolves to a commit — in EITHER
+  merge mode — else the bare name. (This bullet said "in pr mode, else the bare name in
+  local mode" until round twelve: the merge-mode fallback round six removed, surviving in
+  the record's own inventory of the thing that replaced it.) It also refuses an empty,
+  whitespace-padded or option-shaped name.
 - `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, origin_base_resolves)` where the
   third argument is a **thunk** `() => Promise<boolean>` invoked only on the arm that needs
   it, next to `detectBaseBranch` which produces the name it refuses to let through. It was
@@ -77,7 +104,9 @@ carried by the STRUCTURE, not by the gate. Stated in the order of how much it pr
   the signature. See the round-eleven section.
   Used at every `resolveBase()`-fed range in `trident/orchestrator.ts`.
 - the shell wrappers compose **no** base at all: `trident/codex-build.sh` and
-  `trident/codex-review.sh` receive a resolved ref as argv. `BASE_BRANCH` became
+  `trident/codex-review.sh` receive whatever the composing side resolved as argv — a sha,
+  `origin/<base>`, or the legitimate bare name; `trident/codex-wrapper-bare-base.test.ts`
+  runs both shipped range lines to show which. `BASE_BRANCH` became
   `BASE_DIFF_REF` so the name stops claiming a branch; `codex-review.sh` also demotes a
   bare name to `origin/<name>` when one resolves, for standalone use.
 
@@ -172,6 +201,55 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round twelve: the parity table held an axis constant, and an absolute survived in three more places
+
+**THE TWO IMPLEMENTATIONS DISAGREED ON WHITESPACE.** `diffBaseRef` opened with
+`const name = base_branch.trim()` and used the trimmed value for its probe and for both
+returns; `inner-workflow.mjs` trimmed only to VALIDATE and composed its probe and its
+fallback from `baseBranch` AS GIVEN. So `" main "` resolved to `origin/main` on the TS side
+while the workflow probed `refs/remotes/origin/ main ^{commit}`, got nothing, and fell back
+to `" main "`. Reachable from configuration, not only from a test: `resolveBase()` returns
+`opts.base_branch` verbatim and the launcher hands that value straight to the workflow.
+
+**The instrument built to prevent divergence had the same blind spot as the code.** The
+parity table varies pinned/unpinned, origin-resolves/missing, both merge modes, empty and
+option-shaped — **and holds whitespace constant.** That is this branch's own axes lesson
+landing on the audit rather than the audited: *a matrix proves nothing about an axis it holds
+constant, and the axis you hold constant is usually the one you did not notice you were
+choosing.*
+
+**Fixed by removing the axis, not by normalising twice.** Both sides now REFUSE a name whose
+`trim()` is not the identity (`TridentPaddedBaseError`; a matching `throw` in the workflow),
+and neither trims the value path at all — so there is no normalisation step left for them to
+disagree about. Two implementations that each remember to trim is precisely the shape that
+has now diverged three times here, each at a different step of one function: the merge-mode
+fallback (round six), the pin/validate ORDER (round eight), the trim (round twelve).
+Nothing legitimate is lost, measured on git 2.43: `git check-ref-format --branch ' main '`
+is fatal (128), so no branch is named this way; and ` main ..HEAD` is itself a fatal
+operand — which the wrappers' `2>/dev/null || true` turns into an EMPTY diff, so git's own
+loudness would not have saved anyone. The `.mjs` substitution also moved INSIDE the
+validated function, since as a module-scope `const` it composed shell text from a value
+nothing had yet examined.
+
+**The absolute had been corrected in two places and survived in three more** — the headline
+invariant above, `codex-build.sh`'s argv comment, the "unconstructable" claim in the
+rejected-alternatives section, and (found in the same sweep) the gate header and the spec's
+argv bullet. Each earlier round fixed the artefact its finding pointed at; nothing had ever
+swept the *class*. Two more "unconstructable" claims in `orchestrator.ts` and
+`inner-workflow.mjs` were narrowed to "the binding throws", and `merge.ts`'s claim that the
+eager-boolean form "no longer exists to be written" now states its limit: the compiler
+prevents one spelling, and a caller can still pass `() => Promise.resolve(r)` around an
+already-awaited value, which is why the absent-side-effect tests are what actually hold the
+ordering.
+
+**And a test written during round ten already carried the superseded rule.**
+`review-diff-base-realgit.test.ts`'s header said local mode "has no origin to be behind" and
+"must still compose the bare name" — the merge-mode rule the code had abandoned four rounds
+earlier — while its own later case asserts `origin/main` and one file in local mode. Not a
+stale comment left behind but **a new narrative written from a mental model the code had
+already dropped**: when a design changes mid-branch, the prose written *after* the change is
+not automatically written *from* it.
 
 ### Round eleven: the caller defeated the ordering, and a rule sweep the number sweep missed
 
@@ -278,14 +356,18 @@ implementation was only ever tested on its own:
 |---|---|---|
 | six | `.mjs` kept a merge-mode-keyed fallback the TS side had dropped | review |
 | eight | `.mjs` validated the name *before* the pin; TS after | review |
+| twelve | TS trimmed the value it probed and returned; `.mjs` trimmed only to validate | review |
 
 So the answer to "two copies of a rule" here is a **parity table**
 (`trident/diff-base-option-shaped.test.ts`): every row asserts BOTH implementations, over
-pinned/unpinned, origin-resolves/missing, both merge modes, and the refusal. The `.mjs`
-answer is a shell word, so it is evaluated in a real repository to be comparable. Verified
-by mutation: reintroducing *either* historical divergence reds a row — the merge-mode one
-only after the table was widened to run both modes, which is itself the lesson that a
-parity table is only as good as the axes it varies.
+pinned/unpinned, origin-resolves/missing, both merge modes, the refusals, AND surrounding
+whitespace. The `.mjs` answer is a shell word, so it is evaluated in a real repository to be
+comparable. Verified by mutation: reintroducing *any* of the three historical divergences
+reds a row — the merge-mode one only after the table was widened to run both modes, and the
+trim one only after round twelve added the whitespace axis, **which the table had held
+constant through eleven rounds of auditing divergence.** A parity table is only as good as
+the axes it varies, and the axis it holds constant is usually the one nobody noticed
+choosing.
 
 That is weaker than one implementation and stronger than two tested separately: the code
 is still duplicated, but a change to either alone cannot land.
@@ -492,8 +574,10 @@ specific rather than a matter of effort:
 
 **The durable fix is the shell wrappers' shape, generalised**: keep narrowing the scope in
 which a base branch NAME exists, rather than improving the matcher that hunts for it. Where
-the resolved ref is the only thing that crosses a boundary, the defect is unconstructable
-and needs no gate at all.
+the resolved ref is the only thing that crosses a boundary, the defect needs no gate —
+though "unconstructable" is the wrong word even there, as round twelve found: an argv
+boundary constrains what the RECEIVER can choose, and says nothing about what the sender
+hands it. What it buys is that there is one place to get right instead of N.
 
 ### Dispositions for the rest of the class
 
@@ -547,10 +631,15 @@ fallback (the bare name is kept when `origin/<base>` does not resolve — prefix
 > per-repository probe. Corrected here in the round-nine reconciliation pass rather than
 > left as a third superseded framing in the permanent record.
 
-**Mutation, re-measured in the round-nine pass:** restoring `${shSingleQuote(baseBranch)}`
+**Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5202`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5243`. The agreement/complement tests stay green, which is what they
 are for.
+
+> Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true
+> when written. Round twelve's own edit to this file moved the line again, which is the point
+> of re-measuring rather than carrying a number forward: **the round that changes the code is
+> the round that invalidates the counts, including its own record's.**
 
 > Written at the time as "4 of the 7 … at `:5119`". Both numbers were true then and neither
 > is now: later rounds added two fixtures to that file and moved the line. **A count and a

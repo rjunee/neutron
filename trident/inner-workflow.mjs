@@ -1412,13 +1412,6 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  * here, so the next site cannot re-introduce the class by forgetting.
  */
 /**
- * The shell substitution the unpinned arm resolves with — declared ABOVE the function
- * that returns it because both are evaluated at module scope, so this is a temporal-dead-
- * zone constraint rather than a matter of layout.
- */
-const diffBaseSubstitution = `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
-
-/**
  * The unpinned arm of `diffBase`, and the ONLY place the base branch NAME is read.
  *
  * AN OPTION-SHAPED NAME IS REFUSED HERE — the same refusal `diffBaseRef` makes on the TS
@@ -1437,6 +1430,13 @@ const diffBaseSubstitution = `"$(git rev-parse --verify -q ${shSingleQuote(`refs
  * That mistake is the mirror of the one it was fixing: there a `-` check refused to
  * EXAMINE the value and let it through; here it refused the whole call over a value that
  * had already been superseded. Validate on the path where the value is actually used.
+ *
+ * AND AN EMPTY OR WHITESPACE-PADDED NAME IS REFUSED, for the reason in each guard below.
+ * The padded case is the THIRD divergence between this and `diffBaseRef`: that one trimmed
+ * before probing and returning, this one trimmed only to validate. Neither trims now — the
+ * value is refused instead, so there is no normalisation step left for the two to disagree
+ * about. `diff-base-option-shaped.test.ts`'s parity table varies the whitespace axis and
+ * holds both to the same answers.
  */
 function unpinnedDiffBase() {
   // AN EMPTY BASE IS REFUSED TOO, matching `diffBaseRef` — `..<head>` is a well-formed
@@ -1448,12 +1448,43 @@ function unpinnedDiffBase() {
       `trident infra: refusing an empty base branch: ${JSON.stringify(baseBranch)}. The range '..<head>' is not an error — git diff exits 0 with no output — so an empty base produces a plausible wrong answer rather than a failure.`,
     )
   }
-  if (typeof baseBranch === 'string' && baseBranch.trim().startsWith('-')) {
+  // SURROUNDING WHITESPACE IS REFUSED TOO — and this one is here because the whole POINT
+  // of the guard above used to be undone one line later.
+  //
+  // `diffBaseRef` (the TS twin) opened with `const name = base_branch.trim()` and used the
+  // TRIMMED value for its probe and both returns. This function trimmed only to VALIDATE and
+  // then composed its probe and its fallback from `baseBranch` AS GIVEN. So the same rule,
+  // implemented twice, answered differently for `" main "`: `origin/main` there, a probe of
+  // `refs/remotes/origin/ main ^{commit}` and a fallback of `" main "` here. Not hypothetical
+  // — `resolveBase()` returns `opts.base_branch` verbatim and the launcher hands that value
+  // straight to this script's args.
+  //
+  // Refused rather than trimmed on BOTH sides, deliberately: two implementations that each
+  // remember to normalise is the exact shape that has diverged three times on this branch
+  // (the merge-mode fallback, then pin/validate ORDER, now trimming), each time at a
+  // different step of the same function. With the padded value refused, `trim()` is the
+  // identity on everything that survives and there is no normalisation left to disagree
+  // about. Measured on git 2.43: `git check-ref-format --branch ' main '` is fatal (128), so
+  // no branch is named this way; and ` main ..HEAD` is a fatal operand — which the wrappers'
+  // `2>/dev/null || true` turns into an EMPTY diff, i.e. a plausible wrong answer, which is
+  // why git's own loudness is not enough.
+  if (baseBranch !== baseBranch.trim()) {
+    throw new Error(
+      `trident infra: refusing a base branch with surrounding whitespace: ${JSON.stringify(baseBranch)}. git check-ref-format rejects such a name and the range operand is fatal, which the wrappers swallow into an empty diff; it is refused rather than trimmed so this script and merge.ts's diffBaseRef cannot normalise it differently.`,
+    )
+  }
+  if (baseBranch.startsWith('-')) {
     throw new Error(
       `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,
     )
   }
-  return diffBaseSubstitution
+  // THE SUBSTITUTION IS COMPOSED HERE, after the refusals, and nowhere else. It used to be a
+  // module-scope `const` above this function, which meant the one place the base branch NAME
+  // became shell text was evaluated BEFORE anything had looked at the value — harmless while
+  // the result went unused on the refusing paths, but it put the composition outside the only
+  // scope that has checked its input. Composing it here is the same principle as the rest of
+  // #546: narrow the scope in which an unvalidated base name can exist.
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
 }
 
 const diffBase =
@@ -5206,8 +5237,9 @@ async function writeResumeDiff(headOid) {
     ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
     : ''
   // `--end-of-options` behind the refusal above, for the same reason the orchestrator's
-  // four consumers carry it: the binding makes the value unconstructable, the marker makes
-  // the command safe for whatever ever reaches it.
+  // four consumers carry it: the binding THROWS on such a value, the marker makes the
+  // command safe for whatever reaches it anyway. The binding's refusal is a check on one
+  // path, not an impossibility, which is why both exist.
   const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff --end-of-options ${diffBase}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
   const res = await agent(
     `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.

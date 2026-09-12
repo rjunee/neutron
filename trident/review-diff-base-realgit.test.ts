@@ -22,9 +22,21 @@
  * A fix that always preferred something-other-than-the-local-ref would pass the
  * stale case and still be wrong. So the fresh case is asserted too: fast-forward
  * local `main` onto `origin/main` and the composed command and the bare-local
- * command must agree, exactly. And local mode — where there is no origin to be
- * behind — must still compose the bare name, or the "fix" is a new bug in the one
- * world the old code was right about.
+ * command must agree, exactly.
+ *
+ * ── AND NOT "LOCAL MODE GETS THE BARE NAME" ───────────────────────────
+ * This header said, until the round that is writing this line, that local mode "has no
+ * origin to be behind" and "must still compose the bare name". THAT IS THE SUPERSEDED
+ * RULE, and the cases below never implemented it: `'LOCAL MODE, unpinned, WITH a remote'`
+ * asserts `origin/main` and ONE file, which is the opposite. The explanation was written
+ * during the rounds that REMOVED the merge-mode fallback, from the mental model the code
+ * had already abandoned — a new narrative carrying an old rule, which is harder to spot
+ * than a stale comment left behind, because nothing about it looks unmaintained.
+ *
+ * The rule the cases actually encode: `origin/<base>` whenever `refs/remotes/origin/<base>`
+ * resolves, IN EITHER MERGE MODE, and the bare name only when it does not — asserted here
+ * by three fixtures that differ in the REF, not in the mode (no remote at all, a configured
+ * origin whose base ref is missing, and both modes against a resolving one).
  *
  * ── REAL GIT, AND THE REAL COMMAND ────────────────────────────────────
  * Nothing here is mocked except the Workflow runtime's `agent()` seam, and that

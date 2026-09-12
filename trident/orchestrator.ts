@@ -2733,8 +2733,11 @@ export function buildTridentOrchestrator(
       // `--end-of-options` — DEFENCE IN DEPTH behind `diffBaseRef`'s refusal. Measured on
       // git 2.43: without it this exact argv with a base of `--output=<path>` EXITS 0 and
       // writes the file; with it git refuses (128) and writes nothing, and a legitimate
-      // range is unaffected. The binding is what makes the value unconstructable; this is
-      // what makes the command safe for any value that ever reaches it.
+      // range is unaffected. The binding REFUSES such a value (it throws); this is what makes
+      // the command safe for any value that ever reaches it. "Refuses" rather than "makes
+      // unconstructable" on purpose — the mechanism is a throw on one code path, not a
+      // property of the type, and a value that never passed through the binding is exactly
+      // what this marker is here for.
       ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', '--end-of-options', `${baseRef}..${headToPublish}`],
       run.repo_path,
     )

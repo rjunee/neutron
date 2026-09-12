@@ -59,14 +59,24 @@
 #   arg $2                              the base DIFF REF — the left-hand side of the
 #                                       branch diff, used only to regenerate that diff
 #                                       when a build committed but never wrote one.
-#                                       A RESOLVED REF, never a bare local branch name:
-#                                       the launch-pinned base sha, or `origin/<base>`.
-#                                       `inner-workflow.mjs`'s `diffBase` composes it;
-#                                       a bare `main` here would diff against whatever
-#                                       `refs/heads/main` holds in a shared checkout and
-#                                       silently present every commit merged into the
-#                                       base since as this branch's work (#546 measured
-#                                       149 files where the branch changed 30).
+#                                       WHATEVER `inner-workflow.mjs`'s `diffBase`
+#                                       RESOLVED: the launch-pinned base sha, else
+#                                       `origin/<base>` when that ref resolves, else the
+#                                       bare base name. An earlier version of this comment
+#                                       said "a RESOLVED REF, never a bare local branch
+#                                       name" — that was false, and the fallback it forgot
+#                                       is the legitimate one: with no resolving
+#                                       `refs/remotes/origin/<base>` there is no better
+#                                       answer without a fetch, so the bare name IS what
+#                                       arrives here and reaches the range below.
+#                                       This script must therefore never IMPROVE the value
+#                                       and never guess one: a bare `main` chosen HERE would
+#                                       diff against whatever `refs/heads/main` holds in a
+#                                       shared checkout and silently present every commit
+#                                       merged into the base since as this branch's work
+#                                       (#546 measured 149 files where the branch changed
+#                                       30). The composing side is the only place that can
+#                                       tell a bare name it CHOSE from one it defaulted to.
 #                                       Optional; omitted means "no last-resort diff",
 #                                       never a guessed base.
 #   arg $3                              the run's MERGE MODE — `pr` or `local`.

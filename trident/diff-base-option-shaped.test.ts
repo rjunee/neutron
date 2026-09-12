@@ -38,6 +38,7 @@ import {
   originBaseResolves,
   TridentEmptyBaseError,
   TridentOptionShapedBaseError,
+  TridentPaddedBaseError,
 } from './merge.ts'
 
 const WORKFLOW_SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -166,7 +167,7 @@ async function seedWorld(label: string): Promise<World> {
 
 describe('the BINDING refuses an option-shaped base — it is not routed past', () => {
   test('diffBaseRef throws, whatever the probe said and whatever else is in hand', async () => {
-    for (const bad of ['--output=/tmp/x', '-x', '--upload-pack=touch', '  --output=/tmp/y  ']) {
+    for (const bad of ['--output=/tmp/x', '-x', '--upload-pack=touch', '--output=/tmp/y']) {
       // Both probe answers, because the defect was that `false` selected the bare branch:
       // neither value may produce a returned string.
       for (const resolves of [true, false]) {
@@ -175,6 +176,17 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
       // …and a pinned sha still wins outright, since it is read before the name at all.
       expect(await diffBaseRef(bad, 'a'.repeat(40), probe(false))).toBe('a'.repeat(40))
     }
+    // A PADDED option-shaped name is refused as PADDED, not as option-shaped, because the
+    // whitespace guard now comes first — and this list used to contain `'  --output=/tmp/y  '`
+    // asserting the option-shaped class, which only passed because the function trimmed
+    // before looking. What matters is that it is refused in both implementations; which
+    // refusal fires is pinned here so the ORDER of the two guards is not free to drift.
+    await expect(diffBaseRef('  --output=/tmp/y  ', null, probe(false))).rejects.toThrow(
+      TridentPaddedBaseError,
+    )
+    await expect(workflowDiffBase({ baseBranch: '  --output=/tmp/y  ' })).rejects.toThrow(
+      /refusing a base branch with surrounding whitespace/,
+    )
   })
 
   test('AN EMPTY BASE IS REFUSED — `..<head>` is a plausible wrong answer, not an error', async () => {
@@ -361,6 +373,43 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     await expect(workflowDiffBase({ baseBranch: '', repoPath: w.repo })).rejects.toThrow(
       /refusing an empty base branch/,
     )
+  })
+
+  test('unpinned, SURROUNDING WHITESPACE: both REFUSE — the axis this table held constant', async () => {
+    // THE THIRD DIVERGENCE, and the one this table was built to catch and did not.
+    //
+    // `diffBaseRef` trimmed before probing and returning; the `.mjs` trimmed only to
+    // validate and built its probe and its fallback from the value as given. So `" main "`
+    // used to answer `origin/main` in TS and `" main "` in the workflow — a production input,
+    // since `resolveBase()` returns `opts.base_branch` verbatim. The rows above vary
+    // pinned/unpinned, resolves/missing, both merge modes, empty and option-shaped, AND HOLD
+    // WHITESPACE CONSTANT: a matrix proves nothing about an axis it holds constant, and the
+    // axis you hold constant is usually the one you did not notice you were choosing. The
+    // instrument built to catch divergence had the same blind spot as the code.
+    //
+    // Neither side trims now, so this row asserts a REFUSAL rather than a normalised answer.
+    // Mutation: restore `const name = base_branch.trim()` in `diffBaseRef` and this reds on
+    // the TS side; drop the workflow's whitespace guard and it reds on the mjs side.
+    const w = await seedWorld('parity-padded')
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
+    for (const padded of [' main', 'main ', ' main ', '\tmain', 'main\n']) {
+      for (const resolves of [true, false]) {
+        await expect(diffBaseRef(padded, null, probe(resolves))).rejects.toThrow(TridentPaddedBaseError)
+      }
+      for (const mergeMode of ['pr', 'local'] as const) {
+        await expect(workflowDiffBase({ baseBranch: padded, repoPath: w.repo, mergeMode })).rejects.toThrow(
+          /refusing a base branch with surrounding whitespace/,
+        )
+      }
+    }
+    // THE COMPLEMENT, so this is not just "everything throws": the same name unpadded is
+    // answered, identically, by both — in the same fixture, where `origin/main` resolves.
+    const got = await bothAgree(w, { baseBranch: 'main', originResolves: true })
+    expect(got).toEqual({ ts: 'origin/main', mjs: 'origin/main' })
+    // …and a PIN still wins over a padded name in both, because the pin is read first.
+    const sha = 'f'.repeat(40)
+    expect(await diffBaseRef(' main ', sha, probe(false))).toBe(sha)
+    expect(await workflowDiffBase({ baseBranch: ' main ', baseSha: sha, repoPath: w.repo })).toBe(`'${sha}'`)
   })
 
   test('unpinned, option-shaped: both REFUSE rather than answering', async () => {
