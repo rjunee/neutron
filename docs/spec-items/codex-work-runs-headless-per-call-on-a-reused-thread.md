@@ -54,7 +54,20 @@ conversation when that process wedges, and a daemon mode this install cannot run
    `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A
    second `CODEX_HOME` for the same account points at the same `auth.json`; it
    never holds a copy of it.
-6. **A thread id has exactly one owner, and that owner's calls on it are strictly
+6. **Approvals, and who is allowed to be the approver.** Headless codex cannot ask
+   *Neutron* for an approval — there is no channel for it. `-c
+   approval_policy=on-request` alone makes codex refuse an escalation outright, with
+   **exit 0** and no event, so a caller that sets it without a reviewer gets a task
+   silently not done. The only headless mechanism is codex's own automatic-review
+   subagent, reached as `--approve-for-me` on a first call and as `-c
+   approvals_reviewer=auto_review` on a resumed one. **It is not a safety control**
+   — the spike did not establish that it ever denies. Therefore: work that needs an
+   approval *decision* does not run on headless codex, and an approval that must
+   reach the **owner** never does — owner questions flow from the orchestrator
+   (Decisions Log 2026-09-11). Today neither consumer needs one: the build runs
+   `--sandbox danger-full-access` on record (`trident/codex-build.sh:181-200`) so it
+   never escalates, and review reads a diff.
+7. **A thread id has exactly one owner, and that owner's calls on it are strictly
    sequential.** Fan-out is expressed as **one thread id per lane**, never as
    several callers sharing an id. Cache warmth is unaffected — it is per-thread,
    so each lane keeps its own warm thread — and this is the only arrangement that
@@ -80,20 +93,27 @@ conversation when that process wedges, and a daemon mode this install cannot run
 
 ## Acceptance
 
-- [ ] A second call against a recorded `thread_id` reaches the first call's
-      conversation. verify: an automated test **generates a fresh high-entropy
-      nonce** per run (≥128 bits, e.g. `randomUUID()`), plants it in call 1, and
-      asserts call 2 returns it — by **exact structured extraction**, an equality
-      check against the generated string, never a substring sniff or a
-      model-judged "mentions it". The control call is prompted with the **byte-identical
-      text** to the resumed call and differs only in carrying no `thread_id`; it
-      must not return the nonce. The test also asserts the nonce does **not**
-      appear in call 2's own prompt, nor in any file the run can read (the
-      worktree, `AGENTS.md`, the spec items) — otherwise what is measured is
-      retrieval from context the test handed over, not thread recall.
+- [ ] A recorded `thread_id` survives **the adapter being destroyed**, and the
+      resumed call reaches the first call's conversation. verify: one test that
+      crosses a real restart, because two calls in one process is a weaker claim
+      wearing this one's clothes — **a memory-only `Map` passes that and loses
+      continuity on restart, which is the exact boundary this design is built on.**
+      The test: (1) generate a fresh high-entropy nonce (≥128 bits, e.g.
+      `randomUUID()`) and plant it in call 1; (2) **destroy the adapter instance and
+      every in-process cache** — a new process, or at minimum a new instance
+      constructed from nothing but the durable store's path; (3) **reload the
+      thread id from durable state**, and assert it was read from there, not
+      carried in a variable; (4) resume and assert the nonce comes back by **exact
+      structured extraction** — equality against the generated string, never a
+      substring sniff or a model-judged "mentions it".
+      Control: a call prompted with the **byte-identical text** and no `thread_id`
+      must not return the nonce. And assert the nonce is absent from call 2's own
+      prompt and from any file the run can read (the worktree, `AGENTS.md`, the spec
+      items), or what is measured is retrieval from context the test handed over.
       A low-entropy or guessable fact would let the "no memory at all"
-      implementation pass the control by inference, which is the wrong
-      implementation this criterion exists to catch.
+      implementation pass the control by inference, which is one of the two wrong
+      implementations this criterion exists to catch; the memory-only map is the
+      other.
 - [ ] The resumed call's `turn.completed.usage.cached_input_tokens` is at least
       90% of its `input_tokens`. verify: the same test reads the JSONL usage
       event. This is the whole cost case for thread reuse; an adapter that
@@ -153,6 +173,22 @@ conversation when that process wedges, and a daemon mode this install cannot run
       NOT a success. An adapter that swallows the conflict and retries silently, or
       one that reports it as an ordinary failure, fails this while still passing
       the waiting half.
+- [ ] An escalation is either **not requested** or **completed explicitly** — never
+      silently refused mid-task. verify: the adapter's default for build-shaped work
+      matches what ships today (`trident/codex-build.sh:1402` runs
+      `--sandbox danger-full-access`, so nothing escalates) and a test asserts the
+      argv carries no approval routing in that mode. For any call that CAN escalate,
+      a test asserts the argv carries **both** `-c approval_policy=on-request` and
+      `-c approvals_reviewer=auto_review`, and drives a real escalation that
+      completes. Negative half, and it is the one that catches the measured trap:
+      a call built with `approval_policy=on-request` and **no** reviewer must be
+      refused by the adapter at build time rather than dispatched — measured on CLI
+      0.149.1, that combination makes codex refuse the escalation outright with
+      **exit 0** and no approval event, so the model reports a task it could not do
+      while the wrapper sees success.
+      A test that only asserts "an escalation succeeded" passes against
+      `--dangerously-bypass-approvals-and-sandbox`, so the test must also assert
+      that flag is absent from every argv the adapter builds.
 - [ ] No long-lived codex process is created. verify: a test asserts every codex
       child the adapter spawns has exited by the time the adapter's call returns,
       and that the adapter exposes no start/stop/health surface for a server.

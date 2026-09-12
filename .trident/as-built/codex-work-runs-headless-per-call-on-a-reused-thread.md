@@ -49,7 +49,40 @@ strongest part of the persistent case, and it is also the part that makes
 persistence unnecessary: what survives is the **thread on disk**, not the
 process, and the headless path resumes the same thread by the same id.
 
-### (c) Approval round-trip — PASS, after one dead end
+### (c) Approval round-trip — PASS on BOTH shapes, by different mechanisms
+
+The first pass of this record proved (c) only for the shape being rejected, which is
+the wrong thing to have measured and was caught by the gate. Re-measured on the
+adopted shape:
+
+- `codex exec` with `-c approval_policy=on-request` emits **no approval event** and
+  refuses the escalation outright — *"this session's approval policy forbids
+  requesting escalated permissions"* — at **exit 0**. A caller that sets the policy
+  and nothing else gets a task silently not done.
+- `codex exec --approve-for-me` routes the request to codex's **own automatic-review
+  subagent**. The escalated write that `on-request` had just refused went through and
+  the file appeared.
+- On a **resumed** call the flag does not exist, but the capability does:
+  `-c approval_policy=on-request` + `-c approvals_reviewer=auto_review` completed the
+  same escalated write on a resumed thread. So (c) holds on every turn of the adopted
+  shape, not only the first.
+
+**Two limits, stated because they bound what (c) means here.** The approver is codex,
+not Neutron — headless has no channel for Neutron to decide, and an approval that must
+reach the *owner* is out of scope by the 2026-09-11 entry anyway. And it was **not
+established that `auto_review` ever denies**: the one refusal seen came from the model
+declining to print a credential-shaped file before any escalation was attempted, so
+the reviewer was never consulted. It is not a safety control.
+
+**Neither consumer needs it today**, which is why this is a capability note rather
+than a blocker. `trident/codex-build.sh:1402` runs
+`codex exec … --sandbox danger-full-access` — deliberate, with each narrower policy
+rejected on record at `trident/codex-build.sh:181-200` (a build writes outside its
+worktree twice over and may need network) — so a build never requests an escalation.
+Cross-model review reads a diff. Checked before asserting it, because
+`trident/codex-build.sh` means review is **not** the only codex caller.
+
+### (c) on the persistent shape — PASS, after one dead end
 
 Bidirectional: `item/commandExecution/requestApproval` → `{"decision":"accept"}`
 ran the escalated command and the file appeared with the expected contents;

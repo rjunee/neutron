@@ -136,6 +136,14 @@ gateway restart and resume, (c) complete an approval round-trip. All three with 
 fragility → one active REPL per harness the project uses. Otherwise headless per call.
 About two hours; its result shapes one adapter; nothing else waits on it.
 
+**That outcome rule is SUPERSEDED and no longer governs** (see the box at the top of this
+section, and `SPEC.md`'s Decisions Log 2026-09-12). It never arbitrated: its `→ persistent`
+branch existed to capture a cost saving, and the spike measured that the saving does not
+exist — the prompt cache is server-side and keyed on the thread prefix, so a one-shot
+resumed turn is no more expensive than a live one. All three tests did pass, so read
+top-down this rule points at persistence; the decision is headless. The rule was correct
+given what was believed, and a measurement is what retired it, not a change of mind.
+
 ### 3.4 Owner questions flow from exactly one place
 
 The orchestrator, in chat. A subagent returns its need; the REPL asks the owner in the
