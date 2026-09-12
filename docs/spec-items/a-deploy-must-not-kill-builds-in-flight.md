@@ -119,6 +119,21 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE COMBINER MERGED TWO QUESTIONS ON ONE LATTICE, and stranded a run through the merge rather
+  than the record. `dead`, `killed-by-gateway-shutdown` and `dead-cause-undetermined` all answer
+  YES to "is it dead?" and differ only on WHY; the combiner treated only the first two as
+  unanimous death, so two homes BOTH positively establishing death fell through to `unknown`, the
+  tick ignored it and the run hung to timeout. Split into two lattices — liveness (any set drawn
+  from the three dead verdicts is death; a single `alive` forbids reaping) and attribution (an
+  explicit table where an attribution survives only if nothing contradicts it: a non-observation
+  never overrides an observation; `dead` + `killed` is a real conflict, reported as disputed and
+  logged rather than resolved by preferring an arm). That last row was decided only after
+  establishing that plain `dead` is positive in both provenances and never arises from a failed
+  look (`pool.ts:931` precedes `pool.ts:961`, so the pool branch answers for a session that has
+  not been through a shutdown; the registry branch answers only when a look found no entry). A
+  merge function is not a reader of one entry but of two verdicts, which is why it sat outside
+  the call-site audit — so each function now records WHICH QUESTION IT ASKS, and the matrix is
+  the full cross-product rather than the rows that happened to be written.
 - AUDITING FIELDS WAS THE WRONG DENOMINATOR — the readers are. Making the record three-valued
   fixed the writers and left `probeLauncherGenerationAlive`'s CURRENT-row branch asking only
   whether some entry carried a timestamp, so `already-gone` and `could-not-sample` both answered

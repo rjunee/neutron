@@ -412,6 +412,75 @@ attributed/reported conflation in one pass instead of three rounds.
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
 
+### Which question is this function asking?
+
+That sentence is the one that would have caught the last three findings in one go, so it is
+the heading rather than a footnote. Every function touching the shutdown record is listed with
+the question it asks, because the bug each time was a function answering a three-valued
+question with a two-valued mechanism — or a two-valued one being widened for no reason.
+
+| function | its question | valued |
+|---|---|---|
+| `observationOf` | what did the shutdown observe here? | 3 |
+| `wasKilledByGatewayShutdown` | did WE kill this child? | 2 (a yes/no about one observation) |
+| `gatewayShutdownKillEntryFor` | where is the entry for this generation? | lookup, not a classification |
+| `recordGatewayShutdownOutcome` idempotence | does an entry already exist? | **2, and correctly so** |
+| `recordGatewayShutdownOutcome` read-back | did my write land? | **2, and correctly so** |
+| `probeReplLiveness` | what should the detector be told? | 3 (passes the observation through) |
+| `detectReplWedged` | which dead-child verdict? | 3 |
+| `probeLauncherGenerationAlive` current row | is it dead, and why? | 3 |
+| `probeLauncherGenerationAlive` historical | is it dead, and why? | 3 |
+| `allDead` (the combiner) | **is it dead?** — liveness ALONE | 2 over a 3-member set |
+| `mergeAttribution` (the combiner) | **why did it die?** | 3, plus a disputed row |
+
+The last two are the round-10 finding. A merge function is not a reader of one entry — it is a
+reader of two verdicts — so it sat outside a call-site audit of entry readers, which is how a
+value added to the vocabulary, the writers and the readers missed the COMBINER, a fourth place
+after the entry encoding, `WedgeReason` and `LauncherLiveness`.
+
+### The combiner merged two questions on one lattice
+
+`dead`, `killed-by-gateway-shutdown` and `dead-cause-undetermined` all answer **yes** to "is it
+dead?" and differ only on **why**. The combiner treated only `{dead, killed-by-gateway-shutdown}`
+as unanimous death, so a `dead` + `dead-cause-undetermined` pair — two homes BOTH positively
+establishing death — fell through to `unknown`, the tick ignored it, and the run hung until the
+later timeout. The stranding this item exists to remove, arriving through the merge instead of
+the record.
+
+Split into two lattices, resolved in order, neither reachable only by fallthrough:
+
+**Liveness.** Any set drawn entirely from the three dead verdicts is unanimous death. Every
+answer `alive` is alive. Mixed is `unknown` — a live process anywhere forbids reaping. So
+`unknown` now means "a home could not tell whether it is alive", never "the homes disagreed
+about why it died".
+
+**Attribution**, an explicit table where an attribution survives only if nothing contradicts it:
+
+- `killed` + `undetermined` → **killed**. A NON-OBSERVATION NEVER OVERRIDES AN OBSERVATION —
+  the same rule that made the shutdown persist what it observed rather than infer it.
+- `dead` + `undetermined` → **undetermined**: the claim both homes support. Plain `dead` would
+  have the tick compose a crash sentence that one home has evidence against.
+- `dead` + `killed` → **disputed**, reported as `dead-cause-undetermined` and logged loudly.
+
+**That last row required checking what plain `dead` asserts, before deciding.** It is positive in
+both provenances and never arises from a failed look: the pool branch answers it for a session
+that by construction has not been through a shutdown (`pool.ts:931` deletes the pool entry
+before the record is written at `pool.ts:961`), and the registry branch answers it only when a
+look for an entry naming this generation found none. So it is a real conflict between two
+positive attributions, not `dead-cause-undetermined` wearing the wrong name — and it is not
+resolved by preferring an arm, which is what an earlier revision did. A disputed cause IS an
+unestablished one, so the existing third value carries it and no fifth value is invented.
+
+A generation lives in one instance's registry (per-spawn UUID), so the disputed row is
+unreachable by construction today. It is resolved rather than asserted away, because an
+unreachability argument is not a reason to let a conflict launder itself into a confident
+sentence if the arrangement changes.
+
+**The matrix is now the cross-product**, not the rows that happened to be written: all fifteen
+unordered pairs over the five verdicts plus the singletons, both orderings asserted, and the
+test fails if a pair has no declared expectation or if a declared row is unreachable. Each new
+rule is mutation-checked on its own.
+
 ### Auditing fields was the wrong denominator; the readers are
 
 The three-valued record fixed the writers and left a reader keyed on the old
@@ -501,7 +570,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-53 mutations applied one at a time, each reverted after: **53 red, 0 survivors.** Every
+57 mutations applied one at a time, each reverted after: **57 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
