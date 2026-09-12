@@ -33,40 +33,45 @@
 export const DEFAULT_MAX_RALPH_ROUNDS = 20 as const
 
 /**
- * The re-fire counter a resumed row may carry, or 0 when there is nothing to carry.
+ * Is `v` a value this repo can use as a Ralph re-fire COUNTER?
  *
- * THE CAP IS DELIBERATELY NOT CONSULTED, and an earlier revision of this file got
- * that exactly backwards (cross-model review, BLOCKER 1). It required
- * `round < max` — "the round must leave a re-fire" — on the theory that a row born
- * at its cap is dead on arrival. Trace the fallback: refusing the carry does not
- * refuse the dispatch, it produces a FRESH row at `ralph_round: 0`, and
- * `refireNextRalphTask` (orchestrator.ts) then asks `0 + 1 > max_ralph_rounds`,
- * which is false — so re-dispatching a card AT its cap restored the WHOLE budget
- * and the nineteen iterations after it. The conjunct meant to bound the loop was
- * the one thing unbounding it.
+ * THE SAME DOMAIN AS {@link isRalphCap}, AND THE SYMMETRY IS THE POINT (cross-model
+ * review, final round — the FOURTH defect of one shape in this lane). The cap got a
+ * careful three-way classification while the counter quietly normalised every value it
+ * did not understand to `0`. So a governed prior at `{ ralph_round: NaN,
+ * max_ralph_rounds: 20 }` produced `{ 0, 20 }`, and `computeTransition` then authorised
+ * the next transition because `0 + 1 > 20` is false: the budget reset, restored for
+ * malformed persisted data, in the field next to the one that had just been fixed.
  *
- * SO EXHAUSTED STAYS EXHAUSTED. A round at or past the cap is carried verbatim and
- * the cap bites on the row that inherits it: `computeTransition` (state-machine.ts,
- * the single site the counter advances) and `refireNextRalphTask` both refuse at
- * `ralph_round + 1 > max_ralph_rounds`, loudly, naming `max_ralph_rounds` in the
- * failure reason. Nothing is bricked by that: a salvage-seeded row resumes to a
- * REVIEW (`fix-round-N`, `outer-published:*`), and `refireNextRalphTask` is reached
- * only from `applyResult`'s `publish_requested && run.ralph && remaining_tasks > 0`
- * arm — so the resumed run can still review, fix and merge the commit it adopted.
- * What it may not do is open a NEW planning iteration on a budget that is spent,
- * which is the whole point of having a budget.
- *
- * FAIL-CLOSED ON EVERY SHAPE IT CANNOT READ. `undefined`, `null`, a string, a
- * float, a negative, `NaN`, `Infinity` and anything past 2^53 answer 0 rather than
- * being coerced — the counter reaches this function from a stored INTEGER column
- * and from caller-supplied options, and `Number.isSafeInteger` is the only test
- * that rejects all of them. `round < 1` answers 0 too: zero is "nothing to carry",
- * which is the fresh-row value, and a negative is a garbled row. 0 always means
- * "take the fresh budget", never "fail the dispatch" — a build must not be lost to
- * an unreadable counter.
+ * A safe integer >= 0. Zero is VALID and means "nothing spent" — the fresh-row value.
+ * Negative, fractional, `NaN`, `±Infinity`, past 2^53 and non-numbers are INVALID
+ * rather than "unset", and callers must refuse them instead of substituting, because
+ * every substitution available is more permissive than the truth.
  */
-export function carryableRalphRound(round: unknown): number {
-  return Number.isSafeInteger(round) && (round as number) >= 1 ? (round as number) : 0
+export function isRalphRound(v: unknown): boolean {
+  return Number.isSafeInteger(v) && (v as number) >= 0
+}
+
+/**
+ * The re-fire counter a caller's INPUT may be normalised to — `0` when genuinely
+ * absent, the value when readable, and `null` when present but unreadable.
+ *
+ * THREE ANSWERS, NOT TWO, for the reason {@link carriedRalphCap} has three: absent and
+ * invalid are different facts and collapsing them is what produced defect four. Absent
+ * (`undefined`/`null`) is a caller that named no counter, and `0` is the right answer
+ * for it — it is what `create` has always written for a fresh row. A PRESENT value that
+ * is not a counter is refused by returning `null`, so the write site can name it rather
+ * than quietly charge the card nothing.
+ *
+ * NOTE THAT `null` HERE IS THE STRICT ANSWER, not the permissive one — the opposite of
+ * `carriedRalphCap`'s `null`. For a CAP, carrying nothing leaves the dispatch's own cap
+ * in place, so `null` costs nothing. For a COUNTER there is no such fallback: carrying
+ * nothing IS the reset. That asymmetry is why callers must treat a `null` round as a
+ * REFUSAL and never as "carry zero".
+ */
+export function carryableRalphRound(round: unknown): number | null {
+  if (round === undefined || round === null) return 0
+  return isRalphRound(round) ? (round as number) : null
 }
 
 /**

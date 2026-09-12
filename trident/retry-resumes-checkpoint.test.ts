@@ -48,12 +48,13 @@ import {
 import {
   TridentRunStore,
   TridentInvalidRalphCapError,
+  TridentInvalidRalphRoundError,
   TridentUnboundedCarriedRoundError,
   TridentUngovernedRalphRoundError,
   type MergeMode,
   type TridentRun,
 } from './store.ts'
-import { carriedRalphCap, DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
+import { carriedRalphCap, carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 import { computeTransition } from './state-machine.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -645,6 +646,234 @@ describe('THE CAP TRAVELS WITH THE ROUND — a re-dispatch may tighten the budge
   })
 })
 
+describe('AN EDGE-VALUE ROUND IS NOT AN UNSET ROUND — the counter, as a peer of the cap', () => {
+  /**
+   * THE FOURTH DEFECT OF ONE SHAPE IN THIS LANE, and the one that says the audit was
+   * aimed too narrowly: the CAP got a three-way classification while the COUNTER beside
+   * it still normalised anything it did not understand to `0`. Measured: a governed prior
+   * at `{ ralph_round: NaN, max_ralph_rounds: 20 }` produced `{ 0, 20 }`, and
+   * `computeTransition` authorised the next transition because `0 + 1 > 20` is false —
+   * the budget reset, restored for malformed persisted data.
+   *
+   * The counter's `null` is the STRICT answer, not the permissive one, and that is the
+   * asymmetry with the cap. For a cap, carrying nothing leaves the dispatch's own cap in
+   * place and costs nothing. For a counter there is no such fallback: carrying nothing IS
+   * the reset. So an unreadable counter REFUSES the dispatch.
+   */
+  test('UNIT: every edge value on the counter, with absent and zero as the controls', () => {
+    // RED-mutation: restore `… ? round : 0` and the null rows below come back 0.
+    // PRESENT AND READABLE is honoured, zero included.
+    expect(carryableRalphRound(0)).toBe(0)
+    expect(carryableRalphRound(1)).toBe(1)
+    expect(carryableRalphRound(19)).toBe(19)
+    // ABSENT is absent — the only case that answers 0 without being 0.
+    expect(carryableRalphRound(undefined)).toBe(0)
+    expect(carryableRalphRound(null)).toBe(0)
+    // PRESENT BUT UNREADABLE answers null, which callers must treat as a refusal.
+    for (const bad of [-1, -20, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53, 2 ** 53 + 2, '4', {}, true]) {
+      expect({ bad, round: carryableRalphRound(bad) }).toEqual({ bad, round: null })
+    }
+  })
+
+  /**
+   * WHICH CORRUPT VALUES CAN ACTUALLY BE PERSISTED — measured against bun:sqlite rather
+   * than assumed, because it decides what the dispatch-level tests can even express.
+   * `code_trident_runs` is STRICT with both columns `INTEGER NOT NULL`, so:
+   *
+   *   -1, -20              → stored verbatim (a real, reachable corruption)
+   *   2**53 and beyond     → stored verbatim; read back as an UNSAFE integer
+   *   2.5, ±Infinity       → REJECTED by sqlite ("cannot store REAL value in INTEGER")
+   *   NaN                  → REJECTED by sqlite (binds as NULL → NOT NULL constraint)
+   *
+   * So the schema itself already blocks three of the shapes, and the persisted surface is
+   * negatives and unsafe magnitudes. That is why the dispatch-level cases below use those
+   * two, while `NaN`/`±Infinity`/fractional are covered at the unit and `create` levels,
+   * where a caller CAN supply them in-process (a `create` input, arithmetic on an absent
+   * field, a partially-built run object). Layered, not duplicated.
+   */
+  test('DISPATCH: a corrupt prior counter REFUSES the dispatch and writes no row', async () => {
+    // `unknown` authorises nothing. While the card's spend cannot be read, nothing can
+    // say whether its budget is exhausted, so nothing may authorise another iteration —
+    // and "carry nothing" would authorise all of it.
+    // RED-mutation: make `carriedRalphBudget` return `{ ok: true, budget: null }` for an
+    // unreadable counter and each dispatch below succeeds at `ralph_round: 0` with a full
+    // budget: defect four, exactly.
+    for (const bad of [-1, -20, 2 ** 53]) {
+      cardLink = null
+      const task = `corrupt round ${String(bad)} — rebuild the importer`
+      const prior = await priorRun({ task, ralph_round: 4 })
+      // Corrupt the persisted counter the way a bad writer would.
+      db.raw().run('UPDATE code_trident_runs SET ralph_round = ? WHERE id = ?', [bad, prior.id])
+      const before = store.listNonTerminalByRepo(tmp).length
+
+      const { result } = await dispatchRecording(async () => HEAD, { task })
+
+      expect({ bad, ok: result.ok }).toEqual({ bad, ok: false })
+      if (result.ok) return
+      expect({ bad, code: result.code }).toEqual({ bad, code: 'backend_error' })
+      // The message names the run and the column, so the repair is a one-line UPDATE.
+      expect(result.message).toContain('ralph_round')
+      expect(result.message).toContain(prior.id)
+      // NOTHING was created — not a fresh row, and certainly not one with a full budget.
+      expect(store.listNonTerminalByRepo(tmp).length).toBe(before)
+    }
+  })
+
+  test('DISPATCH: NaN, ±Infinity and a fractional counter refuse through the REAL dispatch path', async () => {
+    // The gate asked for all five shapes through the REDISPATCH path, not only at the
+    // store. Three of them cannot be PERSISTED (the measurement above: sqlite's STRICT
+    // INTEGER NOT NULL rejects them), so the row is supplied to the real
+    // `dispatchBoardBoundBuild` through a store whose `latestTerminalBySlug` is
+    // overridden — every other decision, including the refusal, is the production code.
+    // Pretending sqlite could store them would be a worse test than this one.
+    // RED-mutation: restore `carryableRalphRound`'s `… ? round : 0` and each of these
+    // dispatches succeeds at `ralph_round: 0` with a full budget.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2.5, -0.5]) {
+      cardLink = null
+      const task = `in-memory corrupt ${String(bad)} — rebuild the importer`
+      const prior = await priorRun({ task, ralph_round: 4 })
+      const corrupting = Object.create(store) as TridentRunStore
+      const real = store.latestTerminalBySlug.bind(store)
+      ;(corrupting as unknown as Record<string, unknown>)['latestTerminalBySlug'] = (
+        project: string,
+        slug: string,
+      ) => {
+        const row = real(project, slug)
+        return row === null ? null : { ...row, ralph_round: bad as unknown as number }
+      }
+
+      // `log.warn` routes to console.WARN, not console.log — the refusal is a warning,
+      // like the branch-liveness one. Capturing only console.log made this assertion
+      // vacuous on the first attempt, which is the same trap as a test that reacts to
+      // its subject rather than its claim.
+      const lines: string[] = []
+      const originalLog = console.log
+      const originalWarn = console.warn
+      const capture = (...args: unknown[]): void => {
+        lines.push(args.map((a) => String(a)).join(' '))
+      }
+      console.log = capture
+      console.warn = capture
+      let result
+      try {
+        result = await dispatchBoardBoundBuild(
+          { task, board_item_id: 'ready' },
+          deps({ store: corrupting, readBranchTip: async () => HEAD }),
+        )
+      } finally {
+        console.log = originalLog
+        console.warn = originalWarn
+      }
+
+      expect({ bad, ok: result.ok }).toEqual({ bad, ok: false })
+      if (result.ok) return
+      expect({ bad, code: result.code }).toEqual({ bad, code: 'backend_error' })
+      expect(result.message).toContain('ralph_round')
+      expect(result.message).toContain(prior.id)
+      // The refusal is not silent either — same discipline as the branch-liveness gate.
+      expect(lines.some((l) => l.includes('event=dispatch_budget_unreadable'))).toBe(true)
+    }
+
+    // THE ADJACENT HONOURED VALUE, through the identical seam: a readable counter of 4
+    // dispatches. Without this the loop above is satisfied by a store proxy that breaks
+    // every dispatch, or by a refusal that fires on anything at all.
+    cardLink = null
+    const okTask = 'in-memory readable counter — rebuild the importer'
+    await priorRun({ task: okTask, ralph_round: 4 })
+    const passthrough = Object.create(store) as TridentRunStore
+    const control = await dispatchBoardBoundBuild(
+      { task: okTask, board_item_id: 'ready' },
+      deps({ store: passthrough, readBranchTip: async () => HEAD }),
+    )
+    expect(control.ok).toBe(true)
+    if (!control.ok) return
+    expect(control.run.ralph_round).toBe(4)
+  })
+
+  test('DISPATCH: a corrupt prior CAP refuses too — the pair is refused as a pair', async () => {
+    // The cap half of the same rule. An unreadable cap cannot degrade to "carry nothing"
+    // either, because that discards a spend that may already be exhausted.
+    // RED-mutation: drop the `isRalphCap(run.max_ralph_rounds)` arm and this dispatch
+    // succeeds with a fresh budget.
+    const task = 'corrupt cap card — rebuild the importer'
+    const prior = await priorRun({ task, ralph_round: 12 })
+    db.raw().run('UPDATE code_trident_runs SET max_ralph_rounds = ? WHERE id = ?', [-4, prior.id])
+
+    const { result } = await dispatchRecording(async () => HEAD, { task })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('backend_error')
+    expect(result.message).toContain('max_ralph_rounds')
+  })
+
+  test('DISPATCH: the ADJACENT SAFE value is honoured — the guard is not "refuse anything large"', async () => {
+    // "WHAT INPUT WOULD A WRONG IMPLEMENTATION GET RIGHT?" A test that feeds `2**53` and
+    // asserts a refusal is satisfied by a function that refuses everything, so the
+    // refusal is paired with the value one step below it, which MUST still be honoured.
+    // `Number.MAX_SAFE_INTEGER` is `2**53 - 1`: the largest counter this repo can read.
+    // RED-mutation: widen the refusal to `>= 2**53 - 1` (an off-by-one on the boundary)
+    // and this legitimate dispatch is refused as corrupt.
+    const task = 'max safe counter card — rebuild the importer'
+    const prior = await priorRun({ task, ralph_round: 4, max_ralph_rounds: 20 })
+    db.raw().run('UPDATE code_trident_runs SET ralph_round = ? WHERE id = ?', [
+      Number.MAX_SAFE_INTEGER,
+      prior.id,
+    ])
+    // Precondition, measured rather than assumed: sqlite really did store it, and it
+    // really is the value on the readable side of the boundary.
+    expect(store.get(prior.id)!.ralph_round).toBe(Number.MAX_SAFE_INTEGER)
+    expect(Number.isSafeInteger(Number.MAX_SAFE_INTEGER)).toBe(true)
+    expect(Number.isSafeInteger(2 ** 53)).toBe(false)
+
+    const { result } = await dispatchRecording(async () => HEAD, { task })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.ralph_round).toBe(Number.MAX_SAFE_INTEGER)
+    // …and the cap still tightens to the prior row's, so the card is exhausted rather
+    // than authorised — the counter being readable does not make it spendable.
+    expect(result.run.max_ralph_rounds).toBe(20)
+    expect(computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {}).phase).toBe(
+      'failed',
+    )
+  })
+
+  test('THE DEFAULT CAP IS PINNED TO ITS LITERAL, not merely to its own name', () => {
+    // #575's lesson, one dimension over: an assertion written against a CONSTANT is blind
+    // to the constant moving. Every `expect(cap).toBe(DEFAULT_MAX_RALPH_ROUNDS)` in this
+    // file keeps passing if someone changes 20 to 200, which would silently multiply
+    // every card's budget tenfold — the exact class of change this PR exists to prevent.
+    // So the literal is pinned ONCE, here, and the symbolic assertions elsewhere then
+    // mean what they say.
+    // RED-mutation: change `DEFAULT_MAX_RALPH_ROUNDS` in ralph-budget.ts and only this
+    // test reds — which is the point: the change becomes a deliberate diff, not a silent one.
+    expect(DEFAULT_MAX_RALPH_ROUNDS).toBe(20)
+    // And the arithmetic the cap participates in, against literals on both sides of the
+    // bound rather than against the constant.
+    expect(carriedRalphCap(30, undefined)).toBe(20)
+    expect(carriedRalphCap(19, undefined)).toBe(19)
+  })
+
+  test('DISPATCH: a prior counter of ZERO is not corrupt — it dispatches and carries zero', async () => {
+    // THE CONTROL, and the reason the two refusals above are not just "refuse on
+    // anything unusual": zero is the fresh-row value and a perfectly ordinary counter.
+    // RED-mutation: widen the counter domain to `>= 1` (the cap's original mistake) and
+    // this legitimate dispatch is refused as corrupt.
+    const task = 'zero counter card — rebuild the importer'
+    await priorRun({ task, ralph_round: 0, max_ralph_rounds: 20 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { task })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 0,
+      cap: 20,
+    })
+  })
+})
+
 describe('AN EDGE-VALUE CAP IS NOT AN UNSET CAP', () => {
   /**
    * THE THIRD BOUNDARY DEFECT IN THIS LANE IN THE SAME SHAPE — after the at-cap reset
@@ -757,6 +986,26 @@ describe('AN EDGE-VALUE CAP IS NOT AN UNSET CAP', () => {
       slug: 'cap-absent', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
     })
     expect(absent.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+  })
+
+  test('NULL is ABSENT at the write site too — the producer and the store agree on it', async () => {
+    // THE DIVERGENCE (adversarial review, item 4). `carriedRalphCap` treats `null` as
+    // ABSENT while `create` treated it as INVALID, so one value meant two different things
+    // in the two copies of a rule that `ralph-budget.ts`'s own docblock says the file
+    // exists to keep identical — and `main` accepted a null cap, so this was also a
+    // regression. The reachable path is a hold payload (`dispatch-holds.ts`
+    // `parseJsonObject`, no field validation) forwarded on `!== undefined` and past a `??`
+    // that does not filter null, ending in an HTTP 500 with the card not queued.
+    // RED-mutation: `!== undefined` instead of `!= null` in `create` and this throws.
+    const nulled = await store.create({
+      slug: 'cap-null', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
+      max_ralph_rounds: null as unknown as number,
+    })
+    expect(nulled.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    // BOTH COPIES, read against each other rather than each against itself — which is the
+    // only way a divergence between them is observable.
+    expect(carriedRalphCap(30, null)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(carriedRalphCap(30, undefined)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
   })
 })
 
@@ -918,13 +1167,16 @@ describe('LOCAL merge-mode over a REAL git repo, with the REAL branch-tip reader
 
 describe('THE LIMIT — what this change does NOT close, pinned so it cannot be forgotten', () => {
   test('a card with NO board link gets a fresh budget, however much it has spent', async () => {
-    // THE HONEST BOUND ON EVERY CLAIM IN THIS FILE. The spend is inherited through the
-    // card's `linked_run_id`, so anything that dispatches without one starts at zero:
-    // `onboarding/overnight/register.ts` creates governed runs with no card at all, and
-    // an owner who re-cuts a card (new title → new slug → no prior) gets a fresh budget
-    // on purpose. The row is recreated by every dispatch, so a per-row counter is one
-    // reset away by construction; holding the spend on the CARD is the durable fix and
-    // is a separate change.
+    // THE HONEST BOUND ON EVERY CLAIM IN THIS FILE, and the cheapest way to reach it is
+    // ONE CLICK — not a re-cut card, which two earlier drafts of this comment claimed.
+    // `work-board/store.ts` NULLs `linked_run_id` when a card leaves the `failed` lane
+    // (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) and again on
+    // `done → upcoming`. So the same card, same slug, same title, same branch, nothing
+    // re-cut, comes back to a full fresh budget. `onboarding/overnight/register.ts`
+    // (governed runs, no card) and a genuinely re-cut card are the OTHER two doors, and
+    // both need the slug lost — describing only those made the limit sound far narrower
+    // than it is. The row is recreated by every dispatch and the link is one click from
+    // gone, so a per-row counter is one reset away by construction; #629 holds the fix.
     // RED-mutation: let an absent link fall back to the task text and this row inherits
     // a budget the board cannot show anyone.
     await priorRun({ ralph_round: 12 })
@@ -938,6 +1190,41 @@ describe('THE LIMIT — what this change does NOT close, pinned so it cannot be 
     expect(result.run.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
     expect(seedLine).toContain('reason=card_names_no_run')
     expect(seedLine).toContain('budget_carried=false')
+  })
+
+  test('a NON-GOVERNED run in between LAUNDERS the whole spend', async () => {
+    // A SECOND DOOR, and it is not the "gap in the chain" #629 already names: the
+    // intervening row is PRESENT, terminal and perfectly readable — it is simply not
+    // governed, so `carriedRalphBudget` answers null on `run.ralph !== true` and the
+    // spend is gone. Measured: a card at 20/20, one dispatch with ralph off (born at 0,
+    // non-governed), that row dies, `latestTerminalBySlug` returns IT, and the next
+    // governed dispatch starts at 0/20.
+    // RED-mutation: none needed to make this fail — it asserts the CURRENT limit. It
+    // reds if someone accumulates the spend over the card's history instead of reading
+    // one prior row, which is exactly what #629 asks for; at that point this test should
+    // be inverted deliberately rather than deleted in passing.
+    const task = 'laundered budget card — rebuild the importer'
+    const spent = await priorRun({ task, ralph_round: 20, max_ralph_rounds: 20 })
+    expect(spent.ralph_round).toBe(20)
+
+    // One non-governed dispatch of the same card, which becomes the latest terminal row.
+    const plain = await dispatchRecording(async () => HEAD, { task, resolveRalph: async () => false })
+    expect(plain.result.ok).toBe(true)
+    if (!plain.result.ok) return
+    expect(plain.result.run.ralph).toBe(false)
+    expect(plain.result.run.ralph_round).toBe(0)
+    await store.update(plain.result.run.id, { phase: 'failed', inner_verdict: 'REVIEW_NOT_RUN' })
+    cardLink = plain.result.run.id
+
+    // …and the next GOVERNED dispatch inherits nothing at all.
+    const governed = await dispatchRecording(async () => HEAD, { task })
+    expect(governed.result.ok).toBe(true)
+    if (!governed.result.ok) return
+    expect({ round: governed.result.run.ralph_round, cap: governed.result.run.max_ralph_rounds }).toEqual({
+      round: 0,
+      cap: 20,
+    })
+    expect(governed.seedLine).toContain('budget_carried=false')
   })
 
   test('an EXHAUSTED ralph run does keep its spend through the board link — the P1 row, measured', async () => {
@@ -970,6 +1257,169 @@ describe('THE LIMIT — what this change does NOT close, pinned so it cannot be 
     const next = computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {})
     expect(next.phase).toBe('failed')
     expect(next.failure_reason).toContain('max_ralph_rounds')
+  })
+})
+
+describe('THE SEED LINE REPORTS THE ROW, not what the dispatch intended', () => {
+  /**
+   * THE DEFECT THIS CLOSES IS THE DOMINANT ONE OF THE WHOLE BUILD PHASE, in its purest
+   * form (adversarial review, item 5). The claim in the PR body was "the line now states
+   * what was WRITTEN, not what was intended". C7 pinned the line's POSITION — that it is
+   * emitted after the row exists — and nothing pinned the SOURCE of its values, so three
+   * mutations survived the entire suite: `checkpoint: seed?.inner_checkpoint ?? null`,
+   * `ralph_round: budget?.ralph_round ?? 0`, `max_ralph_rounds: budget?.max_ralph_rounds ?? 0`.
+   *
+   * A test that reacts to its subject while the claim is about something else is worth
+   * less than no test, because it is read as coverage. These pin the values against
+   * `store.get(run.id)` in the cases where the row and the intent DISAGREE — which is the
+   * only place the distinction is observable.
+   */
+  test('when budget is NOT carried, the line still reports the ROW\'s cap — not 0', async () => {
+    // THE CASE THAT CAUGHT THE MUTANT. `card_names_no_run` carries no budget, so
+    // `budget?.max_ralph_rounds ?? 0` logs 0 while the ROW is at the configured cap. Read
+    // the two against each other and the mutant cannot hide.
+    // RED-mutation: `max_ralph_rounds: budget?.max_ralph_rounds ?? 0` — logs 0, row is 20.
+    await priorRun({ ralph_round: 12 })
+    cardLink = null
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const row = store.get(result.run.id)!
+    expect(row.max_ralph_rounds).toBe(20)
+    expect(seedLine).toContain(`max_ralph_rounds=${row.max_ralph_rounds}`)
+    expect(seedLine).toContain(`ralph_round=${row.ralph_round}`)
+    expect(seedLine).not.toContain('max_ralph_rounds=0')
+  })
+
+  test('when the COMMIT is refused, the line still reports the row\'s null checkpoint', async () => {
+    // `seed?.inner_checkpoint ?? null` is indistinguishable from the row here — `seed` is
+    // null and the row's checkpoint is null — so the discriminating case is the RESUMED
+    // one below. This half pins that a refused commit is reported as such alongside a
+    // CARRIED budget, which is the shape the two-gate split created and which no single
+    // field can describe.
+    await priorRun({ ralph_round: 4 })
+    const { result, seedLine } = await dispatchRecording(async () => MOVED)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const row = store.get(result.run.id)!
+    expect(row.inner_checkpoint).toBeNull()
+    expect(seedLine).toContain('checkpoint=null')
+    expect(seedLine).toContain(`ralph_round=${row.ralph_round}`)
+    expect(row.ralph_round).toBe(4)
+    expect(seedLine).toContain('budget_carried=true')
+  })
+
+  test('on a RESUME every logged field equals the stored row, field by field', async () => {
+    // The discriminating case for the checkpoint mutant: `seed.checkpoint` and
+    // `run.inner_checkpoint` agree here, so the pin is that BOTH are read off the row and
+    // that a reader can trust the line as a description of state. Paired with the two
+    // above — where they disagree — the three together say the line's source is the row.
+    // RED-mutation: `checkpoint: seed?.inner_checkpoint ?? null` — `seed` has no
+    // `inner_checkpoint` field at all, so the line logs `checkpoint=null` for a row that
+    // carries `fix-round-3`.
+    await priorRun({ ralph_round: 4, max_ralph_rounds: 20 })
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const row = store.get(result.run.id)!
+    expect(seedLine).toContain(`checkpoint=${row.inner_checkpoint}`)
+    expect(seedLine).toContain(`ralph_round=${row.ralph_round}`)
+    expect(seedLine).toContain(`max_ralph_rounds=${row.max_ralph_rounds}`)
+    expect(seedLine).toContain(`run=${row.id}`)
+    // …and the literals, so the assertions above cannot all pass on a row of zeroes.
+    expect({ cp: row.inner_checkpoint, round: row.ralph_round, cap: row.max_ralph_rounds }).toEqual({
+      cp: 'fix-round-3',
+      round: 4,
+      cap: 20,
+    })
+  })
+})
+
+describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
+  /**
+   * A consequence of inheriting a spend, and a real cost of it (adversarial review,
+   * item 3). A row can now reach the Ralph cap having run NO iteration of its own — the
+   * measured case: a prior at 20/20 whose spec doc was edited past the slug's 35th
+   * character produces a fresh `forge-init` row at 20/20 with no checkpoint, which fails
+   * at its first transition. "Ralph loop hit max_ralph_rounds (20) without converging" is
+   * false for that row: nothing was attempted, so nothing failed to converge, and it sends
+   * whoever reads it hunting a planner problem that does not exist.
+   */
+  test('a row that inherited a spent budget is not accused of failing to converge', async () => {
+    // RED-mutation: `const neverRan = false` in `enterRalphPlan` — the inherited row is
+    // blamed on the planner again.
+    const PREFIX = 'reason wording card for the governed importer'
+    const BEFORE = `${PREFIX} — first pass`
+    const AFTER = `${PREFIX} — second pass with the CSV note`
+    expect(slugifyTask(AFTER)).toBe(slugifyTask(BEFORE))
+    await priorRun({ task: BEFORE, ralph_round: 20, max_ralph_rounds: 20 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { task: AFTER })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const row = store.get(result.run.id)!
+    // The measured shape: a fresh build that inherited a spent budget.
+    expect({ cp: row.inner_checkpoint, round: row.ralph_round, cap: row.max_ralph_rounds }).toEqual({
+      cp: null,
+      round: 20,
+      cap: 20,
+    })
+
+    const t = computeTransition({ ...row, phase: 'ralph-task' }, {})
+    expect(t.phase).toBe('failed')
+    // The token every downstream reader keys on is still there…
+    expect(t.failure_reason).toContain('max_ralph_rounds')
+    // …and the explanation is now TRUE.
+    expect(t.failure_reason).toContain('inherited a spent budget')
+    expect(t.failure_reason).not.toContain('without converging')
+
+    // POSITIVE CONTROL — a run that DID build something and then exhausted the loop keeps
+    // the convergence wording, because for it that wording is accurate. Without this the
+    // assertion above is satisfied by deleting the phrase everywhere.
+    const ran = computeTransition(
+      { ...row, phase: 'ralph-task', inner_checkpoint: 'ralph-task-built' },
+      {},
+    )
+    expect(ran.phase).toBe('failed')
+    expect(ran.failure_reason).toContain('without converging')
+    expect(ran.failure_reason).not.toContain('inherited a spent budget')
+  })
+})
+
+describe('BOTH runs must be governed — both halves of the gate, pinned', () => {
+  test('a NON-governed PRIOR hands nothing to a governed dispatch', async () => {
+    // THE UNPINNED HALF (adversarial review, item 6). Dropping `run.ralph !== true` from
+    // `carriedRalphBudget` survived the whole suite, because every existing test exercised
+    // only the `opts.ralph` direction. A count of Ralph iterations on a non-Ralph row is
+    // not a Ralph spend — the counter is whatever happened to be in the column.
+    // RED-mutation: drop `run.ralph !== true` and this row inherits 9.
+    const task = 'non governed prior card — rebuild the importer'
+    const prior = await priorRun({ task, ralph: false, ralph_round: 0 })
+    // Give the non-governed row a counter, the way `update` still permits.
+    await store.update(prior.id, { ralph_round: 9 })
+    expect(store.get(prior.id)!.ralph).toBe(false)
+    expect(store.get(prior.id)!.ralph_round).toBe(9)
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD, { task })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.ralph).toBe(true) // the NEW row is governed
+    expect(result.run.ralph_round).toBe(0) // …and inherits nothing
+    expect(seedLine).toContain('budget_carried=false')
+    // POSITIVE CONTROL: the same shape with a GOVERNED prior carries 9.
+    cardLink = null
+    const okTask = 'governed prior control card — rebuild the importer'
+    const ok = await priorRun({ task: okTask, ralph: true, ralph_round: 9 })
+    expect(store.get(ok.id)!.ralph).toBe(true)
+    const carried = await dispatchRecording(async () => HEAD, { task: okTask })
+    expect(carried.result.ok).toBe(true)
+    if (!carried.result.ok) return
+    expect(carried.result.run.ralph_round).toBe(9)
   })
 })
 
@@ -1247,16 +1697,37 @@ describe('the write site refuses a carried round it should never have been offer
     expect(computeTransition({ ...underCap, phase: 'ralph-task' }, {}).phase).toBe('ralph-plan')
   })
 
-  test('a garbled round reads as 0 rather than failing the dispatch', async () => {
-    // The counter reaches `create` from a stored INTEGER column and from caller
-    // options. A non-integer is the fresh-budget case, not a reason to lose a build:
-    // failing the dispatch would convert a salvageable card into an HTTP 500.
-    for (const bad of [-3, 1.5, Number.NaN, '4', null, undefined]) {
-      const run = await store.create({
-        slug: `garbled-${String(bad)}`, project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
-        ralph_round: bad as unknown as number,
-      })
-      expect({ bad, round: run.ralph_round }).toEqual({ bad, round: 0 })
+  test('a garbled round is REFUSED, never normalised to 0', async () => {
+    // THE TEST THAT USED TO BLESS DEFECT FOUR. It asserted that every unreadable counter
+    // became `0` "rather than failing the dispatch" — and `0` is the most permissive
+    // answer available, because a row at `{ 0, 20 }` is authorised for the entire budget
+    // (`0 + 1 > 20` is false). So malformed persisted data restored exactly the budget
+    // this change exists to preserve, and a test called it correct.
+    //
+    // There is no normalisation of a counter that is not MORE permissive than the truth,
+    // so there is none. ABSENT still means 0 — a caller that named no counter is a fresh
+    // row — and zero itself is valid.
+    // RED-mutation: restore `carryableRalphRound` to `… ? round : 0` and every rejection
+    // below stops.
+    for (const bad of [-3, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53, '4', {}]) {
+      await expect(
+        store.create({
+          slug: `garbled-${String(bad)}`, project_slug: 'proj-1', repo_path: tmp, task: 'x',
+          ralph: true, max_ralph_rounds: 20, ralph_round: bad as unknown as number,
+        }),
+      ).rejects.toThrow(TridentInvalidRalphRoundError)
     }
+    // ABSENT is absent: no counter named → 0, exactly as before this existed.
+    const absent = await store.create({
+      slug: 'round-absent', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
+    })
+    expect(absent.ralph_round).toBe(0)
+    // …and an explicit ZERO is valid, not refused — the control that stops this test from
+    // passing by rejecting everything.
+    const zero = await store.create({
+      slug: 'round-zero', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 0, max_ralph_rounds: 20,
+    })
+    expect(zero.ralph_round).toBe(0)
   })
 })

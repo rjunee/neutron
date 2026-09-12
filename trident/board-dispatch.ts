@@ -41,11 +41,17 @@
  *
  * WHAT THAT DOES NOT DO, stated here because an earlier revision of this header
  * claimed it did: it does NOT make `max_ralph_rounds` a bound on the CARD. The spend
- * rides the card's `linked_run_id`, so any dispatch without one — `onboarding/
- * overnight/register.ts` creates governed runs with no card at all, and an owner who
- * re-cuts a card gets a new slug and no prior — starts at zero. The row is recreated
- * by every dispatch, so a per-row counter is one reset away by construction; holding
- * the spend on the CARD is the durable fix and is a separate change.
+ * rides the card's `linked_run_id`, and THE CHEAPEST WAY TO CLEAR THAT IS ONE CLICK —
+ * `work-board/store.ts` NULLs `linked_run_id` when a card leaves the `failed` lane
+ * (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) and again on
+ * `done → upcoming`. Measured: link cleared → `card_names_no_run` → a full fresh
+ * budget, on the same card, same slug, same title, same branch, with nothing re-cut.
+ * Two earlier drafts of this paragraph described the escapes as "no card at all"
+ * (`onboarding/overnight/register.ts`) or "a re-cut card", both of which require
+ * LOSING the slug; that made the limit sound far narrower than it is. The row is
+ * recreated by every dispatch and the link is one click from gone, so a per-row
+ * counter is one reset away by construction; holding the spend on the CARD is the
+ * durable fix and is a separate change (#629).
  *
  * Every other shape dispatches exactly as it did before, and now SAYS SO: one
  * `dispatch_resume_seed` line per dispatch that had a prior terminal run AND created
@@ -1175,7 +1181,7 @@ export async function dispatchBoardBoundBuild(
   // STRONG identity alone — see `carriedRalphBudget` (run-disposition.ts). Null for
   // every dispatch that has no governed prior to inherit from, which is the
   // pre-existing shape.
-  let budget: ReturnType<typeof carriedRalphBudget> = null
+  let budget: { ralph_round: number; max_ralph_rounds: number } | null = null
   const prior = deps.store.latestTerminalBySlug(deps.project_slug, slug)
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
   // DIFFERENT cards whose titles agree on their first 35 slugged characters share
@@ -1216,24 +1222,6 @@ export async function dispatchBoardBoundBuild(
   //
   // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
   // MEASURED defect (adversarial review, P2). It used to compare the task text
-  // before the link, and refuse with `prior_run_is_a_different_card`. But the ▶ task
-  // text is the card's design-doc BODY (`work-board-surface.ts`), and `slugifyTask`
-  // truncates at 35 characters — so an owner clarifying that doc between two presses
-  // keeps the same slug, the same branch and the same card, while the full text
-  // differs. Measured: a prior at `ralph_round 12` on `fix-round-3`, tip unmoved,
-  // `linked_run_id` naming it, came back `prior_run_is_a_different_card` with a fresh
-  // budget — the same lane, the same card, and a diagnosis that was simply false.
-  // Clarifying a spec doc between two presses is the most likely thing an owner does.
-  //
-  // So the link decides identity and the text decides only whether the COMMIT may be
-  // adopted. The asymmetry is not a compromise, it is the hazard model: adopting the
-  // wrong card's unreviewed commit sends code to review under another card's title,
-  // whereas the budget carry is MONOTONE (`min`) and can only tighten a bound. A
-  // wrong budget carry under-authorises; a wrong commit carry authorises. This repo
-  // takes the under-authorising side.
-  //
-  // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
-  // MEASURED defect (adversarial review, P2). It used to compare the task text
   // BEFORE the link and refuse with `prior_run_is_a_different_card`. But the ▶ task
   // text is the card's design-doc BODY (`work-board-surface.ts`) and `slugifyTask`
   // truncates at 35 characters — so an owner clarifying that doc between two presses
@@ -1262,10 +1250,45 @@ export async function dispatchBoardBoundBuild(
     // the carried cap — never as a gate on the carried ROUND, which is the mistake an
     // earlier revision of this branch made: a refused carry is a fresh row at 0, i.e.
     // a budget RESET wearing a guard's clothes.
-    budget = carriedRalphBudget(prior, {
+    const read = carriedRalphBudget(prior, {
       ralph,
       ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
     })
+    // AN UNREADABLE PRIOR BUDGET REFUSES THE DISPATCH (final review round, defect four).
+    // It cannot degrade to "carry nothing": for a COUNTER that is the reset, and the
+    // reset is the whole defect this change exists to close. Both columns are
+    // `INTEGER NOT NULL DEFAULT`, so an unreadable value is CORRUPT state rather than a
+    // legacy shape — and while the card's spend is unknown, nothing can say whether its
+    // budget is exhausted, so nothing may authorise another iteration. `unknown`
+    // authorises nothing.
+    //
+    // `backend_error` rather than a new code, deliberately: corrupt persisted state IS a
+    // backend fault, it is the code this chokepoint already uses for "the substrate is
+    // wrong, not the request", and it needs no change in the HTTP surface that maps
+    // these codes. It creates no row and queues no hold — a hold would replay against
+    // the same corrupt row forever. The message names the run and the column so the
+    // repair is a one-line UPDATE.
+    if (!read.ok) {
+      log.warn('dispatch_budget_unreadable', {
+        project: deps.project_slug,
+        item: board_item_id,
+        prior_run_id: prior.id,
+        column: read.column,
+        value: typeof read.value === 'number' ? String(read.value) : JSON.stringify(read.value),
+      })
+      return {
+        ok: false,
+        code: 'backend_error',
+        message:
+          `Refused: this card's previous run ${prior.id.slice(0, 8)} carries an unreadable ` +
+          `${read.column} (${typeof read.value === 'number' ? String(read.value) : JSON.stringify(read.value)}), ` +
+          'so how much of its Ralph budget the card has spent cannot be established — and an unknown spend ' +
+          'authorises no further iteration. Both columns are INTEGER NOT NULL, so this row is corrupt rather ' +
+          `than legacy: repair code_trident_runs.${read.column} for run ${prior.id} and dispatch again. ` +
+          'Nothing was dispatched.',
+      }
+    }
+    budget = read.budget
     if (prior.task !== input.task) {
       // Only the COMMIT is refused, and the reason names which of the two facts
       // disagreed rather than claiming this is a different card.

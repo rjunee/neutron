@@ -86,19 +86,10 @@ export class TridentIncompleteSeedError extends Error {
  */
 export class TridentUnseededPinError extends Error {
   constructor(
-    column: 'inner_checkpoint_head' | 'base_sha' | 'inner_checkpoint_findings' | 'ralph_round',
+    column: 'inner_checkpoint_head' | 'base_sha' | 'inner_checkpoint_findings',
     value: string | null,
   ) {
-    super(
-      `refusing to create a trident run with no inner_checkpoint but ${column}=${value === null ? 'NULL' : `'${value}'`}: those columns are the salvage-resume seed and are meaningless without the checkpoint that names it — ` +
-        (column === 'ralph_round'
-          // THE TAIL IS THE COLUMN'S OWN CONSEQUENCE, not always base_sha's (#519).
-          // A carried re-fire counter on an unseeded row is not a mis-pinned base; it
-          // is a row that starts a FRESH build already partway through a Ralph budget
-          // it never spent, and whose plan-refresh cadence lands on the wrong iteration.
-          ? 'an unseeded row is a fresh build, and a fresh build has spent no Ralph iterations — carrying a count onto it charges the new build for work it did not do and shifts the periodic full re-plan onto the wrong iteration'
-          : 'an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value'),
-    )
+    super(`refusing to create a trident run with no inner_checkpoint but ${column}=${value === null ? 'NULL' : `'${value}'`}: those columns are the salvage-resume seed and are meaningless without the checkpoint that names it — an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value`)
     this.name = 'TridentUnseededPinError'
   }
 }
@@ -137,7 +128,17 @@ export class TridentUnboundedCarriedRoundError extends Error {
  * (`refireNextRalphTask` is never reached on a non-Ralph run) and it is READ by
  * `buildWorkflowArgs` regardless, so the workflow would be told an iteration number
  * for a loop that does not exist. `carriedRalphBudget` (run-disposition.ts) already
- * answers null for that shape; this is the same predicate at the write site.
+ * `carriedRalphBudget` (run-disposition.ts) already answers null for that shape; this is
+ * the same predicate at the write site.
+ *
+ * A CREATE-TIME RULE, NOT A TABLE INVARIANT, and the distinction is stated because an
+ * earlier draft implied the stronger one (adversarial review, item 6). `update` applies
+ * none of the three new predicates — `crash-recovery.test.ts` and `tick-liveness.test.ts`
+ * both write `ralph_round: 3` onto rows whose `ralph` defaulted to false — so a
+ * non-governed row CAN hold a counter if something patches one on. That is deliberate for
+ * now: `TridentRunUpdate` is the state machine's own seam and tightening it is a separate
+ * change with its own blast radius. What this class guarantees is that no DISPATCH can
+ * create such a row, which is the path #519 is about.
  */
 export class TridentUngovernedRalphRoundError extends Error {
   constructor(ralph_round: number) {
@@ -166,6 +167,29 @@ export class TridentInvalidRalphCapError extends Error {
   constructor(value: unknown) {
     super(`refusing to create a trident run with max_ralph_rounds=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Ralph cap must be a non-negative safe integer (0 is allowed and means "no iterations"). ABSENT gets the default; a value that is PRESENT but unreadable is refused rather than replaced, because every ralph_round + 1 > max_ralph_rounds comparison would otherwise be decided against an unchecked number — and NaN makes that comparison false forever, i.e. an unbounded loop from a config typo`)
     this.name = 'TridentInvalidRalphCapError'
+  }
+}
+
+/**
+ * A `ralph_round` that is present but is not a counter (#519, final review round —
+ * defect FOUR of one shape).
+ *
+ * `create` normalised any unreadable counter to `0`, which is the most permissive answer
+ * available: a row written `{ ralph_round: 0, max_ralph_rounds: 20 }` is authorised for
+ * the whole budget, because `0 + 1 > 20` is false. So malformed persisted data — or a
+ * caller passing `NaN` from arithmetic on an absent field — restored exactly the budget
+ * this change exists to preserve, in the field beside the cap that had just been given a
+ * three-way classification. A test asserted the coercion as correct.
+ *
+ * Zero is NOT invalid and is not refused: it is the fresh-row value and means "nothing
+ * spent". ABSENT still gets `0` for the same reason. Only a PRESENT-and-unreadable
+ * counter throws, because there is no substitution for it that is not a lie about how
+ * much the card has spent.
+ */
+export class TridentInvalidRalphRoundError extends Error {
+  constructor(value: unknown) {
+    super(`refusing to create a trident run with ralph_round=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Ralph counter must be a non-negative safe integer (0 is allowed and means "nothing spent"). ABSENT gets 0; a value that is PRESENT but unreadable is refused rather than normalised, because every normalisation available is MORE permissive than the truth — a counter quietly read as 0 authorises the card's entire max_ralph_rounds budget`)
+    this.name = 'TridentInvalidRalphRoundError'
   }
 }
 
@@ -655,16 +679,12 @@ export class TridentRunStore {
         throw new TridentUnseededPinError('inner_checkpoint_findings', input.inner_checkpoint_findings ?? null)
       }
     }
-    // THE CARRIED RE-FIRE COUNTER IS THE FOURTH SEED COLUMN (#519), and ONE thing
-    // makes it unwritable — checked here for exactly the reason the other three are:
-    // the safety of a seeded row must not rest on a predicate one function away.
-    //
-    //   AN UNSEEDED ROW MAY NOT CARRY ONE. A row with no `inner_checkpoint` is a
-    //   fresh build; it has spent no Ralph iterations, so a non-zero count charges
-    //   it for work it did not do and lands the periodic full re-plan
-    //   (`ralphRound % PLAN_REFRESH_EVERY`, inner-workflow.mjs) on the wrong
-    //   iteration. Refused with the same `TridentUnseededPinError` the other three
-    //   unseeded-pin shapes take.
+    // THE CARRIED RALPH BUDGET (#519) — checked here for exactly the reason the three
+    // seed columns are: the safety of a row must not rest on a predicate one function
+    // away. What makes it unwritable is enforced below rather than described here; an
+    // earlier revision of this comment asserted an unseeded-row rule that the code
+    // thirty lines down explicitly REMOVED, and the two contradicted each other in the
+    // same function (adversarial review, item 7).
     //
     // THE CAP IS NOT A PRECONDITION HERE, DELIBERATELY (cross-model review,
     // BLOCKER 1). An earlier revision threw when a carried round left no re-fire
@@ -689,11 +709,28 @@ export class TridentRunStore {
     // `ralph_round + 1 > max_ralph_rounds` comparison — and `NaN` makes that comparison
     // false forever, which is an unbounded Ralph loop produced by a config typo. Zero is
     // a VALID cap (no iterations) and passes through untouched.
-    if (input.max_ralph_rounds !== undefined && !isRalphCap(input.max_ralph_rounds)) {
+    // `!= null`, NOT `!== undefined` (adversarial review, item 4). `carriedRalphCap`
+    // treats `null` as ABSENT and this site treated it as INVALID, so the producer and the
+    // write site disagreed about one value — the exact divergence `ralph-budget.ts`'s
+    // docblock says that file exists to make impossible, shipped with the two copies
+    // diverged. `main` accepted a null cap; the reachable path is a hold payload
+    // (`dispatch-holds.ts` `parseJsonObject`, no field validation) forwarded on
+    // `!== undefined` and past a `??` that does not filter null, ending in an HTTP 500
+    // with the card not queued. Latent today because no production caller sets the dep.
+    if (input.max_ralph_rounds != null && !isRalphCap(input.max_ralph_rounds)) {
       throw new TridentInvalidRalphCapError(input.max_ralph_rounds)
     }
     const maxRalphRounds = input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
-    const carriedRalphRound = carryableRalphRound(input.ralph_round)
+    // ABSENT GETS 0; PRESENT-BUT-UNREADABLE IS REFUSED — the same three-way split the cap
+    // above takes, and for a sharper reason (final review round, defect four). A counter
+    // normalised to 0 does not merely lose information: it AUTHORISES the card's whole
+    // budget, because `0 + 1 > max_ralph_rounds` is false. There is no substitution that
+    // is not more permissive than the truth, so there is no substitution.
+    const carriedRalphRoundOrNull = carryableRalphRound(input.ralph_round)
+    if (carriedRalphRoundOrNull === null) {
+      throw new TridentInvalidRalphRoundError(input.ralph_round)
+    }
+    const carriedRalphRound = carriedRalphRoundOrNull
     if (carriedRalphRound > 0) {
       // GOVERNED, OR NOT AT ALL (adversarial review P3). The producer already answers
       // null for a non-Ralph row; this is that predicate at the write site, which is

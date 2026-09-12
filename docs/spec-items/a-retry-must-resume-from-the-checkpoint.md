@@ -75,9 +75,19 @@ only changes the cadence of a resumed run's LATER iterations, whose behaviour
 `trident/inner-workflow-plan-next.test.ts` already pins at rounds 1-4 versus 5 and 10.
 
 **3. `max_ralph_rounds` is still not a bound on the CARD, and this is the structural
-one.** The spend rides `linked_run_id`, so any dispatch without one starts at zero:
-`onboarding/overnight/register.ts` creates governed runs with no card, and an owner who
-re-cuts a card gets a new slug and no prior. The row is recreated by every dispatch, so
-a per-row counter is one reset away by construction. The durable fix is to hold the
-spend on the card, or to refuse/announce the dispatch when the card's budget is spent.
-Tracked as **rjunee/neutron#629**, with the measurement.
+one.** The spend rides `linked_run_id`, and **the cheapest way to clear that is one
+click**: `work-board/store.ts` NULLs `linked_run_id` when a card leaves the `failed`
+lane (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) and again on
+`done → upcoming`. Measured: link cleared → `card_names_no_run` → a full fresh budget,
+same card, same slug, same title, same branch, nothing re-cut. Two other doors need the
+slug lost (`onboarding/overnight/register.ts` creates governed runs with no card; a
+re-cut card gets a new slug), and an **intervening non-governed run** launders the spend
+outright — that row is present and readable, just not governed, so `carriedRalphBudget`
+answers null and the next governed dispatch starts at zero. Earlier drafts of this
+paragraph named only the two slug-losing doors, which made the limit sound far narrower
+than it is.
+
+The row is recreated by every dispatch and the link is one click from gone, so a per-row
+counter is one reset away by construction. The durable fix is to hold the spend on the
+card, or to refuse/announce the dispatch when the card's budget is spent. Tracked as
+**rjunee/neutron#629**, with the measurement.

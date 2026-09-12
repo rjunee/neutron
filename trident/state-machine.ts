@@ -213,11 +213,28 @@ function enterRalphPlan(
 ): { phase: TridentPhase; round: number; ralph_round: number; failure_reason: string | null; note: string } {
   const nextRalphRound = run.ralph_round + 1
   if (nextRalphRound > run.max_ralph_rounds) {
+    // WHY THE REASON IS TWO REASONS (#519, adversarial review item 3). Since a
+    // re-dispatch can INHERIT a card's spent Ralph budget, a row can reach this branch
+    // having run no iteration of its own — the measured case: a prior at 20/20 whose
+    // spec doc was edited past the slug's 35th character produces a fresh `forge-init`
+    // row at 20/20 with no checkpoint, which fails here. Calling that "without
+    // converging" is false: nothing was attempted, so nothing failed to converge, and it
+    // sends whoever reads the row hunting a planner problem that does not exist. A
+    // terminal reason that misdescribes what happened is worse than a vague one.
+    //
+    // `inner_checkpoint === null` is the fact that separates them, read off the row
+    // rather than inferred: every Ralph iteration writes a checkpoint, so a null one
+    // means this row never completed a phase. The `max_ralph_rounds` token is present in
+    // both spellings — `delivery.ts` and several tests key on it — so only the
+    // explanation changes, never the classification.
+    const neverRan = run.inner_checkpoint === null
     return {
       phase: 'failed',
       round: run.round,
       ralph_round: run.ralph_round,
-      failure_reason: `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`,
+      failure_reason: neverRan
+        ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) before this run built anything: it inherited a spent budget (${run.ralph_round} of ${run.max_ralph_rounds} already used by an earlier run of this card) and so had no iteration left to start. This is an exhausted CARD, not a planner that failed to converge`
+        : `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`,
       note: 'ralph loop → failed (max ralph rounds reached)',
     }
   }

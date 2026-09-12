@@ -57,7 +57,7 @@
  */
 
 import type { TridentRun } from './store.ts'
-import { carriedRalphCap, carryableRalphRound } from './ralph-budget.ts'
+import { carriedRalphCap, isRalphCap, isRalphRound } from './ralph-budget.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { OUTER_PUBLISHED_CHECKPOINT } from './checkpoint-round.ts'
@@ -251,17 +251,68 @@ export function terminalRunDisposition(
  * (task text) does not get to veto the strong identity (`linked_run_id`, which
  * `attachRun` alone writes) for a value that cannot authorise anything.
  *
- * FAIL-CLOSED ON ANY SHAPE IT CANNOT READ: `null` (carry nothing) rather than a
- * guess. See `carryableRalphRound` / `carriedRalphCap`.
+ * WHAT CARRYING AN AT-CAP ROUND COSTS, ON BOTH BRANCHES (adversarial review, item 3).
+ * An earlier version of this reasoning lived in `ralph-budget.ts` and claimed "nothing is
+ * bricked", justified by an argument that covers only one of the two branches this split
+ * created:
+ *
+ *   - ON THE SEEDED BRANCH nothing is lost. The row resumes to a REVIEW (`fix-round-N`,
+ *     `outer-published:*`) and `refireNextRalphTask` is reached only from `applyResult`'s
+ *     `publish_requested && run.ralph && remaining_tasks > 0` arm, so the run still
+ *     reviews, fixes and merges the commit it adopted. Only a NEW planning iteration is
+ *     refused, which is what a budget is for.
+ *   - ON THE TASK-TEXT-DIFFERS BRANCH THERE IS NO SEED. The row is a fresh `forge-init`
+ *     build that inherits a spent budget and dies at its first Ralph transition, having
+ *     paid for a forge bootstrap first. The policy is still right — an exhausted card must
+ *     not get twenty more iterations because its spec doc was edited — but it is a real
+ *     cost, not a free one. `enterRalphPlan` (state-machine.ts) now says WHICH of the two
+ *     happened rather than blaming a planner that never ran.
+ *
+ * FAIL-CLOSED MEANS REFUSING, NOT CARRYING NOTHING (cross-model review, final round —
+ * defect FOUR of one shape). The counter used to be normalised to `0` for any value it
+ * could not read, so a governed prior at `{ ralph_round: NaN, max_ralph_rounds: 20 }`
+ * became `{ 0, 20 }` and `computeTransition` authorised the next transition because
+ * `0 + 1 > 20` is false — the budget reset, restored for malformed persisted data, in
+ * the field next to the one that had just been given a careful three-way
+ * classification. For a COUNTER there is no benign fallback: "carry nothing" IS the
+ * reset. So an unreadable half of the prior pair returns `ok: false` and the dispatch
+ * REFUSES, naming the run and the column. Both columns are `INTEGER NOT NULL DEFAULT`,
+ * so nothing this rejects is a legacy shape.
  */
+/**
+ * The answer `carriedRalphBudget` gives. Three cases, and the third is the one defect
+ * four was missing: an UNREADABLE prior budget is neither "carry this" nor "carry
+ * nothing", because carrying nothing IS the reset.
+ */
+export type CarriedRalphBudget =
+  | { ok: true; budget: { ralph_round: number; max_ralph_rounds: number } | null }
+  | { ok: false; column: 'ralph_round' | 'max_ralph_rounds'; value: unknown }
+
 export function carriedRalphBudget(
   run: TridentRun,
   opts: { ralph?: boolean; max_ralph_rounds?: number },
-): { ralph_round: number; max_ralph_rounds: number } | null {
-  if (opts.ralph !== true || run.ralph !== true) return null
+): CarriedRalphBudget {
+  // NOT GOVERNED IS NOT AN ERROR — there is genuinely no Ralph spend to inherit.
+  if (opts.ralph !== true || run.ralph !== true) return { ok: true, budget: null }
+  // THE PRIOR ROW MUST BE READABLE IN BOTH HALVES, AND ABSENCE IS NOT EXCUSED HERE.
+  // Both columns are `INTEGER NOT NULL DEFAULT` (migrations 0068/0100), asserted rather
+  // than assumed, so a persisted row has no legitimate unset state: anything this
+  // predicate rejects is CORRUPT, not legacy. And an unreadable half cannot degrade to
+  // "carry nothing" the way an unreadable DISPATCH cap can, because there is no
+  // fallback that preserves a spend — carrying nothing restores the whole budget, which
+  // is precisely defect four. `unknown` authorises nothing, so the dispatch refuses.
+  if (!isRalphRound(run.ralph_round)) {
+    return { ok: false, column: 'ralph_round', value: run.ralph_round }
+  }
+  if (!isRalphCap(run.max_ralph_rounds)) {
+    return { ok: false, column: 'max_ralph_rounds', value: run.max_ralph_rounds }
+  }
   const cap = carriedRalphCap(run.max_ralph_rounds, opts.max_ralph_rounds)
-  if (cap === null) return null
-  return { ralph_round: carryableRalphRound(run.ralph_round), max_ralph_rounds: cap }
+  // Only reachable when the DISPATCH's cap is present-but-unreadable. That value then
+  // reaches `create`, which refuses it BY NAME (`TridentInvalidRalphCapError`), so the
+  // dispatch fails loudly rather than silently inheriting nothing — see `carriedRalphCap`.
+  if (cap === null) return { ok: true, budget: null }
+  return { ok: true, budget: { ralph_round: run.ralph_round, max_ralph_rounds: cap } }
 }
 
 /**
