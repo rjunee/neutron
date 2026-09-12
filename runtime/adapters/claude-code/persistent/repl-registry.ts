@@ -169,6 +169,20 @@ export interface GatewayShutdownKillEntry {
   identity?: ProcessIdentity
 }
 
+/** The spawn-time properties {@link ReplRegistryRecord.reuse} carries. A nested
+ *  object rather than three top-level fields: they are one fact about one child —
+ *  what it was spawned as — and they are read as a set or not at all. */
+export interface ReplReuseProperties {
+  /** `session.toolSurface`: the `--tools` value as a stable comma-joined key. An
+   *  EMPTY STRING IS A REAL VALUE here (`--tools ""`, the default-deny surface an
+   *  untrusted-content REPL gets), never a missing one. */
+  tool_surface: string
+  /** `session.toolBridgeActive`: was the native-MCP tool bridge attached at spawn. */
+  tool_bridge: boolean
+  /** `session.authFingerprint`: see {@link ReplRegistryRecord.reuse}. */
+  auth_fingerprint: string
+}
+
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
   /** Pool key — opaque; follows S3 re-namespacing. */
@@ -213,6 +227,32 @@ export interface ReplRegistryRecord {
    * recycling hazard a pid has and is answered the same way.
    */
   pane_handle?: string
+  /**
+   * #539 — THE THREE SPAWN-TIME PROPERTIES THE WARM-REUSE GUARDS COMPARE AGAINST,
+   * persisted so a RE-ADOPTED session can answer them.
+   *
+   * WITHOUT THIS THE ADOPTION IS POINTLESS. `getOrSpawnSession` refuses to serve a
+   * turn on a warm REPL whose tool surface, bridge attachment or credential
+   * fingerprint differ from the request's, and EVICTS it. A session rebuilt from a
+   * registry row knows none of the three, so all three compare unequal and the very
+   * first turn after the restart destroys the REPL that was just re-adopted — a
+   * feature that works right up until something uses it.
+   *
+   * THEY ARE PROPERTIES OF THE CHILD, WRITTEN BY THE SPAWN THAT MADE IT, in the same
+   * write as its pid, generation and pane handle. That is what keeps them from
+   * drifting: one child, one row, one write, and a respawn replaces all of it.
+   *
+   * ON `auth_fingerprint` SPECIFICALLY, since it is derived from a secret: it is the
+   * first 16 hex chars of `sha256(<the env auth secret>)` (`authFingerprintFor`) —
+   * never the secret, and already the form the in-memory guard compares. The file it
+   * lands in is written 0600 in the instance state dir, which is the SAME directory
+   * as `sinkTokenPath` — the actual reply-sink secret. So the marginal exposure is a
+   * truncated hash stored beside the plaintext key it is a hash of; what it buys is
+   * that a rotated token still EVICTS (fingerprints differ) instead of being
+   * unanswerable. Empty string where the instance has no env auth secret (the
+   * interactive-login model), which is exactly what the in-memory guard holds there.
+   */
+  reuse?: ReplReuseProperties
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string

@@ -203,6 +203,34 @@ export class ReplSession {
     return this.turnSeq
   }
 
+  /**
+   * Was this session RE-ADOPTED from a still-running REPL a previous gateway
+   * spawned (#539), rather than spawned by this process?
+   *
+   * The child is the same process it always was; what is new is the object watching
+   * it. Everything in-memory therefore starts empty — the ring, the detector latches,
+   * the turn counter — while the REPL itself carries a full conversation and a screen
+   * full of whatever it was doing. Anything that infers the CHILD's history from this
+   * object's counters is wrong for exactly this session, which is what the flag is
+   * for; {@link mayHoldPriorContext} is the one such inference in the tree.
+   */
+  adopted = false
+
+  /**
+   * Might this REPL's context already contain a previous turn?
+   *
+   * `turnSeq > 0` answers it for a session this process spawned: a fresh child's
+   * conversation is empty until we inject into it. It answers it WRONGLY for an
+   * adopted one, whose child has been serving turns since before this object
+   * existed — and the consumer is the per-turn context reset
+   * (`reset_context_per_turn`, the import profile), where a wrong `false` skips the
+   * `/clear` and runs an isolated-by-contract turn on top of the previous one's
+   * transcript. The counter is not the fact; "could there be anything in there" is.
+   */
+  mayHoldPriorContext(): boolean {
+    return this.turnSeq > 0 || this.adopted
+  }
+
   constructor(
     readonly sessionKey: string,
     readonly childGeneration: string,

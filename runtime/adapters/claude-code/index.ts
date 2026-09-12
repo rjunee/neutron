@@ -30,7 +30,9 @@ import { createLogger } from '@neutronai/logger'
 import type { Substrate } from '../../substrate.ts'
 import {
   createPersistentReplSubstrate,
+  poolKeyFor,
   registerSupervisedSubstrate,
+  startBootAdoption,
   startModelUpdateWatchdogForInstance,
   startReplWatchdog,
   type ChildCrashInfo,
@@ -531,6 +533,20 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     // endpoint actuate each session with its OWNING substrate's options (keyed by
     // pool key).
     registerSupervisedSubstrate(p)
+    // #539 — RECONCILE THIS KEY'S SURVIVING REPL BEFORE ANYTHING CAN SPAWN ON IT.
+    // Under the herdr host a gateway restart leaves the REPL running as a pane of the
+    // herdr server, so this is where the new gateway either takes it back (with its
+    // conversation, its dev-channel and its sink credential intact) or closes it.
+    // Started here, and NOT awaited here, because this factory is synchronous and runs
+    // per construction: the waiting is done by the three things that could otherwise
+    // spawn over the survivor — `getOrSpawnSession`, the watchdog tick and the boot
+    // drain — each of which awaits `awaitBootAdoption`. Idempotent per key, so the
+    // second construction joins the first pass rather than racing it.
+    //
+    // AFTER `registerSupervisedSubstrate`, deliberately: an adoption that completes
+    // puts a live session in the pool, and anything that then resolves that session's
+    // owning options must find them already registered.
+    startBootAdoption(p, poolKeyFor(p))
     // Idempotent per registry (startReplWatchdog self-dedupes + tracks its handle
     // for shutdown), so a per-turn call starts exactly ONE watchdog per instance
     // registry and a post-shutdown restart re-arms cleanly.

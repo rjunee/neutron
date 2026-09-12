@@ -22,6 +22,8 @@ import {
   type PendingShutdownKillReport,
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
+import { shutdownSurvivalVerdict } from './gateway-shutdown-survival.ts'
+import { resetBootAdoption } from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
@@ -460,14 +462,19 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         // to the PTY, so each chunk analysis runs on a fresh, bounded context —
         // ONE warm process, isolated per-turn context. Skipped on the ephemeral
         // path (each ephemeral turn is already a fresh REPL) and on the first
-        // turn of a fresh/resumed spawn (`turnSeq === 0` ⇒ context already empty).
+        // turn of a fresh/resumed spawn (`turnSeq === 0` ⇒ context already empty —
+        // which is NOT true of an adopted one, see `mayHoldPriorContext`).
         // `/clear` produces no correlated reply, so it is NOT an ActiveTurn — it
         // is a fire-then-wait-for-idle interstitial. Concurrency-1 on the import
         // runner guarantees no live turn races this clear on the same REPL.
         if (
           options.reset_context_per_turn === true &&
           !ephemeral &&
-          session.turnsServedThisIncarnation() > 0 &&
+          // `mayHoldPriorContext`, NOT the turn counter: an ADOPTED session's counter
+          // starts at 0 while its child's conversation does not (#539), and skipping
+          // the reset there would run an isolated-by-contract turn on top of the
+          // previous gateway's transcript.
+          session.mayHoldPriorContext() &&
           !session.hasChildExited()
         ) {
           try {
@@ -927,6 +934,16 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * store's own 7-day prune clears. Surviving the restart instead of reporting it is
  * the herdr-host half (#538 moves the REPL out of this process tree; #539 gates
  * this kill and adds the adopt arm); this is the half that is true either way.
+ *
+ * #539 — EXCEPT THE CHILDREN THAT CAN BE FOUND AGAIN. A herdr-hosted child is a child
+ * of the herdr SERVER, so it does not die with this process and the next gateway can
+ * re-adopt it — but ONLY if a persisted row names its pane AND its generation.
+ * `shutdownSurvivalVerdict` (`gateway-shutdown-survival.ts`) is that check, and it
+ * runs BEFORE the marking phase below, because a child we do not kill must never be
+ * recorded as killed. Everything it does not clear is killed and reported exactly as
+ * described above. Read that module before widening this: the kill it gates exists
+ * because of the 632-orphan / ~19 GB incident, and what replaces it is the guarantee
+ * that a surviving pane is always reachable from a row the next boot reads.
  */
 export async function shutdownAllPersistentRepls(
   opts: {
@@ -988,9 +1005,6 @@ export async function shutdownAllPersistentRepls(
     let owedForThisChild: PendingShutdownKillReport | null = null
     try {
       session.sizeWatchdog?.stop()
-      // BEFORE the kill. After it this process may not get another turn, and the
-      // gateway closes its database a few statements after we return.
-      //
       // The owning options come from `supervisedBySessionKey` — the SAME map the
       // supervision watchdog resolves a crash sink through. The production adapter
       // populates it for every REPL whose instance home resolves
@@ -1000,6 +1014,39 @@ export async function shutdownAllPersistentRepls(
       // a child that hosted work and recording nothing, which is the silence this
       // whole change exists to remove.
       const owner = supervisedBySessionKey.get(key)
+      // #539 — THE SURVIVAL GATE, AND IT RUNS BEFORE THE MARKING BELOW. A record
+      // written here attributes a death to this shutdown, so a child this gate leaves
+      // ALIVE must never reach it: "killed by the deploy" about a process that is
+      // still serving turns is exactly the false sentence #518 exists to remove,
+      // arriving from the other direction.
+      //
+      // READ AT SHUTDOWN, not remembered from spawn: the row is what the NEXT boot
+      // will read, so it is the only thing that can answer whether this child is
+      // findable. A respawn may have rewritten it since this session was created.
+      const registryPath = owner?.replRegistryPath
+      const survival = shutdownSurvivalVerdict({
+        paneHandle: session.child.paneHandle,
+        childGeneration: session.childGeneration,
+        record: registryPath === undefined ? undefined : getRecord(registryPath, key),
+      })
+      if (survival.kind === 'survive') {
+        // LEFT RUNNING, AND LEFT INTACT. No kill, no marker, no sink unregister that
+        // matters (this process is going away), and — load-bearing — NO
+        // `unlinkSessionConfigs`: those files are the live child's `--mcp-config` and
+        // `--settings`, and deleting them under a running REPL would leave it wired to
+        // nothing the next gateway could rebuild.
+        //
+        // `return`, not `continue`: this is the per-child teardown closure, and the
+        // walk that calls it is above.
+        process.stderr.write(
+          `[repl] gateway shutdown LEAVING session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} ` +
+            `alive in pane ${survival.handle} — the registry row names it, so the next boot re-adopts or closes it\n`,
+        )
+        return
+      }
+      process.stderr.write(
+        `[repl] gateway shutdown killing session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)}: ${survival.reason}\n`,
+      )
       if (owner !== undefined) {
         // PHASE 1 — MARK, synchronously. The owed live report is COLLECTED, not
         // awaited: a sink we do not own, awaited here, would sit between this child's
@@ -1131,6 +1178,10 @@ export async function shutdownAllPersistentRepls(
   // marker phase 1 wrote, which is what the marker is for.
   await deliverShutdownKillReports(owedReports)
   // Reset supervision state so tests don't leak per-key gates across cases.
+  // #539 — the boot-adoption gates go too: a resolved gate from the incarnation that
+  // just shut down would release a later boot's first spawn instantly while its
+  // surviving panes were still unreconciled.
+  resetBootAdoption()
   respawnGates.clear()
   childByKey.clear()
   pendingChildKills.clear()
