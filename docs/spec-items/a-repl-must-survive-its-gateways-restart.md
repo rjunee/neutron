@@ -46,20 +46,33 @@ everything, which is how a security fix becomes an outage.
 - [ ] **…and a foreign token is still refused** (401), or the criterion above is met by
       a sink that authenticates nothing.
       *Verified by* the same test's final assertion.
-- [ ] **AUTHORIZATION — a valid token does not authorize an action.** A request bearing
-      a valid sink token that names a session this gateway is NOT driving is refused on
-      `/tool-call`, `/activity` and `/tools`, and nothing is dispatched or recorded.
-      *Verified by* `sink-restart-survival.test.ts` — "an ORPHAN with a valid token is
-      refused on every privileged route". The check itself is the registered-session
-      lookup at the top of `ReplSink.handle` (`persistent/pool-state.ts`).
-- [ ] **…and a LIVE registered session with the same token still dispatches both**, so
-      a re-adopted child keeps working.
-      *Verified by* the paired test "a LIVE registered session with the same token
-      still dispatches both".
-- [ ] **Revocation has teeth.** Unregistering a session ends its authority immediately
-      — otherwise reaping an orphan (`persistent/orphan-adoption.ts`) is cosmetic while
-      its token still works.
-      *Verified by* "unregistering a session revokes it immediately".
+- [ ] **AUTHORIZATION — the caller must BE the session, not merely name it.** A
+      session id is an IDENTIFIER, not a credential: `--session-id` / `--resume` publish
+      it to the process table by design, and this tree's own `orphan-adoption.ts` parses
+      exactly that. So no check that consults only a session id can distinguish its
+      owner from a reader, however carefully the registry is maintained. The sink
+      therefore authorizes CREDENTIAL → SESSION: each child is handed
+      `HMAC(root token, childGeneration)` in its own 0600 config and the sink derives
+      which session that is.
+      *Verified by* "an orphan presenting a LIVE session's id — lifted from the process
+      table — is refused", which uses a REAL id belonging to a live session, with a
+      bridge and a tap wired so a 503 cannot make it pass vacuously.
+- [ ] **…bound to the INCARNATION, not the session id.** Respawn-is-always-resume reuses
+      the session id, so a credential keyed on the id would stay valid for the
+      REPLACEMENT child — exactly the orphan-from-a-previous-generation case. A
+      credential must die with the process it was minted for.
+      *Verified by* "an orphan whose session has since RESPAWNED is refused, though the
+      id is unchanged", which also asserts the replacement's credential works.
+- [ ] **…and the LEGITIMATE child still succeeds on every privileged route**, carrying
+      its own project scope. Without this the refusals above are satisfied by a sink
+      that refuses everything, which trades a security hole for an outage.
+      *Verified by* "the LEGITIMATE child still succeeds on every privileged route, with
+      its scope".
+- [ ] **Revocation is immediate**: unregistering a session kills its credential, or
+      reaping an orphan (`persistent/orphan-adoption.ts`) is cosmetic while its
+      credential still works.
+      *Verified by* "unregistering a session revokes its credential immediately".
+
 - [ ] **The port is per instance, not per box.** Two instances on one machine derive
       different ports; one instance derives the same port across restarts; and a port
       that cannot be bound FAILS LOUDLY rather than falling back to an ephemeral one,
@@ -130,7 +143,20 @@ the next item's work (`ISSUES #539`), and after the authorization criterion abov
 is also the right answer: an unadopted child is indistinguishable from an orphan, so
 it must be refused until something adopts it.
 
-A PER-SESSION credential is the stronger shape and is deliberately out of scope: it
-is a larger change, and narrowing authorization gets the property now. The residual
-it would close is that any live child's token is accepted for any live session id —
-the sink checks that the caller names a session it drives, not that it names its OWN.
+WHAT THE CREDENTIAL DOES NOT CLOSE, so this item is not read as a clean bill:
+
+  - **Same-uid read access defeats it.** The credential lives in the child's per-session
+    config (dir 0700, files 0600) and in the child's process env. Anything running as
+    the owner's uid that can read those can impersonate that child — which is the
+    plaintext-token exposure `spawn.ts`'s owner-only note already states, and is why
+    those modes are load-bearing rather than tidy.
+  - **There is no kernel-supplied peer identity to check.** `SO_PEERCRED` would be the
+    strongest discriminator available — an externally maintained handle the subject
+    cannot rewrite — but it needs a unix socket, and the sink is loopback TCP
+    (`Bun.serve({ port, hostname: '127.0.0.1' })`), where there is nothing to read.
+    Moving the sink to a unix socket would change the child's transport and the two
+    baking call sites; it is a real option for a later item, not a free addition here.
+  - **The root token is a KEY, not a bearer credential.** It authorizes nothing by
+    itself; it only derives per-child values. A process that reads the root token
+    (0600, state dir) can derive any child's credential — but that process already has
+    the instance's secrets.

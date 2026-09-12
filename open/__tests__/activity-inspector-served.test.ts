@@ -171,16 +171,21 @@ async function withComposition(
  */
 const TAP_SESSION_ID = 'activity-served-live-session'
 
-function registerTapSession(): void {
-  sink.register(TAP_SESSION_ID, new ReplSession('k', 'gen', TAP_SESSION_ID, 'chan', '/tmp'))
+/** Register the session AND return the credential that child would present. The route
+ *  authorizes credential → session, so the instance root token is not a way in: a
+ *  session id is published to the process table and proves nothing on its own. */
+function registerTapSession(): string {
+  const session = new ReplSession('k', 'gen', TAP_SESSION_ID, 'chan', '/tmp')
+  sink.register(TAP_SESSION_ID, session)
+  return sink.credentialFor(session)
 }
 
 async function tapPost(payload: Record<string, unknown>): Promise<Response> {
   const info = await getReplSinkInfo()
-  registerTapSession()
+  const credential = registerTapSession()
   return fetch(`http://127.0.0.1:${info.port}/activity`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'X-Sink-Token': info.token },
+    headers: { 'content-type': 'application/json', 'X-Sink-Token': credential },
     body: JSON.stringify({ session_id: TAP_SESSION_ID, ...payload }),
   })
 }

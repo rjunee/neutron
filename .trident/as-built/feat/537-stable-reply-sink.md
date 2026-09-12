@@ -262,6 +262,64 @@ block a boot. `open/persisted-secret.ts` does combine pid+counter with `O_EXCL`,
 its caller degrades to an ephemeral secret with a loud warn rather than throwing;
 it is pre-existing and left alone here rather than smuggled into this change.
 
+### A session id is an IDENTIFIER, not a credential — the durable-token finding one layer up
+
+The registered-session gate from the previous round asked whether the id was KNOWN and
+never WHOSE it was, and that is not a fix. Every child carried the same durable token,
+and session ids are PUBLISHED to the process table by design: `--session-id` /
+`--resume` is how resume works, and this tree's own orphan scanner parses exactly that
+representation (`orphan-adoption.ts`). So an orphan holding the shared token could read
+a live child's `/proc/<pid>/cmdline`, lift its id, and be authorized AS that child. The
+PR's own title said an orphan must not; the mechanism said it could.
+
+This is the sibling of the `O_NOFOLLOW` finding one section down: that check asked
+where the open LANDED and never what it landed ON; this one asked whether the id was
+known and never whose it was.
+
+**Authorization now runs CREDENTIAL → SESSION.** Each child is handed
+`HMAC(root token, childGeneration)` — derived by the sink so the value baked into the
+child and the value the sink authorizes cannot drift — written only into its own 0700/0600
+config, and the sink derives WHICH session a caller is from what it presents. The body's
+`session_id` is advisory: it is the value an orphan can read, so it decides nothing.
+
+Four properties, each load-bearing:
+
+  - **Per child.** A child is handed only its own derived value, never the root, so it
+    cannot compute a sibling's credential.
+  - **Per INCARNATION.** `childGeneration` is a fresh UUID per spawn, and respawn reuses
+    the SESSION ID — so a credential keyed on the id would stay valid for the
+    REPLACEMENT child, which is precisely the orphan-from-a-previous-generation case.
+    This is the property that is easy to miss and the one the respawn test exists for.
+  - **Not guessable from the process table.** The generation is never on argv and never
+    in the child's env.
+  - **Recomputable, so nothing new is stored.** A restarted gateway holding the root plus
+    the already-persisted `child_generation` re-derives exactly the credential a
+    surviving child is still presenting — which is what lets #539's adoption
+    re-establish authorization with NO new secret at rest. The restart criterion is now
+    tested that way: the second sink instance derives the SAME credential for the same
+    generation, and the child baked by the first is authorized by the second.
+
+The root token keeps its purpose and loses its power: it is a KEY, not a bearer
+credential. It authorizes nothing by itself, which is why
+`getStartedReplSinkInfo()` — the accessor that handed tests the root so they could pose
+as a child — is DELETED rather than renamed. Keeping it would be keeping the shape of
+the hole. Tests standing in for a child now read what that child was actually given,
+out of its own per-session MCP config (`bakedChildSinkInfo(argv)`), which is the same
+path the real child takes; that is 24 files, mechanically, and it is the faithful shape
+rather than a workaround.
+
+`injectMessage` takes the SESSION rather than a port, for the same reason: the
+gateway→child leg must present THAT child's credential, because the child validates the
+inbound header against the `SINK_TOKEN` it was baked with.
+
+WHAT THIS DOES NOT CLOSE is in the spec item in full: same-uid read access to the
+child's 0700/0600 config defeats it (the exposure `spawn.ts`'s owner-only note already
+states); and `SO_PEERCRED` — the strongest discriminator available, an externally
+maintained handle the subject cannot rewrite — needs a UNIX SOCKET, while the sink is
+loopback TCP, so there is nothing to read. I checked the transport rather than assuming
+it: moving the sink to a unix socket would change the child's transport and both baking
+call sites, which is a real option for a later item and not a free addition here.
+
 ### A durable token authenticates the CHANNEL; it must not authorize the ACTION
 
 The sharpest finding of the change, and it is this PR's own thesis inverted rather
@@ -757,3 +815,11 @@ removed (2 red — FIFO and directory, via the refusal REASON, which is the asse
 that makes that check load-bearing); and `O_NOFOLLOW` traded away for `O_NONBLOCK`
 (3 red — every symlink case), which is the pairing that proves the new flag did not
 cost the old property.
+
+Round-12 mutations, one per case as required: the pre-fix check (shared root + any
+registered id) reds 7 — including all three new cases and the restart criterion; the
+credential keyed on the SESSION ID instead of the incarnation reds 3, including the
+respawn case that only the incarnation binding catches; baking the ROOT into the child
+again reds 116 across the persistent directory, because every fake host presents what
+the child was given; and dropping the credential revocation in `unregister` reds the
+immediate-revocation case.
