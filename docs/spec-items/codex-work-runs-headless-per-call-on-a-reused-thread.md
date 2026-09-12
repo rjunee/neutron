@@ -69,11 +69,14 @@ the owner's subscription seat, which is what `trident/codex-review.sh:145-152` s
 in capitals. The criteria below are scoped to this surface and assert nothing about
 the adapter's.
 
-> **One real discrepancy, named and not chased.** The two scrub lists disagree:
-> `CODEX_CLI_AUTH_ENV_VARS` covers `OPENAI_API_KEY`, `OPENAI_AUTH_TOKEN`,
-> `OPENAI_API_TOKEN` (`auth.ts:37-41`), while `trident/codex-review.sh:152` unsets
-> `OPENAI_API_KEY` and `OPENAI_KEY`. Neither list is a superset. Reconciling them is
-> its own change against the adapter, not this one.
+> **One real discrepancy, filed as #645 rather than carried here.** There are three
+> scrub lists and none is a superset: `trident/codex-review.sh:152` and
+> `trident/codex-build.sh:850` unset `OPENAI_API_KEY`/`OPENAI_KEY`;
+> `CODEX_CLI_AUTH_ENV_VARS` covers
+> `OPENAI_API_KEY`/`OPENAI_AUTH_TOKEN`/`OPENAI_API_TOKEN` (`auth.ts:37-41`). The
+> intersection is one variable, so `OPENAI_KEY` survives the adapter's scrub and two
+> token variants survive both wrappers'. One shared list read by every call site is
+> the fix, and it is a change against the adapter, not this one.
 
 ## What the adapter owns
 

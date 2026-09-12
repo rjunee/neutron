@@ -260,12 +260,22 @@ do about it rather than a judgement call:
   `process.env` (`index.ts:30-43`). Ambient keys are dropped on both surfaces. What
   differs is whether a *deliberately passed* instance credential is allowed — yes for
   a self-hoster's own gateway turns, no here, because this surface spends the owner's
-  subscription seat.
+  subscription seat. **The repository holds one position, described in two places,
+  one of which describes itself badly.** That is a materially different conclusion
+  from "two contradictory positions", and the difference is entirely that the code
+  was run instead of the comment being read — the same correction this record makes
+  against itself twice above, arriving a third time from the reviewing side.
 
-One real discrepancy found and left alone: the two scrub lists are not supersets of
-each other — the adapter covers `OPENAI_API_KEY`/`OPENAI_AUTH_TOKEN`/`OPENAI_API_TOKEN`
-(`auth.ts:37-41`), the wrapper unsets `OPENAI_API_KEY`/`OPENAI_KEY`
-(`trident/codex-review.sh:152`).
+**One real discrepancy, filed rather than left here (#645).** The scrub lists are not
+supersets of one another, and there are **three** of them, not two:
+`trident/codex-review.sh:152` and `trident/codex-build.sh:850` both unset
+`OPENAI_API_KEY`/`OPENAI_KEY`, while `CODEX_CLI_AUTH_ENV_VARS` covers
+`OPENAI_API_KEY`/`OPENAI_AUTH_TOKEN`/`OPENAI_API_TOKEN` (`auth.ts:37-41`). The
+intersection is one variable. So `OPENAI_KEY` survives the adapter's scrub and two
+token variants survive both wrappers'. Two surfaces solved the same problem
+independently against different vocabularies and neither knows about the other; the
+fix is one shared list both call sites read, which is a change against the adapter
+and not this one.
 
 **The lesson is about the brief, not the tree.** "Specify an adapter" was taken as a
 greenfield instruction by both the briefing and the spike, and the question *what is
