@@ -42,6 +42,7 @@ import {
   TridentOptionShapedBaseError,
   TridentPaddedBaseError,
 } from './merge.ts'
+import { gitRangeArgv, type GitRangeArgv } from './git-range.ts'
 
 const WORKFLOW_SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -425,39 +426,33 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
   })
 })
 
-describe('EVERY interpolated git rev-range in the shipped modules carries --end-of-options', () => {
+describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and the rest is enumerated', () => {
   /**
-   * ── WHY THIS IS KEYED TO BEHAVIOUR AND NOT TO A NAME ──────────────────
-   * The version that shipped for thirteen rounds searched `orchestrator.ts` for
-   * `${baseRef}..` and pinned FOUR call sites. `computeDiffLineCount` spells the same value
-   * `base_ref`, so it was invisible to the coverage test that existed to find it — and it
-   * went to review with no `--end-of-options`, which means an operand of `--output=/tmp/pwn`
-   * made git write that file and exit 0. `mutation-prover.ts` escaped twice over: a
-   * THREE-dot range, spread across its own argv lines.
+   * ── WHY THIS STOPPED BEING A SCANNER PROBLEM ──────────────────────────
+   * "Every consumer carries `--end-of-options`" was asserted by a text scanner over the
+   * tree for three rounds, and the scanner was wrong three times, each in a different
+   * mechanism:
    *
-   * So the rule is a `..`/`...` RANGE OPERATOR adjacent to an INTERPOLATION, in any of the
-   * shipped modules, with no reference to what the operand is called.
+   *   1. it searched for one SPELLING of the operand (`${baseRef}..`), so
+   *      `computeDiffLineCount`'s `base_ref` was invisible — and shipped unshielded — as was
+   *      `mutation-prover.ts`'s three-dot range on its own argv line;
+   *   2. it then attributed the marker by a TWELVE-LINE WINDOW, so a protected command above
+   *      an unprotected one shielded it, and the window read the round's own explanatory
+   *      comments — which say `--end-of-options` — as evidence, passing every mutation;
+   *   3. with comments blanked and attribution parsed, it still examined only the FIRST
+   *      range on each physical line.
    *
-   * ── AND WHY ATTRIBUTION IS PARSED, NOT GUESSED FROM PROXIMITY ─────────
-   * The first version of THAT fix decided a range was shielded if `--end-of-options`
-   * appeared anywhere in the twelve preceding lines. A protected command one to twelve lines
-   * above an unprotected one therefore shielded it — the marker was attributed to a command
-   * it does not belong to, and the acceptance claim went back to being unenforced. **A
-   * coverage test that infers structure from line proximity is measuring LAYOUT, not
-   * syntax**; twelve lines is a guess about formatting, and formatting is not a property of
-   * the call.
+   * **Three rounds spent making one instrument adequate means the property was being
+   * measured where it should be prevented.** So the eleven TypeScript call sites now build
+   * their argv through `gitRangeArgv` (`trident/git-range.ts`), which has no parameter for
+   * the marker: an unshielded range cannot be expressed there. The population this file
+   * scans fell from 21 to 10, and every survivor is a place a TypeScript helper cannot
+   * reach — a command inside a prompt string, or a line of shell.
    *
-   * The attribution here is the command itself: from the nearest preceding `git` TOKEN to
-   * the range operand — which is the argv array for
-   * `['git', …, '--end-of-options', `${x}..${y}`]`, including the multi-line form, and the
-   * shell command for a range inside a prompt string. A hit with no `git` token within
-   * `MAX_ATTRIBUTION` characters is UNATTRIBUTABLE and fails: an unattributable case is a
-   * failure, never a pass.
-   *
-   * Comments are blanked first (length-preserving, so offsets and line numbers survive),
-   * because the round that shielded these sites wrote `--end-of-options` in the comment
-   * above each one — an instrument that reads its own documentation as evidence measures
-   * nothing, and that is not hypothetical: it is why the first three mutations passed.
+   * What is left to assert is two much simpler claims, and both are enumerable:
+   *   A. no interpolated range is built anywhere in the shipped modules except inside
+   *      `git-range.ts` — with six argued exceptions, each a command a helper cannot build;
+   *   B. `gitRangeArgv` always emits the marker, in the only position that works.
    */
   const MODULES = [
     'orchestrator.ts',
@@ -465,29 +460,30 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
     'merge.ts',
     'mutation-prover.ts',
     'mutation-claim-artifact.ts',
+    'git-range.ts',
     'codex-build.sh',
     'codex-review.sh',
   ] as const
 
   /**
    * An interpolated operand touching the range operator: `` `${x}..` `` or `` `..${x}` ``.
-   * Spelling-independent by construction. It also matches `...`, since `}..` is a prefix of
-   * `}...` (how `mutation-prover.ts` spells its blast-radius range).
+   * GLOBAL, because it used to be `exec`'d once per line: a protected command followed by an
+   * unprotected one ON THE SAME LINE reported clean, since the detector stopped at the first
+   * match. It also matches `...`, `}..` being a prefix of `}...`.
    */
-  const RANGE = /\}\.\.|\.\.\$\{/
+  const RANGE = /\}\.\.|\.\.\$\{/g
 
   /**
-   * How far back a `git` token may be and still be this range's command. The real maximum in
-   * the tree is 468 characters (`mutation-prover.ts`'s multi-line argv); the three
-   * operator-facing NOTES that merely describe a range sit 1205-1587 characters from any
-   * `git`, so the bound also separates prose from commands on evidence rather than by
-   * assertion.
+   * How far back a `git` token may be and still be this range's command. The real maximum
+   * among the survivors is 123 characters; the three operator-facing NOTES that merely
+   * describe a range sit 1205-1587 characters from any `git`, so the bound separates prose
+   * from commands on measurement rather than by assertion.
    */
   const MAX_ATTRIBUTION = 600
 
   /**
-   * Hits that are NOT git invocations, each argued. A hit that is neither shielded nor
-   * listed here fails, so adding prose about a range is also a deliberate act.
+   * Hits that are NOT git invocations, each argued. A hit that is neither shielded nor listed
+   * here fails, so adding prose about a range is also a deliberate act.
    */
   const NON_INVOCATIONS: ReadonlyArray<{ file: string; needle: string; why: string }> = [
     {
@@ -512,6 +508,20 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
     },
   ]
 
+  /**
+   * The six ranges a TypeScript helper cannot build, each with the reason it is out of reach.
+   * They still have to carry the marker — being unreachable by the helper is a reason to
+   * enumerate them, not a reason to exempt them.
+   */
+  const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
+    { file: 'inner-workflow.mjs', line: 1572, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2306, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2412, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5249, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'codex-build.sh', line: 819, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
+    { file: 'codex-review.sh', line: 300, why: 'shell: the standalone reviewer builds its own diff' },
+  ]
+
   interface Hit {
     file: string
     line: number
@@ -526,9 +536,7 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
   /**
    * `line` with its comment blanked to spaces — same length, so offsets stay aligned.
    *
-   * A `//` or `#` inside a string literal is not a comment opener, so quotes are tracked;
-   * this is the same hazard `scripts/ci/diff-base-check.mjs` has for its exemption marker,
-   * where a `" //` in data used to satisfy the opener test.
+   * A `//` or `#` inside a string literal is not a comment opener, so quotes are tracked.
    */
   function blankComment(line: string): string {
     const pad = (from: number): string => line.slice(0, from) + ' '.repeat(line.length - from)
@@ -556,7 +564,7 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
     return line
   }
 
-  /** Every interpolated range in `source`, each attributed to its own git command. */
+  /** EVERY interpolated range in `source` — all matches per line — attributed to its own command. */
   function scan(file: string, source: string): Hit[] {
     const blanked = source.split('\n').map(blankComment)
     const text = blanked.join('\n')
@@ -568,24 +576,27 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
     }
     const hits: Hit[] = []
     blanked.forEach((line, i) => {
-      const m = RANGE.exec(line)
-      if (m === null) return
-      const index = (offsets[i] as number) + m.index
-      // THE COMMAND, found by parsing backwards for its `git` token rather than by counting
-      // lines. `lastIndexOf` over the blanked text, so a `git` inside a comment cannot be it.
-      const before = text.slice(0, index)
-      let gitAt = -1
-      for (const g of before.matchAll(/\bgit\b/g)) gitAt = g.index
-      const attributed = gitAt !== -1 && index - gitAt <= MAX_ATTRIBUTION
-      const command = attributed ? text.slice(gitAt, index) : ''
-      hits.push({
-        file,
-        line: i + 1,
-        text: line.trim(),
-        shielded: attributed && command.includes('--end-of-options'),
-        attributed,
-        excused: NON_INVOCATIONS.find((n) => n.file === file && line.includes(n.needle))?.why ?? null,
-      })
+      // ALL of them. `RANGE.exec(line)` once was the third defect in this instrument: the
+      // first match on a line decided the line, so `…'--end-of-options', \`${a}..HEAD\`]; …\`${b}..HEAD\`]`
+      // reported clean.
+      for (const m of line.matchAll(RANGE)) {
+        const index = (offsets[i] as number) + (m.index as number)
+        // THE COMMAND, found by parsing backwards for its `git` token rather than by counting
+        // lines. Over the blanked text, so a `git` in a comment cannot be it.
+        const before = text.slice(0, index)
+        let gitAt = -1
+        for (const g of before.matchAll(/\bgit\b/g)) gitAt = g.index
+        const attributed = gitAt !== -1 && index - gitAt <= MAX_ATTRIBUTION
+        const command = attributed ? text.slice(gitAt, index) : ''
+        hits.push({
+          file,
+          line: i + 1,
+          text: line.trim(),
+          shielded: attributed && command.includes('--end-of-options'),
+          attributed,
+          excused: NON_INVOCATIONS.find((n) => n.file === file && line.includes(n.needle))?.why ?? null,
+        })
+      }
     })
     return hits
   }
@@ -595,44 +606,100 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
     return MODULES.flatMap((file) => scan(file, readFileSync(join(import.meta.dir, file), 'utf8')))
   }
 
-  /** Offenders as the test reports them: unshielded or unattributable, and not excused. */
+  /** Offenders as the tests report them: unshielded or unattributable, and not excused. */
   function offenders(hits: Hit[]): string[] {
     return hits
       .filter((h) => h.excused === null && (!h.attributed || !h.shielded))
       .map((h) => `${h.file}:${h.line} ${h.attributed ? 'UNSHIELDED' : 'UNATTRIBUTABLE'} ${h.text.slice(0, 70)}`)
   }
 
-  test('every hit is either shielded in its OWN command or an argued non-invocation', () => {
-    const hits = rangeHits()
-    // PINNED COUNTS, per file, because "all of them are shielded" is vacuous if the matcher
-    // found none — and because the comment blanking could otherwise swallow a range
-    // silently. The old block pinned 4 in one file; this is the whole surface.
+  test('A · the TypeScript modules build NO range of their own — the helper does it', () => {
+    // The structural claim that replaces "every call site remembered the marker". Before the
+    // refactor these three files held eleven ranges between them; now they hold none, and
+    // `gitRangeArgv` is the only thing that can make one.
     const perFile: Record<string, number> = {}
-    for (const h of hits) perFile[h.file] = (perFile[h.file] ?? 0) + 1
+    for (const h of rangeHits()) perFile[h.file] = (perFile[h.file] ?? 0) + 1
     expect(perFile).toEqual({
-      'orchestrator.ts': 9,
+      // Four commands inside PROMPTS — a helper cannot reach an agent's command line.
       'inner-workflow.mjs': 4,
-      'merge.ts': 1,
-      'mutation-prover.ts': 1,
+      // Three operator-facing notes that describe a range in prose.
       'mutation-claim-artifact.ts': 3,
+      // Two shell wrapper commands plus the trailer label.
       'codex-build.sh': 1,
       'codex-review.sh': 2,
     })
-    expect(offenders(hits)).toEqual([])
-    // Every excused hit carries a stated reason, so the escape hatch cannot be used silently.
-    for (const h of hits.filter((x) => x.excused !== null)) {
-      expect({ site: `${h.file}:${h.line}`, why: (h.excused ?? '').length > 20 }).toEqual({
-        site: `${h.file}:${h.line}`,
-        why: true,
-      })
+    // Named explicitly, because an empty key is easy to misread as "not scanned".
+    for (const gone of ['orchestrator.ts', 'merge.ts', 'mutation-prover.ts', 'git-range.ts']) {
+      expect({ file: gone, ranges: perFile[gone] ?? 0 }).toEqual({ file: gone, ranges: 0 })
     }
   })
 
+  test('A · every surviving range is shielded in its OWN command, or is argued prose', () => {
+    const hits = rangeHits()
+    expect(offenders(hits)).toEqual([])
+    // The six out-of-reach commands are exactly the shielded survivors — so a new one cannot
+    // appear without being argued here, and one that disappears cannot go unnoticed.
+    const shielded = hits.filter((h) => h.excused === null).map((h) => `${h.file}:${h.line}`)
+    expect(shielded.sort()).toEqual(OUT_OF_REACH.map((o) => `${o.file}:${o.line}`).sort())
+    for (const o of OUT_OF_REACH) expect({ site: `${o.file}:${o.line}`, argued: o.why.length > 20 }).toEqual({ site: `${o.file}:${o.line}`, argued: true })
+    for (const h of hits.filter((x) => x.excused !== null)) {
+      expect({ site: `${h.file}:${h.line}`, why: (h.excused ?? '').length > 20 }).toEqual({ site: `${h.file}:${h.line}`, why: true })
+    }
+  })
+
+  test('B · gitRangeArgv cannot omit the marker — there is no parameter for it', () => {
+    // The prevention itself, asserted as a property over the shapes the tree actually uses.
+    const shapes: GitRangeArgv[] = [
+      { repo_path: '/repo', subcommand: 'diff', flags: ['--numstat'], base: 'b', head: 'HEAD' },
+      { repo_path: '/repo', subcommand: 'diff', base: 'b', head: 'h' },
+      { repo_path: '/repo', config: ['-c', 'core.quotePath=false'], subcommand: 'diff', flags: ['-z'], base: 'b', head: 'h', dots: '...' },
+      { repo_path: '/repo', subcommand: 'log', flags: ['--format=%H'], base: 'b', head: 'h', pathspec: ['src/a.ts'] },
+      { repo_path: '/repo', subcommand: 'rev-list', flags: ['--count'], base: 'refs/heads/main', head: 'tip' },
+    ]
+    for (const s of shapes) {
+      const argv = gitRangeArgv(s)
+      const marker = argv.indexOf('--end-of-options')
+      const operand = argv.findIndex((a) => a.includes('..'))
+      // Present, exactly once, AFTER every flag and BEFORE the operand. Anywhere else is
+      // useless: before the flags it stops git reading them, after the operand it is too late.
+      expect({ s, present: marker !== -1, once: argv.filter((a) => a === '--end-of-options').length }).toEqual({ s, present: true, once: 1 })
+      expect({ s, beforeOperand: marker < operand }).toEqual({ s, beforeOperand: true })
+      for (const f of s.flags ?? []) expect({ s, f, flagFirst: argv.indexOf(f) < marker }).toEqual({ s, f, flagFirst: true })
+      // `-c` settings precede the subcommand, which git requires.
+      for (const c of s.config ?? []) expect({ s, c, early: argv.indexOf(c) < argv.indexOf(s.subcommand) }).toEqual({ s, c, early: true })
+    }
+    // And the argv is the one the tree already pinned, byte for byte.
+    expect(gitRangeArgv({ repo_path: '/repo', subcommand: 'diff', flags: ['--numstat'], base: 'b', head: 'HEAD' })).toEqual([
+      'git', '-C', '/repo', 'diff', '--numstat', '--end-of-options', 'b..HEAD',
+    ])
+    expect(
+      gitRangeArgv({ repo_path: '/r', config: ['-c', 'core.quotePath=false'], subcommand: 'diff', flags: ['-z', '--name-status'], base: 'a', head: 'b', dots: '...' }),
+    ).toEqual(['git', '-C', '/r', '-c', 'core.quotePath=false', 'diff', '-z', '--name-status', '--end-of-options', 'a...b'])
+    // A pathspec lands after the operand, behind `--`; an empty one adds nothing.
+    expect(gitRangeArgv({ repo_path: '/r', subcommand: 'log', base: 'a', head: 'b', pathspec: ['x.ts'] }).slice(-3)).toEqual(['a..b', '--', 'x.ts'])
+    expect(gitRangeArgv({ repo_path: '/r', subcommand: 'log', base: 'a', head: 'b', pathspec: [] }).slice(-1)).toEqual(['a..b'])
+  })
+
+  test('TWO COMMANDS ON ONE LINE: the second is examined too', () => {
+    // THE THIRD INSTRUMENT DEFECT. `RANGE.exec(line)` ran once, so the first match decided
+    // the line and an unprotected command sharing it was never looked at.
+    const oneLine =
+      "const a = ['git','diff','--end-of-options',`${good}..HEAD`]; const b = ['git','diff',`${bad}..HEAD`]"
+    const hits = scan('fixture.ts', oneLine)
+    expect(hits.map((h) => ({ line: h.line, shielded: h.shielded }))).toEqual([
+      { line: 1, shielded: true },
+      { line: 1, shielded: false },
+    ])
+    expect(offenders(hits).length).toBe(1)
+    // THE COMPLEMENT, so a detector that refuses everything cannot pass.
+    const bothShielded = oneLine.replace("['git','diff',`${bad}", "['git','diff','--end-of-options',`${bad}")
+    expect(offenders(scan('fixture.ts', bothShielded))).toEqual([])
+  })
+
   test('A PROTECTED COMMAND DOES NOT SHIELD THE NEXT ONE — through the real detector', () => {
-    // THE CONTROL THE PROXIMITY VERSION DID NOT HAVE, and could not have had: its control
-    // used a separate per-line filter, so it proved that *a* detector works, not that *this*
-    // detector does. Two different code paths, and only one of them is the guard. This
-    // fixture goes through `scan()` itself.
+    // The second instrument defect: a twelve-line proximity window. The control runs through
+    // `scan()` itself, because the version that missed this used a separate per-line filter
+    // and so proved that *a* detector works, not that *this* one does.
     const fixture = [
       'const first = await run_host(',
       "  ['git', '-C', repo, 'diff', '--name-only', '--end-of-options', `${goodBase}..HEAD`],",
@@ -648,61 +715,37 @@ describe('EVERY interpolated git rev-range in the shipped modules carries --end-
       { line: 2, shielded: true },
       { line: 6, shielded: false },
     ])
-    expect(offenders(hits)).toEqual(['fixture.ts:6 UNSHIELDED ' + "['git', '-C', repo, 'diff', '--numstat', `${otherBase}..HEAD`],"])
-
-    // THE COMPLEMENT, so a detector that refuses everything cannot pass: shield the second
-    // command and the same fixture is clean.
+    expect(offenders(hits)).toEqual(["fixture.ts:6 UNSHIELDED ['git', '-C', repo, 'diff', '--numstat', `${otherBase}..HEAD`],"])
     const fixed = fixture.replace("'--numstat',", "'--numstat', '--end-of-options',")
     expect(offenders(scan('fixture.ts', fixed))).toEqual([])
   })
 
   test('a range with no git command near it is UNATTRIBUTABLE, which fails rather than passes', () => {
-    // The other half of parsing rather than guessing: if the detector cannot say which
-    // command a range belongs to, it must not decide it is fine. `x`-padding puts the only
-    // `git` token further away than MAX_ATTRIBUTION.
-    const far = `const cmd = 'git diff'\n${'// x\n'.repeat(0)}${'const filler = "' + 'x'.repeat(MAX_ATTRIBUTION + 50) + '"\n'}const r = \`\${someBase}..HEAD\``
+    const far = `const cmd = 'git diff'\nconst filler = "${'x'.repeat(MAX_ATTRIBUTION + 50)}"\nconst r = \`\${someBase}..HEAD\``
     const hits = scan('fixture.ts', far)
     expect(hits.map((h) => ({ line: h.line, attributed: h.attributed }))).toEqual([{ line: 3, attributed: false }])
-    expect(offenders(hits)).toEqual(['fixture.ts:3 UNATTRIBUTABLE ' + 'const r = `${someBase}..HEAD`'])
+    expect(offenders(hits)).toEqual(['fixture.ts:3 UNATTRIBUTABLE const r = `${someBase}..HEAD`'])
   })
 
   test('a git token inside a COMMENT cannot attribute or shield a range', () => {
-    // Why the blanking exists. Without it, this comment's `git diff --end-of-options` is the
-    // nearest preceding `git` token and the range below reads as shielded — which is exactly
-    // how the first version of this fix passed all three of its mutations.
+    // The first instrument defect: the window read this round's own comments as evidence.
     const fixture = [
       '// the shipped form is `git diff --end-of-options ${base}..HEAD`',
       "const cmd = ['git', '-C', repo, 'diff', `${plainBase}..HEAD`]",
     ].join('\n')
-    const hits = scan('fixture.ts', fixture)
-    expect(hits.map((h) => ({ line: h.line, shielded: h.shielded, attributed: h.attributed }))).toEqual([
+    expect(scan('fixture.ts', fixture).map((h) => ({ line: h.line, shielded: h.shielded, attributed: h.attributed }))).toEqual([
       { line: 2, shielded: false, attributed: true },
     ])
   })
 
   test('POSITIVE CONTROL: a new consumer under a THIRD spelling is caught', () => {
-    // `whicheverNameIFeelLike` appears nowhere in the codebase, which is the case that
-    // defeated the previous instrument. Measured for real too: planting this function in
-    // `orchestrator.ts` reds the first test in this block, and removing it goes clean.
-    const planted = [
-      'const res = await run_host(',
-      "  ['git', '-C', repo, 'diff', '--numstat', `${whicheverNameIFeelLike}..${tipOid}`],",
-      '  repo,',
-      ')',
-    ].join('\n')
+    // `whicheverNameIFeelLike` appears nowhere in the codebase — the case that defeated the
+    // spelling-keyed instrument. Measured for real too: planting such a function in
+    // `orchestrator.ts` reds test A, and removing it goes clean.
+    const planted = ["const res = await run_host(", "  ['git', '-C', repo, 'diff', '--numstat', `${whicheverNameIFeelLike}..${tipOid}`],", '  repo,', ')'].join('\n')
     expect(offenders(scan('fixture.ts', planted)).length).toBe(1)
-    // …and a THREE-dot range on its own argv line, the `mutation-prover.ts` shape.
     const threeDot = ["const a = ['git', '-C', repo, 'diff', '-z', '--name-status',", '  `${someOtherName}...${revision}`,', ']'].join('\n')
     expect(offenders(scan('fixture.ts', threeDot)).length).toBe(1)
-  })
-
-  test('the population really does span several spellings — the proof the name is irrelevant', () => {
-    const texts = rangeHits().map((h) => h.text)
-    // Each of these is the SAME KIND of value under a different name. A matcher keyed to any
-    // one of them would report a clean tree while the others went unshielded.
-    for (const spelling of ['base_ref', 'baseRef', 'BASE_DIFF_REF', 'BASE_REF', 'seenPin', 'base_sha', 'diffBase']) {
-      expect({ spelling, present: texts.some((t) => t.includes(spelling)) }).toEqual({ spelling, present: true })
-    }
   })
 
   test('the two wrappers each take the base as argv and diff with it', () => {

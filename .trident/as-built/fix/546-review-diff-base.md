@@ -202,6 +202,50 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round fifteen: three rounds on one instrument means the property should be prevented
+
+The scan had a third defect — `RANGE.exec(line)` ran **once per physical line**
+(`diff-base-option-shaped.test.ts`), so a shielded command followed by an unshielded one on
+the same line reported clean. Three defects, three mechanisms, in the same instrument:
+
+| # | mechanism | what it could not see |
+|---|---|---|
+| 1 | keyed to one identifier SPELLING (`${baseRef}..`) | `computeDiffLineCount`'s `base_ref` — which shipped unshielded — and `mutation-prover.ts`'s three-dot argv |
+| 2 | a TWELVE-LINE proximity window, reading the round's own `--end-of-options` comments as evidence | any command within twelve lines of a shielded one; every mutation passed |
+| 3 | one `exec` per line | a second command sharing a physical line |
+
+**So the fourth fix was not a wider scanner.** The eleven TypeScript ranges now go through
+`gitRangeArgv` (`trident/git-range.ts`), whose signature has **no parameter for the marker** —
+`-c` settings, subcommand, flags, base, head, dots, pathspec, and the marker welded between
+the last flag and the operand. An unshielded range is not something a call site must remember
+not to write; it is something it cannot express. The scanned population fell from **21 to 10**,
+`orchestrator.ts`/`merge.ts`/`mutation-prover.ts` hold **zero** ranges, and every survivor is
+somewhere a TypeScript helper cannot reach: four commands inside PROMPT strings and two lines
+of shell, each enumerated by `file:line` with its reason.
+
+The iteration defect is fixed too (`matchAll`, with a two-commands-on-one-line control),
+because the scan still carries the six survivors. But it now asserts two enumerable claims
+instead of a universal one over an open population.
+
+**Mutations, all measured:** single-`exec` reds 2 tests; a raw unshielded argv put back in
+`orchestrator.ts` reds 2 and names the site; **removing the marker from the helper reds 19
+tests**, because nineteen existing assertions pin those argv arrays — the prevention and the
+pins reinforce each other.
+
+**And a count that was wrong while the test was right.** The prose said "21 hits, 18 shielded,
+3 notes plus one shell label" — 22 from a population of 21. Re-derived: 17 shielded COMMANDS
+plus 4 argued non-invocations, the fourth being `codex-review.sh`'s `DIFF_SRC` label, which is
+attributed to the command above it and therefore *looked* shielded while not being a consumer
+at all. The prose had counted it twice. Both numbers were re-derived from the tree rather than
+one adjusted to match the other, because the two failure modes differ: a wrong number is a
+typo, a wrong population is a coverage gap.
+
+**The generalisable lesson, and it is the lane's own, one level up.** *A check can only refuse
+what it can still see.* Three rounds spent making one instrument adequate is the signal that
+the property is being measured where it should be prevented — the same shape as a lock opened
+`O_TRUNC` and then validated, where no ordering of checks can fix a truncation that already
+happened at open.
+
 ### Round fourteen: the sweep turned on the instruments — and both were wrong
 
 Round thirteen read 467 added lines of prose for absolutes. **The absolute that was actually

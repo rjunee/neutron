@@ -27,14 +27,15 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   false selects the *bare name*, which reached git unguarded: measured on git 2.43, a base of
   `--output=<path>` made `git diff --name-only` exit 0 and write the file, the artifact diff
   honour both `--output`s, and `git rev-list --count` write it despite exiting 129. `diffBaseRef`
-  now throws `TridentOptionShapedBaseError`, and **every interpolated git rev-range in the
-  shipped modules** carries `--end-of-options` as defence in depth — 18 of them, not the four
-  the first version of that claim meant. Verified by `trident/diff-base-option-shaped.test.ts`
-  per command family, with three mutations. This bullet was FALSE at one head: the coverage
-  test searched for `${baseRef}`, `computeDiffLineCount` spells it `base_ref`, and it shipped
-  unshielded — **a completeness claim is only as wide as the instrument that checks it**, and
-  that instrument is now keyed to the `..` operator next to an interpolation rather than to
-  anybody's choice of identifier;
+  now throws `TridentOptionShapedBaseError`, and **no TypeScript call site can build a range
+  without `--end-of-options`**: all eleven now go through `gitRangeArgv`
+  (`trident/git-range.ts`), which has no parameter for the marker. Six ranges remain outside
+  it — four commands inside prompt strings and two lines of shell, none of which a TypeScript
+  helper can reach — and they are enumerated by `file:line` with a reason each. This bullet
+  was FALSE at one head: the coverage test searched for `${baseRef}`, `computeDiffLineCount`
+  spells it `base_ref`, and it shipped unshielded. **A completeness claim is only as wide as
+  the instrument that checks it** — and after three rounds of widening that instrument, the
+  property is now prevented rather than measured;
 - an **empty** base name — **REFUSED** (`TridentEmptyBaseError`), so the
   "resolves / does not resolve" framing does not apply to it at all. This bullet said
   "returns the input untouched" for two rounds while the acceptance below required refusal;
@@ -222,12 +223,21 @@ The resolution order is evidence-first, and is the same at every site:
       while doing it. `diffBaseRef` throws rather than returning such a name — refusing to
       *probe* it (an earlier round's mitigation) only routed it to the unguarded branch.
       Verified by `trident/diff-base-option-shaped.test.ts`: the binding refuses under both
-      probe answers; **every hit of `/\}\.\.|\.\.\$\{/` across `orchestrator.ts`,
-      `inner-workflow.mjs`, `merge.ts`, `mutation-prover.ts`, `mutation-claim-artifact.ts` and
-      both wrappers either carries the marker IN ITS OWN COMMAND or is listed as an argued
-      non-invocation** (21 hits, 18 shielded, 3 operator-facing notes plus one shell label),
-      with the per-file counts pinned; and per command family, against real git, the marker is
-      shown to be what stops the write while ordinary ranges still work.
+      probe answers; **the eleven TypeScript ranges are built by `gitRangeArgv` and cannot omit
+      the marker** (asserted as a property over the five argv shapes the tree uses — present
+      exactly once, after every flag, before the operand, with `-c` ahead of the subcommand);
+      **`orchestrator.ts`, `merge.ts` and `mutation-prover.ts` now contain NO range of their
+      own**, asserted as zero and named file by file; and the six that remain — four prompt
+      commands in `inner-workflow.mjs`, two shell lines in the wrappers — each carry the marker
+      in their own command and are listed with the reason a helper cannot reach them. Plus,
+      per command family against real git, the marker is shown to be what stops the write while
+      ordinary ranges still work.
+      **The count this replaces was wrong, and the test was right.** It read "21 hits, 18
+      shielded, 3 notes plus one shell label" — 22 from a population of 21. Re-derived on the
+      tree: 21 hits were 17 shielded COMMANDS plus 4 argued non-invocations (3 operator-facing
+      notes and `codex-review.sh`'s `DIFF_SRC` label, which is attributed to the command above
+      it and so looked shielded while not being a consumer at all). The prose had counted that
+      label twice — once as shielded, once as excused.
       **"Its own command" is parsed, not guessed from proximity.** The first version of this
       instrument called a range shielded if the marker appeared anywhere in the twelve
       preceding lines, so a protected command one to twelve lines above an unprotected one

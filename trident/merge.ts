@@ -63,6 +63,7 @@ import { join } from 'node:path'
 import { createLogger } from '@neutronai/logger'
 
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
+import { gitRangeArgv } from './git-range.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 
@@ -941,7 +942,14 @@ async function commitsTouching(
     // `--end-of-options` (#546), before the operand and before the `--` pathspec
     // separator — measured on git 2.43: `git log --format=%H --end-of-options A..B -- <path>`
     // parses exactly as it did without the marker.
-    ['git', '-C', repo, 'log', '--format=%H', '--end-of-options', `${base_sha}..${head_sha}`, '--', path],
+    gitRangeArgv({
+      repo_path: repo,
+      subcommand: 'log',
+      flags: ['--format=%H'],
+      base: base_sha,
+      head: head_sha,
+      pathspec: [path],
+    }),
     repo,
   )
   if (!res.ok) return null

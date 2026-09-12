@@ -86,6 +86,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
+import { gitRangeArgv } from './git-range.ts'
 import type { RunHostCommand } from './merge.ts'
 import type { TridentRun } from './store.ts'
 
@@ -3917,22 +3918,15 @@ export async function changedFilesWithStatus(
   //       it a legal target made a deletion-only diff an unreachable-nomination
   //       deadlock: the refusal named the one file that could not be named back.
   const res = await run_host(
-    [
-      'git',
-      '-C',
+    gitRangeArgv({
       repo_path,
-      '-c',
-      'core.quotePath=false',
-      'diff',
-      '-z',
-      '--no-renames',
-      '--name-status',
-      // `--end-of-options` (#546). A THREE-dot range, which is why the first coverage test
-      // did not think of it: that test matched `..` after a specific identifier spelling and
-      // this argv is spread over its own lines, so neither half of the pattern reached it.
-      '--end-of-options',
-      `${baseRef}...${ref}`,
-    ],
+      config: ['-c', 'core.quotePath=false'],
+      subcommand: 'diff',
+      flags: ['-z', '--no-renames', '--name-status'],
+      base: baseRef,
+      head: ref,
+      dots: '...',
+    }),
     repo_path,
   )
   if (!res.ok) return null

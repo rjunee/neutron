@@ -77,6 +77,7 @@ import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
+import { gitRangeArgv } from './git-range.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { ralphCapFailureReason } from './ralph-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
@@ -806,7 +807,7 @@ export async function computeDiffLineCount(
       // the coverage test could not see it: that test searched for `${baseRef}`, and this
       // one spells the same value `base_ref`. Called with `--output=/tmp/pwn` this argv
       // writes that file and exits 0, exactly as the shielded sites were measured doing.
-      ['git', '-C', repo_path, 'diff', '--numstat', '--end-of-options', `${base_ref}..HEAD`],
+      gitRangeArgv({ repo_path, subcommand: 'diff', flags: ['--numstat'], base: base_ref, head: 'HEAD' }),
       repo_path,
     )
   } catch {
@@ -1666,7 +1667,13 @@ export async function rebaseOntoObservedBase(
       // answers a sha today, but a range operand is a range operand and the marker costs
       // nothing. Uniform across every git range in this module (#546) so the claim is
       // "all of them" rather than "the ones whose value I reasoned about".
-      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, '--end-of-options', `${await localForkPoint()}..refs/heads/${branch}`],
+      gitRangeArgv({
+        repo_path: repoPath,
+        subcommand: 'diff',
+        flags: [`--output=${diffFile}`],
+        base: await localForkPoint(),
+        head: `refs/heads/${branch}`,
+      }),
       repoPath,
     )
     if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
@@ -2747,7 +2754,14 @@ export function buildTridentOrchestrator(
       // unconstructable" on purpose — the mechanism is a throw on one code path, not a
       // property of the type, and a value that never passed through the binding is exactly
       // what this marker is here for.
-      ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', '--end-of-options', `${baseRef}..${headToPublish}`],
+      gitRangeArgv({
+        repo_path: run.repo_path,
+        config: ['-c', 'core.quotePath=false'],
+        subcommand: 'diff',
+        flags: ['--name-only', '--no-renames'],
+        base: baseRef,
+        head: headToPublish,
+      }),
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
@@ -2855,7 +2869,14 @@ export function buildTridentOrchestrator(
         // `--end-of-options` (#546): `seenPin` is 40-hex-checked one line above, so this is
         // belt-and-braces — kept anyway so EVERY range in this module carries it and the
         // coverage test needs no per-site exemption to reason about.
-        ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', '--end-of-options', `${seenPin}..${headToPublish}`],
+        gitRangeArgv({
+          repo_path: run.repo_path,
+          config: ['-c', 'core.quotePath=false'],
+          subcommand: 'diff',
+          flags: ['--no-renames', '--name-only'],
+          base: seenPin,
+          head: headToPublish,
+        }),
         run.repo_path,
       )
       if (unseenRes.ok) {
@@ -2875,7 +2896,13 @@ export function buildTridentOrchestrator(
       const diff = await opts.run_host(
         // `--end-of-options`: without it a second `--output=` arrives from the operand and
         // git honours BOTH (measured, exit 0, two files written).
-        ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, '--end-of-options', `${baseRef}..${headToPublish}`],
+        gitRangeArgv({
+          repo_path: run.repo_path,
+          subcommand: 'diff',
+          flags: [`--output=${diffFile}`],
+          base: baseRef,
+          head: headToPublish,
+        }),
         run.repo_path,
       )
       if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
@@ -2892,10 +2919,14 @@ export function buildTridentOrchestrator(
         // reviewer reads the same hunks under two headings. Literal magic turns each
         // token back into the exact path `--name-only` printed.
         const partDiff = await opts.run_host(
-          [
-            'git', '-C', run.repo_path, 'diff', '--no-renames',
-            `--output=${part}`, '--end-of-options', `${baseRef}..${headToPublish}`, '--', ...group.map((f) => `:(literal)${f}`),
-          ],
+          gitRangeArgv({
+            repo_path: run.repo_path,
+            subcommand: 'diff',
+            flags: ['--no-renames', `--output=${part}`],
+            base: baseRef,
+            head: headToPublish,
+            pathspec: group.map((f) => `:(literal)${f}`),
+          }),
           run.repo_path,
         )
         if (!partDiff.ok) throw new Error('outer publisher could not materialize the review diff')
@@ -3303,7 +3334,7 @@ export function buildTridentOrchestrator(
       const ahead = await opts.run_host(
         // `--end-of-options`: `rev-list` exits 129 on an option-shaped operand and writes
         // the file anyway (measured); the marker stops it reaching the option parser.
-        ['git', '-C', run.repo_path, 'rev-list', '--count', '--end-of-options', `${baseRef}..${localHead}`],
+        gitRangeArgv({ repo_path: run.repo_path, subcommand: 'rev-list', flags: ['--count'], base: baseRef, head: localHead }),
         run.repo_path,
       )
       const aheadText = ahead.stdout.trim()
@@ -4005,7 +4036,13 @@ export function buildTridentOrchestrator(
         // `--end-of-options` (#546). The `refs/heads/` prefix already makes an option-shaped
         // base non-option-shaped, so this is the least exposed range here; it carries the
         // marker so the module's rule has no exceptions to remember.
-        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', '--end-of-options', `refs/heads/${base}..${remoteRef}`],
+        gitRangeArgv({
+          repo_path: launchRun.repo_path,
+          subcommand: 'rev-list',
+          flags: ['--count'],
+          base: `refs/heads/${base}`,
+          head: remoteRef,
+        }),
         launchRun.repo_path,
       )
       const count = Number.parseInt(behind.stdout.trim(), 10)
@@ -4343,7 +4380,13 @@ export function buildTridentOrchestrator(
             // `--end-of-options` (#546): `base_sha` is the launcher's own resolved oid, and
             // `rev-list` is the family measured to write the smuggled file even while
             // exiting 129, so the marker goes here too.
-            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', '--end-of-options', `${base_sha}..${branchTip}`],
+            gitRangeArgv({
+              repo_path: launchRun.repo_path,
+              subcommand: 'rev-list',
+              flags: ['--count'],
+              base: base_sha,
+              head: branchTip,
+            }),
             launchRun.repo_path,
           )
           const rawAheadCount = ahead.stdout.trim()
