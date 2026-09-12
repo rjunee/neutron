@@ -23,7 +23,7 @@ import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
-import { DEFAULT_MAX_RALPH_ROUNDS, ralphRoundIsSpendable } from './ralph-budget.ts'
+import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -100,25 +100,6 @@ export class TridentUnseededPinError extends Error {
           : 'an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value'),
     )
     this.name = 'TridentUnseededPinError'
-  }
-}
-
-/**
- * A carried `ralph_round` the row could never spend (#519).
- *
- * `refireNextRalphTask` (orchestrator.ts) refuses at
- * `ralph_round + 1 > max_ralph_rounds`, so a row born at or past its own cap
- * cannot continue the Ralph loop it was seeded to continue.
- * `builtButNeverReviewedSeed` already answers 0 for that shape, through the SAME
- * `ralphRoundIsSpendable` predicate and the same {@link DEFAULT_MAX_RALPH_ROUNDS}
- * — this is that predicate at the write site, for the same reason
- * `TridentUnresumableSeedError` is: the safety of a seeded row must not rest on a
- * check one function away.
- */
-export class TridentUnusableRalphRoundError extends Error {
-  constructor(ralph_round: number, max_ralph_rounds: number) {
-    super(`refusing to create a trident run carrying ralph_round=${ralph_round} with max_ralph_rounds=${max_ralph_rounds}: the row could never re-fire (refireNextRalphTask refuses at ralph_round + 1 > max_ralph_rounds), so it would be born unable to continue the Ralph loop it was seeded to continue — carry 0 and take a fresh budget instead`)
-    this.name = 'TridentUnusableRalphRoundError'
   }
 }
 
@@ -318,11 +299,12 @@ export interface CreateTridentRunInput {
    *
    * PART OF THE SEED, not an independent knob: `create` REFUSES a non-zero value on
    * a row that seeds no `inner_checkpoint` (`TridentUnseededPinError`), because a
-   * fresh build has spent no Ralph iterations, and refuses one at or past this row's
-   * own `max_ralph_rounds` (`TridentUnusableRalphRoundError`), because
-   * `refireNextRalphTask` could never re-fire it. `builtButNeverReviewedSeed`
-   * (run-disposition.ts) is the only writer and applies both predicates first, on
-   * the same {@link DEFAULT_MAX_RALPH_ROUNDS} — one predicate, both places.
+   * fresh build has spent no Ralph iterations. It does NOT bound the value by this
+   * row's `max_ralph_rounds`: a round at or past the cap is stored verbatim so the
+   * cap BITES here, because refusing it would fall back to a fresh row at 0 and hand
+   * an exhausted card its whole budget back. `builtButNeverReviewedSeed`
+   * (run-disposition.ts) is the only writer and normalises through the same
+   * `carryableRalphRound` — one predicate, both places.
    */
   ralph_round?: number
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
@@ -605,10 +587,9 @@ export class TridentRunStore {
         throw new TridentUnseededPinError('inner_checkpoint_findings', input.inner_checkpoint_findings ?? null)
       }
     }
-    // THE CARRIED RE-FIRE COUNTER IS THE FOURTH SEED COLUMN (#519), and it is
-    // checked here for exactly the reason the other three are: the safety of a
-    // seeded row must not rest on a predicate one function away. Two things make a
-    // carried round unwritable.
+    // THE CARRIED RE-FIRE COUNTER IS THE FOURTH SEED COLUMN (#519), and ONE thing
+    // makes it unwritable — checked here for exactly the reason the other three are:
+    // the safety of a seeded row must not rest on a predicate one function away.
     //
     //   AN UNSEEDED ROW MAY NOT CARRY ONE. A row with no `inner_checkpoint` is a
     //   fresh build; it has spent no Ralph iterations, so a non-zero count charges
@@ -617,27 +598,26 @@ export class TridentRunStore {
     //   iteration. Refused with the same `TridentUnseededPinError` the other three
     //   unseeded-pin shapes take.
     //
-    //   AND IT MUST LEAVE A RE-FIRE. `refireNextRalphTask` (orchestrator.ts)
-    //   refuses at `ralph_round + 1 > max_ralph_rounds`, so a round at or past THIS
-    //   row's cap creates a row that cannot continue the loop it was seeded to
-    //   continue — the one outcome worse than starting over.
+    // THE CAP IS NOT A PRECONDITION HERE, DELIBERATELY (cross-model review,
+    // BLOCKER 1). An earlier revision threw when a carried round left no re-fire
+    // inside this row's `max_ralph_rounds`. Both halves of that were wrong. The
+    // PRODUCER's matching refusal fell back to a fresh row at 0, which handed an
+    // exhausted card its entire budget back — so the store must ACCEPT a round at or
+    // past the cap and let the cap bite on this row (`refireNextRalphTask`,
+    // `computeTransition`: fail loudly, naming `max_ralph_rounds`). And throwing here
+    // would convert an exhausted card's dispatch into a `backend_error` — HTTP 500,
+    // nothing queued — when the honest answer is a row that reviews the commit it
+    // adopted and refuses only a NEW planning iteration. Clamping was not an option
+    // either: it manufactures budget out of a number nobody asked for.
     //
-    // Anything that is not a non-negative safe integer reads as 0 rather than
-    // throwing: `undefined` is the shape every existing caller passes, and a
-    // garbled number is the fresh-budget case, not a reason to fail a dispatch.
+    // Anything that is not a positive safe integer reads as 0 rather than throwing:
+    // `undefined` is the shape every existing caller passes, and a garbled number is
+    // the fresh-budget case, not a reason to lose a build. `carryableRalphRound` is
+    // the same normaliser the producer applies — one predicate, both places.
     const maxRalphRounds = input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
-    const requestedRalphRound = input.ralph_round
-    const carriedRalphRound =
-      Number.isSafeInteger(requestedRalphRound) && (requestedRalphRound as number) > 0
-        ? (requestedRalphRound as number)
-        : 0
-    if (carriedRalphRound > 0) {
-      if (seededCheckpoint === '') {
-        throw new TridentUnseededPinError('ralph_round', String(carriedRalphRound))
-      }
-      if (!ralphRoundIsSpendable(carriedRalphRound, maxRalphRounds)) {
-        throw new TridentUnusableRalphRoundError(carriedRalphRound, maxRalphRounds)
-      }
+    const carriedRalphRound = carryableRalphRound(input.ralph_round)
+    if (carriedRalphRound > 0 && seededCheckpoint === '') {
+      throw new TridentUnseededPinError('ralph_round', String(carriedRalphRound))
     }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()

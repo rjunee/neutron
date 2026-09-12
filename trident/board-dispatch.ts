@@ -82,7 +82,6 @@ import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from '
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
-import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 
 const log = createLogger('trident')
 
@@ -1108,10 +1107,12 @@ export async function dispatchBoardBoundBuild(
   // gate, so a retry that resets it to 0 hands the card a FRESH 20-iteration
   // budget every time ▶ is pressed — the bound `max_ralph_rounds` exists to impose
   // becomes unenforceable by re-dispatch — and restarts the plan-refresh cadence.
-  // It travels under the SAME proof as the checkpoint, plus the two facts a
-  // counter needs (both runs governed, and a round that still leaves a re-fire);
-  // `carriedRalphRound` in run-disposition.ts owns that predicate and `create`
-  // re-applies it at the write site.
+  // It travels under the SAME proof as the checkpoint, plus the one fact a counter
+  // needs (both runs governed); `carriedRalphRound` in run-disposition.ts owns that
+  // predicate and `create` re-applies its normalisation at the write site. It is
+  // NOT bounded by the cap on the way through: an exhausted round is carried so the
+  // cap refuses the next iteration on THIS row, rather than being dropped for a
+  // fresh row that has the whole budget again.
   //
   // THE HEAD EQUALITY IS LOAD-BEARING, not a nicety. It is what makes ADOPTING the
   // prior run's commit — its checkpoint, head, findings and base pin — safe: the
@@ -1199,16 +1200,12 @@ export async function dispatchBoardBoundBuild(
   } else if (cardsPriorRun !== prior.id) {
     seedReason = 'card_names_a_different_run'
   } else {
-    // THE EFFECTIVE RE-FIRE CAP OF THE ROW ABOUT TO BE CREATED, resolved exactly as
-    // `create` resolves it, because the carried `ralph_round` is only usable if it
-    // leaves a re-fire inside THIS row's cap — not the prior row's. Passing the
-    // prior row's own cap would offer `create` a round it then refuses
-    // (`TridentUnusableRalphRoundError`), turning a salvageable dispatch into a
-    // backend error.
-    const candidate = builtButNeverReviewedSeed(prior, {
-      ralph,
-      max_ralph_rounds: deps.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS,
-    })
+    // NO CAP IS PASSED, deliberately (cross-model review, BLOCKER 1). The carried
+    // `ralph_round` travels verbatim so `max_ralph_rounds` bites on the row that
+    // inherits it; gating the carry on the cap looked prudent and did the opposite,
+    // because this call's refusal path is not a refusal — it is a fresh row at 0,
+    // on which the cap check then authorises the whole budget again.
+    const candidate = builtButNeverReviewedSeed(prior, { ralph })
     if (candidate === null) {
       seedReason = 'prior_run_has_no_resumable_build'
     } else {

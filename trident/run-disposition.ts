@@ -57,7 +57,7 @@
  */
 
 import type { TridentRun } from './store.ts'
-import { DEFAULT_MAX_RALPH_ROUNDS, ralphRoundIsSpendable } from './ralph-budget.ts'
+import { carryableRalphRound } from './ralph-budget.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { OUTER_PUBLISHED_CHECKPOINT } from './checkpoint-round.ts'
@@ -199,54 +199,49 @@ export function terminalRunDisposition(
 }
 
 /**
- * The prior run's Ralph re-fire counter, as it may be carried onto the row that
- * resumes its work — or `0`, which is byte-identical to the fresh-dispatch value
- * `create` writes for every other row.
+ * The prior run's Ralph re-fire counter, as it is carried onto the row that resumes
+ * its work — or `0`, which is byte-identical to the fresh-dispatch value `create`
+ * writes for every other row.
  *
  * WHY IT IS CARRIED AT ALL (#519). `ralph_round` is not decoration: the
  * orchestrator's `refireNextRalphTask` bounds the whole Ralph loop on it
- * (`nextRalphRound > run.max_ralph_rounds` → fail loudly), and
- * `buildWorkflowArgs` threads it to the inner workflow as `ralphRound`, where the
- * planner-cadence gate reads it (`ralphRoundNum % PLAN_REFRESH_EVERY`). A retry
- * that resets it to 0 therefore hands the card a FRESH 20-iteration budget on
- * every re-dispatch — a non-converging planner can be resurrected indefinitely by
- * re-pressing ▶, which is exactly the bound `max_ralph_rounds` exists to impose —
- * and restarts the plan-refresh cadence, so the periodic full re-plan lands on the
- * wrong iteration. The durable row already holds the answer; nothing had to be
- * measured again, only carried.
+ * (`nextRalphRound > run.max_ralph_rounds` → fail loudly), and `buildWorkflowArgs`
+ * threads it to the inner workflow as `ralphRound`, where the planner-cadence gate
+ * reads it (`ralphRoundNum % PLAN_REFRESH_EVERY`). A retry that resets it to 0
+ * therefore hands the card a FRESH 20-iteration budget on every re-dispatch — a
+ * non-converging planner can be resurrected indefinitely by re-pressing ▶, which
+ * is exactly the bound `max_ralph_rounds` exists to impose — and restarts the
+ * plan-refresh cadence, so the periodic full re-plan lands on the wrong iteration.
+ * The durable row already holds the answer; nothing had to be measured again, only
+ * carried.
  *
- * IT IS GATED ON THE SAME EVIDENCE AS THE REST OF THE SEED, plus two facts only a
+ * IT IS GATED ON THE SAME EVIDENCE AS THE REST OF THE SEED, plus ONE fact only a
  * counter needs. The caller has already proven the live branch tip is exactly this
  * run's recorded commit and that the card names this run; this function adds:
  *
- *   1. BOTH RUNS ARE GOVERNED. `opts.ralph` is the mode the NEW row will be born
- *      in (resolved at dispatch by `detectRalphMode`) and `run.ralph` is the mode
- *      the counter was produced in. A count of Ralph iterations means nothing on a
- *      row that will not run a Ralph loop, and a non-Ralph prior has no iterations
- *      to count. Either half missing → 0.
- *   2. THE CARRIED ROUND LEAVES A RE-FIRE. `refireNextRalphTask` refuses at
- *      `ralph_round + 1 > max_ralph_rounds`, so carrying a round at or past the
- *      cap the new row will get creates a row that is born unable to continue —
- *      a resume into a state that is gone, which is the one outcome worse than
- *      starting over. `opts.max_ralph_rounds` is the EFFECTIVE cap of the row
- *      being created (the caller resolves it exactly as `create` does, via
- *      {@link DEFAULT_MAX_RALPH_ROUNDS}), not the prior row's, because the prior
- *      row's cap says nothing about what this one may spend.
+ *   BOTH RUNS ARE GOVERNED. `opts.ralph` is the mode the NEW row will be born in
+ *   (resolved at dispatch by `detectRalphMode`) and `run.ralph` is the mode the
+ *   counter was produced in. A count of Ralph iterations means nothing on a row
+ *   that will not run a Ralph loop, and a non-Ralph prior has no iterations to
+ *   count. Either half missing → 0.
  *
- * FAIL-CLOSED ON ANY SHAPE IT CANNOT READ. A non-integer, negative, `undefined`
- * or unsafe `ralph_round` (a partially-built run object in a caller's test, a
- * legacy row, a column read back as a string) answers 0 rather than guessing —
- * `Number.isSafeInteger` rejects every one of them. So does an unreadable cap.
- * The cost of answering 0 is the pre-#519 behaviour; the cost of guessing is a
- * budget nobody can account for.
+ * AND IT DOES NOT COMPARE THE ROUND AGAINST ANY CAP (cross-model review, BLOCKER
+ * 1). An earlier revision refused to carry a round at or past the cap the new row
+ * would get, reasoning that such a row could never re-fire. But the refusal path is
+ * not a refusal — it is a FRESH row at `ralph_round: 0`, on which
+ * `refireNextRalphTask` asks `1 > max_ralph_rounds` and authorises another twenty
+ * iterations. Gating on the cap therefore handed an EXHAUSTED card its whole budget
+ * back, which is the defect this change exists to close. Exhausted stays exhausted:
+ * the round travels verbatim and the cap bites on the row that inherits it. See
+ * `carryableRalphRound` (ralph-budget.ts) for why nothing useful is lost by that —
+ * a seeded row resumes to a REVIEW, and only a NEW planning iteration is refused.
+ *
+ * FAIL-CLOSED ON ANY SHAPE IT CANNOT READ — see `carryableRalphRound`. Answering 0
+ * costs the pre-#519 behaviour; guessing costs a budget nobody can account for.
  */
-function carriedRalphRound(
-  run: TridentRun,
-  opts: { ralph?: boolean; max_ralph_rounds?: number },
-): number {
+function carriedRalphRound(run: TridentRun, opts: { ralph?: boolean }): number {
   if (opts.ralph !== true || run.ralph !== true) return 0
-  const cap = opts.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
-  return ralphRoundIsSpendable(run.ralph_round, cap) ? run.ralph_round : 0
+  return carryableRalphRound(run.ralph_round)
 }
 
 /**
@@ -291,7 +286,7 @@ function carriedRalphRound(
  */
 export function builtButNeverReviewedSeed(
   run: TridentRun,
-  opts: { ralph?: boolean; max_ralph_rounds?: number } = {},
+  opts: { ralph?: boolean } = {},
 ): {
   checkpoint: string
   head: string
@@ -328,9 +323,11 @@ export function builtButNeverReviewedSeed(
     // carry precisely because the caller has proven the branch still holds that
     // run's own recorded head: same commit, same base it was cut from.
     base_sha: trimCheckpoint(run.base_sha).toLowerCase(),
-    // THE RE-FIRE COUNTER TRAVELS TOO (#519) — see `carriedRalphRound`. `0` on
-    // every shape that cannot prove a round worth carrying, which is the value
-    // `create` writes for a fresh row, so nothing changes for them.
+    // THE RE-FIRE COUNTER TRAVELS TOO (#519) — see `carriedRalphRound`. Verbatim,
+    // cap and all: a round at or past the new row's cap is carried so the cap
+    // BITES on that row, because the alternative (refusing the carry) produces a
+    // fresh row at 0 and hands an exhausted card its whole budget back. `0` only
+    // when there is genuinely nothing to carry, which is the fresh-row value.
     ralph_round: carriedRalphRound(run, opts),
     // `pr` is deliberately NOT carried. `launch()` resolves it with
     // `run.pr ?? await detectExistingPr(run)`, and a seeded number SHORT-CIRCUITS

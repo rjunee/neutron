@@ -33,28 +33,38 @@
 export const DEFAULT_MAX_RALPH_ROUNDS = 20 as const
 
 /**
- * Can a row capped at `max` actually SPEND a re-fire counter of `round`?
+ * The re-fire counter a resumed row may carry, or 0 when there is nothing to carry.
  *
- * `refireNextRalphTask` (orchestrator.ts) refuses at
- * `ralph_round + 1 > max_ralph_rounds`, so a row born at or past its own cap
- * cannot continue the Ralph loop at all — carrying a round like that onto a
- * resumed row produces a run that is dead on arrival, which is strictly worse
- * than starting over with a fresh budget. `round < max` is exactly the condition
- * that leaves one re-fire available.
+ * THE CAP IS DELIBERATELY NOT CONSULTED, and an earlier revision of this file got
+ * that exactly backwards (cross-model review, BLOCKER 1). It required
+ * `round < max` — "the round must leave a re-fire" — on the theory that a row born
+ * at its cap is dead on arrival. Trace the fallback: refusing the carry does not
+ * refuse the dispatch, it produces a FRESH row at `ralph_round: 0`, and
+ * `refireNextRalphTask` (orchestrator.ts) then asks `0 + 1 > max_ralph_rounds`,
+ * which is false — so re-dispatching a card AT its cap restored the WHOLE budget
+ * and the nineteen iterations after it. The conjunct meant to bound the loop was
+ * the one thing unbounding it.
+ *
+ * SO EXHAUSTED STAYS EXHAUSTED. A round at or past the cap is carried verbatim and
+ * the cap bites on the row that inherits it: `computeTransition` (state-machine.ts,
+ * the single site the counter advances) and `refireNextRalphTask` both refuse at
+ * `ralph_round + 1 > max_ralph_rounds`, loudly, naming `max_ralph_rounds` in the
+ * failure reason. Nothing is bricked by that: a salvage-seeded row resumes to a
+ * REVIEW (`fix-round-N`, `outer-published:*`), and `refireNextRalphTask` is reached
+ * only from `applyResult`'s `publish_requested && run.ralph && remaining_tasks > 0`
+ * arm — so the resumed run can still review, fix and merge the commit it adopted.
+ * What it may not do is open a NEW planning iteration on a budget that is spent,
+ * which is the whole point of having a budget.
  *
  * FAIL-CLOSED ON EVERY SHAPE IT CANNOT READ. `undefined`, `null`, a string, a
- * float, a negative, `NaN`, `Infinity` and anything past 2^53 all answer false
- * rather than being coerced — the counter reaches this function from a stored
- * INTEGER column and from caller-supplied options, and `Number.isSafeInteger` is
- * the only test that rejects all of them. `round < 1` answers false too: zero is
- * "nothing to carry", which is the fresh-row value, and a negative is a garbled
- * row. False always means "take the fresh budget", never "fail the dispatch".
+ * float, a negative, `NaN`, `Infinity` and anything past 2^53 answer 0 rather than
+ * being coerced — the counter reaches this function from a stored INTEGER column
+ * and from caller-supplied options, and `Number.isSafeInteger` is the only test
+ * that rejects all of them. `round < 1` answers 0 too: zero is "nothing to carry",
+ * which is the fresh-row value, and a negative is a garbled row. 0 always means
+ * "take the fresh budget", never "fail the dispatch" — a build must not be lost to
+ * an unreadable counter.
  */
-export function ralphRoundIsSpendable(round: unknown, max: unknown): boolean {
-  return (
-    Number.isSafeInteger(round) &&
-    (round as number) >= 1 &&
-    Number.isSafeInteger(max) &&
-    (round as number) < (max as number)
-  )
+export function carryableRalphRound(round: unknown): number {
+  return Number.isSafeInteger(round) && (round as number) >= 1 ? (round as number) : 0
 }

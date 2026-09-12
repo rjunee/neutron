@@ -16,10 +16,11 @@
  *
  * The `inner_checkpoint` half of continuity already lands (the salvage-resume seed).
  * This file drives the REAL `dispatchBoardBoundBuild` against the REAL store and
- * pins both directions of the round half — it resumes on proof, it starts fresh and
- * SAYS WHY without it — plus the two boundaries that make resuming safe: a live run
- * is refused at the existing claim chokepoint, and the launcher-CRASH relaunch (a
- * different path, on the SAME row) is untouched.
+ * pins both directions of the round half — it resumes on proof, it starts fresh
+ * (and logs why) without it — plus the three boundaries that make resuming safe: an
+ * EXHAUSTED round is carried so the cap still bites rather than being reset to a
+ * fresh budget, a live run is refused at the existing claim chokepoint, and the
+ * launcher-CRASH relaunch (a different path, on the SAME row) is untouched.
  *
  * Every case names the mutation that turns it RED.
  */
@@ -38,11 +39,11 @@ import {
 import {
   TridentRunStore,
   TridentUnseededPinError,
-  TridentUnusableRalphRoundError,
   type MergeMode,
   type TridentRun,
 } from './store.ts'
 import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
+import { computeTransition } from './state-machine.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentTickLoop } from './tick.ts'
 import { buildWorkflowArgs, type InnerLoopInput } from './inner-loop.ts'
@@ -139,10 +140,18 @@ function deps(over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
 
 /**
  * Dispatch the card, recording the branch-tip reads AND the `[trident]` lines the
- * chokepoint emitted. The log matters as much as the row here: every refusal below
- * falls back to a byte-identical FRESH dispatch, so without the line the refusal is
- * invisible — a card that silently rebuilt finished work looks exactly like a card
- * that was never built.
+ * chokepoint emitted. Every refusal below falls back to a byte-identical FRESH
+ * dispatch, so without the line the refusal leaves no trace anywhere — a card that
+ * silently rebuilt finished work looks exactly like a card that was never built.
+ *
+ * WHAT THIS DOES *NOT* PROVE, stated so no future reader mistakes it (cross-model
+ * review, BLOCKER 2). The spec item's first criterion wants a refusal stated
+ * "plainly on the card", and a captured `console.log` is not that: it is a SERVER
+ * LOG, and nobody looking at the board sees it. That half of the criterion is NOT
+ * delivered and its box is deliberately unticked — `work_board_items` has no
+ * free-text field and `TridentBoardBinder` is `get`/`attachRun`/reconcile, so there
+ * is no board surface to write to. These assertions pin the log because the log is
+ * what exists, not because it answers the criterion.
  */
 async function dispatchRecording(
   tip: (repo: string, branch: string) => Promise<string>,
@@ -446,24 +455,64 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     expect(control.result.run.inner_checkpoint).toBe('fix-round-3')
   })
 
-  test('AN UNSPENDABLE ROUND falls back to a fresh budget rather than a row that cannot re-fire', async () => {
-    // `refireNextRalphTask` refuses at `ralph_round + 1 > max_ralph_rounds`, so a
-    // carried round at the cap would create a run that is dead on arrival. The
-    // checkpoint still travels — the commit is real and still on the branch — but the
-    // round does not, and the fresh budget is the honest answer.
-    // RED-mutation: drop the `round < max` arm of `ralphRoundIsSpendable` and the
-    // dispatch throws `TridentUnusableRalphRoundError` at `create`, failing outright.
+  test('AN EXHAUSTED PRIOR STAYS EXHAUSTED — the round is carried and the cap still bites', async () => {
+    // THE BEHAVIOUR THIS TEST USED TO ASSERT AS CORRECT (cross-model review,
+    // BLOCKER 1). It created a prior at the cap and asserted the resumed row came
+    // back at `ralph_round: 0` with `max_ralph_rounds: 20` — a FULL budget. Trace it
+    // forward: the next Ralph handoff computes `nextRalphRound = 1`, the only refusal
+    // is `nextRalphRound > run.max_ralph_rounds`, and `1 > 20` is false — so another
+    // iteration is authorised, and the nineteen after it. Re-dispatching a card AT
+    // its cap restored the whole budget, which is the unbounded-retry defect this
+    // change exists to close, and the test was blessing it.
+    //
+    // A refusal to carry has to be a refusal, not a reset. So the round travels
+    // verbatim and the cap bites on the row that inherits it.
+    // RED-mutation: restore the `round < max` conjunct in `carryableRalphRound` and
+    // this row comes back at 0 with a fresh budget — every assertion below fails.
     await priorRun({ ralph_round: DEFAULT_MAX_RALPH_ROUNDS, max_ralph_rounds: DEFAULT_MAX_RALPH_ROUNDS })
 
     const { result, seedLine } = await dispatchRecording(async () => HEAD)
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
+    // The commit still travels — it is real and still on the branch.
     expect(result.run.inner_checkpoint).toBe('fix-round-3')
-    expect(result.run.ralph_round).toBe(0)
+    // AND SO DOES THE SPENT BUDGET.
+    expect(result.run.ralph_round).toBe(DEFAULT_MAX_RALPH_ROUNDS)
     expect(result.run.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(store.get(result.run.id)!.ralph_round).toBe(DEFAULT_MAX_RALPH_ROUNDS)
     expect(seedLine).toContain('reason=resumed')
-    expect(seedLine).toContain('ralph_round=0')
+    expect(seedLine).toContain(`ralph_round=${DEFAULT_MAX_RALPH_ROUNDS}`)
+
+    // THE FORWARD TRACE, on the row the real dispatch actually produced. A NEW Ralph
+    // iteration is refused, loudly, naming the cap — `computeTransition` is the state
+    // machine's single ralph-counter site and `refireNextRalphTask` (orchestrator.ts)
+    // applies the identical `+1 > max` test on the same two columns.
+    const exhausted = computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {})
+    expect(exhausted.phase).toBe('failed')
+    expect(exhausted.failure_reason).toContain('max_ralph_rounds')
+  })
+
+  test('ONE BELOW THE CAP still has its re-fire — the bound bites at the cap, not before it', async () => {
+    // The other side of the bound, so the test above cannot pass by refusing every
+    // iteration. A card that had spent 19 of 20 resumes with 19 and gets its
+    // twentieth; it is the twenty-first that is refused.
+    // RED-mutation: make the carry unconditional AND off-by-one (carry `round + 1`)
+    // and this row is already exhausted a round early.
+    await priorRun({
+      ralph_round: DEFAULT_MAX_RALPH_ROUNDS - 1,
+      max_ralph_rounds: DEFAULT_MAX_RALPH_ROUNDS,
+    })
+
+    const { result } = await dispatchRecording(async () => HEAD)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.ralph_round).toBe(DEFAULT_MAX_RALPH_ROUNDS - 1)
+
+    const oneLeft = computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {})
+    expect(oneLeft.phase).toBe('ralph-plan')
+    expect(oneLeft.ralph_round).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(oneLeft.failure_reason).toBeNull()
   })
 
   test('A NON-GOVERNED re-dispatch carries no round, even from a governed prior', async () => {
@@ -632,23 +681,32 @@ describe('the write site refuses a carried round it should never have been offer
     expect(seeded.ralph_round).toBe(4)
   })
 
-  test('a round the row could never spend is refused, not silently clamped', async () => {
-    // A clamp would be the wrong answer twice over: it writes a number nobody asked
-    // for, and it hides that the producer offered an impossible one. RED-mutation:
-    // replace the throw with a clamp and the rejection assertion fails.
+  test('a round at or past the cap is stored VERBATIM — not refused, not clamped', async () => {
+    // WHY THE WRITE SITE MUST ACCEPT IT (cross-model review, BLOCKER 1). An earlier
+    // revision threw `TridentUnusableRalphRoundError` here. Two things were wrong
+    // with that. It made the producer's matching refusal necessary, and that refusal
+    // fell back to a fresh row at 0 — handing an exhausted card its whole budget
+    // back. And throwing would turn an exhausted card's dispatch into a
+    // `backend_error` (HTTP 500, nothing queued) when the honest outcome is a row
+    // that reviews the commit it adopted and refuses only a NEW iteration.
+    // Clamping was no better: it manufactures budget out of a number nobody asked for.
+    // RED-mutation: reinstate a cap check in `create` and these rejections come back.
     const full = {
       project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true,
       inner_checkpoint: 'fix-round-3', inner_checkpoint_head: HEAD, base_sha: BASE,
     }
-    await expect(
-      store.create({ ...full, slug: 'at-cap', ralph_round: 5, max_ralph_rounds: 5 }),
-    ).rejects.toThrow(TridentUnusableRalphRoundError)
-    await expect(
-      store.create({ ...full, slug: 'past-cap', ralph_round: 9, max_ralph_rounds: 5 }),
-    ).rejects.toThrow(TridentUnusableRalphRoundError)
-    // BOTH SIDES OF THE BOUND: one below the cap is accepted.
-    const ok = await store.create({ ...full, slug: 'under-cap', ralph_round: 4, max_ralph_rounds: 5 })
-    expect(ok.ralph_round).toBe(4)
+    const atCap = await store.create({ ...full, slug: 'at-cap', ralph_round: 5, max_ralph_rounds: 5 })
+    expect(atCap.ralph_round).toBe(5)
+    expect(store.get(atCap.id)!.ralph_round).toBe(5)
+    const pastCap = await store.create({ ...full, slug: 'past-cap', ralph_round: 9, max_ralph_rounds: 5 })
+    expect(pastCap.ralph_round).toBe(9) // verbatim: NOT clamped to 5
+    // BOTH SIDES OF THE BOUND, so this cannot pass by storing everything wrong.
+    const underCap = await store.create({ ...full, slug: 'under-cap', ralph_round: 4, max_ralph_rounds: 5 })
+    expect(underCap.ralph_round).toBe(4)
+    // …and the cap bites on the rows that are at or past it, not on the one below.
+    expect(computeTransition({ ...atCap, phase: 'ralph-task' }, {}).phase).toBe('failed')
+    expect(computeTransition({ ...pastCap, phase: 'ralph-task' }, {}).phase).toBe('failed')
+    expect(computeTransition({ ...underCap, phase: 'ralph-task' }, {}).phase).toBe('ralph-plan')
   })
 
   test('a garbled round reads as 0 rather than failing the dispatch', async () => {
