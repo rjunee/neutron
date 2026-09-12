@@ -760,6 +760,11 @@ async function spawnSession(
       first_ready_at: Date.now(),
     }
     if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
+    // #539 — the durable terminal handle, when this host issues one. Written HERE,
+    // at the same moment as the pid and the generation, because those three are one
+    // fact about one child: the next gateway reads all three together to decide
+    // whether the thing under the handle is still the child this row describes.
+    if (child.paneHandle !== undefined) record.pane_handle = child.paneHandle
     try {
       // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
       // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
@@ -774,9 +779,27 @@ async function spawnSession(
           // never be read as describing this one, and it has to outlive that child:
           // a QUARANTINED generation is superseded by this very write, and its entry
           // is the only durable record that a deploy killed it.
+          //
+          // #539 — `pane_handle` IS dropped here, and the contrast with the field
+          // above is the whole reason both comments exist. That one describes a
+          // child that is GONE and must stay describable; this one describes the
+          // child that is RUNNING, so a value inherited from its predecessor is a
+          // claim about a pane this child does not have. It is re-stated below from
+          // `record` when this spawn actually produced one.
+          pane_handle: _mergedHandle,
           ...merged
         } = prev ? { ...prev, ...record } : record
-        registry[sessionKey] = merged
+        // #539 — THE HANDLE IS NOT MERGED, IT IS RE-STATED. A spread carries the
+        // PRIOR row's `pane_handle` through whenever this spawn produced none (the
+        // in-process host, a test double), so the row would keep asserting a pane for
+        // a child that has no pane — and the next boot would go looking for it. A
+        // handle describes the CURRENT child or it is absent; there is no inheriting
+        // one. Written back only from `record`, i.e. only from the child we just
+        // spawned.
+        registry[sessionKey] =
+          record.pane_handle !== undefined
+            ? { ...merged, pane_handle: record.pane_handle }
+            : merged
         return { registry, result: undefined }
       })
     } catch {

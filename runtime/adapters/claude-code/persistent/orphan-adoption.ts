@@ -44,6 +44,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import type { HandleInspection } from './pty-host.ts'
 
 /** Verdict for one orphan-adoption attempt. */
 export type OrphanAdoptionVerdict =
@@ -51,6 +52,157 @@ export type OrphanAdoptionVerdict =
   | 'not-ours' // pid alive but cmdline does not match → recycled/unrelated → untouched
   | 'dead' // pid not alive → nothing to adopt
   | 'no-pid' // record carried no usable pid → nothing to do
+// ───────────────────────────────────────────────────────────────────────────
+// #539 — THE ADOPT ARM.
+//
+// Everything above this line is adopt-OR-KILL that only ever kills: the module was
+// written when a surviving REPL was a hazard to be removed, because nothing could
+// re-attach to one. Under the herdr host a REPL is a pane of the herdr SERVER and
+// genuinely outlives a gateway restart, so the same identity question now has a
+// second useful answer — keep it, and take it back.
+//
+// THE TWO DIRECTIONS ARE NOT THE SAME CLAIM, and this is why the verdict below is
+// not a boolean:
+//   - to ADOPT, we must establish that the process under the handle IS the child
+//     this row describes. Getting that wrong attaches the pool to a stranger's
+//     terminal and types into it.
+//   - to CLOSE, we must establish that the process under the handle owns a
+//     transcript we are about to give to somebody else. Getting THAT wrong kills a
+//     process that was never ours.
+//   - and `unknown` establishes NEITHER, so it licenses neither act. It is a verdict
+//     of its own, not a quiet member of one of the other two.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * What should happen to the pane a registry row names (#539). Derived ONLY from
+ * evidence the host reported; this function performs no IO and decides nothing about
+ * timing.
+ */
+export type PaneAdoptionVerdict =
+  /** The pane is live and running THE CHILD THIS ROW DESCRIBES — our claude, on our
+   *  transcript, wired to our dev-channel. Re-attach to it. */
+  | { readonly kind: 'adopt'; readonly pid?: number }
+  /**
+   * The pane is live and running a `claude` ON OUR TRANSCRIPT that is NOT our child —
+   * no `server:<channelName>` for this row's channel, so nothing we spawned. It must
+   * be closed before anything resumes that transcript, because the one-owner-per-
+   * transcript invariant is enforced ONLY by ending the other owner
+   * (`session-respawn.ts`, `spawn.ts`).
+   *
+   * THE SHAPE THAT PRODUCES IT IS NOT HYPOTHETICAL: herdr's own native agent restore
+   * (`[session] resume_agents_on_restore`, which DEFAULTS TO TRUE) relaunches a
+   * claude pane as exactly `["claude", "--resume", <id>]` — read in herdr's source,
+   * `src/agent_resume.rs` `plan()`, in the 0.9.0 tree available on this box; the
+   * installed server is 0.8.2, so the line numbers are not cited as if they were the
+   * running binary's. That relaunch carries NONE of our flags: no `--mcp-config`, no
+   * dev-channel, no per-child credential. It is on our transcript and it can never
+   * answer a turn.
+   *
+   * WHICH IS WHY THE CHANNEL TOKEN IS THE DISCRIMINATOR AND THE FLAG SPELLING IS NOT.
+   * herdr uses the same `--resume <id>` spelling we do, so no amount of parsing the
+   * resume flag separates the two; the dev-channel name does, because only a spawn of
+   * ours passes it. Turning herdr's native resume OFF makes this arm RARE; this arm is
+   * what makes it SAFE, and configuration alone would be a rule living in a file
+   * nobody re-reads.
+   */
+  | { readonly kind: 'close-foreign-owner'; readonly reason: string }
+  /** The pane is live and is NOT running a claude on our transcript — a recycled
+   *  pane id, or the owner's own work. LEFT UNTOUCHED: the recycled-identifier safety
+   *  rule this module exists for, applied to a pane id instead of a pid. */
+  | { readonly kind: 'leave-not-ours'; readonly reason: string }
+  /** The host positively reports the handle names nothing. Nothing to adopt, nothing
+   *  to close, and the row's handle can be cleared. */
+  | { readonly kind: 'gone' }
+  /** The pane EXISTS but the host could report no argv for it, so neither direction
+   *  is established. Distinct from `leave-not-ours`, which is a finding about the
+   *  process; this is the absence of one. */
+  | { readonly kind: 'unverifiable'; readonly reason: string }
+  /** The host could not be asked at all. Says nothing about the pane. */
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/** The row fields the classifier needs. Deliberately narrow so a test supplies a
+ *  literal rather than a whole registry record. */
+export interface PaneAdoptionRecord {
+  /** The session UUID the surviving child is resuming — matched as the VALUE of
+   *  `--resume`/`--session-id`. */
+  readonly sessionId: string
+  /** The dev-channel name this row's child was spawned with — matched as the VALUE
+   *  of `--dangerously-load-development-channels`, i.e. `server:<channelName>`. */
+  readonly channelName: string
+}
+
+/**
+ * Does this argv carry OUR dev-channel — `--dangerously-load-development-channels
+ * server:<channelName>`, exactly as `buildReplArgv` pushes it?
+ *
+ * THE VALUE AFTER THE FLAG, NEVER A SUBSTRING, for the same reason
+ * {@link cmdlineMatchesSession} insists on it: the channel name also appears in the
+ * `--mcp-config` and `--settings` PATHS on the same command line
+ * (`neutron-repl-<channel>/session-mcp.json`), so a substring test would be satisfied
+ * by a process that merely has our config files open.
+ *
+ * WHAT IT ADDS OVER THE SESSION MATCH, and why both are required to adopt: the
+ * session id says WHICH TRANSCRIPT a process is attached to, and the channel name
+ * says WHICH SPAWN it came from. A `claude --resume <our uuid>` that somebody else
+ * started is on our transcript and is not our child — it has no dev-channel we can
+ * inject into and no credential the sink will authorise, so adopting it would put a
+ * REPL in the pool that can never answer a turn. Pure — no IO.
+ */
+export function argvCarriesChannel(argv: readonly string[], channelName: string): boolean {
+  if (channelName === '') return false
+  const want = `server:${channelName}`
+  for (let i = 0; i + 1 < argv.length; i++) {
+    if (argv[i] === '--dangerously-load-development-channels' && argv[i + 1] === want) return true
+  }
+  return false
+}
+
+/**
+ * Classify what the host found under a row's pane handle (#539).
+ *
+ * PURE, and it consumes only what a host can honestly report — which is what makes
+ * the adopt verdict falsifiable. Every `adopt` is the conjunction of two positive
+ * matches against argv the HOST supplied (`pane.process_info`, measured to carry the
+ * child's real argv vector), so a pane running anything else, or a pane the host
+ * could not sample, cannot reach it. The caller then adds a THIRD, independent
+ * probe before it acts — the dev-channel's `/health` answering with this row's
+ * session id — so adoption never rests on one authority.
+ */
+export function classifyPaneForAdoption(
+  inspection: HandleInspection,
+  record: PaneAdoptionRecord,
+  claudeBasename: string = 'claude',
+): PaneAdoptionVerdict {
+  if (inspection.kind === 'gone') return { kind: 'gone' }
+  if (inspection.kind === 'unavailable') {
+    return { kind: 'unavailable', reason: inspection.reason }
+  }
+  if (inspection.argv.length === 0) {
+    return {
+      kind: 'unverifiable',
+      reason: 'the host reported no foreground argv for this pane — nothing identifies what is in it',
+    }
+  }
+  const cmdline = inspection.argv.join(' ')
+  const onOurTranscript = cmdlineMatchesSession(cmdline, record.sessionId, claudeBasename)
+  if (!onOurTranscript) {
+    return {
+      kind: 'leave-not-ours',
+      reason: `pane runs ${JSON.stringify(inspection.argv[0] ?? '')} which is not a claude on session ${record.sessionId.slice(0, 8)}`,
+    }
+  }
+  if (!argvCarriesChannel(inspection.argv, record.channelName)) {
+    return {
+      kind: 'close-foreign-owner',
+      reason:
+        `pane runs a claude on session ${record.sessionId.slice(0, 8)} but WITHOUT this row's dev-channel ` +
+        `(server:${record.channelName.slice(0, 16)}…) — it is not the child this row describes, and two ` +
+        'processes must never own one transcript',
+    }
+  }
+  return { kind: 'adopt', ...(inspection.pid !== undefined ? { pid: inspection.pid } : {}) }
+}
+
 
 /** Injected side-effect surface so the identity check is fully unit-testable
  *  without touching the real OS / process table. */

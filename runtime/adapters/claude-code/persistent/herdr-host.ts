@@ -49,7 +49,7 @@
  */
 
 import type { Key } from './keystrokes.ts'
-import type { PtyChild, PtyExitCause, PtyHost, PtySpawnOpts } from './pty-host.ts'
+import type { AdoptableHost, HandleInspection, PtyChild, PtyExitCause, PtySpawnOpts } from './pty-host.ts'
 import {
   HERDR_POLL_INTERVAL_MS,
   HERDR_READ_LINE_CAP,
@@ -93,6 +93,11 @@ const FATAL_UTF8_IN = new TextDecoder('utf-8', { fatal: true })
  *  attach. */
 export const HERDR_REPL_PANE_LABEL = 'neutron-repl'
 
+/** One-line error text for a diagnostic string. */
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
 /** Drop `undefined`-valued keys so the child sees only real env vars (the
  *  auth-scrub contract relies on the caller passing `KEY: undefined` to mean
  *  "unset" — we honour that by not forwarding it). */
@@ -129,6 +134,12 @@ export interface HerdrHostDeps {
   onPollExit?: () => void
 }
 
+/** What {@link HerdrHost.open} is being asked to produce a child for: a pane to be
+ *  CREATED from an argv, or one that already EXISTS and is to be re-attached. */
+type HerdrOpenTarget =
+  | { readonly kind: 'create'; readonly argv: string[] }
+  | { readonly kind: 'attach'; readonly paneId: string }
+
 /**
  * WHY AN ACTUATION DID NOT REACH THE PANE — two outcomes, never one.
  *
@@ -157,13 +168,47 @@ type NotDelivered = 'refused' | 'skipped'
  * changed its architecture is the highest-density place for this**, and it is the fourth
  * on this branch.
  */
-export class HerdrHost implements PtyHost {
+export class HerdrHost implements AdoptableHost {
   constructor(private readonly deps: HerdrHostDeps = {}) {}
 
   async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
     if (argv.length === 0) {
       throw new Error('herdr-host: argv must be non-empty')
     }
+    return this.open({ kind: 'create', argv }, opts)
+  }
+
+  /**
+   * Re-attach to a pane an EARLIER GATEWAY created (#539) — the adoption half of
+   * {@link AdoptableHost}.
+   *
+   * IT EXECS NOTHING, and that is the whole difference from {@link spawn}: the
+   * `claude` under this pane has been running since before this process existed, so
+   * `opts.env` and `opts.cwd` describe a launch that already happened and are
+   * deliberately not applied. Everything downstream of the pane id is identical —
+   * the same poll loop, the same actuation queue, the same exit settlement — because
+   * a re-attached child must be indistinguishable from a spawned one to every
+   * consumer above the host boundary. Sharing the body rather than reimplementing it
+   * is what makes that true by construction instead of by review.
+   *
+   * REJECTS rather than creating anything when the pane is gone. A caller that wants
+   * "attach, else spawn fresh" must establish {@link HandleInspection} `gone` first
+   * and decide deliberately — an attach that silently became a spawn would start a
+   * second owner for a transcript whose first owner this method failed to find.
+   */
+  async attach(handle: string, opts: PtySpawnOpts): Promise<PtyChild> {
+    if (handle === '') {
+      throw new Error('herdr-host: attach requires a pane id')
+    }
+    return this.open({ kind: 'attach', paneId: handle }, opts)
+  }
+
+  /**
+   * Create-or-attach, then wire the child. ONE body for both, so the two cannot
+   * drift: a re-attached child gets the identical poll loop, actuation ordering and
+   * exit settlement a freshly-spawned one gets.
+   */
+  private async open(target: HerdrOpenTarget, opts: PtySpawnOpts): Promise<PtyChild> {
     const pollMs = this.deps.pollIntervalMs ?? HERDR_POLL_INTERVAL_MS
     const sleep = this.deps.sleep ?? ((ms: number) => Bun.sleep(ms))
 
@@ -203,7 +248,10 @@ export class HerdrHost implements PtyHost {
     let paneId: string | undefined
     let pid: number
     try {
-      paneId = await this.applyLayout(client, argv, opts)
+      paneId =
+        target.kind === 'create'
+          ? await this.applyLayout(client, target.argv, opts)
+          : await this.claimExistingPane(client, target.paneId)
       // The pid. Load-bearing above here: `supervision.ts` liveness-probes it with
       // `process.kill(pid, 0)` and the crashed-agent registry keys entries on
       // `(name, pid)`. herdr reports it as `shell_pid`, which is NULLABLE — and
@@ -221,7 +269,15 @@ export class HerdrHost implements PtyHost {
       }
       pid = found
     } catch (e) {
-      await this.abandonPane(client, paneId)
+      // THE CLEANUP OBLIGATION BELONGS TO WHOEVER CREATED THE PANE. On a `create` a
+      // failed initialisation leaves a process running that no caller ever received,
+      // so it must be closed — the orphan-manufactured-on-an-error-path case above.
+      // On an `attach` we created nothing: the pane was already running the previous
+      // gateway's REPL, and closing it because WE could not finish wiring would
+      // destroy a live session (and its conversation) to tidy up our own failure.
+      // A failed attach therefore leaves the pane exactly as it found it, and the
+      // caller decides what to do about a pane it could not adopt.
+      if (target.kind === 'create') await this.abandonPane(client, paneId)
       throw e instanceof Error ? e : new Error(String(e))
     }
 
@@ -449,6 +505,10 @@ export class HerdrHost implements PtyHost {
 
     const child: PtyChild = {
       pid,
+      // THE DURABLE HANDLE. Its presence is what tells the shutdown path this child
+      // is a child of the herdr SERVER rather than of this process, and it is what
+      // the next gateway's boot reconciliation looks the child up by (#539).
+      paneHandle: paneId,
       write(data) {
         // FATAL, LIKE THE INBOUND BOUNDARY. `PtyChild.write` promises to deliver the
         // BYTES it was given; `Buffer.toString('utf8')` substitutes U+FFFD for every
@@ -692,6 +752,112 @@ export class HerdrHost implements PtyHost {
       },
     }
     return child
+  }
+
+  /**
+   * WHAT IS RUNNING UNDER `handle`, PER HERDR — the evidence the adoption decision is
+   * made from (#539). Never decides anything itself: it reports, and
+   * `orphan-adoption.ts` classifies.
+   *
+   * TWO CALLS, AND THE SECOND IS THE ONE THAT MATTERS. `pane.get` answers whether the
+   * pane exists at all and gives its label; `pane.process_info` gives the FOREGROUND
+   * PROCESS ARGV, which is the only thing that can say WHICH `claude` is in there.
+   * Measured on the live server (2026-09-12): a `layout.apply` pane answers
+   * `foreground_processes[0].argv` with the exact argv vector it was given, and a
+   * production REPL child's argv carries both `--resume <uuid>` and
+   * `--dangerously-load-development-channels server:<channel>` — the two tokens the
+   * classifier needs. (A `claude` that was started bare, with no flags, reports
+   * `argv: ["claude"]`; it therefore matches nothing and is never adopted, which is
+   * the correct answer for a REPL this gateway did not launch.)
+   *
+   * ABSENCE IS ONLY EVER THE TYPED ONE. `pane_not_found` — the code herdr returns for
+   * an unknown OR malformed pane id, measured — is the single route to `gone`. Every
+   * other rejection is `unavailable`, because a timeout or a transport error measures
+   * the call and says nothing about the pane. A pane we could not ask about may be
+   * running a `claude` that owns a transcript; treating that as `gone` is how a second
+   * owner gets started.
+   */
+  async inspectHandle(handle: string): Promise<HandleInspection> {
+    if (handle === '') return { kind: 'unavailable', reason: 'empty pane id' }
+    let client: HerdrRpc
+    try {
+      client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
+    } catch (e) {
+      return { kind: 'unavailable', reason: `connect failed: ${errText(e)}` }
+    }
+    let info: HerdrPaneInfo | undefined
+    try {
+      const r = (await client.call('pane.get', { pane_id: handle })) as unknown as {
+        pane?: HerdrPaneInfo
+      }
+      info = r.pane
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) return { kind: 'gone' }
+      return { kind: 'unavailable', reason: `pane.get failed: ${errText(e)}` }
+    }
+    if (info === undefined) {
+      // The call SUCCEEDED and carried no pane. That is neither a typed absence nor a
+      // transport failure — it is a reply this client cannot read, so it establishes
+      // nothing and must not be read as either answer.
+      return { kind: 'unavailable', reason: 'pane.get returned no pane object' }
+    }
+    let argv: readonly string[] = []
+    let pid: number | undefined
+    try {
+      const r = (await client.call('pane.process_info', { pane_id: handle })) as unknown as {
+        process_info?: HerdrProcessInfo
+      }
+      const pi = r.process_info
+      const fg = pi?.foreground_processes?.[0]
+      argv = fg?.argv ?? []
+      const candidate = pi?.shell_pid ?? fg?.pid
+      if (typeof candidate === 'number' && candidate > 0) pid = candidate
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) return { kind: 'gone' }
+      // The pane EXISTS (pane.get answered) but we could not sample what is in it.
+      // `live` with an empty argv would be read by the classifier as "not ours", which
+      // is a verdict about the process; this is a failure to look. Say so.
+      return { kind: 'unavailable', reason: `pane.process_info failed: ${errText(e)}` }
+    }
+    return {
+      kind: 'live',
+      argv,
+      ...(pid !== undefined ? { pid } : {}),
+      ...(typeof info.label === 'string' ? { label: info.label } : {}),
+    }
+  }
+
+  /** Terminate whatever runs under `handle`. Idempotent: a pane that is already gone
+   *  resolves, because the post-condition ("nothing runs under this handle") already
+   *  holds. Any OTHER failure rejects — the caller asked for a guarantee it did not
+   *  get, and a silent success there would let a live REPL be recorded as reaped. */
+  async closeHandle(handle: string): Promise<void> {
+    const client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
+    try {
+      await client.call('pane.close', { pane_id: handle })
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) return
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /**
+   * Confirm a pane we are about to ATTACH to exists, and hand back its id.
+   *
+   * The mirror of {@link applyLayout} for the attach path — and it deliberately
+   * REFUSES rather than creating anything when the pane is gone, so a caller that
+   * meant "adopt the running REPL" can never silently receive a new one.
+   */
+  private async claimExistingPane(client: HerdrRpc, paneId: string): Promise<string> {
+    try {
+      await client.call('pane.get', { pane_id: paneId })
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) {
+        throw new Error(`herdr-host: cannot attach — pane ${paneId} does not exist`)
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    return paneId
   }
 
   /**
@@ -961,5 +1127,8 @@ export class HerdrHost implements PtyHost {
   }
 }
 
-/** Default singleton — herdr is the REPL container. */
-export const herdrHost: PtyHost = new HerdrHost()
+/** Default singleton — herdr is the REPL container. Typed as {@link AdoptableHost}
+ *  because its children outlive this process: that is the capability #539 is built
+ *  on, and a `PtyHost`-typed export would hide it behind a runtime narrowing at
+ *  every call site. */
+export const herdrHost: AdoptableHost = new HerdrHost()

@@ -1,0 +1,135 @@
+/**
+ * pane-adoption-verdict.test.ts — #539 seam 2: the ADOPT arm's classifier.
+ *
+ * `orphan-adoption.ts` was adopt-or-kill and only ever killed. This suite drives the
+ * new verdict in BOTH directions, which is the only way it can be shown to be a
+ * decision rather than a default:
+ *
+ *   - a pane that IS the child a row describes must be adopted (a classifier that
+ *     refuses everything satisfies every "it refuses" case and is still broken);
+ *   - a pane running a claude on our transcript that is NOT our child must be
+ *     closed, because the one-owner-per-transcript invariant is enforced only by
+ *     ending the other owner;
+ *   - a pane running something else must be left alone;
+ *   - and "the pane is gone", "I could not sample it" and "I could not ask" must
+ *     stay three separate answers, because only the first licenses a cold spawn.
+ */
+
+import { describe, it, expect } from 'bun:test'
+import { argvCarriesChannel, classifyPaneForAdoption } from '../orphan-adoption.ts'
+import type { HandleInspection } from '../pty-host.ts'
+
+const SESSION = 'b1f3c0de-1234-5678-9abc-def012345678'
+const CHANNEL = 'neutron-abcdef0123456789abcdef0123456789'
+const ROW = { sessionId: SESSION, channelName: CHANNEL }
+
+/** The real shape, in the order `buildReplArgv` emits it. */
+const oursArgv = (sessionFlag: '--resume' | '--session-id' = '--resume'): string[] => [
+  '/usr/local/bin/claude',
+  sessionFlag,
+  SESSION,
+  '--dangerously-load-development-channels',
+  `server:${CHANNEL}`,
+  '--mcp-config',
+  `/tmp/neutron-repl-${CHANNEL}/session-mcp.json`,
+  '--model',
+  'claude-opus-5',
+]
+
+const live = (argv: string[], extra: Partial<Extract<HandleInspection, { kind: 'live' }>> = {}): HandleInspection => ({
+  kind: 'live',
+  argv,
+  ...extra,
+})
+
+describe('classifyPaneForAdoption — the adopt direction', () => {
+  it('adopts a pane running THIS row\'s child, on either session flag', () => {
+    expect(classifyPaneForAdoption(live(oursArgv('--resume'), { pid: 4242 }), ROW)).toEqual({
+      kind: 'adopt',
+      pid: 4242,
+    })
+    expect(classifyPaneForAdoption(live(oursArgv('--session-id')), ROW).kind).toBe('adopt')
+  })
+
+  it('carries the pid through when the host reported one, and omits it when it did not', () => {
+    const withPid = classifyPaneForAdoption(live(oursArgv(), { pid: 77 }), ROW)
+    expect(withPid).toEqual({ kind: 'adopt', pid: 77 })
+    // ABSENT, not zero: a pid we were not given is not a pid of 0, and a caller that
+    // probes `kill(pid, 0)` on a fabricated 0 asks about its own process group.
+    expect(classifyPaneForAdoption(live(oursArgv()), ROW)).toEqual({ kind: 'adopt' })
+  })
+})
+
+describe('classifyPaneForAdoption — the refuse directions', () => {
+  it('CLOSES a claude on our transcript that lacks our dev-channel (herdr\'s own resume)', () => {
+    // Exactly what herdr's native agent restore relaunches: `claude --resume <id>`
+    // with none of our flags. On our transcript, not our child.
+    const v = classifyPaneForAdoption(live(['claude', '--resume', SESSION]), ROW)
+    expect(v.kind).toBe('close-foreign-owner')
+  })
+
+  it('CLOSES a claude on our transcript wired to a DIFFERENT channel', () => {
+    const other = oursArgv()
+    other[4] = 'server:neutron-someone-elses-channel'
+    expect(classifyPaneForAdoption(live(other), ROW).kind).toBe('close-foreign-owner')
+  })
+
+  it('leaves a pane that is not a claude on our transcript UNTOUCHED', () => {
+    expect(classifyPaneForAdoption(live(['/usr/sbin/cupsd', '-l', '-f']), ROW).kind).toBe(
+      'leave-not-ours',
+    )
+    // The recycled-pid trap in pane form: a `tail` on our transcript path carries the
+    // uuid AND the `claude` substring, and is not ours.
+    expect(
+      classifyPaneForAdoption(
+        live(['tail', '-f', `/home/u/.claude/projects/p/${SESSION}.jsonl`]),
+        ROW,
+      ).kind,
+    ).toBe('leave-not-ours')
+  })
+
+  it('leaves a DIFFERENT session\'s claude untouched even with our channel token', () => {
+    const otherSession = oursArgv()
+    otherSession[2] = 'ffffffff-0000-0000-0000-000000000000'
+    expect(classifyPaneForAdoption(live(otherSession), ROW).kind).toBe('leave-not-ours')
+  })
+})
+
+describe('classifyPaneForAdoption — absence, ignorance and failure are three answers', () => {
+  it('gone is a positive absence', () => {
+    expect(classifyPaneForAdoption({ kind: 'gone' }, ROW)).toEqual({ kind: 'gone' })
+  })
+
+  it('a live pane with no argv is UNVERIFIABLE, not not-ours', () => {
+    const v = classifyPaneForAdoption(live([]), ROW)
+    expect(v.kind).toBe('unverifiable')
+  })
+
+  it('a host that could not be asked is UNAVAILABLE, not gone', () => {
+    const v = classifyPaneForAdoption({ kind: 'unavailable', reason: 'socket timeout' }, ROW)
+    expect(v.kind).toBe('unavailable')
+    expect(v.kind === 'unavailable' && v.reason).toContain('socket timeout')
+  })
+})
+
+describe('argvCarriesChannel', () => {
+  it('matches the VALUE after the flag, never a substring elsewhere', () => {
+    expect(argvCarriesChannel(oursArgv(), CHANNEL)).toBe(true)
+    // The channel name also appears inside the --mcp-config PATH. That must not count.
+    expect(
+      argvCarriesChannel(['claude', '--mcp-config', `/tmp/neutron-repl-${CHANNEL}/session-mcp.json`], CHANNEL),
+    ).toBe(false)
+    // The flag with somebody else's value.
+    expect(
+      argvCarriesChannel(['claude', '--dangerously-load-development-channels', 'server:other'], CHANNEL),
+    ).toBe(false)
+    // A trailing flag with no value at all.
+    expect(argvCarriesChannel(['claude', '--dangerously-load-development-channels'], CHANNEL)).toBe(false)
+  })
+
+  it('an empty channel name matches nothing', () => {
+    expect(argvCarriesChannel(['claude', '--dangerously-load-development-channels', 'server:'], '')).toBe(
+      false,
+    )
+  })
+})

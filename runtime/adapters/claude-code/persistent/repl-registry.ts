@@ -187,6 +187,32 @@ export interface ReplRegistryRecord {
   pid?: number
   /** Dev-channel HTTP port — `/health` liveness probe target. */
   devchannel_port?: number
+  /**
+   * #539 — THE DURABLE HANDLE FOR THIS CHILD'S TERMINAL: the herdr pane id, written
+   * at spawn, read at the next gateway's boot so a REPL that OUTLIVED its gateway can
+   * be found again instead of being spawned over.
+   *
+   * PRESENT ONLY WHERE THE CHILD OUTLIVES US. A `BunTerminalHost` child is a child of
+   * the gateway process and dies with it, so it has no handle and this stays absent —
+   * `PtyChild.paneHandle` carries the same fact at runtime and this is its persisted
+   * form. Absence therefore means "nothing survives for anyone to adopt", which is
+   * exactly what the shutdown path needs in order to keep killing what it must.
+   *
+   * IT IS CLEARED WHEN A SPAWN REPLACES THE CHILD WITH ONE THAT HAS NO HANDLE
+   * (`spawn.ts`), not merely left alone. A row that keeps a handle from a previous,
+   * differently-hosted incarnation would send the next boot chasing a pane id that
+   * names nothing — or, after a herdr server restarted its pane numbering from
+   * scratch, names somebody else's pane. A handle is a claim about the CURRENT child
+   * and must not outlive it.
+   *
+   * IT IS NOT AN IDENTITY. Nothing may adopt on the strength of this field alone: the
+   * pane it names has to be re-verified (`orphan-adoption.ts` matches the pane's live
+   * argv against this row's `sessionId` AND `channelName`, and the dev-channel's
+   * `/health` has to answer with this row's session id). A pane id is an identifier
+   * the herdr server issues and can reissue across its own restart, which is the same
+   * recycling hazard a pid has and is answered the same way.
+   */
+  pane_handle?: string
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
