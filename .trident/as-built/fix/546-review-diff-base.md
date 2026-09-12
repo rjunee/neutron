@@ -232,6 +232,38 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-seven: sweep the documents that describe the guard's INPUTS
+
+Round twenty-six changed a precondition and swept for the sentence that STATES the rule. Three
+more sentences said the same thing by DESCRIBING the guard's inputs, and all three survived:
+
+* the spec item's implementation bullet — *"additionally requires `refs/heads/<x>` to resolve …
+  so it promotes only a proven, unambiguous local branch name"*;
+* `lint.sh`'s summary of the wrapper — *"…and to `refs/heads/main` otherwise, for a proven local
+  branch name"*;
+* **the wrapper's OWN header**, two lines above the code — *"branch, no tag, with
+  `refs/remotes/origin/<x>`"*.
+
+**A change that narrows or widens a guard has to sweep the documents that describe the guard's
+INPUTS, not only those that state the guard.** A sweep for the rule does not find prose that
+merely says where the rule applies — and the third of those was inside the file being changed,
+which is the strongest form of the point: proximity is not attention.
+
+Only the half that moved was corrected. The tag clause is still true and still load-bearing (a
+tag `release` beside `origin/release` is not rewritten to the remote branch), so it is left
+standing exactly as written, with the removed half recorded beside it. **Being precise about
+which half of a conjunction moved is the difference between a correction and a rewrite that
+loses the reason the other half exists.**
+
+The same sweep caught the "kept VERBATIM" lists in two places still naming `origin/<x>` and
+`HEAD~1` — qualified and resolved respectively since rounds twenty-three and twenty-two. Those
+are input descriptions too.
+
+**This is the third instance of round-N code with round-(N−1) text in one document**, and the
+item's own `:90-95` already names why: a sentence that reads like a NAME is not read as a claim.
+The parenthetical style that catches these — *"this said X until round N"* — is now used
+consistently, which is the only thing that has reliably worked.
+
 ### Round twenty-six: the first failure in the OTHER direction
 
 The promotion arm required `refs/heads/<x>` AND `refs/remotes/origin/<x>` to resolve — so a

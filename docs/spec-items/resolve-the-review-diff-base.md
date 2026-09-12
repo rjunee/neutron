@@ -71,10 +71,21 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   legitimate is lost — measured on git 2.43, `git check-ref-format --branch ' main '` is fatal
   (128), and ` main ..HEAD` is a fatal operand that the wrappers' `2>/dev/null || true` turns into
   an empty diff;
-- `codex-review.sh`'s **standalone** promotion is *stricter still*: it additionally requires
-  `refs/heads/<x>` to resolve and `refs/tags/<x>` not to, so it promotes only a proven,
-  unambiguous local branch name. The trident path never reaches it (it passes an already-resolved
-  ref); a caller passing a tag does, and that is the regression this round fixed.
+- `codex-review.sh`'s **standalone** promotion additionally requires `refs/tags/<x>` NOT to
+  resolve, so what it promotes is a remote-tracking ref **that is not shadowed by a tag of the
+  same name**. That clause is load-bearing and unchanged: it is why a tag `release` sitting
+  beside `origin/release` is not rewritten to the remote branch — a different commit, silently.
+
+  > **It also required `refs/heads/<x>` to resolve, and this bullet said so — "a proven,
+  > unambiguous local branch name" — until round twenty-six removed that half.** Requiring a
+  > local branch rejected the ORDINARY state of a CI checkout (detached or fresh: the
+  > remote-tracking ref and no local `main`), so the chain fell through and the shape guard
+  > refused the wrapper's own default argument. Promotion now keys on the remote-tracking ref
+  > independently of whether a local branch exists. Only that half moved; the tag clause is
+  > still exactly as written above.
+
+  The trident path never reaches the promotion (it passes a sha or a fully qualified ref); a
+  caller passing a bare name or a tag does.
 
 An earlier draft of this item said "a bare local branch name is **never** the left-hand side of a
 rev-range" and, below, "**no code path** composes a rev-range from a base branch NAME" — while the
@@ -327,10 +338,16 @@ The resolution order is evidence-first, and is the same at every site:
       silently rewritten to the remote branch `origin/release` — a different commit — because
       `origin/<x>` resolving proves a remote-tracking ref exists, not that the argument was a
       branch. Verified by `trident/codex-review-base-ref.test.ts`, which builds one repository
-      holding both collisions at once and pins the COMMIT each argument resolves to: a local
-      branch is promoted, a tag is not, an ambiguous branch+tag name is not, and a sha,
-      `origin/<x>`, `HEAD~1` and an unknown name are kept verbatim. The block under test is
-      extracted from the shipped script rather than retyped; mutating it back to the
+      holding both collisions at once and pins the COMMIT each argument resolves to: a
+      remote-tracking ref is promoted **whether or not a local branch of that name exists**
+      (the detached CI checkout is the ordinary case, and requiring a local branch rejected it
+      until round twenty-six), a tag is not promoted, an ambiguous branch+tag name is REFUSED,
+      a tag-only name is REFUSED, and an unresolvable name is REFUSED. What is kept VERBATIM is
+      now only what already satisfies the shape property: a 40-hex object name that resolves,
+      and an explicit `refs/…` path. (`origin/<x>` is QUALIFIED to `refs/remotes/origin/<x>`
+      and `HEAD~1` is RESOLVED to an object name — this criterion listed both, plus an unknown
+      name, as "kept verbatim" until rounds twenty-two and twenty-three.) The block under test
+      is extracted from the shipped script rather than retyped; mutating it back to the
       string-shaped form reddens two tests.
 - [ ] **The fallback is reached whenever the REF does not resolve — not only when the repository
       has no remote.** Two fixtures, because they are different states and an earlier draft of

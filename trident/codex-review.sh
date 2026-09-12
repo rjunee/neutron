@@ -69,14 +69,21 @@ BASE_REF="${1:-main}"
 # SO THE BLOCK BELOW DECIDES BY KIND, and every arm names a ref IN FULL:
 #   * branch AND tag of the same name → AMBIGUOUS: REFUSED (exit 3). Leaving it alone was
 #     also a guess — git's, and git picks the TAG.
-#   * branch, no tag, with `refs/remotes/origin/<x>` → `refs/remotes/origin/<x>`.
+#   * no tag, with `refs/remotes/origin/<x>` → `refs/remotes/origin/<x>`. NO LOCAL BRANCH IS
+#     REQUIRED: this line read "branch, no tag, with …" until round twenty-six, and that
+#     precondition rejected the ORDINARY detached/fresh CI checkout, which carries the
+#     remote-tracking ref and no local `main`.
+#   * `origin/<x>` with `refs/remotes/origin/<x>` → `refs/remotes/origin/<x>`. A slash is not
+#     a namespace: the shorthand is one git resolves across them, preferring tags.
 #   * TAG ONLY, no branch of that name → REFUSED (exit 3). A bare word that resolves only as
 #     a tag is not a base branch; `refs/tags/<x>` said explicitly is still accepted below.
 #   * branch, no tag, no remote counterpart → `refs/heads/<x>`. The FALLBACK gets the same
 #     treatment as the primary arm: it runs in the degraded world (fresh clone, no remote,
 #     detached CI checkout), which is where a stray tag is likeliest and least noticed.
-# Anything else is kept VERBATIM, because it is the caller's own EXPLICIT choice rather than a
-# bare word git will resolve for them: a 40-hex sha, `origin/<x>`, `refs/tags/<x>`, `HEAD~1`.
+# Anything else is kept VERBATIM only if it already satisfies the shape property below — a
+# 40-hex object name that resolves, or an explicit `refs/…` path. (`origin/<x>` and `HEAD~1`
+# were on this list until rounds twenty-three and twenty-two: the first is qualified by the arm
+# above, the second is RESOLVED to an object name, and an unresolvable name is REFUSED.)
 # A value that resolves to NOTHING is then refused by the guard below — git does NOT refuse it
 # out loud here, which is what this comment used to claim: the diff's stderr was discarded and
 # the empty result read as "no findings".

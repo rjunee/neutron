@@ -148,8 +148,10 @@ fi
 # holding a base branch NAME exists in their scope at all". `codex-build.sh` reaches
 # it (argv $2, default EMPTY, and empty skips the diff). `codex-review.sh` does NOT:
 # it defaults `BASE_REF` to the literal `main` for standalone use, promoting it to
-# `refs/remotes/origin/main` when that ref resolves and to `refs/heads/main` otherwise, for a
-# proven local branch name, refusing an ambiguous or tag-only argument.
+# `refs/remotes/origin/main` when that ref resolves — whether or not a local branch of that
+# name exists, since a detached CI checkout carries only the remote-tracking ref — and to
+# `refs/heads/main` otherwise, refusing an ambiguous or tag-only argument. ("for a proven local
+# branch name" until round twenty-six: that precondition rejected the ordinary CI checkout.)
 # The as-built for this branch records that default; a guard describing its own
 # coverage must not contradict it, because a stale sentence HERE tells the next
 # person a gap is covered when it is not.
