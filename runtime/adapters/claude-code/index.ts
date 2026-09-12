@@ -33,6 +33,7 @@ import {
   registerSupervisedSubstrate,
   startModelUpdateWatchdogForInstance,
   startReplWatchdog,
+  type ChildCrashInfo,
   type PersistentReplSubstrateOptions,
   type RateLimitBannerNotice,
   type RecoveredReply,
@@ -51,6 +52,9 @@ export {
 } from './persistent/sink-coordinates.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
+// #518 — a consumer wiring `onChildCrash` needs the cause discriminant to tell a
+// deploy-driven kill from a genuine crash. Re-exported at THIS adapter boundary.
+export type { ChildCrashCause, ChildCrashInfo } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
 export { injectPersistentReplActiveTurn } from './persistent/persistent-repl-substrate.ts'
 // O6 — re-export the remaining notice-family types so a gateway consumer wiring
@@ -188,7 +192,7 @@ export interface ClaudeCodeSubstrateOptions {
    *   - `onRateLimitBanner` (row #10) — a rate-limit / overload BANNER appeared;
    *     surface a notify-only alert (no keystroke, no auto-retry). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
-  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** Eviction guard — see `PersistentReplSubstrateOptions.hostsLiveWork`. */
   hostsLiveWork?: (childGeneration: string) => number
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void

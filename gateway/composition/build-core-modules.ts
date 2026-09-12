@@ -708,7 +708,21 @@ export function buildCoreModules(
         // unconditionally beside the reader above.
         if (tridentWiring.probe_launcher_alive !== undefined) {
           const launcherProbe = tridentWiring.probe_launcher_alive
-          orchestratorOpts.probe_run_alive = (run) => launcherProbe(run)
+          // #518 — the probe now distinguishes a launcher a GATEWAY SHUTDOWN killed
+          // (a restart, which is what a deploy ends with) from one that crashed. The
+          // hang watchdog is not the layer that reports cause: it asks only whether a
+          // live process exists, and composes its own reason from its own evidence. So
+          // the attributed verdict COLLAPSES to 'dead' here rather than widening
+          // `RunLiveness` and its eight `probe === 'dead'` comparisons — a deploy-killed
+          // launcher IS dead, and the attribution is carried by the liveness loop
+          // (`tick.ts` livenessBody, 15 s cadence), which latches the run terminal long
+          // before the 90-minute hang watchdog could look at it.
+          orchestratorOpts.probe_run_alive = async (run) => {
+            const verdict = await launcherProbe(run)
+            return verdict === 'killed-by-gateway-shutdown' || verdict === 'dead-cause-undetermined'
+              ? 'dead'
+              : verdict
+          }
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session

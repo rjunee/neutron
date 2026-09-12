@@ -26,6 +26,13 @@ import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
+import {
+  readChildPid,
+  recordGatewayShutdownKill,
+  sampleLivenessBeforeShutdownKill,
+  type PendingShutdownKillReport,
+  type ShutdownExitWatch,
+} from './gateway-shutdown-kill.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
 import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
@@ -762,6 +769,11 @@ async function spawnSession(
         const {
           respawn_in_flight_at: _drop,
           child_crash_notified_at: _oldCrashEdge,
+          // #518 — `killed_by_gateway_shutdown` is DELIBERATELY NOT DROPPED HERE. It
+          // is keyed by generation, so an entry for the child we are replacing can
+          // never be read as describing this one, and it has to outlive that child:
+          // a QUARANTINED generation is superseded by this very write, and its entry
+          // is the only durable record that a deploy killed it.
           ...merged
         } = prev ? { ...prev, ...record } : record
         registry[sessionKey] = merged
@@ -951,16 +963,55 @@ export async function sweepQuarantinedChildren(): Promise<number> {
 /** Terminate EVERY quarantined child, hosted work or not. Called only from
  *  `shutdownAllPersistentRepls` — at gateway teardown the hosted workflows are
  *  going away regardless, and a quarantined child is outside the pool, so the
- *  shutdown loop would otherwise orphan its process. */
-export async function shutdownQuarantinedChildren(): Promise<void> {
+ *  shutdown loop would otherwise orphan its process.
+ *
+ *  #518 — AND THIS IS THE SITE WHERE A DEPLOY IS GUARANTEED TO KILL LIVE WORK. A
+ *  child is quarantined precisely BECAUSE it still hosts running workflows (the
+ *  eviction guard deferred its reaping), so "hosted work or not" is in practice
+ *  always "hosted work". It reported nothing at all: the `child.exited` hook
+ *  `quarantineChild` installs returns early when the entry is already gone from
+ *  the map, and the delete below happens first. So each kill is now reported as
+ *  the gateway shutdown it is, before it happens. */
+export function shutdownQuarantinedChildren(
+  shutdownAt: number = Date.now(),
+): { reports: PendingShutdownKillReport[]; awaitingExit: ShutdownExitWatch[] } {
+  const owed: PendingShutdownKillReport[] = []
+  const awaitingExit: ShutdownExitWatch[] = []
   for (const [generation, entry] of [...quarantinedChildren]) {
     quarantinedChildren.delete(generation)
+    // MARK, THEN KILL. Both are cheap and local; neither may sit behind a sink. The
+    // owed live report is RETURNED for the caller's bounded delivery phase — awaiting
+    // it here would put an unbounded call from a sink we do not own between this
+    // child's kill and the next one's (see `gateway-shutdown-kill.ts`, the constraint
+    // at the top).
+    //
+    // Sampled BEFORE the kill for the reason that module also gives: a quarantined
+    // child can have died on its own while we were keeping it alive for its hosted
+    // work, and that death is not this deploy's to claim.
+    const report = recordGatewayShutdownKill(
+      entry.options,
+      entry.sessionKey,
+      generation,
+      shutdownAt,
+      sampleLivenessBeforeShutdownKill(() => entry.session.hasChildExited()),
+      // Recorded so this generation's death can be CONFIRMED later rather than assumed
+      // from the entry — and a quarantined generation needs it most, because the row's
+      // own pid belongs to the replacement child that spawned over it.
+      readChildPid(entry.session.child),
+    )
+    owed.push(report)
+    // Same rule as the pooled path: SIGNAL here, and let the caller's shared pass
+    // establish whether it actually died. Only an observed exit attributes the kill.
+    let signalDelivered = false
     try {
       entry.session.child.kill()
+      signalDelivered = true
     } catch {
-      /* already gone */
+      /* the signal failed; a later death is then not ours to claim */
     }
+    awaitingExit.push({ report, child: entry.session.child, signalDelivered })
   }
+  return { reports: owed, awaitingExit }
 }
 
 /** Test/diagnostic seam: how many children are quarantined right now. */
@@ -982,6 +1033,11 @@ async function notifyEvictedChild(
     await options.onChildCrash({
       sessionKey,
       generationKey: childGeneration,
+      // #518 — an eviction is the pool's own doing, but it is a FAULT response (an
+      // abandon-poisoned child), not a deploy. It stays on the `child-died` side of
+      // the discriminant: crediting it to a gateway shutdown would be the negative
+      // half of the spec item's acceptance failing.
+      cause: 'child-died',
       detail: `pooled child evicted (${reason}) — every in-process workload it hosted died with it`,
     })
   } catch (err) {

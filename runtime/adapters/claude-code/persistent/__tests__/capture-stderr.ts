@@ -32,6 +32,31 @@
  * `tee` writes through to the real stderr as well, which a long live proof wants so a
  * human watching it still sees the output.
  */
+/**
+ * The SYNCHRONOUS sibling, for a body that is a pure function.
+ *
+ * Shares the one assignment site rather than duplicating it. The async form cannot serve
+ * a synchronous body without making its caller `await`, and a second hand-rolled copy is
+ * precisely what this module exists to prevent: five suites wrote that copy and all five
+ * got the same two things wrong.
+ */
+export function withCapturedStderrSync(body: (lines: string[]) => void): string[] {
+  const lines: string[] = []
+  const original = process.stderr.write
+  const realWrite = original.bind(process.stderr)
+  process.stderr.write = ((c: unknown): boolean => {
+    lines.push(String(c))
+    void realWrite
+    return true
+  }) as typeof process.stderr.write
+  try {
+    body(lines)
+  } finally {
+    process.stderr.write = original
+  }
+  return lines
+}
+
 export async function withCapturedStderr(
   body: (lines: string[]) => Promise<void>,
   opts: { tee?: boolean } = {},

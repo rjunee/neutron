@@ -36,6 +36,7 @@
  * specifiers stay valid.
  */
 
+import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
 import { isPublishedUnreviewedReason } from './fire-evidence.ts'
@@ -131,6 +132,18 @@ export type FailureClass =
    * somebody else owns.
    */
   | 'branch-held'
+  /**
+   * THE BUILD WAS KILLED BY A DEPLOY OR A SERVICE RESTART OF THIS INSTANCE (#518).
+   * Not a fault: the detached inner workflow lives inside a warm REPL the gateway
+   * owns, so `systemctl restart` — what a deploy does after it checks out the new
+   * vendor tree — takes every build in flight with it. Its own class because the
+   * one thing that must not be said about it is that the build crashed: the owner
+   * reading "pooled child exited" went looking for a bug in his own code, and the
+   * 08-13 instance of this was trident's OWN merge deploying and killing the
+   * builds still running. Retrying IS the right advice here, and it is the only
+   * class where the cause is entirely outside the work.
+   */
+  | 'deploy-restart'
   | 'unknown'
 
 export interface FailureInterpretation {
@@ -716,6 +729,44 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       // established. Which arm fired is read from the evidence sentence the composer puts
       // immediately after its prefix, so a quoted lock reason further along cannot forge it.
       input_needed: `${NO_DESTRUCTIVE_WRITE} ${wrongBaseWrites(wrongBaseRest)} ${LAUNCH_PATH_FETCH} ${HOOK_CAVEAT} ${wrongBaseNextStep(wrongBaseRest)}`,
+    }
+  }
+
+  // A DEPLOY KILLED IT, AND WE KNOW BECAUSE WE ARE THE ONES WHO KILLED IT (#518).
+  // The detached inner workflow runs inside a warm REPL the gateway owns, and the
+  // gateway's own SIGTERM handler terminates that child (`shutdownAllPersistentRepls`).
+  // The composer records the fact at the kill; this reads it back, so the announce
+  // says "a deploy" rather than the detector's true-but-wrong "the child exited".
+  //
+  // MATCHED ON AN AUTHORED CONSTANT, NOT A KEYWORD. `DEPLOY_RESTART_KILL_MARKER` is
+  // `deployRestartKillReason`'s own phrase and nothing else authors it; THE TWO HALVES
+  // MUST MOVE TOGETHER, exactly as for the infra and wrong-base markers above. Placed
+  // ahead of every token branch because the reason embeds the observation site's
+  // evidence sentence, and a plain-token fall-through would answer a deploy with hang
+  // or review copy.
+  // AND THE CASE WHERE NOBODY ESTABLISHED WHY (#518). A child that died of a genuine
+  // fault moments before a teardown is "killed" by that teardown's idempotent kill();
+  // the shutdown path refuses to claim it either way. `klass` is honestly `'unknown'`
+  // — we do not know — but the SUMMARY must say which unknown, because the fallback
+  // arm at the bottom only prints an authored reason while it stays under 200
+  // characters and otherwise degrades to "The build did not complete.", which tells
+  // the owner nothing about a build whose launcher vanished. Checked before the deploy
+  // branch so the two can never be confused by a shared substring.
+  if (isUndeterminedLauncherDeathReason(reason)) {
+    return {
+      klass: 'unknown',
+      summary:
+        'The build stopped because the process running it is gone, and I could not establish why \u2014 it was not the reviewer rejecting the work, and I cannot tell you a deploy did it either.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
+  if (isDeployRestartKillReason(reason)) {
+    return {
+      klass: 'deploy-restart',
+      summary:
+        'The build was killed by a deploy or restart of this instance, not by anything wrong with the work \u2014 nothing about the code was rejected, and no reviewer judged it.',
+      input_needed: `${retry} ${saved}`,
     }
   }
 

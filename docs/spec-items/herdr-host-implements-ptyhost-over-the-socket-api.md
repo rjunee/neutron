@@ -431,6 +431,27 @@ not-new. That is accepted and recorded here rather than hidden.
       new case parks the poll, so the close is the only observer — which is the
       arrangement in which the close path's own handling is the whole answer.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **EVERY `PtyHost` FAKE MATCHES THE CURRENT SIGNATURE — swept, with the compiler as
+      the instrument and a positive control on its DOMAIN.** Making `spawn` async is an
+      interface change, so every fake is a caller of it, including ones on branches that
+      merged while this was in flight: #642 brought three fakes built on the synchronous
+      signature. A fake that returns a child where a promise is expected becomes
+      ACCIDENTALLY THENABLE once spread (`{...child}` over a promise yields `then`/`catch`
+      and none of `pid`/`write`/`exited`), and anything that awaits it awaits the fake
+      rather than the child — so the cases die on the CLOCK, at a uniform ~2 s, rather
+      than on their subject. A uniform timeout is a thing never settling, not an
+      assertion disagreeing. Fix by returning a real promise of a complete `PtyChild`,
+      never by widening a type until the error stops, and never by adjusting the
+      expectations of tests that are asserting the right thing.
+      THE SWEEP IS THE COMPILER'S DOMAIN, NOT A GREP'S: 45 objects implement `PtyHost`
+      across `runtime/`, `gateway/` and the test trees, every one inside a checked
+      tsconfig — including fakes constructed inline in a test body. The positive control
+      is that the compiler DID report these (seven errors in one file), which is what
+      makes an empty result afterwards mean something.
+      verify: `scripts/ci/typecheck-all.sh` — and read its exit STATUS, not the tail of
+      its output: `cmd | tail -3; echo $?` reports `tail`'s code, so a matrix with seven
+      errors above the window prints three `pass` lines and looks green. An instrument
+      that cannot fail is not a gate.
 - [ ] **NO FLAG MAY OUTLIVE THE ACT IT CLAIMS — enumerated across both hosts, not fixed
       where reported.** An operation that failed must not leave behind a latch saying it
       succeeded. THE RULE ATTACHES TO EVERY OPERATION THAT LATCHES INTENT BEFORE AN ACT

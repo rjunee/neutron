@@ -1527,6 +1527,65 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### My own gate was measuring `tail`
+
+Every local `TYPECHECK rc=0` I reported this whole branch was a lie, and the shape is the
+one I have been finding in other people's instruments all week:
+
+```
+timeout 2400 bash scripts/ci/typecheck-all.sh 2>&1 | tail -3; echo "rc=$?"
+```
+
+`$?` after a pipeline is the exit code of the LAST stage — `tail` — which succeeds
+unconditionally. Proven rather than asserted: `(exit 7) | tail -1; echo $?` prints 0. The
+same bug was in my TESTS, LINT and DEPCRUISE lines.
+
+**What saved it was that the other output was real.** I read pass/fail COUNTS for the
+tests, and the lint/depcruise gates print their own verdicts, so those were genuine
+signal. `typecheck-all.sh` prints `pass <tsconfig>` lines, and `tail -3` showed three of
+them — which looked exactly like success while seven type errors sat above the window.
+Nothing false reached CI, because CI's own `typecheck` job is a separate instrument and
+it is what caught this. But for a whole branch my local pre-push gate was reporting
+nothing about types at all.
+
+The gate now captures output and status separately and prints the real code. **An
+instrument that cannot fail is not a gate**, and I had been quoting one.
+
+### A fake that is accidentally thenable
+
+`main` moved to `3633ff62` (#642) mid-round, bringing three `PtyHost` fakes written
+against the SYNCHRONOUS `spawn` this item made `Promise<PtyChild>`. Rebasing produced a
+fake that returns a child where a promise is expected — and the object spread
+`{...child}` then spreads a PROMISE, producing something with `then`/`catch` and none of
+`pid`/`write`/`exited`.
+
+**The tell was the timing, not the message.** Three failures, all at ~2005 ms: a uniform
+timeout is a thing never settling, not an assertion disagreeing. A fake that is
+accidentally thenable gets awaited by anything that awaits it, so the caller waits on the
+fake's own resolution and the case dies on the clock rather than on its subject. The fix
+is a real promise of a complete `PtyChild` — not a widened type until the error stops.
+
+Worth naming what these tests are: all three are #642's own FAILURE paths, including one
+about a `kill()` that throws — the same subject as this branch's Bun-host fix, arrived at
+independently on two branches in the same week.
+
+**The sweep, with its positive control.** Declared-return sync fakes
+(`spawn(...): PtyChild`): three, all in that file, all fixed — zero remain. Arrow-form
+fakes returning a child object: the hits are `BunTerminalHostDeps.spawn`, which is the
+injected BUN-PROCESS spawn and is correctly synchronous, not `PtyHost.spawn`. POSITIVE
+CONTROL: **45 objects implement `PtyHost`** across `runtime/`, `gateway/` and the test
+trees, every one inside a checked tsconfig — and the compiler demonstrably reports these
+errors when they exist, which is how the seven were found. The instrument here is tsc; the
+sweep's job was to confirm its domain covers the fakes, and it does, including fakes
+constructed inline in a test body.
+
+**And the widened stderr guard earned itself.** `gateway-shutdown-kill.test.ts` arrived
+from #642 with two more hand-rolled `process.stderr.write` patches, restoring a BOUND
+COPY — the identical bug the five earlier suites had. Neither branch's author had reason
+to re-read that file; the guard caught it because its domain is every test rather than the
+files where the defect was first noticed. Both now delegate to the one sanctioned site,
+which grew a synchronous sibling rather than a second copy.
+
 ### False and unknown shared a branch, in the one place the rule was already written down
 
 `pane.close` settled only on its `.then` arm. Every rejection went to the handler for a
@@ -2609,6 +2668,8 @@ Run against the named suites.
 | M212 | a refused SIGINT keeps its latch (the defect) | RED 1 |
 | M213 | PAIR: the SIGINT flag is never latched at all | RED 3 |
 | M214 | the Bun release dispatch is unguarded again (a throwing consumer escapes) | RED 1 (the SHARED suite) |
+| M215 | a `PtyHost` fake returns a child SYNCHRONOUSLY (the #642 fixtures) | RED 3 by TIMEOUT + 7 typecheck errors — and the timeout is the tell |
+| M216 | a hand-rolled stderr patch arrives from another branch | RED 1 (the widened guard, on a file neither branch's author re-read) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
