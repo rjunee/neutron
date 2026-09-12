@@ -1513,6 +1513,64 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### Unknown must not confirm — and known must not be discarded
+
+Every rule on this branch so far has been the first half: an ambiguous failure settles
+nothing, a failed question is not a negative answer, could-not-read is not absent. The
+poll loop was breaking the OTHER half. Its `catch` took every read rejection alike,
+threw the error away, and asked `pane.get` the same question — so a `pane.read` that came
+back with the exact typed positive absence herdr offers settled nothing whenever the
+follow-up probe happened to fail transiently. A definite answer discarded because the
+code never looked at it.
+
+The caught error is now examined: a typed `pane_not_found` settles immediately, and only
+a genuinely ambiguous failure is worth a second question. The test that could see this
+had to be the MIXED case — read typed, probe broken. Every existing test made BOTH calls
+answer `pane_not_found`, which passes either way. M149 is the pair: widening the typed
+check to any rejection reddens the three transient cases, so the fix did not buy the
+definite case by giving up the ambiguous one.
+
+### The live proof could leave stderr monkey-patched for the rest of the process
+
+The hand-rolled capture is install, do the interesting thing, restore. The interesting
+thing here is `await host.spawn(...)`, and the restore sat in a `finally` that began
+AFTER it — so a protocol mismatch, an unreachable socket or a pid that never arrived left
+`process.stderr.write` patched for the rest of the process. Two sites had that shape, one
+of them the live boundary proof, where the failure mode is at its worst: the only test
+that can see a real server fails, and its failure silently degrades every test after it.
+
+Same family as the three suites that pointed `HERDR_SOCKET_PATH` at a dead path and never
+put it back — process-wide state borrowed without a guaranteed return — which is why the
+fix is a scoped helper rather than a fixed `finally`. The helper owns the `finally`, the
+spawn runs inside its scope, and it needed one correction the first version got wrong:
+restoring `original.bind(process.stderr)` leaves a DIFFERENT function object in place, so
+two nested captures stack binds and nothing ever returns the process to where it started.
+The test asserts IDENTITY for exactly that reason (M151 reddens it), and the reject case
+asserts both that the write is restored AND that the error still propagates — a helper
+that swallowed it would hide every live failure it exists to surface.
+
+The rule is enforced, not observed: a guard fails any `*.e2e.test.ts` that assigns
+`process.stderr.write` at all, with a positive control that the pattern finds the
+assignment where it legitimately lives.
+
+### The deletion sweep, done as a surface rather than as one symbol
+
+Second deletion-claim mismatch on this PR, so this time the check was the whole exported
+surface rather than the name in the review: every exported symbol in `herdr-host.ts`,
+`herdr-client.ts`, `herdr-protocol.ts` and `pty-host.ts`, counted against its uses. It
+found two.
+
+`HerdrHostDeps.paneCloseTimeoutMs` — documented as the timeout for a post-transport-loss
+`pane.close`, with no consumer and no such path left. Deleted: an exported option is a
+promise, and this one promised a machine that had been removed.
+
+`HerdrLayoutPaneNode` — a protocol shape carrying a live-server measurement (`command`
+genuinely execs, which is the whole reason spawn is `layout.apply` and not `agent.start`),
+also with no consumer. Deleting it would have thrown away the measurement; leaving it
+exported and unused is the same dead-option defect. So it was made LIVE instead: the
+`layout.apply` root is now typed with it, which is what turns a claim about the protocol
+into a description of the request we actually send.
+
 ### A per-frame bound written as a per-delivery bound, and what the survivor means
 
 The bound I built measured `end + chunk.length` — the DELIVERY — and then looked for the
@@ -1862,6 +1920,11 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M145 | the bound runs AFTER the copy | SURVIVED — both orders reject identically; ordering has no runtime observable here |
 | M146 | settle a SUCCESS with no result | TS2554 at typecheck — refused by the type, not by a test |
 | M147 | the live-proof guard's assignment pattern matches `===` too | RED 1 (it reported all three gated suites as offenders) |
+| M148 | the typed `pane_not_found` from the READ is discarded again | RED 1 |
+| M149 | PAIR: ANY read rejection settles, not only the typed one | RED 3 |
+| M150 | the capture helper restores only on the happy path (no `finally`) | RED 1 |
+| M151 | the helper restores a BOUND copy instead of the original reference | RED 2 |
+| M152 | a live proof hand-rolls the stderr patch again | RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

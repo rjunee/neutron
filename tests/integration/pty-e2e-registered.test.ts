@@ -140,6 +140,36 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     expect(offenders).toEqual([])
   })
 
+  // A LIVE PROOF MAY NOT MONKEY-PATCH PROCESS STATE BY HAND. The hand-rolled shape is
+  // install, do the interesting thing, restore — and the interesting thing in a live
+  // proof is `await host.spawn(...)`, which rejects on a protocol mismatch, an
+  // unreachable socket or a pid that never arrives. The restore then never runs and
+  // `process.stderr.write` stays patched for the rest of the process. That is the worst
+  // possible failure shape: the one test that can see a real server fails, and its
+  // failure silently degrades every test after it. Use the scoped capture helper, whose
+  // restore is in a `finally`.
+  test('no live proof monkey-patches stderr by hand', () => {
+    const PATCH = /process\.stderr\.write\s*=(?!=)/
+    const offenders = walkTests(REPO_ROOT)
+      .filter((f) => f.endsWith('.e2e.test.ts'))
+      .filter((f) => {
+        try {
+          return PATCH.test(readFileSync(f, 'utf8'))
+        } catch {
+          return false
+        }
+      })
+      .map((f) => relative(REPO_ROOT, f))
+    expect(offenders).toEqual([])
+    // POSITIVE CONTROL: the pattern finds the assignment where it legitimately lives,
+    // so an empty offender list is an absence rather than a typo.
+    const helper = readFileSync(
+      join(REPO_ROOT, 'runtime/adapters/claude-code/persistent/__tests__/herdr-fake-server.ts'),
+      'utf8',
+    )
+    expect(PATCH.test(helper)).toBe(true)
+  })
+
   test('the registry lists no suite that no longer exists', () => {
     // A stale entry makes the runner report a MISSING suite at run time, which is
     // the one moment nobody is watching CI.

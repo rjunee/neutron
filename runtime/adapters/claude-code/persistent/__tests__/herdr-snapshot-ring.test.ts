@@ -22,7 +22,9 @@ import { describe, expect, it } from 'bun:test'
 import { HerdrHost } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
-import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import { FakeHerdrServer, until, withCapturedStderr } from './herdr-fake-server.ts'
+import { HerdrError } from '../herdr-client.ts'
+import { HERDR_PANE_NOT_FOUND } from '../herdr-protocol.ts'
 import { terminateChild } from '../repl-session.ts'
 import type { PtyChild } from '../pty-host.ts'
 
@@ -211,6 +213,25 @@ describe('a failed question is not a negative answer', () => {
     await until(() => screens.includes('after'), 'recovered')
     expect(child.hasExited()).toBe(false)
     child.kill()
+  })
+
+  // THE OTHER HALF OF THE RULE. Everything above is "unknown must not confirm". This
+  // is "known must not be discarded": the read itself came back with the exact typed
+  // positive absence herdr offers, and the handler threw it away and asked `pane.get`
+  // the same question — so a transient failure of the FOLLOW-UP left the child
+  // unsettled on evidence that was already conclusive. A test where BOTH calls answer
+  // `pane_not_found` cannot see this; only the MIXED case can.
+  it('a TYPED pane_not_found from the READ settles even when the follow-up probe fails', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'x'
+    const { child } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.failMethod('pane.read', new HerdrError(HERDR_PANE_NOT_FOUND, 'pane w9:p1 not found'))
+    // ...and the probe that used to be the ONLY source of settlement cannot answer.
+    server.failMethod('pane.get', new Error('transient: server busy'))
+    expect(await child.exited).toBeNull()
+    expect(child.exitCause?.()).toBe('pane-vanished')
+    expect(child.wasKilledByUs?.()).toBe(false)
   })
 
   it('CONTROL — a TYPED pane_not_found IS proof, and does settle', async () => {
@@ -459,6 +480,39 @@ describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
   })
 })
 
+// THE CAPTURE HELPER ITSELF, because the thing it exists to prevent is a FAILURE path.
+// A helper whose restore only runs on the happy path is the same bug with a nicer name.
+describe('the stderr capture restores unconditionally', () => {
+  it('puts process.stderr.write back when the body REJECTS — the spawn-failure case', async () => {
+    const before = process.stderr.write
+    let thrown: Error | undefined
+    await withCapturedStderr(async () => {
+      // Exactly the shape that broke it: the interesting await is `host.spawn`, and it
+      // can reject on a protocol mismatch, an unreachable socket or a pid that never
+      // arrives — before any restore written after it.
+      throw new Error('spawn refused: protocol mismatch')
+    }).catch((e: unknown) => {
+      thrown = e as Error
+    })
+    // BOTH halves. The error must still reach the test, or a helper that swallowed it
+    // would pass this and hide every live failure it was meant to surface.
+    expect(thrown?.message).toContain('spawn refused')
+    // IDENTITY, not equivalence: a restore that installs a bound copy leaves a
+    // different function in place, and two nested captures would then stack binds
+    // forever without ever returning the process to where it started.
+    expect(process.stderr.write).toBe(before)
+  })
+
+  it('CONTROL — a body that RESOLVES also restores, and the capture is returned', async () => {
+    const before = process.stderr.write
+    const lines = await withCapturedStderr(async () => {
+      process.stderr.write('captured, not printed\n')
+    })
+    expect(process.stderr.write).toBe(before)
+    expect(lines).toEqual(['captured, not printed\n'])
+  })
+})
+
 describe('the producer does not start before its consumer can exist', () => {
   it('NO screen is delivered until beginOutput() releases the gate', async () => {
     // `spawn` is async, so the caller cannot wire the consumer until it resolves. A
@@ -538,31 +592,29 @@ describe('the producer does not start before its consumer can exist', () => {
     // Withholding output forever is worse than delivering it late: a REPL whose
     // screens never reach the detectors is wedged silently and looks idle. So the
     // gate is an ordering device, not a permission.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
-    const server = new FakeHerdrServer()
-    server.screen = 'eventually'
-    const screens: string[] = []
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(ms),
-      workspaceId: 'w9',
-      outputGateMaxMs: 30, // the production bound is 5s
+    // THE SPAWN IS INSIDE THE CAPTURE. Hand-rolling this put `await host.spawn(...)`
+    // between the override and the restore, so a rejecting spawn left
+    // `process.stderr.write` patched for the rest of the process.
+    const errs = await withCapturedStderr(async () => {
+      const server = new FakeHerdrServer()
+      server.screen = 'eventually'
+      const screens: string[] = []
+      const host = new HerdrHost({
+        connect: async () => server,
+        pollIntervalMs: 5,
+        sleep: (ms) => Bun.sleep(ms),
+        workspaceId: 'w9',
+        outputGateMaxMs: 30, // the production bound is 5s
+      })
+      const child = await host.spawn(['claude'], {
+        cwd: '/tmp',
+        env: {},
+        onScreen: (sc) => screens.push(sc),
+      })
+      // beginOutput() is DELIBERATELY not called.
+      await until(() => screens.includes('eventually'), 'released by the fail-open timer')
+      child.kill()
     })
-    const child = await host.spawn(['claude'], {
-      cwd: '/tmp',
-      env: {},
-      onScreen: (sc) => screens.push(sc),
-    })
-    // beginOutput() is DELIBERATELY not called.
-    await until(() => screens.includes('eventually'), 'released by the fail-open timer')
-    child.kill()
-    process.stderr.write = realWrite
 
     // ...AND *LOUDLY*, WHICH IS HALF THE CRITERION AND WAS THE HALF NOT ASSERTED.
     // "The screen arrived" is IMPLIED BY failing open and says nothing at all about

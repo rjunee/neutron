@@ -61,6 +61,7 @@ import {
   herdrKeyNames,
   herdrReadWindow,
   type HerdrLayoutApply,
+  type HerdrLayoutPaneNode,
   type HerdrPaneInfo,
   type HerdrPaneRead,
   type HerdrProcessInfo,
@@ -118,10 +119,6 @@ export interface HerdrHostDeps {
   /** How long to wait for herdr to report a pid. Defaults to
    *  {@link HERDR_PID_WAIT_MS}; a test shortens it so the refusal path is fast. */
   pidWaitMs?: number
-
-  /** How long a post-transport-loss `pane.close` may take before it counts as
-   *  unconfirmed. */
-  paneCloseTimeoutMs?: number
 }
 
 /**
@@ -494,17 +491,22 @@ export class HerdrHost implements PtyHost {
    */
   private async applyLayout(client: HerdrRpc, argv: string[], opts: PtySpawnOpts): Promise<string> {
     const workspaceId = this.deps.workspaceId ?? process.env['HERDR_WORKSPACE_ID']
+    // TYPED, not a bare literal. `HerdrLayoutPaneNode` records what was measured
+    // against the live server about this node — `command` genuinely execs — and an
+    // exported shape with no consumer is a supported-looking dead option. Using it
+    // here is what makes it a description of the request we actually send.
+    const root: HerdrLayoutPaneNode = {
+      type: 'pane',
+      command: argv,
+      cwd: opts.cwd,
+      env: compactEnv(opts.env),
+      label: HERDR_REPL_PANE_LABEL,
+    }
     const params: Record<string, unknown> = {
       // The owner's focus is theirs: they must be able to `herdr session attach`
       // and find themselves where they left off, not yanked to a REPL pane.
       focus: false,
-      root: {
-        type: 'pane',
-        command: argv,
-        cwd: opts.cwd,
-        env: compactEnv(opts.env),
-        label: HERDR_REPL_PANE_LABEL,
-      },
+      root,
     }
     if (workspaceId !== undefined && workspaceId !== '') params['workspace_id'] = workspaceId
     const applied = (await client.call('layout.apply', params)) as unknown as HerdrLayoutApply
@@ -666,11 +668,25 @@ export class HerdrHost implements PtyHost {
               `changed under a protocol version that did not.\n`,
           )
         }
-      } catch {
+      } catch (e) {
         // A read that FAILED tells us nothing about the screen. Drop it — do NOT
         // synthesize an empty snapshot, which would erase the ring's record of a
-        // dead REPL's last output. Confirm death against the pane's existence
-        // rather than inferring it from one failed read.
+        // dead REPL's last output.
+        //
+        // UNKNOWN MUST NOT CONFIRM — AND KNOWN MUST NOT BE DISCARDED. Every other
+        // rule on this branch is the first half: an ambiguous failure settles
+        // nothing. This is its other half, and it was the one being broken. The
+        // handler caught every rejection alike and threw the error away, then asked
+        // `pane.get` the same question again — so a read that came back with the
+        // exact typed positive absence herdr offers (`pane_not_found`) settled
+        // nothing if the FOLLOW-UP probe happened to fail transiently. A definite
+        // answer discarded because the code did not look at it.
+        if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) {
+          settleExit('pane-vanished')
+          return
+        }
+        // Genuinely ambiguous: a timeout, a transport hiccup, a server error. Only
+        // now is a second question worth asking.
         if (await this.paneIsGone(client, paneId)) {
           settleExit('pane-vanished')
           return

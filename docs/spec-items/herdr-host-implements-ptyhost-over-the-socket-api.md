@@ -327,6 +327,24 @@ not-new. That is accepted and recorded here rather than hidden.
       call would double every operation, and the server's protocol cannot change under a
       running host without restarting herdr, whose panes are its children.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **No live proof borrows process state without a guaranteed return.** The
+      hand-rolled capture is install, do the interesting thing, restore — and the
+      interesting thing in a live proof is `await host.spawn(...)`, which rejects on a
+      protocol mismatch, an unreachable socket or a pid that never arrives. The restore
+      then never runs and `process.stderr.write` stays patched for the rest of the
+      process. That is the worst failure shape available: the one test that can see a
+      real server fails, and its failure silently degrades every test after it — the
+      same family as a suite that points `HERDR_SOCKET_PATH` at a dead path and never
+      puts it back. A scoped helper owns the `finally`, the spawn runs INSIDE its scope,
+      and the helper restores the ORIGINAL reference rather than a bound copy, because
+      identity is the only restoration that composes under nesting.
+      The helper needs its own cases in both directions — a body that REJECTS restores
+      AND still propagates its error (a helper that swallowed it would hide every live
+      failure it exists to surface), and a body that resolves restores and returns what
+      it captured. And the rule is enforced rather than observed: a guard fails any
+      `*.e2e.test.ts` that assigns `process.stderr.write` at all, with a positive control
+      that the pattern finds the assignment where it legitimately lives.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts tests/integration/pty-e2e-registered.test.ts`
 - [ ] **No test may switch a live proof off.** The live herdr proofs are the only tests
       in this repo that can see a real server, and they are exactly the instrument that
       would have caught the transport defect this branch fixed. Three unit suites point
@@ -400,6 +418,15 @@ not-new. That is accepted and recorded here rather than hidden.
       file>` which finds the 5 exports that remain. The unanchored grep still finds the
       two lines of the deletion comment, which is the "one hit, and it is prose" shape
       again: the reasoning stays, the machinery does not.
+      AND THE SWEEP IS THE SURFACE, NOT THE ONE SYMBOL NAMED. Fixing only what a review
+      points at leaves the next one; the check is every exported name in `herdr-host.ts`,
+      `herdr-client.ts`, `herdr-protocol.ts` and `pty-host.ts` counted against its uses.
+      Run 2026-09-12 it found two more: `HerdrHostDeps.paneCloseTimeoutMs`, documented as
+      a post-transport-loss `pane.close` timeout with no consumer — deleted; and
+      `HerdrLayoutPaneNode`, a measured protocol shape with no consumer — made live by
+      typing the `layout.apply` root with it, since the measurement it records is worth
+      keeping and an unused export is not the way to keep it. An exported option is a
+      promise.
 - [ ] **Every live caller performs the readiness handshake.** Each converted E2E proof
       must call `beginOutput()` after wiring its consumers, and at least one live
       boundary test must assert NO fail-open warning across the whole run. Without it
@@ -485,11 +512,19 @@ not-new. That is accepted and recorded here rather than hidden.
       the drop loop must keep the MAXIMAL fitting tail — a bound-only assertion
       passes for an implementation that discards everything.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-ring.test.ts`
-- [ ] **Only a typed `pane_not_found` proves a pane is gone.** A transient rejection
-      — timeout, temporary server error — must NOT settle the child, and the bridge
-      must recover when it clears. Assert the control too: a typed not-found DOES
-      settle with `'pane-vanished'`, or an implementation that never concludes
-      absence passes.
+- [ ] **Only a typed `pane_not_found` proves a pane is gone — and a typed one must not
+      be thrown away.** Two halves of one rule, and the second was the one being broken.
+      UNKNOWN MUST NOT CONFIRM: a transient rejection — timeout, temporary server error
+      — must NOT settle the child, and the bridge must recover when it clears. KNOWN
+      MUST NOT BE DISCARDED: a `pane.read` that itself rejects with `pane_not_found` is
+      already the conclusive evidence, and the poll must settle on it rather than
+      throwing the error away and asking a second question — the handler caught every
+      rejection alike, so a typed not-found settled nothing whenever the follow-up
+      `pane.get` happened to fail transiently.
+      THE MIXED CASE IS THE ONLY ONE THAT SEES IT. A test where both calls answer
+      `pane_not_found` passes either way; the case must make the READ typed and the
+      PROBE transiently broken. Both directions still needed: widening the typed check
+      to any rejection must redden the transient cases.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **A malformed inbound frame fails the call, and cannot poison the next one.** The
       old second half — "a later call is refused without reaching the wire" — was a
