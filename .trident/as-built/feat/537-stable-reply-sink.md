@@ -788,7 +788,18 @@ nothing downstream could notice. The threat model was correct and it simply did 
 reach the sibling the change added — the same shape as `O_NOFOLLOW` + `fstat` asking
 where the open LANDED rather than what it landed ON, one file over.
 
-Both halves are now there and both are mutation-checked **separately**, which is the
+The first fix was still wrong, and the second round is the more useful one:
+`O_NOFOLLOW` stops a SYMLINK and does nothing about a HARD LINK. The alias is a regular
+file, `fstat` agrees it is a regular file, and with `O_TRUNC` the original is already
+empty before any check can run. **No ordering of validations fixes a truncation that
+happens at open** — so the destructive flag is gone rather than guarded. A lockfile
+carries no payload (`flock` is advisory; nothing reads these bytes), which is why
+`O_TRUNC` was never buying anything in the first place.
+
+That is the shape worth keeping: the first patch added a CHECK where the answer was to
+remove a CAPABILITY. A check can only refuse what it can still see.
+
+Both halves of the remaining hardening are mutation-checked **separately**, which is the
 part worth recording:
 
 | mutation | result |

@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registryLockPath, withFlockSync } from '../registry-lock.ts'
@@ -36,6 +36,23 @@ describe('registry-lock', () => {
       }),
     ).toThrow(/not a regular file/)
     expect(ran).toBe(false)
+  })
+
+  it('does not truncate a HARD-LINKED target — the lock carries no payload, so it never truncates', () => {
+    // O_NOFOLLOW stops a symlink and does nothing about a hard link: the alias IS a
+    // regular file, `fstat` agrees, and with O_TRUNC the original would already be empty
+    // before any check could run. No ordering of validations fixes a truncation that
+    // happens at open, so the destructive flag is gone instead.
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-lock-hardlink-'))
+    const victim = join(dir, 'precious.txt')
+    const contents = 'bytes that must survive\n'
+    writeFileSync(victim, contents, { mode: 0o600 })
+
+    const lock = join(dir, '.registry.lock')
+    linkSync(victim, lock)
+
+    expect(withFlockSync(lock, () => 'ran')).toBe('ran')
+    expect(readFileSync(victim, 'utf8')).toBe(contents)
   })
 
   it('runs fn under the lock and returns its value', () => {

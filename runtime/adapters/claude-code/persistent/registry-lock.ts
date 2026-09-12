@@ -152,13 +152,16 @@ export function withFlockSync<T>(
   // through). It reads the FD, never the path, so there is no window to swap the file
   // between the check and the lock — asking where the open LANDED, not what the name
   // pointed at when we looked.
+  // NO `O_TRUNC`. A lockfile carries no payload — `flock` is advisory and nothing ever
+  // reads these bytes — so truncation buys nothing and costs everything: `O_TRUNC`
+  // applies AT OPEN, before any validation can run. `O_NOFOLLOW` stops a SYMLINK, and a
+  // HARD LINK defeats it completely: the alias is a regular file, `fstat` agrees it is a
+  // regular file, and the original is already empty by then. The type check cannot save
+  // a file the open has destroyed, so the destructive flag is removed rather than
+  // guarded — there is no ordering of checks that fixes a truncation that happens first.
   const fd = openSync(
     lockPath,
-    fsConstants.O_WRONLY |
-      fsConstants.O_CREAT |
-      fsConstants.O_TRUNC |
-      fsConstants.O_NONBLOCK |
-      fsConstants.O_NOFOLLOW,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW,
   )
   try {
     if (!fstatSync(fd).isFile()) {
