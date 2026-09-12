@@ -11,6 +11,17 @@ import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
+import {
+  SHUTDOWN_PENDING_SPAWN_GRACE_MS,
+  cancellableWait,
+  readChildPid,
+  confirmShutdownExits,
+  deliverShutdownKillReports,
+  recordGatewayShutdownKill,
+  sampleLivenessBeforeShutdownKill,
+  type PendingShutdownKillReport,
+  type ShutdownExitWatch,
+} from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
@@ -883,30 +894,214 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
 // D1: `activeWatchdogs` / `activeModelWatchdogs` live in `pool-state.ts`,
 // imported above.
 
-/** Test/operator helper: SIGTERM every warm REPL and clear the pool. */
-export async function shutdownAllPersistentRepls(): Promise<void> {
+/**
+ * Test/operator helper: SIGTERM every warm REPL and clear the pool.
+ *
+ * IN PRODUCTION THIS IS THE DEPLOY (#518). The gateway's SIGTERM handler calls it
+ * (`gateway/index.ts`), so `systemctl restart` — which is what a deploy does after
+ * it checks out the new vendor tree — reaches `session.child.kill()` below and
+ * takes every detached trident workflow inside those children with it. Three of
+ * five recorded `trident_launcher_crashes` landed 18-28 s after a vendor checkout,
+ * and the 08-13 deploy rolled trident's own merge: a build that lands killed the
+ * builds still running, at the rate the pipeline succeeded.
+ *
+ * So before each kill we say so, durably — `reportGatewayShutdownKill` writes the
+ * generation-scoped marker to the REPL registry AND tells the durable crash sink
+ * with `cause: 'gateway-shutdown'`. Without it the owner learned about his lost
+ * build from the next boot's watchdog as `pid-dead → pooled child exited`, or from
+ * the liveness probe as `inner workflow launcher crashed`: true sentences about a
+ * fault that never happened.
+ *
+ * Reporting is NOT gated on how much live work the child hosts. `hostsLiveWork` is
+ * optional and its absence means zero, so gating on it would turn an unwired
+ * callback into silence — and a run the sink cannot match is a cheap no-op the
+ * store's own 7-day prune clears. Surviving the restart instead of reporting it is
+ * the herdr-host half (#538 moves the REPL out of this process tree; #539 gates
+ * this kill and adds the adopt arm); this is the half that is true either way.
+ */
+export async function shutdownAllPersistentRepls(
+  opts: {
+    /** Test seam for {@link SHUTDOWN_PENDING_SPAWN_GRACE_MS}. Production takes the
+     *  default; a case that pins the traversal passes a small one so it does not spend
+     *  the real budget proving a spawn never settles. */
+    pendingSpawnGraceMs?: number
+  } = {},
+): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
   for (const w of activeWatchdogs.values()) w.stop()
   activeWatchdogs.clear()
   for (const w of activeModelWatchdogs.values()) w.stop()
   activeModelWatchdogs.clear()
+  // ONE timestamp for the whole teardown: every child in this pool dies of the
+  // same event, and a per-child `Date.now()` would invite a reader to treat the
+  // spread as evidence of separate causes.
+  const shutdownAt = Date.now()
+  // The live reports owed once every child is marked and killed — delivered in a
+  // bounded phase at the end, never inline. See `gateway-shutdown-kill.ts`.
+  const owedReports: PendingShutdownKillReport[] = []
+  // Children that have been signalled and whose exit is not yet confirmed.
+  const awaitingExit: ShutdownExitWatch[] = []
+
+  // PHASE 0 — PARTITION WITHOUT AWAITING ANYTHING.
+  //
+  // `pool` stores the spawn PROMISE and inserts it BEFORE it settles (`spawn.ts`), so an
+  // entry can be a spawn still in flight, or one that will never finish. This walk used to
+  // `await` each entry in turn, which put a wedged spawn in front of every later child's
+  // MARKER AND KILL — the timing note on this function measures that at ~40 s against a
+  // 30 s `TimeoutStopSec`, so the children behind it were killed by the cgroup with
+  // NEITHER channel having reported. The guarantee this change exists to make ("a deploy
+  // kill is always recorded") then held only until the first entry that would not settle,
+  // and the launcher it lost was the one whose gateway was already in trouble.
+  //
+  // `Bun.peek.status` reads the settled state synchronously — the same
+  // synchronous-mirror trick `supervision.ts` uses on this map — so the children that CAN
+  // be reported are reported first and nothing pending is in front of them.
+  const settledNow: Array<[string, ReplSession]> = []
+  const stillSpawning: Array<[string, Promise<ReplSession>]> = []
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
+    const status = Bun.peek.status(p)
+    if (status === 'fulfilled') {
+      settledNow.push([key, Bun.peek(p) as ReplSession])
+      continue
+    }
+    if (status === 'rejected') {
+      // A spawn that failed owns no child. Attach a catch so an abandoned rejection
+      // cannot surface later as an unhandled one.
+      p.catch(() => undefined)
+      continue
+    }
+    stillSpawning.push([key, p])
+  }
+
+  const teardown = async (key: string, session: ReplSession): Promise<void> => {
+    // The report owed for THIS child, so the kill's outcome can be attached to it.
+    let owedForThisChild: PendingShutdownKillReport | null = null
     try {
-      const session = await p
       session.sizeWatchdog?.stop()
-      session.child.kill()
+      // BEFORE the kill. After it this process may not get another turn, and the
+      // gateway closes its database a few statements after we return.
+      //
+      // The owning options come from `supervisedBySessionKey` — the SAME map the
+      // supervision watchdog resolves a crash sink through. The production adapter
+      // populates it for every REPL whose instance home resolves
+      // (`adapters/claude-code/index.ts`, beside `replRegistryPath`), which is every
+      // supervised REPL including the trident fire launcher. An UNREGISTERED key can
+      // only be a directly-constructed substrate (tests); say so rather than killing
+      // a child that hosted work and recording nothing, which is the silence this
+      // whole change exists to remove.
+      const owner = supervisedBySessionKey.get(key)
+      if (owner !== undefined) {
+        // PHASE 1 — MARK, synchronously. The owed live report is COLLECTED, not
+        // awaited: a sink we do not own, awaited here, would sit between this child's
+        // kill and every later child's marker AND kill, and the cgroup SIGKILL at
+        // `TimeoutStopSec` does not wait for it. One hung sink would then cost every
+        // remaining child its durable marker — this function's own purpose, defeated
+        // inside this function. See the constraint at the top of
+        // `gateway-shutdown-kill.ts`.
+        //
+        // SAMPLED BEFORE THE KILL, because `kill()` is idempotent after exit
+        // (`pty-host.ts`): teardown "kills" a child that died of a real fault moments
+        // earlier exactly as readily as a live one, and calling that a deploy buries a
+        // fault where nobody investigates it. Only an observed-alive child is
+        // attributed to this shutdown.
+        const owed = recordGatewayShutdownKill(
+          owner,
+          key,
+          session.childGeneration,
+          shutdownAt,
+          sampleLivenessBeforeShutdownKill(() => session.hasChildExited()),
+          // The pid goes ON the durable entry so a later reader can confirm this death
+          // against the process table instead of trusting the entry. Read before the
+          // kill, while the handle is certainly still valid.
+          readChildPid(session.child),
+        )
+        if (owed !== null) owedReports.push(owed)
+        owedForThisChild = owed
+      } else {
+        process.stderr.write(
+          `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,
+        )
+      }
+      // SIGNAL ONLY — the confirmation is a SHARED pass after every child has been
+      // signalled (`confirmShutdownExits`). `kill()` returns void and only REQUESTS
+      // termination; a child that ignores or delays SIGTERM returns normally from it, so
+      // "the signal did not throw" is the absence of one failure mode, not evidence of
+      // death. Waiting per child here would also put one child's grace period in front
+      // of the next child's signal, which is the phase rule this module already obeys.
+      let signalDelivered = false
+      try {
+        session.child.kill()
+        signalDelivered = true
+      } catch {
+        /* the signal failed; a later death is then not ours to claim */
+      }
+      if (owedForThisChild !== null) {
+        awaitingExit.push({ report: owedForThisChild, child: session.child, signalDelivered })
+      }
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
     } catch {
       // ignore
     }
   }
+
+  for (const [key, session] of settledNow) await teardown(key, session)
+
+  // PHASE 0b — and only now, the ones that had not spawned yet, on ONE shared bound.
+  // A spawn that lands inside it is marked and killed exactly like the rest; one that
+  // does not is said out loud and left to the cgroup, with a best-effort kill attached in
+  // case it settles while this process still exists. Nothing durable is written for it:
+  // it has no `child_generation` yet, so there is no generation to attribute anything to
+  // — and a pool entry that never resolved never had a turn injected, so it hosts no
+  // detached workflow. The builds at risk are behind the SETTLED entries above, which is
+  // why they go first.
+  if (stillSpawning.length > 0) {
+    const bound = cancellableWait(opts.pendingSpawnGraceMs ?? SHUTDOWN_PENDING_SPAWN_GRACE_MS)
+    try {
+      await Promise.race([Promise.allSettled(stillSpawning.map(([, p]) => p)), bound.expired])
+    } finally {
+      bound.cancel()
+    }
+    for (const [key, p] of stillSpawning) {
+      if (Bun.peek.status(p) === 'fulfilled') {
+        await teardown(key, Bun.peek(p) as ReplSession)
+        continue
+      }
+      if (Bun.peek.status(p) === 'rejected') {
+        p.catch(() => undefined)
+        continue
+      }
+      process.stderr.write(
+        `[repl] gateway shutdown reached pool key ${key.slice(0, 24)} whose SPAWN has not settled — it has no ` +
+          `generation yet, so nothing durable can name it; left to the unit's cgroup kill\n`,
+      )
+      fireAndForget(
+        'pool.shutdown.late-spawn-kill',
+        p.then((session) => {
+          // It finished after we stopped waiting. Terminate it rather than orphan it —
+          // this is the polite layer non-systemd deployments depend on.
+          try {
+            session.child.kill()
+          } catch {
+            /* already gone */
+          }
+        }),
+      )
+    }
+  }
   // Quarantined children are OUT of `pool` by construction (that is what makes
   // them quarantined), so the loop above cannot see them. At teardown the hosted
   // work they were being kept alive for is going away anyway — kill them, or the
   // process is orphaned.
-  await shutdownQuarantinedChildren()
+  const quarantined = shutdownQuarantinedChildren(shutdownAt)
+  owedReports.push(...quarantined.reports)
+  awaitingExit.push(...quarantined.awaitingExit)
+
+  // PHASE 2b — CONFIRM THE KILLS, once, with one shared budget. Only a child that is
+  // actually gone is recorded as killed by this shutdown; one that outlives the
+  // escalation records an undetermined disposition instead.
+  await confirmShutdownExits(awaitingExit)
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs.
@@ -921,6 +1116,11 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
     }
   }
   ephemeralSessions.clear()
+  // PHASE 3 — every child is now marked and killed, so the live reports can be
+  // attempted with no child's fate behind them. Bounded per sink AND across the
+  // phase; anything abandoned here is still attributed on the next boot from the
+  // marker phase 1 wrote, which is what the marker is for.
+  await deliverShutdownKillReports(owedReports)
   // Reset supervision state so tests don't leak per-key gates across cases.
   respawnGates.clear()
   childByKey.clear()

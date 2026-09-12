@@ -18,6 +18,9 @@ import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnR
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
+import { gatewayShutdownKillEntryFor, observationOf } from './gateway-shutdown-kill.ts'
+import { classifyRecordedPid } from './process-identity.ts'
+import type { GatewayShutdownObservation } from './repl-registry.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
@@ -390,6 +393,14 @@ export interface ReplWatchdog {
  *  pool is the authoritative source when it holds the session; otherwise (after
  *  a crash evicted it, or across a gateway restart) the registry's recorded
  *  `pid` is the liveness anchor — exactly Nova's "topic-map pid" fallback. */
+/** What the gateway shutdown established about the generation this row CURRENTLY
+ *  names, or undefined when it never reached it. */
+function observationFor(record: ReplRegistryRecord | undefined): GatewayShutdownObservation | undefined {
+  const current = record?.child_generation
+  if (typeof current !== 'string' || current.length === 0) return undefined
+  return observationOf(gatewayShutdownKillEntryFor(record, current))
+}
+
 async function probeReplLiveness(
   sessionKey: string,
   record: ReplRegistryRecord | undefined,
@@ -420,7 +431,18 @@ async function probeReplLiveness(
   // Pass the recorded session id so the default probe can reject a recycled port
   // serving a DIFFERENT session (port-recycle guard).
   const healthOk = port !== undefined ? await healthProbe(port, record?.sessionId) : false
-  return { hasChild, childAlive, healthOk, ccReady: record?.first_ready_at !== undefined }
+  const observed = observationFor(record)
+  return {
+    hasChild,
+    childAlive,
+    healthOk,
+    ccReady: record?.first_ready_at !== undefined,
+    // #518 — generation-scoped: a record naming a SUPERSEDED generation is not read as
+    // describing this child, so the next child's genuine crash is never excused.
+    // Undefined when the shutdown never reached this generation, which is the state an
+    // ordinary crash is in.
+    ...(observed !== undefined ? { shutdownObserved: observed } : {}),
+  }
 }
 
 /**
@@ -481,7 +503,23 @@ export async function runReplWatchdogTick(
       crashSink !== undefined
     ) {
       try {
-        await crashSink({ sessionKey, generationKey: record.child_generation, detail: verdict.detail })
+        await crashSink({
+          sessionKey,
+          generationKey: record.child_generation,
+          // #518 — WHY it is gone travels as a field, not as a phrase the consumer
+          // has to pattern-match back out of `detail`.
+          // THREE REASONS, THREE CAUSES. An earlier revision mapped everything that was
+          // not a deploy onto `child-died`, so an honest undetermined outcome was
+          // reported as a confident fault on every retry — the conflation this whole
+          // change exists to remove, surviving in the one place nothing recorded it.
+          cause:
+            verdict.reason === 'pid-dead-gateway-shutdown'
+              ? 'gateway-shutdown'
+              : verdict.reason === 'pid-dead-cause-undetermined'
+                ? 'unknown'
+                : 'child-died',
+          detail: verdict.detail,
+        })
         patchRecord(registryPath, sessionKey, { child_crash_notified_at: now })
       } catch (err) {
         log.error('child_crash_sink_error', { sessionKey, error: String(err) })
@@ -504,7 +542,11 @@ export async function runReplWatchdogTick(
         continue
       }
       const trigger: RespawnTrigger =
-        action.verdict.reason === 'pid-dead' ? 'crash-watchdog' : 'wedge-watchdog'
+        action.verdict.reason === 'pid-dead' ||
+        action.verdict.reason === 'pid-dead-gateway-shutdown' ||
+        action.verdict.reason === 'pid-dead-cause-undetermined'
+          ? 'crash-watchdog'
+          : 'wedge-watchdog'
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
       respawned = outcome.ok
       if (action.alert.send) {
@@ -939,6 +981,22 @@ export async function peekSizeWatchdogForTest(
 // External launcher liveness — the PULL half of crash detection.
 // ---------------------------------------------------------------------------
 
+/** What {@link probeLauncherGenerationAlive} can answer. Mirrored by trident's
+ *  `LauncherLiveness` (`trident/tick.ts`), which is the same union — the
+ *  runtime layer may not import trident, so the two are kept identical by name
+ *  and a compile-time check at the wiring seam
+ *  (`open/wiring/trident-launcher-liveness.ts`). */
+export type LauncherGenerationLiveness =
+  | 'alive'
+  | 'dead'
+  | 'unknown'
+  | 'killed-by-gateway-shutdown'
+  /** Positively gone, and the shutdown recorded that it did NOT kill it — already gone
+   *  when the shutdown arrived, or unsampleable. Death established, cause not. A third
+   *  dead-flavoured value because folding it into `'dead'` makes the caller compose a
+   *  crash sentence for a fault nobody observed. */
+  | 'dead-cause-undetermined'
+
 /**
  * Is the launcher child identified by `generationKey` still a LIVE process?
  *
@@ -965,11 +1023,19 @@ export async function peekSizeWatchdogForTest(
  *
  * 'dead' therefore requires POSITIVE evidence, and the answer is BINARY process
  * liveness: no amount of thinking can make a live agent probe 'dead'.
+ *
+ * #518 — 'killed-by-gateway-shutdown' IS 'dead', WITH THE CAUSE ATTACHED. The
+ * registry row carries a generation-scoped marker written by the gateway that
+ * terminated this child on its own way down (a service restart or a deploy). It
+ * is reported separately so the caller's durable failure reason can name the
+ * deploy instead of saying the launcher crashed: same reaping, honest sentence.
+ * The marker is NEVER allowed to manufacture a death — the pid check runs first
+ * and must independently say dead.
  */
 export function probeLauncherGenerationAlive(
   generationKey: string,
   replRegistryPath: string,
-): 'alive' | 'dead' | 'unknown' {
+): LauncherGenerationLiveness {
   try {
     // The pool stores `Promise<ReplSession>`, so read the SETTLED value rather than
     // awaiting a spawn that may still be in flight — the same synchronous-mirror
@@ -995,6 +1061,21 @@ export function probeLauncherGenerationAlive(
       // malformed pid must not turn process.kill's EINVAL/TypeError into positive
       // death evidence for a potentially healthy launcher.
       if (typeof record.pid !== 'number' || !Number.isInteger(record.pid) || record.pid <= 0) return 'unknown'
+      // IDENTITY FIRST, WHERE THERE IS ONE. A pid is an identifier, not a handle: a
+      // shutdown entry stays eligible for four hours and a recycled pid answers
+      // `process.kill(pid, 0)` exactly like a live launcher, so the raw look below
+      // reports a dead child as ALIVE and its build waits out the 90-minute reaper —
+      // this item's own lag defect, arriving through the process table.
+      const currentEntry = gatewayShutdownKillEntryFor(record, generationKey)
+      const verdict = currentEntry === undefined ? 'unverifiable' : classifyRecordedPid(currentEntry.pid ?? record.pid, currentEntry.identity)
+      if (verdict === 'ours-alive') return 'alive'
+      if (verdict === 'confirmed-gone' || verdict === 'not-comparable') {
+        // Both establish that the recorded process is gone: a reissued pid means ours
+        // released it, and an entry from an earlier boot cannot have a live process
+        // behind it. What KILLED it still comes from the observation, never from here.
+        const observed = observationOf(currentEntry)
+        return observed === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
+      }
       // EPERM is positive evidence that this PID exists under another uid. Keep
       // that conservative interpretation scoped to this destructive liveness
       // decision; changing the shared watchdog primitive would alter unrelated
@@ -1003,7 +1084,83 @@ export function probeLauncherGenerationAlive(
         process.kill(record.pid, 0)
         return 'alive'
       } catch (err) {
-        return (err as NodeJS.ErrnoException)?.code === 'EPERM' ? 'alive' : 'dead'
+        if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'alive'
+        // Dead, positively. Now — and only now — ask WHAT THE SHUTDOWN ESTABLISHED, and
+        // ask it the same way the historical-entry branch below does. This classifies
+        // through `observationOf`; an earlier revision asked only whether SOME entry
+        // carried a timestamp, so all three observations funnelled to
+        // `killed-by-gateway-shutdown` and the owner was told a deploy killed a build
+        // that had died on its own. Two readers of one field, one updated and one not.
+        //
+        // Absent ⇒ the shutdown never reached this generation ⇒ an ordinary crash.
+        const observed = observationFor(record)
+        // UNVERIFIABLE PID, so this look established a DEATH and cannot attribute one:
+        // with no stored identity the number may have been reissued and released again
+        // between the kill and now, which makes its absence an observation about a
+        // number rather than about our child. An entry that cannot be tied to a process
+        // is not evidence that we killed that process.
+        return observed === undefined ? 'dead' : 'dead-cause-undetermined'
+      }
+    }
+    // NOT THE CURRENT GENERATION OF ANY ROW — which is exactly what a QUARANTINED
+    // child looks like once its replacement has spawned over the session key. Without
+    // this arm such a child stays 'unknown' forever and its build waits out the
+    // 90-minute reaper, which is a hole older than the shutdown marker itself.
+    //
+    // THE MARKER ATTRIBUTES A DEATH; IT DOES NOT ESTABLISH ONE. It is written BEFORE
+    // `kill()`, and `kill()` can throw or the process can die between the two — so an
+    // entry means "we intended to kill a child we had observed alive", never "this
+    // child is gone". The only thing that knows whether the kill landed is the process
+    // table, so death is confirmed HERE, against the pid the entry carries, and the
+    // marker is used only to EXPLAIN a death already observed. That is also what makes
+    // "the marker never manufactures a death" true rather than aspirational — an
+    // earlier revision returned the attribution from the entry alone, which would
+    // crash a run whose child was still alive.
+    //
+    // The row's own `pid` cannot serve: for a superseded generation it belongs to the
+    // replacement child. Hence the pid on the entry.
+    for (const record of Object.values(loadRegistry(replRegistryPath))) {
+      const entry = gatewayShutdownKillEntryFor(record, generationKey)
+      if (entry === undefined) continue
+      const pid = entry.pid
+      // No usable pid (an entry from a build before the field existed) → we cannot
+      // confirm, so we do not conclude. UNKNOWN, never an implicit death.
+      if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return 'unknown'
+      // THE IDENTITY IS WHAT TIES THIS RECORD TO A PROCESS. Without it the pid look is
+      // about a number: four hours is long enough for the kernel to reissue it, and a
+      // stranger holding it is indistinguishable from our launcher still running.
+      switch (classifyRecordedPid(pid, entry.identity)) {
+        case 'ours-alive':
+          // Still the process we recorded, still running. Nothing to conclude.
+          return 'unknown'
+        case 'confirmed-gone':
+        case 'not-comparable':
+          // Gone, positively: either the pid has been reissued (a running process keeps
+          // its pid, so ours released it) or the entry predates this boot. Only now may
+          // the record explain the death it did not establish.
+          return observationOf(entry) === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
+        case 'unverifiable':
+          break
+      }
+      try {
+        process.kill(pid, 0)
+        // STILL RUNNING. Either the kill never landed, or this pid has been recycled
+        // onto something unrelated — and neither can be told apart from here. Both mean
+        // there is no positive death evidence, which is 'unknown' rather than 'alive':
+        // claiming life for a pid that may not be ours would be the same over-claim in
+        // the other direction.
+        return 'unknown'
+      } catch (err) {
+        // EPERM is positive evidence the pid EXISTS under another uid — same
+        // conservative reading as the branch above.
+        if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'unknown'
+        // Positively gone — and this is the UNVERIFIABLE path, reached only when no
+        // identity was stored (a pre-upgrade entry, or a host with no `/proc`). The
+        // death is established; the attribution is NOT, because the absent pid cannot
+        // be shown to be the one we killed rather than one reissued and released since.
+        // `already-gone` / `could-not-sample` land here too: the shutdown reached this
+        // child and did not kill it.
+        return 'dead-cause-undetermined'
       }
     }
     return 'unknown'

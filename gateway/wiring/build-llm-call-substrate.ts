@@ -38,6 +38,7 @@
 
 import {
   createClaudeCodeSubstrateAuto,
+  type ChildCrashInfo,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
   type DeadTurnNotice,
@@ -382,8 +383,12 @@ export interface BuildLlmCallSubstrateInput {
    * Wired ONLY on the owner's conversational substrate (`cc-agent-*`); the
    * stateless-utility / import / trident substrates leave them unset (stderr). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
-  /** Durable-work failure sink for a pooled child exit detected by supervision. */
-  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  /** Durable-work failure sink for a pooled child exit detected by supervision —
+   *  or for the gateway's OWN shutdown killing the child (#518), which
+   *  `info.cause` distinguishes. Shape imported from the adapter boundary rather
+   *  than restated here: the third copy of this literal was how the cause
+   *  discriminant failed to reach its only consumer. */
+  onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** Eviction guard: live in-process workloads hosted by a child generation
    *  (see `PersistentReplSubstrateOptions.hostsLiveWork`). Wired on the trident
    *  fire substrate only. */

@@ -46,6 +46,7 @@ import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { buildTridentChildCrashSink } from './trident-child-crash-sink.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
@@ -560,22 +561,16 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
       // profile — see substrate-profiles.ts.
       profile: PROFILE_WARM_FIRE,
-      // #514 — the supervision watchdog knows synchronously when this warm
-      // launcher's child died. Stamp every still-live workflow owned by its repo;
-      // the Trident tick then performs the normal terminal transition + board
-      // reconcile instead of leaving a durable `running` phantom until timeout.
-      onChildCrash: async ({ generationKey, detail }) => {
-        // #240 — measure the cause rather than asserting one. Report what was
-        // actually observed (crash time, gateway process boot time) so a
-        // reader can correlate crashes with deploys/restarts, without
-        // claiming the restart caused this specific crash.
-        const observed = new Date()
-        const gatewayBooted = new Date(Date.now() - process.uptime() * 1000)
-        await tridentRuns.crashRunningByLauncher(
-          generationKey,
-          `inner workflow child crashed: ${detail} (observed ${observed.toISOString()}; gateway process booted ${gatewayBooted.toISOString()})`,
-        )
-      },
+      // #514 / #518 — the supervision watchdog and the shutdown path both know
+      // when this warm launcher's child is gone. The sink stamps every still-live
+      // workflow the dead generation owned (so the tick performs the normal terminal
+      // transition + board reconcile instead of leaving a durable `running` phantom
+      // until timeout) AND says WHICH death it was: a deploy/restart we caused, or a
+      // genuine crash. Composition lives in `trident-child-crash-sink.ts` so the
+      // production function is the one under test.
+      onChildCrash: buildTridentChildCrashSink({
+        latch: (session_key, failure_reason) => tridentRuns.crashRunningByLauncher(session_key, failure_reason),
+      }),
       // THE EVICTION GUARD. Before the pool evicts an abandon-poisoned warm
       // launcher it asks how many runs are live INSIDE that child (their Argus
       // panel, arbiter and terminal steps are in-process subagents; only the
