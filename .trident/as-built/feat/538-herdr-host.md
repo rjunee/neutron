@@ -1527,6 +1527,43 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The missing row is the operation that FAILS, in a table built from operations that work
+
+`BunTerminalHost.kill()` latched `killedByUs` and then swallowed a throwing
+`proc.kill(signal)` without clearing it — a signal that was never delivered leaving
+behind a flag asserting it was. `spawn.ts` evaluates `!killedByUs && exitCode !== 0`, so
+the flag short-circuits the exit code entirely and the child's later NONZERO exit — a
+real crash, since nothing killed it — classifies as a clean recycle. It also disarms the
+escalation ladder, whose `hasExited()` guards return early.
+
+**The fix was already written in the sibling file**, for the herdr host's failed
+`pane.close`, and states the rule outright: do not settle, and do not latch; clearing
+leaves the child exactly as it is, alive and unflagged, which is both the truth and what
+re-arms the ladder. Copying the whole shape rather than half of it is the point, and the
+half that is easy to drop is the liveness guard on the clear.
+
+Every existing kill case used a `proc.kill` that succeeds. **A host whose signal cannot
+fail cannot test what a failed signal leaves behind** — the row missing from a table built
+entirely from operations that work, which is the same shape as the missing well-formed
+envelope row one section down, and the same shape as the fixture findings before it.
+
+**Copying the shape exposed a real difference between the two backends, and it is worth
+recording rather than papering.** herdr's failure arrives as an ASYNC rejection, so the
+exit genuinely can settle in between and its `if (exited) return` is reachable and
+load-bearing — it was added there for a defect that actually happened. The Bun host's
+`kill()` is synchronous end to end and `exited` is set only in the `proc.exited`
+microtask, so the equivalent inner guard is UNREACHABLE: M205 and M208 each survive
+alone, absorbed by the other, and only M209 reddens. Rather than leave a guard that looks
+tested and is not, the entry guard got its own observable — an already-exited child is not
+signalled at all, which M208 now reddens — and the inner one is kept with its
+unreachability stated, because the rule is the shared rule and the interface admits a host
+whose `kill` awaits.
+
+M206 is the other half: a widened clear, where a failing SIGINT erases a termination
+already recorded, survived the SIGINT-only case because both flags are false there either
+way. **The clear must be as narrow as the latch**, and that needs a case with a successful
+terminal kill first.
+
 ### The row that was missing is the one that is well-formed
 
 Every request sent `id: "r"`; `classifyReply` accepted any string id. So
@@ -2502,6 +2539,12 @@ Run against the named suites.
 | M201 | the id check is dropped entirely | RED 3 |
 | M202 | PAIR: the check is over-strict — nothing correlates | RED 12 |
 | M203 | the REQUEST sends an id the check does not expect (they drift) | RED 1 |
+| M204 | the flag is NOT cleared when the signal throws (the defect) | RED 2 |
+| M205 | the INNER liveness guard alone | SURVIVED — unreachable in this host; `kill()` is synchronous end to end |
+| M206 | the clear is WIDENED — a failing SIGINT erases a recorded termination | SURVIVED (both flags false in the SIGINT-only case) → own case added → RED 1 |
+| M207 | PAIR: nothing latches at all | RED 4 |
+| M208 | the TOP liveness guard alone | SURVIVED (absorbed) → entry-guard observable added → RED 1 |
+| M209 | COMBINED: BOTH liveness guards removed | RED 1, and a DIFFERENT test from M204 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

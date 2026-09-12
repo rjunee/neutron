@@ -854,6 +854,37 @@ not-new. That is accepted and recorded here rather than hidden.
       verify (audit): `awk '/^export async function herdrCall/,/^}/'
       runtime/adapters/claude-code/persistent/herdr-client.ts | grep -c 'await '` is 2.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **A SIGNAL THAT COULD NOT BE DELIVERED LEAVES NO CLAIM THAT IT WAS — on either
+      backend.** `kill()` latches before signalling (classify-before-latch is right and
+      stays), so a `proc.kill` that THROWS must clear the flag it set: the signal never
+      landed, and `spawn.ts` evaluates `!killedByUs && exitCode !== 0`, so a surviving
+      flag short-circuits the exit code and the child's later NONZERO exit — a real
+      crash, since nothing killed it — reads as a clean recycle. It also disarms
+      `repl-session.ts`'s escalation, whose `hasExited()` guards return early; leaving
+      the child unflagged is what RE-ARMS the SIGKILL retry. The rule is stated for the
+      herdr backend's failed `pane.close` and is the same rule here, so the whole shape
+      is copied rather than half of it.
+      THE CLEAR MUST BE AS NARROW AS THE LATCH: a failing SIGINT clears only
+      `wasInterruptedByUs`, never a termination already recorded — a widened clear erases
+      a delivered kill and turns the recycle after it into an apparent crash. The
+      SIGINT-only case cannot see that (both flags are false there either way), so it
+      needs its own case with a successful terminal kill first.
+      THE MISSING ROW IS THE OPERATION THAT FAILS, in a table built entirely from
+      operations that work: a host whose `proc.kill` cannot fail cannot test what a
+      failed signal leaves behind. Inject one that throws, resolve the exit NONZERO, and
+      assert the classification through the expression `spawn.ts` actually evaluates —
+      not through the flag alone.
+      RECORDED, because copying the shape exposed a real difference between the two
+      backends. herdr's failure arrives as an ASYNC rejection, so the exit genuinely can
+      settle in between and its `if (exited) return` is reachable and load-bearing. The
+      Bun host's `kill()` is synchronous end to end — `exited` is set only in the
+      `proc.exited` microtask — so the equivalent inner guard is UNREACHABLE there: the
+      two liveness guards are redundant, each absorbs a single mutation of the other, and
+      only the COMBINED mutation reddens. The entry guard has its own observable (an
+      already-exited child is not signalled at all) and is asserted directly. The inner
+      one is kept because the rule is shared and the interface admits a host whose `kill`
+      awaits — and said to be unreachable rather than left looking tested.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
 - [ ] **Only TERMINAL operations latch `wasKilledByUs`.** `kill('SIGINT')` is an
       interrupt, not a termination: it must leave `wasKilledByUs()` false, record
       `wasInterruptedByUs()` instead, and an unexpected exit afterwards must classify

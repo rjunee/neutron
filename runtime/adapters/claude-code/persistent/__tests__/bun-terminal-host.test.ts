@@ -577,3 +577,206 @@ describe('a child that has ALREADY exited still hands over what it printed', () 
     expect(errs.filter((e) => e.includes('beginOutput() was not called')).length).toBe(1)
   })
 })
+
+/**
+ * A SIGNAL THAT THREW WAS NEVER DELIVERED — the row missing from a table built entirely
+ * from operations that work.
+ *
+ * Every other kill case here uses a `proc.kill` that succeeds, and **a host whose signal
+ * cannot fail cannot test what a failed signal leaves behind.** The flag asserting the
+ * termination survived the failure, and `spawn.ts` evaluates
+ * `!killedByUs && exitCode !== 0` — so the child's later NONZERO exit, a real crash since
+ * nothing killed it, classified as a clean recycle.
+ *
+ * TWO FACTS, TWO CASES. Clearing the flag is one; guarding that clear on liveness is the
+ * other, and dropping either must redden a different test — otherwise the pair is one
+ * test written twice.
+ */
+describe('a kill that could not be delivered leaves no claim that it was', () => {
+  /** A host whose `proc.kill` throws, and whose exit is resolved on demand. */
+  function hostWithFailingSignal(): {
+    host: BunTerminalHost
+    endWith: (code: number) => void
+    killAttempts: () => number
+  } {
+    let endWith: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endWith = res
+    })
+    let attempts = 0
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({
+        pid: 5150,
+        exited: exitedPromise,
+        exitCode: null,
+        kill: () => {
+          attempts += 1
+          throw new Error('EPERM: operation not permitted')
+        },
+      }),
+      outputGateMaxMs: 60_000,
+    })
+    return { host, endWith: (c) => endWith(c), killAttempts: () => attempts }
+  }
+
+  /** The exact expression `spawn.ts` evaluates. */
+  const classify = (exitCode: number | null, killedByUs: boolean): 'crash' | 'clean' =>
+    !killedByUs && exitCode !== 0 ? 'crash' : 'clean'
+
+  it('a TERMINAL kill that throws leaves wasKilledByUs FALSE, so a later crash reads as a crash', async () => {
+    const f = hostWithFailingSignal()
+    const child = await f.host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    const errs = await withCapturedStderr(async () => {
+      child.kill()
+    })
+    expect(f.killAttempts()).toBe(1) // it really was attempted
+    expect(child.wasKilledByUs?.()).toBe(false)
+    // ...and the failure is said out loud, naming the consequence rather than the errno.
+    expect(errs.filter((e) => e.includes('was NOT delivered')).length).toBe(1)
+    // THE CONSEQUENCE, through the expression that actually decides it.
+    f.endWith(1)
+    const code = await child.exited
+    expect(classify(code, child.wasKilledByUs?.() ?? false)).toBe('crash')
+  })
+
+  it('a SIGINT that throws clears its own flag, not the terminal one', async () => {
+    const f = hostWithFailingSignal()
+    const child = await f.host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    await withCapturedStderr(async () => {
+      child.kill('SIGINT')
+    })
+    expect(child.wasInterruptedByUs?.()).toBe(false)
+    expect(child.wasKilledByUs?.()).toBe(false)
+  })
+
+  it('a signal that throws AFTER the exit has settled does NOT clear the flag', async () => {
+    // THE OPPOSITE DIRECTION, and the same defect: a cleanup path that never asked
+    // whether the question was still open. `proc.kill` can throw precisely BECAUSE the
+    // child has already gone — and clearing then would rewrite a deliberate recycle into
+    // an apparent crash, after it had settled.
+    let endWith: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endWith = res
+    })
+    let killThrows = false
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({
+        pid: 5151,
+        exited: exitedPromise,
+        exitCode: null,
+        kill: () => {
+          if (killThrows) throw new Error('ESRCH: no such process')
+        },
+      }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    child.kill() // succeeds: the flag latches, legitimately
+    expect(child.wasKilledByUs?.()).toBe(true)
+    endWith(0)
+    await child.exited
+    // A SECOND attempt — the escalation ladder's SIGKILL rung — now throws because the
+    // process is gone. The flag must survive it.
+    killThrows = true
+    await withCapturedStderr(async () => {
+      child.kill('SIGKILL')
+    })
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(classify(0, child.wasKilledByUs?.() ?? false)).toBe('clean')
+  })
+
+  it('an already-exited child is not signalled AT ALL — the guard that actually runs', async () => {
+    // The entry guard's own observable. Without it, `kill()` after the exit still
+    // attempts the signal, and the two liveness guards stop being a redundant pair with
+    // one of them load-bearing for the flag: this is what makes dropping the TOP one
+    // visible on its own rather than only in combination.
+    let endWith: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endWith = res
+    })
+    let attempts = 0
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({
+        pid: 5154,
+        exited: exitedPromise,
+        exitCode: null,
+        kill: () => {
+          attempts += 1
+        },
+      }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    endWith(0)
+    await child.exited
+    child.kill()
+    child.kill('SIGINT')
+    expect(attempts).toBe(0)
+  })
+
+  it('a failing SIGINT does NOT erase a termination that was already recorded', async () => {
+    // The clear must be as narrow as the latch. A widened clear — a failing interrupt
+    // resetting BOTH flags — would erase a real, delivered termination and turn the
+    // recycle that followed it into an apparent crash. The SIGINT-only case above
+    // cannot see that: both flags are false there either way.
+    let endWith: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endWith = res
+    })
+    let killThrows = false
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({
+        pid: 5153,
+        exited: exitedPromise,
+        exitCode: null,
+        kill: () => {
+          if (killThrows) throw new Error('EPERM')
+        },
+      }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    child.kill() // delivered: the terminal flag latches legitimately
+    expect(child.wasKilledByUs?.()).toBe(true)
+    killThrows = true
+    await withCapturedStderr(async () => {
+      child.kill('SIGINT') // an interrupt that could not be delivered
+    })
+    expect(child.wasKilledByUs?.()).toBe(true) // untouched
+    expect(child.wasInterruptedByUs?.()).toBe(false) // its own flag cleared
+    endWith(0)
+    await child.exited
+  })
+
+  it('CONTROL — a kill that SUCCEEDS still latches, and says nothing', async () => {
+    // Or "clear on failure" is satisfied by a host that never latches at all, and the
+    // whole discriminator is gone in the other direction.
+    let endWith: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endWith = res
+    })
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({ pid: 5152, exited: exitedPromise, exitCode: null, kill: () => undefined }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    const errs = await withCapturedStderr(async () => {
+      child.kill()
+    })
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(errs.filter((e) => e.includes('was NOT delivered'))).toEqual([])
+    endWith(1)
+    expect(classify(await child.exited, child.wasKilledByUs?.() ?? false)).toBe('clean')
+  })
+})

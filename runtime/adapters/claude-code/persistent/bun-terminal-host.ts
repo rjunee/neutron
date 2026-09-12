@@ -454,8 +454,47 @@ export class BunTerminalHost implements PtyHost {
         else killedByUs = true
         try {
           proc.kill(signal)
-        } catch {
-          // already gone
+        } catch (e) {
+          // A SIGNAL THAT THREW WAS NEVER DELIVERED, so the flag asserting it was must
+          // not survive. This is the same rule `herdr-host.ts` states for a failed
+          // `pane.close` — "do not settle, and do not latch; clearing the flag leaves
+          // the child exactly as it is, alive and unflagged, which is both the truth and
+          // what RE-ARMS the ladder" — and both of its named consequences apply here
+          // unchanged. `spawn.ts` evaluates `!killedByUs && exitCode !== 0`, so a latched
+          // flag short-circuits the exit code entirely and the child's later NONZERO exit
+          // — a real crash, since nothing killed it — reads as a clean recycle. And
+          // `repl-session.ts`'s escalation returns early at both of its `hasExited()`
+          // guards, so leaving the child unflagged is what lets the SIGKILL retry fire.
+          //
+          // GUARDED ON LIVENESS. ONCE A TERMINAL STATE IS SETTLED, NO LATER PATH MAY
+          // REWRITE IT: clearing after the exit had settled would flip `wasKilledByUs()`
+          // from true to false and rewrite a deliberate recycle into an apparent crash —
+          // the same defect in the opposite direction, a cleanup path that never asked
+          // whether the question was still open. `herdr-host.ts` carries the identical
+          // guard for the identical reason.
+          //
+          // IT IS UNREACHABLE IN THIS HOST TODAY, AND THAT IS WORTH SAYING RATHER THAN
+          // IMPLYING OTHERWISE. `exited` is set in ONE place — the `proc.exited` handler,
+          // a microtask — and this whole method is synchronous from its entry guard
+          // through `proc.kill` to this catch, so `exited` cannot change mid-call. The
+          // guard that actually runs is the one at the top. They are therefore REDUNDANT
+          // for the flag, each absorbing a single mutation of the other, and only the
+          // COMBINED mutation reddens; the top one has its own independent observable
+          // (an already-exited child is not signalled at all). The difference from the
+          // herdr sibling is real: there the failure arrives as an async rejection, so
+          // the exit genuinely can settle in between. This one is kept because the rule
+          // is the shared rule and the interface admits a host whose `kill` awaits — not
+          // because a test can see it.
+          if (exited) return
+          if (asInt) interruptedByUs = false
+          else killedByUs = false
+          process.stderr.write(
+            `[bun-terminal-host] pid ${proc.pid}: kill(${String(signal ?? 'SIGTERM')}) FAILED ` +
+              `(${e instanceof Error ? e.message : String(e)}) — the signal was NOT delivered. ` +
+              `Leaving the child unflagged: claiming a termination that did not happen would ` +
+              `disarm the caller's SIGKILL escalation and misreport a later crash as an ` +
+              `intentional recycle.\n`,
+          )
         }
       },
       exited: exitedPromise,
