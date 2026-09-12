@@ -202,8 +202,10 @@ form; the "kills:" note names what the earlier form let through.
       and assert the nonce returns by **exact equality** against the generated string
       — never a substring sniff or a model-judged "mentions it".
       Controls: a call with the byte-identical prompt and no `thread_id` must not
-      return the nonce; and the nonce must be absent from call 2's prompt and from
-      every readable file **outside codex's own thread store**.
+      return the nonce; and the nonce must be absent from call 2's prompt and from every
+      file in **the same controlled root the credential scan uses** — the selected
+      `CODEX_HOME`, the worktree, the adapter's state dir and the temp dir the adapter is
+      given — **excepting codex's own thread store** (`<home>/sessions/**`).
       **The thread store is excluded because it is the mechanism under test, not a
       leak.** codex appends every session to a rollout at
       `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl` — measured in this tree, and
@@ -213,10 +215,16 @@ form; the "kills:" note names what the earlier form let through.
       merely strict, it is **unsatisfiable**: the nonce must be persisted to be
       recalled. The claim the control actually needs to make is narrower and more
       useful — *recall arrives through codex's own persistence and through no other
-      path*. So: assert the nonce is absent from the worktree, from `AGENTS.md` and the
-      spec items, from any adapter-owned state file, and from the prompt; assert it
-      **is** present in the recorded thread's rollout, which pins that the mechanism
-      being exercised is the one claimed. Alternatively run the control under a
+      path*. So: **walk the controlled root and assert per location**, rather than
+      enumerating a few named files. An earlier form listed the worktree, `AGENTS.md`, the
+      spec items, the adapter state and the prompt — which let a readable file in the
+      supplied temp dir carry the nonce while every listed assertion passed. *A finite list
+      of places is not a scope*, and this is the same bounded-root discipline the credential
+      criterion already uses. Then assert the nonce **is** present in the recorded thread's
+      rollout, which pins that the mechanism being exercised is the one claimed.
+      **Seeded leakage control for every location in the root:** plant the nonce in each in
+      turn and assert the check **fails** each time, so the walk is known to reach
+      everywhere it claims to. Alternatively run the control under a
       filesystem policy that cannot read the rollout at all.
       *kills:* a memory-only `Map` (dies at step 3); a guessable fact (the control
       passes by inference); **"resume the most recent thread"** — without the decoy at
@@ -252,12 +260,19 @@ form; the "kills:" note names what the earlier form let through.
       `-c sandbox_mode=<that exact value>` by string equality — not a prefix match on
       `sandbox_mode=`. Assert no argv the adapter can build carries an empty value, or
       `danger-full-access` unless the caller asked for it, or
-      `--dangerously-bypass-approvals-and-sandbox` **ever**. cwd is exercised with a
-      value different from the test process's own.
-      *kills:* a hard-coded constant (two modes); an empty value (prefix match); and
-      **an implementation that honours the mode and then bypasses the sandbox
-      entirely**, which the earlier wording permitted because the bypass exclusion
-      lived only in the approval criterion.
+      `--dangerously-bypass-approvals-and-sandbox` **ever**.
+      **cwd: assert the result, not merely vary the input.** `spawnOptions.cwd ===
+      requestedCwd` (or the child's `/proc/<pid>/cwd`), on **both** a first call and a
+      **resumed** one. The resumed case is the one that matters — `codex exec resume` has
+      no `-C/--cd`, so the child process's cwd is the *only* mechanism there and nothing
+      else in this item constrains it. Boundary: the requested cwd differs from the test
+      process's own, **and** the test asserts the spawn did not use the test process's cwd.
+      *kills:* a hard-coded constant (two modes); an empty value (prefix match); **an
+      implementation that honours the mode and then bypasses the sandbox entirely**, which
+      the earlier wording permitted because the bypass exclusion lived only in the approval
+      criterion; and **an adapter that ignores the requested cwd altogether** — removing
+      the coincidence between requested and inherited cwd stopped that passing *by
+      accident*, but only asserting the spawn's cwd stops it passing at all.
 
 - [ ] **A metered API key cannot be spent, including one inherited from the
       environment.** verify:
@@ -275,9 +290,14 @@ form; the "kills:" note names what the earlier form let through.
       way, and bills.
       (ii) seed the **union of every recognised credential variable** in the parent —
       `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — and
-      assert **not one** reaches the process that execs codex. Read the child's
-      environment (the env handed to the spawn, or `/proc/<pid>/environ`), never the
-      config: the file being correct is what the broken implementation gets right.
+      assert **not one** reaches the process that execs codex. Read **the environment
+      object handed to the spawn, captured at the spawn boundary** — never the config (the
+      file being correct is what the broken implementation gets right), and **not
+      `/proc/<pid>/environ` alone**: measured this round, a process that unsets a variable
+      and execs no longer carries it there, so a child that reads a leaked key and then
+      scrubs its own environment would make that instrument report success. The spawn
+      boundary is the last point the subject cannot rewrite; `/proc/<pid>/environ` may
+      corroborate but must not be the assertion.
       (iii) assert **the adapter's own spawn execs `codex` directly**, not through a
       login shell (`bash -lc`), whose profile sourcing can re-export a scrubbed key.
       Scoped to the adapter's spawn deliberately: codex runs the *model's* commands
@@ -462,20 +482,31 @@ form; the "kills:" note names what the earlier form let through.
       closed on this machine today for a reason unrelated to the CLI contract**, whose
       first victim would disable the gate rather than fix the config.
 
-- [ ] **No long-lived codex process is created.** verify by **state, on an instrument
-      that can see a re-parented process**: give the test its own unique `CODEX_HOME`, and
-      after the call returns scan the **whole process table** for any process whose
-      executable is codex and whose environment names that home — asserting none remains.
-      **Not by process group, and not by tracked child pids:** a `setsid`/double-forked
-      descendant is re-parented to init and leaves both, so either instrument would report
-      success precisely in the case the criterion exists to catch. The unique home is what
-      makes a full-table scan attributable without parentage.
+- [ ] **No long-lived codex process is created.** verify by **state, on an instrument the
+      subject cannot edit**: run the call inside a **test-created cgroup** (or PID
+      namespace) and assert it holds no processes once the call returns; or, equivalently,
+      spawn codex from a **uniquely named copy of the binary** the test owns and assert no
+      process has that path as its `/proc/<pid>/exe`. Both handles are kernel-maintained
+      and external to the process.
+      **Not by environment variable, and not by process group or tracked pids.** Measured:
+      a process that unsets a variable and execs no longer carries it in
+      `/proc/<pid>/environ`, so `env -u CODEX_HOME …` or a server sanitising its own
+      environment after startup defeats an env-attributed scan entirely — *a subject that
+      can write the attribution can erase it.* A `setsid`/double-forked descendant is
+      re-parented to init and leaves both the process group and any pid list. Each of the
+      three instruments this criterion has named failed a different way: the first could
+      not see far enough, the second could see everywhere **and be lied to**, and only an
+      externally maintained handle is both.
+      **Positive control is the evasion itself:** a detached descendant that unsets
+      `CODEX_HOME` (and one that `setsid`s away) must still be caught. A scan that cannot
+      catch the evasion is not evidence about the honest case either.
       Also assert the adapter exposes no start/stop/health surface for a server and opens
       no listening socket.
-      *kills:* the persistent shape returning by the back door; a detached grandchild,
-      which "every child has exited" does not cover; and **the earlier process-group
-      instrument**, which claimed to cover re-parented descendants while structurally
-      unable to observe one.
+      *kills:* the persistent shape returning by the back door; a detached grandchild; an
+      env-attributed scan, which reports success precisely when a process is hiding; and
+      **any attribution the attributed process can write** — the general rule, the same one
+      #606 reached for a destructive primitive's attestation: prove against something the
+      subject cannot modify.
 
 ## Telemetry, deliberately not acceptance
 

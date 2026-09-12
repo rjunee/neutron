@@ -264,6 +264,7 @@ learned:
 4. What does this criterion assume that the surrounding prose has already contradicted? — *the document disagrees with itself*
 5. Does this assertion's strength depend on something the test does not control? — *the comparison cannot fail for the reason it exists*
 6. Can the instrument actually observe what this criterion asserts? — *the test sees nothing, though property, criterion and mutant are all correct*
+7. Can the subject alter what the instrument reads? — *full reach, and a lie away from useless; prove against something the subject cannot write*
 
 ### Two rules about instruments and about the tree
 
@@ -323,6 +324,46 @@ Replaced with a whole-process-table scan attributed by a **unique `CODEX_HOME`**
 which needs no parentage to be sound. Two of the ten criteria named an instrument narrower
 than their claim, which suggests this question earns a standing place rather than a
 one-off.
+
+**An instrument must also be unforgeable by its subject — question 6 does not ask that.**
+The long-lived-process check has now named three instruments and each failed differently.
+The process group could not see a `setsid`/double-forked descendant: **too little reach**.
+Its replacement scanned the whole process table and attributed processes by the unique
+`CODEX_HOME` in their environment: **full reach, and a lie away from useless** — measured, a
+process that unsets a variable and execs no longer carries it in `/proc/<pid>/environ`, so
+`env -u CODEX_HOME …` or a server sanitising its own environment defeats the scan entirely,
+and it reports success precisely when something is hiding. The attribution is now an
+externally maintained handle the subject cannot write: a test-created cgroup or PID
+namespace, or a uniquely named copy of the binary observed through the kernel's
+`/proc/<pid>/exe`. **The positive control is the evasion itself** — a descendant that unsets
+the variable, and one that `setsid`s away, must both be caught.
+
+Swept over the other nine the same round, and it caught one: the credential criterion
+allowed the absence assertion to be read from `/proc/<pid>/environ`, which is the very
+surface just measured as forgeable — a child that reads a leaked key and then scrubs its own
+environment makes that instrument report success. Moved to **the environment object captured
+at the spawn boundary**, the last point the subject cannot rewrite; `/proc` may corroborate
+but is not the assertion. Two of ten criteria were reading subject-writable evidence.
+
+This is #606's finding in another subsystem: a destructive primitive's attestation had to
+live in a `WeakMap` rather than as a field on the candidate, because *a forger sets a field
+as readily as a ref*. An environment variable is a field on the subject. So the question
+about instruments splits in two — *can it observe what the criterion asserts?* and **can the
+thing being observed alter what the instrument reads?** Question 6 asks only the first, and
+this criterion passed it while being trivially evadable.
+
+**A correction is finished when the property holds, not when the thing the finding pointed
+at has changed.** Two findings this round were previous fixes of mine stopping one step
+short, and both are a different failure from the encode-my-own-path pattern diagnosed
+earlier. The cwd fix removed the *coincidence* — requiring a requested cwd different from
+the test process's own — without ever asserting the spawn's cwd, so an adapter ignoring the
+request still passed; the input changed, the property was never checked, and it matters most
+on resumed calls, where `codex exec resume` has no `-C/--cd` and the child's cwd is the only
+mechanism. The bounded-root rule was applied to the credential scan, which the finding named,
+and not to its sibling the recall control, which went on replacing "every readable file" with
+a five-item list — so a nonce in the supplied temp dir passed every assertion. Both now
+assert the property: the spawn's cwd on first and resumed calls, and a walk of the same
+controlled root with a seeded leakage control per location.
 
 **When raising the instrument is out of scope, the claim must come down — and the gap
 named rather than implied.** The rule this record had been applying was *match the claim to
