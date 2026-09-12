@@ -345,6 +345,16 @@ seat's reply, so both readings behave identically on every input a test can buil
 also driving the CI seam — while remaining the guard that stops this file's own advisories
 being laundered into a reviewer's judgement.
 
+THE AUDIT, COUNTED. Across the seven suites this PR touches there are 324 source-text or
+call-count assertions; this branch ADDED or CHANGED five of them, and five is the number
+that was reviewable. Three are gone (the two in `review-round-cap` that duplicated what
+the executed suite now shows, and the re-plan literal that started this); two remain and
+are named above. The other 319 are pre-existing and belong to the cards that wrote them —
+notably `inner-workflow.test.ts`'s reflection-placement checks, which that file itself
+calls "belt-and-suspenders" beside a behavioural harness, on a trust-boundary property
+where redundancy is a deliberate choice rather than an oversight. Changing them is not
+this card's call; the one this card touched was kept true and no wider.
+
 TWO WERE CONVERTED rather than deleted, and converting them found things. "The re-plan
 may raise the executor tag but never lower it" is now asserted on the MODEL the fix round
 was actually routed to — and writing it showed there is no useful control for the
