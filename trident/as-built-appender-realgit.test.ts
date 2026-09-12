@@ -55,6 +55,17 @@ async function seedWorld(label: string): Promise<World> {
   await git(checkout, 'remote', 'add', 'origin', origin)
   mkdirSync(join(checkout, 'docs', 'as-built'), { recursive: true })
   writeFileSync(join(checkout, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
+  // THE STAGING FLOOR, in the fixture because it is in the repo. Every directory
+  // that can hold a staged record keeps one tracked non-record file, so that a
+  // promotion consuming the last record cannot leave the directory empty and make
+  // git read the promotion as a rename of it (docs/as-built/README.md; the
+  // property itself is proved in as-built-staging-floor-realgit.test.ts). The
+  // fixture carries it so the promoter is exercised against the tree it will
+  // actually meet — and so `stagedRecords` below is asserting "no records left"
+  // rather than "nothing left", which are no longer the same claim.
+  mkdirSync(join(checkout, '.trident', 'as-built', 'trident'), { recursive: true })
+  writeFileSync(join(checkout, '.trident', 'as-built', '.gitkeep'), '')
+  writeFileSync(join(checkout, '.trident', 'as-built', 'trident', '.gitkeep'), '')
   // The live record directory, with one file already in it, so a promotion has
   // something real to not disturb and something real to collide with.
   writeFileSync(
@@ -83,9 +94,22 @@ async function originOutput(world: World, ...args: string[]): Promise<string> {
   return output(world.origin, ...args)
 }
 
+/**
+ * The staged RECORDS still queued on origin/main — not every file under the
+ * staging directory.
+ *
+ * This listed everything and every caller compared it to `[]`, which asserted "the
+ * staging directory is empty after the fold". That is no longer a true statement
+ * about this repo: the directory keeps a tracked `.gitkeep` floor in it, and in
+ * every subdirectory that holds a record, precisely so that it CANNOT empty (see
+ * docs/as-built/README.md). The claim these tests mean is "the fold consumed the
+ * records", and the filter is the promoter's own — it globs `*.md`
+ * (as-built-appender.ts:101), so a non-`.md` file is by construction not a queued
+ * record. Keeping the old spelling would have made a correct tree fail.
+ */
 async function queuePaths(world: World): Promise<string[]> {
   const listed = await originOutput(world, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')
-  return listed === '' ? [] : listed.split('\n')
+  return listed === '' ? [] : listed.split('\n').filter((path) => path.endsWith('.md'))
 }
 
 describe('foldStagedAsBuiltEntries with real git — staged entries become files under docs/as-built/', () => {
@@ -116,6 +140,14 @@ describe('foldStagedAsBuiltEntries with real git — staged entries become files
       `${AS_BUILT_COMMITTER_NAME}\n${AS_BUILT_COMMITTER_EMAIL}`,
     )
     expect(await queuePaths(world)).toEqual([])
+    // THE FLOOR SURVIVES THE PROMOTION, in the record's own directory and at the
+    // top. That is the mechanism, not a detail: the promoter globs `*.md`, so it
+    // cannot carry a floor away, so no directory it drains can end up empty, so git
+    // never reads a promotion as a rename of the staging directory. What happens
+    // when one of those is missing is measured in as-built-staging-floor-realgit.test.ts.
+    expect(
+      (await originOutput(world, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')).split('\n').sort(),
+    ).toEqual(['.trident/as-built/.gitkeep', '.trident/as-built/trident/.gitkeep'])
 
     const again = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
     expect(again).toEqual({ ok: true, folded: 0 })
