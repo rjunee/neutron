@@ -18,7 +18,8 @@
  * the only job kaizen has.
  *
  * MIRRORS `runtime/adapters/claude-code/persistent/__tests__/dev-channel-pty-bind.e2e.test.ts`
- * mechanics EXACTLY (real Bun PTY spawn, dev-channel MCP sink for
+ * mechanics EXACTLY (real herdr-pane spawn via `HerdrHost` — NOT the Bun PTY spawn
+ * both files originally used — dev-channel MCP sink for
  * /channel-ready //channel-bound //reply, disclaimer dismiss in onData,
  * MCP_CONNECTION_NONBLOCKING:'false'). Deltas from the sibling: cwd + addDir = a
  * mkdtemp FIXTURE owner_home; skipPermissions:true; the injected message is the

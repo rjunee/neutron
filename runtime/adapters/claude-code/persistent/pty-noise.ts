@@ -14,8 +14,11 @@
  * buffer of recent output for (a) liveness diagnostics and (b) the Sprint-2
  * login/banner watchdogs. Stripping CR + DCS keeps that buffer greppable.
  *
- * Ported as-is so `pty-spawn.test.ts`'s split-chunk ESC-buffering cases port
- * verbatim against the Bun-terminal backend.
+ * Ported as-is so Nova's `pty-spawn.test.ts` split-chunk ESC-buffering cases port
+ * verbatim (see `__tests__/pty-noise.test.ts`). That port was made against the
+ * in-process Bun-native backend, which is GONE (herdr step 2b) — the strip
+ * discipline is unchanged, but what it now strips is a herdr pane's rendered
+ * screen, delivered by `herdr-host.ts` rather than a raw byte stream.
  */
 
 /**

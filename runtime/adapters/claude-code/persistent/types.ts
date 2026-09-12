@@ -352,7 +352,9 @@ export interface PersistentReplSubstrateOptions {
    */
   enableToolBridge?: boolean
   // --- host / test injection (all optional; production uses defaults) ---
-  /** PTY backend. Default: Bun-native terminal host. Tests inject a fake. */
+  /** PTY backend. Default: `HerdrHost` — the REPL is a herdr pane reached over the
+   *  socket API (`herdr-host.ts`). The Bun-native in-process host this used to name
+   *  is deleted; there is no second backend. Tests inject a fake. */
   ptyHost?: PtyHost
   /** Path to the dev-channel MCP server script. Default: the shipped one. */
   devChannelPath?: string

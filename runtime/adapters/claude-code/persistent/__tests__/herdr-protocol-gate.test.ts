@@ -496,6 +496,19 @@ describe('herdr client framing', () => {
     ['an object with an id but no outcome', '{"id":"n1"}'],
     ['an object with an outcome but no id', '{"result":{"type":"ok"}}'],
     ['an object with a non-string event', '{"event":7,"data":{}}'],
+    // `data` IS PART OF THE ENVELOPE, and each of these four is a DIFFERENT way to
+    // not be an object — listed individually because they take four different
+    // branches (`in`/`undefined`, `typeof null === 'object'`, `Array.isArray`, a
+    // primitive `typeof`), so a partial check passes for some and fails for others.
+    // Each was previously coerced to `{}`: the frame validated, handlers ran with an
+    // empty object, and `pane_exited`'s `pane_id` comparison failed — the exit
+    // SILENTLY DROPPED. The `pane_exited` name is deliberate: this is the event whose
+    // loss actually costs something.
+    ['an event whose data is ABSENT', '{"event":"pane_exited"}'],
+    ['an event whose data is null', '{"event":"pane_exited","data":null}'],
+    ['an event whose data is an array', '{"event":"pane_exited","data":[]}'],
+    ['an event whose data is a bare string', '{"event":"pane_exited","data":"w1:p1"}'],
+    ['an event whose data is a bare number', '{"event":"pane_exited","data":0}'],
   ] as [string, string][]) {
     it(`a frame of ${label} tears the transport down, and never throws`, async () => {
       // The RPC clock is set far out ON PURPOSE. With a short one, a client that
@@ -541,14 +554,24 @@ describe('herdr client framing', () => {
     expect(client.isClosed()).toBe(false)
     // An event. `subscribe` issues its own rpc, so its reply has to be fed before it
     // resolves — the ids are sequential, and this is the third call.
-    let seen: Record<string, unknown> | undefined
+    // Collected rather than overwritten: every delivery is kept, so "the second event
+    // arrived with an empty object" is distinguishable from "the second event never
+    // arrived and the first is still sitting in the variable".
+    const seen: Record<string, unknown>[] = []
     const sub = client.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
-      seen = d
+      seen.push(d)
     })
     feed(client, '{"id":"n3","result":{"type":"ok"}}\n')
     await sub
     feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:p1"}}\n')
-    expect(seen).toEqual({ pane_id: 'w1:p1' })
+    expect(seen).toEqual([{ pane_id: 'w1:p1' }])
+    expect(client.isClosed()).toBe(false)
+    // AND A GENUINELY EMPTY `data` IS STILL VALID — the distinction the fix rests on
+    // is empty-and-known versus not-an-object. Without this, requiring `data` could
+    // be "reject anything whose data is falsy", which would pass every case in the
+    // table above and break a legitimate event carrying no fields.
+    feed(client, '{"event":"pane_exited","data":{}}\n')
+    expect(seen).toEqual([{ pane_id: 'w1:p1' }, {}])
     expect(client.isClosed()).toBe(false)
     client.close()
   })

@@ -734,6 +734,87 @@ which is precisely why there was a third. Failure is now injectable for **any** 
 where the `pane_exited` race lives, and a fake that answers instantly collapses that
 window to nothing and makes every in-flight property vacuously true.
 
+### The same defect a third time, in the validator — and the document sweep
+
+Review r10, and the shape is now unmistakable, because it arrived through a third
+completely different door.
+
+**An exit event was silently dropped.** `classifyEnvelope` built the event envelope as
+`data: asObject(o['data']) ?? {}`. The `?? {}` turns an ABSENT, `null`, array or
+primitive `data` into a well-formed empty object: the frame validates, the handler is
+called with `{}`, the `pane_id` comparison in `herdr-host.ts` fails, and the exit is
+**ignored without a word** — the child keeps polling a pane that no longer exists.
+`{"event":"pane_exited","data":null}` was accepted as valid and did nothing.
+
+That is the r9 lesson with the actors swapped: **a missing fact coerced into a
+well-formed empty one, so `unknown` rides the branch reserved for `known-and-empty`.**
+In r9 a failed close became a clean exit; here a malformed frame becomes an empty
+event. The remedy is the same in both — keep the two states apart and let the unknown
+one reach the path built for it, which in the client's case is the malformed-frame
+teardown I had already built and then routed around. It is also the defect the repo's
+own memory names (*false and unknown must not share a branch*), which I had written
+about in this very file before writing it into the code.
+
+Five cases, mutated **individually**, because they are not one case: `in`/`undefined`,
+`typeof null === 'object'`, `Array.isArray`, and primitive `typeof` are four different
+branches, so a partial check passes some and fails others. Each single-shape leak
+(M75a–M75e) reddens exactly its own case and nothing else, which is the proof that no
+case in the table is redundant. And the pair matters as much: `data:{}` is genuinely
+empty and must stay VALID (M74b), or "require `data`" degenerates into "reject anything
+falsy" and breaks a legitimate fieldless event.
+
+And the typechecker caught a weak assertion the runtime could not. My first control
+reused one `seen` variable, resetting it to `undefined` before the second event —
+which `bun test` accepted and `tsc` rejected, because the reset narrows the type. The
+narrowing was pointing at a real gap: with a single overwritten variable, "the second
+event arrived carrying `{}`" and "the second event never arrived, and this is still the
+first one" are the same observation when the payloads happen to match. Collecting the
+deliveries into an array fixes both the type and the assertion. Fifth time on this
+branch that a gate found something I had reasoned past — and a reminder that
+`typecheck-all.sh` is the gate, since `bun test` alone was green.
+
+**The document sweep, decided per file.** Deleting a backend narrows a guard, and this
+tree's rule is that every document asserting the old rule is fixed in the same change.
+I had missed the worst one: `runtime/adapters/claude-code/AGENTS.md:5` still said the
+REPL is hosted "(Bun-native PTY + dev-channel)" inside a sentence beginning "**It MUST
+spawn…**". A per-directory `AGENTS.md` is the worst possible place to leave a stale
+mandate, because it is injected into the context of the next agent working in that
+directory — it would have built against a backend that no longer exists.
+
+The sweep also taught me something about my own grep. My first pattern
+(`Bun\.Terminal|bun-terminal`) found five files; the tree spells it
+`Bun.spawn({ terminal })`, `Bun PTY` and `Bun-native`, and the real pattern finds
+seventeen. **A grep is only as good as its guess at the vocabulary** — the absence-claim
+discipline says a grep finding nothing proves nothing without a positive control, and
+this is its sibling: a grep finding *something* does not prove it found *everything*.
+
+Three outcomes, all legitimate, and the reason not to blanket-edit:
+
+- **Defect — a live claim about current behaviour that is now false (7 fixed).**
+  `AGENTS.md:5` (the mandate) and `:15` (the sprint log, which gets the later fact
+  APPENDED so S1's history survives); `types.ts:355`, which named "Bun-native terminal
+  host" as the *default* when the default is `HerdrHost`; `pty-noise.ts:18`;
+  `SYSTEM-OVERVIEW.md:7630`, a present-tense claim that the regression guard "spawns
+  claude under a real `Bun.spawn({terminal})` PTY" when its body now uses `HerdrHost`;
+  and the docstrings of `dev-channel-pty-bind.e2e.test.ts:4` and
+  `reminders/bundled-rituals.e2e.test.ts:21`, both describing a mechanism their own
+  converted bodies no longer use. Plus my own `herdr-host.ts:4`, which called the
+  deleted thing `Bun.Terminal` — a symbol that never existed.
+- **Correct AS HISTORY — kept deliberately (5).** `spawn.ts:260` is inside an
+  explicit `HISTORICAL NOTE (P0, 2026-06-26)`; `post-spawn-assertion.ts:25` records
+  where a still-live design decision was *verified*; `SYSTEM-OVERVIEW.md:7569` records
+  where a bug was *reproduced*; and both `docs/research/AS-BUILT-*-archive-2026-07.md`
+  are archives. Those sentences are true statements about the past, and the harness
+  was the Bun PTY at the time. Rewriting them would forge the record — the same reason
+  an immutable decision log is never edited to match today's architecture. A
+  find-and-replace across the sweep would have destroyed all five.
+- **Already correct (2).** `pty-host.ts:12` and `__tests__/pty-noise.test.ts:4` had
+  already been updated to say the Bun backend is gone.
+
+Filenames stay. `dev-channel-pty-bind` and `pty-noise` are still accurate: a herdr pane
+IS a pty, and what changed is who allocates it, which is what the corrected docstrings
+now say. Renaming would churn every citation to buy nothing.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -818,6 +899,17 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M71 | the fake ignores injected per-method failures | RED 4 |
 | M72 | a successful `pane.close` does not record the closure in the fake | RED 2 |
 | M73 | the fake's `holdMethod` does not actually hold | RED 1 |
+| M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
+| M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
+| M75a | accept ONLY an absent `data` | RED 1 (its own case) |
+| M75b | accept ONLY `data:null` | RED 1 (its own case) |
+| M75c | accept ONLY an array `data` | RED 1 (its own case) |
+| M75d | accept ONLY a string `data` | RED 1 (its own case) |
+| M75e | accept ONLY a number `data` | RED 1 (its own case) |
+
+M75a–M75e are the individual-case proof: each leaks exactly ONE shape past the guard
+and reddens exactly that shape's row, so no case in the `data` table is redundant.
+M74 is the defect restored (all five), M74b the over-strict twin.
 
 M62/M62b bracket settlement from both sides — settling on failure and failing to settle
 on success — and M63/M63b do the same for the kill flag; without the pair, "never latch"

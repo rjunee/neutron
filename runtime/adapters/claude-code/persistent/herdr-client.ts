@@ -92,8 +92,9 @@ function asObject(v: unknown): Record<string, unknown> | undefined {
 
 /**
  * Classify a parsed frame, or `undefined` when it matches NEITHER envelope — which
- * includes every JSON primitive (`null`, `42`, `"s"`, `true`), arrays, and objects
- * with no recognised discriminator such as `{}`. A frame that answers nothing is not
+ * includes every JSON primitive (`null`, `42`, `"s"`, `true`), arrays, objects
+ * with no recognised discriminator such as `{}`, and an event whose `data` is not a
+ * plain object (absent, `null`, an array, or a primitive). A frame that answers nothing is not
  * a frame this client can act on, and the stream carrying it is not one it should
  * keep reading.
  */
@@ -101,7 +102,24 @@ function classifyEnvelope(parsed: unknown): Envelope | undefined {
   const o = asObject(parsed)
   if (o === undefined) return undefined
   if (typeof o['event'] === 'string') {
-    return { kind: 'event', event: o['event'], data: asObject(o['data']) ?? {} }
+    // `data` MUST BE A REAL OBJECT — an absent, `null`, array or primitive `data` is
+    // a malformed frame, not an empty one.
+    //
+    // THE DEFECT THIS REPLACES: `asObject(o['data']) ?? {}`. That coerced every one
+    // of those into `{}`, so the frame passed validation, handlers were called with
+    // an empty object, and `pane_exited`'s `data['pane_id'] === paneId` comparison in
+    // `herdr-host.ts` quietly failed — an EXIT EVENT SILENTLY DROPPED, with the
+    // child left polling a pane that no longer exists. `{"event":"pane_exited",
+    // "data":null}` was accepted as valid and did nothing.
+    //
+    // It is the same mistake this whole change is about, arriving through the
+    // validator instead of through `kill()`: a MISSING fact coerced into a
+    // well-formed EMPTY one, so `unknown` rides the branch reserved for
+    // `known-and-empty`. `{"event":"x","data":{}}` is genuinely empty and stays
+    // valid; the four non-object forms are unknown and must reach the teardown.
+    const data = asObject(o['data'])
+    if (data === undefined) return undefined
+    return { kind: 'event', event: o['event'], data }
   }
   // A reply must carry an id AND one of the two outcomes. `id: ''` is legitimate —
   // the server sends it when it could not parse our request well enough to echo one.

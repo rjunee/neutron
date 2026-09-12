@@ -1,7 +1,10 @@
 /**
  * dev-channel-pty-bind.e2e.test.ts — REAL-PTY end-to-end proof that the
  * dev-channel MCP binds and `reply()` round-trips when `claude` is spawned under
- * a real Bun PTY (`Bun.spawn({terminal})`), exactly as the substrate does.
+ * a real PTY, exactly as the substrate does — which since herdr step 2b means a
+ * real `herdr` PANE (`HerdrHost`, below), NOT the `Bun.spawn({terminal})` this
+ * originally used. The file name still says PTY because a herdr pane IS one; what
+ * changed is who allocates it.
  *
  * THIS IS THE REGRESSION GUARD for the 2026-06-26 P0: the prior post-spawn
  * assertion fast-failed every PTY spawn as `channel-wedged` by scanning the PTY

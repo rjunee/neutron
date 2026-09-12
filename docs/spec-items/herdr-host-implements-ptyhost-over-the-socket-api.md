@@ -341,6 +341,29 @@ not-new. That is accepted and recorded here rather than hidden.
       discriminator; a test asserting the child is alive AND killed-by-us is
       documenting a contradiction rather than refusing it, and is not a criterion.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
+- [ ] **`data` is part of the event envelope, and each way of not being an object is
+      its own case.** Absent, `null`, an array, a bare string and a bare number must
+      each reach the malformed-frame teardown — listed and mutated INDIVIDUALLY, since
+      they take different branches (`in`, `typeof null === 'object'`, `Array.isArray`,
+      primitive `typeof`) and a partial check passes some while failing others.
+      Coercing any of them to `{}` is the defect: the frame validates, handlers run
+      with an empty object, `pane_exited`'s `pane_id` comparison fails, and the exit is
+      SILENTLY DROPPED. Pair it with the control that `data:{}` — genuinely empty and
+      known — stays VALID, or "require data" is satisfiable by rejecting anything
+      falsy, which breaks a legitimate fieldless event.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **No document still mandates the deleted backend.** Deleting a backend is
+      narrowing a guard, so every document asserting the old rule is fixed in the same
+      change — above all the per-directory `runtime/adapters/claude-code/AGENTS.md`,
+      which is injected into the next agent's context and whose "It MUST spawn…"
+      sentence named the Bun-native PTY. The sweep must be decided PER FILE, because
+      three outcomes are all legitimate and different: a live reference to a deleted
+      backend is a defect; a dated historical statement (an archive, a `HISTORICAL
+      NOTE`, a record of where a bug was reproduced) is correct AS HISTORY and must
+      survive; a docstring describing a mechanism its own body no longer uses is
+      misleading and gets corrected. A blanket find-and-replace fails this criterion
+      by destroying the second category.
+      verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is an archive, an explicitly dated historical note, or unrelated to the REPL backend
 - [ ] **A frame that PARSES but matches no envelope is torn down.** "Malformed" must
       be defined by the protocol's requirement, not by the parser throwing: `null`,
       `[]`, `{}`, bare primitives, an id with no outcome and an outcome with no id all
