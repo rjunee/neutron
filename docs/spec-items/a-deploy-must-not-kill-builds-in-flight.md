@@ -45,7 +45,7 @@ disappears.
       - **Drain/defer cannot work while the REPL is in the gateway's cgroup.** A deploy ends
         in `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is
         SIGKILLed at `TimeoutStopSec` regardless of what our polite layer decides
-        (`gateway/index.ts:1026-1038` says so in as many words). A `hostsLiveWork` gate on
+        (`gateway/index.ts:1026-1045` says so in as many words). A `hostsLiveWork` gate on
         `shutdownAllPersistentRepls` would therefore *report* a deferral it cannot deliver.
       - **Nothing here can make a survivor useful either.** `orphan-adoption.ts` is
         adopt-or-kill and only kills — verdicts `killed|not-ours|dead|no-pid`
@@ -162,9 +162,21 @@ disappears.
 
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
-  handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:993`) on every warm child. We kill it
+  handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1052`), which walks the
+  pool and calls `session.child.kill()` (`pool.ts:1033`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- A WEDGED SPAWN COST EVERY LAUNCHER BEHIND IT ITS REPORT, which made the guarantee above
+  hold only until the first pool entry that would not settle. `pool` stores the spawn
+  PROMISE and inserts it before it resolves, and the shutdown walk awaited each entry in
+  turn — so an unfinished spawn sat in front of every later child's MARKER AND KILL, at the
+  ~40 s this function's own timing note measures against a 30 s `TimeoutStopSec`. Those
+  children were then killed by the cgroup with NEITHER channel having reported, and the
+  launcher that lost its report was the one whose gateway was already in trouble. Settled
+  entries are now read synchronously (`Bun.peek.status`) and handled FIRST; the rest share
+  one bounded wait, and anything still unsettled after it is named on stderr and left to
+  the cgroup with a best-effort kill attached in case it lands later. Nothing durable is
+  written for it: a pool entry that never resolved has no `child_generation` to attribute
+  anything to, and never had a turn injected, so it hosts no detached workflow.
 - THE RECOVERY PATH DROPPED THE ONE FIELD THAT MAKES RECOVERY POSSIBLE. `confirmShutdownKill`
   reconstructs a lost journal entry from the report and passed only the pid, so the
   surviving record could not be verified on the next boot and a confirmed deploy kill was
@@ -262,7 +274,7 @@ disappears.
   never overrides an observation; `dead` + `killed` is a real conflict, reported as disputed and
   logged rather than resolved by preferring an arm). That last row was decided only after
   establishing that plain `dead` is positive in both provenances and never arises from a failed
-  look (`pool.ts:935` precedes `pool.ts:967`, so the pool branch answers for a session that has
+  look (`pool.ts:961` precedes `pool.ts:1007`, so the pool branch answers for a session that has
   not been through a shutdown; the registry branch answers only when a look found no entry). A
   merge function is not a reader of one entry but of two verdicts, which is why it sat outside
   the call-site audit — so each function now records WHICH QUESTION IT ASKS, and the matrix is
@@ -330,7 +342,7 @@ disappears.
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control
-  (systemd SIGKILLs the cgroup at `TimeoutStopSec`, `gateway/index.ts:1026-1038`), and an
+  (systemd SIGKILLs the cgroup at `TimeoutStopSec`, `gateway/index.ts:1026-1045`), and an
   earlier revision awaited the unrestricted `onChildCrash` promise between one child's kill
   and the next child's marker. One sink that never settled therefore took the deadline away
   from every child behind it, and each of those died unmarked and was reported on the next
@@ -361,7 +373,7 @@ disappears.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:967`, then `pool.ts:1008`).
+  spawn took it over — and they share one registry row (`pool.ts:1007`, then `pool.ts:1093`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink

@@ -12,6 +12,8 @@ import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respa
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
 import {
+  SHUTDOWN_PENDING_SPAWN_GRACE_MS,
+  cancellableWait,
   confirmShutdownExits,
   deliverShutdownKillReports,
   recordGatewayShutdownKill,
@@ -916,7 +918,14 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * the herdr-host half (#538 moves the REPL out of this process tree; #539 gates
  * this kill and adds the adopt arm); this is the half that is true either way.
  */
-export async function shutdownAllPersistentRepls(): Promise<void> {
+export async function shutdownAllPersistentRepls(
+  opts: {
+    /** Test seam for {@link SHUTDOWN_PENDING_SPAWN_GRACE_MS}. Production takes the
+     *  default; a case that pins the traversal passes a small one so it does not spend
+     *  the real budget proving a spawn never settles. */
+    pendingSpawnGraceMs?: number
+  } = {},
+): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
   for (const w of activeWatchdogs.values()) w.stop()
   activeWatchdogs.clear()
@@ -931,12 +940,43 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   const owedReports: PendingShutdownKillReport[] = []
   // Children that have been signalled and whose exit is not yet confirmed.
   const awaitingExit: ShutdownExitWatch[] = []
+
+  // PHASE 0 — PARTITION WITHOUT AWAITING ANYTHING.
+  //
+  // `pool` stores the spawn PROMISE and inserts it BEFORE it settles (`spawn.ts`), so an
+  // entry can be a spawn still in flight, or one that will never finish. This walk used to
+  // `await` each entry in turn, which put a wedged spawn in front of every later child's
+  // MARKER AND KILL — the timing note on this function measures that at ~40 s against a
+  // 30 s `TimeoutStopSec`, so the children behind it were killed by the cgroup with
+  // NEITHER channel having reported. The guarantee this change exists to make ("a deploy
+  // kill is always recorded") then held only until the first entry that would not settle,
+  // and the launcher it lost was the one whose gateway was already in trouble.
+  //
+  // `Bun.peek.status` reads the settled state synchronously — the same
+  // synchronous-mirror trick `supervision.ts` uses on this map — so the children that CAN
+  // be reported are reported first and nothing pending is in front of them.
+  const settledNow: Array<[string, ReplSession]> = []
+  const stillSpawning: Array<[string, Promise<ReplSession>]> = []
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
+    const status = Bun.peek.status(p)
+    if (status === 'fulfilled') {
+      settledNow.push([key, Bun.peek(p) as ReplSession])
+      continue
+    }
+    if (status === 'rejected') {
+      // A spawn that failed owns no child. Attach a catch so an abandoned rejection
+      // cannot surface later as an unhandled one.
+      p.catch(() => undefined)
+      continue
+    }
+    stillSpawning.push([key, p])
+  }
+
+  const teardown = async (key: string, session: ReplSession): Promise<void> => {
     // The report owed for THIS child, so the kill's outcome can be attached to it.
     let owedForThisChild: PendingShutdownKillReport | null = null
     try {
-      const session = await p
       session.sizeWatchdog?.stop()
       // BEFORE the kill. After it this process may not get another turn, and the
       // gateway closes its database a few statements after we return.
@@ -1002,6 +1042,51 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
       unlinkSessionConfigs(session)
     } catch {
       // ignore
+    }
+  }
+
+  for (const [key, session] of settledNow) await teardown(key, session)
+
+  // PHASE 0b — and only now, the ones that had not spawned yet, on ONE shared bound.
+  // A spawn that lands inside it is marked and killed exactly like the rest; one that
+  // does not is said out loud and left to the cgroup, with a best-effort kill attached in
+  // case it settles while this process still exists. Nothing durable is written for it:
+  // it has no `child_generation` yet, so there is no generation to attribute anything to
+  // — and a pool entry that never resolved never had a turn injected, so it hosts no
+  // detached workflow. The builds at risk are behind the SETTLED entries above, which is
+  // why they go first.
+  if (stillSpawning.length > 0) {
+    const bound = cancellableWait(opts.pendingSpawnGraceMs ?? SHUTDOWN_PENDING_SPAWN_GRACE_MS)
+    try {
+      await Promise.race([Promise.allSettled(stillSpawning.map(([, p]) => p)), bound.expired])
+    } finally {
+      bound.cancel()
+    }
+    for (const [key, p] of stillSpawning) {
+      if (Bun.peek.status(p) === 'fulfilled') {
+        await teardown(key, Bun.peek(p) as ReplSession)
+        continue
+      }
+      if (Bun.peek.status(p) === 'rejected') {
+        p.catch(() => undefined)
+        continue
+      }
+      process.stderr.write(
+        `[repl] gateway shutdown reached pool key ${key.slice(0, 24)} whose SPAWN has not settled — it has no ` +
+          `generation yet, so nothing durable can name it; left to the unit's cgroup kill\n`,
+      )
+      fireAndForget(
+        'pool.shutdown.late-spawn-kill',
+        p.then((session) => {
+          // It finished after we stopped waiting. Terminate it rather than orphan it —
+          // this is the polite layer non-systemd deployments depend on.
+          try {
+            session.child.kill()
+          } catch {
+            /* already gone */
+          }
+        }),
+      )
     }
   }
   // Quarantined children are OUT of `pool` by construction (that is what makes

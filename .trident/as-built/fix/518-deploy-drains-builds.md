@@ -17,8 +17,8 @@ A trident inner workflow is not its own process: it runs detached inside a warm 
 REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
-`shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:993`). We kill it. Three of five
+`shutdownAllPersistentRepls` (`gateway/index.ts:1052`), which walks the pool and calls
+`session.child.kill()` on every warm child (`pool.ts:1033`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -41,7 +41,7 @@ launcher's restart. The architecture rules.
 
 **Drain/defer cannot work from inside this process.** A deploy ends in
 `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is SIGKILLed
-at `TimeoutStopSec` no matter what the polite layer decides — `gateway/index.ts:1026-1038`
+at `TimeoutStopSec` no matter what the polite layer decides — `gateway/index.ts:1026-1045`
 already writes that down. A `hostsLiveWork` gate on the shutdown loop would report a
 deferral it could not deliver, and would reopen the 632-orphan / 19 GB risk that call site
 exists to close on non-systemd hosts.
@@ -146,8 +146,8 @@ somebody can find beats an unbounded one nobody knows about.
 
 **The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
 generations on one session key — the pooled child, and a quarantined child that held the key
-before a fresh spawn took it over — and they share one registry row (`pool.ts:967`, then
-`pool.ts:1008`). The later write replaced the earlier one, so the row named one generation
+before a fresh spawn took it over — and they share one registry row (`pool.ts:1007`, then
+`pool.ts:1093`). The later write replaced the earlier one, so the row named one generation
 beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
 disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
 now refuses a generation the row does not currently name — free, because both consumers match
@@ -230,7 +230,7 @@ It is written down now, at the top of `gateway-shutdown-kill.ts`:
 > or bounded-and-optional, and the two are separated by phase.
 
 Concretely: systemd's `TimeoutStopSec` is 30 s and the cgroup SIGKILL fires at the deadline
-whatever we are mid-way through (`gateway/index.ts:1026-1038`); the database closes a few
+whatever we are mid-way through (`gateway/index.ts:1026-1045`); the database closes a few
 statements after we return. So the registry marker — local, synchronous, durable — runs for
 every child first, and the live `onChildCrash` report — a call into a sink this module does
 not own — is attempted only after every child is marked and killed, under a bound.
@@ -432,6 +432,41 @@ still terminate every pooled and quarantined child — and criterion 1's own ana
 why nothing inside this process can change that while the REPL lives in the gateway's
 cgroup. So the PR carries no `Closes`, the issue stays open against the drain/survive half
 (#538/#539), and criteria 1 and 2 stay unticked.
+
+### The guarantee held only until the first wedged spawn
+
+`pool` stores the spawn PROMISE and inserts it into the map BEFORE it settles, so an entry
+can be a spawn still in flight — or one that never finishes. The shutdown walk awaited each
+entry in turn. So a single unfinished spawn sat in front of every later child's MARKER AND
+KILL: this function's own production note measures that at ~40 s against a 30 s
+`TimeoutStopSec`, which means the children behind it were killed by the cgroup with NEITHER
+channel having reported. Every careful thing this change does — mark before kill, confirm
+the exit, withhold what was not established, keep the record readable — applied only to the
+launchers ahead of the first wedged entry. And the failure is silent in the worst way: the
+build that gets no report is the one whose gateway was already in trouble.
+
+THE SAME DEFECT THE REPORTING PHASE WAS SPLIT OUT TO AVOID, one phase earlier. The module
+already refuses to let a sink it does not own sit between one child's kill and the next
+child's marker; the traversal was letting a SPAWN it does not own do exactly that.
+
+`Bun.peek.status` reads the settled state synchronously — the same synchronous-mirror trick
+`supervision.ts` uses on this map — so the walk now partitions first and handles every
+settled entry before waiting for anything. The unsettled ones then share ONE bounded wait
+(`SHUTDOWN_PENDING_SPAWN_GRACE_MS`, 2 s, the same size as the exit grace); a spawn that
+lands inside it is marked and killed like any other child, and one that does not is named
+on stderr and left to the cgroup, with a best-effort kill attached in case it settles while
+this process still exists. Nothing durable is written for it, and that is not a gap: a pool
+entry that never resolved has no `child_generation` to attribute anything to, and never had
+a turn injected into it, so it hosts no detached workflow. The builds at risk are behind the
+settled entries — which is exactly why those go first.
+
+The drain's budget is now bounded by its own phases (~2 s exits + ~2 s pending spawns + ~5 s
+reporting) rather than by the slowest spawn, and the timing note in `gateway/index.ts` that
+described the old behaviour is corrected rather than left to read as current.
+
+WHY THE EXISTING CASES MISSED IT: they covered a never-settling **sink**, not an unsettled
+**pool promise**. Adjacent shapes, and only one of them is on the traversal — the bounded
+thing was tested and the blocking thing was not.
 
 ### A record that survives without the thing that makes it readable
 
@@ -809,8 +844,8 @@ about why it died".
 
 **That last row required checking what plain `dead` asserts, before deciding.** It is positive in
 both provenances and never arises from a failed look: the pool branch answers it for a session
-that by construction has not been through a shutdown (`pool.ts:935` deletes the pool entry
-before the record is written at `pool.ts:967`), and the registry branch answers it only when a
+that by construction has not been through a shutdown (`pool.ts:961` deletes the pool entry
+before the record is written at `pool.ts:1007`), and the registry branch answers it only when a
 look for an entry naming this generation found none. So it is a real conflict between two
 positive attributions, not `dead-cause-undetermined` wearing the wrong name — and it is not
 resolved by preferring an arm, which is what an earlier revision did. A disputed cause IS an
@@ -932,7 +967,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-95 mutations applied one at a time, each reverted after: **95 red, 0 survivors.** Every
+97 mutations applied one at a time, each reverted after: **97 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

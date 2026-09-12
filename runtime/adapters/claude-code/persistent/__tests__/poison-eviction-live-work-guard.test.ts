@@ -56,7 +56,7 @@ import {
   wasKilledByGatewayShutdown,
   type PendingShutdownKillReport,
 } from '../gateway-shutdown-kill.ts'
-import { childByKey } from '../pool-state.ts'
+import { childByKey, pool } from '../pool-state.ts'
 import type { ReplRegistryRecord } from '../repl-registry.ts'
 
 /** The generations a row records as killed by a gateway shutdown. */
@@ -1594,5 +1594,95 @@ describe('a signal that failed does not become a deploy kill when the child dies
     expect(observationOf(gatewayShutdownKillEntryFor(loadRegistry(registryPath)[key], loadRegistry(registryPath)[key]?.child_generation as string))).not.toBe(
       'alive-and-killed',
     )
+  }, 20_000)
+})
+
+/**
+ * #518 — A WEDGED SPAWN MUST NOT COST EVERY LATER LAUNCHER ITS REPORT.
+ *
+ * `pool` stores the spawn PROMISE and inserts it BEFORE it settles, so an entry can be a
+ * spawn in flight — or one that never finishes. The shutdown walk used to `await` each
+ * entry in turn, so one such entry sat in front of every later child's MARKER AND KILL.
+ * This function's own timing note measures that at ~40 s against a 30 s `TimeoutStopSec`:
+ * the children behind it were killed by the cgroup with NEITHER channel having reported,
+ * and the guarantee this change makes held only until the first entry that would not
+ * settle. The build that lost its report was the one whose gateway was already in trouble.
+ */
+describe('an unsettled spawn does not hold the shutdown report of a live child (#518)', () => {
+  it('the settled child is still marked, killed and reported', async () => {
+    // RED-mutation: restore the single `for (const [key, p] of pool.entries()) { const
+    // session = await p ... }` walk. The wedged entry is first, so the walk never reaches
+    // the live child and this case times out — which is precisely what the deploy did.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-wedged-spawn-')), 'repl-registry.json')
+    const seen: Array<{ cause: string; generationKey: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push({ cause: info.cause, generationKey: info.generationKey })
+      },
+    })
+    registerSupervisedSubstrate(options)
+
+    // A spawn that never settles, FIRST in the map — insertion order is iteration order.
+    const wedgedKey = 'cc-trident-fire-o-wedged /repo'
+    pool.set(wedgedKey, new Promise<never>(() => {}))
+
+    const sub = createPersistentReplSubstrate(options)
+    // Incarnation #1 of this host never answers (that is its point), so the live child is
+    // the replacement that serves turn 2.
+    await abandonFirstTurn(sub, messagesSeen)
+    await captureStderr(() => drain(sub.start(spec('turn-2'))))
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const liveGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    expect(childAlive(2)).toBe(true)
+
+    const { lines } = await captureStderr(() => shutdownAllPersistentRepls({ pendingSpawnGraceMs: 20 }))
+    await realKillsSettled()
+
+    // THE LIVE CHILD WAS REPORTED, from behind an entry that will never resolve.
+    expect(seen.map((s) => s.generationKey)).toContain(liveGeneration)
+    expect(seen.find((s) => s.generationKey === liveGeneration)?.cause).toBe('gateway-shutdown')
+    expect(childAlive(2)).toBe(false)
+    // ...durably, too — the channel the next boot reads.
+    expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(true)
+    // And the entry that could not be reached is NAMED rather than silently skipped: it
+    // has no generation yet, so nothing durable can describe it.
+    expect(lines.join('')).toContain('whose SPAWN has not settled')
+    pool.delete(wedgedKey)
+  }, 20_000)
+
+  it('a spawn that lands INSIDE the grace is treated like any other child', async () => {
+    // The complement: the bound is a ceiling on waiting, not a rule that pending entries
+    // are abandoned. Without it, "do not block" could be implemented as "skip anything not
+    // already settled", which would drop the report for a child that was merely slow.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-slow-spawn-')), 'repl-registry.json')
+    const seen: string[] = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push(info.generationKey)
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    await captureStderr(() => drain(sub.start(spec('turn-2'))))
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const liveGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+
+    // Re-enter the same session behind a promise that resolves a tick later, in the slot
+    // the pool would hold mid-spawn.
+    const settled = pool.get(key) as Promise<never>
+    const session = await settled
+    pool.delete(key)
+    pool.set(key, new Promise((resolve) => setTimeout(() => resolve(session), 5)) as typeof settled)
+
+    await captureStderr(() => shutdownAllPersistentRepls({ pendingSpawnGraceMs: 500 }))
+    await realKillsSettled()
+
+    expect(seen).toContain(liveGeneration)
+    expect(childAlive(2)).toBe(false)
   }, 20_000)
 })

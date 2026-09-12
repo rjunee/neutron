@@ -575,6 +575,24 @@ export function cancellableWait(ms: number): BoundedWait {
   }
 }
 
+/**
+ * How long the shutdown walk waits, ONCE and shared, for pool entries whose spawn has not
+ * settled yet.
+ *
+ * `pool` holds the spawn PROMISE and inserts it before it resolves, so an entry can be a
+ * spawn still in flight — or one that will never finish. Awaiting those in the walk put a
+ * wedged spawn in front of every later child's MARKER AND KILL, which is the same defect
+ * the reporting phase was split out to avoid, one phase earlier: the production note on
+ * `shutdownAllPersistentRepls` measures that at ~40 s against a 30 s `TimeoutStopSec`, so
+ * the children behind it were killed by the cgroup with neither channel having reported.
+ *
+ * Settled entries are therefore handled first and this bound applies only to the rest.
+ * Deliberately the same size as {@link SHUTDOWN_EXIT_GRACE_MS}: they are the two "wait for
+ * something outside this process" budgets, and together with the reporting phase they sit
+ * well inside the unit's deadline.
+ */
+export const SHUTDOWN_PENDING_SPAWN_GRACE_MS = 2_000
+
 /** How long every signalled child together gets to exit before the escalation, and
  *  again after it. Mirrors `CHILD_KILL_GRACE_MS`, which is what the tree's own safe
  *  termination helper waits — shared across the phase rather than spent per child,
