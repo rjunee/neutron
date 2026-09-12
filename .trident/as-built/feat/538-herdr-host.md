@@ -1,9 +1,23 @@
-## 2026-09-12 — herdr is the REPL container: HerdrHost replaces the in-process PTY, and the ring becomes a rendered screen
+## 2026-09-12 — herdr is the DEFAULT REPL container, the PTY host stays selectable, and the ring becomes a rendered screen
 
-`bun-terminal-host.ts` is deleted. The `PtyHost` backend is now `herdr-host.ts`,
-driving herdr's unix-socket API (`herdr-client.ts`, `herdr-protocol.ts`). No flag,
-no dual path. This is step 2b of the cutover (ISSUES #538), on top of #537's
+herdr is the **only wired** `PtyHost` backend: `spawn.ts` resolves
+`options.ptyHost ?? herdrHost`, and `herdr-host.ts` drives herdr's unix-socket API
+(`herdr-client.ts`, `herdr-protocol.ts`). The in-process `bun-terminal-host.ts` is
+**KEPT as an injectable option**, adapted to the interface as it now stands and covered
+by its own tests — reachable only by injecting it at that seam, with no user-facing
+chooser. Governing record: SPEC.md Decisions Log **2026-09-12, "THE REPL SUBSTRATE
+BECOMES SELECTABLE"**. This is step 2b of the cutover (ISSUES #538), on top of #537's
 durable reply sink.
+
+> **SUPERSEDED HISTORY, kept because this record is chronological and half of it was
+> written under the old rule.** This section opened with *"`bun-terminal-host.ts` is
+> deleted. … No flag, no dual path."* That was the item as specified and is what the
+> first sixteen commits on the branch did. The owner reversed it mid-branch; the
+> reversal, its reasoning and what it supersedes are recorded in the Decisions Log entry
+> above and in "SCOPE REVERSAL" below. **A reader takes the opening as the outcome**, so
+> the outcome is now what the opening says — the same correction `SPEC.md`'s body marker
+> got, for the same reason. Everything below this line that speaks of the deletion is
+> dated reasoning from before the reversal and is left verbatim.
 
 Everything below that describes herdr was measured against the live server on
 2026-09-12 (herdr 0.8.2, **protocol 20**), not read off a document. Where I
@@ -1513,6 +1527,33 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The same rule, for the third time, and this time it was still in the host
+
+**An obligation starts when the resource exists, not when the function succeeds.** The
+host learned it as `abandonPane` — a `layout.apply` that returned left a pane and a
+`claude` running, and both post-creation failures closed only the connection. The live
+E2E suites learned it again by leaking four real panes, because their spawn sat outside
+the `try`. It was STILL in `BunTerminalHost`: by the time `Bun.spawn` runs, the readiness
+timer is armed and the pty is allocated, so an executable that does not exist is enough
+to reject out of `spawn()` with an open terminal — and five seconds later emit a
+`beginOutput()` wiring warning about a child that was never created. A false diagnostic
+on top of a leak.
+
+Both the allocation and the spawn are now inside one guard, because `createTerminal` can
+throw too — with nothing to close, but with the timer already armed. The close is
+best-effort, so a failing close cannot mask the error that caused the abandonment: the
+same rule `abandonPane` follows on the herdr side.
+
+Four cases, and the CONTROL is the one that matters most: a successful spawn must close
+NOTHING and must still ARM the gate, or "closes on failure" is satisfied by a host that
+closes unconditionally and "disarms on failure" by one that never arms. M193 — running
+the cleanup on the success path — reddens five cases, including the fail-open warning
+that proves the gate is still doing its job.
+
+That the existing fixture could not see this is the familiar half: `__tests__` covered
+the PRE-allocation empty-argv refusal, and the injected terminal modelled only successful
+spawning. A fixture does not have to be permissive to hide a defect.
+
 ### The PR about making herdr the REPL container leaked REPL containers into herdr
 
 The owner found four unexplained tabs in his own workspace and asked whether they were
@@ -2339,6 +2380,10 @@ Run against the named suites.
 | M187 | the confirmation wait is UNBOUNDED (a leak becomes a hang) | RED 1 |
 | M188 | an already-exited child is killed anyway | RED 1 |
 | M189 | the leak diff is a length compare (a CLOSED pane reads as a leak) | RED 2 |
+| M190 | a failing spawn does not close the terminal it already allocated | RED 2 |
+| M191 | a failing spawn leaves the readiness timer armed (a FALSE wiring warning) | RED 1 |
+| M192 | the allocation is outside the guard again | RED 2 |
+| M193 | PAIR: the cleanup runs on SUCCESS too, closing a live pty | RED 5 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

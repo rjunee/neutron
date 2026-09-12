@@ -297,35 +297,63 @@ export class BunTerminalHost implements PtyHost {
     // turns that into U+FFFD pairs while everything downstream still looks like text.
     const decoder = new TextDecoder('utf-8')
 
-    const createTerminal =
-      this.deps.createTerminal ?? ((o) => new BunTerminal(o))
-    const terminal = createTerminal({
-      cols: opts.cols ?? 120,
-      rows: opts.rows ?? 40,
-      data: (_t, bytes) => {
-        if (opts.onScreen === undefined) return
-        const clean = stripPtyNoise(bytes, stripState)
-        if (clean.length === 0) return
-        const text = decoder.decode(clean, { stream: true })
-        if (text === '') return // the chunk was a partial character; wait for the rest
-        // ACCUMULATE ALWAYS, DELIVER ONLY ONCE RELEASED. The bytes are never dropped;
-        // what the gate holds back is the CALL, so a screen produced before the
-        // consumer exists is delivered the moment it does.
-        const screen = accumulator.push(text)
-        if (!outputReleased) {
-          heldScreen = screen
-          return
-        }
-        opts.onScreen(screen)
-      },
-    })
+    const createTerminal = this.deps.createTerminal ?? ((o) => new BunTerminal(o))
 
-    const proc = (this.deps.spawn ?? bunSpawn)({
-      cmd: argv,
-      cwd: opts.cwd,
-      env: compactEnv(opts.env),
-      terminal,
-    })
+    // THE OBLIGATION STARTS WHEN THE RESOURCE EXISTS, NOT WHEN THE FUNCTION SUCCEEDS.
+    //
+    // Third time this branch has met this, and the first two are why it is written out
+    // here: the host learned it as `abandonPane` (a `layout.apply` that returned left a
+    // pane and a `claude` running, and both post-creation failures closed only the
+    // connection), and the live E2E suites learned it again by leaking four real panes
+    // into the owner's herdr because their spawn sat outside the `try`. It was STILL in
+    // this backend. By the time `Bun.spawn` runs, the readiness timer is armed and the
+    // pty is allocated — so an executable that does not exist is enough to reject out of
+    // `spawn()` with an open terminal, and five seconds later emit a `beginOutput()`
+    // wiring warning about a child that was never created. A false diagnostic on top of
+    // a leak.
+    //
+    // Both the allocation and the spawn are inside, because `createTerminal` can throw
+    // too — with nothing to close, but with the timer already armed.
+    let allocated: BunTerminalLike | undefined
+    let proc: BunSpawnedLike
+    try {
+      allocated = createTerminal({
+        cols: opts.cols ?? 120,
+        rows: opts.rows ?? 40,
+        data: (_t, bytes) => {
+          if (opts.onScreen === undefined) return
+          const clean = stripPtyNoise(bytes, stripState)
+          if (clean.length === 0) return
+          const text = decoder.decode(clean, { stream: true })
+          if (text === '') return // the chunk was a partial character; wait for the rest
+          // ACCUMULATE ALWAYS, DELIVER ONLY ONCE RELEASED. The bytes are never dropped;
+          // what the gate holds back is the CALL, so a screen produced before the
+          // consumer exists is delivered the moment it does.
+          const screen = accumulator.push(text)
+          if (!outputReleased) {
+            heldScreen = screen
+            return
+          }
+          opts.onScreen(screen)
+        },
+      })
+      proc = (this.deps.spawn ?? bunSpawn)({
+        cmd: argv,
+        cwd: opts.cwd,
+        env: compactEnv(opts.env),
+        terminal: allocated,
+      })
+    } catch (e) {
+      clearTimeout(gateTimer)
+      try {
+        allocated?.close()
+      } catch {
+        // Best-effort: a close that fails must not mask the error that caused the
+        // abandonment — the same rule `abandonPane` follows on the herdr side.
+      }
+      throw e
+    }
+    const terminal = allocated
     spawnedPid = proc.pid
 
     // Surface the real subprocess exit (the Terminal `exit` cb reports PTY

@@ -22,6 +22,7 @@ import {
   writeAllOrThrow,
 } from '../bun-terminal-host.ts'
 import type { PtyChild } from '../pty-host.ts'
+import { withCapturedStderr } from './capture-stderr.ts'
 
 /** Wait until `cond()` holds, or throw. */
 async function until(cond: () => boolean, label: string, timeoutMs = 5000): Promise<void> {
@@ -405,5 +406,105 @@ describe('submitLine is WIRED to the short-write guard, not merely accompanied b
     expect(writes.length).toBe(2)
     expect(writes[0]).toBe('/compact')
     expect(String(writes[1])).toBe('\r')
+  })
+})
+
+/**
+ * A FAILED SPAWN LEAVES NOTHING ALLOCATED — the third appearance of one rule on this
+ * branch, and the first two are why these cases exist. The host learned it as
+ * `abandonPane`; the live E2E suites learned it again by leaking four real panes into
+ * the owner's herdr because their spawn sat outside the `try`. It was still here: by the
+ * time `Bun.spawn` runs, the readiness timer is armed and the pty is allocated, so an
+ * executable that does not exist rejects out of `spawn()` with an open terminal and, five
+ * seconds later, a `beginOutput()` wiring warning about a child that was never created.
+ */
+describe('a failed spawn leaves no terminal open and no timer armed', () => {
+  it('a SPAWN that throws closes the terminal that was already allocated', async () => {
+    let closes = 0
+    const host = new BunTerminalHost({
+      createTerminal: () => ({
+        write: () => 0,
+        resize: () => undefined,
+        close: () => {
+          closes += 1
+        },
+      }),
+      spawn: () => {
+        throw new Error('ENOENT: no such file or directory')
+      },
+    })
+    await expect(host.spawn(['/nope'], { cwd: '/tmp', env: {} })).rejects.toThrow(/ENOENT/)
+    // The pty existed before the failure, so the failure owns it.
+    expect(closes).toBe(1)
+  })
+
+  it('a CREATE that throws is also handled — nothing to close, but the timer is armed', async () => {
+    const host = new BunTerminalHost({
+      createTerminal: () => {
+        throw new Error('pty allocation refused')
+      },
+      spawn: () => {
+        throw new Error('must not be reached')
+      },
+    })
+    await expect(host.spawn(['/nope'], { cwd: '/tmp', env: {} })).rejects.toThrow(
+      /pty allocation refused/,
+    )
+  })
+
+  it('the readiness timer is DISARMED — no wiring warning about a child that never existed', async () => {
+    // The warning is the visible half: a caller that never called `beginOutput()` on a
+    // child it never received would be told it had a WIRING BUG. Short gate so the
+    // timer would have fired well inside this case.
+    let closes = 0
+    const host = new BunTerminalHost({
+      createTerminal: () => ({
+        write: () => 0,
+        resize: () => undefined,
+        close: () => {
+          closes += 1
+        },
+      }),
+      spawn: () => {
+        throw new Error('ENOENT')
+      },
+      outputGateMaxMs: 20,
+    })
+    const errs = await withCapturedStderr(async () => {
+      await host.spawn(['/nope'], { cwd: '/tmp', env: {} }).catch(() => undefined)
+      await Bun.sleep(120) // well past the gate
+    })
+    expect(closes).toBe(1)
+    expect(errs.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
+  })
+
+  it('CONTROL — a SUCCESSFUL spawn closes nothing and still arms the gate', async () => {
+    // Or "closes on failure" is satisfied by a host that closes unconditionally, and
+    // "disarms on failure" by one that never arms at all.
+    let closes = 0
+    const host = new BunTerminalHost({
+      createTerminal: () => ({
+        write: () => 0,
+        resize: () => undefined,
+        close: () => {
+          closes += 1
+        },
+      }),
+      spawn: () => ({
+        pid: 77,
+        exited: new Promise<number | null>(() => {}),
+        exitCode: null,
+        kill: () => undefined,
+      }),
+      outputGateMaxMs: 20,
+    })
+    const errs = await withCapturedStderr(async () => {
+      const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+      expect(child.pid).toBe(77)
+      await Bun.sleep(120) // the caller never releases the gate
+    })
+    expect(closes).toBe(0)
+    // The gate WAS armed, so the fail-open warning is the proof it is still doing its job.
+    expect(errs.filter((e) => e.includes('beginOutput() was not called')).length).toBe(1)
   })
 })

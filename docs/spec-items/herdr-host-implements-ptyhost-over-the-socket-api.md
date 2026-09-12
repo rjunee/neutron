@@ -694,6 +694,22 @@ not-new. That is accepted and recorded here rather than hidden.
       second, and viewports of 24/62/120 alone prove nothing about the boundary. The
       shrunken content window must be reported, not silently absorbed.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-poll-bounds.test.ts`
+- [ ] **A failed spawn leaves nothing allocated — on EITHER backend.** The rule is the
+      interface's, not herdr's: an obligation starts when the resource exists, not when
+      the function succeeds. Under `BunTerminalHost` the readiness timer is armed and the
+      pty is allocated before `Bun.spawn` runs, so an executable that does not exist is
+      enough to reject out of `spawn()` with an open terminal AND a live timer that
+      five seconds later reports a `beginOutput()` wiring bug about a child that was
+      never created — a false diagnostic on top of a leak. Both the allocation and the
+      spawn go inside one guard, since `createTerminal` can throw too (nothing to close,
+      timer already armed), and the close is best-effort so a failing close cannot mask
+      the error that caused the abandonment.
+      The CONTROL carries this one: a SUCCESSFUL spawn must close nothing and must still
+      ARM the gate, or "closes on failure" is satisfied by closing unconditionally and
+      "disarms on failure" by never arming. Note what the existing fixture could not see
+      — it covered the PRE-allocation empty-argv refusal, and the injected terminal
+      modelled only successful spawning.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
 - [ ] **A failed spawn leaves no pane running.** Every initialization failure AFTER
       `layout.apply` returns — at this version, the pid never arriving — must send
       `pane.close`; the obligation starts when the pane exists, not when
