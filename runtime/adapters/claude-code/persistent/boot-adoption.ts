@@ -207,7 +207,6 @@ export function beginBootAdoption(
       reason: `the pass threw: ${e instanceof Error ? e.message : String(e)}`,
     } satisfies RowAdoptionOutcome
   })
-  forRegistry.set(sessionKey, started)
   // THE BUDGET IS ARMED HERE, not inside the pass, so it bounds the WAIT rather than
   // the work: the pass runs to completion either way (and closes rather than adopts
   // once abandoned), while the gate stops blocking.
@@ -222,8 +221,15 @@ export function beginBootAdoption(
     )
   }, budgetMs)
   ;(timer as unknown as { unref?: () => void }).unref?.()
-  void started.finally(() => clearTimeout(timer))
-  return started
+  // THE STORED PROMISE IS THE ONE THAT CLEARS THE TIMER, so there is no second,
+  // unobserved promise to leak or to swallow a rejection: `started` already
+  // converts every failure into a verdict, and every caller awaits this.
+  const gated = started.then((outcome) => {
+    clearTimeout(timer)
+    return outcome
+  })
+  forRegistry.set(sessionKey, gated)
+  return gated
 }
 
 /**
