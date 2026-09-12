@@ -1271,6 +1271,147 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(outcome).toContain('outcome=refused-integrity')
   })
 
+  test('AN OVERSIZED COMMIT MESSAGE IS REFUSED BEFORE ITS BODY IS EVER READ', async () => {
+    // A LIMIT ON HOW MANY IS NOT A LIMIT ON HOW MUCH. `--max-count` bounds the NUMBER of
+    // commits; one enormous message was still materialised in full before the 12 KiB refusal
+    // could apply — the resource-exhaustion class the blob ceiling closes, reached through the
+    // one input that bypassed it.
+    //
+    // ASSERTING THE REFUSAL ALONE WOULD PASS AGAINST THE OLD CODE, which also refused — after
+    // reading. So the assertion is that the message-bearing `git log` IS NEVER ISSUED: the
+    // commands are recorded, and the read simply does not appear.
+    const run = localRun('feat-bighist')
+    const wt = wtOf('/shared', run)
+    const COMMIT_SHA = 'c'.repeat(40)
+    const issued: string[][] = []
+    let reported = 0
+    let bodyReads = 0
+    const host: RunHostCommand = async (cmd) => {
+      issued.push([...cmd])
+      if (cmd.includes('log') && cmd.includes('--format=%H')) {
+        return ok([COMMIT_SHA, 'd'.repeat(40)].join('\n'))
+      }
+      if (cmd.includes('log')) {
+        // If this is ever reached, the body was materialised — the defect.
+        bodyReads++
+        return ok(`aaa1 ${'M'.repeat(9 * 1024 * 1024)}\u0000`)
+      }
+      // ONLY THE COMMIT OBJECTS are enormous. The conflict's own blobs are small, so the blob
+      // ceiling does not fire first and this test really is about the history path.
+      if (cmd.includes('cat-file') && cmd.includes('-s')) {
+        return ok(cmd.some((a) => a === COMMIT_SHA || a === 'd'.repeat(40)) ? String(9 * 1024 * 1024) : '64')
+      }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // THE LOAD-BEARING ASSERTION: the body was never fetched.
+    expect(bodyReads, 'the message-bearing git log must never be issued').toBe(0)
+    // The sha query — the bounded one — WAS issued, so the refusal is not an accident of
+    // nothing having run.
+    expect(issued.some((c) => c.includes('--format=%H')), 'the sha query ran').toBe(true)
+    // And it lands on the ordinary owner path, counted as over-budget.
+    expect(seen.length, 'the judge is not asked').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=over-budget',
+    )
+  })
+
+  test('the history ceiling weighs the TOTAL, and an unweighable object is unknown', async () => {
+    // TWO MUTATION SURVIVORS, closed together because they share a fixture shape.
+    //
+    // A RUNNING TOTAL, not the largest single object: two commits of 5 MiB each are individually
+    // under the 8 MiB ceiling and together over it. A check that only ever looked at one object
+    // passed every earlier fixture, where a single commit was oversized on its own.
+    //
+    // AND AN UNWEIGHABLE OBJECT IS UNKNOWN, never zero — the `?? {}` defect in the one place
+    // that decides whether a read is safe to perform. Treating it as zero reads the thing the
+    // check exists to avoid reading.
+    const CA = 'c'.repeat(40)
+    const CB = 'd'.repeat(40)
+    const drive = async (
+      slug: string,
+      sizeFor: (sha: string) => string | null,
+    ): Promise<{ bodyReads: number; why: string; asked: number }> => {
+      const run = localRun(slug)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      let bodyReads = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok([CA, CB].join('\n'))
+        if (cmd.includes('log')) {
+          bodyReads++
+          return ok('aaa1 subject\u0000')
+        }
+        if (cmd.includes('cat-file') && cmd.includes('-s')) {
+          const sha = cmd[cmd.length - 1] ?? ''
+          const size = sizeFor(sha)
+          return size === null ? fail('fatal: bad object') : ok(size)
+        }
+        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, seen } = stubArbiter({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'would have granted the retry',
+      })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      const lines = await captureLogs(async () => {
+        await cleanupAfterMerge(run, deps).catch(() => {})
+      })
+      const line = lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? ''
+      const why = /why=([a-z-]+)/.exec(line)?.[1] ?? ''
+      return { bodyReads, why, asked: seen.length }
+    }
+
+    const FIVE_MIB = String(5 * 1024 * 1024)
+    const sum = await drive('feat-histsum', (sha) => (sha === CA || sha === CB ? FIVE_MIB : '64'))
+    expect(sum.why, 'two 5 MiB commits exceed the 8 MiB ceiling together').toBe('over-budget')
+    expect(sum.bodyReads, 'and the messages are never read').toBe(0)
+    expect(sum.asked).toBe(0)
+
+    const unweighable = await drive('feat-histnosize', (sha) => (sha === CB ? null : '64'))
+    expect(unweighable.why, 'a size git will not give is unknown, not zero').toBe('evidence-unreadable')
+    expect(unweighable.bodyReads, 'and nothing is read on an unknown').toBe(0)
+    expect(unweighable.asked).toBe(0)
+  })
+
   test('THE 20/21 BOUNDARY: the claim narrows exactly when the cap actually bites', async () => {
     // THE CAP IS DELIBERATE AND THE CLAIM DENIED IT. `--max-count` asks for a fixed number of
     // commits, so a branch with one more has a commit the judge never sees, while the sentence
@@ -1928,6 +2069,10 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
       if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
         ranges.push(cmd[cmd.length - 1] ?? '')
         counts.push(Number(cmd.find((a) => a.startsWith('--max-count'))?.split('=')[1] ?? '-1'))
+        // THE SHA QUERY IS A DIFFERENT CALL FROM THE MESSAGE READ (#541 round 26). The sizes
+        // are weighed from the shas before any message is fetched, so a stub that answers the
+        // sha query with message text is not modelling the path it is testing.
+        if (cmd.includes('--format=%H')) return ok(['a'.repeat(40), 'b'.repeat(40)].join('\n'))
         return log(cmd[cmd.length - 1] ?? '')
       }
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
@@ -1976,7 +2121,8 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // the defect this round deleted, one layer up. Asserting the heading's number equals the
     // number actually passed to git is what makes a hand-written "20 most recent" in the
     // prose fail, which is the only way that drift could be introduced.
-    expect(counts.length, 'git was given a --max-count on both sides').toBe(2)
+    // FOUR CALLS: per side, the sha query that bounds the read and then the message read.
+    expect(counts.length, 'both sides are weighed and then read').toBe(4)
     // GIT IS ASKED FOR ONE MORE THAN IS SHOWN, deliberately: the extra record is how the code
     // establishes whether the cap actually BIT rather than assuming it did, so the completeness
     // claim can hedge only on branches that are really bounded (#541 round 25). The anti-drift

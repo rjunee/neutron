@@ -2022,8 +2022,8 @@ export type ConflictEvidence =
  */
 const ARBITER_COLLECTION_BYTES_MAX = 8 * 1024 * 1024
 
-/** A blob's size in bytes without reading it, or `null` if git would not say. */
-async function blobSize(run_host: RunHostCommand, repo: string, sha: string): Promise<number | null> {
+/** Any git object's size in bytes WITHOUT reading it, or `null` if git would not say. */
+async function objectSize(run_host: RunHostCommand, repo: string, sha: string): Promise<number | null> {
   let res: HostCommandResult
   try {
     res = await run_host(['git', '-C', repo, 'cat-file', '-s', sha], repo)
@@ -2175,7 +2175,7 @@ export async function conflictEvidence(
         body = `${QUOTE}(no two-sided diff: neither side has a version of this path)`
       } else {
         const blob = stage.get(side === 'BASE' ? 2 : 3) ?? ''
-        const size = await blobSize(run_host, repo, blob)
+        const size = await objectSize(run_host, repo, blob)
         if (size === null) return { kind: 'unreadable', why: 'blob' }
         if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
         let res: HostCommandResult
@@ -2219,7 +2219,7 @@ export async function conflictEvidence(
       // larger than the collection ceiling cannot produce a showable diff and must not be
       // fetched to find that out.
       for (const stageNo of [2, 3] as const) {
-        const size = await blobSize(run_host, repo, stage.get(stageNo) ?? '')
+        const size = await objectSize(run_host, repo, stage.get(stageNo) ?? '')
         if (size === null) return { kind: 'unreadable', why: 'blob' }
         if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
       }
@@ -2288,6 +2288,32 @@ async function sideHistory(
   repo: string,
   range: string,
 ): Promise<EvidencePart> {
+  // BOUND THE READ BEFORE IT HAPPENS (#541 round 26). `--max-count` limits HOW MANY commits,
+  // not HOW MUCH they weigh — a limit on how many is not a limit on how much — so a single
+  // enormous commit message was still materialised in full before the 12 KiB refusal could
+  // apply. Same resource-exhaustion class the blob ceiling closes, reached through the one
+  // input that bypassed it.
+  //
+  // The strategy is the blobs' strategy, applied to commit objects: ask for the SHAS (bounded
+  // by count, ~41 bytes each), size each object with `cat-file -s` — which reads no message —
+  // and refuse on the RUNNING TOTAL before the message-bearing `git log` is ever issued.
+  let ids: HostCommandResult
+  try {
+    ids = await run_host(
+      ['git', '-C', repo, 'log', `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H', range],
+      repo,
+    )
+  } catch {
+    return { kind: 'missing', why: 'evidence-unreadable' }
+  }
+  if (!ids.ok) return { kind: 'missing', why: 'evidence-unreadable' }
+  let weighed = 0
+  for (const sha of ids.stdout.split('\n').map((x) => x.trim()).filter((x) => x.length > 0)) {
+    const size = await objectSize(run_host, repo, sha)
+    if (size === null) return { kind: 'missing', why: 'evidence-unreadable' }
+    weighed += size
+    if (weighed > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'missing', why: 'over-budget' }
+  }
   let res: HostCommandResult
   try {
     res = await run_host(

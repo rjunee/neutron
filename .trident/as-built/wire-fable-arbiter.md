@@ -1338,7 +1338,8 @@ kinds the first pass did not:
 
 | # | site | kind | disposition |
 |---|---|---|---|
-| 14 | `sideHistory` `--max-count` | a **request** for less | **disclosed and derived**: git is asked for N+1 to establish whether the cap BIT, N are shown, and the part is marked `bounded` — so `assembleEvidence` narrows the claim exactly when a commit really is being withheld (round 25) |
+| 14 | `sideHistory` `--max-count` | a **request** for less | **disclosed and derived**: git is asked for N+1 to establish whether the cap BIT, N are shown, and the part is marked `bounded` — so `assembleEvidence` narrows the claim exactly when a commit really is being withheld (round 25). **It bounds HOW MANY, not HOW MUCH** — see row 17 for the byte ceiling, which is a different quantity and needed its own bound |
+| 17 | `sideHistory` message read | a **collection** with no byte ceiling | **bounded before reading** (round 26): the commit SHAs are fetched first (bounded by count, ~41 bytes each), each object is weighed with `cat-file -s`, and the RUNNING TOTAL is checked against `ARBITER_COLLECTION_BYTES_MAX` before the message-bearing `git log` is issued at all |
 | 15 | `conflictEvidence` two-sided diff | a **collection** with no ceiling | **bounded before reading**: both stage blobs are sized with `cat-file -s` against `ARBITER_COLLECTION_BYTES_MAX` before any content is fetched |
 | 16 | `conflictEvidence` one-sided blob | a **collection** with no ceiling | same |
 
@@ -1413,6 +1414,45 @@ removed; a refused retry emitting nothing.
 **And the as-built said 13 tests where the file has 80.** Counted on the final tree with
 `bun test <file>`, and the section now says where the number came from. A count is a claim, and
 it decayed for twenty rounds because nothing re-took it.
+
+### ROUND 26 — a limit on how many is not a limit on how much
+
+The collection ceiling added in round 25 covered the diffs and the blobs and **missed the
+history**, because `--max-count` looked like a bound and is one — of the wrong quantity. It
+limits the NUMBER of commits; `--format=%h %s%n%b%x00` then captures every message in full, so a
+single enormous commit body was materialised before the 12 KiB refusal could apply.
+
+**Third variant of one sentence across two PRs this week:**
+
+| | the limit that looked sufficient | the quantity it actually bounds |
+|---|---|---|
+| round 25 | the display budget | what you **keep**, not what you **do** |
+| round 25 | the blob ceiling | objects it was applied to, not the ones it wasn't |
+| round 26 | `--max-count` | how **many**, not how **much** |
+
+**Fixed with the blobs' own strategy, applied to commit objects**: fetch the SHAs (bounded by
+count, ~41 bytes each), weigh each with `cat-file -s` — which reads no message — and refuse on
+the **running total** before the message-bearing `git log` is issued.
+
+**The boundary test asserts the read NEVER HAPPENS**, not merely that the refusal occurs:
+asserting the refusal alone passes against the old code, which also refused — after reading. The
+host records every command and the message read must not appear, with a positive control that
+the sha query *did* run so the refusal is not an artefact of nothing having happened.
+
+**Two more survivors closed**, both about the shape of the check rather than its presence: a
+check that weighed the largest object instead of the **running total** (two 5 MiB commits are
+each under an 8 MiB ceiling and together over it), and one that treated an **unweighable** object
+as zero — the `?? {}` defect in the one place deciding whether a read is safe to perform, where
+it reads the very thing the check exists to avoid.
+
+**And the audit row was corrected**, which matters more than the code change: row 14 claimed
+`--max-count` as the history's bound, and that table is the terminating condition's evidence. **A
+row claiming a bound that bounds a different quantity is the one kind of error it cannot
+afford** — it is the document asserting the enumeration is complete. `--max-count` now says what
+it bounds, and row 17 carries the byte ceiling.
+
+**Three mutations, all red:** the pre-check removed; the total not accumulated; an unweighable
+object counted as zero.
 
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
@@ -1677,7 +1717,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and nineteen mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and twenty-two mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
