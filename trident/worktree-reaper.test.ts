@@ -1240,6 +1240,304 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/trident-reaped/half-done/${sha}`)).toBe(sha)
   }, 30_000)
 
+  test('THE OWNERSHIP RACE: a worktree added at the UNCHANGED tip just before the delete', async () => {
+    // THE REVIEWER'S EXACT INTERLEAVING (#547 round 3). The CAS protects the ref's VALUE,
+    // so a claim that does NOT move the sha sails straight through it: pause immediately
+    // before the delete, `git worktree add` the branch at the already-enumerated tip,
+    // resume. The expected sha still matches, the delete succeeds — and a branch a live run
+    // is standing on is gone. `update-ref -d` will not refuse a checked-out branch (proven
+    // by "a PLAINLY checked-out holder…" above), which is what makes this bite.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/claimed-mid-sweep'
+    const sha = await seedRef(repo, branch, 'claimed')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_the-next-run')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let claimed = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        // Fire at the LAST possible moment: the delete command itself.
+        if (!claimed && cmd.includes('update-ref') && cmd.includes('-d')) {
+          claimed = true
+          const added = await spawnCapture(
+            ['git', '-C', repo, 'worktree', 'add', claimant, branch],
+            repo,
+          )
+          expect(added.ok, added.stderr).toBe(true)
+          // THE PREMISE: the tip has NOT moved, so the CAS cannot refuse on value.
+          expect(await (await spawnCapture(['git', '-C', repo, 'rev-parse', `refs/heads/${branch}`], repo)).stdout.trim()).toBe(sha)
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(claimed).toBe(true)
+    // The ref is NOT reported as reaped, and it is BACK at exactly the sha it had.
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_restored).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('raced-a-new-claim:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    // AND THE CLAIMANT IS WHOLE: its worktree still resolves the branch to that commit.
+    expect(await git(claimant, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(branch)
+    expect(await git(claimant, 'rev-parse', 'HEAD')).toBe(sha)
+    expect(await git(claimant, 'show', `${branch}:claimed.txt`)).toBe('claimed')
+  }, 60_000)
+
+  test('a claim that lands BEFORE the delete means the delete never happens', async () => {
+    // The ordinary case, and the one that must not even perform the destructive act. The
+    // claim commits between the per-ref gates and the delete — here, on the salvage write.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/claimed-early'
+    const sha = await seedRef(repo, branch, 'early')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_early-run')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleteAttempted = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('update-ref') && cmd.includes('-d')) deleteAttempted = true
+        const result = await spawnCapture(cmd, cwd)
+        if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+        }
+        return result
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(deleteAttempted).toBe(false)
+    expect(report.refs_restored).toEqual([])
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('claim-appeared:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('a LIVE RUN ROW appearing mid-sweep also stops the reap', async () => {
+    // The other half of a claim: the dispatch INSERTs a non-terminal row. The store read is
+    // re-taken, so a row that appears after the ownership snapshot is seen.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/row-claimed'
+    const sha = await seedRef(repo, branch, 'rowclaim')
+    const rows: TridentBranchOwner[] = [owner(branch, { phase: 'failed' })]
+    const store: WorktreeReaperStore = {
+      listRepoPaths: () => [repo],
+      listNonTerminal: () => [],
+      listBranchOwners: () => [...rows],
+    }
+
+    const report = await sweepTridentWorktrees({
+      store,
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          // The next launch of this card claims the slug.
+          rows.push(owner(branch, { phase: 'forge-init' }))
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) =>
+          k.ref === `refs/heads/${branch}` &&
+          k.reason === "claim-appeared: a run in phase 'forge-init' claims it",
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('the restore is CREATE-ONLY, so a claimant that made its own branch wins', async () => {
+    // The repair must never clobber. If the claimant reacts to the missing ref by creating
+    // the branch itself — at its own, different sha — that branch is the live one, and
+    // putting the old tip back over it would destroy the claimant's starting point.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/claimant-remade-it'
+    const sha = await seedRef(repo, branch, 'remade')
+    let theirSha = ''
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        const result = await spawnCapture(cmd, cwd)
+        if (cmd.includes('update-ref') && cmd.includes('-d')) {
+          // The next run creates the branch itself, at main's tip, and stands on it.
+          theirSha = (await spawnCapture(['git', '-C', repo, 'rev-parse', 'refs/heads/main'], repo)).stdout.trim()
+          expect(theirSha).not.toBe(sha)
+          await spawnCapture(['git', '-C', repo, 'branch', branch, theirSha], repo)
+          await spawnCapture(
+            ['git', '-C', repo, 'worktree', 'add', join(repo, '.claude', 'worktrees', 'wf_theirs'), branch],
+            repo,
+          )
+        }
+        return result
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    // THEIR ref survives untouched; ours is not forced back over it.
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(theirSha)
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('restore declined'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    // And our tip is still reachable, because the salvage was written before any of this.
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/claimant-remade-it/${sha}`)).toBe(sha)
+  }, 60_000)
+
+  test('a DETACHED worktree appearing on the tip mid-sweep stops the reap', async () => {
+    // A claimant need not check the branch out by name to be standing on it: `merge.ts` and
+    // `review-run.ts` both add DETACHED worktrees at a head. The commit-keyed witness in the
+    // claim probe is what sees that, and it is the same witness gate 4c uses.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/detached-claimant'
+    const sha = await seedRef(repo, branch, 'detclaim')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        const result = await spawnCapture(cmd, cwd)
+        if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          await spawnCapture(
+            ['git', '-C', repo, 'worktree', 'add', '--detach', join(root, 'scratch-at-tip'), sha],
+            repo,
+          )
+        }
+        return result
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('a detached worktree stands on the tip'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('a claim probe that cannot READ the holders refuses, it does not assume none', async () => {
+    // The probe's own failure is the absence of a measurement, not the measurement that
+    // nothing claims the ref. Gate 3's listing is allowed through; the PROBE's is denied.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/probe-blinded'
+    const sha = await seedRef(repo, branch, 'probeblind')
+    let listings = 0
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('-z') && cmd.includes('list')) {
+          listings += 1
+          // The FIRST listing is gate 3's; every later one is the claim probe's.
+          if (listings > 1) return { ok: false, stdout: '', stderr: 'listing denied', exit_code: 128 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(listings).toBeGreaterThan(1)
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('holders-unreadable:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('a rebase state that goes unreadable mid-sweep refuses, it does not read as clear', async () => {
+    // The probe re-asks `readRebaseHead` for every detached entry, and an 'unknown' there is
+    // as disqualifying inside the probe as it is in gate 4 — a rebase whose state cannot be
+    // read may be standing on this very ref.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/probe-rebase-dark'
+    const sha = await seedRef(repo, branch, 'probereb')
+    await addWorktree(repo, 'rb_darkening')
+    let deleting = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          deleting = true
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      // Readable while gate 4 asks, unreadable by the time the claim probe does.
+      rebase_head: () => (deleting ? { kind: 'unknown' } : { kind: 'none' }),
+      proc_root: makeProc(root),
+    })
+
+    expect(deleting).toBe(true)
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('rebase/bisect state unreadable'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('a claim probe that cannot READ the owners refuses too', async () => {
+    // The store side of the probe has the same contract as the git side: a read that threw
+    // established nothing. The ownership snapshot earlier in the sweep succeeded, so this
+    // store fails only on the probe's re-read — which is exactly the shape of a database
+    // that became unreadable partway through a sweep.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/owners-went-dark'
+    const sha = await seedRef(repo, branch, 'ownersdark')
+    let reads = 0
+    const store: WorktreeReaperStore = {
+      listRepoPaths: () => [repo],
+      listNonTerminal: () => [],
+      listBranchOwners: () => {
+        reads += 1
+        if (reads > 1) throw new Error('the owners table is unreadable')
+        return [owner(branch, { phase: 'failed' })]
+      },
+    }
+
+    const report = await sweepTridentWorktrees({
+      store,
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(reads).toBeGreaterThan(1)
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.includes('owners-unreadable:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
   test('a salvage that cannot be written blocks the delete', async () => {
     // Only the salvage WRITE is broken, not the delete: a stub that broke both would let
     // the ref survive for the wrong reason and prove nothing about the ordering.

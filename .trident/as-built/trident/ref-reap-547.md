@@ -1,4 +1,4 @@
-## 2026-09-12 — a run's branch ref no longer outlives the run: eleven checks, a durable holder gate, and an atomic delete
+## 2026-09-12 — a run's branch ref no longer outlives the run: a durable holder gate, an atomic delete, and a reap that cannot outrun a dispatch
 
 Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
 no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
@@ -79,6 +79,55 @@ terminal", which is the answer that authorises the delete.
     checks the old value and unlinks the ref under one ref lock. A branch that advanced since the
     enumeration cannot be deleted at all, because there is no read-then-delete window: there is no
     separate read. See below for what this replaces.
+
+**THE CAS PROTECTS THE REF'S VALUE, NOT ITS HOLDER — so the holder and owner checks were still
+racy, and this is the inverse of the bug the card exists to fix.** The holder listing and the owner
+rows are snapshotted before the per-ref loop; the delete happens later. A new run can claim the slug
+and `git worktree add` the branch at its UNCHANGED tip in between — so the sha is exactly what was
+expected, the compare-and-swap succeeds, and a branch a live run is standing on is deleted.
+`update-ref -d` does not refuse a checked-out branch, a fact this suite measures on purpose, so
+nothing fails closed by itself. The zero-retention argument invokes the very scenario: "a NEXT launch
+that can be seconds away" is the thing that claims the slug inside the sweep.
+
+WHY NOT THE EXISTING CLAIM CHOKEPOINT, which was the first direction to evaluate. `createIfClaimsAvailable`
+(`trident/store.ts`) does arbitrate exactly this question, in one transaction, backed by the live-only
+unique index (`migrations/0120_trident_slug_unique_only_live.sql`). The reaper cannot join it:
+
+  * Its refusals are typed `conflict: 'path' | 'branch'` and each carries a `holding_run`. A reap
+    lease has no run to name, so admitting one needs a NEW conflict kind — and the consumer of those
+    kinds is `board-dispatch.ts`, which this lane may not edit. Naming a terminal row as the
+    `holding_run` would be a lie about liveness in the one place that exists to tell the truth.
+  * The alternative, holding a SQLite write transaction across the git delete so the dispatch's own
+    transaction blocks on it, would serialise correctly and stall every other writer — the tick loop
+    included — for the duration of up to `MAX_REF_DELETIONS_PER_SWEEP` subprocess calls.
+
+A RETENTION FLOOR DOES NOT CLOSE IT EITHER, and it is worth saying why rather than just declining
+it: the race is not about age. A dispatch can claim a slug whose owners went terminal weeks ago, so
+any floor still leaves the same interleaving on the other side of it.
+
+SO THE OUTCOME IS MADE CORRECT INSTEAD OF THE WINDOW MADE SMALL, which is the property that matters:
+
+  * GATE 9a re-measures holders and live owners from scratch immediately before the delete. This is
+    the ordinary case, and it means the destructive act is never performed at all when a claim has
+    already landed.
+  * GATE 9b takes the SAME measurement again afterwards, and a claim that appeared puts the ref back
+    at exactly the sha it had. Git offers no primitive that compares a HOLDER and unlinks a ref in one
+    operation — `update-ref --stdin` refuses `verify` + `delete` on one ref — so the one remaining
+    interleaving is REPAIRED rather than raced.
+
+The repair is lossless, which is what makes it an answer and not a hedge: the sha is unchanged by
+construction (the CAS proved it, and the salvage ref already holds it), so the claimant's worktree
+HEAD symref resolves to the same commit it did before, and no commit, working tree or index is
+touched. The restore is CREATE-ONLY, so a claimant that has meanwhile made its own branch at a
+different sha keeps it and this reports rather than clobbers. The residue is a sub-second window in
+which the ref does not resolve, which can fail a `git switch` in the claiming run's first step — a
+retryable error in a run that has just started, weighed against silently deleting a live lane's
+branch. Both halves refuse on an unreadable measurement, git side and store side alike.
+
+Pinned by the reviewer's exact interleaving — `worktree add` at the already-enumerated tip, fired on
+the delete command itself — plus a claim landing before the delete, a live run ROW appearing
+mid-sweep, a DETACHED worktree appearing on the tip, a claimant that re-made the branch itself, and
+all four unreadable-measurement cases.
 
 **GATE 4b HELD FOR EXACTLY ONE SWEEP, NOT "UNTIL THE TREE IS GONE" — and this document said
 otherwise.** `detachedThisSweep` is built inside the per-repo loop, so it is memory for ONE sweep.

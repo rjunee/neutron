@@ -99,6 +99,24 @@
  *      reachable — outside `refs/heads` so it can never re-enter a launch, and outside
  *      `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push.
  *      Recovery is `git branch <name> <sha>`. Salvage failing REFUSES the delete.
+ *  9a. NOTHING CLAIMS THE REF AS OF NOW — holders and live owners RE-MEASURED, not
+ *      remembered, immediately before the delete.
+ *  9b. AND NOTHING CLAIMED IT DURING THE DELETE. The same measurement again, afterwards,
+ *      with a CREATE-ONLY restore at the unchanged sha if one did.
+ *
+ *      WHY BOTH (#547 round 3). The CAS below protects the ref's VALUE and nothing else. A
+ *      dispatch can claim the slug and check the branch out at its UNCHANGED tip after the
+ *      holder and owner snapshots are taken — so the sha is exactly what was expected, the
+ *      CAS succeeds, and a branch a live run is standing on is deleted. `update-ref -d`
+ *      does not refuse a checked-out branch, so nothing fails closed on its own.
+ *
+ *      9a is the ordinary case and 9b is what makes the OUTCOME correct rather than the bad
+ *      ordering merely rare: git offers no primitive that compares a HOLDER and unlinks a
+ *      ref in one operation (`update-ref --stdin` refuses `verify` + `delete` on one ref),
+ *      so the one remaining interleaving is REPAIRED instead of raced. The repair is
+ *      lossless — the sha is unchanged by construction, so the claimant's HEAD symref
+ *      resolves to the same commit, and the restore is create-only so a claimant that made
+ *      its own branch wins. See the call site for the residue this leaves.
  *  10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP: `git update-ref -d <ref>
  *      <expected-sha>` checks the old value and unlinks the ref under one ref lock, so a
  *      branch that has advanced since the enumeration cannot be deleted at all. There is
@@ -232,6 +250,12 @@ export interface WorktreeReapReport {
    * action worth logging while ordinary per-ref refusals stay quiet.
    */
   refs_stood_down: number
+  /**
+   * Refs DELETED and then PUT BACK because a claim appeared inside the sweep (#547,
+   * round 3). Non-zero is not an error — it is this guard doing its job — but it is the
+   * signal that a dispatch and a reap collided, so it is counted and logged.
+   */
+  refs_restored: { ref: string; sha: string }[]
 }
 
 interface WorktreeEntry {
@@ -265,6 +289,7 @@ function emptyReport(): WorktreeReapReport {
     refs_deleted: [],
     refs_kept: [],
     refs_stood_down: 0,
+    refs_restored: [],
   }
 }
 
@@ -611,6 +636,63 @@ function ownerProcessLive(owner: TridentBranchOwner, processCwds: string[]): boo
 }
 
 /**
+ * IS ANYTHING CLAIMING THIS REF RIGHT NOW? Re-measured from scratch — a fresh worktree
+ * listing and a fresh store read — rather than from the snapshots the per-ref gates use.
+ *
+ * WHY THIS EXISTS (#547 round 3, cross-model gate). The delete is an atomic
+ * compare-and-swap on the ref's VALUE, and that is all it is. A new run can claim the
+ * slug and `git worktree add` the branch at its UNCHANGED tip after the holder and owner
+ * snapshots are taken — so the sha is exactly what was expected, the CAS succeeds, and a
+ * branch a live run is standing on is deleted. `update-ref -d` will not refuse a
+ * checked-out branch (this suite measures that deliberately), which is what makes the race
+ * bite rather than fail closed.
+ *
+ * Returns a reason when something claims it, null when nothing provably does. A read that
+ * FAILS returns a reason too: an unanswered question is not an absence of claimants.
+ */
+async function refClaimedNow(
+  opts: WorktreeReaperOptions,
+  repo: string,
+  ref: string,
+  short: string,
+  sha: string,
+): Promise<string | null> {
+  let listed
+  try {
+    listed = await opts.run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain', '-z'], repo)
+  } catch (error) {
+    return `holders-unreadable: ${errText(error)}`
+  }
+  if (!listed.ok) return `holders-unreadable: ${hostText(listed)}`
+  const readRebase = opts.rebase_head ?? readRebaseHead
+  const entries = parseHoldersZ(listed.stdout)
+  for (const [index, holder] of entries.entries()) {
+    if (holder.branch === ref) return `checked out at ${holder.path}`
+    // The commit-keyed witness, linked trees only, for the same reasons as gate 4c.
+    if (index > 0 && !holder.bare && holder.head === sha && existsSync(holder.path)) {
+      return `a detached worktree stands on the tip at ${holder.path}`
+    }
+    if (holder.branch === null) {
+      const rebasing = readRebase(holder.path)
+      if (rebasing.kind === 'unknown') return `rebase/bisect state unreadable in ${holder.path}`
+      if (rebasing.kind === 'branch' && rebasing.ref === ref) {
+        return `a ${rebasing.state ?? 'rebase'} holds it at ${holder.path}`
+      }
+    }
+  }
+  // And the DB side, re-read: a dispatch's claim is an INSERT of a NON-TERMINAL row.
+  let owners
+  try {
+    owners = opts.store.listBranchOwners(repo)
+  } catch (error) {
+    return `owners-unreadable: ${errText(error)}`
+  }
+  const live = owners.find((owner) => owner.branch === short && !isTerminalPhase(owner.phase))
+  if (live !== undefined) return `a run in phase '${live.phase}' claims it`
+  return null
+}
+
+/**
  * Sweep ONE repository's `refs/heads/trident/*` refs. Every gate refuses by RECORDING
  * why and moving on; nothing here throws, and nothing here is reached at all when
  * `/proc` could not be read (gate 1, enforced by the caller).
@@ -890,6 +972,15 @@ async function reapBranchRefs(
     // branch — the next sweep confirms that salvage and finishes. A process that dies
     // after leaves the intended end state. Nothing spans two refs, so there is no
     // partially-applied state for a crash to leave behind.
+    // GATE 11a — NOTHING CLAIMS IT AS OF NOW, re-measured rather than remembered. This
+    // is the ordinary case: a dispatch that already committed its claim is seen here and
+    // the destructive act is never performed at all.
+    const claimedBefore = await refClaimedNow(opts, repo, ref, short, sha)
+    if (claimedBefore !== null) {
+      report.refs_kept.push({ ref, reason: `claim-appeared: ${claimedBefore}` })
+      continue
+    }
+
     deletionBudget.attempts += 1
     let deleted
     try {
@@ -904,6 +995,53 @@ async function reapBranchRefs(
       report.refs_kept.push({ ref, reason: `delete-refused: ${hostText(deleted)}` })
       continue
     }
+    // GATE 11b — AND NOTHING CLAIMED IT DURING THE DELETE. This is what makes the
+    // OUTCOME correct for every interleaving instead of merely making the bad one rare.
+    //
+    // Gate 11a and the CAS together still leave one ordering: a dispatch claims the slug
+    // and checks the branch out AFTER 11a read and BEFORE `update-ref -d` ran, at the
+    // unchanged tip. Nothing git offers can close that from inside one command — there is
+    // no primitive that compares a HOLDER and unlinks a ref atomically, and
+    // `update-ref --stdin` refuses `verify` + `delete` on one ref — so this repairs it
+    // instead of racing it: the same measurement is taken again, and a claim that appeared
+    // puts the ref back at exactly the sha it had.
+    //
+    // THE REPAIR IS LOSSLESS, which is why it is a real answer and not a hedge. The sha is
+    // unchanged by construction (the CAS proved it, and the salvage ref above holds it), so
+    // the claimant's worktree HEAD symref resolves to the same commit it did before; no
+    // commit, working tree or index is touched. The restore is CREATE-ONLY, so if the
+    // claimant has meanwhile made its own branch at a different sha, that branch wins and
+    // this reports rather than clobbers.
+    //
+    // The residue is a sub-second window in which the ref does not resolve, which can fail
+    // a concurrent `git switch` in the claiming run's first step. That is a retryable error
+    // in a run that has just started, against silently deleting a live lane's branch.
+    const claimedDuring = await refClaimedNow(opts, repo, ref, short, sha)
+    if (claimedDuring !== null) {
+      let restored
+      try {
+        restored = await opts.run_host(['git', '-C', repo, 'update-ref', ref, sha, ''], repo)
+      } catch (error) {
+        restored = { ok: false, stdout: '', stderr: errText(error), exit_code: 1 }
+      }
+      report.refs_restored.push({ ref, sha })
+      report.refs_kept.push({
+        ref,
+        reason: restored.ok
+          ? `raced-a-new-claim: ${claimedDuring} — the ref was put back at ${sha}`
+          : `raced-a-new-claim: ${claimedDuring} — restore declined (${hostText(restored)}), the claimant holds its own ref`,
+      })
+      log.warn('worktree_reaper_ref_restored', {
+        repo,
+        ref,
+        sha,
+        salvage,
+        claim: claimedDuring,
+        restored: restored.ok,
+      })
+      continue
+    }
+
     report.refs_deleted.push({ ref, sha, salvage })
     log.info('worktree_reaper_ref_deleted', { repo, ref, sha, salvage })
   }
@@ -921,7 +1059,8 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     report.detached.length === 0 &&
     report.removed.length === 0 &&
     report.refs_deleted.length === 0 &&
-    report.refs_stood_down === 0
+    report.refs_stood_down === 0 &&
+    report.refs_restored.length === 0
   ) {
     return
   }
@@ -938,6 +1077,7 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     refs_deleted: report.refs_deleted.length,
     refs_kept: report.refs_kept.length,
     refs_stood_down: report.refs_stood_down,
+    refs_restored: report.refs_restored.length,
   })
 }
 
