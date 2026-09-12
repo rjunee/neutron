@@ -75,10 +75,12 @@ test:
 - **(d) THE REAP PERFORMS DELETIONS ONLY ONCE THIS GUARD IS IN PLACE.** #606 landed every gate, the
   salvage, the measurement and the reporting but deliberately performs **no deletions** — the
   destructive half sits in an exported `deleteReapableRef` that the sweep does not call, behind one
-  named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). Satisfying this item therefore includes deleting
-  that deferral and restoring the single call, and proving the sweep deletes again. Until then the
-  sweep records CANDIDATES in `refs_candidates` — refs that pass gates 1-10: **72 of 80 on the repo of
-  record** as of 2026-09-12 (see the issue comment). That figure is an UPPER BOUND on what would be
+  named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). That function accepts only a `ReapableCandidate`
+  minted by the gate chain, so the single call this item restores must pass the candidate the sweep
+  minted — reconstructing `{ ref, sha }` is refused at the boundary and deletes nothing. Satisfying
+  this item therefore includes deleting that deferral and restoring the single call, and proving the
+  sweep deletes again. Until then the sweep records CANDIDATES in `refs_candidates` — refs that pass
+  gates 1-10: **72 of 80 on the repo of record** as of 2026-09-12 (see the issue comment). That figure is an UPPER BOUND on what would be
   deleted, not a measurement of it: gate 11 *is* the salvage write, so a dry run that evaluated it
   would not be dry, and gates 12-14 re-measure sources gates 4-8 have just read, so in a dry sweep
   they would re-derive the same answer and add the appearance of rigour rather than any. The exposure

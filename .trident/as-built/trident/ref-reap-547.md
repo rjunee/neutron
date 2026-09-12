@@ -1,4 +1,4 @@
-## 2026-09-12 — the reap that measures everything and deletes nothing yet: fourteen gates, an atomic delete held back for its guard
+## 2026-09-12 — preparing a branch-ref reap: fourteen gates and a measurement, with the deletion held behind a boundary until its guard lands
 
 Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
 no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
@@ -46,10 +46,24 @@ probe to refuse on an unreadable listing, proven BEFORE deletion is re-enabled.
 
 ### WHAT THIS SHIPS, AND WHAT IT DELIBERATELY DOES NOT
 
+**THIS IS A PREPARATORY CHANGE, AND #547 STAYS OPEN.** What ships makes the deletion possible and
+provably safe to enable; it does not enable it. Stale `trident/*` refs still survive their runs after
+this merges, and the next launch of those cards still re-enters them — the failure #547 describes is
+unchanged until #635 lands and the deletion is turned on. The issue closes with the PR that turns it
+on, and this record is a record of the half that can be built safely first, not of a fix.
+
+THAT DISTINCTION WAS ALMOST LOST, AND LOSING IT IS THE INTERESTING PART. The deferral was decided
+deliberately and for a good reason (below), and then the PR kept its original title — "reap a run's
+branch ref on every terminal path" — and its `Closes #547`. Both were true of the change as first
+conceived and neither was true of what shipped. A deferral that is agreed in review and not carried
+into the claim produces something worse than an un-deferred change: an issue marked solved by a PR
+that does not solve it, and nobody looking again.
+
 **IT PERFORMS NO DELETIONS.** Every gate, the salvage, the atomic compare-and-swap, the claim probe,
 the repair, the measurement and the reporting all land. The `update-ref -d` itself does not run: the
 destructive half is an exported `deleteReapableRef` the sweep does not call, behind one named reason
-(`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635**. The sweep records what it WOULD reap in
+(`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635** — and it accepts only a `ReapableCandidate`
+the gate chain minted, so being exported does not make it reachable around the gates (see below). The sweep records CANDIDATES — refs that pass gates 1-10 — in
 `refs_candidates` — measured on the repo of record: **72 of 80 refs** pass gates 1-10, with 2 held by
 a worktree and 6 kept for unprovable ownership.
 
@@ -189,7 +203,9 @@ could drop the one old row that turns "a non-terminal run still owns this" into 
 terminal", which is the answer that authorises the delete.
 
 **FOURTEEN CHECKS, and unprovable refuses at every one.** (The count is the length of the list
-below, stated once; the module header carries the same fourteen in the same order.) The 2026-09-01 incident
+below, stated once; the module header carries the same fourteen in the same order.) They sit behind a
+GATE 0 that is not one of them: the destructive half accepts only a `ReapableCandidate`, so gates 1-10
+are not advice to a caller but the thing its argument attests to. The 2026-09-01 incident
 (`docs/as-built/wrong-base-guard-prints-a-destructi.md`) is a guard that composed an unconditional
 `git branch -D` from nothing and aimed it at a branch a live locked worktree was holding. So:
 
@@ -461,6 +477,59 @@ only the stale token: it said the sweep "records what it *would* reap", which is
 rename existed to retire. Fixing the identifier without fixing the sentence would have left the
 document wrong in the way that mattered.
 
+### An extraction for testability can create an unguarded destructive primitive
+
+The destructive half was EXTRACTED rather than short-circuited so that its ~20 tests would keep
+covering the code #635 re-enables — coverage that a short-circuit would have let lapse in tests as
+well as in production. That reasoning was right and its consequence was not followed through:
+extracting it made it an EXPORTED ENTRY POINT whose doc comment read *"preconditions, all fourteen of
+them, are the caller's"*. That sentence is an accurate description of an unguarded destructive
+primitive. A direct caller could hand it `refs/heads/feature/abcdefgh` with that branch's true tip and
+delete it with no owner row, no terminal phase and no holder evidence — and the tests had established
+direct invocation as a supported pattern, so the bypass was not even unusual.
+
+**TEN GATES PROTECTING A PATH ARE WORTH NOTHING IF THE PATH IS CALLABLE AROUND THEM.** The fix is to
+stop expressing preconditions as prose addressed to a caller and express them as a VALUE the caller
+cannot fabricate: `deleteReapableRef` takes a `ReapableCandidate`, minted at exactly one place — the
+end of the gate chain — by a module-private `mintReapableCandidate`. The tests obtain one the way
+production will: run the sweep, take what the gates minted, hand it back. It is the same object, not a
+reconstruction, and that is the point.
+
+WHY THE PROOF IS RUNTIME IDENTITY AND NOT A PHANTOM TYPE. A type-level brand is erased at runtime, so
+`as` and plain JavaScript both walk straight through it — and, decisively, the negative test cannot
+CONSTRUCT the forged input it needs in order to prove the refusal, so the guard ships untested.
+Membership of a module-private `WeakSet` is unforgeable in both, because there is no expression outside
+the module that adds to it. A `WeakSet` also gets two things right for free: a dropped report takes its
+candidates with it, and a candidate that has been serialised and revived is a copy carrying no
+evidence, which is correctly not a candidate.
+
+THE FALLBACK WAS TAKEN AS WELL, NOT INSTEAD. The namespace and object-name checks are re-asserted
+INSIDE the destructive boundary, so the checks travel with the operation rather than living only at the
+place that mints. On the production path they can never fire — minting already implies both. They are
+there for the same reason `--no-deref` is: "unreachable in this tree" has been the wrong answer twice
+in this change already. Ordering them ahead of the membership test also makes each independently
+reddenable, which is how they are mutation-checked.
+
+WHAT THE MUTATIONS SHOW, and one of them is the whole argument: dropping the membership check leaves
+the namespace string as the only barrier, and the in-namespace forgery is then DELETED. Dropping the
+mint's attestation reds 47 tests — the boundary is on the production path, not decoration bolted to the
+side of it.
+
+### The pattern both of this round's findings share
+
+A decision made correctly, whose consequences were not propagated to the things that DEPEND on it.
+The deferral was right and the PR's claim still said the opposite. The extraction was right and the
+guard did not follow it across the new boundary. This is the rename lesson one level up: the change
+reaches everything that is ABOUT it — the diff, the record, the comments — and stops at the thing that
+merely TAKES A DEPENDENCY on it. The dependent artefact is never in the diff, which is exactly why
+nothing prompts you to open it.
+
+So the question after any decision is not "did I implement this" but **"what now asserts something
+that was true before I decided, and is not true after"** — an issue link, a title, a function's
+contract, an acceptance clause. Each of those was written by someone who had no reason to expect the
+decision. It caught this PR twice in one round, on a review that was explicitly watching for it
+elsewhere.
+
 ### The transferable pattern
 
 FOUR ROUNDS OF THIS REVIEW WERE SPENT NARROWING A RACE THAT CANNOT BE CLOSED FROM THIS SIDE OF IT.
@@ -497,6 +566,13 @@ unreadable-measurement refusals have their own case; and the restore classificat
 adversarial shape for EACH half of the EEXIST predicate — a fatal exit carrying a different message,
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
+
+THE DESTRUCTIVE BOUNDARY HAS ITS OWN FOUR CASES and its own five mutations, paired as a negative and
+a complement on the same ref in the same repo: an out-of-namespace forgery, an in-namespace forgery, a
+COPY of a genuinely minted candidate (which pins that the proof is identity and not field equality),
+and a truncated object name — each refused with nothing written, not even the salvage, and without
+spending the sweep's deletion allowance; against a minted candidate that still deletes, so the
+refusals cannot be satisfied by a boundary that refuses everything.
 
 SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a test rather than a
 note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable

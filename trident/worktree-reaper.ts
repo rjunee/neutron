@@ -128,7 +128,14 @@
  *   `git update-ref` (all forms) — produces no stdout to parse; its outcome is the exit code,
  *     which the two classifications above already cover.
  *
- * ── THE EVIDENCE GUARD — FOURTEEN CHECKS, SAFER THAN THE 2026-09-01 INCIDENT ──────
+ * ── THE EVIDENCE GUARD — FOURTEEN CHECKS BEHIND ONE BOUNDARY ─────────────────────
+ *
+ * Safer than the 2026-09-01 incident, and the fourteen sit behind a gate 0 that refuses any
+ * ref the chain did not itself produce: the destructive half takes a `ReapableCandidate`,
+ * which only `reapBranchRefs` can mint. Gates 1-10 are therefore not advice to a caller —
+ * they are the thing the argument attests to, and there is no expression outside this module
+ * that fabricates the attestation. See `ReapableCandidate` for why the proof is runtime
+ * identity rather than a phantom type.
  *
  * `docs/as-built/wrong-base-guard-prints-a-destructi.md` records a guard that
  * composed an unconditional `git branch -D` from NOTHING and pointed it at a branch
@@ -272,6 +279,79 @@ export const SALVAGE_REF_PREFIX = 'refs/trident-reaped/'
 export const MAX_REF_DELETIONS_PER_SWEEP = 50
 
 /**
+ * THE ONLY VALUE `deleteReapableRef` ACCEPTS, and the reason a caller cannot reach the
+ * destructive write around the gates.
+ *
+ * WHY THIS EXISTS (#547 round 12). The destructive half was extracted so its tests would keep
+ * covering the code the sweep declines to call — and the extraction turned a guarded inner
+ * step into an exported entry point that documented its ten preconditions as "the caller's".
+ * That is not a guard. A direct caller could hand it `refs/heads/feature/abcdefgh` with a
+ * matching sha and delete a branch with no owner row, no terminal phase and no holder
+ * evidence, and the tests established direct invocation as a supported pattern. Ten gates
+ * protecting a path are worth nothing if the path is callable around them.
+ *
+ * So the preconditions became a VALUE. A candidate is minted at exactly one place — the end
+ * of the gate chain in `reapBranchRefs` — and `mintReapableCandidate` is module-private, so
+ * nothing outside this file can produce one. The proof is a WeakSet membership rather than a
+ * phantom type, deliberately: a type-level brand is erased at runtime, so `as` and plain
+ * JavaScript both walk straight through it, and the negative test cannot even construct the
+ * forged input it needs to prove the refusal. Identity in a private WeakSet is unforgeable in
+ * both — there is no expression outside this module that adds to it.
+ *
+ * The tests obtain a candidate the way production will: run the sweep, take what the gates
+ * minted, pass it back. That is the same object, not a reconstruction — which is the point.
+ */
+export interface ReapableCandidate {
+  readonly ref: string
+  readonly sha: string
+}
+
+/**
+ * Minted candidates, by IDENTITY. A `WeakSet` so a report that is dropped takes its
+ * candidates with it, and so a serialised-and-revived candidate — which is a copy carrying no
+ * evidence — is correctly not one.
+ */
+const MINTED_CANDIDATES = new WeakSet<ReapableCandidate>()
+
+/** A full object name. `update-ref` would refuse anything else; this refuses it first. */
+const FULL_OBJECT_NAME = /^[0-9a-f]{40}$/
+
+/**
+ * The ONE place a `ReapableCandidate` comes into existence: after gates 1-10 have passed.
+ * Module-private on purpose — exporting it would hand back the bypass this type removes.
+ */
+function mintReapableCandidate(ref: string, sha: string): ReapableCandidate {
+  const candidate: ReapableCandidate = Object.freeze({ ref, sha })
+  MINTED_CANDIDATES.add(candidate)
+  return candidate
+}
+
+/**
+ * Why this value may not be deleted, or `null` if it may — the boundary check, evaluated
+ * before anything is written.
+ *
+ * THE NAMESPACE AND SHA CHECKS COME FIRST AND ARE NOT REDUNDANT. Minting already implies
+ * both, so on the production path they can never fire; they are here because the checks that
+ * matter are the ones that TRAVEL WITH THE OPERATION. A forged value is refused by the
+ * membership test below, and a value that somehow carried membership while naming
+ * `refs/heads/main` is refused by this one — which is the same posture as `--no-deref` at
+ * the delete: "unreachable in this tree" has been the wrong answer more than once here.
+ * Ordering them this way also makes each independently reddenable.
+ */
+function candidateRefusal(candidate: ReapableCandidate): string | null {
+  if (!candidate.ref.startsWith(TRIDENT_REF_PREFIX)) {
+    return `${candidate.ref} is outside ${TRIDENT_REF_PREFIX}`
+  }
+  if (!FULL_OBJECT_NAME.test(candidate.sha)) {
+    return `${candidate.sha} is not a full object name`
+  }
+  if (!MINTED_CANDIDATES.has(candidate)) {
+    return 'it was not minted by the gate chain'
+  }
+  return null
+}
+
+/**
  * Attempts at putting a raced ref back (gate 14). Small and fixed: the failure it covers is
  * a transient ref-lock contention, and the thing it must not become is an unbounded wait
  * inside a sweep. Exported so the bound is pinned by VALUE in the tests and not merely by
@@ -401,7 +481,7 @@ export interface WorktreeReapReport {
    * So this is the strongest honest count available without writing anything, and the gap
    * between it and "what would actually be deleted" is named rather than papered over.
    */
-  refs_candidates: { ref: string; sha: string }[]
+  refs_candidates: ReapableCandidate[]
 }
 
 interface WorktreeEntry {
@@ -1187,7 +1267,7 @@ async function reapBranchRefs(
     // A CANDIDATE, not a decision: gates 1-10 passed. Gates 11-14 are evaluated only at
     // deletion time (see the field's own note), so a ref listed here can still be refused by
     // the salvage or by the claim probe when #635 turns this branch into a call.
-    report.refs_candidates.push({ ref, sha })
+    report.refs_candidates.push(mintReapableCandidate(ref, sha))
     report.refs_kept.push({ ref, reason: DEFERRED_PENDING_CLAIMANT_GUARD })
     continue
     // ───────────────────────────────────────────────────────────────────────────────
@@ -1203,21 +1283,37 @@ async function reapBranchRefs(
  * under test so the code #635 re-enables is code whose coverage never lapsed. There is no
  * flag here and no second path — production reaches this function from nowhere.
  *
- * Preconditions, all fourteen of them, are the caller's: by the time this runs the ref is in
- * trident's namespace, no worktree holds it by name or by commit, every owning run row is
- * terminal, no recorded worktree survives and no process stands in one. This function
- * assumes all of that and adds the four checks that can only be made at the moment of the
- * write.
+ * THE PRECONDITIONS ARE CARRIED BY THE ARGUMENT, NOT BY THE CALLER'S DISCIPLINE. Gates 1-10
+ * — the ref is in trident's namespace, no worktree holds it by name or by commit, every
+ * owning run row is terminal, no recorded worktree survives, no process stands in one — are
+ * what `mintReapableCandidate` attests to, and only `reapBranchRefs` can mint. Gate 0 here
+ * refuses anything else before a byte is written; gates 11-14 below are the four checks that
+ * can only be made at the moment of the write.
+ *
+ * This used to read "preconditions, all fourteen of them, are the caller's", which was an
+ * accurate description of an unguarded destructive primitive. See `ReapableCandidate`.
  */
 export async function deleteReapableRef(
   opts: WorktreeReaperOptions,
   repo: string,
-  ref: string,
-  short: string,
-  sha: string,
+  candidate: ReapableCandidate,
   report: WorktreeReapReport,
   deletionBudget: { attempts: number },
 ): Promise<void> {
+  const { ref, sha } = candidate
+
+  // GATE 0 — THE BOUNDARY. Nothing below runs for a value the gate chain did not produce.
+  // This is the difference between preconditions that are DOCUMENTED and preconditions that
+  // are ENFORCED, and it is checked before the budget so that a forged value cannot even
+  // consume a sweep's deletion allowance.
+  const refused = candidateRefusal(candidate)
+  if (refused !== null) {
+    report.refs_kept.push({ ref, reason: `not-a-reapable-candidate: ${refused}` })
+    log.error('worktree_reaper_ref_boundary_refused', { repo, ref, sha, reason: refused })
+    return
+  }
+  const short = ref.slice('refs/heads/'.length)
+
   if (deletionBudget.attempts >= MAX_REF_DELETIONS_PER_SWEEP) {
     report.refs_kept.push({ ref, reason: 'deletion limit reached' })
     return

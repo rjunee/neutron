@@ -24,6 +24,7 @@ import {
   DEFERRED_PENDING_CLAIMANT_GUARD,
   MAX_REF_DELETIONS_PER_SWEEP,
   MAX_RESTORE_ATTEMPTS,
+  type ReapableCandidate,
   SALVAGE_REF_PREFIX,
   TRIDENT_REF_PREFIX,
   sweepTridentWorktrees,
@@ -37,8 +38,9 @@ import {
  * `#606` ships every gate, the measurement and the reporting; the `update-ref -d` itself waits
  * for `#635` (a run whose HEAD does not resolve must refuse to commit), because nothing deletes
  * these refs today and a destructive operation should not arrive ahead of the only check that
- * can settle its failure mode without a race. The sweep therefore records what it WOULD reap in
- * `refs_candidates` and calls nothing.
+ * can settle its failure mode without a race. The sweep therefore records CANDIDATES — refs that
+ * pass gates 1-10, an upper bound on what would be deleted rather than a measurement of it — in
+ * `refs_candidates`, and calls nothing.
  *
  * Every test below that exercises the salvage, the claim probe, the compare-and-swap delete or
  * the repair drives it through here, so the code `#635` re-enables is code whose coverage never
@@ -51,9 +53,12 @@ import {
 async function sweepAndReap(opts: Parameters<typeof sweepTridentWorktrees>[0]): Promise<WorktreeReapReport> {
   const report = await sweepTridentWorktrees(opts)
   const budget = { attempts: 0 }
-  for (const { ref: full, sha } of [...report.refs_candidates]) {
+  for (const minted of [...report.refs_candidates]) {
     const repo = opts.store.listRepoPaths().find((candidate) => candidate !== '') ?? ''
-    await deleteReapableRef(opts, repo, full, full.slice('refs/heads/'.length), sha, report, budget)
+    // THE CANDIDATE IS PASSED THROUGH, NOT REBUILT. `deleteReapableRef` only accepts a value
+    // the gate chain minted, so a test that reconstructed `{ ref, sha }` here would be
+    // refused at gate 0 — which is exactly the property the negative tests below pin.
+    await deleteReapableRef(opts, repo, minted, report, budget)
   }
   return report
 }
@@ -485,6 +490,21 @@ function ref(branch: string): string {
 function isADelete(cmd: readonly string[]): boolean {
   const joined = cmd.join(' ')
   return /update-ref (--no-deref )?-d/.test(joined) || joined.includes('branch -D')
+}
+
+/**
+ * The one candidate a sweep minted, non-optional.
+ *
+ * Tests take candidates the way production will — out of the report the gate chain filled —
+ * and `deleteReapableRef` accepts nothing else. This asserts the inventory rather than
+ * cast away the `undefined`, so a sweep that minted nothing fails HERE, loudly, instead of
+ * further down where a boundary refusal would look like the behaviour under test.
+ */
+function onlyCandidate(report: WorktreeReapReport): ReapableCandidate {
+  expect(report.refs_candidates).toHaveLength(1)
+  const minted = report.refs_candidates[0]
+  if (minted === undefined) throw new Error('the sweep minted no candidate')
+  return minted
 }
 
 async function refExists(repo: string, ref: string): Promise<boolean> {
@@ -2557,8 +2577,9 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
     expect(report.refs_deleted).toEqual([])
 
-    // AND DELETION TIME REFUSES IT, on the gate the dry run could not evaluate.
-    await deleteReapableRef(opts, repo, ref(branch), branch, sha, report, { attempts: 0 })
+    // AND DELETION TIME REFUSES IT, on the gate the dry run could not evaluate. The candidate
+    // the sweep minted is handed straight back — the only value the boundary accepts.
+    await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
 
     // BOTH FACTS SURVIVE IN THE REPORT, separately: still a candidate, still not deleted.
     expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
@@ -2582,7 +2603,11 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(source).not.toContain('refs_reapable')
     expect(source).toContain('refs_candidates')
     // And the field documents the gap rather than leaving the reader to find it.
-    const doc = source.slice(0, source.indexOf('refs_candidates: { ref: string; sha: string }[]'))
+    const declaration = 'refs_candidates: ReapableCandidate[]'
+    // POSITIVE CONTROL: an `indexOf` that missed would slice to -1 and hand the assertions
+    // below the whole file, which contains both strings and would pass for the wrong reason.
+    expect(source).toContain(declaration)
+    const doc = source.slice(0, source.indexOf(declaration))
     expect(doc).toContain('GATES 11-14 ARE NOT IN THIS COUNT AND CANNOT BE')
     expect(doc).toContain('UPPER BOUND')
   })
@@ -2604,7 +2629,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
     expect(await refExists(repo, ref(branch))).toBe(true)
 
-    await deleteReapableRef(opts, repo, ref(branch), branch, sha, report, { attempts: 0 })
+    await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
 
     expect(report.refs_deleted).toEqual([
       { ref: ref(branch), sha, salvage: `refs/trident-reaped/deferred-but-intact/${sha}` },
@@ -2840,5 +2865,162 @@ describe('branch-ref reap — the backlog sweep (#547)', () => {
     // Reachable means git will not collect it, and the content is still there.
     expect(await git(repo, 'cat-file', '-t', sha)).toBe('commit')
     expect(await git(repo, 'show', `${sha}:reachable.txt`)).toBe('reachable')
+  }, 30_000)
+})
+
+/**
+ * THE DESTRUCTIVE BOUNDARY — what `deleteReapableRef` refuses when it is called directly
+ * (#547 round 12).
+ *
+ * The extraction that keeps the destructive half under test also made it an exported entry
+ * point, and an exported destructive primitive whose preconditions live in its doc comment is
+ * a bypass with documentation. These tests pin the fix from the outside: a forged value is
+ * refused before anything is written, and a value the gate chain actually minted still
+ * deletes. Every forgery below needs an `as` cast, which is itself the finding — there is no
+ * honest expression that produces one.
+ */
+describe('the destructive boundary refuses what the gates did not mint (#547)', () => {
+  const budget = (): { attempts: number } => ({ attempts: 0 })
+  const emptyReport = (): WorktreeReapReport => ({
+    repos_swept: 0,
+    candidates: 0,
+    live_skipped: 0,
+    detached: [],
+    removed: [],
+    preserved: [],
+    protected_nonterminal: [],
+    skipped_no_liveness: false,
+    refs_examined: 0,
+    refs_deleted: [],
+    refs_kept: [],
+    refs_stood_down: 0,
+    refs_restored: [],
+    refs_restore_failed: [],
+    refs_candidates: [],
+  })
+
+  // `makeProc` creates the directory, so it is called ONCE per repo and the result reused.
+  const opts = (repo: string, proc: string): Parameters<typeof deleteReapableRef>[0] => ({
+    store: stubStore(repo),
+    run_host: spawnCapture,
+    proc_root: proc,
+  })
+
+  test('an out-of-namespace ref is refused, even with a real sha and a terminal owner row', async () => {
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    // A branch that is NOT trident's: the exact shape the unguarded primitive would have
+    // deleted — a matching short name and the ref's true tip.
+    const branch = 'feature/abcdefgh'
+    const sha = await seedRef(repo, branch, 'notours')
+    const report = emptyReport()
+    const attempts = budget()
+
+    await deleteReapableRef(
+      opts(repo, proc),
+      repo,
+      { ref: ref(branch), sha } as ReapableCandidate,
+      report,
+      attempts,
+    )
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual([
+      {
+        ref: ref(branch),
+        reason: `not-a-reapable-candidate: ${ref(branch)} is outside ${TRIDENT_REF_PREFIX}`,
+      },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(true)
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    // Nothing was written at all — not even the salvage, which is the FIRST write.
+    expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
+    // And a refusal does not spend the sweep's deletion allowance.
+    expect(attempts.attempts).toBe(0)
+  }, 30_000)
+
+  test('an IN-namespace forgery is refused too — the namespace string is not the proof', async () => {
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/forged'
+    const sha = await seedRef(repo, branch, 'forged')
+    const report = emptyReport()
+
+    await deleteReapableRef(
+      opts(repo, proc),
+      repo,
+      { ref: ref(branch), sha } as ReapableCandidate,
+      report,
+      budget(),
+    )
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual([
+      { ref: ref(branch), reason: 'not-a-reapable-candidate: it was not minted by the gate chain' },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(true)
+  }, 30_000)
+
+  test('a COPY of a real minted candidate is not a candidate — the proof is identity', async () => {
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/copied'
+    const sha = await seedRef(repo, branch, 'copied')
+
+    // Minted for real, by the gate chain, with a terminal owner row: this value would delete.
+    const sweep = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    })
+    const minted = onlyCandidate(sweep)
+    expect(minted).toEqual({ ref: ref(branch), sha })
+
+    const report = emptyReport()
+    await deleteReapableRef(opts(repo, proc), repo, { ...minted } as ReapableCandidate, report, budget())
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual([
+      { ref: ref(branch), reason: 'not-a-reapable-candidate: it was not minted by the gate chain' },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(true)
+
+    // THE COMPLEMENT, on the same ref in the same repo: the object the gates produced still
+    // deletes. Without this the tests above would also pass if the boundary refused
+    // everything.
+    const real = emptyReport()
+    const attempts = budget()
+    await deleteReapableRef(opts(repo, proc), repo, minted, real, attempts)
+
+    expect(real.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}copied/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+    expect(attempts.attempts).toBe(1)
+  }, 60_000)
+
+  test('a truncated sha is refused before the salvage name is composed', async () => {
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/shortsha'
+    const sha = await seedRef(repo, branch, 'shortsha')
+    const abbreviated = sha.slice(0, 8)
+    const report = emptyReport()
+
+    await deleteReapableRef(
+      opts(repo, proc),
+      repo,
+      { ref: ref(branch), sha: abbreviated } as ReapableCandidate,
+      report,
+      budget(),
+    )
+
+    expect(report.refs_kept).toEqual([
+      {
+        ref: ref(branch),
+        reason: `not-a-reapable-candidate: ${abbreviated} is not a full object name`,
+      },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(true)
   }, 30_000)
 })
