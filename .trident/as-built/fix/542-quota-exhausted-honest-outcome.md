@@ -211,7 +211,7 @@ It also contradicted the docblock directly above it, which says in words that *a
 keyword classifier cannot safely be handed the MEASURED cause: that text is model/CI
 prose*. The branch was a keyword classifier handed the measured cause.
 
-**The shape is now anchored at both ends** — `CROSS_MODEL_RATE_LIMIT_CAUSE` — the way
+**The shape is anchored at both ends** — `CROSS_MODEL_RATE_LIMIT_CAUSE` — the way
 `PRE_LAUNCH_PREFIX` and `isPublishedUnreviewedReason` already are in that file. Only
 the seat label varies, and the label vocabulary is letters, digits, spaces, hyphens
 and parens: no colon, no em dash. Every probe-quoted shape introduces one of those
@@ -224,6 +224,40 @@ Structural would be better and is not available to this lane: `deriveInfraBlock`
 carries only `{ cause }`, and adding a field to the harvested result means editing
 `parseInnerResult` in `trident/inner-loop.ts`. Carrying the flag as a column is the
 follow-up; the anchor is what makes the string channel safe meanwhile.
+
+### ...and the anchors alone were still not enough: the label had to be a CLOSED SET
+
+The anchored version let the label be `[a-z0-9 ()-]+` — any label of that shape, not only
+the six a seat can emit. `infraCause` passes a **thrown workflow message** through
+verbatim as a terminal cause, so an exact-shape impostor matched:
+
+```
+GitHub cross-model review RATE LIMITED (HTTP 429) — no review was performed
+The registry RATE LIMITED (HTTP 429) — no review was performed
+```
+
+Both measured; both sent the operator to check a model provider's balance for a sentence
+no seat authored. The anchors had closed the two *wrapping* vectors (a prefix, because
+every probe-quoted shape puts a colon or em dash in front; a suffix, because `probeCause`
+joins two lines with a space). They did nothing about **substitution**.
+
+`CROSS_MODEL_SEAT_LABELS` is now the complete set of six, and the matcher's alternation is
+built from it with every metacharacter escaped. Anything unrecognised falls back to the
+generic line — what `main` said before any of this, never wrong and only vague.
+
+**The two halves cannot drift, and that is a test rather than a promise.** The emitter is a
+Workflow body with no module resolution, so the list is necessarily restated in
+`delivery.ts`; a drift guard enumerates the labels by RUNNING the real emitter across every
+route (including groups it does not recognise), reads the shipped list out of
+`delivery.ts`'s own source, and requires the two sets to be identical and both of size six.
+The size assertion is not decoration: the first version of that guard sliced the
+declaration to the first `]` — which the type annotation `readonly string[]` contains — and
+compared two empty sets. A guard that cannot fail, one more time, caught by mutation.
+
+Replacing the string channel with a decoded column is filed as **#631** rather than left as
+a comment: `parseInnerResult` lives in `trident/inner-loop.ts`, which this lane does not
+own, and inventing a second decoder beside the one true one would be worse than the string
+it replaced.
 
 ### The false sentence also survived where the MODEL reads it
 
@@ -313,6 +347,24 @@ subprocess against a local server (`KIMI_BASE_URL` is environment-driven, so
 nothing is stubbed) and the marker is asserted present for 429 and **absent** for
 401, 403, 500, 502, an answerless 200, a refused connection and a missing
 credential.
+
+### The root cause of every proxy-test finding on this branch
+
+Five review rounds found five defects, and four of them were the same defect:
+
+1. the ordering assertion that could not fail;
+2. two CLI tests that asserted a substring existed in a source file and executed nothing;
+3. the child environment built by omission, so the boundary held only on a box with no
+   `KIMI_API_KEY`;
+4. the absence claim "authored here and nowhere else", which was false in three ways;
+5. the drift guard that compared two empty sets.
+
+Stated once, because it is the same mistake each time: **the intended invariant was written
+into prose before the code was proven to discriminate.** Every one of those passed, and
+every one of them would have kept passing through the change it existed to prevent. The
+fix in each case was not a broader assertion but a *discriminating fixture* — the input on
+which a right implementation and a wrong one diverge. An absence claim in particular is
+worth nothing until the thing it says cannot happen is a red test.
 
 **25 mutations applied and reverted one at a time; 24 red.** The one survivor is
 recorded rather than papered over: keying the CLI's marker on

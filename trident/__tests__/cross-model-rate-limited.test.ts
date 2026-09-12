@@ -72,6 +72,13 @@ import { makeTridentRun } from '../testing/make-trident-run.ts'
 import type { TridentRun } from '../store.ts'
 
 const SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
+/** `delivery.ts`'s own source — the seat-label set is read out of it rather than retyped,
+ *  so the drift guard below compares the SHIPPED list against the SHIPPED emitter. */
+const DELIVERY_SRC = await Bun.file(new URL('../delivery.ts', import.meta.url)).text()
+/** Six today: two same-family seats plus two off-family choices for each of the two slots.
+ *  Pinned as a NUMBER as well as a set, so a slice bug that reads zero labels cannot make
+ *  the drift guard pass by comparing two empty sets — which is exactly what it first did. */
+const CROSS_MODEL_SEAT_LABEL_COUNT = 6
 
 /** Brace-match one function out of the workflow source. */
 function grab(name: string): string {
@@ -1017,6 +1024,77 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
       'Kimi K3 cross-model review RATE LIMITED (HTTP 429) — no review was performed and then the probe said something else',
     ]) {
       expect(interpretFailure(infraRun(cause)).input_needed).toContain('once the infrastructure is healthy')
+    }
+  })
+
+  test('HEADLINE: an EXACT-SHAPE IMPOSTOR with a label no seat owns keeps the generic line', () => {
+    // THE SUBSTITUTION VECTOR, which the anchors alone did not close. `infraCause` hands a
+    // THROWN workflow message through verbatim as a terminal cause, so a sentence in
+    // exactly the authored shape but carrying a label no seat can produce used to match —
+    // and the operator was again sent to check a model provider's balance for something no
+    // seat authored. The previous fixtures covered a prefix and a suffix; this is the one
+    // they omitted, and it is why the label is now a CLOSED SET rather than a shape.
+    for (const cause of [
+      'GitHub cross-model review RATE LIMITED (HTTP 429) — no review was performed',
+      'The registry RATE LIMITED (HTTP 429) — no review was performed',
+      'gh RATE LIMITED (HTTP 429) — no review was performed',
+      // Near-misses on a REAL label: a seat number that does not exist, a family that is
+      // not offered, a pluralised word. Each is one character-class hop from a real label.
+      'Cross-model review 3 (Kimi K3) RATE LIMITED (HTTP 429) — no review was performed',
+      'Cross-model review 1 (GPT) RATE LIMITED (HTTP 429) — no review was performed',
+      'Codex cross-model reviews RATE LIMITED (HTTP 429) — no review was performed',
+    ]) {
+      expect({ cause, advice: interpretFailure(infraRun(cause)).input_needed }).toEqual({
+        cause,
+        advice: interpretFailure(infraRun('an unrecognised infrastructure cause')).input_needed,
+      })
+    }
+  })
+
+  test('HEADLINE: the matcher\'s label set is EXACTLY what the emitter can produce', () => {
+    // BOTH HALVES MOVE TOGETHER, and this is what makes that true rather than asserted.
+    // The labels are composed in `deferredCrossModelPeers`, a Workflow body with no module
+    // resolution, so `delivery.ts` necessarily restates them. Drift is removed by deriving
+    // the truth HERE — running the real emitter across every route, including groups it
+    // does not recognise — and requiring the two sets to be identical. Add or rename a
+    // seat and this reds, instead of that seat silently losing its advice.
+    const { deferredCrossModelPeers } = loadReal()
+    const emitted = new Set<string>()
+    const groups = ['codex', 'kimi', 'claude', undefined, 'an-unknown-family']
+    for (const g1 of groups) {
+      for (const g2 of groups) {
+        const route = {
+          ...(g1 === undefined ? {} : { codex: { group: g1 } }),
+          ...(g2 === undefined ? {} : { kimi: { group: g2 } }),
+        }
+        for (const peer of deferredCrossModelPeers(
+          { codex: 'deferred', kimi: 'deferred' },
+          route,
+          { codex: true, kimi: true },
+        )) {
+          emitted.add(peer.title.replace(/ RATE LIMITED \(HTTP 429\) — no review was performed$/, ''))
+        }
+      }
+    }
+    // The set delivery.ts matches on, read out of its source so the test cannot drift from
+    // it either.
+    // Sliced from the `= [` rather than from the declaration, because the TYPE ANNOTATION
+    // (`readonly string[]`) contains a `]` of its own — the first version of this test
+    // stopped there and compared an empty set, which is a guard that cannot fail.
+    const declAt = DELIVERY_SRC.indexOf('const CROSS_MODEL_SEAT_LABELS')
+    expect(declAt).toBeGreaterThan(-1)
+    const openAt = DELIVERY_SRC.indexOf('= [', declAt)
+    const block = DELIVERY_SRC.slice(openAt, DELIVERY_SRC.indexOf(']', openAt))
+    const matched = new Set([...block.matchAll(/'([^']+)'/g)].map((m) => m[1] as string))
+    // Non-empty on both sides, or the comparison above proves nothing.
+    expect(matched.size).toBe(CROSS_MODEL_SEAT_LABEL_COUNT)
+    expect(emitted.size).toBe(CROSS_MODEL_SEAT_LABEL_COUNT)
+    expect([...matched].sort()).toEqual([...emitted].sort())
+    // And every one of them really does reach the specific advice.
+    for (const label of emitted) {
+      expect(
+        interpretFailure(infraRun(`${label} RATE LIMITED (HTTP 429) — no review was performed`)).input_needed,
+      ).toContain('rather than assuming either')
     }
   })
 

@@ -214,14 +214,18 @@ function wrongBaseGuardEvidence(reason: string): string | null {
  * `mode === 'unknown'` arm, and a thrown workflow message quoted as `infraCause`.
  *
  * SO THE SHAPE IS ANCHORED AT BOTH ENDS, the way `PRE_LAUNCH_PREFIX` and
- * `isPublishedUnreviewedReason` already are here: only the SEAT LABEL varies, and the
- * label vocabulary (`Codex cross-model review`, `Kimi K3 cross-model review`,
- * `Cross-model review 1 (Claude)`, …) is letters, digits, spaces, hyphens and parens —
- * no colon and no em dash. Every probe-quoted shape introduces at least one of those
- * before the phrase, so a quotation cannot satisfy the anchor even when it embeds the
- * authored sentence verbatim (the echo case: `gh pr view` output containing a PRIOR
- * run's title). A label that ever grows a colon stops matching and falls back to the
- * generic advice — the safe direction, by construction.
+ * `isPublishedUnreviewedReason` already are here, AND THE LABEL IS A CLOSED SET rather
+ * than a character class (see `CROSS_MODEL_SEAT_LABELS`). The anchors defeat a quotation
+ * that WRAPS the authored sentence — a prefix, because every probe-quoted shape puts a
+ * colon or an em dash in front of it, and a suffix, because `probeCause` joins two lines
+ * with a space so the sentence can be a prefix of arbitrary prose. The closed label set
+ * defeats an exact-shape IMPOSTOR, which the character class did not: `infraCause` hands
+ * a thrown workflow message straight through, so `GitHub cross-model review RATE LIMITED
+ * (HTTP 429) — no review was performed` used to match.
+ *
+ * Anything this does not recognise falls back to the generic advice, which is what `main`
+ * said before any of this — never wrong, only vague. That is the safe direction, by
+ * construction.
  *
  * WHY NOT STRUCTURALLY, which would be better: `deriveInfraBlock` carries only
  * `{ cause }`, and adding a field to the harvested result means editing
@@ -233,7 +237,55 @@ function wrongBaseGuardEvidence(reason: string): string | null {
  * `trident/inner-workflow.mjs` and nothing else. Tests assert the real title matches AND
  * that all three probe-derived shapes above do not.
  */
-const CROSS_MODEL_RATE_LIMIT_CAUSE = /^[a-z0-9 ()-]+ rate limited \(http 429\) — no review was performed$/
+/**
+ * EVERY SEAT LABEL `rateLimitedPeer` CAN BE GIVEN — the complete set, not a shape.
+ *
+ * WHY A FINITE SET AND NOT A CHARACTER CLASS. The previous revision anchored both ends
+ * but let the label be `[a-z0-9 ()-]+`, which accepts ANY label of that shape rather
+ * than only the ones a seat can actually produce. `infraCause` passes a THROWN workflow
+ * message through verbatim as a terminal cause, so an exact-shape impostor —
+ * `GitHub cross-model review RATE LIMITED (HTTP 429) — no review was performed`, or
+ * `The registry RATE LIMITED …` — matched, and the operator was again sent to check a
+ * model provider's balance for something no seat authored. Measured, both of them.
+ *
+ * The anchors closed the PREFIX and SUFFIX vectors (probe prose wrapping the sentence);
+ * this closes the SUBSTITUTION vector. With a closed set the absence claim below is
+ * TRUE rather than approximately true, which is the whole difference between documenting
+ * an intention and having a guard.
+ *
+ * BOTH HALVES MUST MOVE TOGETHER, AND A TEST IS WHAT MAKES THAT SO. These labels are
+ * composed in `deferredCrossModelPeers` (`trident/inner-workflow.mjs`), which is a
+ * Workflow body with no module resolution — it cannot import this constant and this file
+ * cannot import it, so the list is necessarily restated. What removes the drift risk is
+ * that a test ENUMERATES the labels by running the real emitter across every route
+ * (including unrecognised groups) and asserts the set is exactly this one, so adding or
+ * renaming a seat reds here instead of silently falling back to the generic advice.
+ *
+ * The fallback direction is safe either way: a label missing from this set produces the
+ * generic "retry once the infrastructure is healthy" line, which is what `main` said
+ * before any of this and is never wrong, only vague.
+ */
+const CROSS_MODEL_SEAT_LABELS: readonly string[] = [
+  'Codex cross-model review',
+  'Kimi K3 cross-model review',
+  'Cross-model review 1 (Claude)',
+  'Cross-model review 1 (Kimi K3)',
+  'Cross-model review 2 (Claude)',
+  'Cross-model review 2 (Codex)',
+]
+
+/**
+ * THE CROSS-MODEL RATE-LIMIT CAUSE — one of a CLOSED set of authored sentences.
+ *
+ * Built from `CROSS_MODEL_SEAT_LABELS` so the matcher and the emitter cannot disagree
+ * about what a seat is called, anchored at both ends so no quotation can wrap it, and
+ * lowercased to meet the already-lowercased cause. Every metacharacter in a label (the
+ * parens) is escaped rather than trusted.
+ */
+const CROSS_MODEL_RATE_LIMIT_CAUSE = new RegExp(
+  `^(?:${CROSS_MODEL_SEAT_LABELS.map((l) => l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})` +
+    ' rate limited \\(http 429\\) — no review was performed$',
+)
 
 const PRE_LAUNCH_PREFIX = /^trident infra: /
 const BUILD_NOT_STARTED = 'the build was NOT started'
