@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { innerTerminalFailureReason } from './orchestrator.ts'
+import { reviewedHeadOid } from './merge.ts'
+import type { TridentRun } from './store.ts'
 import { TERMINAL_CAUSE_MAX } from './inner-loop.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -398,6 +400,54 @@ describe('a pr-mode run with an unreadable head still records what it built', ()
 })
 
 /**
+ * THE PUBLISH HANDOFF CARRIES THE PIN THE PUBLISH SEAT READS.
+ *
+ * Argus r18 blocker: `orchestrator.ts`'s never-reviewed-first diff ordering keys on
+ * `reviewedHeadOid(run)` — `reviewedHead` inside `inner_result` — and the only two
+ * results that ever reach that seat are the two `publishRequested: true` handoffs in
+ * `inner-workflow.mjs`. Neither emitted the field, so `seenPin` was '' on every real
+ * publish and the reorder was live in `orchestrator.test.ts` and INERT in the loop.
+ *
+ * These tests read the handoff the REAL workflow source emits (the harness above runs
+ * `inner-workflow.mjs` itself) and push it through the REAL reader, so a regression
+ * that drops the field again cannot pass by fabricating a row shape.
+ */
+describe('the pr-mode publish handoff carries the pin the outer publisher orders the diff by', () => {
+  /** Exactly what `orchestrator.ts` does at the publish seat. */
+  const pinOf = (result: unknown): string | null =>
+    reviewedHeadOid({ inner_result: JSON.stringify(result) } as unknown as TridentRun)
+
+  test('a FIX ROUND hands back `reviewedHead` = the head the LAST review judged, not the head it just built', async () => {
+    // The outer published H in round 1, reviewers read H and asked for changes, so the
+    // resumed run fixes it into FIX. H is what has been seen; FIX is what has not.
+    const out = await runBuiltHead({
+      mode: 'pr',
+      resumeCheckpoint: `outer-published:${H}:0:1`,
+      resumeLiveHead: H,
+      verdicts: ['REQUEST_CHANGES'],
+      fixClaim: FIX,
+    })
+    expect(out.result.checkpoint).toBe('fix-round-2')
+    expect(out.result.publishRequested).toBe(true)
+    expect(out.result.publishHead).toBe(FIX)
+    expect(out.result.reviewedHead).toBe(H)
+    // …and the reader the publish seat uses accepts it. Null here is the inert state.
+    expect(pinOf(out.result)).toBe(H)
+    expect(pinOf(out.result)).not.toBe(FIX)
+  })
+
+  test('ROUND 1 hands back NO pin — no reviewer has seen anything, so nothing may be called reviewed', async () => {
+    const out = await runBuiltHead({ mode: 'pr', claim: H })
+    expect(out.result.checkpoint).toBe('forge-done')
+    expect(out.result.publishRequested).toBe(true)
+    expect(out.result.reviewedHead).toBeUndefined()
+    // '' at the seat = the unordered fallback, which is the right artifact for a
+    // first review: every file in it is unseen.
+    expect(pinOf(out.result)).toBeNull()
+  })
+})
+
+/**
  * A STOP REPORTS ONLY THE CHECKPOINT IT WROTE. `writeTerminalResult` does not touch
  * `inner_checkpoint`; the outer loop copies `result.checkpoint` into the row and leaves
  * `inner_checkpoint_head` alone. Naming a phase here that `checkpoint()` never recorded
@@ -441,6 +491,22 @@ describe('the two bounded stops agree on `ok` — one failure class, one shape',
     expect(out.result.blockKind).toBe('code')
     expect(out.result.findings).toEqual([{ severity: 'blocker', title: 'fix it', evidence: 'x:1' }])
     expect(terminal(out)).toContain("inner_verdict 'REQUEST_CHANGES'")
+    // …AND THE REASONS TRAVEL IN THE SAME INVOCATION. `checkpoint.sh` refuses a
+    // `REQUEST_CHANGES` whose effective findings are not a non-empty JSON array and
+    // records `REVIEW_NOT_RUN` instead, so the terminal write has to bring them:
+    // the row's own findings column may since have been blanked by an intervening
+    // `fix-round-N` checkpoint, which writes `[]`.
+    expect(terminal(out)).toContain('inner_findings_file')
+    expect(terminal(out)).toContain('trident-terminal-findings-')
+    expect(terminal(out)).toContain('{"severity":"blocker","title":"fix it","evidence":"x:1"}')
+  })
+
+  test('a NON-rejection brings no findings file — the guard is scoped to the rejection', async () => {
+    // The column keeps whatever the last checkpoint recorded; only a rejection has
+    // a precondition to satisfy.
+    const out = await runBuiltHead({ probes: UNREADABLE })
+    expect(terminal(out)).toContain("inner_verdict 'REVIEW_NOT_RUN'")
+    expect(terminal(out)).not.toContain('inner_findings_file')
   })
 
   /**

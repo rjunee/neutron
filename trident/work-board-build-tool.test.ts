@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
@@ -21,7 +21,9 @@ import {
   WORK_BOARD_DISPATCH_BUILD_TOOL,
   WORK_BOARD_START_TOOL,
 } from './work-board-build-tool.ts'
-import type { GitModeProbe } from './git-mode.ts'
+import type { EnvCapableHostRunner, GitModeProbe } from './git-mode.ts'
+import { makeCredentialedHostRunner } from './git-mode.ts'
+import { slugifyTask } from './slugify-task.ts'
 
 /**
  * A merge-mode probe that never shells out. `hasGithubOrigin: false` short-
@@ -583,5 +585,173 @@ describe('chat-ack seam (#429 task 4)', () => {
       ctx,
     )) as Record<string, unknown>
     expect(out.ok).toBe(true)
+  })
+})
+
+/**
+ * THE CREDENTIAL MUST REACH THE SEED PROBE FROM EVERY TOOL ENTRY, NOT JUST ONE.
+ *
+ * Argus r17 blocker: `work_board_dispatch_build` spread `host_runner` into the
+ * chokepoint deps and `work_board_start` — the agent-native ▶ START/RETRY, which
+ * is the path a re-dispatched card actually takes — did not. On that path
+ * `dispatchBoardBoundBuild` fell back to bare `spawnCapture`, so against a PRIVATE
+ * origin the built-but-never-reviewed tip probe exited non-zero, collapsed to '',
+ * and seeded nothing: the finished commit rebuilt from scratch, failing closed so
+ * nothing ever looked wrong. That is the exact waste this card exists to remove.
+ *
+ * These drive the REAL tools through the REAL chokepoint against a REAL `git` on
+ * PATH that refuses an uncredentialed `ls-remote`, and each entry carries its own
+ * unwired falsification. A four-site substring count over `open/composer.ts`
+ * (`open-trident-prod-boot-wiring.test.ts`) cannot see this: the drop is a layer
+ * BELOW the composer, in the tool surface's own deps builder.
+ */
+describe('the seed tip probe is credentialed on EVERY tool entry (private origin, real git)', () => {
+  const HEAD = 'a'.repeat(40)
+  const BASE = 'c'.repeat(40)
+  const FINDINGS = '[{"severity":"P2","title":"full suite deferred"}]'
+  const TITLES: Record<string, string> = {
+    // The leading words differ WITHIN the first 35 characters on purpose:
+    // `slugifyTask` truncates there, and four cards sharing a slug would share a
+    // prior run and a branch, which is a different test than this one.
+    'd-wired': 'dispatch entry wired: rebuild the CSV export pipeline with tests',
+    'd-bare': 'dispatch entry unwired: rebuild the CSV export pipeline with tests',
+    's-wired': 'start entry wired: rebuild the CSV export pipeline with tests',
+    's-bare': 'start entry unwired: rebuild the CSV export pipeline with tests',
+  }
+  let links: Map<string, string>
+  let shimPath: string | undefined
+
+  beforeEach(() => {
+    links = new Map()
+    shimPath = undefined
+  })
+  afterEach(() => {
+    if (shimPath !== undefined) process.env['PATH'] = shimPath
+  })
+
+  function binder(): TridentBoardBinder {
+    return {
+      get: (_slug, id) =>
+        TITLES[id] === undefined
+          ? null
+          : { id, title: TITLES[id]!, design_doc_ref: null, linked_run_id: links.get(id) ?? null },
+      attachRun: async () => {},
+    }
+  }
+
+  /** A finished, BUILT-but-never-reviewed prior attempt at `task`, named by the card. */
+  async function priorRun(itemId: string, task: string): Promise<void> {
+    const run = await store.create({
+      slug: slugifyTask(task),
+      project_slug: 'proj-1',
+      repo_path: tmp,
+      task,
+      branch: `trident/${slugifyTask(task)}`,
+    })
+    await store.update(run.id, {
+      phase: 'failed',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      inner_checkpoint_findings: FINDINGS,
+      inner_verdict: 'REVIEW_NOT_RUN',
+      base_sha: BASE,
+    })
+    links.set(itemId, run.id)
+  }
+
+  /** A `git` that answers `ls-remote` ONLY with the credential env present. */
+  function privateOriginGit(): string {
+    const shimDir = join(tmp, 'git-shim')
+    mkdirSync(shimDir)
+    const argv = join(tmp, 'git-argv')
+    writeFileSync(
+      join(shimDir, 'git'),
+      `#!/bin/sh\n` +
+        `printf '%s\\n' "$*" >> "${argv}"\n` +
+        `case "$*" in\n` +
+        `  *ls-remote*)\n` +
+        `    [ -n "\${GIT_CONFIG_COUNT:-}" ] || { echo "fatal: could not read Username" >&2; exit 128; }\n` +
+        `    printf '%s\\t%s\\n' "${HEAD}" "refs/heads/whatever"\n` +
+        `    ;;\n` +
+        `esac\n` +
+        `exit 0\n`,
+    )
+    chmodSync(join(shimDir, 'git'), 0o755)
+    shimPath = process.env['PATH']
+    process.env['PATH'] = `${shimDir}:${shimPath ?? ''}`
+    return argv
+  }
+
+  /** The tool surface as the composition root builds it, with or without the runner. */
+  function tools(host_runner?: EnvCapableHostRunner): ToolRegistry {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: binder(),
+      repo_path: tmp,
+      resolveBuildRepo: async (home) => home,
+      merge_mode_probe: prProbe(),
+      resolveRalph: async () => false,
+      // Not under test, and it must not need a live `gh`.
+      landed_probe: async () => null,
+      ...(host_runner !== undefined ? { host_runner } : {}),
+    })
+    return reg
+  }
+
+  const credentialed = (): EnvCapableHostRunner =>
+    makeCredentialedHostRunner({ GH_TOKEN: 'test-sentinel', GIT_CONFIG_COUNT: '1' })
+
+  /** Did the dispatch ADOPT the prior build's commit, or throw it away? */
+  function seededCheckpoint(out: Record<string, unknown>): string | null {
+    expect(out.ok).toBe(true)
+    return store.get(out.run_id as string)!.inner_checkpoint
+  }
+
+  test('work_board_start (the ▶ RETRY path) adopts the built commit only when host_runner is wired', async () => {
+    const argv = privateOriginGit()
+    await priorRun('s-wired', TITLES['s-wired']!)
+    await priorRun('s-bare', TITLES['s-bare']!)
+
+    const wired = (await tools(credentialed()).get(WORK_BOARD_START_TOOL)!.handler(
+      { board_item_id: 's-wired' },
+      ctx,
+    )) as Record<string, unknown>
+    const bare = (await tools().get(WORK_BOARD_START_TOOL)!.handler(
+      { board_item_id: 's-bare' },
+      ctx,
+    )) as Record<string, unknown>
+
+    // The remote read really was attempted — an assertion about the credential is
+    // worth nothing if the probe never ran.
+    expect(readFileSync(argv, 'utf8')).toContain('ls-remote --heads origin')
+    // WIRED: the credential arrived, the tip matched the recorded head, the
+    // finished commit (and its recorded findings) are adopted instead of rebuilt.
+    expect(seededCheckpoint(wired)).toBe('forge-done')
+    expect(store.get(wired.run_id as string)!.inner_checkpoint_head).toBe(HEAD)
+    expect(store.get(wired.run_id as string)!.inner_checkpoint_findings).toBe(FINDINGS)
+    // UNWIRED, the same card shape one line apart: the private origin refuses the
+    // read, nothing is adopted, and the built commit is rebuilt from scratch.
+    expect(seededCheckpoint(bare)).toBeNull()
+    expect(store.get(bare.run_id as string)!.inner_checkpoint_findings).toBeNull()
+  })
+
+  test('work_board_dispatch_build carries the same runner — the two entries do not disagree', async () => {
+    const argv = privateOriginGit()
+    await priorRun('d-wired', TITLES['d-wired']!)
+    await priorRun('d-bare', TITLES['d-bare']!)
+
+    const wired = (await tools(credentialed()).get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'd-wired', task: TITLES['d-wired'] },
+      ctx,
+    )) as Record<string, unknown>
+    const bare = (await tools().get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'd-bare', task: TITLES['d-bare'] },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(readFileSync(argv, 'utf8')).toContain('ls-remote --heads origin')
+    expect(seededCheckpoint(wired)).toBe('forge-done')
+    expect(seededCheckpoint(bare)).toBeNull()
   })
 })
