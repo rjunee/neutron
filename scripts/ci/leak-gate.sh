@@ -750,10 +750,22 @@ FORBIDDEN_PREFIXES='tenancy/ tenant-provisioning/ signup/ identity/ proxy/'
 # K10 intentionally introduces a root SPEC.md (the public master spec), which
 # flips the repo into Ralph-governed mode (`detectRalphMode` in
 # trident/git-mode.ts keys off a root SPEC.md). That flip is now INTENDED, so a
-# root SPEC.md must NOT trip forbidden-path. The remaining root files stay
-# banned as carve tripwires against Managed's private root docs re-entering the
-# public tree (STATUS.md/ISSUES.md/CLAUDE.md/AGENTS.md).
-FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md'
+# root SPEC.md must NOT trip forbidden-path.
+#
+# `AGENTS.md` is absent for the SAME reason, as of this change, and the evidence
+# is the private repo itself: STATUS.md, ISSUES.md and CLAUDE.md all exist at its
+# root today and are real carve hazards, but a root AGENTS.md has NEVER existed
+# there — `git log --all -- AGENTS.md` returns zero commits. The entry was
+# guarding an empty set while blocking a file this repo intends to ship: the
+# cross-harness entry point a self-hoster's Codex reads, which has no equivalent
+# (this tree's 32 AGENTS.md files are all per-directory and only apply once you
+# are inside those directories).
+#
+# The three retained entries stay banned as carve tripwires against the private
+# repo's root docs re-entering the public tree. If a root AGENTS.md is ever
+# created THERE, restore it here — the content rules (Tier 1/2) are what actually
+# catch a copied private doc, but the path tripwire is the cheap first line.
+FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md'
 forbidden_path_hits() {
   local f p
   while IFS= read -r f; do
