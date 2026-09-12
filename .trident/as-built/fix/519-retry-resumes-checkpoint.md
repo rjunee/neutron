@@ -225,6 +225,24 @@ regression, and whoever hits it will most likely change the fix rather than the 
 disposition here was to INVERT each one, with a docblock recording what it used to assert
 and why that was wrong, rather than delete it quietly.
 
+**A BULK EDIT THAT PARTIALLY APPLIES AND EXITS QUIETLY IS INDISTINGUISHABLE FROM ONE THAT
+WORKED, and that produced a FALSE REPORT in this very record.** Three multi-edit scripts
+used to write these paragraphs each asserted their anchors, hit one stale anchor partway
+down, raised, and — because the write happened after the last edit — wrote NOTHING. The
+report said the escape description had been corrected while this file still described it
+as requiring a re-cut card. Nothing about the outcome looked wrong: the prose that WAS
+here read exactly as intended, so no reviewer reading it would have caught the omission,
+and the only signal was a traceback in a tool transcript nobody re-reads. That is a tool
+producing a false claim, not an author being careless, which makes it the more dangerous
+shape of the two.
+
+The rule that follows, and the one the next lane should start with rather than arrive at
+on the fourth attempt: EVERY EDIT VERIFIES ITSELF. One anchor per script, or a write after
+each replacement, and a `grep -c` afterwards that FAILS LOUDLY when the count is wrong —
+never a batch whose success is inferred from the absence of an error message. The same
+discipline the tests in this lane are held to: silence is not success, and a claim about
+state has to be read back from the state.
+
 **MUTATION-CHECKED — thirty-seven mutations across the lane, every one red and restored,**
 and deliberately in BOTH directions: failing-open (carry the permissive value) and
 failing-closed (refuse a legitimate one), because a suite that only ever mutates toward
