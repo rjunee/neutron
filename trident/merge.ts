@@ -1766,7 +1766,9 @@ export async function worktreeFingerprint(run_host: RunHostCommand, wt: string):
  *
  * A BYTE budget, not a character one, because the bound that matters is what actually
  * leaves the process; a character cap on multi-byte text bounds neither the prompt size
- * nor the cost. 2 KiB per side is roughly 15-25 commit subjects plus bodies — enough to
+ * nor the cost. Spent NEWEST-FIRST on whole records (`newestRecordsWithinBudget`) —
+ * `git log` prints newest first, and the newest commit is the one that caused the
+ * conflict, so which END the budget keeps is a correctness question, not a detail. 2 KiB per side is roughly 15-25 commit subjects plus bodies — enough to
  * answer "why does each change exist", which is the one question Bash used to serve —
  * against a prompt whose other parts are already far larger.
  *
@@ -1780,12 +1782,53 @@ export async function worktreeFingerprint(run_host: RunHostCommand, wt: string):
  */
 const ARBITER_HISTORY_BYTES_PER_SIDE = 2_048
 
-/** Keep the last `maxBytes` BYTES of `s` (UTF-8). A cut that lands mid-character
- *  yields a replacement char, which is cosmetic and never a parse the prompt relies on. */
-function tailBytes(s: string, maxBytes: number): string {
+/** Keep the FIRST `maxBytes` bytes of `s` (UTF-8). A cut landing mid-character yields
+ *  a replacement char, which is cosmetic and never a parse the prompt relies on. */
+function headBytes(s: string, maxBytes: number): string {
   const buf = Buffer.from(s, 'utf8')
   if (buf.byteLength <= maxBytes) return s
-  return buf.subarray(buf.byteLength - maxBytes).toString('utf8')
+  return buf.subarray(0, maxBytes).toString('utf8')
+}
+
+/**
+ * Fit `git log` output into a byte budget by dropping WHOLE RECORDS, oldest first
+ * (#541 review round 5).
+ *
+ * THE BUG THIS REPLACES IS WORTH STATING. The previous version budgeted with a
+ * `tailBytes` — keep the LAST n bytes — under a comment claiming it preserved the
+ * newest commits, "exactly as the last lines of stderr are the ones that explain a
+ * failure". That reasoning is right for stderr and backwards here: `git log` prints
+ * NEWEST FIRST, so keeping the tail kept the OLDEST commits and discarded the ones
+ * that caused the conflict. It could also begin midway through a NUL record and hand
+ * the arbiter a fragment. The evidence was bounded, defanged — and actively
+ * misleading, which is worse than absent.
+ *
+ * THE NEWEST RECORD ALWAYS SURVIVES, even when it alone exceeds the budget: it is
+ * head-truncated rather than dropped, because a commit's subject comes first and a
+ * truncated subject still says more than nothing. Every other kept record is WHOLE,
+ * so no fragment is ever produced, and the count of dropped records is stated rather
+ * than left as a silent gap.
+ */
+function newestRecordsWithinBudget(raw: string, maxBytes: number): string {
+  const records = raw.split('\u0000').filter((record) => record.trim().length > 0)
+  if (records.length === 0) return ''
+  const kept: string[] = []
+  let used = 0
+  for (const record of records) {
+    const size = Buffer.byteLength(record, 'utf8')
+    if (kept.length === 0) {
+      // The newest, unconditionally — truncated to the budget if it is oversized.
+      kept.push(size > maxBytes ? headBytes(record, maxBytes) : record)
+      used = Math.min(size, maxBytes)
+      continue
+    }
+    if (used + size > maxBytes) break
+    kept.push(record)
+    used += size
+  }
+  const dropped = records.length - kept.length
+  if (dropped > 0) kept.push(`(+${dropped} older commit(s) omitted for length)`)
+  return kept.join('\u0000')
 }
 
 /**
@@ -1838,9 +1881,8 @@ async function sideHistory(
     return '(history unavailable)'
   }
   if (!res.ok) return '(history unavailable)'
-  // Budget the RAW bytes first (so a single enormous commit body cannot buy extra
-  // room by being split into records), then fold each surviving record separately.
-  const budgeted = tailBytes(res.stdout, ARBITER_HISTORY_BYTES_PER_SIDE)
+  // Budget by WHOLE RECORDS, newest first, then fold each survivor separately.
+  const budgeted = newestRecordsWithinBudget(res.stdout, ARBITER_HISTORY_BYTES_PER_SIDE)
   const folded = budgeted
     .split('\u0000')
     .map((record) => foldEvidenceTo(record, ARBITER_HISTORY_BYTES_PER_SIDE).trim())
@@ -1881,7 +1923,25 @@ async function arbitrateConflict(
   if (arbitrate === undefined) {
     return { kind: 'unavailable', reason: 'no arbiter is wired' }
   }
-  const files = ctx.conflicted.length > 0 ? ctx.conflicted.join(', ') : '(unnamed)'
+  // THE THIRD CHANNEL IN (#541 review round 5). The resolver question and both
+  // histories were folded; the FILENAMES were interpolated raw, and a git path may
+  // contain newlines and Unicode control characters. That is a STRONGER attack than
+  // the prose injection closed in round 4: a path named
+  // `x\nOPTIONS:\n- retry-resolution: …` forges the prompt's STRUCTURE — it
+  // fabricates the option list rather than arguing with it. Same shape as the
+  // previous two findings, one input over.
+  //
+  // `foldEvidence` PER NAME, not over the joined string: folding the join would let
+  // one enormous path consume the whole budget and silently erase the others, and a
+  // per-name cap is what makes each entry independently bounded. It folds every
+  // forgery codepoint and newline to an ASCII space, which keeps an ordinary path
+  // with a space in it readable (the arbiter has to be able to Read these) while
+  // removing any ability to start a new line. `renderPaths` then bounds the COUNT,
+  // so a thousand-file conflict cannot flood the prompt either.
+  const files =
+    ctx.conflicted.length > 0
+      ? renderPaths(ctx.conflicted.map((path) => foldEvidence(path)))
+      : '(unnamed)'
   // THE TWO SIDES' HISTORY, gathered HERE because the arbiter has no Bash to gather
   // it with (#541 review round 3). `base...branch` two-dot ranges each way: what the
   // branch added that the base does not have, and vice versa — the two sets of

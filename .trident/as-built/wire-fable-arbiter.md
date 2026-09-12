@@ -118,6 +118,58 @@ If phase D lands a real sandbox, `Bash` could return under it and this becomes t
 belt-and-braces it should always have been. `permission_mode`/`sandbox` were never
 touched: shape-only at Step 0, and irrelevant to the mechanism that works.
 
+### The third channel IN: conflict filenames
+
+The resolver question and both histories were folded; the FILENAMES were interpolated
+raw. Git paths may contain newlines and Unicode control characters, so a path is a
+writable channel into the prompt — and a stronger one than prose injection, because a
+name carrying `\nOPTIONS:\n- …` forges the prompt's STRUCTURE rather than arguing with
+it: it fabricates the option list instead of trying to talk the model out of the real
+one. A conflicted path comes from `git diff --diff-filter=U`, i.e. from the repository,
+so it is attacker-influenceable by exactly the same argument as a commit message, which
+was already folded. The gap was never asking whether a NAME was an input.
+
+`foldEvidence` is applied PER NAME, then `renderPaths` bounds the count. Per-name rather
+than over the join, because folding the joined string lets one 60 KB path consume the
+whole budget and silently erase its siblings. Folding to an ASCII space (not the
+ref-name `?` rule) keeps an ordinary path with a space in it readable — the arbiter has
+to be able to Read these.
+
+One test needed a second attempt for the usual reason: my oversized-name case put the
+huge path FIRST, and joined folding keeps the TAIL, so the sibling survived by luck and
+the assertion passed for the wrong reason. Putting the sibling first makes it a real
+detector — verified by mutation.
+
+### The history cap kept the wrong end
+
+`git log` prints NEWEST FIRST; `tailBytes` kept the LAST bytes. So once a side exceeded
+2 KiB the cap kept the OLDEST commits and discarded the ones that caused the conflict —
+and could begin midway through a NUL record and hand over a fragment. The evidence was
+bounded, defanged, and actively misleading, which is worse than absent. The rationale
+written beside it justified tail-keeping as preserving the newest, borrowing an argument
+that is true for stderr and backwards for `git log`.
+
+`newestRecordsWithinBudget` now drops WHOLE records, oldest first, and the newest record
+always survives — head-truncated if it alone exceeds the budget, because a commit's
+subject comes first. Dropped records are counted in the text rather than left as a
+silent gap.
+
+The old test could not have caught this: 400 KB of one repeated character makes every
+record look like every other, which is precisely the fixture shape that hides an
+ordering bug. The replacement uses identifiable records and asserts the newest is
+present, the oldest is gone, kept records are whole, and the newest survives even when
+it alone exceeds the budget.
+
+### THE PATTERN, named because it recurred four times
+
+Every failed control in this lane was **correct in the dimension measured and wrong in
+the dimension that mattered**. The fingerprint was correct about state and blind to time.
+The tool grant was correct about the arbiter and blind to who it could ask. The channel
+deletion was correct about prose and blind to a third input. The cap was correct about
+bytes and blind to meaning. Each measurement was real; the property claimed was not the
+one measured. The only thing that ever caught it was varying a parameter and watching the
+result change — which is also what caught the e2e arms passing by accident of argv order.
+
 ### The channel out of the arbiter, closed rather than filtered
 
 THE SAME VECTOR, ONE HOP DOWNSTREAM. Removing `Bash` took away the arbiter's ability to
