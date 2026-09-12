@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:957`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:974`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -24,7 +24,7 @@ Worse, the ONE class of child certain to be hosting a live build reported nothin
 A child is quarantined precisely because it still hosts running workflows (the eviction
 guard deferred its reaping), and `shutdownQuarantinedChildren` deleted its map entry
 before killing it — which makes the `child.exited` hook `quarantineChild` installs return
-early (`spawn.ts:846`). Every deploy killed those silently.
+early (`spawn.ts:850`). Every deploy killed those silently.
 
 ### The choice the spec item demanded, and why it is what it is
 
@@ -129,8 +129,8 @@ somebody can find beats an unbounded one nobody knows about.
 
 **The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
 generations on one session key — the pooled child, and a quarantined child that held the key
-before a fresh spawn took it over — and they share one registry row (`pool.ts:945`, then
-`pool.ts:968`). The later write replaced the earlier one, so the row named one generation
+before a fresh spawn took it over — and they share one registry row (`pool.ts:961`, then
+`pool.ts:985`). The later write replaced the earlier one, so the row named one generation
 beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
 disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
 now refuses a generation the row does not currently name — free, because both consumers match
@@ -139,6 +139,61 @@ stderr rather than failing quietly.
 
 The multi-generation test asserted only the emitted callbacks while reading as though it
 covered the durable half; it now asserts the final registry row.
+
+### The premise that was missing, and the three defects that shared it
+
+Three review rounds found three defects in this module, and each fix introduced the next:
+round 1 claimed attribution for children that were already dead; round 2 wrote the "reported"
+tombstone before the report; round 3 put the report on the kill path. They share a root. The
+reporting path was bolted onto a shutdown sequence whose constraint was never written down.
+
+It is written down now, at the top of `gateway-shutdown-kill.ts`:
+
+> This code runs inside a shutdown with a bounded external deadline that this process does
+> not control, and it may get no further turn. Everything in it is either durable-and-cheap
+> or bounded-and-optional, and the two are separated by phase.
+
+Concretely: systemd's `TimeoutStopSec` is 30 s and the cgroup SIGKILL fires at the deadline
+whatever we are mid-way through (`gateway/index.ts:1026-1038`); the database closes a few
+statements after we return. So the registry marker — local, synchronous, durable — runs for
+every child first, and the live `onChildCrash` report — a call into a sink this module does
+not own — is attempted only after every child is marked and killed, under a bound.
+
+**What the third defect actually cost.** `shutdownAllPersistentRepls` awaited the
+unrestricted sink promise between one child's kill and the next child's marker. Give the
+first pooled session a sink that never settles and the walk never reaches the second child at
+all: no marker, no kill. Production then SIGKILLs the cgroup 30 s later, and every remaining
+child is reported on the next boot as a bare crash — this change's own purpose, defeated
+inside this change, and worse than the original defect because one hung sink took out every
+child behind it rather than one.
+
+**The shape of the fix.** `recordGatewayShutdownKill` is synchronous: it samples liveness,
+writes the marker, and RETURNS the live report that is now owed.
+`deliverShutdownKillReports` runs once, at the end, bounded twice — at most
+`SHUTDOWN_REPORT_PER_SINK_MS` per sink so one hang cannot hold the phase, and at most
+`SHUTDOWN_REPORT_PHASE_BUDGET_MS` across the phase so N hangs cannot each spend the per-sink
+bound out of a deadline the rest of the teardown shares. An abandoned promise keeps a
+`.catch` attached so a later rejection cannot surface as an unhandled one. The phase returns
+a per-outcome tally rather than `void`, because a phase that delivered nothing must be
+distinguishable from one that delivered everything.
+
+Losing a report there is survivable by construction — the next boot reads the marker and
+delivers the attributed report. Losing a marker or a kill is not, which is why neither is
+allowed behind a sink.
+
+One test had to change rather than be added, and the change is the honest one: the pooled
+case asserted that the report arrived *before* the kill. That was true of the old shape and
+is deliberately false now. It asserts the property that replaced it — the durable marker is
+already on disk when the report is attempted — and that the child is already dead by then, on
+purpose.
+
+**On the clamp, and a test that could not exist as a count.** `Math.min(perSinkMs, remaining)`
+has exactly one observable effect: elapsed time. It never changes which reports are attempted,
+only how long the last one may hold the phase, so a count-based assertion cannot discriminate
+it — measured, not assumed: a count-based version left the mutation alive. The gate's own
+opt-out (`WALL-CLOCK-BOUND-OK`) exists for bounds with no deterministic substitute and this is
+one, so it is used with the margin argued: ~60 ms clamped against ~500 ms unclamped, threshold
+at 250 ms.
 
 ### A tombstone is written after the thing it attests to
 
@@ -215,7 +270,7 @@ next boot's watchdog would have laundered the deploy attribution away.
 
 ### Measured
 
-29 mutations applied one at a time, each reverted after: **29 red, 0 survivors.** Every
+35 mutations applied one at a time, each reverted after: **35 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
@@ -226,6 +281,9 @@ rather than confirming them:
 - **M15** (delete the quarantine report) initially SURVIVED. The assertion said "at least one
   report, all of them deploys", which the *pooled* child's report satisfied on its own. It now
   names the quarantined generation explicitly.
+- **M31** (drop the per-phase clamp) survived its first version, and that is what established
+  the paragraph above: the clamp changes no count, so only an elapsed-time assertion can kill
+  it. Retargeted with a justified opt-out rather than left unfalsifiable.
 - **M27** (restore the early `child_crash_notified_at` stamp) reddens ONLY the new sequence
   test. Every shutdown-half assertion still passes under it — the marker is written, the
   throw is caught — which is precisely why an artifact-shaped test could not see the defect.

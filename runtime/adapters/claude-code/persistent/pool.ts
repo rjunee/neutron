@@ -11,7 +11,12 @@ import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
-import { reportGatewayShutdownKill, sampleLivenessBeforeShutdownKill } from './gateway-shutdown-kill.ts'
+import {
+  deliverShutdownKillReports,
+  recordGatewayShutdownKill,
+  sampleLivenessBeforeShutdownKill,
+  type PendingShutdownKillReport,
+} from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
@@ -919,6 +924,9 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // same event, and a per-child `Date.now()` would invite a reader to treat the
   // spread as evidence of separate causes.
   const shutdownAt = Date.now()
+  // The live reports owed once every child is marked and killed — delivered in a
+  // bounded phase at the end, never inline. See `gateway-shutdown-kill.ts`.
+  const owedReports: PendingShutdownKillReport[] = []
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
     try {
@@ -937,18 +945,27 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
       // whole change exists to remove.
       const owner = supervisedBySessionKey.get(key)
       if (owner !== undefined) {
+        // PHASE 1 — MARK, synchronously. The owed live report is COLLECTED, not
+        // awaited: a sink we do not own, awaited here, would sit between this child's
+        // kill and every later child's marker AND kill, and the cgroup SIGKILL at
+        // `TimeoutStopSec` does not wait for it. One hung sink would then cost every
+        // remaining child its durable marker — this function's own purpose, defeated
+        // inside this function. See the constraint at the top of
+        // `gateway-shutdown-kill.ts`.
+        //
         // SAMPLED BEFORE THE KILL, because `kill()` is idempotent after exit
         // (`pty-host.ts`): teardown "kills" a child that died of a real fault moments
         // earlier exactly as readily as a live one, and calling that a deploy buries a
         // fault where nobody investigates it. Only an observed-alive child is
         // attributed to this shutdown.
-        await reportGatewayShutdownKill(
+        const owed = recordGatewayShutdownKill(
           owner,
           key,
           session.childGeneration,
           shutdownAt,
           sampleLivenessBeforeShutdownKill(() => session.hasChildExited()),
         )
+        if (owed !== null) owedReports.push(owed)
       } else {
         process.stderr.write(
           `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,
@@ -965,7 +982,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // them quarantined), so the loop above cannot see them. At teardown the hosted
   // work they were being kept alive for is going away anyway — kill them, or the
   // process is orphaned.
-  await shutdownQuarantinedChildren(shutdownAt)
+  owedReports.push(...shutdownQuarantinedChildren(shutdownAt))
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs.
@@ -980,6 +997,11 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
     }
   }
   ephemeralSessions.clear()
+  // PHASE 3 — every child is now marked and killed, so the live reports can be
+  // attempted with no child's fate behind them. Bounded per sink AND across the
+  // phase; anything abandoned here is still attributed on the next boot from the
+  // marker phase 1 wrote, which is what the marker is for.
+  await deliverShutdownKillReports(owedReports)
   // Reset supervision state so tests don't leak per-key gates across cases.
   respawnGates.clear()
   childByKey.clear()

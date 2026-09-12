@@ -26,7 +26,11 @@ import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
-import { reportGatewayShutdownKill, sampleLivenessBeforeShutdownKill } from './gateway-shutdown-kill.ts'
+import {
+  recordGatewayShutdownKill,
+  sampleLivenessBeforeShutdownKill,
+  type PendingShutdownKillReport,
+} from './gateway-shutdown-kill.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
 import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
@@ -944,25 +948,34 @@ export async function sweepQuarantinedChildren(): Promise<number> {
  *  `quarantineChild` installs returns early when the entry is already gone from
  *  the map, and the delete below happens first. So each kill is now reported as
  *  the gateway shutdown it is, before it happens. */
-export async function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): Promise<void> {
+export function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): PendingShutdownKillReport[] {
+  const owed: PendingShutdownKillReport[] = []
   for (const [generation, entry] of [...quarantinedChildren]) {
     quarantinedChildren.delete(generation)
-    // Sampled BEFORE the kill, for the reason `gateway-shutdown-kill.ts` gives: a
-    // quarantined child can also have died on its own while we were keeping it alive
-    // for its hosted work, and that death is not this deploy's to claim.
-    await reportGatewayShutdownKill(
+    // MARK, THEN KILL. Both are cheap and local; neither may sit behind a sink. The
+    // owed live report is RETURNED for the caller's bounded delivery phase — awaiting
+    // it here would put an unbounded call from a sink we do not own between this
+    // child's kill and the next one's (see `gateway-shutdown-kill.ts`, the constraint
+    // at the top).
+    //
+    // Sampled BEFORE the kill for the reason that module also gives: a quarantined
+    // child can have died on its own while we were keeping it alive for its hosted
+    // work, and that death is not this deploy's to claim.
+    const report = recordGatewayShutdownKill(
       entry.options,
       entry.sessionKey,
       generation,
       shutdownAt,
       sampleLivenessBeforeShutdownKill(() => entry.session.hasChildExited()),
     )
+    if (report !== null) owed.push(report)
     try {
       entry.session.child.kill()
     } catch {
       /* already gone */
     }
   }
+  return owed
 }
 
 /** Test/diagnostic seam: how many children are quarantined right now. */

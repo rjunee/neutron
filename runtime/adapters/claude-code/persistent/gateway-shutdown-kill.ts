@@ -35,6 +35,37 @@
  *   - trident's external launcher-liveness probe, which would otherwise latch
  *     `inner workflow launcher crashed`.
  *
+ * ── THE CONSTRAINT EVERYTHING HERE IS WRITTEN AGAINST ────────────────────────
+ * READ THIS BEFORE ADDING ANYTHING TO THIS PATH.
+ *
+ * This code runs inside a shutdown with a BOUNDED EXTERNAL DEADLINE that this
+ * process does not control, and it may get NO FURTHER TURN. The gateway's SIGTERM
+ * handler calls `shutdownAllPersistentRepls`; systemd's `TimeoutStopSec` is 30 s and
+ * the cgroup SIGKILL fires at the deadline whatever we are in the middle of
+ * (`gateway/index.ts:1029-1038`). The database closes a few statements after we
+ * return. Nothing here gets a retry, a second pass, or an apology.
+ *
+ * Therefore every step in this module is EITHER durable-and-cheap OR
+ * bounded-and-optional, and the two are separated BY PHASE:
+ *
+ *   - DURABLE AND CHEAP — the registry marker. A local, synchronous write that
+ *     records what we know before we act on it. It runs for every child, first.
+ *   - BOUNDED AND OPTIONAL — the live `onChildCrash` report. It talks to a sink
+ *     this module does not own and cannot vouch for, so it is attempted only after
+ *     every child is marked and killed, and every wait on it is bounded.
+ *
+ * NOTHING UNBOUNDED MAY SIT ON THE CRITICAL PATH OF THE KILLING WORK. A sink that
+ * never settles must cost a late report and nothing else — never another child's
+ * marker, and never another child's kill. This rule is written here because the
+ * three defects this module has already had were all the same mistake: the
+ * reporting path was bolted onto a shutdown sequence whose deadline was never made
+ * explicit. It claimed attribution for a child that was already dead; it wrote the
+ * "reported" tombstone before the report; and it awaited an unrestricted sink
+ * promise between one child's kill and the next, so one hung sink could take the
+ * cgroup deadline away from every child behind it and leave them all to be reported
+ * on the next boot as bare crashes — this module's own purpose, defeated by this
+ * module. Each fix introduced the next, and the missing premise was the same.
+ *
  * ── ONLY FOR A CHILD WE ACTUALLY KILLED ──────────────────────────────────────
  * `shutdownAllPersistentRepls` calls `kill()`, which is IDEMPOTENT AFTER EXIT
  * (`pty-host.ts`). So teardown "kills" a child that died of a genuine fault
@@ -265,30 +296,170 @@ export function closeCrashReportEdge(
   }
 }
 
+/** How long ONE sink call may hold the shutdown. */
+export const SHUTDOWN_REPORT_PER_SINK_MS = 2_000
+/** How long the WHOLE reporting phase may hold the shutdown, across every child.
+ *  Bounded as a phase and not only per child, because N hung sinks must not cost
+ *  N × the per-sink bound out of a deadline shared with the rest of the teardown. */
+export const SHUTDOWN_REPORT_PHASE_BUDGET_MS = 5_000
+
 /**
- * Tell the durable crash sink that a gateway shutdown killed this child, and
- * record the same fact on the registry row for the next boot.
+ * A live report that is OWED, once the child it describes has been marked and killed.
  *
- * The sink call is AWAITED: the gateway closes its database a few statements
- * after `shutdownAllPersistentRepls` returns (`gateway/index.ts`), so a
- * fire-and-forget write here would race `db.close()` and lose exactly the report
- * this exists to produce. A throwing sink is logged to stderr and does not stop
- * the shutdown — the registry marker is the backstop that gets the next boot to
- * the same answer.
+ * It exists as a value because the reporting is deliberately NOT done where it is
+ * decided: deciding is cheap and local, reporting talks to a sink this module does
+ * not own. See the constraint at the top of this file.
+ */
+export interface PendingShutdownKillReport {
+  options: PersistentReplSubstrateOptions
+  sessionKey: string
+  childGeneration: string
+  at: number
+  /** True when the shutdown demonstrably killed a live child. */
+  attributed: boolean
+  liveness: ShutdownLivenessSample
+}
+
+/**
+ * PHASE 1 — record what we know, durably and synchronously, and return the live
+ * report that is now owed.
  *
- * THE ORDER OF THE TWO WRITES IS THE WHOLE DESIGN:
- *   1. the ATTRIBUTION marker, BEFORE the kill, because it records a fact we know at
- *      that moment (we are about to terminate a child observed alive) and after the
- *      kill this process may get no further turn;
- *   2. the crash-report edge, AFTER the sink commits, because it records that the
- *      report HAPPENED — and a tombstone written before the thing it attests to is
- *      an intention dressed as an outcome.
+ * Everything expensive is deliberately left to {@link deliverShutdownKillReports}.
+ * This function does not await anything: it must be safe to run for every child
+ * before any of them is killed, and it must not be able to consume the shutdown's
+ * deadline on behalf of a child that has not been reached yet.
  *
- * Split that way, a throwing sink degrades into exactly the behaviour worth having:
- * the marker survives, the edge stays open, and the next boot's watchdog finds the
- * dead pid, reads the marker, and delivers the ATTRIBUTED report — a deploy, late,
- * rather than a generic crash or nothing at all. The retry carries the attribution
- * because the attribution is on disk; no second state is needed to preserve it.
+ * Returns `null` when there is nothing to deliver (no sink wired) — the marker, if
+ * this death was ours, has still been written.
+ */
+export function recordGatewayShutdownKill(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+  childGeneration: string,
+  at: number,
+  liveness: ShutdownLivenessSample,
+): PendingShutdownKillReport | null {
+  // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
+  // ALIVE was killed by this shutdown; anything else is reported as undetermined.
+  const attributed = liveness === 'alive'
+  if (attributed && options.replRegistryPath !== undefined) {
+    // The marker is an EXCUSE for a death, so it is written only where the death is
+    // ours to own. Writing it for a child that was already gone would excuse a fault,
+    // and it would also close the crash edge — silencing the next boot's honest
+    // report of the very fault we are refusing to claim.
+    const marked = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
+    if (!marked) {
+      // Refused (the row has moved on to another generation) or unwritable. A
+      // best-effort write that quietly did nothing is the silence this module exists
+      // to remove, so it is said out loud.
+      process.stderr.write(
+        `[repl] gateway shutdown could not record the durable marker for generation=${childGeneration.slice(0, 8)} ` +
+          `(the registry row names a different generation, or could not be written) — this death will be reported ` +
+          `by the live sink only, if that lands\n`,
+      )
+    }
+  }
+  if (options.onChildCrash === undefined) return null
+  return { options, sessionKey, childGeneration, at, attributed, liveness }
+}
+
+/**
+ * PHASE 3 — attempt the owed live reports, AFTER every child is marked and killed.
+ *
+ * BOUNDED TWICE, and both bounds are load-bearing. Each sink call gets at most
+ * {@link SHUTDOWN_REPORT_PER_SINK_MS}, so one hung sink cannot hold the phase; the
+ * phase gets at most {@link SHUTDOWN_REPORT_PHASE_BUDGET_MS} in total, so N hung
+ * sinks cannot each spend the per-sink bound out of a deadline the rest of the
+ * teardown also needs. A report that runs out of budget is ABANDONED, not awaited:
+ * the promise is left with a catch attached so a later rejection cannot surface as
+ * an unhandled one, and the child it describes is already dead and already marked.
+ *
+ * LOSING A REPORT HERE IS SURVIVABLE BY CONSTRUCTION, which is the whole point of
+ * doing the marker first: the next boot's watchdog reads the marker and delivers the
+ * ATTRIBUTED report. Losing a marker or a kill is not survivable, which is why
+ * neither is allowed behind this.
+ *
+ * Returns a per-outcome tally rather than `void` — a phase that delivered nothing
+ * must be distinguishable from one that delivered everything.
+ */
+export async function deliverShutdownKillReports(
+  reports: readonly PendingShutdownKillReport[],
+  opts: { perSinkMs?: number; phaseBudgetMs?: number; now?: () => number } = {},
+): Promise<{ delivered: number; timedOut: number; failed: number; skipped: number }> {
+  const perSinkMs = opts.perSinkMs ?? SHUTDOWN_REPORT_PER_SINK_MS
+  const phaseBudgetMs = opts.phaseBudgetMs ?? SHUTDOWN_REPORT_PHASE_BUDGET_MS
+  const now = opts.now ?? Date.now
+  const phaseDeadline = now() + phaseBudgetMs
+  const tally = { delivered: 0, timedOut: 0, failed: 0, skipped: 0 }
+
+  for (const report of reports) {
+    const remaining = phaseDeadline - now()
+    if (remaining <= 0) {
+      // The phase is spent. Everything left is already marked and killed, so the
+      // next boot reports it; saying so beats discovering it there.
+      tally.skipped += 1
+      process.stderr.write(
+        `[repl] gateway shutdown reporting budget spent — generation=${report.childGeneration.slice(0, 8)} ` +
+          `was not reported live; the next boot reports it from the durable marker\n`,
+      )
+      continue
+    }
+    const sink = report.options.onChildCrash
+    if (sink === undefined) {
+      tally.skipped += 1
+      continue
+    }
+    const budget = Math.min(perSinkMs, remaining)
+    const TIMED_OUT = Symbol('timed-out')
+    let settled: unknown
+    try {
+      const call = Promise.resolve(
+        sink({
+          sessionKey: report.sessionKey,
+          generationKey: report.childGeneration,
+          cause: report.attributed ? 'gateway-shutdown' : 'unknown',
+          detail: report.attributed
+            ? gatewayShutdownKillDetail(report.at)
+            : undeterminedShutdownDetail(report.liveness, report.at),
+        }),
+      )
+      // A sink we abandon must not become an unhandled rejection later. Attaching the
+      // catch here — to the ORIGINAL promise, not to the race — is what makes
+      // abandoning it safe.
+      call.catch(() => undefined)
+      settled = await Promise.race([call.then(() => undefined), Bun.sleep(budget).then(() => TIMED_OUT)])
+    } catch (err) {
+      tally.failed += 1
+      process.stderr.write(
+        `[repl] onChildCrash sink threw on gateway-shutdown kill generation=${report.childGeneration.slice(0, 8)}: ${String(err)} ` +
+          `— the next boot reports it from the durable marker\n`,
+      )
+      continue
+    }
+    if (settled === TIMED_OUT) {
+      tally.timedOut += 1
+      process.stderr.write(
+        `[repl] onChildCrash sink did not answer within ${budget}ms for generation=${report.childGeneration.slice(0, 8)} ` +
+          `— abandoned; the next boot reports it from the durable marker\n`,
+      )
+      continue
+    }
+    tally.delivered += 1
+    // COMMITTED — and only now is the edge closed, so the next boot does not report
+    // this death a second time. A timed-out or thrown report deliberately leaves it
+    // OPEN, exactly as the unattributed path does, so the backstop still fires.
+    if (report.attributed && report.options.replRegistryPath !== undefined) {
+      closeCrashReportEdge(report.options.replRegistryPath, report.sessionKey, report.childGeneration, report.at)
+    }
+  }
+  return tally
+}
+
+/**
+ * Record and deliver in one call — the single-child convenience used by callers that
+ * are NOT inside the shutdown walk (and by tests). Callers that ARE must use
+ * {@link recordGatewayShutdownKill} and {@link deliverShutdownKillReports} so that no
+ * child's marker or kill sits behind another child's sink.
  */
 export async function reportGatewayShutdownKill(
   options: PersistentReplSubstrateOptions,
@@ -297,44 +468,6 @@ export async function reportGatewayShutdownKill(
   at: number,
   liveness: ShutdownLivenessSample,
 ): Promise<void> {
-  // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
-  // ALIVE was killed by this shutdown; anything else is reported as undetermined.
-  const attributed = liveness === 'alive'
-  if (attributed && options.replRegistryPath !== undefined) {
-    // The marker is an EXCUSE for a death, so it is written only where the death is
-    // ours to own. Writing it for a child that was already gone would excuse a fault,
-    // and it also closes the crash edge — which would silence the next boot's honest
-    // report of the very fault we are refusing to claim.
-    const marked = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
-    if (!marked) {
-      // Refused (the row has moved on to another generation) or unwritable. The live
-      // sink call below still goes out; the DURABLE backstop does not, and a
-      // best-effort write that quietly did nothing is the silence this module exists
-      // to remove.
-      process.stderr.write(
-        `[repl] gateway shutdown could not record the durable marker for generation=${childGeneration.slice(0, 8)} ` +
-          `(the registry row names a different generation, or could not be written) — the live report was still sent\n`,
-      )
-    }
-  }
-  if (options.onChildCrash === undefined) return
-  try {
-    await options.onChildCrash({
-      sessionKey,
-      generationKey: childGeneration,
-      cause: attributed ? 'gateway-shutdown' : 'unknown',
-      detail: attributed ? gatewayShutdownKillDetail(at) : undeterminedShutdownDetail(liveness, at),
-    })
-    // COMMITTED — and only now is the edge closed, so the next boot does not report
-    // this death a second time. The unattributed path deliberately never reaches here:
-    // it leaves the edge open so the next boot CAN report the death we declined to
-    // claim. Both branches now obey the same rule from opposite sides.
-    if (attributed && options.replRegistryPath !== undefined) {
-      closeCrashReportEdge(options.replRegistryPath, sessionKey, childGeneration, at)
-    }
-  } catch (err) {
-    process.stderr.write(
-      `[repl] onChildCrash sink threw on gateway-shutdown kill generation=${childGeneration.slice(0, 8)}: ${String(err)}\n`,
-    )
-  }
+  const owed = recordGatewayShutdownKill(options, sessionKey, childGeneration, at, liveness)
+  if (owed !== null) await deliverShutdownKillReports([owed])
 }

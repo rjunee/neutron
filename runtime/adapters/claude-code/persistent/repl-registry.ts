@@ -91,15 +91,20 @@ export interface ReplRegistryRecord {
    *  (`supervision.ts`), and cleared by `spawn.ts` when a new child generation is
    *  written so the next edge reports freely.
    *
-   *  TWO WRITERS, and the distinction matters to anyone reasoning from this field:
-   *    - the watchdog, AFTER its durable child-crash sink committed for the edge;
-   *    - the gateway-shutdown kill path (`gateway-shutdown-kill.ts`), which closes
-   *      the edge alongside the marker below because it has just reported the edge
-   *      itself — and which therefore sets this with no sink wired at all.
-   *  It is deliberately NOT named for the sink: the earlier wording said "after the
-   *  durable child-crash sink committed", which the second writer falsifies, and a
-   *  field whose plain reading is false is worse than one that is merely terse
-   *  (`GLOSSARY.md` → "Names whose plain reading is false"). */
+   *  TWO WRITERS, and BOTH write it only after a sink call has actually committed:
+   *    - the supervision watchdog, after its durable child-crash sink returned;
+   *    - the gateway-shutdown kill path (`gateway-shutdown-kill.ts`
+   *      → `closeCrashReportEdge`), after its own sink call returned.
+   *  It is never set when no sink is wired, and never when a sink threw or was
+   *  abandoned on a timeout: no report happened, so the edge stays OPEN and the next
+   *  boot is free to report the death. That is what makes the shutdown marker a
+   *  backstop rather than a decoration.
+   *
+   *  The name is for the EDGE, not for the sink, because the watchdog reads it to
+   *  answer "is there anything left to say about this death" — but the two are no
+   *  longer in tension. An earlier revision of the shutdown path did close this
+   *  alongside the marker, before its report, and this docblock described that; both
+   *  the behaviour and the sentence were wrong, and the behaviour was fixed first. */
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string

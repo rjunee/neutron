@@ -98,8 +98,24 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:957`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:974`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
+  other two findings shared. Shutdown runs against a deadline this process does not control
+  (systemd SIGKILLs the cgroup at `TimeoutStopSec`, `gateway/index.ts:1026-1038`), and an
+  earlier revision awaited the unrestricted `onChildCrash` promise between one child's kill
+  and the next child's marker. One sink that never settled therefore took the deadline away
+  from every child behind it, and each of those died unmarked and was reported on the next
+  boot as a bare crash — this item's own purpose, defeated by this item's own code, and
+  worse than the original defect because it took out every remaining child rather than one.
+  Fixed by phase, not by patch: mark every child (cheap, local, durable), kill every child,
+  then attempt the live reports with a bound per sink AND across the phase. A hung sink now
+  costs a late report and nothing else, which is exactly what the marker was for. The
+  constraint that makes this the rule rather than a one-off — *this code runs against a
+  bounded external deadline and may get no further turn; everything in it must be either
+  durable-and-cheap or bounded-and-optional* — is now written at the top of
+  `gateway-shutdown-kill.ts`, because three consecutive defects shared that missing premise
+  and a rule stated once is what stops the fourth.
 - A "notified" tombstone written BEFORE the notification turned a transient failure into
   permanent silence, in the change whose whole subject is a death being reported wrongly.
   An earlier revision stamped `child_crash_notified_at` in the same patch as the attribution
@@ -117,7 +133,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:945`, then `pool.ts:968`).
+  spawn took it over — and they share one registry row (`pool.ts:961`, then `pool.ts:985`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink
@@ -128,5 +144,5 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:846`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:850`). Every
   deploy killed those silently.

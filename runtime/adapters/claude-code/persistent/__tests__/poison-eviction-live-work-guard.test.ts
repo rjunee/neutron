@@ -47,7 +47,12 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
-import { markKilledByGatewayShutdown, wasKilledByGatewayShutdown } from '../gateway-shutdown-kill.ts'
+import {
+  deliverShutdownKillReports,
+  markKilledByGatewayShutdown,
+  wasKilledByGatewayShutdown,
+  type PendingShutdownKillReport,
+} from '../gateway-shutdown-kill.ts'
 import { childByKey } from '../pool-state.ts'
 import { runReplWatchdogTick } from '../supervision.ts'
 import { loadRegistry, patchRecord } from '../repl-registry.ts'
@@ -499,7 +504,7 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     // crashed — reported by the NEXT boot as "pooled child exited".
     const { host, childAlive, messagesSeen } = makeWedgeOnceHost()
     const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-shutdown-')), 'repl-registry.json')
-    const seen: Array<{ cause: string; generation: string; detail: string; killedAlready: boolean }> = []
+    const seen: Array<{ cause: string; generation: string; detail: string; markedAlready: boolean }> = []
     const options = opts(host, {
       replRegistryPath: registryPath,
       onChildCrash: (info) => {
@@ -510,7 +515,13 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
           cause: info.cause,
           generation: info.generationKey,
           detail: info.detail,
-          killedAlready: !childAlive(1),
+          // THE ORDERING THAT MATTERS, observed from inside the sink: the durable
+          // marker is ALREADY on disk by the time the live report is attempted. The
+          // report is the optional half and runs last, so it must never be the thing
+          // that puts the marker there.
+          markedAlready:
+            loadRegistry(registryPath)[Object.keys(loadRegistry(registryPath))[0] as string]
+              ?.killed_by_gateway_shutdown_generation === info.generationKey,
         })
       },
     })
@@ -526,8 +537,16 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
 
     expect(seen).toHaveLength(1)
     expect(seen[0]?.cause).toBe('gateway-shutdown')
-    expect(seen[0]?.killedAlready).toBe(false)
     expect(seen[0]?.detail).toContain('deploy')
+    // MARK BEFORE REPORT. RED-mutation: move the `markKilledByGatewayShutdown` call
+    // out of `recordGatewayShutdownKill` and into the delivery phase — the marker then
+    // depends on the sink, which is the dependency this whole structure removes.
+    expect(seen[0]?.markedAlready).toBe(true)
+    // And the child is already dead by the time its report is attempted — deliberately.
+    // The kill is cheap and local and must not queue behind a sink; the report is the
+    // bounded, optional half and goes last. RED-mutation: await the report inline in
+    // the pool loop and this flips.
+    expect(childAlive(1)).toBe(false)
     // And the durable marker is on the row for the next boot's watchdog, naming the
     // generation it describes.
     const record = Object.values(loadRegistry(registryPath))[0]
@@ -825,5 +844,201 @@ describe('the durable backstop actually backs up a failed report (#518)', () => 
       postAlert: () => {},
     })
     expect(delivered).toEqual(['gateway-shutdown'])
+  })
+})
+
+/**
+ * #518 — A HUNG SINK COSTS A LATE REPORT AND NOTHING ELSE.
+ *
+ * Shutdown runs against a deadline this process does not control: systemd SIGKILLs the
+ * cgroup at `TimeoutStopSec` whatever we are in the middle of. An earlier revision
+ * awaited the unrestricted `onChildCrash` promise BETWEEN one child's kill and the
+ * next child's marker, so a single sink that never settled took the whole deadline
+ * away from every child behind it — and each of those then died unmarked and was
+ * reported on the next boot as a bare crash. That is this change's own purpose,
+ * defeated by this change, and worse than the original defect because it took out
+ * every remaining child rather than one.
+ *
+ * The fix is phase separation, so these cases assert the phases rather than the
+ * timing: mark everything, kill everything, then attempt the reports under a bound.
+ */
+describe('no child’s marker or kill sits behind another child’s sink (#518)', () => {
+  it('a sink that NEVER settles still leaves every child marked and killed', async () => {
+    // RED-mutation: revert `shutdownAllPersistentRepls` to awaiting
+    // `reportGatewayShutdownKill` inline in the pool loop. This test then hangs until
+    // the suite's own timeout — the shutdown never reaches the second child at all.
+    const hostA = makeWedgeOnceHost()
+    const hostB = makeWedgeOnceHost()
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-hung-sink-'))
+    const registryA = join(dir, 'a.json')
+    const registryB = join(dir, 'b.json')
+
+    // Child A's sink never answers. Child B's records.
+    const deliveredB: string[] = []
+    const optionsA = opts(hostA.host, {
+      substrate_instance_id: 'cc-trident-fire-A',
+      cwd: '/tmp/neutron-hung-a',
+      replRegistryPath: registryA,
+      onChildCrash: () => new Promise<void>(() => {}),
+    })
+    const optionsB = opts(hostB.host, {
+      substrate_instance_id: 'cc-trident-fire-B',
+      cwd: '/tmp/neutron-hung-b',
+      replRegistryPath: registryB,
+      onChildCrash: (info) => {
+        deliveredB.push(info.cause)
+      },
+    })
+    registerSupervisedSubstrate(optionsA)
+    registerSupervisedSubstrate(optionsB)
+    const subA = createPersistentReplSubstrate(optionsA)
+    const subB = createPersistentReplSubstrate(optionsB)
+    await abandonFirstTurn(subA, hostA.messagesSeen)
+    await abandonFirstTurn(subB, hostB.messagesSeen)
+    expect(hostA.childAlive(1)).toBe(true)
+    expect(hostB.childAlive(1)).toBe(true)
+
+    const keyA = Object.keys(loadRegistry(registryA))[0] as string
+    const keyB = Object.keys(loadRegistry(registryB))[0] as string
+    const genA = loadRegistry(registryA)[keyA]?.child_generation as string
+    const genB = loadRegistry(registryB)[keyB]?.child_generation as string
+
+    // Bounded so the phase cannot outlive the case even if the fix regresses in a way
+    // the structure does not catch.
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    // BOTH children are dead. Neither kill waited on a sink.
+    expect(hostA.childAlive(1)).toBe(false)
+    expect(hostB.childAlive(1)).toBe(false)
+
+    // BOTH children are MARKED — which is what lets the next boot attribute them even
+    // though one report never landed and the other may have been abandoned.
+    expect(loadRegistry(registryA)[keyA]?.killed_by_gateway_shutdown_generation).toBe(genA)
+    expect(loadRegistry(registryB)[keyB]?.killed_by_gateway_shutdown_generation).toBe(genB)
+
+    // The hung sink never committed, so ITS edge stays open for the next boot.
+    expect(loadRegistry(registryA)[keyA]?.child_crash_notified_at).toBeUndefined()
+    // And the child behind it was still reported live — the hang cost a late report
+    // for A, not B's report and not anybody's marker.
+    expect(deliveredB).toEqual(['gateway-shutdown'])
+    expect(loadRegistry(registryB)[keyB]?.child_crash_notified_at).toBeGreaterThan(0)
+  })
+
+  it('THE COMPLEMENT — a fast sink is still reported INLINE, not deferred away', async () => {
+    // The fix must not degrade into "never wait". A sink that answers promptly still
+    // commits during the shutdown, and its edge is closed before we return — so the
+    // next boot does not re-report a death the owner has already been told about.
+    //
+    // RED-mutation: make `deliverShutdownKillReports` skip every report (treat the
+    // phase budget as 0). This reddens while the hung-sink case above stays green.
+    const { host, messagesSeen } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-fast-sink-')), 'repl-registry.json')
+    const delivered: string[] = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        delivered.push(info.cause)
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    expect(delivered).toEqual(['gateway-shutdown'])
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeGreaterThan(0)
+  })
+})
+
+describe('deliverShutdownKillReports is bounded per sink AND across the phase', () => {
+  const pending = (id: string, sink: () => Promise<void>): PendingShutdownKillReport => ({
+    options: { substrate_instance_id: id, cwd: '/x', onChildCrash: sink } as PersistentReplSubstrateOptions,
+    sessionKey: `key-${id}`,
+    childGeneration: `gen-${id}`,
+    at: 1_000,
+    attributed: true,
+    liveness: 'alive',
+  })
+
+  it('one hung sink is abandoned and the NEXT report still goes out', async () => {
+    // The per-sink bound. RED-mutation: await the sink without the race — the case
+    // never finishes.
+    const seen: string[] = []
+    const { result } = await captureStderr(() =>
+      deliverShutdownKillReports(
+        [
+          pending('hung', () => new Promise<void>(() => {})),
+          pending('ok', async () => {
+            seen.push('ok')
+          }),
+        ],
+        { perSinkMs: 20, phaseBudgetMs: 5_000 },
+      ),
+    )
+    expect(result.timedOut).toBe(1)
+    expect(result.delivered).toBe(1)
+    expect(seen).toEqual(['ok'])
+  })
+
+  it('the PHASE stops once its budget is spent, instead of paying the per-sink bound N times', async () => {
+    // The second bound, and it is not the same as the first: without it, ten hung
+    // sinks at the per-sink bound would spend ten times that out of a deadline the
+    // rest of the teardown shares. RED-mutation: drop the `remaining <= 0` check —
+    // every one of the ten then times out instead of most being skipped.
+    const hung = Array.from({ length: 10 }, (_, i) => pending(`h${i}`, () => new Promise<void>(() => {})))
+    const { result } = await captureStderr(() =>
+      deliverShutdownKillReports(hung, { perSinkMs: 20, phaseBudgetMs: 45 }),
+    )
+    expect(result.timedOut + result.skipped).toBe(10)
+    // The phase gave up rather than paying 10 × 20ms: most were never attempted.
+    expect(result.skipped).toBeGreaterThanOrEqual(6)
+    expect(result.delivered).toBe(0)
+  })
+
+  it('the LAST report before the deadline is clamped to what is left of the budget', async () => {
+    // The `Math.min(perSinkMs, remaining)` clamp, and its ONLY observable effect is
+    // elapsed time: the clamp never changes which reports are attempted, only how long
+    // the last one may hold the phase, so no count-based assertion can discriminate it
+    // (measured — a count-based version of this case left the mutation alive). Without
+    // the clamp the phase overruns its own budget by up to one per-sink bound, which
+    // makes `phaseBudgetMs` a suggestion rather than a bound in the one situation that
+    // matters: a shutdown already close to the cgroup SIGKILL deadline.
+    //
+    // Margin: budget 60ms, per-sink 500ms, one hung sink. Clamped the phase ends at
+    // ~60ms; unclamped at ~500ms. The 250ms threshold sits an order of magnitude clear
+    // of the 60ms target and less than half the unclamped time, so neither scheduler
+    // jitter nor a slow box can flip it.
+    const started = Date.now()
+    await captureStderr(() =>
+      deliverShutdownKillReports([pending('hung', () => new Promise<void>(() => {}))], {
+        perSinkMs: 500,
+        phaseBudgetMs: 60,
+      }),
+    )
+    const elapsed = Date.now() - started
+    // WALL-CLOCK-BOUND-OK: the clamp's entire effect IS elapsed time — it changes no
+    // count, no outcome and no ordering, so there is no deterministic substitute for
+    // this assertion. Measured margin: ~60ms clamped versus ~500ms unclamped, with the
+    // threshold at 250ms, i.e. >4x the expected value and <half the mutant's.
+    expect(elapsed).toBeLessThan(250)
+  })
+
+  it('a throwing sink is counted as failed, and does not stop the ones behind it', async () => {
+    const seen: string[] = []
+    const { result } = await captureStderr(() =>
+      deliverShutdownKillReports([
+        pending('throws', async () => {
+          throw new Error('sqlite busy')
+        }),
+        pending('ok', async () => {
+          seen.push('ok')
+        }),
+      ]),
+    )
+    expect(result.failed).toBe(1)
+    expect(result.delivered).toBe(1)
+    expect(seen).toEqual(['ok'])
   })
 })
