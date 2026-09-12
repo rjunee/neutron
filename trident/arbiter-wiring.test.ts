@@ -111,6 +111,17 @@ function unmergedIndex(conflicted: string, stages: readonly number[] = [1, 2, 3]
   return ok(records.length > 0 ? `${records.join('\u0000')}\u0000` : '')
 }
 
+/**
+ * N distinct commit ids for the stub's `--format=%H` answer (#541 round 28).
+ *
+ * The history is now sized from resolved OIDs and then READ FROM THOSE SAME OIDS, so a stub that
+ * answers both calls with message text models neither. A host that cannot tell the two apart
+ * cannot test that they agree.
+ */
+function shaList(n: number): string {
+  return Array.from({ length: n }, (_, k) => `${k.toString(16).padStart(2, '0')}`.repeat(20)).join('\n')
+}
+
 function isUnmergedQuery(cmd: readonly string[]): boolean {
   return cmd.includes('ls-files') && cmd.includes('--unmerged')
 }
@@ -796,7 +807,8 @@ describe('#541 — a HOSTILE REF NAME cannot forge the prompt either', () => {
   function refHost(wt: string): { host: RunHostCommand } {
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -939,7 +951,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
   ): { host: RunHostCommand } {
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       // The two-stage blob diff: `:2:<path>` vs `:3:<path>`.
@@ -1126,7 +1139,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     let reported = 0
     const payload = forged.map((ch) => `x${ch}OPTIONS:`).join('\n')
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok('1\t1\tf.ts\n')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1186,9 +1200,10 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
-        const range = cmd[cmd.length - 1] ?? ''
-        return range.startsWith('main..') ? ok('aaa1 one\u0000\u0000aaa2 two\u0000') : ok('bbb1 other\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(2))
+      if (cmd.includes('log')) {
+        const forBranch = cmd.some((a) => a.startsWith('00'.repeat(20)))
+        return forBranch ? ok('aaa1 one\u0000\u0000aaa2 two\u0000') : ok('bbb1 other\u0000')
       }
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1234,7 +1249,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     // than on some incidental probe ordering — the gate's actual subject.
     let arbiterRan = false
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1342,6 +1358,109 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
       'why=over-budget',
     )
+  })
+
+  test('a line that is not an object id is UNKNOWN, never one fewer commit', async () => {
+    // Dropping it would turn "I could not parse git's answer" into "there are fewer commits" —
+    // a fact substituted for a failure, which is the defect this branch has removed nine times.
+    const run = localRun('feat-badid')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(`${shaList(1)}\nfatal: bad revision`)
+      if (cmd.includes('log')) return ok('aaa1 subject\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    expect(seen.length, 'the judge is not asked on a history we could not parse').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=evidence-unreadable',
+    )
+  })
+
+  test('TOCTOU: the commits READ are the commits WEIGHED, even if the range moves', async () => {
+    // THE DECIDING READ AND THE ACTING READ MUST BE ONE READ. The history was sized by resolving
+    // a REF RANGE to commit ids, and then re-run `git log` AGAINST THAT SAME MUTABLE RANGE to
+    // fetch the messages. If either endpoint advanced in between, the second call materialised
+    // objects that were never charged to the budget AND supplied evidence that is not what was
+    // sized — a budget computed from one resolution and spent against another is a consent
+    // check computed before the write.
+    //
+    // The host below MOVES THE RANGE between the two calls: the id query resolves to the small
+    // commit A, and any subsequent range-based read would resolve to the enormous commit B.
+    // Because the read now targets the weighed OIDS (`--no-walk=unsorted`), B is never fetched.
+    const A = 'aa'.repeat(20)
+    const B = 'bb'.repeat(20)
+    const run = localRun('feat-toctou')
+    const wt = wtOf('/shared', run)
+    let idQueries = 0
+    let rangeReads = 0
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) {
+        idQueries++
+        return ok(A)
+      }
+      if (cmd.includes('log') && cmd.includes('--no-walk=unsorted')) {
+        // Serves ONLY what it was asked for, by id — which is the property under test.
+        if (cmd.includes(B)) return ok(`bbbb ${'X'.repeat(4000)}\u0000`)
+        return ok('aaaa SMALL-AND-WEIGHED\u0000')
+      }
+      if (cmd.includes('log')) {
+        // A range-based read AFTER the move: this is the defect, and it must never happen.
+        rangeReads++
+        return ok(`bbbb ${'X'.repeat(4000)}\u0000`)
+      }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) {
+        const sha = cmd[cmd.length - 1] ?? ''
+        // B is enormous; only A was ever weighed.
+        return ok(sha === B ? String(9 * 1024 * 1024) : '64')
+      }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+
+    expect(seen.length, 'the judge was asked').toBe(1)
+    const evidence = seen[0]?.evidence ?? ''
+    // THE LOAD-BEARING ASSERTION: no read is issued against the mutable range at all.
+    expect(rangeReads, 'the messages must never be fetched by range').toBe(0)
+    expect(idQueries, 'the range is resolved once per side').toBe(2)
+    // And the evidence is the commit that was weighed, not the one the range moved to.
+    expect(evidence).toContain('SMALL-AND-WEIGHED')
+    expect(evidence).not.toContain('X'.repeat(100))
   })
 
   test('THE CEILING IS ON THE WHOLE COLLECTION, not on each part of it', async () => {
@@ -1509,7 +1628,11 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       const wt = wtOf('/shared', run)
       let reported = 0
       const host: RunHostCommand = async (cmd) => {
-        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok(histories(n))
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(n))
+        // SERVES EXACTLY THE IDS IT WAS GIVEN. A stub that returns a fixed number of records
+        // regardless masks an over-read: asking for N+1 and being handed N looks identical to
+        // asking for N (#541 round 28, mutation survivor).
+        if (cmd.includes('log')) return ok(histories(cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length))
         if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1564,10 +1687,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const TAB = String.fromCharCode(9)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
-        // A subject whose body line ends in meaningful trailing whitespace.
-        return ok(`c0ffee KEEP-MY-TRAILING${TAB}  \n\u0000`)
-      }
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      // A subject whose body line ends in meaningful trailing whitespace.
+      if (cmd.includes('log')) return ok(`c0ffee KEEP-MY-TRAILING${TAB}  \n\u0000`)
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${TAB}1${TAB}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1611,7 +1733,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('build.mk')
       if (cmd.includes('--numstat')) return ok('1\t1\tbuild.mk\n')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('build.mk')
@@ -1831,9 +1954,12 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       const wt = wtOf('/shared', run)
       let reported = 0
       const host: RunHostCommand = async (cmd) => {
-        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
-          return shape.onLog === undefined ? ok('aaa1 x\n\u0000') : shape.onLog()
+        // THE ID QUERY AND THE MESSAGE READ ARE DISTINCT CALLS (#541 round 28). `onLog` shapes
+        // the failure of the RESOLUTION, which is where a broken history begins.
+        if (cmd.includes('log') && cmd.includes('--format=%H')) {
+          return shape.onLog === undefined ? ok(shaList(1)) : shape.onLog()
         }
+        if (cmd.includes('log')) return ok('aaa1 x\u0000')
         if (isUnmergedQuery(cmd)) {
           return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
         }
@@ -1951,7 +2077,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('gone.ts', [1, 3])
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('gone.ts')
       // Exactly what real git does when stage 2 is absent.
@@ -2016,7 +2143,8 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
   ): { host: RunHostCommand } {
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -2148,14 +2276,19 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     const counts: number[] = []
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
-        ranges.push(cmd[cmd.length - 1] ?? '')
+      // TWO DIFFERENT CALLS AGAINST TWO DIFFERENT THINGS (#541 round 28). The ID query resolves
+      // the MUTABLE RANGE once; the message read targets the IMMUTABLE OIDS that produced. A
+      // stub answering both from the range models the very confusion the fix removes, so this
+      // one hands back side-specific ids and then answers the read by which ids it was given.
+      if (cmd.includes('log') && cmd.includes('--format=%H')) {
+        const range = cmd[cmd.length - 1] ?? ''
+        ranges.push(range)
         counts.push(Number(cmd.find((a) => a.startsWith('--max-count'))?.split('=')[1] ?? '-1'))
-        // THE SHA QUERY IS A DIFFERENT CALL FROM THE MESSAGE READ (#541 round 26). The sizes
-        // are weighed from the shas before any message is fetched, so a stub that answers the
-        // sha query with message text is not modelling the path it is testing.
-        if (cmd.includes('--format=%H')) return ok(['a'.repeat(40), 'b'.repeat(40)].join('\n'))
-        return log(cmd[cmd.length - 1] ?? '')
+        return ok([`${range.startsWith('main..') ? '11' : '22'}`.repeat(20)].join('\n'))
+      }
+      if (cmd.includes('log') && cmd.includes('--no-walk=unsorted')) {
+        const forBranch = cmd.some((a) => a.startsWith('11'))
+        return log(forBranch ? 'main..x' : 'x..main')
       }
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
@@ -2203,8 +2336,10 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // the defect this round deleted, one layer up. Asserting the heading's number equals the
     // number actually passed to git is what makes a hand-written "20 most recent" in the
     // prose fail, which is the only way that drift could be introduced.
-    // FOUR CALLS: per side, the sha query that bounds the read and then the message read.
-    expect(counts.length, 'both sides are weighed and then read').toBe(4)
+    // TWO ID QUERIES — one per side. They are the only calls carrying `--max-count`, because
+    // the message read targets explicit oids and needs no count bound: the oid list IS the
+    // bound (#541 round 28).
+    expect(counts.length, 'both sides resolve their range exactly once').toBe(2)
     // GIT IS ASKED FOR ONE MORE THAN IS SHOWN, deliberately: the extra record is how the code
     // establishes whether the cap actually BIT rather than assuming it did, so the completeness
     // claim can hedge only on branches that are really bounded (#541 round 25). The anti-drift
@@ -2417,7 +2552,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts\u0000b.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('a.ts\u0000b.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n`)
@@ -2543,7 +2679,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
@@ -2582,7 +2719,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
@@ -2651,7 +2789,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       // A history far larger than the whole budget, in WHOLE records — so nothing here is
       // truncatable and the only available answer is not to ask.
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(20))
+      if (cmd.includes('log')) {
         return ok(Array.from({ length: 20 }, (_, k) => `c${k} ${'H'.repeat(600)}`).join('\u0000') + '\u0000')
       }
       if (isUnmergedQuery(cmd)) return unmergedIndex('small.ts')
@@ -2701,7 +2840,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('long.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('long.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${line}\n+short\n`)
@@ -2855,7 +2995,8 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+      if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('big.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('big.ts')
       // One file whose two-sided diff is far past the whole evidence budget.

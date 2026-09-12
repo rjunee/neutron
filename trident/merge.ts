@@ -2332,6 +2332,10 @@ async function sideHistory(
   let ids: HostCommandResult
   try {
     ids = await run_host(
+      // ONE MORE THAN WE SHOW, so whether the cap actually BIT is established rather than
+      // assumed (#541 round 25): receiving N+1 ids is positive evidence that older commits
+      // exist. THIS IS THE ONLY PLACE THE MUTABLE RANGE IS RESOLVED; everything after it works
+      // from the immutable ids this produced.
       ['git', '-C', repo, 'log', `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H', range],
       repo,
     )
@@ -2339,8 +2343,24 @@ async function sideHistory(
     return { kind: 'missing', why: 'evidence-unreadable' }
   }
   if (!ids.ok) return { kind: 'missing', why: 'evidence-unreadable' }
-  for (const sha of ids.stdout.split('\n').map((x) => x.trim()).filter((x) => x.length > 0)) {
-    const size = await objectSize(run_host, repo, sha)
+  const lines = ids.stdout
+    .split('\n')
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0)
+  // A LINE THAT IS NOT AN OBJECT ID IS A READ WE DID NOT UNDERSTAND, not a line to drop. Silently
+  // filtering it would turn "I could not parse git's answer" into "there are fewer commits" —
+  // the same substitution of a fact for a failure this branch has now removed nine times, and
+  // the identical rule `unmergedStages` applies to an unparseable index record.
+  if (lines.some((x) => !/^[0-9a-f]{40,64}$/.test(x))) {
+    return { kind: 'missing', why: 'evidence-unreadable' }
+  }
+  const resolved = lines
+  // The extra id is asked for to DETECT the bound, and is neither weighed nor read.
+  const moreExist = resolved.length > MAX_HISTORY_COMMITS_PER_SIDE
+  const oids = resolved.slice(0, MAX_HISTORY_COMMITS_PER_SIDE)
+  if (oids.length === 0) return { kind: 'present', text: '(no commits in range)' }
+  for (const oid of oids) {
+    const size = await objectSize(run_host, repo, oid)
     if (size === null) return { kind: 'missing', why: 'evidence-unreadable' }
     if (!budget.weigh(size)) return { kind: 'missing', why: 'over-budget' }
   }
@@ -2354,12 +2374,6 @@ async function sideHistory(
         '-c',
         'core.quotePath=false',
         'log',
-        // ONE MORE THAN WE SHOW, so whether the cap actually BIT is established rather than
-        // assumed (#541 round 25). Receiving N+1 records is positive evidence that older
-        // commits exist; receiving N or fewer proves this is the whole history. Without the
-        // extra record the code could only say "up to N", and the completeness claim would
-        // have to hedge on every branch instead of only the ones that are really bounded.
-        `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`,
         '--no-color',
         '--no-decorate',
         '-s',
@@ -2369,7 +2383,19 @@ async function sideHistory(
         // a commit message, so it is the one delimiter the content cannot forge; each
         // record is folded on its own and the newlines are put back BETWEEN them.
         '--format=%h %s%n%b%x00',
-        range,
+        // THE DECIDING READ AND THE ACTING READ ARE ONE READ (#541 round 28). This used to
+        // re-run `git log` against the same REF RANGE that had been resolved a moment earlier
+        // for sizing — and a ref range is mutable. If either endpoint advanced in between, the
+        // second call materialised commit objects that were never charged to the budget AND
+        // supplied evidence that is not what was sized: a budget computed from one resolution
+        // and spent against another is a consent check computed before the write.
+        //
+        // `--no-walk=unsorted` lists EXACTLY the object ids given, in the order given (verified
+        // against real git), so the commits read here are the very ones weighed above. The
+        // range is resolved ONCE, and everything downstream uses the immutable oids that
+        // resolution produced.
+        '--no-walk=unsorted',
+        ...oids,
       ],
       repo,
     )
@@ -2404,9 +2430,7 @@ async function sideHistory(
   // that is parsing; dropping whatever happens to look blank is guessing.
   const framed = res.stdout.split('\u0000')
   while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
-  // The extra record is asked for to DETECT the bound, never to show it.
-  const moreExist = framed.length > MAX_HISTORY_COMMITS_PER_SIDE
-  const records = framed.slice(0, MAX_HISTORY_COMMITS_PER_SIDE).map((record) => quoteLine(record))
+  const records = framed.map((record) => quoteLine(record))
   let used = 0
   for (const record of records) {
     used += Buffer.byteLength(`${record}\n`, 'utf8')

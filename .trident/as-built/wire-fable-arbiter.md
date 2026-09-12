@@ -1340,7 +1340,7 @@ kinds the first pass did not:
 | # | site | kind | disposition |
 |---|---|---|---|
 | 14 | `sideHistory` `--max-count` | a **request** for less | **disclosed and derived**: git is asked for N+1 to establish whether the cap BIT, N are shown, and the part is marked `bounded` — so `assembleEvidence` narrows the claim exactly when a commit really is being withheld (round 25). **It bounds HOW MANY, not HOW MUCH** — see row 17 for the byte ceiling, which is a different quantity and needed its own bound |
-| 17 | `sideHistory` message read | a **collection** with no byte ceiling | **bounded before reading** (round 26): the commit SHAs are fetched first (bounded by count, ~41 bytes each), each object is weighed with `cat-file -s`, and the total is charged to the SAME arbitration-wide budget as rows 15-16 before the message-bearing `git log` is issued at all. Bounds TOTAL BYTES READ |
+| 17 | `sideHistory` message read | a **collection** with no byte ceiling, read from a MUTABLE range | **bounded before reading** (round 26): the commit SHAs are fetched first (bounded by count, ~41 bytes each), each object is weighed with `cat-file -s`, and the total is charged to the SAME arbitration-wide budget as rows 15-16 before the message-bearing `git log` is issued at all, and that read targets the WEIGHED OIDS via `--no-walk=unsorted` rather than re-resolving the range (round 28). Bounds TOTAL BYTES READ, of exactly the objects it charged |
 | 15 | `conflictEvidence` two-sided diff | a **collection** with no ceiling | **bounded before reading, on the WHOLE collection**: both stage blobs are sized with `cat-file -s` and charged to the arbitration's single `CollectionBudget` before any content is fetched. Bounds TOTAL BYTES READ across both stages and every conflicted file |
 | 16 | `conflictEvidence` one-sided blob | a **collection** with no ceiling | same budget, same quantity |
 
@@ -1470,6 +1470,7 @@ rather than a run of unrelated slips.
 | 25 | display budget | what you **keep**, not what you **do** |
 | 26 | `--max-count` | how **many**, not how **much** |
 | 27 | the blob ceiling | **each part**, not **the whole** |
+| 28 | the history budget | **a different set of objects than the one it charged** |
 
 **One `CollectionBudget` per arbitration**, threaded through every reader the way the truncation
 log is threaded through every fold — the conflict's blobs on both stages, across every file, and
@@ -1496,6 +1497,51 @@ but squarely inside its decision.
 
 **Three mutations, all red:** blobs bounded per-item again; each reader given its own budget;
 the budget not accumulating.
+
+### ROUND 28 — the deciding read and the acting read must be one read
+
+`sideHistory` resolved a **mutable ref range** to commit ids and weighed them, then independently
+re-ran `git log` **against that same range** to fetch the messages. If either endpoint advanced
+in between, the second call materialised objects that were never charged to the budget — and,
+worse, supplied evidence that **is not what was sized**.
+
+**A budget computed from one resolution and spent against another is a consent check computed
+before the write.** The fix is not a tighter bound; it is removing the second resolution. The
+range is resolved ONCE, and `--no-walk=unsorted` reads exactly the object ids that resolution
+produced, in the order given — verified against real git before relying on it.
+
+**The table's fourth row is a different axis from the first three**, which is why it is worth
+keeping as a table rather than a list of fixes:
+
+| round | the bound | what it actually bounded |
+|---|---|---|
+| 25 | display budget | what you **keep**, not what you **do** |
+| 26 | `--max-count` | how **many**, not how **much** |
+| 27 | the blob ceiling | **each part**, not **the whole** |
+| 28 | the history budget | **a different set of objects than the one it charged** |
+
+Rows 25-27 are all "the bound measures the wrong quantity". Row 28 is "the bound measures the
+right quantity **of the wrong things**" — a correct number about a set that no longer exists by
+the time it is spent.
+
+**My tests could not see it, and the reason generalises.** Every stub answered both history
+calls from canned output and never moved the range between them. **A host that cannot change
+between two reads cannot test that two reads agree** — the same shape as "a host that cannot
+fail cannot test a failure path", one round earlier, and as the stub that answered the size
+query with prose. Thirteen stubs now model the id query and the message read as the distinct
+calls they are, and the TOCTOU fixture **moves the range between them** and asserts the read is
+never issued against it.
+
+**Two further survivors closed, and one of them was a real defect rather than a missing test.**
+A line in the id output that is not an object id was being silently **filtered**, which turns
+"I could not parse git's answer" into "there are fewer commits" — a fact substituted for a
+failure, the same substitution this branch has now removed nine times. It is `unreadable`. And
+the stub for the 20/21 boundary returned a fixed number of records regardless of what was asked
+for, which **masks an over-read**: asking for N+1 and being handed N looks identical to asking
+for N. It now serves exactly the ids it is given.
+
+**Three mutations, all red:** the read returning to the mutable range; a non-oid line dropped;
+the detection id weighed and read rather than held back.
 
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
@@ -1760,7 +1806,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and twenty-five mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and twenty-eight mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
