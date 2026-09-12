@@ -1,6 +1,20 @@
 /**
  * WHAT EACH WRAPPER'S SHIPPED RANGE LINE DOES WITH THE BASE IT IS HANDED (#546).
  *
+ * ── THE FILE NAME WAS A CLAIM, AND IT WENT STALE ──────────────────────
+ * This was `codex-wrapper-bare-base.test.ts` until round twenty-one. The name asserted the
+ * contract round nineteen deleted — that a bare base is something `diffBase` produces and the
+ * wrappers receive — and a file name is the claim nobody audits, which is this branch's own
+ * lesson about titles arriving at the level of the filesystem.
+ *
+ * What it tests is legitimately different and worth keeping: **the wrappers' shipped range
+ * lines, driven with values THIS FILE supplies.** That distinction matters. A test that
+ * supplies the value it claims the system produces is measuring the fixture, not the system —
+ * which is exactly why the stale claims inside it read as true for two rounds. Nothing here
+ * shows what `diffBase` composes; `review-diff-base-realgit.test.ts` and the parity table do
+ * that. These tests show what the wrapper does with whatever argv carries, which is what makes
+ * the composing side's choice load-bearing.
+ *
  * ── WHY THIS FILE EXISTS ──────────────────────────────────────────────
  * Every other wrapper assertion on this branch reads ARGV or SOURCE TEXT: that
  * `codex-build.sh` is invoked with `${diffBase}`, that the range line carries
@@ -160,12 +174,15 @@ async function seed(label: string, opts: { remote: boolean }): Promise<World> {
 }
 
 describe('codex-build.sh: whatever argv carries DOES reach the range, and the wrapper cannot repair it', () => {
-  test('NO REMOTE: the bare name is what arrives, and it is the right answer there', async () => {
+  test('NO REMOTE: a bare name handed in DOES range, and the answer is the branch', async () => {
     // THE CLAIM THIS REPLACES: "codex-build.sh holds no base-branch-name binding, so a
     // bare-base range is unconstructable there". The wrapper cannot CHOOSE a base — true —
-    // but `diffBase`'s legitimate fallback hands it one, and here it is, reaching the
-    // shipped line and producing the diff. Correct in this world because there is no fresher
-    // ref to prefer: `refs/heads/main` IS the base.
+    // but it cannot refuse one either, and here a bare name reaches the shipped line and
+    // produces a diff. **THE VALUE IS SUPPLIED BY THIS TEST, not by `diffBase`**, which since
+    // round nineteen has no arm that produces one; what this measures is the WRAPPER's
+    // behaviour for whatever argv carries, which is what makes the composing side's choice
+    // load-bearing. Correct in this world in the sense that `refs/heads/main` is the base —
+    // and `diffBase` would name it in full.
     const w = await seed('build-no-remote', { remote: false })
     expect(await git(w.repo, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).toBe('')
     expect(await buildDiffPaths(w.repo, 'main', w.out)).toEqual([OWN_WORK])
@@ -202,8 +219,8 @@ describe('codex-build.sh: whatever argv carries DOES reach the range, and the wr
   })
 })
 
-describe('codex-review.sh: same range, and the promotion is what keeps a bare name correct', () => {
-  test('NO REMOTE: nothing to promote to, the bare name ranges, the answer is the branch', async () => {
+describe('codex-review.sh: same range, and its own qualification is what keeps a bare argument correct', () => {
+  test('NO REMOTE: a bare name handed to the RANGE LINE still ranges — the wrapper qualifies earlier', async () => {
     const w = await seed('review-no-remote', { remote: false })
     expect(await reviewDiffPaths(w.repo, 'main')).toEqual([OWN_WORK])
   })

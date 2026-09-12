@@ -1386,7 +1386,9 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *    launcher (`orchestrator.ts`, base pinning) and the exact commit the build branch
  *    was cut from. A sha cannot go stale, and it is the cut point, so this branch's own
  *    work is exactly what the range names. `probeCiBase` already prefers it.
- *  • `origin/<base>` in pr mode — the remote-tracking ref. The launcher FETCHES
+ *  • `refs/remotes/origin/<base>` in pr mode — the remote-tracking ref, NAMED IN FULL (the
+ *    shorthand `origin/<base>` is a different thing: a tag of that name outranks it). The
+ *    launcher FETCHES
  *    `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build if
  *    that fetch or its rev-parse fails, so in pr mode this ref exists and is as fresh
  *    as launch. The same choice `planProbeRef` makes for the branch side.
@@ -1421,7 +1423,8 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
 /**
  * The unpinned arm of `diffBase`, and the only place `diffBase` reads the base branch
  * NAME. NOT the only place in this file: `probeCiBase` reads it as the unpinned fallback
- * for its check-runs API path, `branchLogBase` qualifies it as `origin/<base>`, and the
+ * for its check-runs API path, `branchLogBase` qualifies it as `refs/remotes/origin/<base>`,
+ * and the
  * prompts print it. Each is argued where it sits. The narrow claim is the one that holds.
  *
  * AN OPTION-SHAPED NAME IS REFUSED HERE — the same refusal `diffBaseRef` makes on the TS

@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5450` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5453` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -79,7 +79,7 @@ Stated in the order of how much it proves:
    last-resort diff entirely, so the wrapper never invents or improves a base. **As of round
    nineteen the trident path hands it only a sha or a fully qualified ref** — `diffBase` has
    no arm that composes a bare name. What the wrapper does with whatever it IS handed is
-   still measured through the shipped line in `trident/codex-wrapper-bare-base.test.ts`,
+   still measured through the shipped line in `trident/codex-wrapper-range-line.test.ts`,
    because the wrapper takes argv from anyone: with no remote a bare `main` yields the
    branch's own single file, and handed a stale `main` where `origin/main` is 4
    commits ahead it yields five files — the wrapper is incapable of repairing a bad base,
@@ -134,7 +134,7 @@ Stated in the order of how much it proves:
 - the shell wrappers compose **no** base at all: `trident/codex-build.sh` and
   `trident/codex-review.sh` receive whatever the composing side resolved as argv — from
   trident, a sha or a fully qualified ref, never a bare name (round nineteen);
-  `trident/codex-wrapper-bare-base.test.ts` runs both shipped range lines to measure what they
+  `trident/codex-wrapper-range-line.test.ts` runs both shipped range lines to measure what they
   do with whatever they are handed, because argv comes from anyone. `BASE_BRANCH` became
   `BASE_DIFF_REF` so the name stops claiming a branch; `codex-review.sh` independently
   qualifies a bare argument for standalone use — `refs/remotes/origin/<x>` when that resolves,
@@ -231,6 +231,36 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round twenty-one: a claim can be restated in words the grep does not contain
+
+Round twenty's sweep read 137 hits and changed 22, and still missed three live sites — because
+its terms were about the WORD: `bare name`, `shorthand`, `else the name`. The survivors said the
+same thing without any of them:
+
+* "leaves the argument bare **without** `origin/<base>`" (the gate's account of the wrapper);
+* "demoted … to shorthand `origin/main`" (a normative acceptance criterion);
+* a TEST NAME asserting the fallback — `'NO REMOTE: the bare name is what arrives'` — inside a
+  file whose own NAME was `codex-wrapper-bare-base.test.ts`.
+
+**A claim can be restated in words the grep does not contain.** So the closing sweep was run by
+THE THING rather than the phrase: every prose mention of `diffBase`/`diffBaseRef`/`BASE_REF`
+(121, all read) and every prose mention of a shorthand `origin/<base>` in the eight files that
+carry the contract. Five more live claims fell out that no word list would have caught, each
+naming the shorthand rather than the bare name: `git-range.ts`'s parameter doc,
+`orchestrator.ts`'s dispatch comment, two of `inner-workflow.mjs`'s order bullets, and
+`lint.sh`'s wrapper summary.
+
+**The file name was itself a survivor**, and renaming it is the point: `codex-wrapper-bare-base`
+asserted the deleted contract in the one place nobody re-reads. It is now
+`codex-wrapper-range-line.test.ts`, which says what it actually does.
+
+**And what it actually does is worth stating, because it is why the stale claims inside it read
+as true.** It drives the wrappers' shipped range lines with values THE TEST SUPPLIES. **A test
+that supplies the value it claims the system produces is measuring the fixture, not the
+system** — the same family as an instrument that enumerates by syntax and a matrix that holds an
+axis constant. Nothing in that file shows what `diffBase` composes; the real-git fixture and the
+parity table do that, and the file now says so in its header.
 
 ### Round twenty: the sweep's DENOMINATOR was "documents I was pointed at"
 
@@ -1143,7 +1173,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5283`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5286`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

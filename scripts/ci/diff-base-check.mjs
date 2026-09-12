@@ -61,16 +61,20 @@
 //     nineteen `diffBase` has no arm that produces a bare name, so the trident path hands
 //     this argv a sha or a fully qualified ref. (This paragraph said "the legitimate
 //     fallback … is a bare NAME" until then.) The wrapper still takes argv from anyone, so
-//     `codex-wrapper-bare-base.test.ts` measures what the shipped line
+//     `codex-wrapper-range-line.test.ts` measures what the shipped line
 //     `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` does with a bare, a stale and a
 //     padded value. What the wrapper guarantees is narrower and still worth having: the base
 //     it ranges against is exactly what the composing side decided, never a guess of its own.
 //
-//     `trident/codex-review.sh` IS WEAKER STILL. Its argv default is the literal `main`
-//     (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which the rev-parse
-//     below promotes to `origin/main` WHEN THAT REF RESOLVES and leaves bare when it does
-//     not. So: a resolved ref on the trident path, which always passes one, and merely
-//     DEMOTED in a standalone invocation against a repo with no `origin/<base>`.
+//     `trident/codex-review.sh` STARTS WEAKER AND CLOSES IT ITSELF. Its argv default is the
+//     literal `main` (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which the
+//     block below QUALIFIES by kind: `refs/remotes/origin/<x>` when that ref resolves, else
+//     `refs/heads/<x>`, refusing an ambiguous (branch + tag) or tag-only argument outright.
+//     So: a sha or a fully qualified ref on the trident path, and a fully qualified LOCAL ref
+//     in a standalone invocation against a repo with no `origin/<base>`. (This paragraph said
+//     it "promotes to `origin/main` … and leaves bare when it does not" — two superseded
+//     answers in one sentence: the shorthand went in round seventeen, the bare arm in
+//     round nineteen.)
 //
 // THIS GATE IS DEFENCE IN DEPTH. It exists to make a regression LOUD, not to prove
 // absence. Read the scope note below before relying on it for the latter.

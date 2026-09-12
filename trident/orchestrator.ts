@@ -4476,8 +4476,9 @@ export function buildTridentOrchestrator(
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
-        // THE BASE `diffBaseRef` CHOSE (#546) — the pin, `origin/<base>` when it resolves,
-        // else `refs/heads/<base>` — never a bare name, and never a base named here. The block this renders tells the build to run
+        // THE BASE `diffBaseRef` CHOSE (#546) — the pin, `refs/remotes/origin/<base>` when it
+        // resolves, else `refs/heads/<base>` — never a shorthand, never a bare name, and never
+        // a base named here. The block this renders tells the build to run
         // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
         // test set; a stale `refs/heads/main` adds every file the base moved past to
         // that set, which is the wasteful direction of the same defect.

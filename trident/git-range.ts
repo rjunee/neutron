@@ -50,7 +50,10 @@ export interface GitRangeArgv {
   subcommand: 'diff' | 'log' | 'rev-list'
   /** Options for the subcommand. They must precede the marker, and this puts them there. */
   flags?: readonly string[]
-  /** The left-hand side: a sha, `origin/<base>`, a qualified ref, or `diffBaseRef`'s answer. */
+  /** The left-hand side: a sha or a FULLY QUALIFIED ref — `diffBaseRef`'s answer, which is
+   *  the launch pin, `refs/remotes/origin/<base>` or `refs/heads/<base>`. Never a shorthand:
+   *  `origin/main` and `main` are both names git resolves against every namespace, and a
+   *  same-named tag answers to either. */
   base: string
   /** The right-hand side. */
   head: string

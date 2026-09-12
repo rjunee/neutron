@@ -140,7 +140,7 @@ fi
 # one binding per boundary (`diffBase`, `diffBaseRef()`), plus an argv boundary that
 # hands the wrappers whatever that binding resolved — a sha, `refs/remotes/origin/<base>`,
 # or `refs/heads/<base>`, never a bare name (round nineteen; this line said "the legitimate
-# bare name when no remote-tracking ref resolves" until then). `codex-wrapper-bare-base.test.ts`
+# bare name when no remote-tracking ref resolves" until then). `codex-wrapper-range-line.test.ts`
 # runs both wrappers' shipped range lines to measure what they do with whatever they are
 # handed, since argv comes from anyone.
 #
@@ -148,7 +148,8 @@ fi
 # holding a base branch NAME exists in their scope at all". `codex-build.sh` reaches
 # it (argv $2, default EMPTY, and empty skips the diff). `codex-review.sh` does NOT:
 # it defaults `BASE_REF` to the literal `main` for standalone use, promoting it to
-# `origin/main` only when that ref resolves and only for a proven local branch name.
+# `refs/remotes/origin/main` when that ref resolves and to `refs/heads/main` otherwise, for a
+# proven local branch name, refusing an ambiguous or tag-only argument.
 # The as-built for this branch records that default; a guard describing its own
 # coverage must not contradict it, because a stale sentence HERE tells the next
 # person a gap is covered when it is not.

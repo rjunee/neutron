@@ -108,7 +108,7 @@ things:
   all (its default is empty, and empty skips the diff), so the wrapper cannot *invent* a base.
   **From trident it now receives only a sha or a fully qualified ref**, because `diffBase` has
   no arm that composes a bare name. That is a property of the CALLER, not of the wrapper: argv
-  comes from anyone, so `trident/codex-wrapper-bare-base.test.ts` still measures what the
+  comes from anyone, so `trident/codex-wrapper-range-line.test.ts` still measures what the
   shipped line `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:821`) does
   with a bare name, a stale one and a padded one. **If a claim says something cannot be built,
   it has to name the mechanism that prevents it** — an earlier draft called a bare-base range
@@ -344,7 +344,7 @@ The resolution order is evidence-first, and is the same at every site:
       argued.** Trident no longer hands either wrapper a bare name — every `diffBase` arm is a
       sha or a qualified ref — but argv comes from anyone, and the wrapper's own behaviour is
       what makes the composing side's choice load-bearing. Verified by
-      `trident/codex-wrapper-bare-base.test.ts`, which extracts both shipped lines by text and
+      `trident/codex-wrapper-range-line.test.ts`, which extracts both shipped lines by text and
       RUNS them: in a no-remote repository a bare `main` yields the branch's own work (pinned
       file list and count); in a repository whose local base is stale the same line handed that
       bare name yields the inflated answer while the resolved ref yields the correct one — so
@@ -368,11 +368,13 @@ The resolution order is evidence-first, and is the same at every site:
       carries the invariant, and it is structural: `diffBase` and `diffBaseRef()` are the
       only things that turn a base branch name into a range base, and `codex-build.sh`
       holds no base-branch-name binding at all (default empty, and empty skips the diff).
-      `codex-review.sh` reaches only the weaker property — its argv default is the literal
-      `main`, demoted to `origin/main` when that ref resolves — and this criterion claims
-      only that. Verified by `trident/inner-workflow.test.ts` and
+      `codex-review.sh` starts weaker — its argv default is the literal `main` — and closes
+      it itself: the argument is qualified to `refs/remotes/origin/<x>` when that ref resolves
+      and to `refs/heads/<x>` otherwise, with an ambiguous or tag-only argument REFUSED. (This
+      criterion said "demoted to `origin/main`", a shorthand production stopped returning in
+      round seventeen.) Verified by `trident/inner-workflow.test.ts` and
       `trident/__tests__/cross-model-dispatch.test.ts` (the wrapper argv carries the
-      resolved ref, per merge mode), by `trident/codex-wrapper-bare-base.test.ts` (what each
+      resolved ref, per merge mode), by `trident/codex-wrapper-range-line.test.ts` (what each
       wrapper's shipped range line does with the value it is handed, including the legitimate
       bare one) and by reading both scripts' base bindings. A criterion
       that said only "CHECK 8 is
