@@ -1873,32 +1873,68 @@ export const MAX_HISTORY_COMMITS_PER_SIDE = 20
 const QUOTE = '| '
 
 /**
- * Fold and quote-prefix one blob of untrusted multi-line text.
+ * EVERY CODEPOINT THAT CAN FORGE A LINE, AND NOTHING ELSE (#541 round 20).
  *
- * NO BYTE BUDGET, deliberately: this function cannot withhold anything, which is what
- * lets the caller's single measurement of the finished string be authoritative.
+ * WHAT THIS REPLACES. Evidence lines went through `foldEvidenceTo` and then `.trim()`, and both
+ * halves destroyed content the judge is being asked to rule on. `defang` rewrites every run of
+ * `\u0000-\u001f` to ONE space — and `\u0009` is in that range, so TABS BECAME SPACES and runs
+ * collapsed — then maps `"` to `'`, then rewrites command-shaped token pairs. `.trim()` then
+ * removed leading and trailing whitespace, which in a unified diff includes GIT'S OWN CONTEXT
+ * MARKER: a context line ` \tcommand` arrived as `| command`, indistinguishable from a
+ * `+`/`-` line with different indentation.
  *
- * EVERY LINE IS FOLDED AND THEN QUOTE-PREFIXED. Folding collapses each line to one line,
- * so no untrusted newline survives; the `|` prefix means no untrusted line can begin at
- * column 0, so content cannot forge a heading like `OPTIONS:` even though the evidence
- * legitimately contains ASCII newlines. Folding alone does not buy that — a line whose
- * whole content IS `OPTIONS:` would still land at column 0 — which is why the prefix is
- * part of the boundary rather than decoration.
+ * THE CONSEQUENCE IS NOT COSMETIC. Merge conflicts in Makefiles, Python and YAML are frequently
+ * ABOUT whitespace, and a whitespace-only conflict rendered this way shows the judge two
+ * identical-looking sides and asks it to choose — the disputed content removed from the
+ * evidence, under a sentence saying nothing had been shortened. Same for a conflict over quote
+ * style, which `"` → `'` erases outright. This is the FIFTH instance of this branch's sentence
+ * and the first about FIDELITY rather than presence: the seam made "is this part here?" honest,
+ * and "nothing has been shortened" is a claim about the BYTES, not only about which parts exist.
  *
- * THE FOLD CAP IS NOT A TRUNCATION POINT, and the arithmetic is what guarantees it rather
- * than a convention. `foldEvidenceTo(line, max)` returns `…` followed by the last `max`
- * CHARACTERS when it cuts, so a cut line is on its own at least `max + 3` bytes (`…` is
- * three bytes in UTF-8) — already past a budget of `max` bytes before its quote prefix,
- * its label, or any other line is counted. A line long enough for folding to shorten it
- * therefore FORCES the caller's over-budget branch, so folding can never be the thing that
- * quietly shortens the evidence. The cap stays because `defang` needs one; it is a scan
- * bound, not a display bound, and naming that is the difference between the two.
+ * SO THE RULE IS NARROWED TO WHAT THE BOUNDARY ACTUALLY NEEDS. The quote prefix works because no
+ * untrusted line can begin a line of the prompt; that requires removing the codepoints that can
+ * END a line or reorder one — newline, U+2028/U+2029, the bidi controls, the zero-width and
+ * invisible set, and the C0/C1 controls that terminals act on. It does NOT require touching tab,
+ * spaces, quotes, or anything else a diff might legitimately contain. Each forgery codepoint
+ * becomes ONE space rather than being dropped, so column positions survive too.
+ *
+ * AND THE COMMAND-REWRITING IS DELIBERATELY ABSENT HERE. `defangCommands` exists because the
+ * evidence it was written for is rendered into CHAT, where a reader may copy a command or a
+ * terminal may act on it. This text goes into a model prompt for a judge with NO TOOLS, whose
+ * entire output is one option id; nothing downstream can execute it. Rewriting `git branch -D`
+ * inside a diff hunk would corrupt the very line under dispute to defend a channel that does
+ * not exist on this path.
+ */
+const FORGERY_CODEPOINTS = /[\u0000-\u0008\u000a-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
+
+/**
+ * One untrusted line, quoted at column 0 with its content intact.
+ *
+ * ONE RESIDUAL, DISCLOSED RATHER THAN PAPERED OVER: the shared host runner trims the whole of
+ * a command's stdout (`git-mode.ts:1223`), so trailing whitespace on the LAST line of a diff is
+ * gone before this function sees it. Everything interior — tabs, leading indentation, trailing
+ * spaces on any other line, quotes — is now exact. Removing that trim would touch every caller
+ * of `spawnCapture` in trident (sha comparisons, path lists) and is not a change this seam can
+ * make safely, so it is recorded here and in the change record instead of being claimed away.
+ */
+function quoteLine(line: string): string {
+  return `${QUOTE}${line.replace(FORGERY_CODEPOINTS, ' ')}`
+}
+
+/**
+ * Quote-prefix one blob of untrusted multi-line text, PRESERVING EVERY LINE'S CONTENT.
+ *
+ * NO BYTE BUDGET and no trimming: this function cannot shorten or alter anything, which is what
+ * lets the caller's single measurement of the finished prompt be authoritative and what lets
+ * `assembleEvidence` claim nothing was left out. Oversize is caught by the caller's running
+ * total and by the final prompt measurement, both of which ESCALATE rather than cut.
+ *
+ * EVERY LINE IS QUOTE-PREFIXED. Folding alone would not buy the boundary — a line whose whole
+ * content IS `OPTIONS:` still lands at column 0 — which is why the prefix is the boundary and
+ * the codepoint rule only has to stop a line from ending early.
  */
 function quoteAll(text: string): string {
-  return text
-    .split('\n')
-    .map((line) => `${QUOTE}${foldEvidenceTo(line, ARBITER_PROMPT_BYTES_MAX).trim()}`)
-    .join('\n')
+  return text.split('\n').map(quoteLine).join('\n')
 }
 
 /**
@@ -2215,15 +2251,24 @@ async function sideHistory(
   // a `defang` scan bound, and a record long enough for it to cut is by itself larger
   // than the whole evidence budget, so it forces the caller's over-budget branch rather
   // than arriving shortened.
-  const folded = res.stdout
+  // SAME FIDELITY RULE AS THE HUNKS (#541 round 20). A commit message's own indentation and
+  // tabs are content too, and `defang` was collapsing them; the only thing that has to go is
+  // what can forge a line, since each record becomes ONE quoted line. Records are NUL-separated
+  // — git forbids NUL in a message, so it is the one delimiter the content cannot forge — and
+  // the newlines inside a record become spaces because the record IS a line here.
+  const records = res.stdout
     .split('\u0000')
-    .map((record) => foldEvidenceTo(record, ARBITER_PROMPT_BYTES_MAX).trim())
-    .filter((record) => record.length > 0)
-    // QUOTE-PREFIXED for the same reason the hunks are: folding removes newlines from a
-    // record, but a record whose whole text IS `OPTIONS:` would still land at column 0.
-    // No untrusted line begins a line of the prompt.
-    .map((record) => `${QUOTE}${record}`)
-    .join('\n')
+    .map((record) => quoteLine(record).replace(/\s+$/, ''))
+    .filter((record) => record.trim() !== QUOTE.trim())
+  let used = 0
+  for (const record of records) {
+    used += Buffer.byteLength(`${record}\n`, 'utf8')
+    // A COST BOUND THAT ESCALATES, never a cut. `foldEvidenceTo`'s cap used to sit here and
+    // could shorten a record silently; this refuses instead, which is the same decision the
+    // conflict loop makes and reaches the owner by the same path.
+    if (used > ARBITER_PROMPT_BYTES_MAX) return { kind: 'missing', why: 'over-budget' }
+  }
+  const folded = records.join('\n')
   // A DEFINITE FACT, so it is PRESENT: git answered, and the answer is that this side adds
   // nothing. That is the same distinction as the one-sided conflict two rounds ago — an
   // established emptiness is evidence; an unasked question is not.

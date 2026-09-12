@@ -933,6 +933,9 @@ describe('REAL git — the arbiter integrity baseline actually SEES a mutation (
 })
 
 describe('REAL git — the arbiter is actually SHOWN both sides of the conflict (#541)', () => {
+  /** Length of the `| ` quote prefix, so a test can compare the CONTENT of two quoted lines. */
+  const QUOTE_LEN = 2
+
   /**
    * WHY REAL GIT. Round 8 removed every tool from the arbiter on the stated ground that the
    * caller already supplied everything it needed. That was asserted rather than checked, and
@@ -1139,6 +1142,94 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     const body = evidence.kind === 'complete' ? evidence.body : ''
     expect(body).toContain('FEAT-TEXT-TOKEN')
     expect(body).toContain('MAIN-TEXT-TOKEN')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('A WHITESPACE-ONLY CONFLICT REACHES THE JUDGE WITH THE DISPUTED BYTES INTACT', async () => {
+    // THE CASE THE OLD RENDERING ERASED ENTIRELY. Evidence lines went through `defang` (which
+    // rewrites every run of \u0000-\u001f — TAB INCLUDED — to one space) and then `.trim()`.
+    // A conflict whose two sides differ ONLY in indentation therefore arrived as two
+    // identical-looking lines, and the judge was asked to choose between them under a sentence
+    // promising nothing had been shortened. Makefiles, Python and YAML conflict about exactly
+    // this.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.ws-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // Tab-indented (the Makefile spelling).
+    // EACH SIDE ALSO CHANGES A DISTINCT LINE, and that is load-bearing rather than decoration:
+    // `git patch-id` IGNORES WHITESPACE, so two branches whose only difference is indentation
+    // are seen as the same patch and the rebase SKIPS the commit entirely — "Successfully
+    // rebased", no conflict, nothing to test. Measured while writing this. The disputed line
+    // below still differs ONLY in whitespace, which is the thing under test.
+    writeFileSync(join(fwt, 'README.md'), 'all:\n\tgcc -O2 main.c\ntail: FEAT\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat tabs')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    // Space-indented, otherwise identical.
+    writeFileSync(join(repo, 'README.md'), 'all:\n    gcc -O2 main.c\ntail: MAIN\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main spaces')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    // THE PREMISE, ASSERTED. A fixture that fails to conflict would make every assertion
+    // below vacuous, and the first draft of this test did exactly that.
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    // THE TAB SURVIVES. Without it the two sides are the same string.
+    expect(body).toContain('\tgcc -O2 main.c')
+    // And so does the space-indented side.
+    expect(body).toContain('    gcc -O2 main.c')
+    // The two disputed lines are DIFFERENT in the evidence — the property the old rendering
+    // destroyed, asserted directly rather than inferred from the two `toContain`s above.
+    const disputed = body
+      .split('\n')
+      .filter((l) => l.includes('gcc -O2 main.c'))
+      .map((l) => l.slice(QUOTE_LEN))
+    expect(disputed.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(disputed).size, 'both sides must not render identically').toBeGreaterThan(1)
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('LEADING, TRAILING AND DIFF-MARKER WHITESPACE all survive rendering', async () => {
+    // The unified-diff CONTEXT MARKER is a single leading space, so `.trim()` removed the one
+    // character that says "this line is unchanged" — a context line ` \tcommand` arrived as
+    // `| command`, indistinguishable from an added or removed line at a different indent.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.ws2-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // A TRAILING LINE AFTER the disputed one, deliberately: `spawnCapture` trims the whole of
+    // git's stdout (`git-mode.ts:1223`), so trailing whitespace on the LAST line of a diff is
+    // gone before this code ever sees it. That residual is disclosed rather than papered over
+    // — see the note in `quoteLine` — and this fixture keeps the whitespace under test where
+    // the guarantee actually holds.
+    writeFileSync(join(fwt, 'cfg.yml'), 'ctx: keep\n  indented: FEAT   \ntail: end\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat cfg')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'cfg.yml'), 'ctx: keep\n  indented: MAIN\ntail: end\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main cfg')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('cfg.yml')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['cfg.yml'])
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    // Two-space indentation intact on both sides.
+    expect(body).toContain('  indented: FEAT')
+    expect(body).toContain('  indented: MAIN')
+    // TRAILING whitespace intact — it is a real difference and a common cause of conflicts.
+    expect(body).toContain('  indented: FEAT   ')
+    // git's own leading marker survives: some quoted line begins with a diff marker followed
+    // by the unchanged context line.
+    expect(body).toMatch(/\n\| [ +-]ctx: keep/)
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 
