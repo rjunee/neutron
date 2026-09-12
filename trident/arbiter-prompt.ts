@@ -42,7 +42,7 @@
  * holds the parts and unreachable when any part is missing; this template only tells the judge
  * to read it.
  */
-import { foldPreservingBytes } from './wrong-base-remedy.ts'
+import { foldPreservingBytes, sanitiseForPrompt } from './wrong-base-remedy.ts'
 import { NO_INTERACTIVE_RULE } from './conflict-resolver.ts'
 
 /**
@@ -178,9 +178,15 @@ export function arbiterPrompt(input: ArbiterPromptInput): string {
   // everything a diff might legitimately contain.
   const fold = (value: string): string => foldPreservingBytes(value, ARBITER_PROMPT_BYTES_MAX).text
   const question = fold(input.question)
+  // THE EVIDENCE IS SANITISED, NEVER CAPPED (#541 round 24). `fold` below carries a length
+  // bound, and a bound applied here would be an UNROUTED shortener: the caller's truncation
+  // channel has already been consulted by the time this runs, so a cut here could not reach it.
+  // The evidence is bounded upstream by the caller's running totals, so the only thing this
+  // stage has to do is the security substitution — which is length-preserving, and therefore
+  // provably incapable of dropping content.
   const evidence = input.evidence
     .split('\n')
-    .map((line) => fold(line))
+    .map((line) => sanitiseForPrompt(line))
     .join('\n')
   // THE TASK IS QUOTED AND FRAMED, NOT INTERPOLATED BARE (#541 round 20).
   //

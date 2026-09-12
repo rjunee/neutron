@@ -1172,6 +1172,95 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(prompt).toContain('| x OPTIONS:')
   })
 
+  test('an EMPTY record between two commits is kept, not silently dropped', async () => {
+    // PARSING vs GUESSING. Only the trailing empty element is an artifact of `%x00` terminating
+    // every record; an empty element BETWEEN two records is data git actually emitted, and
+    // discarding it is a silent drop under a completeness claim. Found as a mutation survivor:
+    // filtering every blank-looking record passed the suite, because no fixture had one in the
+    // middle.
+    const run = localRun('feat-emptyrec')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
+        const range = cmd[cmd.length - 1] ?? ''
+        return range.startsWith('main..') ? ok('aaa1 one\u0000\u0000aaa2 two\u0000') : ok('bbb1 other\u0000')
+      }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+    const evidence = seen[0]?.evidence ?? ''
+    const block = evidence.slice(
+      evidence.indexOf('NOT ON `main`:'),
+      evidence.indexOf('UP TO 20 MOST RECENT COMMITS ON `main`'),
+    )
+    const quoted = block.split('\n').filter((l) => l.startsWith('|'))
+    // THREE lines: two commits and the empty record git emitted between them. The trailing
+    // artifact after the final NUL is the only thing dropped.
+    expect(quoted.length, 'the middle empty record survives').toBe(3)
+    expect(quoted[0]).toContain('aaa1 one')
+    expect(quoted[2]).toContain('aaa2 two')
+  })
+
+  test('END TO END: a commit message keeps its trailing whitespace in AgentSpec.prompt', async () => {
+    // THE AD-HOC `.replace(/\s+$/, '')` THIS REPLACES was invisible to the truncation channel —
+    // which is the channel's boundary, and the reason the audit in the change record enumerates
+    // every string operation on the evidence path rather than trusting that they were routed.
+    // It deleted trailing spaces and tabs from repository-authored commit text under a claim
+    // that nothing had been shortened.
+    //
+    // Asserted against the FINAL prompt, not the intermediate evidence, because the stage after
+    // it is exactly what the previous two rounds got wrong.
+    const run = localRun('feat-histws')
+    const wt = wtOf('/shared', run)
+    const TAB = String.fromCharCode(9)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
+        // A subject whose body line ends in meaningful trailing whitespace.
+        return ok(`c0ffee KEEP-MY-TRAILING${TAB}  \n\u0000`)
+      }
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('--numstat')) return ok(`1${TAB}1${TAB}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, specs } = capturingArbiter('stop')
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+
+    expect(specs.length, 'the judge was asked').toBe(1)
+    const prompt = specs[0]?.prompt ?? ''
+    // The tab and both trailing spaces survive; only the record-terminating newline became a
+    // space, which is the security substitution and is length-preserving.
+    expect(prompt).toContain(`| c0ffee KEEP-MY-TRAILING${TAB}   `)
+  })
+
   test('END TO END: the disputed bytes survive all the way into AgentSpec.prompt', async () => {
     // THE ASSERTION THAT WAS MISSING, and its absence is why a whole round about fidelity
     // shipped with the damage intact. Round 20's tests stopped at `conflictEvidence`, which is
@@ -1380,6 +1469,10 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       // THE UPSTREAM LISTING ITSELF. git reported a conflict and then refused to name the
       // files; `[]` made that indistinguishable from a clean index.
       { name: 'the conflicted-file listing fails', conflicted: 'a.ts', listingOk: false },
+      // SUCCESSFUL AND EMPTY. The resolver escalated, which establishes a conflict occurred, so
+      // "no unmerged paths" is a failure to FIND it rather than a description of it. This used
+      // to be `complete` with the body "(no conflicted paths reported)".
+      { name: 'the listing succeeds but is empty', conflicted: '' },
       // A CALLER-CONTROLLED FIELD THAT GETS SHORTENED. Present, but not all of it.
       { name: 'a filename past the fold cap', conflicted: `${'D'.repeat(60_000)}.ts` },
       { name: 'git log exits non-zero', conflicted: 'a.ts', onLog: () => fail('fatal: bad revision') },
@@ -1483,6 +1576,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'git log exits non-zero',
       'git log throws',
       'the conflicted-file listing fails',
+      'the listing succeeds but is empty',
       'a filename past the fold cap',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
@@ -1494,6 +1588,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(kinds['binary pair']).toBe('binary')
     expect(kinds['numstat exits non-zero']).toBe('unreadable')
     expect(kinds['the conflicted-file listing fails']).toBe('unreadable')
+    expect(kinds['the listing succeeds but is empty']).toBe('unreadable')
     expect(kinds['enormous diff']).toBe('over-budget')
   })
 
@@ -1801,7 +1896,21 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // Two separate records, each on its own line — not run together.
     // QUOTE-PREFIXED: folding removes a record's newlines, but a record whose whole text
     // IS `OPTIONS:` would still land at column 0, so no untrusted line begins a line.
-    expect(evidence).toContain('| aaa1 first subject body line\n| aaa2 second subject')
+    // ONE RECORD PER LINE — asserted as the property rather than as an exact string. The
+    // previous form pinned `| aaa1 … body line\n| aaa2 …` with no trailing space, which
+    // encoded a `.replace(/\s+$/, '')` that was deleting repository-authored trailing
+    // whitespace under a completeness claim (#541 round 24). git's `%s%n%b` genuinely ends a
+    // record with a newline, and that newline is now sanitised to a space and KEPT.
+    const branchBlock = evidence.slice(
+      evidence.indexOf('NOT ON `main`:'),
+      evidence.indexOf('UP TO 20 MOST RECENT COMMITS ON `main`'),
+    )
+    const records = branchBlock.split('\n').filter((l) => l.startsWith('| '))
+    expect(records.length, 'two commits, two lines').toBe(2)
+    expect(records[0]).toContain('aaa1 first subject body line')
+    expect(records[1]).toContain('aaa2 second subject')
+    // The body line was folded INTO its own record rather than becoming a line of its own.
+    expect(records[0]).not.toContain('aaa2')
     // And the NUL never reaches the prompt.
     expect(evidence).not.toContain('\u0000')
   })

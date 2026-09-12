@@ -80,11 +80,11 @@ import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
 // The back edge from that module is a TYPE import, so this closes no runtime cycle.
 import {
-  FORGERY_CODEPOINTS,
   foldEvidence,
   foldEvidenceReporting,
   foldEvidenceTo,
   foldRefName,
+  sanitiseForPrompt,
 } from './wrong-base-remedy.ts'
 
 export type RunHostCommand = EnvCapableHostRunner
@@ -1932,7 +1932,7 @@ const QUOTE = '| '
  * make safely, so it is recorded here and in the change record instead of being claimed away.
  */
 function quoteLine(line: string): string {
-  return `${QUOTE}${line.replace(FORGERY_CODEPOINTS, ' ')}`
+  return `${QUOTE}${sanitiseForPrompt(line)}`
 }
 
 /**
@@ -1987,12 +1987,12 @@ function quoteAll(text: string): string {
  * NO PAYLOAD ON THE TWO REFUSAL ARMS beyond a fixed reason literal. `over-budget` carries no
  * byte figure — the loop stops fetching once it knows the answer, so any number would mean "at
  * least this much" while reading as a total, which is verbatim the round-12 defect — and
- * `unreadable`'s `why` is one of five repo-authored words, never a path or a git message.
+ * `unreadable`'s `why` is one of six repo-authored words, never a path or a git message.
  */
 export type ConflictEvidence =
   | { kind: 'complete'; body: string }
   | { kind: 'over-budget' }
-  | { kind: 'unreadable'; why: 'listing' | 'index' | 'not-in-index' | 'diff' | 'blob' }
+  | { kind: 'unreadable'; why: 'listing' | 'listing-empty' | 'index' | 'not-in-index' | 'diff' | 'blob' }
   /**
    * BINARY: established, and unshowable. Its own arm rather than `unreadable`, because the two
    * are different facts and the kill criterion has to tell them apart — a repo whose conflicts
@@ -2104,7 +2104,14 @@ export async function conflictEvidence(
   // a conflict; being unable to name the files is a failure to establish it.
   if (!listing.readable) return { kind: 'unreadable', why: 'listing' }
   const paths = listing.paths
-  if (paths.length === 0) return { kind: 'complete', body: '(no conflicted paths reported)' }
+  // AN EMPTY LISTING CANNOT DESCRIBE A CONFLICT (#541 round 24). This function is only reached
+  // after the bounded resolver ESCALATED, which establishes that a conflict occurred. git
+  // answering "no unmerged paths" is therefore not a fact about that conflict — it is a failure
+  // to find it, and the two views of the tree disagreeing is a fact about our reading rather
+  // than about the branches. It used to return `complete` with the body
+  // `(no conflicted paths reported)`, so the judge was asked to rule on a conflict with no
+  // conflict in it, under a claim that every part was present.
+  if (paths.length === 0) return { kind: 'unreadable', why: 'listing-empty' }
   const stages = await unmergedStages(run_host, repo)
   if (stages === null) return { kind: 'unreadable', why: 'index' }
   const sections: string[] = []
@@ -2279,10 +2286,19 @@ async function sideHistory(
   // what can forge a line, since each record becomes ONE quoted line. Records are NUL-separated
   // — git forbids NUL in a message, so it is the one delimiter the content cannot forge — and
   // the newlines inside a record become spaces because the record IS a line here.
-  const records = res.stdout
-    .split('\u0000')
-    .map((record) => quoteLine(record).replace(/\s+$/, ''))
-    .filter((record) => record.trim() !== QUOTE.trim())
+  // PARSE THE FRAMING, DO NOT STRIP THE CONTENT (#541 round 24). This used to run
+  // `.replace(/\s+$/, '')` over every record, deleting trailing spaces, tabs and newlines from
+  // repository-authored commit text under a claim that nothing had been shortened — an ad-hoc
+  // string operation that never touched the reporting channel, which is precisely the channel's
+  // boundary: it covers the transformations routed through it and is blind to an inline
+  // `.replace` anywhere else.
+  //
+  // `--format=%h %s%n%b%x00` terminates EVERY record with NUL, so splitting yields one trailing
+  // empty element that is an artifact of the delimiter rather than a record. Dropping exactly
+  // that is parsing; dropping whatever happens to look blank is guessing.
+  const framed = res.stdout.split('\u0000')
+  while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
+  const records = framed.map((record) => quoteLine(record))
   let used = 0
   for (const record of records) {
     used += Buffer.byteLength(`${record}\n`, 'utf8')

@@ -1286,6 +1286,74 @@ convenient approximation of it.**
 | M109 | a range removed from the declared list | **red** |
 | M110 | tab put back into the class | **red**, 3 tests |
 
+### ROUND 24 — instances eight and nine, and THE AUDIT THAT ENDS THE SEQUENCE
+
+**Eight: a successful-but-EMPTY listing was still `complete`.** `conflictEvidence` is only
+reached after the bounded resolver ESCALATED, which establishes that a conflict occurred. git
+answering "no unmerged paths" is therefore not a description of that conflict — it is a failure
+to find it, and two views of the same tree disagreeing is a fact about our reading rather than
+about the branches. It returned `{kind:'complete'}` with the body `(no conflicted paths
+reported)`, so the judge was asked to rule on a conflict with no conflict in it. Now
+`unreadable why='listing-empty'`, named apart from `'listing'` because "git refused to answer"
+and "git answered nothing" are different facts.
+
+**Nine: the commit history was shortened by an ad-hoc `.replace(/\s+$/, '')`**, deleting
+trailing spaces, tabs and newlines from repository-authored commit text under a claim that
+nothing had been shortened. **This one matters more than its size, because it shows the
+channel's boundary**: round 21 built a reporting fold so truncation could not happen silently,
+and this never touched it. The channel covers the transformations routed through it and is
+blind to an inline string operation anywhere else. Fixed by **parsing the known framing** —
+`--format=…%x00` terminates every record, so exactly one trailing empty element is an artifact
+of the delimiter — rather than discarding whatever happens to look blank.
+
+### THE AUDIT: every transformation between git and `assembleEvidence`
+
+Nine instances have shown the class is not "a few places got it wrong" but **"any string
+operation on evidence is a silent shortener unless routed"**. So here is every one of them,
+found by grepping the evidence path for `.replace(`, `.slice(`, `.trim(`, `.substring(`,
+`.split(` and `.join(`, with the disposition for each. **Routed, or proven lossless. No
+exceptions.**
+
+| # | site | operation | disposition |
+|---|---|---|---|
+| 1 | `quoteLine` | `sanitiseForPrompt(line)` | **lossless**: each forgery codepoint → exactly one space, so length and column positions are preserved; nothing is cut or collapsed |
+| 2 | `quoteAll` | `split('\n') … join('\n')` | **lossless**: split and join on the same delimiter is the identity |
+| 3 | `isBinaryNumstat` | `split('\n')`, `trim()`, `split('\t')` | **not on the evidence path**: reads git's numstat to CLASSIFY; produces no evidence text |
+| 4 | `unmergedStages` | `split('\u0000')`, `indexOf`, `slice` | **not on the evidence path**: parses the index into a stage/sha map used for classification and blob lookup; the section label uses the CALLER's path, not this one |
+| 5 | section label | `shortened.fold(path)` | **routed** through the truncation channel |
+| 6 | section label | `QUOTE.trim()` | **lossless**: operates on a repo-authored constant (`'\| '`), never on evidence |
+| 7 | two-sided body | `res.stdout.trim().length > 0` | **lossless**: the trim is in the PREDICATE only; the value rendered is `res.stdout`, untrimmed |
+| 8 | `conflictEvidence` | `sections.join('\n')` | **lossless**: joins sections this file built |
+| 9 | `sideHistory` | `split('\u0000')` + pop trailing empty | **lossless**: parses git's own record terminator; only the delimiter artifact is dropped, and a middle empty record is KEPT (pinned by test) |
+| 10 | `sideHistory` | `records.join('\n')` | **lossless** |
+| 11 | `assembleEvidence` | `sections.map(…).join('\n\n')` | **lossless**: composes repo-authored headings with part text |
+| 12 | `arbiterPrompt` | evidence `split('\n').map(sanitiseForPrompt).join('\n')` | **lossless**: split/join identity plus the length-preserving substitution — see below |
+| 13 | `arbiterPrompt` | `fold(question / task / options)` | **capped, and outside the claim's scope**: the completeness sentence is about THE EVIDENCE; these are prompt framing. A cut here also forces the caller's over-budget refusal, since the cap IS the budget |
+
+**Item 12 changed in this round as a consequence of the audit.** `arbiterPrompt` was folding
+evidence lines through the CAPPED fold and discarding the `truncated` flag — an unrouted
+shortener that the audit found and the two blockers did not name. It could not have reached the
+channel even if it wanted to: the caller consults `shortened` inside `assembleEvidence`, which
+runs BEFORE the prompt is built. So the evidence now goes through `sanitiseForPrompt`, which has
+no length behaviour at all and is therefore lossless **by construction rather than by an
+argument about another module's budget check**.
+
+**Expected survivor, labelled honestly.** Mutating item 12 back to the capped fold (M114) is
+GREEN, and no test can catch it: an evidence line long enough to be cut at the budget also makes
+the prompt exceed the budget, so both variants refuse and the seam cannot tell them apart. The
+reason to prefer the pure sanitiser is that it removes the possibility rather than relying on a
+coincidence of two bounds having the same value — which is exactly the kind of argument this
+lane has watched fail nine times.
+
+**Four mutations:**
+
+| # | mutation | result |
+|---|---|---|
+| M111 | an empty-but-readable listing is `complete` again | **red** |
+| M112 | the history strips trailing whitespace again | **red** (end-to-end, against `AgentSpec.prompt`) |
+| M113 | the framing parse drops any blank-looking record | survived → **red** |
+| M114 | the final assembler caps the evidence again | **green — expected, reasoning above** |
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1540,7 +1608,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and ten mutations reverted one at a time, each proved a test red. Eight survived a
+One hundred and fourteen mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

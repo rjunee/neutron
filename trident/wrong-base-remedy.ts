@@ -745,6 +745,22 @@ export const FORGERY_CODEPOINTS =
  * point. Here the reader is a judge with no tools whose entire output is one option id, so there
  * is nothing for a rewritten command to protect and a corrupted diff line to lose.
  */
+/**
+ * THE SECURITY SUBSTITUTION ON ITS OWN, WITH NO LENGTH BEHAVIOUR AT ALL (#541 round 24).
+ *
+ * Each forgery codepoint becomes ONE space; nothing is cut, nothing is collapsed, and the
+ * result is the same length as the input. That makes it PROVABLY LOSSLESS in the only sense the
+ * completeness claim cares about — no content can go missing — which is why the evidence path
+ * uses this rather than the capped variant below.
+ *
+ * The capped variant exists for prompt FRAMING (the question, the options, the run's task),
+ * where a bound is wanted and a cut is reported. Evidence is already bounded upstream by the
+ * caller's running totals, so a second cap there could only ever be a silent shortener.
+ */
+export function sanitiseForPrompt(s: string): string {
+  return s.replace(FORGERY_CODEPOINTS, ' ')
+}
+
 export function foldPreservingBytes(s: string, max: number): { text: string; truncated: boolean } {
   const scanned = s.length > EVIDENCE_SCAN_MAX
   const folded = (scanned ? s.slice(-EVIDENCE_SCAN_MAX) : s).replace(FORGERY_CODEPOINTS, ' ')
