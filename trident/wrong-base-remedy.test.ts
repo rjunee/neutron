@@ -7,6 +7,7 @@ import {
   composeWrongBaseRefusal,
   foldEvidence,
   foldEvidenceReporting,
+  foldPreservingBytes,
   probePidLiveness,
   probeTreeOccupancy,
   TOTAL_BUDGET_MS,
@@ -2795,5 +2796,34 @@ describe('#541 round 21 — the fold reports what it dropped', () => {
     const scanned = foldEvidenceReporting('b'.repeat(70_000), 1_000_000)
     expect(scanned.truncated, 'the scan-window cut is reported').toBe(true)
     expect(scanned.text.startsWith('…'), 'and it carries no marker of its own').toBe(false)
+  })
+})
+
+describe('#541 round 22 — the prompt sanitiser keeps the bytes a judge is ruling on', () => {
+  test('it removes ONLY what can forge a line', () => {
+    // `defang` does two jobs under one name. This is the security half on its own: what can END
+    // or REORDER a line has to go, because the quoted-evidence boundary rests on it. Everything
+    // else a diff might legitimately contain stays.
+    const line = '-\tgcc -O2 "main.c"   '
+    expect(foldPreservingBytes(line, 1000).text).toBe(line)
+
+    // Line-forging codepoints are neutralised.
+    for (const forgery of ['\u2028', '\u2029', '\u202e', '\u0000', '\u001b', '\n']) {
+      expect(foldPreservingBytes(`a${forgery}b`, 1000).text).toBe('a b')
+    }
+  })
+
+  test('EACH forgery codepoint becomes one space — runs are not collapsed', () => {
+    // Found as a mutation survivor: the column-position test one layer up drives `merge.ts`'s
+    // own quoting, so this sanitiser's run behaviour had no detector of its own. Collapsing a
+    // run keeps the boundary intact and shifts every column after it, and in a diff columns are
+    // content.
+    expect(foldPreservingBytes('a\u0007\u0007\u0007b', 1000).text).toBe('a   b')
+  })
+
+  test('it reports both cuts, exactly as the prose fold does', () => {
+    expect(foldPreservingBytes('x'.repeat(50), 10).truncated).toBe(true)
+    expect(foldPreservingBytes('x'.repeat(70_000), 1_000_000).truncated).toBe(true)
+    expect(foldPreservingBytes('short', 1000).truncated).toBe(false)
   })
 })

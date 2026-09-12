@@ -42,7 +42,7 @@
  * holds the parts and unreachable when any part is missing; this template only tells the judge
  * to read it.
  */
-import { foldEvidenceTo } from './wrong-base-remedy.ts'
+import { foldPreservingBytes } from './wrong-base-remedy.ts'
 import { NO_INTERACTIVE_RULE } from './conflict-resolver.ts'
 
 /**
@@ -161,7 +161,22 @@ export function arbiterPrompt(input: ArbiterPromptInput): string {
   // characters, so a cut value is alone at least `max + 3` bytes and forces the caller's
   // over-budget branch. The fold still runs on every one of them, because defanging is not
   // optional — only the LENGTH stops being a display bound.
-  const fold = (value: string): string => foldEvidenceTo(value, ARBITER_PROMPT_BYTES_MAX)
+  // THE FINAL FORM PRESERVES BYTES, NOT JUST LENGTH (#541 round 22).
+  //
+  // This used `foldEvidenceTo`, which calls `defang`, which collapses control RUNS — tab
+  // included — and rewrites double quotes to single. So `merge.ts` assembled the evidence
+  // byte-faithfully and THIS function then damaged it: `| -\tcommand "x"` reached the model as
+  // `| - command 'x'`, and a whitespace- or quote-sensitive conflict arrived with the disputed
+  // bytes altered, under a completeness claim that says tabs and quotes are preserved exactly.
+  // Every fidelity guarantee upstream was advisory.
+  //
+  // IT IS THE ROUND-13 RULE AGAIN, FOR CONTENT RATHER THAN SIZE: there is exactly one place the
+  // prompt exists in final form, and that is the only place it may be measured OR SANITISED.
+  // `prompt_bytes` has been honest since that rule was applied to length; this applies it to
+  // bytes. `foldPreservingBytes` removes only what can forge a line — which is the whole of the
+  // security requirement for a judge with no tools whose output is one option id — and leaves
+  // everything a diff might legitimately contain.
+  const fold = (value: string): string => foldPreservingBytes(value, ARBITER_PROMPT_BYTES_MAX).text
   const question = fold(input.question)
   const evidence = input.evidence
     .split('\n')

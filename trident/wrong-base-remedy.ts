@@ -684,6 +684,41 @@ export function foldEvidenceTo(s: string, max: number): string {
  * `max` cut is the obvious one, and `EVIDENCE_SCAN_MAX` silently keeps only the last 64,000
  * characters of an enormous input before `defang` ever runs.
  */
+/**
+ * THE CODEPOINTS THAT CAN FORGE A LINE — the security half of "defang", on its own.
+ *
+ * `defang` does two different jobs under one name: it removes what can END or REORDER a line
+ * (the boundary every quoted-evidence scheme rests on), and it also collapses control RUNS to a
+ * single space, rewrites double quotes to single, and rewrites command-shaped token pairs. Only
+ * the first is security. The rest is CHAT-RENDERING HYGIENE, right for a sentence posted to the
+ * owner where a reader may copy a command, and wrong for a diff whose bytes are the thing under
+ * dispute — it collapses TABS and erases quote-style differences.
+ *
+ * Splitting them is what lets the evidence path keep the bytes a judge needs while still being
+ * unable to forge prompt structure (#541 round 22).
+ */
+export const FORGERY_CODEPOINTS =
+  /[\u0000-\u0008\u000a-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
+
+/**
+ * Fold for a MODEL PROMPT: remove only what can forge a line, and report what was dropped.
+ *
+ * Same contract as `foldEvidenceReporting` — including reporting the `EVIDENCE_SCAN_MAX` window,
+ * which carries no marker of its own — but each forgery codepoint becomes ONE space rather than
+ * a run collapsing to one, so column positions survive, and nothing else is touched: tab,
+ * indentation, trailing spaces and quotes all arrive byte for byte.
+ *
+ * NOT a replacement for `foldEvidence` at the chat boundary. There, command-rewriting is the
+ * point. Here the reader is a judge with no tools whose entire output is one option id, so there
+ * is nothing for a rewritten command to protect and a corrupted diff line to lose.
+ */
+export function foldPreservingBytes(s: string, max: number): { text: string; truncated: boolean } {
+  const scanned = s.length > EVIDENCE_SCAN_MAX
+  const folded = (scanned ? s.slice(-EVIDENCE_SCAN_MAX) : s).replace(FORGERY_CODEPOINTS, ' ')
+  if (folded.length > max) return { text: `…${folded.slice(-max)}`, truncated: true }
+  return { text: folded, truncated: scanned }
+}
+
 export function foldEvidenceReporting(s: string, max: number): { text: string; truncated: boolean } {
   const scanned = s.length > EVIDENCE_SCAN_MAX
   const folded = defang(scanned ? s.slice(-EVIDENCE_SCAN_MAX) : s)

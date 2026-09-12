@@ -79,7 +79,13 @@ import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 // or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
 // The back edge from that module is a TYPE import, so this closes no runtime cycle.
-import { foldEvidence, foldEvidenceReporting, foldEvidenceTo, foldRefName } from './wrong-base-remedy.ts'
+import {
+  FORGERY_CODEPOINTS,
+  foldEvidence,
+  foldEvidenceReporting,
+  foldEvidenceTo,
+  foldRefName,
+} from './wrong-base-remedy.ts'
 
 export type RunHostCommand = EnvCapableHostRunner
 
@@ -1914,7 +1920,6 @@ const QUOTE = '| '
  * inside a diff hunk would corrupt the very line under dispute to defend a channel that does
  * not exist on this path.
  */
-const FORGERY_CODEPOINTS = /[\u0000-\u0008\u000a-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
 
 /**
  * One untrusted line, quoted at column 0 with its content intact.

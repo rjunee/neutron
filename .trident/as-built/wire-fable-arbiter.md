@@ -1190,11 +1190,70 @@ no detector is a comment.
 | M102 | the fold stops reporting the scan-window cut | survived → **red** |
 | M103 | the path label bypasses the truncation channel | **red**, 2 tests |
 
+### ROUND 22 — the fidelity fix was advisory, because the final assembler undid it
+
+Round 20 made `merge.ts` assemble the conflict byte-faithfully. `arbiterPrompt` then ran every
+line through `foldEvidenceTo` → `defang`, which collapses control runs — **tab included** — and
+rewrites double quotes to single:
+
+```
+assembled:  | -\tgcc -O2 "main.c"
+delivered:  | - gcc -O2 'main.c'
+```
+
+So a whitespace- or quote-sensitive conflict still reached the judge with the disputed bytes
+altered, under a completeness claim that now explicitly says tabs and quotes are preserved
+exactly. **Every fidelity guarantee upstream was advisory.**
+
+**THIS IS THE ROUND-13 RULE, FOR CONTENT INSTEAD OF SIZE.** That round established: *there is
+exactly one place the prompt exists in final form, and that is the only place it may be measured
+or bounded.* `prompt_bytes` has been honest ever since. The same sentence governs SANITISING —
+a transformation applied after the guarantee is made is exactly as damaging as a measurement
+taken before the transformation, and for the same reason.
+
+**`defang` was doing two jobs under one name**, and only one is security:
+
+| job | what it is | belongs on the evidence path? |
+|---|---|---|
+| remove what can END or REORDER a line | the boundary every quoted-evidence scheme rests on | **yes** |
+| collapse control runs, rewrite `"`→`'`, rewrite commands | chat-rendering hygiene | **no** |
+
+The second is right where a reader may copy a command out of a message. It is wrong for a diff
+going to a judge with **no tools** whose entire output is one option id — there is nothing for a
+rewritten command to protect, and a corrupted diff line to lose. `foldPreservingBytes` is the
+first job on its own, with the same truncation reporting as its prose sibling.
+
+**AND THE TESTS MEASURED THE WRONG STAGE — the fourth instrument on this branch to do so.**
+Round 20's fidelity tests stopped at `conflictEvidence`, the layer *before* the transformation
+that damaged it. **A test that stops before the last transformation cannot see the last
+transformation**, which is how a round whose entire subject was fidelity shipped with the damage
+intact. The assertion now runs end-to-end against the captured `AgentSpec.prompt` — the same
+instrument the `prompt_bytes` identity test uses, pointed at content rather than length.
+
+**Four mutations, one survivor closed:**
+
+| # | mutation | result |
+|---|---|---|
+| M104 | the final assembler re-folds through `defang` | **red** |
+| M105 | the preserving sanitiser collapses runs | survived → **red** |
+| M106 | tab added back to the forgery class | **red**, 2 tests |
+| M107 | the sanitiser stops neutralising a line separator | **red**, 3 tests |
+
+M107 matters as much as the rest: narrowing the class must not weaken the injection boundary,
+and the hostile-fields property still fires when it does. M105 survived because the column test
+one layer up drives `merge.ts`'s own quoting, so the new sanitiser's run behaviour had no
+detector of its own — the same shape as every other survivor on this branch.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
 understanding as the code, so they encoded the same mistake — a test cannot catch an error in
-the premise it shares. **The structural fixes are the only thing that broke the symmetry**,
+the premise it shares. **ASSERT AT THE BOUNDARY THE GUARANTEE IS ABOUT.** Presence was fixed by a type, loss by a
+reporting channel, and fidelity by moving the assertion to the final form — three different
+remedies for one class, because the class is **a claim separated from the thing it describes**.
+For any future evidence field the three questions are: is its ABSENCE representable, do its
+BYTES survive every stage, and does it arrive FRAMED as data. **The structural fixes are the
+only thing that broke the symmetry**,
 because they make the wrong behaviour *unrepresentable* rather than merely unasserted:
 `EvidencePart` for presence, the single `assembleEvidence` constructor for the claim, and the
 reporting fold for loss. Each one turns "I remembered to check" into "there is no way to say it".
@@ -1439,7 +1498,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and three mutations reverted one at a time, each proved a test red. Eight survived a
+One hundred and seven mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

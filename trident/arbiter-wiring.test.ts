@@ -1102,6 +1102,63 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
 
+  test('END TO END: the disputed bytes survive all the way into AgentSpec.prompt', async () => {
+    // THE ASSERTION THAT WAS MISSING, and its absence is why a whole round about fidelity
+    // shipped with the damage intact. Round 20's tests stopped at `conflictEvidence`, which is
+    // the layer BEFORE the last transformation: `arbiterPrompt` then re-folded every line
+    // through `defang`, collapsing tabs and rewriting double quotes to single. A test that
+    // stops before the last transformation cannot see the last transformation.
+    //
+    // This drives the REAL `buildFableArbiter` over a capturing substrate and asserts the
+    // `AgentSpec.prompt` the model would actually receive — the same instrument the
+    // `prompt_bytes` identity test uses, pointed at content instead of length.
+    //
+    // The diff body is the exact shape real git emits for a Makefile conflict, measured in
+    // `merge-realgit.test.ts`: a tab-indented recipe line and a quoted string.
+    const run = localRun('feat-bytes')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('build.mk')
+      if (cmd.includes('--numstat')) return ok('1\t1\tbuild.mk\n')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('build.mk')
+      if (cmd.some((a) => a.startsWith(':2:'))) {
+        return ok('@@ -1,2 +1,2 @@\n all:\n-\tgcc -O2 "main.c"\n+    gcc -O2 \'main.c\'\n')
+      }
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, specs } = capturingArbiter('stop')
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+
+    expect(specs.length, 'the judge was asked').toBe(1)
+    const prompt = specs[0]?.prompt ?? ''
+    // THE TAB survives into the final prompt. Without this the two sides of a Makefile
+    // conflict are the same string by the time the model sees them.
+    expect(prompt).toContain('-\tgcc -O2 "main.c"')
+    // THE DOUBLE QUOTE survives — `defang` used to rewrite it to a single quote, which erases
+    // a quote-style conflict outright by making both sides identical.
+    expect(prompt).toContain('"main.c"')
+    // And the space-indented side is still distinguishable from the tab-indented one.
+    expect(prompt).toContain("+    gcc -O2 'main.c'")
+    // The boundary still holds: no untrusted line begins a line of the prompt.
+    const conflictBlock = prompt.slice(prompt.indexOf('THE CONFLICT'), prompt.indexOf('UP TO '))
+    for (const line of conflictBlock.split('\n').slice(1)) {
+      if (line.trim().length === 0) continue
+      expect(line.startsWith('| '), JSON.stringify(line.slice(0, 30))).toBe(true)
+    }
+  })
+
   test('THE TRUNCATION CHANNEL: a shortened field cannot reach a completeness claim', async () => {
     // DRIVEN DIRECTLY, because production cannot reach it today: every cap in `merge.ts` is the
     // prompt budget itself, so anything long enough to be shortened is also over budget and the
