@@ -120,6 +120,24 @@ afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
 })
 
+/** Capture `console.log` — the logger's default sink for info lines — so a test can assert
+ *  what production emitted. Module-scoped because BOTH the instrumentation describe and the
+ *  hunk describe now need it: the telemetry and the judge's notices are one concept, so the
+ *  tests that check they agree have to reach both. */
+async function captureLogs(body: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = []
+  const original = console.log
+  console.log = (...args: unknown[]): void => {
+    lines.push(args.map((a) => String(a)).join(' '))
+  }
+  try {
+    await body()
+  } finally {
+    console.log = original
+  }
+  return lines
+}
+
 const RESOLVER_QUESTION =
   'flush.ts: drop-oldest vs block-until-space — which behaviour do you want?'
 
@@ -973,6 +991,53 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     }
   })
 
+  test('THE TELEMETRY AGREES WITH WHAT THE JUDGE WAS SHOWN — one owner, both audiences', async () => {
+    // THE DEFECT THIS REPLACES. `raw_bytes` was documented as the conflict "before any
+    // bounding", but the loop stops fetching once the display budget is spent, so it
+    // counted only the diffs pulled before the break: five 2 KiB conflicts reported ~2-4 KiB,
+    // not 10 KiB. The field was present and wrong, and the test asserted only that it
+    // EXISTED — the third instance of the disclosure path drifting at a third site, after
+    // the judge's per-file notice and the backstop's silent cut.
+    //
+    // The fix is structural rather than another patched site: withholding has one owner, and
+    // RECORDING IS EMITTING — every notice the judge sees is returned by the same call that
+    // counts it. These assertions are what that buys: the counts and the notices cannot
+    // disagree, because they are the same events read two ways.
+    const paths = Array.from({ length: 10 }, (_, k) => `big-${k}.ts`)
+    const bigDiff = `diff\n${Array.from({ length: 80 }, (_, k) => `-l${k} ${'B'.repeat(20)}\n+r${k} ${'F'.repeat(20)}`).join('\n')}\n`
+    const run = localRun('feat-agree')
+    const { host } = hunkHost(wtOf('/shared', run), () => ok(bigDiff), paths.join('\u0000'))
+    const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    let logLines: string[] = []
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    logLines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    const evidence = seen[0]?.evidence ?? ''
+    const line = logLines.find((l) => l.includes('merge_conflict_arbitration')) ?? ''
+    expect(line).not.toBe('')
+
+    // THE JUDGE WAS TOLD files were left out…
+    expect(evidence).toContain('further conflicted file(s) omitted')
+    const omittedInNotice = Number(/\(\+(\d+) further conflicted file/.exec(evidence)?.[1] ?? '-1')
+    expect(omittedInNotice).toBeGreaterThan(0)
+    // …AND THE TELEMETRY SAYS THE SAME NUMBER. Divergence here is the whole finding.
+    expect(line, 'telemetry disagrees with the notice the judge was shown').toContain(
+      `conflict_files_omitted=${omittedInNotice}`,
+    )
+    expect(line).toContain(`conflict_files=${paths.length - omittedInNotice}`)
+    // Withholding happened, so `truncated` is true — derived from the same events.
+    expect(line).toContain('hunk_truncated=true')
+    // And `shown_bytes` is bounded by what was actually sent, never an invented total.
+    const shown = Number(/hunk_shown_bytes=(\d+)/.exec(line)?.[1] ?? '-1')
+    expect(shown).toBeGreaterThan(0)
+    expect(shown).toBeLessThanOrEqual(4_096)
+  })
+
   test('THE INVARIANT: the hunk payload never exceeds its total budget, for any shape', async () => {
     // A PROPERTY, not a single case — and stated as one deliberately. The per-file loop and
     // the final `headBytes` both bound this, so no single mutation makes it red; what must
@@ -1462,19 +1527,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
    * The logger's default sink is `console.log` for info lines, so capturing it is the
    * seam — no production change to make the behaviour observable.
    */
-  async function captureLogs(body: () => Promise<void>): Promise<string[]> {
-    const lines: string[] = []
-    const original = console.log
-    console.log = (...args: unknown[]): void => {
-      lines.push(args.map((a) => String(a)).join(' '))
-    }
-    try {
-      await body()
-    } finally {
-      console.log = original
-    }
-    return lines
-  }
+
 
   test('a granted retry that RESOLVES is recorded as resolved, alongside the decision', async () => {
     const run = localRun('feat-instr-ok')
@@ -1552,7 +1605,15 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     for (const [name, line] of [['arbitration', arbitration], ['outcome', outcome]] as const) {
       expect(line, `${name} line missing`).not.toBe('')
       expect(line, `${name}: conflict_files`).toContain('conflict_files=2')
-      expect(line, `${name}: hunk_raw_bytes`).toContain('hunk_raw_bytes=')
+      // THE VALUE, NOT ITS EXISTENCE. Asserting only that the field APPEARS is what let a
+      // metric ship whose name promised a pre-bounding total while it counted only the
+      // diffs fetched before the display budget ran out — the field was present and wrong.
+      // Two files at ~600 bytes of quoted diff each, nothing omitted, so the judge saw the
+      // whole thing and `shown_bytes` is therefore also the true total.
+      const shown = Number(/hunk_shown_bytes=(\d+)/.exec(line)?.[1] ?? '-1')
+      expect(shown, `${name}: hunk_shown_bytes value`).toBeGreaterThan(500)
+      expect(shown, `${name}: hunk_shown_bytes value`).toBeLessThanOrEqual(4_096)
+      expect(line, `${name}: files omitted`).toContain('conflict_files_omitted=0')
       expect(line, `${name}: hunk_truncated`).toContain('hunk_truncated=false')
     }
     // The outcome is still recorded alongside it — size is an addition, not a replacement.

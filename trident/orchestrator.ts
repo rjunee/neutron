@@ -1874,9 +1874,15 @@ export async function rebaseOntoObservedBase(
         // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
         // each one is USUALLY a different commit that `git rebase --continue` advanced onto —
         // #541 made that "usually" rather than "always": an arbiter-directed retry there
-        // re-runs the resolver on the SAME commit, deliberately, because a second opinion
-        // supplies reasoning the first turn did not have. It still spends a round and never
-        // resets the counter, so the cap remains the bound. No such tier exists here; there is
+        // re-runs the resolver on the SAME commit, deliberately — and the reason is weaker
+        // than it looks, so state it honestly: the resolver is NONDETERMINISTIC, so a second
+        // attempt may succeed where the first failed. It carries NO new information. The
+        // arbiter's reasoning is deliberately not threaded into that turn (passing an
+        // untrusted judge's prose into a credentialed, write-capable agent was a
+        // privilege-escalation path — `SPEC.md` Decisions Log 2026-09-12 names its absence as
+        // the trap), so what a retry buys is another draw, not a better brief. Writing that
+        // down is what stops someone restoring the channel to make this comment true. It
+        // still spends a round and never resets the counter, so the cap remains the bound. No such tier exists here; there is
         // exactly one apply, so a round that leaves the same work undone will leave it undone
         // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
         // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in

@@ -1953,20 +1953,95 @@ function quoteBounded(text: string, maxBytes: number): { body: string; truncated
 }
 
 /**
+ * WHAT WAS WITHHELD, AND WHO NEEDS TO KNOW — one owner for both audiences (#541 round 12).
+ *
+ * WHY THIS EXISTS. Three rounds running found the same defect at three different sites: the
+ * judge's per-file notice (round 11), the whole-evidence notice the backstop failed to emit
+ * (round 11), and the telemetry's magnitude (round 12, where `raw_bytes` claimed a total it
+ * had stopped counting at the display budget). Two instances is a coincidence; three at
+ * three sites with one concept is a structure. Per-site markers mean every site is
+ * independently responsible for telling the truth, and sites do not stay in step — the
+ * judge was told one thing and the instrumentation another, from the same event.
+ *
+ * So withholding is recorded in ONE place, and RECORDING IS EMITTING: each `note*` method
+ * returns the notice text and counts the event in the same call. A notice cannot be shown
+ * to the judge without the telemetry knowing, and a count cannot be incremented without the
+ * judge being told, because there is no way to do either separately. `truncated` is derived
+ * from the same events that produced the notices rather than tracked alongside them, which
+ * is the divergence this replaces.
+ *
+ * The notice STRINGS live here too — they were duplicated across the sites that emitted
+ * them, which is how one of them came to be cut off without anything noticing.
+ */
+function makeWithholding(): {
+  noteFileTruncated: () => string
+  noteFilesOmitted: (n: number) => string
+  noteEvidenceCut: () => string
+  countShown: (bytes: number) => void
+  fileNoticeBytes: () => number
+  omittedNoticeBytes: (n: number) => number
+  report: (totalPaths: number) => Omit<ConflictHunks, 'body'>
+} {
+  const fileText = `${QUOTE}(… this file's diff was truncated)`
+  const omittedText = (n: number): string => `${QUOTE}(+${n} further conflicted file(s) omitted for length)`
+  const cutText = `${QUOTE}(… this evidence was truncated — you are seeing only part of the conflict)`
+  let fileTruncations = 0
+  let filesOmitted = 0
+  let evidenceCut = false
+  let shownBytes = 0
+  return {
+    noteFileTruncated: () => {
+      fileTruncations++
+      return fileText
+    },
+    noteFilesOmitted: (n) => {
+      filesOmitted += n
+      return omittedText(n)
+    },
+    noteEvidenceCut: () => {
+      evidenceCut = true
+      return cutText
+    },
+    countShown: (bytes) => {
+      shownBytes += bytes
+    },
+    // Sizing helpers for the budget. They read the same templates the notices come from,
+    // so a reserve can never be computed against a string the emitter no longer uses.
+    fileNoticeBytes: () => Buffer.byteLength(`\n${fileText}`, 'utf8'),
+    omittedNoticeBytes: (n) => Buffer.byteLength(`\n${omittedText(n)}`, 'utf8'),
+    report: (totalPaths) => ({
+      shown_bytes: shownBytes,
+      // DERIVED, not tracked. Any recorded withholding makes this true, which is what
+      // stops the telemetry disagreeing with what the judge was shown.
+      truncated: fileTruncations > 0 || filesOmitted > 0 || evidenceCut,
+      files_shown: totalPaths - filesOmitted,
+      files_omitted: filesOmitted,
+    }),
+  }
+}
+
+/**
  * What the judge was shown, and how much of the conflict that was (#541 review round 10).
  *
- * `raw_bytes` is the size of the conflict BEFORE bounding and `truncated` says whether the
- * turn saw all of it. Those two are the size dimension the kill criterion is measured
- * along: a 4 KiB payload bound means a large conflict reaches the arbiter as a fragment
- * and the prompt tells it to escalate, so the tier's useful range is SMALL conflicts —
- * plausibly the same range the bounded resolver already handled. Logging resolved-versus-
- * escalated without the size would measure the mechanism's value while hiding the one
- * variable that most likely explains it.
+ * `shown_bytes` is what the judge was ACTUALLY SENT, and `truncated` says whether that was
+ * the whole conflict. It is deliberately NOT a pre-bounding total: the loop stops fetching
+ * once the display budget is spent, so a "total" would have required a `git diff` per
+ * conflicting file purely to report a number, and the previous field claimed a total while
+ * counting only the diffs fetched before the break — a name promising more than it computed,
+ * which is the same overclaim as every other defect on this lane, in a field name.
+ *
+ * AND THE RENAME COSTS THE CRITERION NOTHING, which is why it is the right shape rather
+ * than merely the cheap one. WHEN `truncated` IS FALSE, SHOWN BYTES **ARE** THE TOTAL — the
+ * metric is exact precisely in the case the kill criterion turns on, and approximate only in
+ * the case the boolean already flags as "the judge did not see it all". Measuring every diff
+ * would buy precision exclusively where the answer is already discarded. The criterion leads
+ * with the boolean for that reason: the question was never "how many bytes" but "did
+ * resolutions only happen when nothing was withheld".
  */
 export interface ConflictHunks {
   body: string
   /** Total bytes of two-sided diff git produced, before any bounding. */
-  raw_bytes: number
+  shown_bytes: number
   /** True when any file's diff, or any whole file, was left out for length. */
   truncated: boolean
   files_shown: number
@@ -1978,31 +2053,29 @@ export async function conflictHunks(
   repo: string,
   paths: string[],
 ): Promise<ConflictHunks> {
+  // ONE OWNER for every notice and every count (#541 round 12). Recording IS emitting, so
+  // the judge's notices and the telemetry's magnitude cannot drift apart — they are the
+  // same events read two ways.
+  const withheld = makeWithholding()
   if (paths.length === 0) {
-    return { body: '(no conflicted paths reported)', raw_bytes: 0, truncated: false, files_shown: 0, files_omitted: 0 }
+    return { body: '(no conflicted paths reported)', ...withheld.report(0) }
   }
-  const fileTruncatedMarker = `${QUOTE}(… this file's diff was truncated)`
-  const filesOmittedMarker = (n: number): string =>
-    `${QUOTE}(+${n} further conflicted file(s) omitted for length)`
-  const overflowNotice = `${QUOTE}(… this evidence was truncated — you are seeing only part of the conflict)`
   // Reserved up front so admitting a section can never make the omission line unaffordable.
-  const omissionReserve = Buffer.byteLength(`\n${filesOmittedMarker(paths.length)}`, 'utf8')
-  let rawBytes = 0
-  let anyTruncated = false
+  const omissionReserve = withheld.omittedNoticeBytes(paths.length)
   const sections: string[] = []
   let used = 0
-  let filesOmitted = 0
+  let omitted = 0
   for (const path of paths) {
     const label = `${QUOTE.trim()} --- ${foldEvidence(path)} (\`-\` = base, \`+\` = branch)`
     // EVERY BYTE A SECTION EMITS IS BUDGETED, not just its body (#541 review round 11).
     // Budgeting the body alone let a long LABEL plus a near-cap diff plus the per-file
-    // truncation marker push the joined result past the total — the third time this cap
-    // has been wrong by not counting something it emits. The label and the marker are
+    // truncation notice push the joined result past the total — the third time this cap
+    // had been wrong by not counting something it emits. The label and the notice are
     // part of what a section costs, so they are subtracted before the body budget.
-    const overhead = Buffer.byteLength(`${label}\n`, 'utf8') + Buffer.byteLength(`\n${fileTruncatedMarker}`, 'utf8')
+    const overhead = Buffer.byteLength(`${label}\n`, 'utf8') + withheld.fileNoticeBytes()
     const remaining = ARBITER_HUNK_BYTES_TOTAL - used - omissionReserve
     if (remaining <= overhead + 64) {
-      filesOmitted = paths.length - sections.length
+      omitted = paths.length - sections.length
       break
     }
     let res: HostCommandResult
@@ -2024,47 +2097,32 @@ export async function conflictHunks(
       used += Buffer.byteLength(`${section}\n`, 'utf8')
       continue
     }
-    rawBytes += Buffer.byteLength(res.stdout, 'utf8')
     const budget = Math.min(ARBITER_HUNK_BYTES_PER_FILE, remaining - overhead)
     const { body, truncated } = quoteBounded(res.stdout, budget)
-    if (truncated) anyTruncated = true
-    const section = truncated ? `${label}\n${body}\n${fileTruncatedMarker}` : `${label}\n${body}`
+    // COUNTED AS SHOWN, not as fetched: the metric is what the judge received.
+    withheld.countShown(Buffer.byteLength(body, 'utf8'))
+    const section = truncated ? `${label}\n${body}\n${withheld.noteFileTruncated()}` : `${label}\n${body}`
     sections.push(section)
     used += Buffer.byteLength(`${section}\n`, 'utf8')
   }
-  if (filesOmitted > 0) {
-    sections.push(filesOmittedMarker(filesOmitted))
-    anyTruncated = true
-  }
+  if (omitted > 0) sections.push(withheld.noteFilesOmitted(omitted))
   const joined = sections.join('\n')
   if (Buffer.byteLength(joined, 'utf8') <= ARBITER_HUNK_BYTES_TOTAL) {
-    return {
-      body: joined,
-      raw_bytes: rawBytes,
-      truncated: anyTruncated,
-      files_shown: paths.length - filesOmitted,
-      files_omitted: filesOmitted,
-    }
+    return { body: joined, ...withheld.report(paths.length) }
   }
   // THE BACKSTOP, AND IT REPORTS (#541 review round 11). Keeping a redundant bound on
-  // arithmetic that has drifted three times is right; what neither review nor I asked was
-  // what happens when it FIRES. The answer was that it silently dropped bytes the loop
-  // believed it had placed — including the per-file marker that would have said the judge
-  // was looking at a fragment — while `truncated` stayed false because it was derived only
-  // from `quoteBounded`. A judge that knows it saw part of a conflict escalates; one that
-  // believes it saw all of it rules on a fragment. So ANY path that removes bytes sets
-  // `truncated`, this one included, and it makes room for a notice rather than cutting
-  // blind. Whole lines only, so a cut can never leave a line without its quote prefix.
-  const room = ARBITER_HUNK_BYTES_TOTAL - Buffer.byteLength(`\n${overflowNotice}`, 'utf8')
+  // arithmetic that has drifted is right; what nobody had asked was what happens when it
+  // FIRES — it silently dropped bytes the loop believed it had placed, including the
+  // per-file notice that would have said the judge was looking at a fragment. A judge that
+  // knows it saw part of a conflict escalates; one that believes it saw all of it rules on
+  // the fragment. Emitting the notice through the owner is what now makes that impossible:
+  // the cut and the report are one call. Whole lines only, so a cut never leaves a line
+  // without its quote prefix.
+  const notice = withheld.noteEvidenceCut()
+  const room = ARBITER_HUNK_BYTES_TOTAL - Buffer.byteLength(`\n${notice}`, 'utf8')
   const cut = headBytes(joined, Math.max(0, room))
   const wholeLines = cut.includes('\n') ? cut.slice(0, cut.lastIndexOf('\n')) : ''
-  return {
-    body: `${wholeLines}\n${overflowNotice}`,
-    raw_bytes: rawBytes,
-    truncated: true,
-    files_shown: paths.length - filesOmitted,
-    files_omitted: filesOmitted,
-  }
+  return { body: `${wholeLines}\n${notice}`, ...withheld.report(paths.length) }
 }
 
 /**
@@ -2499,12 +2557,14 @@ async function rebaseBranchOntoBase(
       // prompt tells it to escalate — which means this tier's useful range is SMALL
       // conflicts, plausibly the same range the bounded resolver already handled. A
       // resolved/escalated ratio without the size would measure the mechanism's value while
-      // hiding the variable most likely to explain it. `hunk_raw_bytes` is the conflict
-      // BEFORE bounding and `hunk_truncated` says whether the judge saw all of it.
+      // hiding the variable most likely to explain it. `hunk_shown_bytes` is what the judge
+      // was actually sent and `hunk_truncated` says whether that was the whole conflict —
+      // and when `hunk_truncated` is false the two are the same number, which is why the
+      // criterion leads with the boolean.
       const sizeFields = {
         conflict_files: arbitration.size?.files_shown ?? 0,
         conflict_files_omitted: arbitration.size?.files_omitted ?? 0,
-        hunk_raw_bytes: arbitration.size?.raw_bytes ?? 0,
+        hunk_shown_bytes: arbitration.size?.shown_bytes ?? 0,
         hunk_truncated: arbitration.size?.truncated ?? false,
       }
       if (mayArbitrate) {

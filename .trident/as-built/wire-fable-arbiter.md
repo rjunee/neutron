@@ -278,6 +278,69 @@ UNCHANGED. A refactor that requires editing the tests which prove the old behavi
 changed the behaviour — that is the difference between re-homing a fact and quietly
 redefining it.
 
+### The pre-committed reading, and why it is framed before the data
+
+The instrumentation now has a HYPOTHESIS TO FALSIFY rather than a number to interpret, and
+the interpretation is committed in `SPEC.md` in advance: if resolutions cluster on
+`truncated: false`, that is not an argument for raising the bound. It means `truncated` was
+never merely the kill criterion but the feature's **precondition** — the arbiter is useful
+only on conflicts that fit — and the payload is doing less work than its complexity implies.
+The response is then to invoke the arbiter only when the payload is complete and DELETE the
+truncation machinery outright: both notices, the per-file budget, the omitted-files
+accounting, and the withholding owner that exists to keep them honest.
+
+Framing it now is the point. Committing to the reading before the data arrives is what stops
+the result being argued with when it is inconvenient — and it reframes that outcome as a
+SIMPLIFICATION rather than a defeat: the feature gets smaller, the disclosure path that
+produced three defects in three rounds stops existing, and what remains is a judge that
+either sees the whole conflict or is never asked. That is a more defensible thing than round
+1 proposed, and it would be reached by measurement rather than by taste. A fourth disclosure
+defect arriving before the data reaches the same conclusion by a different route.
+
+### The third instance: the refactor the pre-authorisation was written for
+
+Round 12 found the same defect at a third site — `raw_bytes` was documented as the conflict
+"before any bounding" while the loop stops FETCHING once the display budget is spent, so it
+counted only the diffs pulled before the break: five 2 KiB conflicts reported ~2-4 KiB, not
+10 KiB. Present, named for a total, and wrong. The test asserted only that the field
+EXISTED.
+
+Three instances, three sites, one concept: the judge's per-file notice, the backstop's
+silent cut, and the telemetry's magnitude. That is the structure the pre-authorisation
+named, so this is the refactor rather than a third patch.
+
+**`makeWithholding` is the single owner, and RECORDING IS EMITTING.** Every `note*` method
+returns the notice text and counts the event in the same call, so a notice cannot reach the
+judge without the telemetry knowing, nor a count move without the judge being told — there
+is no way to do either separately. `truncated` is DERIVED from those events rather than
+tracked beside them, which is exactly the divergence it replaces, and the notice strings
+live in one place instead of being duplicated across the sites that emitted them.
+
+**THE MIGRATION CONSTRAINT HELD, and it is the part worth checking rather than asserting.**
+The success condition was that the existing marker call-site tests pass UNCHANGED — a
+refactor needing them edited would have changed the behaviour rather than re-homed it. When
+the refactor landed, the only failures were the four METRIC assertions (the rename, which
+finding 1 explicitly sanctioned); every marker assertion — the per-file notice count, the
+omitted-files line, the whole-evidence notice — passed untouched. That is the evidence the
+fact moved without being redefined.
+
+**ON THE METRIC, THE CHEAPER OPTION IS ALSO THE SHARPER ONE.** `shown_bytes` reports what
+the judge actually received rather than measuring every diff before budgeting. The reason is
+not cost: **when `truncated` is false, shown bytes ARE the total**, so the number is exact
+precisely in the case the kill criterion turns on, and approximate only where the boolean
+already says the judge did not see it all. Measuring every diff would buy precision
+exclusively where the answer is discarded. So the criterion now leads with the boolean —
+the question was never "how many bytes" but "did resolutions only happen when nothing was
+withheld".
+
+**And the retry's rationale is now stated honestly in the one place that contradicted it.**
+`orchestrator.ts` justified the arbiter-directed retry as "a second opinion supplies
+reasoning the first turn did not have" while the implementation deliberately deletes that
+channel and the SPEC entry names its absence as the trap. The real reason is weaker: the
+resolver is NONDETERMINISTIC, so a second attempt may succeed where the first failed — no
+new information, only another draw. Writing that down is what stops someone restoring the
+channel to make the comment true.
+
 **RULE — WHEREVER A BACKSTOP EXISTS, ASSERTING THE OUTCOME IT GUARANTEES CANNOT DETECT A
 BROKEN PRIMARY PATH.** The test must assert something the backstop does not provide. This
 cap has a per-file budgeting loop and a final `headBytes` behind it; budgeting only the body
@@ -341,7 +404,7 @@ to escalate. That is the right failure direction, but it means the mechanism's u
 is SMALL conflicts — which is plausibly where the bounded resolver was already succeeding.
 That is the third reduction in this tier's expected value, after the guidance channel's
 removal and the one-invocation cap, and it is a measurable rather than an argument:
-`conflict_files`, `hunk_raw_bytes` and `hunk_truncated` ride both instrumentation lines, so
+`conflict_files`, `hunk_shown_bytes` and `hunk_truncated` ride both instrumentation lines, so
 the resolved/escalated ratio can be sliced by whether the judge actually saw the whole
 conflict. If resolutions cluster entirely on conflicts shown in full, the honest claim is
 "rescues the easy end of escalations" rather than "rescues escalations".
