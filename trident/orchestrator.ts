@@ -111,6 +111,7 @@ import {
   type RunHostCommand,
 } from './merge.ts'
 import { escalationKindAgrees, escalationStopSentence } from './escalation-block.ts'
+import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { infraDeathSentence } from './infra-block.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
@@ -2941,12 +2942,22 @@ export function buildTridentOrchestrator(
       // findings-non-empty test recorded 113 never-reviewed runs — 68 stopped at
       // `forge-done`, 45 at `inner-error` — as reviewed rejections. That is what
       // makes an un-reviewed queue read as reviewed-and-rejected.
+      // …AND AN ESCALATION KEEPS ITS REJECTION HERE TOO. This is the FOURTH copy of the
+      // findings rule, found by enumerating the readers of `inner_verdict` rather than the
+      // sites that name escalation kinds. It is not reachable with a live escalation today
+      // — `recordedTerminalVerdict` at the terminal-result path is the ONLY production
+      // writer of a REQUEST_CHANGES verdict, and that path overrides this value — so this
+      // is closing a latent trap rather than fixing a live defect. It is closed anyway,
+      // because the next caller to reuse `failedRun` on a row that already carries one
+      // would silently downgrade a stop the owner is waiting on, and the cost of the line
+      // is a line.
       inner_verdict:
         run.inner_verdict === 'APPROVE'
           ? 'APPROVE'
           : run.inner_verdict === 'REQUEST_CHANGES' &&
               hasArgusProvenance(run.inner_checkpoint) &&
-              parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+              (parseCheckpointFindings(run.inner_checkpoint_findings).length > 0 ||
+                resultCarriesEscalation(run.inner_result))
             ? 'REQUEST_CHANGES'
             : 'REVIEW_NOT_RUN',
       failure_reason: reason,

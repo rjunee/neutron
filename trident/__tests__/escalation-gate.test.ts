@@ -106,10 +106,49 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(findingIdentity(dotRule)).not.toBe(findingIdentity(plainSym))
     expect(repeatVerdict([dotRule], [plainSym]).outcome).not.toBe('repeat')
 
-    // A LEADING EMPTY SEGMENT MUST NOT MOVE THE PATH. On `:a/b.ts:sym:rule` the file is
-    // not index 0 until the empties are dropped, so the normalisation is applied after
-    // the filter — otherwise a malformed-but-accepted key silently loses it.
-    expect(findingIdentity(f(':./a/b.ts:sym:rule'))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
+    // A LEADING EMPTY SEGMENT IS NOW UNDECIDABLE RATHER THAN REPAIRED — see the test
+    // below. A key with a leading colon is malformed, and saying so beats silently
+    // rebuilding it into a confident identity.
+    expect(findingIdentity(f(':./a/b.ts:sym:rule'))).toBe('')
+  })
+
+  test('HEADLINE: an EMPTY SEGMENT makes the key undecidable — it is not deleted', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // THE FOURTH INSTANCE OF ONE MISTAKE IN THIS FUNCTION, and the subtlest: the empty
+    // segment was FILTERED OUT, and that filter was itself a CLAIM — that an empty
+    // segment could not have been meaningful. It is not a claim anyone can make about a
+    // reviewer-authored free-text key. `a.ts:sym::rule` and `a.ts:sym:rule` collapsed to
+    // one identity, so two keys written differently read as one finding surviving a fix
+    // round and the run escalated while CONVERGING.
+    const doubled = f('a.ts:sym::rule')
+    const plain = f('a.ts:sym:rule')
+    expect(findingIdentity(doubled)).toBe('')
+    expect(findingIdentity(doubled)).not.toBe(findingIdentity(plain))
+    expect(repeatVerdict([doubled], [plain]).outcome).not.toBe('repeat')
+
+    // `''` is the answer this function ALREADY gives when it cannot read a key, and it is
+    // the fail-safe half: an undecidable identity cannot PROVE a repeat, the run keeps
+    // going, and the arithmetic and the cap are both still behind it.
+    expect(repeatVerdict([doubled], [doubled]).outcome).toBe('undecidable')
+
+    // THE OVER-STRICT DIRECTION, asserted rather than left as a side effect. A trailing
+    // colon states four things, one of which is nothing — refusing it costs a repeat this
+    // gate might otherwise have proven, and accepting it would mean choosing which of the
+    // reviewer's segments to ignore.
+    expect(findingIdentity(f('a.ts:sym:rule:'))).toBe('')
+    expect(findingIdentity(f(':a.ts:sym:rule'))).toBe('')
+  })
+
+  test('CONTROL: a well-formed key still produces a STABLE identity across rounds', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // Without this, "empty segments are undecidable" is satisfied by an implementation
+    // that decides NOTHING — which would switch the repeat gate off entirely while every
+    // assertion above stayed green.
+    const key = f('a/b.ts:sym:rule')
+    expect(findingIdentity(key)).toBe('a/b.ts:sym:rule')
+    expect(repeatVerdict([key], [key]).outcome).toBe('repeat')
+    // …and a four-segment key with no empties is still perfectly decidable.
+    expect(findingIdentity(f('a/b.ts:sym:401:rule'))).toBe('a/b.ts:sym:401:rule')
   })
 
   test('HEADLINE: CASE tells two findings apart — different files, different symbols', () => {

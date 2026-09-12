@@ -3327,16 +3327,37 @@ function findingIdentity(f) {
     // slot. This also covers whitespace around the whole key, so an outer `.trim()` beside
     // it is dead work (mutation-checked: removing it changed nothing).
     .map((seg) => seg.trim())
-    .filter((seg) => seg !== '')
-    // …BUT STRIP `./` FROM THE PATH SEGMENT ONLY. `./a/b.ts` and `a/b.ts` name the same
+    // …AND STRIP `./` FROM THE PATH SEGMENT ONLY. `./a/b.ts` and `a/b.ts` name the same
     // file, which makes this a fact about PATH NOTATION — and therefore a fact about
     // segment zero and about nothing else. Applied to every segment it silently equated
-    // `a.ts:sym:./rule` with `a.ts:sym:rule`, which are two keys a reviewer chose to write
+    // `a.ts:sym:./rule` with `a.ts:sym:rule`, two keys a reviewer chose to write
     // differently, and `repeatVerdict` called them one finding surviving a fix round.
-    // Applied AFTER the empty-segment filter so "segment zero" means the first REAL
-    // segment — on a malformed key like `:a.ts:sym:rule` the file is not index 0 before
-    // filtering, and the path normalisation would have missed it.
     .map((seg, i) => (i === 0 ? seg.replace(/^\.\//, '') : seg))
+  // AN EMPTY SEGMENT MAKES THE KEY UNDECIDABLE — IT IS NOT DELETED. This used to
+  // `.filter(seg => seg !== '')`, and that filter was itself a CLAIM: that an empty
+  // segment could not have been meaningful. It is not one I can make about a
+  // reviewer-authored free-text key. `a.ts:sym::rule` and `a.ts:sym:rule` collapsed to one
+  // identity, so `repeatVerdict` reported a repeat on two keys written differently and
+  // escalated a run that was CONVERGING — the fourth time in this one function that a
+  // normalisation discarded content, and the fourth time in the over-fire direction.
+  //
+  // `''` IS THE ANSWER THE FUNCTION ALREADY GIVES when it cannot read a key, and it is the
+  // fail-safe half: an undecidable identity fails to PROVE a repeat, the run keeps going,
+  // and the no-progress arithmetic and the round cap are both still behind it.
+  //
+  // IT ALSO DISSOLVES THE CASE THE OLD FILTER POSITION WAS REASONING ABOUT. A leading
+  // colon (`:a.ts:sym:rule`) used to need the strip applied after filtering so that
+  // "segment zero" still meant the file. Now such a key is simply undecidable — a key with
+  // a leading colon is malformed, and saying so is better than silently repairing it into
+  // a confident identity.
+  //
+  // THE OVER-STRICT DIRECTION IS DELIBERATE AND STATED: a TRAILING colon
+  // (`a.ts:sym:rule:`) is undecidable too. `''.split(':')` yields a trailing empty
+  // segment, so that key states four things and one of them is nothing. Refusing it costs
+  // a repeat this gate might otherwise have proven; accepting it would mean deciding which
+  // of the reviewer's four segments to ignore, which is the very move this whole sequence
+  // has been removing.
+  if (segments.some((seg) => seg === '')) return ''
   if (segments.length < 3) return ''
   return segments.join(':')
 }

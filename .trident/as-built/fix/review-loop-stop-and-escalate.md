@@ -63,13 +63,30 @@ consecutive spaces. Case is now content, so the schema says the key is compared 
 INCLUDING case and must stay byte-identical between rounds: the grammar move again, making
 the stable thing explicit rather than subtracting the volatile thing afterwards.
 
+AND A FOURTH TIME, IN THE SUBTLEST PLACE: the empty-segment FILTER. `a.ts:sym::rule` and
+`a.ts:sym:rule` collapsed to one identity, because the filter deleted the empty segment
+before the join. That filter was itself a CLAIM — that an empty segment could not have been
+meaningful — and it is not one anybody can make about a reviewer-authored free-text key. An
+empty segment now makes the whole key UNDECIDABLE (`''`), which is the answer this function
+already gives when it cannot read a key, and the fail-safe half: an undecidable identity
+cannot PROVE a repeat, so the run keeps going with the arithmetic and the cap still behind
+it. It also DISSOLVES the case the filter's position was reasoning about — a leading colon
+is malformed, and saying so beats silently repairing it — and the over-strict direction is
+deliberate: a trailing colon states four things, one of which is nothing.
+
+What made this one instructive is where the previous round's attention went. The comment
+above the filter reasoned carefully about its POSITION in the pipeline (applied before the
+`./` strip so "segment zero" meant the first real segment) and never asked whether the
+filter was a claim. Examining where a normalisation sits is not the same as examining
+whether it is entitled to exist.
+
 AND A THIRD TIME, IN A THIRD DIMENSION: the `./` strip ran on EVERY segment. `./a/b.ts`
 and `a/b.ts` are the same file, which makes the strip a fact about PATH notation — and
 therefore a fact about segment zero and about nothing else. Applied everywhere it equated
 `a.ts:sym:./rule` with `a.ts:sym:rule`, two keys a reviewer chose to write differently.
 Same function, same over-fire direction, three times.
 
-THE GENERAL RULE, which is what all three instances are: EVERY NORMALISATION IS A CLAIM
+THE GENERAL RULE, which is what all FOUR instances are: EVERY NORMALISATION IS A CLAIM
 THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and for an identity derived
 from free text that claim is almost never safe. Two survive, and each is a fact about the
 NOTATION rather than about the content it denotes: whitespace around a segment, in every
