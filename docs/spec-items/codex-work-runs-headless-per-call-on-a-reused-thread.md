@@ -224,13 +224,17 @@ form; the "kills:" note names what the earlier form let through.
       *kills:* re-sending prompt text to fake continuity (no `resume`, no id); and
       any newest-thread heuristic, which the decoy makes visible in the argv.
 
-- [ ] **`--last` and every equivalent of it are absent.** verify: `grep -rn -- '--last'`
-      over the adapter's sources returns nothing (positive control: the same grep over
-      this file finds it) **and** the behavioural half — with the decoy thread present,
-      a follow-up call must reach the recorded thread, not the newest.
-      *kills:* an adapter that avoids the literal string but computes "most recent"
-      itself by reading the sessions directory. A grep tests a spelling; this tests
-      the behaviour the rule is about.
+- [ ] **A follow-up never resolves "the most recent thread" by any route.** verify
+      **behaviourally**: with the decoy thread present — created *after* the recorded one
+      — a follow-up call must reach the **recorded** thread, and its argv must carry the
+      recorded id. That is the property; it holds regardless of how the adapter is
+      spelled.
+      *Cheap secondary check, labelled as such:* `grep -rn -- '--last'` over the
+      adapter's sources returns nothing (positive control: the same grep over this file
+      finds it).
+      *kills:* an adapter that avoids the literal string and computes "most recent"
+      itself by reading the sessions directory — **a grep enumerates the spellings
+      someone thought of and cannot express a property about what the program does.**
 
 - [ ] **Every call applies the caller's sandbox mode and cwd, exactly, and never
       disables the sandbox.** verify: build argv for **two different** caller-requested
@@ -247,8 +251,18 @@ form; the "kills:" note names what the earlier form let through.
 
 - [ ] **A metered API key cannot be spent, including one inherited from the
       environment.** verify:
-      (i) an `auth.json` with `auth_mode` absent and `OPENAI_API_KEY` set returns the
-      not-connected outcome without spawning codex; a subscription `auth.json` spawns it.
+      (i) **File path — match `validateCodexSubscriptionAuth`'s coverage, case for case**
+      (`trident/codex-auth.ts:73-115`), asserting codex is **not spawned** in each
+      negative: a bare `sk-…` paste (`:85`); an `auth.json` carrying `OPENAI_API_KEY`
+      and no tokens; and — the case that bills and that a hand-built suite omits —
+      **`OPENAI_API_KEY` present *alongside* valid OAuth tokens**, which the tree rejects
+      explicitly because *"the codex CLI PREFERS the key over OAuth, so its presence =
+      metered"* (`:108-110`). Positive control: a clean subscription `auth.json` does
+      spawn codex.
+      The rule this encodes: **where the tree already validates something, match that
+      validator's coverage rather than re-deriving cases.** An implementation that
+      rejects key-only files and accepts OAuth-plus-key passes a suite built the other
+      way, and bills.
       (ii) seed the **union of every recognised credential variable** in the parent —
       `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — and
       assert **not one** reaches the process that execs codex. Read the child's
@@ -269,16 +283,25 @@ form; the "kills:" note names what the earlier form let through.
       which re-sources the user's profile and can re-export a scrubbed key into the
       grandchild that actually runs.**
 
-- [ ] **An account's `auth.json` exists in exactly one place, and the adapter never
-      creates a second.** verify: the adapter resolves a `CODEX_HOME` **path** and
-      performs no write that materialises credentials — a test asserts that after a
-      full call cycle the number of `auth.json` files under the credential root is
-      unchanged, and that none of `copyFile`, `link` or `symlink` appears in the
-      adapter's sources (positive control: the same grep over a fixture that uses them
-      finds them). Bidirectional half: the adapter **does** still resolve the right
-      home when a per-project override or a non-default rotation seat is selected — so
-      the criterion is satisfied by correct selection, not by refusing to support
-      multiple homes at all.
+- [ ] **An account's credentials are never materialised anywhere outside the selected
+      existing home.** verify **behaviourally, not by grep**: run a full call cycle with
+      filesystem writes observed or intercepted — a spy over the fs module, or an
+      `strace`/audit trace of the process tree — and assert **no write anywhere on the
+      filesystem contains the credential's contents** (match on the token value seeded
+      for the test), and that the adapter's only credential interaction is a **read** of
+      the resolved home.
+      Grepping source for `copyFile`/`link`/`symlink` is **not** acceptable as the
+      primary check: it enumerates the mechanisms someone thought of, and a mutant that
+      reads the credential and `writeFile`s it to `/tmp/auth.json` violates the property
+      while matching none of those names and leaving the credential root's file count
+      unchanged. Observing writes asserts the **outcome**, so it covers `writeFile`,
+      `writeFileSync`, a stream, a shell redirect and whatever the next API is called.
+      *Cheap secondary checks, labelled as such and not sufficient alone:* the count of
+      `auth.json` files under the credential root is unchanged, and the three API names
+      are absent from the adapter's sources.
+      Bidirectional half: the adapter **does** still resolve the right home when a
+      per-project override or a non-default rotation seat is selected — so the criterion
+      is satisfied by correct selection, not by refusing to support multiple homes.
       *kills:* an adapter that provisions a second home for an account that has one, by
       any means — copy, hard link or symlink. Each was specified and each failed under
       a rotation it had not modelled; the as-built records that arc. The rule here is

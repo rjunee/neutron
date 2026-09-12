@@ -264,6 +264,40 @@ learned:
 4. What does this criterion assume that the surrounding prose has already contradicted? — *the document disagrees with itself*
 5. Does this assertion's strength depend on something the test does not control? — *the comparison cannot fail for the reason it exists*
 
+### Two rules about instruments and about the tree
+
+**A textual instrument cannot express a behavioural property.** Three criteria here leaned
+on source greps. The one-home rule counted `auth.json` files under the credential root and
+grepped for `copyFile`/`link`/`symlink` — and a mutant that reads the credential and
+`writeFile`s it to `/tmp/auth.json` violates the property while matching none of those
+names and leaving the count untouched. A grep enumerates the mechanisms someone thought of.
+The fix was to **raise the instrument, not narrow the claim**: observe or intercept
+filesystem writes and assert no write anywhere carries the credential's contents, which
+covers `writeFile`, a stream, a shell redirect and whatever the next API is called, because
+it asserts the outcome rather than the route. The greps and the file count survive as
+*secondary* checks, explicitly labelled, and the `--last` criterion was reshaped the same
+way — behavioural primary, grep secondary. Another lane reached this independently today
+(#638, where "every rev-range" was delivered as a pattern match and "only itself" as a
+basename comparison): **narrowing a claim to fit a textual instrument encodes the gap
+permanently; raising the instrument deletes it** — and raising it is available whenever the
+property is observable at runtime, which here it was.
+
+**Where the tree already validates something, match that validator's coverage.** The
+metered-key criterion tested an `auth.json` with a key and no tokens, and missed the
+configuration that actually bills: a key present **alongside** valid OAuth tokens, which
+codex prefers. `validateCodexSubscriptionAuth` already rejects exactly that, and says why —
+*"the codex CLI PREFERS the key over OAuth, so its presence = metered"*
+(`trident/codex-auth.ts:108-110`) — plus a bare `sk-…` paste (`:85`). Three cases in the
+tree, one in the criterion.
+
+That is the **third** time on this PR that a criterion was narrower than a rule the
+repository had already reasoned out, after `auth.ts:24-33`'s "must NOT inherit" variant
+list and `codex-credential.ts:396-399`'s seat-never-copied comment. The pattern is now
+unmistakable and the rule follows from it: when a validator exists, the criterion's job is
+to **match its coverage case for case**, not to re-derive coverage from the cases one
+happens to construct — because the validator was written by someone who had already met
+the boundary.
+
 ### The third audit question
 
 Two questions had been extracted from this PR's failures: *what is the weakest
