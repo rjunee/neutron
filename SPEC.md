@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-09-12 (the work queue leaves this file — `Phases → Steps` split into `docs/spec-items/`, Decisions Log 2026-09-12; previous: 2026-09-11 (the harness-orchestrator pivot — Decisions Log 2026-09-11; previous: 2026-07-27 (app remote diagnostics: the mobile app reports its own JS errors to the owner's OWN gateway — self-hosted, credential-free, no third party; native crashes remain uncovered)
+last_updated: 2026-09-12 (recurring cross-model work is one-shot headless per call on a reused thread — the codex persistence spike, Decisions Log 2026-09-12; previous: 2026-09-12 (the work queue leaves this file — `Phases → Steps` split into `docs/spec-items/`, Decisions Log 2026-09-12; previous: 2026-09-11 (the harness-orchestrator pivot — Decisions Log 2026-09-11; previous: 2026-07-27 (app remote diagnostics: the mobile app reports its own JS errors to the owner's OWN gateway — self-hosted, credential-free, no third party; native crashes remain uncovered)
 ---
 <!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr replaces the PTY host · migration re-run) -->
 

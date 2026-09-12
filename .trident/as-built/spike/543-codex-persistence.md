@@ -106,7 +106,10 @@ the meter's resolution too.
   `CODEX_HOME` shape — `<owner_home>/.codex/projects/<project_id>`,
   `trident/codex-auth.ts:191-194` — that path measures **114 bytes against a
   108-byte `SUN_LEN` limit**: `path must be shorter than SUN_LEN`, reported with
-  **exit status 0**. The global dir's own socket path is 68 bytes and fits.
+  **exit status 0**. The global dir's own socket path is 68 bytes and fits. Filed
+  as its own Post-cutover issue (#637): the limit is not the expensive part, the
+  success exit code on a failed probe is — the same class as #542/#576, where a
+  429 folded into `deferred`, reached from the other direction.
 
 ### Dead ends, in order
 
