@@ -605,6 +605,14 @@ export function buildCoreModules(
               probe_launcher_alive: tridentWiring.probe_launcher_alive,
               latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
             }
+      // #547 — the boot rescue's turn comes first. `sweepStrandedFailures` publishes a
+      // stranded failed PR run's commits by PUSHING ITS BRANCH, and the reaper's ref reap
+      // deletes a finished run's branch ref: on the one boot where both fire, the reaper
+      // won the race and the rescue found nothing to push. This latch is handed to the
+      // reaper as a PREDICATE (`refs_ready`) so no tick ever blocks on a rescue talking
+      // to a remote — the worktree half of the sweep runs from tick one either way, and
+      // the ref half simply records that it is waiting.
+      let strandedSweepSettled = false
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -618,7 +626,11 @@ export function buildCoreModules(
         // worktrees / 84 `wf_*` holders, and 42% of run failures. Wired ONLY on this
         // branch for the same reason as `fold_staged_as_built` below: the stub branch
         // runs no builds, so it creates no worktrees to reap.
-        reaper = buildWorktreeReaperLoop({ store, run_host: runHost })
+        reaper = buildWorktreeReaperLoop({
+          store,
+          run_host: runHost,
+          refs_ready: () => strandedSweepSettled,
+        })
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
         // loop is one native CC Dynamic Workflow. The FIRER (`fire_inner_workflow`)
         // invokes the `Workflow` tool on a WARM substrate and SETTLES the
@@ -830,12 +842,32 @@ export function buildCoreModules(
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       if (reaper !== undefined) loopRegistry.register(reaper.describe())
       loop.start()
+      // THE LATCH IS DECIDED BEFORE THE REAPER STARTS, and the order is load-bearing
+      // (#547 round 5). `SupervisedLoop.start()` fires its first tick SYNCHRONOUSLY when
+      // the descriptor is `immediate: true`, so a latch set after `start()` is still unset
+      // when the boot sweep reads it — which silently stood the boot sweep's REF half down
+      // on the branch whose whole point is that there is no rescue to wait for. Lifting it
+      // here costs nothing on the rescue branch, which overwrites it to false below before
+      // anything can observe it.
+      if (reconcileStranded === undefined) strandedSweepSettled = true
       // `immediate: true` on the descriptor, so `start()` IS the startup sweep — the
       // one-time hand cleanup of 2026-08-17 becomes something the gateway does for
       // itself on every boot.
       reaper?.start()
       if (reconcileStranded !== undefined) {
         const stranded_sweep = sweepStrandedFailures({ store, reconcile: reconcileStranded })
+        // LIFT THE REF-REAP LATCH once the rescue has had its turn, however it went. The
+        // sweep is best-effort and swallows its own failures, so `finally` and `then`
+        // behave the same here; `finally` says the latch is about the rescue being OVER,
+        // not about it succeeding. Not awaited, because module init must not block on a
+        // rescue talking to a remote — and through `fireAndForget` rather than a bare
+        // `void`, so a rejection is logged instead of taking the process down.
+        fireAndForget(
+          'trident_ref_reap_latch',
+          stranded_sweep.finally(() => {
+            strandedSweepSettled = true
+          }),
+        )
         // `drain` is spread conditionally, matching the line below: under
         // exactOptionalPropertyTypes an explicit `drain: undefined` is NOT
         // assignable to `drain?: () => Promise<void>`, which is what reddened
@@ -847,6 +879,11 @@ export function buildCoreModules(
           ? { store, loop, drain, stranded_sweep, ...reaperOpt }
           : { store, loop, stranded_sweep, ...reaperOpt }
       }
+      // NO RESCUE IS WIRED, so there is nothing whose turn the ref reap could be taking —
+      // already lifted ABOVE `reaper.start()`, because the first tick is synchronous and
+      // would otherwise read it unset. Left here as a belt-and-braces idempotent set, not
+      // as the place the decision is made.
+      strandedSweepSettled = true
       const reaperOpt = reaper !== undefined ? { reaper } : {}
       return drain !== undefined
         ? { store, loop, drain, ...reaperOpt }
