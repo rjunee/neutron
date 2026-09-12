@@ -48,16 +48,46 @@ conversation when that process wedges, and a daemon mode this install cannot run
    `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A
    second `CODEX_HOME` for the same account points at the same `auth.json`; it
    never holds a copy of it.
+6. **A thread id has exactly one owner, and that owner's calls on it are strictly
+   sequential.** Fan-out is expressed as **one thread id per lane**, never as
+   several callers sharing an id. Cache warmth is unaffected — it is per-thread,
+   so each lane keeps its own warm thread — and this is the only arrangement that
+   holds across processes, because the lock that enforces it is codex's, not ours.
+   Concretely, when the adapter is asked for a concurrent call on a thread already
+   in flight:
+   - **The second caller waits**, on a per-thread queue keyed by thread id, up to
+     a bounded timeout. It does not get a fresh thread silently: that would
+     abandon the conversation the caller asked to continue.
+   - **On timeout, and on a writer-lock error that arrives anyway** — which it can,
+     because the queue is per-process and the lock is per-`CODEX_HOME` — the caller
+     gets a **distinct typed outcome naming the conflict**, never a generic
+     failure and never a silent retry loop. That is the #542/#576 rule applied
+     here: a distinguishable failure state must be reportable as itself.
+
+   **Why this is a rule and not a caution.** The writer lock was measured on the
+   persistence side of the spike and counted against it, but going one-shot removes
+   only the *wedged long-lived owner*; the lock still holds for the duration of an
+   active call. The reason to reuse a thread at all is warmth across recurring
+   work, so recurring work is exactly what will share an id — and a retry landing
+   on top of an in-flight call, or several review seats on one thread, overlaps by
+   construction. "Avoid overlapping calls" is not a contract; the above is.
 
 ## Acceptance
 
 - [ ] A second call against a recorded `thread_id` reaches the first call's
-      conversation. verify: an automated test drives two `codex exec` calls where
-      the first establishes a fact only that call could have supplied and the
-      second must return it; the test asserts the second call's stdout carries
-      that fact AND that a control call with **no** `thread_id` does not. A test
-      that only asserts the resumed call succeeded passes against an adapter that
-      silently starts a fresh thread every time.
+      conversation. verify: an automated test **generates a fresh high-entropy
+      nonce** per run (≥128 bits, e.g. `randomUUID()`), plants it in call 1, and
+      asserts call 2 returns it — by **exact structured extraction**, an equality
+      check against the generated string, never a substring sniff or a
+      model-judged "mentions it". The control call is prompted with the **byte-identical
+      text** to the resumed call and differs only in carrying no `thread_id`; it
+      must not return the nonce. The test also asserts the nonce does **not**
+      appear in call 2's own prompt, nor in any file the run can read (the
+      worktree, `AGENTS.md`, the spec items) — otherwise what is measured is
+      retrieval from context the test handed over, not thread recall.
+      A low-entropy or guessable fact would let the "no memory at all"
+      implementation pass the control by inference, which is the wrong
+      implementation this criterion exists to catch.
 - [ ] The resumed call's `turn.completed.usage.cached_input_tokens` is at least
       90% of its `input_tokens`. verify: the same test reads the JSONL usage
       event. This is the whole cost case for thread reuse; an adapter that
@@ -78,6 +108,17 @@ conversation when that process wedges, and a daemon mode this install cannot run
       `auth.json` with `auth_mode` absent and `OPENAI_API_KEY` set and asserts the
       adapter returns the not-connected outcome without spawning codex; the
       positive half asserts a subscription `auth.json` does spawn it.
+- [ ] Two overlapping calls on one thread id produce the specified behaviour, not a
+      collision. verify: a test starts call A on a thread and, while A is still in
+      flight, starts call B on the same thread id; it asserts B **waited** (B's
+      turn began no earlier than A's completion) and that both returned their own
+      result. Negative half, and the one that matters: a test that forces the
+      writer-lock error — a second `CODEX_HOME`-level caller the per-process queue
+      cannot see — asserts the caller receives the **conflict-specific typed
+      outcome**, and asserts it is NOT the adapter's generic failure outcome and
+      NOT a success. An adapter that swallows the conflict and retries silently, or
+      one that reports it as an ordinary failure, fails this while still passing
+      the waiting half.
 - [ ] No long-lived codex process is created. verify: a test asserts every codex
       child the adapter spawns has exited by the time the adapter's call returns,
       and that the adapter exposes no start/stop/health surface for a server.

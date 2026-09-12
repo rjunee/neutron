@@ -94,7 +94,21 @@ the meter's resolution too.
   resume <id>` on that thread fails `thread-store conflict: … already has an
   active writer (code -32600)`. Positive control: the identical command succeeded
   the moment the server was killed. A wedged persistent process therefore strands
-  its conversation with no one-shot fallback. The headless path has no such state.
+  its conversation with no one-shot fallback.
+
+  **This finding is also a constraint on the option that won, and it nearly did not
+  cross over.** Going one-shot removes the *wedged long-lived owner* — but the lock
+  still holds for the duration of an active call, so two overlapping resumed calls
+  on one thread id collide whichever shape is chosen. The reason to reuse a thread
+  is warmth across recurring work, so recurring work is exactly what shares an id,
+  and a retry landing on an in-flight call or several seats on one thread overlaps
+  by construction. It was written up here as an argument against persistence and so
+  read as rhetoric rather than as a boundary on the recommendation; it reached the
+  acceptance criteria only when the gate pointed at it. **A finding that helps
+  reject option A is often also a constraint on option B** — the spec item now
+  carries the positive contract (one owner per thread id, per-lane fan-out, the
+  second caller waits on a bounded per-thread queue, and a conflict that arrives
+  anyway is a distinct typed outcome per #542/#576) and a test with both halves.
 - **The supervised form is unavailable.** `codex app-server daemon start` refuses
   without a managed standalone install at
   `$CODEX_HOME/packages/standalone/current/codex`; codex here is the npm
