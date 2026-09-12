@@ -688,6 +688,38 @@ same sweep found one more of the species in code — `createTokenIfAbsent`'s hea
 still said `rename` was "still right for REPLACING an untrusted file, where clobbering
 is the point", which the quarantine publish had already made false.
 
+### The lock this change introduced was not held to the standard the token was
+
+`readSinkToken` was given `O_NOFOLLOW` and a same-fd `fstat` because a token path is
+caller-supplied and may sit where someone else writes. The *lock* that arrived beside
+it, in this same PR, got neither — `withFlockSync` opened it
+`O_WRONLY|O_CREAT|O_TRUNC|O_NONBLOCK`. `O_TRUNC` applies AT OPEN, so a lock path that is
+a symlink destroyed whatever it pointed at before the function had done anything, and
+nothing downstream could notice. The threat model was correct and it simply did not
+reach the sibling the change added — the same shape as `O_NOFOLLOW` + `fstat` asking
+where the open LANDED rather than what it landed ON, one file over.
+
+Both halves are now there and both are mutation-checked **separately**, which is the
+part worth recording:
+
+| mutation | result |
+|---|---|
+| drop `O_NOFOLLOW` | symlink case reds — the victim file is truncated |
+| drop the `fstat` regular-file check | **initially GREEN — nothing could see it** |
+
+That second row is the finding inside the finding. Every other non-regular type fails
+at `open` on its own: a FIFO and a socket answer ENXIO under `O_WRONLY|O_NONBLOCK`, a
+directory answers EISDIR. So the type check had no case that reached it, and a check
+nothing can falsify is believed rather than tested — exactly the state the earlier round
+collapsed two flags into one for.
+
+The case that falsifies it is `/dev/null`: it opens cleanly with the production flags,
+`fstat` reports a character device, and without the check `flock` succeeds and the body
+RUNS. It also needs no `CAP_MKNOD`, which is what makes it usable here at all — the
+suite cannot create a device node, as the spec item's non-regular criterion now says
+out loud instead of in a parenthetical. An existing device was the way past a privilege
+the tests do not have.
+
 ### The acceptance lives in a spec item; the tests verify it
 
 This section used to be headed "the test is the acceptance", which is exactly what

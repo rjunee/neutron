@@ -162,6 +162,43 @@ describe('sink token — load or create (#537)', () => {
     expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 
+  test('a SYMLINKED lock path does not truncate its target — the lock is opened O_NOFOLLOW', () => {
+    // EFFECT-BASED, through the production loader. The lock is opened with O_TRUNC, and
+    // O_TRUNC applies AT OPEN — so without O_NOFOLLOW the victim is already destroyed
+    // before `withFlockSync` has done anything, and no assertion about flock or about
+    // call counts would notice. What is asserted here is the victim's BYTES.
+    //
+    // Reachable because the token path is caller-supplied (`PersistentReplSubstrateOptions
+    // .sinkTokenPath`), so the lock can be made to land in a directory someone else writes.
+    // The token's own reader carries O_NOFOLLOW; the lock introduced beside it did not.
+    const dir = scratch()
+    const victim = join(dir, 'precious.txt')
+    const contents = 'do not truncate me\n'
+    writeFileSync(victim, contents, { mode: 0o600 })
+
+    const path = join(dir, SINK_TOKEN_FILENAME)
+    symlinkSync(victim, join(dir, `${SINK_TOKEN_FILENAME}.lock`))
+
+    // The mint must not succeed by quietly following the link either, so the outcome is
+    // pinned as well as the bytes: this call FAILS.
+    expect(() => loadOrCreateSinkToken(path)).toThrow()
+
+    // The assertion that matters. Under the defect this file is empty.
+    expect(readFileSync(victim, 'utf8')).toBe(contents)
+  })
+
+  test('a lock path that is a DIRECTORY fails promptly rather than locking something else', () => {
+    // The complement O_NOFOLLOW does not cover: the flag rejects a symlink, the fstat
+    // rejects everything that is not a regular file. Without the type check this opens
+    // EISDIR anyway — so this case is here to keep the check honest if the open flags
+    // ever change, and it fails fast rather than hanging.
+    const dir = scratch()
+    const path = join(dir, SINK_TOKEN_FILENAME)
+    mkdirSync(join(dir, `${SINK_TOKEN_FILENAME}.lock`), { recursive: true })
+
+    expect(() => loadOrCreateSinkToken(path)).toThrow()
+  })
+
   test('a group/world-readable token file is REFUSED and replaced', () => {
     const dir = scratch()
     const path = join(dir, SINK_TOKEN_FILENAME)

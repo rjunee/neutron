@@ -18,7 +18,7 @@
  */
 
 import { createLogger } from '@neutronai/logger'
-import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
+import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const log = createLogger('registry-lock')
@@ -119,11 +119,32 @@ export function withFlockSync<T>(
   // Nothing changes for a regular file, which is every real lockfile: O_NONBLOCK
   // affects neither the create nor the write semantics there, and it does not touch
   // `flock` itself, which blocks on the LOCK, not on the fd.
+  //
+  // O_NOFOLLOW, and then `fstat` on the descriptor we already hold. O_TRUNC applies at
+  // OPEN, so without O_NOFOLLOW a lock path that is a SYMLINK truncates whatever it
+  // points at before this function has done anything at all — and `sinkTokenPath` /
+  // `replRegistryPath` are caller-supplied (`types.ts`), so the lock can be made to
+  // land in a directory an attacker writes. The token's own reader was given
+  // O_NOFOLLOW for exactly this; the lock introduced beside it was not, which is the
+  // same threat model failing to reach the sibling the change added.
+  //
+  // The `fstat` is not redundant with the flag: O_NOFOLLOW rejects a symlink, and the
+  // type check rejects the rest (a directory, a socket, a FIFO that O_NONBLOCK let
+  // through). It reads the FD, never the path, so there is no window to swap the file
+  // between the check and the lock — asking where the open LANDED, not what the name
+  // pointed at when we looked.
   const fd = openSync(
     lockPath,
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NONBLOCK,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_TRUNC |
+      fsConstants.O_NONBLOCK |
+      fsConstants.O_NOFOLLOW,
   )
   try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`registry-lock: lock path is not a regular file: ${lockPath}`)
+    }
     const rc = lib.symbols.flock(fd, LOCK_EX)
     if (rc !== 0) {
       log.error('flock_lock_ex_nonzero', { rc })
