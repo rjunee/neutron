@@ -282,15 +282,18 @@ describe('no report can park a credential past the ceiling', () => {
     // ms, six hours to eleven, with every other ceiling assertion still green.
     const pool = one()
     const YEAR = 365 * 24 * 60 * 60_000
-    // PIN THE CLOCK ACROSS THE PARK THAT ESTABLISHES THE ANCHOR. `t0` and the
-    // `Date.now()` inside `reportFailure` that becomes `cooldown_started_at` must be
-    // the SAME instant, because the assertion below measures the ceiling against `t0`
-    // while the product derives it from the anchor (`credential-pool.ts:334`). Read
-    // separately, a millisecond boundary crossing between them makes `first - t0`
-    // exactly `MAX_PARK_MS + 1` and reds a test about a six-hour bound — which is what
-    // happened on CI, and is a defect in this test rather than in the ceiling. The
-    // second half of this case already pins the clock for the same reason; this half
-    // was reading it twice and subtracting.
+    // PIN THE CLOCK ACROSS THE PARK THAT ESTABLISHES THE ANCHOR. There are THREE
+    // reads on this path, not two: `t0` here, `reportFailure`'s own
+    // (`credential-pool.ts:413`, the proposed expiry), and `park`'s INDEPENDENT read
+    // (`:320`) — and it is that third one which becomes `cooldown_started_at` (`:333`).
+    // The ceiling is derived from the anchor (`:334`), so this assertion measures a
+    // bound against an instant two reads earlier than the one it was anchored to, and
+    // any millisecond boundary crossed in between puts `first - t0` over `MAX_PARK_MS`.
+    // Observed on CI as `Received: 21600001`; under a clock that ticks on every read,
+    // `21600002` — the `+2` being exactly the two internal reads.
+    //
+    // This is a defect in the test, not in the ceiling. The second half of this very
+    // case already pins the clock for the same reason; only this half read it live.
     const realNow = Date.now
     const t0 = realNow.call(Date)
     Date.now = () => t0

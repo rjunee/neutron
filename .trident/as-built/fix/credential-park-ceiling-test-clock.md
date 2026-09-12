@@ -4,13 +4,23 @@
 BEGAN` failed on CI with `Expected: <= 21600000 / Received: 21600001` — one
 millisecond over six hours, on a branch that touches no credential code.
 
-**The ceiling was never wrong.** The test read the clock twice and subtracted.
-`t0 = Date.now()` in the test; then `reportFailure` reads `Date.now()` itself and
-stores it as `cooldown_started_at`; and the product derives the bound from that
-anchor (`credential-pool.ts:334`, `c.cooldown_started_at + MAX_PARK_MS`). When a
-millisecond boundary falls between the two reads, `first - t0` is exactly
-`MAX_PARK_MS + 1`. The assertion compared a ceiling to an instant that was not
-the one it was anchored to.
+**The ceiling was never wrong, and there are THREE clock reads, not two.** The
+test read `t0 = Date.now()`; `reportFailure` reads `Date.now()` for the proposed
+expiry (`credential-pool.ts:413`); and `park` reads it **again, independently**
+(`:320`), and it is *that* third read which becomes `cooldown_started_at`
+(`:333`). The ceiling is then derived from the anchor (`:334`,
+`c.cooldown_started_at + MAX_PARK_MS`), so the assertion compared a bound to an
+instant two reads earlier than the one it was anchored to. Any millisecond
+boundary crossed between `t0` and `park`'s read puts `first - t0` over
+`MAX_PARK_MS`.
+
+**A correction to this record's own first draft**, worth keeping rather than
+quietly rewriting. It said the clock was read twice and that `reportFailure`'s
+read became the anchor. Both wrong, and the evidence was already sitting in the
+measurement below: the adversarial run reported `MAX_PARK_MS + 2`, and a
+two-read story predicts `+1`. The number disagreed with the sentence beside it
+for a whole draft — the same defect class this tree has been finding all week,
+committed in the record of a fix for it. The cross-model gate caught it.
 
 **Reproduced rather than called flaky.** Under a preloaded clock whose every read
 advances 1 ms the case fails deterministically — 28 pass / 1 fail, `Received:
