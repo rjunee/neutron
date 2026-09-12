@@ -21,6 +21,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
+import { TridentRunStore } from './store.ts'
 import { composeTerminalDelivery, interpretFailure } from './delivery.ts'
 import {
   deriveEscalationBlock,
@@ -333,6 +334,143 @@ describe('the CARD — BLOCKED is its own lane, and the run cannot move anything
   afterEach(() => {
     db.close()
     rmSync(tmp, { recursive: true, force: true })
+  })
+
+  test('HEADLINE: a findings-free escalation SURVIVES THE WRITE and the card reaches blocked', async () => {
+    // THE GAP SEVEN REVIEW ROUNDS DID NOT CATCH, because every test of this classified a
+    // result and stopped there. `recordedTerminalVerdict` was taught that an escalation
+    // with no findings is a REQUEST_CHANGES — and the store's guard then REFUSED to write
+    // that row, because its thesis ("an empty finding set is an approval or an
+    // infrastructure failure, never a rejection") was exhaustive only while a rejection
+    // could come from nothing but findings. A refused terminal save does not settle: it
+    // THROWS, the tick retries, and the card never reaches `blocked` at all — worse than
+    // the mislabel it replaced, because a mislabelled row at least stops.
+    //
+    // So this drives the whole path: classify, WRITE through `saveIfActive`, reconcile,
+    // and read the lane off the board.
+    const runs = new TridentRunStore(db)
+    const obs = buildBoardReconcileObserver(board, { resolveRepoWebUrl: async () => null })!
+    const card = await board.create('proj-1', { title: 'the plan is wrong' })
+
+    const innerResult = escalatingResult({
+      blockKind: 'design-gap',
+      escalation: { kind: 'design-gap', whatIsMissing: 'the plan assumes an API that does not exist', triggers: ['design-gap'], evidence: 'e', round: 1 },
+    })
+    const created = await runs.create({
+      slug: 'plan-wrong', project_slug: 'proj-1', repo_path: tmp,
+      task: 'the plan is wrong', branch: 'trident/plan-wrong',
+    })
+    // The workflow's typed result lands on the row exactly as the harvest writes it.
+    await runs.update(created.id, { inner_result: innerResult })
+    // Bound to the card by its REAL id, so the reconcile below is reading this run.
+    await board.attachRun('proj-1', card.id, created.id)
+    const parsed = parseInnerResult(innerResult)!
+
+    // The verdict the orchestrator computes for this row — REQUEST_CHANGES, with NO
+    // findings anywhere.
+    const verdict = recordedTerminalVerdict(parsed, null)
+    expect(verdict).toBe('REQUEST_CHANGES')
+
+    // THE WRITE. This threw `TridentEmptyFindingsRejectionError` before the store could
+    // see the escalation.
+    const stored = runs.get(created.id)!
+    await runs.saveIfActive({
+      ...stored,
+      phase: 'failed',
+      harvested_at: 1,
+      inner_verdict: verdict,
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: null,
+      inner_result: innerResult,
+    })
+    expect(runs.get(created.id)?.phase).toBe('failed')
+    expect(runs.get(created.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+
+    // …and the card lands in the lane the whole card is about.
+    await obs(runs.get(created.id)!)
+    expect(board.get('proj-1', card.id)?.status).toBe('blocked')
+  })
+
+  test('CONTROL: a findings-free REQUEST_CHANGES with NO escalation still REFUSES to write', async () => {
+    // Without this, "an escalation may be findings-free" is satisfied by an
+    // implementation that lets EVERY empty rejection through — which is the row this
+    // guard exists to make unwritable.
+    const runs = new TridentRunStore(db)
+    const created = await runs.create({
+      slug: 'plain-reject', project_slug: 'proj-1', repo_path: tmp,
+      task: 'ordinary rejection', branch: 'trident/plain-reject',
+    })
+    const stored = runs.get(created.id)!
+    await expect(
+      runs.saveIfActive({
+        ...stored,
+        phase: 'failed',
+        harvested_at: 1,
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint: 'argus-request-changes',
+        inner_checkpoint_findings: null,
+        inner_result: null,
+      }),
+    ).rejects.toThrow(/no findings and no escalation/)
+  })
+
+  test('the escalation on the STORED ROW satisfies the guard when the save omits it', async () => {
+    // `saveIfActive` DELIBERATELY never writes `inner_result` (the orchestrator's own
+    // note: it is set on the harvest path and a save must not clobber it). So the STORED
+    // column is the authoritative copy, and a caller whose in-memory run carries `null`
+    // there must not lose the exemption — otherwise the guard would be satisfiable only
+    // by callers that happened to carry a column this method does not even persist, which
+    // is the "guard reads a column its own writer cannot populate" defect in reverse.
+    const runs = new TridentRunStore(db)
+    const created = await runs.create({
+      slug: 'stored-esc', project_slug: 'proj-1', repo_path: tmp,
+      task: 'stored escalation', branch: 'trident/stored-esc',
+    })
+    await runs.update(created.id, {
+      inner_result: escalatingResult({
+        blockKind: 'not-converging',
+        escalation: { kind: 'not-converging', whatIsMissing: 'the count stopped falling', triggers: ['no-progress'], evidence: 'e', round: 2 },
+      }),
+    })
+    const stored = runs.get(created.id)!
+    await runs.saveIfActive({
+      ...stored,
+      phase: 'failed',
+      harvested_at: 1,
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: null,
+      // The caller does NOT carry it forward; the row does.
+      inner_result: null,
+    })
+    expect(runs.get(created.id)?.phase).toBe('failed')
+    expect(runs.get(created.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+  })
+
+  test('CONTROL: a HALF-WRITTEN escalation does not buy the exemption at the write either', async () => {
+    // The store applies the SAME kind/payload agreement rule as every other reader, so a
+    // row that merely LABELS itself an escalation falls back to the findings requirement.
+    const runs = new TridentRunStore(db)
+    const created = await runs.create({
+      slug: 'half-esc', project_slug: 'proj-1', repo_path: tmp,
+      task: 'half written', branch: 'trident/half-esc',
+    })
+    const stored = runs.get(created.id)!
+    await expect(
+      runs.saveIfActive({
+        ...stored,
+        phase: 'failed',
+        harvested_at: 1,
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint: 'argus-request-changes',
+        inner_checkpoint_findings: null,
+        // blockKind says design-gap; the payload says missing-dependency.
+        inner_result: escalatingResult({
+          blockKind: 'design-gap',
+          escalation: { kind: 'missing-dependency', whatIsMissing: 'x', triggers: [], evidence: '', round: 1 },
+        }),
+      }),
+    ).rejects.toThrow(/no findings and no escalation/)
   })
 
   test('HEADLINE: a missing-dependency escalation moves the card to BLOCKED', async () => {

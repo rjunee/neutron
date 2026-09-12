@@ -61,6 +61,11 @@ import { FIRE_SETTLE_TIMEOUT_ERROR } from './fire-evidence.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import {
+  parseInnerEscalation as decodeEscalation,
+  type EscalationKind,
+  type InnerEscalation,
+} from './escalation-evidence.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -191,12 +196,13 @@ export interface InnerLoopInput {
  * only that fixing stopped working. A gate that let the arithmetic borrow one of the
  * first two names would report a cause nobody measured.
  */
-export const ESCALATION_KINDS = ['design-gap', 'missing-dependency', 'not-converging'] as const
-export type EscalationKind = (typeof ESCALATION_KINDS)[number]
+export { ESCALATION_KINDS, type EscalationKind } from './escalation-evidence.ts'
 
 /** `whatIsMissing` / `evidence` are persisted and delivered to the owner; bound them on
- *  the way in, exactly as {@link TERMINAL_CAUSE_MAX} bounds the terminal cause. */
-export const ESCALATION_TEXT_MAX = 500
+ *  the way in, exactly as {@link TERMINAL_CAUSE_MAX} bounds the terminal cause.
+ *  OWNED BY `escalation-evidence.ts`, the leaf the STORE can also reach — see that file
+ *  for why the vocabulary lives there rather than here. */
+export { ESCALATION_TEXT_MAX } from './escalation-evidence.ts'
 
 /**
  * WHAT THE RUN IS ESCALATING — reported by the run, acted on by the ORCHESTRATOR.
@@ -207,20 +213,7 @@ export const ESCALATION_TEXT_MAX = 500
  * the work with no judgement in between, which is the one thing this whole mechanism is
  * forbidden to do.
  */
-export interface InnerEscalation {
-  kind: EscalationKind
-  /** The SPECIFIC thing the plan got wrong, or the dependency that must land first.
-   *  Never empty: an escalation that states nothing is refused at decode. */
-  whatIsMissing: string
-  /** EVERY gate that fired ('repeat-finding', 'no-progress', 'design-gap',
-   *  'missing-dependency', 're-plan-failed'), so a stop is never recorded as having
-   *  happened only because an agent said so. `[]` when the workflow reported none. */
-  triggers: string[]
-  /** The arithmetic the decision was made on, in the workflow's own words. '' when absent. */
-  evidence: string
-  /** The round the escalation fired at. 0 when the workflow reported none. */
-  round: number
-}
+export type { InnerEscalation } from './escalation-evidence.ts'
 
 export interface InnerResult {
   ok: boolean
@@ -808,25 +801,7 @@ export const TERMINAL_CAUSE_MAX = 500
  * arithmetic fired when nothing says it did. Non-string members are dropped for the same
  * reason.
  */
-export function parseInnerEscalation(raw: unknown): InnerEscalation | null {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
-  const e = raw as Record<string, unknown>
-  const kind = e['kind']
-  if (typeof kind !== 'string' || !(ESCALATION_KINDS as readonly string[]).includes(kind)) return null
-  const whatIsMissing = typeof e['whatIsMissing'] === 'string' ? (e['whatIsMissing'] as string).trim() : ''
-  if (whatIsMissing === '') return null
-  const evidence = typeof e['evidence'] === 'string' ? (e['evidence'] as string).trim() : ''
-  const round = typeof e['round'] === 'number' && Number.isSafeInteger(e['round']) ? (e['round'] as number) : 0
-  return {
-    kind: kind as EscalationKind,
-    whatIsMissing: whatIsMissing.slice(0, ESCALATION_TEXT_MAX),
-    triggers: Array.isArray(e['triggers'])
-      ? (e['triggers'] as unknown[]).filter((t): t is string => typeof t === 'string' && t.trim() !== '').map((t) => t.trim().slice(0, 64))
-      : [],
-    evidence: evidence.slice(0, ESCALATION_TEXT_MAX),
-    round,
-  }
-}
+export { parseInnerEscalation } from './escalation-evidence.ts'
 
 /**
  * Decode the workflow's TYPED terminal result from the `inner_result` column.
@@ -913,7 +888,7 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // THE ESCALATION, decoded as a WHOLE or not at all — see the field docs. Everything
     // here is model-adjacent text that will be shown to the owner, so it is trimmed and
     // clamped on the way in, exactly as `terminal_cause` is.
-    escalation: parseInnerEscalation(p.escalation),
+    escalation: decodeEscalation(p.escalation),
     // THE MEASURED CAUSE (#240). Empty/absent/non-string → null, so the reason falls back
     // to the generic sentence rather than to an empty quotation.
     terminal_cause:

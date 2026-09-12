@@ -515,6 +515,44 @@ present would make a reviewer invent a code finding in order to be allowed to sa
 is wrong. A schema that forces a model to fabricate an artifact it does not have is worse
 than the bug it closes.
 
+AND THE ROW COULD NOT BE WRITTEN. Classifying it `REQUEST_CHANGES` was only half: the
+STORE refuses a findings-free rejection, and `tick.ts` routes every transition through
+that method — so the design-gap escalation THREW instead of terminalising, and the card
+never reached `blocked` at all. That is worse than the mislabel it replaced, because a
+mislabelled row at least SETTLES; a refused save retries forever. `grep -c escalat` on
+`trident/store.ts` returned 0: the store genuinely could not see that the row was an
+escalation.
+
+The store's thesis — "an empty finding set is an approval or an infrastructure failure,
+never a rejection" — was EXHAUSTIVE while a rejection could only come from findings. The
+escalation channel is a third thing, so the guard now refuses on REQUEST_CHANGES + no
+findings + NO VALID ESCALATION. It reads the evidence off `inner_result` on the ROW rather
+than taking a boolean from the caller, because a guard that trusts the caller it exists to
+check is not a guard; and it applies the same kind/payload agreement rule as every other
+reader, so a half-written escalation falls back to the findings requirement.
+
+`trident/escalation-evidence.ts` is a new LEAF module holding the escalation vocabulary and
+the one decoder for it, because `inner-loop.ts` imports a value from `store.ts` and the
+store therefore cannot import the decoder back. It is the same reason `checkpoint-findings.ts`
+exists, and `inner-loop.ts` now re-exports from it so there is ONE list of kinds and ONE
+decoder rather than a second spelling maintained beside the first.
+
+THE SWEEP THAT WOULD HAVE FOUND IT, AND THE ONE I DID INSTEAD. I swept for the same SHAPE —
+sites naming the escalation kinds — and reported that `recordedTerminalVerdict` was the only
+one. That sweep was sound and it was the wrong question. The right one is: **I changed a
+classifier's OUTPUT; what CONSUMES that output?** Enumerating readers of `inner_verdict`
+finds nine files, of which three branch on `REQUEST_CHANGES` inside the store — and all
+three carried the identical blind spot. `saveIfActive` was the one review found; `update()`
+and `save()` were found by the enumeration and fixed in the same commit. A fourth copy lives
+out-of-process in `checkpoint.sh`, and is deliberately untouched: its verdict path is
+entered only when a caller passes `inner_verdict`, and the workflow's checkpoints pass
+`{pr, head, findings}` — so a terminal escalation never reaches it. Named here rather than
+left unexamined, because the point of an enumeration is to say what was checked.
+
+Changing a value's meaning obliges a sweep of its CONSUMERS, and that is a different sweep
+from the one over its producers — only the second finds a guard that refuses to store what
+you just taught the system to say.
+
 THE SHAPE, which is the same one as the summary sentence two sections up: a condition
 written for one case and inherited by a case it was never reasoned about. Extending the
 block-kind list was the visible edit; the conjunction it sits in was the one that needed
