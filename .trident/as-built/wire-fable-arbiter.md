@@ -262,6 +262,22 @@ of the only measurement that matters. That defect was in the first cut of the
 instrumentation and was caught by the control test asserting nothing is logged when no
 arbiter is consulted.
 
+**PRE-AUTHORISED — IF A THIRD DISCLOSURE-MARKER DEFECT APPEARS, REFACTOR RATHER THAN PATCH.**
+Two rounds running, the bound held and the telling-you-about-it did not: round 10 made
+truncation visible to the INSTRUMENTATION, round 11 found it invisible to the JUDGE. Two
+audiences, two mechanisms, neither aware of the other. Per-site markers mean every site is
+independently responsible for telling the truth, and sites do not stay in step — two
+instances is a coincidence, three is a structure. A third instance is therefore a mandate to
+give "what was withheld, and who needs to know" a SINGLE OWNER that serves both audiences
+from one fact, not to add a third marker. Decided in advance so the evidence, not a
+round-trip, triggers it.
+
+**AND THE MIGRATION IS THE RISK, NOT THE DESIGN.** Every existing marker call site has a
+test that passes today, so the refactor's success condition is that THOSE TESTS STILL PASS
+UNCHANGED. A refactor that requires editing the tests which prove the old behaviour has
+changed the behaviour — that is the difference between re-homing a fact and quietly
+redefining it.
+
 **RULE — WHEREVER A BACKSTOP EXISTS, ASSERTING THE OUTCOME IT GUARANTEES CANNOT DETECT A
 BROKEN PRIMARY PATH.** The test must assert something the backstop does not provide. This
 cap has a per-file budgeting loop and a final `headBytes` behind it; budgeting only the body
