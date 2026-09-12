@@ -234,12 +234,14 @@ describe('G8 leak-gate — planted findings FAIL', () => {
   })
 
   test('the retained forbidden root files each trip forbidden-path', () => {
-    // K10 un-banned SPEC.md but the remaining FORBIDDEN_EXACT entries stay
-    // banned as carve tripwires against Managed's private root docs re-entering
-    // the public tree. Pin EACH one individually so deleting any entry from the
-    // list fails this suite (Codex P2 — the `signup/` prefix test alone did not
-    // cover FORBIDDEN_EXACT).
-    for (const name of ['STATUS.md', 'ISSUES.md', 'CLAUDE.md', 'AGENTS.md']) {
+    // K10 un-banned SPEC.md, and AGENTS.md was un-banned later for the same
+    // reason (it is now an intended public file, and it had never existed at the
+    // private repo's root — it was guarding an empty set). The remaining three
+    // stay banned as carve tripwires against that repo's root docs re-entering
+    // the public tree; all three exist there today. Pin EACH one individually so
+    // deleting any entry from the list fails this suite (Codex P2 — the
+    // `signup/` prefix test alone did not cover FORBIDDEN_EXACT).
+    for (const name of ['STATUS.md', 'ISSUES.md', 'CLAUDE.md']) {
       const dir = freshTree()
       try {
         writeFileSync(join(dir, name), '# forbidden root file\n')
@@ -262,12 +264,36 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     // That flip is now INTENDED, so a root SPEC.md must NOT trip forbidden-path.
     // This test is the inversion of the pre-K10 tripwire, which banned a root
     // SPEC.md; it pins that an otherwise-clean tree WITH a root SPEC.md stays
-    // silent. The remaining root files (STATUS.md/ISSUES.md/CLAUDE.md/AGENTS.md)
-    // stay banned — covered by the "forbidden Managed structural path" test and
-    // the FORBIDDEN_EXACT list.
+    // silent. The remaining root files (STATUS.md/ISSUES.md/CLAUDE.md) stay
+    // banned — covered by the "forbidden Managed structural path" test and the
+    // FORBIDDEN_EXACT list.
     const dir = freshTree()
     try {
       writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
+      expect(out).not.toContain('[forbidden-path]')
+      expect(out).toContain('LEAK GATE: SILENT')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a root AGENTS.md is allowed (the cross-harness entry point is intended)', () => {
+    // Same shape as the SPEC.md case above, and for the same reason. A root
+    // AGENTS.md is the entry point a non-Claude harness (Codex) reads; this
+    // tree's other 32 AGENTS.md files are per-directory and only apply once you
+    // are already inside those directories, so without this there is no
+    // repo-wide instruction file for a self-hoster's Codex to find.
+    //
+    // It was previously banned as a carve tripwire, but the private repo it
+    // guards against has never had one (`git log --all -- AGENTS.md` there:
+    // zero commits), so the entry cost a real capability and protected nothing.
+    // This pins the un-ban so it cannot be silently reintroduced; if that repo
+    // ever grows a root AGENTS.md, this test is what must be argued with.
+    const dir = freshTree()
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), '# Working in this repository\n')
       const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST })
       expect(out).not.toContain('[forbidden-path]')
       expect(out).toContain('LEAK GATE: SILENT')
