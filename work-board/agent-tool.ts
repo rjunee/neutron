@@ -52,9 +52,13 @@ export const WORK_BOARD_COMPLETE_TOOL = 'work_board_complete'
 export const WORK_BOARD_REORDER_TOOL = 'work_board_reorder'
 export const WORK_BOARD_REMOVE_TOOL = 'work_board_remove'
 
-// 'failed' is deliberately ABSENT: it is run-driven (only the terminal reconcile
-// writes it), so it is not client-writable. 'archived' IS here — it is the
-// deprioritise lever.
+// 'failed' and 'blocked' are deliberately ABSENT: both are run-driven (only the
+// terminal reconcile writes them), so neither is client-writable. For 'blocked'
+// that is the guardrail itself — the RUN reports and the ORCHESTRATOR decides, so a
+// build that could put a card into a lane of its own choosing is a build
+// re-prioritising the owner's queue. Moving a card OUT of blocked is allowed and is
+// exactly the decision: set 'upcoming'. 'archived' IS here — it is the deprioritise
+// lever.
 const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 
 const statusProp = {
@@ -65,7 +69,9 @@ const statusProp = {
     "'archived' (SHELVED — deprioritised and taken off the active board WITHOUT shipping). " +
     "'archived' is not a quieter 'done': use it, never 'done'/work_board_complete, for anything " +
     'dropped, parked, or superseded, so the board never reports unshipped work as completed. ' +
-    'A shelved card keeps its history and can be un-shelved back to upcoming.',
+    'A shelved card keeps its history and can be un-shelved back to upcoming. ' +
+    "A card in the run-driven 'blocked' lane cannot be set here and cannot be built until " +
+    "it leaves it: set 'upcoming' once the block is cleared — that move IS the decision.",
 }
 
 const designDocRefProp = {

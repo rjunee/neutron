@@ -698,6 +698,14 @@ describe('work_board_update — the SHELVED lane (status=archived)', () => {
       expect(schema.properties.status.enum).toContain('archived')
       // 'failed' is run-driven (terminal reconcile only) — not client-writable.
       expect(schema.properties.status.enum).not.toContain('failed')
+      // NEITHER IS 'blocked', and for that one it is the guardrail itself: the RUN
+      // reports and the ORCHESTRATOR decides, so an agent that could set this lane
+      // could park a card nobody asked it to park. Moving a card OUT of blocked is
+      // an ordinary `status:'upcoming'` update, and that move IS the decision — so
+      // the description has to say so rather than leave the agent to discover that
+      // its build was refused.
+      expect(schema.properties.status.enum).not.toContain('blocked')
+      expect(schema.properties.status.description).toContain('blocked')
       // The model is told archived ≠ shipped.
       expect(schema.properties.status.description).toContain('archived')
     }

@@ -145,13 +145,20 @@ were enumerated — decode, render, advance, dispatch, escalate — and each was
   carries it, and neither UI offers a control for it.
 - **escalate** — the reconcile routes it; `detachRun` writes the lane and stamps nothing.
 
+`agent-tool.ts` and the HTTP surface already REFUSED `blocked` (it is absent from both
+client-writable allowlists), but only by omission — neither comment explaining why `failed`
+is absent mentioned it, and the tool's status description said nothing, so an agent whose
+build was refused with `card_blocked` had no way to learn what to do from the tool it was
+holding. For `blocked` the omission IS the guardrail; the schema now says so, and says that
+moving a card OUT of it is an ordinary `status:'upcoming'` update and that move is the
+decision.
+
 Checked and deliberately UNCHANGED, with the reason: `inline-activity.ts` (a blocked card
 arrives with `inline_active` already cleared by `detachRun`, and the only rule that could
 turn it back on requires `status === 'in_progress'` — so nothing can claim live inline
 work on it); `project-rail.ts` (a blocked card with a bound terminal run raises rail
 ATTENTION, which is correct — it needs the owner; the internal variable is named for
-failure but the signal is "needs you"); `agent-tool.ts` and the HTTP surface's writable
-`STATUS_VALUES` (four values, unchanged — `blocked` is run-driven, like `failed`).
+failure but the signal is "needs you").
 
 ### The renderers were deriving from the run, and the run says "failed"
 
