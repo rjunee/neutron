@@ -70,8 +70,7 @@ already carried `inner_checkpoint`, its head, its findings, the base pin and the
 `round`. #628 adds the card's Ralph SPEND on a separate gate: `ralph_round` together
 with the cap it is measured against, `min(prior, dispatch)`, so a re-dispatch may
 tighten the budget and never loosen it. Record:
-`docs/as-built/a-retry-must-resume-from-the-checkpoint.md` (staged at
-`docs/as-built/a-retry-must-resume-from-the-checkpoint.md`).
+`docs/as-built/a-retry-must-resume-from-the-checkpoint.md`.
 
 **The scope, and the two halves are different widths.** Calling it "the mid-budget case"
 under-claimed — the phrasing this paragraph used to carry, and the same error as the
