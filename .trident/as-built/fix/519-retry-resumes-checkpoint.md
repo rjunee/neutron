@@ -16,9 +16,30 @@ as `ralphRound`, where the plan-refresh cadence reads `ralphRound % PLAN_REFRESH
 A re-dispatch that writes 0 hands a mid-budget run a fresh count and lands its periodic
 full re-plan on the wrong iteration of the same piece of work.
 
-**THE SHIPPED SCOPE IS THE MID-BUDGET CASE, and getting to that sentence took three
-review rounds, each of which caught this branch claiming more than it did.** The
-history is recorded because the wrong versions are the useful part.
+**THE SHIPPED SCOPE, STATED ACCURATELY — AND THIS LINE ITSELF WAS WRONG, in the rarer
+direction.** It read "the shipped scope is the MID-BUDGET case", which UNDER-claims: the
+budget carry covers every valid governed pair, EXHAUSTED linked runs included, because it
+is gated on the board link rather than on the commit seed (`carriedRalphBudget`), and this
+record's own spec item says exhausted `ralph-task-built` rows retain their spend. A reader
+of the old line would conclude exhausted runs get a fresh budget — which is the defect
+this change exists to remove. Under-claiming is not the safe direction when the claim is
+about a guard.
+
+So, precisely:
+
+  - BUDGET INHERITANCE covers any governed prior the card names, exhausted included. The
+    spend and its cap travel; the cap can only tighten.
+  - COMPLETE CHECKPOINT RESUMPTION is narrower and unchanged: only a review-capable
+    checkpoint (`fix-round-N`, `outer-published:*`) on an unmoved tip hands its commit
+    forward, which is the branch the acceptance criteria name.
+
+It took three review rounds to get the carry right, and a fourth to state its scope
+without over- or under-claiming — and that fourth correction had to be made in THREE
+places, because the under-claim had been written into the as-built, the spec item and a
+`run-disposition.ts` docblock. The sweep that caught the first two was over COMMENTS in
+touched files; the record and the spec item are not comments, and were not in it. A scope
+statement lives wherever it was written, not only in code. The history below is recorded because the wrong versions
+are the useful part.
 
 *Round 1 — the guard that inverted the change.* The carry required `round < max`
 ("the round must leave a re-fire"), on the theory that a row born at its cap is dead on
@@ -201,6 +222,20 @@ is therefore negatives and unsafe magnitudes; those are covered through the real
 database, and the three sqlite cannot store are covered through the real dispatch
 chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
+
+**THE RULE I APPLY TO FIX A CLAIM IS A CLAIM TOO, AND IT NEEDS APPLYING EVERYWHERE THE
+OLD RULE REACHED — INCLUDING THE NEIGHBOURING ARM OF THE SAME `if`.** Five times on this
+change a correction reached the artefact it was pointed at and no further, and the sixth
+was the sharpest: having concluded for arm 1 that a null `inner_checkpoint` cannot
+establish what a run did, the same file went on asserting "this run built nothing" in arm
+2 and "nothing was attempted" in arm 3 — the latter contradicting the very next clause of
+its own sentence, since `enterRalphPlan` advances `ralph_round` WITHOUT writing a
+checkpoint. Three lines apart, in one function.
+
+Reading the function as ONE artefact — rather than arm-by-arm as findings arrived — is
+what found arm 2's copy, which no round had looked at since it was written. All three arms
+now claim only column values and the arithmetic of the refusal, and the docblock says to
+read it whole before changing any arm.
 
 **FIVE ROUNDS, FIVE PROXIES, EACH NARROWER AND EACH STILL AN OVERCLAIM. THE STOPPING
 POINT IS THE WEAKEST STATEMENT THE DATA SUPPORTS, NOT THE MOST INFORMATIVE ONE THAT SEEMS

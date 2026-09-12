@@ -53,12 +53,19 @@ tighten the budget and never loosen it. Record:
 `docs/as-built/a-retry-must-resume-from-the-checkpoint.md` (staged at
 `.trident/as-built/fix/519-retry-resumes-checkpoint.md`).
 
-**The honest scope is the MID-BUDGET case.** A governed run that died at `fix-round-N`
-or `outer-published:*` with iterations left keeps its count and its plan-refresh
-cadence. Measured improvement beyond that: because the spend is gated on the board
-link rather than on the commit seed, it also survives a moved tip, an unreadable ref,
-an unresumable prior — including the `ralph-task-built` row the Ralph loop's own
-exhaustion path parks on — and a spec-doc edit past the slug's 35th character.
+**The scope, and the two halves are different widths.** Calling it "the mid-budget case"
+under-claimed — the phrasing this paragraph used to carry, and the same error as the
+as-built's, which would leave a reader concluding exhausted runs get a fresh budget.
+
+- **Budget inheritance** covers any governed prior the card NAMES, exhausted included: it
+  is gated on the board link rather than on the commit seed, so it survives a moved tip,
+  an unreadable ref, an unresumable prior — including the `ralph-task-built` row the
+  Ralph loop's own exhaustion path parks on — and a spec-doc edit past the slug's 35th
+  character. The spend and its cap travel together and the cap can only tighten.
+- **Complete checkpoint resumption** is narrower and unchanged: a review-capable
+  checkpoint (`fix-round-N`, `outer-published:*`) on an unmoved tip, which is the branch
+  the criteria above name. A governed run that died there with iterations left keeps its
+  count and its plan-refresh cadence.
 
 ## Not met
 

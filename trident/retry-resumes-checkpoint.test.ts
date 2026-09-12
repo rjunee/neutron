@@ -1424,9 +1424,15 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     // claim; this one made a lying message look verified.
     // BRANCH 3: the budget IS consumed — that much is certain whoever consumed it —
     // and only WHO is left open.
-    expect(t.failure_reason).toContain('no build of its own')
-    expect(t.failure_reason).toContain('the budget is consumed')
-    expect(t.failure_reason).toContain('does not record WHO consumed it')
+    // ARM 3 claims only the two column values and the arithmetic. "no build of its own"
+    // and "nothing was attempted" were removed: the phase graph advances this counter
+    // WITHOUT writing a checkpoint, and the checkpoint is written out-of-process, so a
+    // null one establishes neither — see the real-phase-graph boundary test below.
+    expect(t.failure_reason).toContain('no inner_checkpoint on this row')
+    expect(t.failure_reason).toContain('the budget is spent')
+    expect(t.failure_reason).toContain('nor which run spent the rounds')
+    expect(t.failure_reason).not.toContain('nothing was attempted')
+    expect(t.failure_reason).not.toContain('no build of its own')
     // It may NAME the two possibilities; it may not assert either one…
     expect(t.failure_reason).not.toContain('inherited')
     // …it may not blame a planner that never ran…
@@ -1455,7 +1461,7 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     // wording's "a resumable build IS on this row" was flatly false for exactly the
     // checkpoint the ralph handoff writes. Fifth proxy on one sentence.
     expect(ran.failure_reason).toContain("inner_checkpoint 'ralph-task-built'")
-    expect(ran.failure_reason).not.toContain('no build of its own')
+    expect(ran.failure_reason).not.toContain('no inner_checkpoint on this row')
     // AND IT CLAIMS NOTHING ELSE: not authorship, not resumability, not convergence.
     // RED-mutation: restore any of the five overclaims to arm 1.
     expect(ran.failure_reason).not.toContain('without converging')
@@ -1504,13 +1510,72 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('max_ralph_rounds')
     // IT SAYS WHAT IS TRUE: nothing was allocated, so nothing was spent.
-    expect(t.failure_reason).toContain('no Ralph iteration was ever authorised')
-    expect(t.failure_reason).toContain('Nothing has been spent')
+    // ARM 2 claims only the cap's consequence and the two column values. "this run built
+    // nothing" and "no planner to investigate" were removed for the same reason arm 3's
+    // claims were: a null checkpoint is written out-of-process, so its absence means "not
+    // recorded", never "did not happen".
+    expect(t.failure_reason).toContain('no Ralph iteration could be authorised')
+    expect(t.failure_reason).toContain('records ralph_round 0 and no inner_checkpoint')
+    expect(t.failure_reason).not.toContain('built nothing')
+    expect(t.failure_reason).not.toContain('no planner to investigate')
     // AND CLAIMS NOTHING ELSE — no predecessor, no consumed budget, no planner.
     expect(t.failure_reason).not.toContain('inherited')
-    expect(t.failure_reason).not.toContain('the budget is consumed')
+    expect(t.failure_reason).not.toContain('the budget is spent')
     expect(t.failure_reason).not.toContain('without converging')
     expect(t.failure_reason).not.toContain('does not record')
+  })
+
+  test('A COUNTER ADVANCED BY THE REAL PHASE GRAPH takes arm 3, and is not told nothing was attempted', async () => {
+    // THE FIXTURE GAP, and it is the same one fixed for arm 1 one round earlier: every
+    // arm-3 case here CONSTRUCTED its counter — inherited through dispatch, or preloaded
+    // on the row — so none of them exercised a counter the PHASE GRAPH advanced. That is
+    // the state the arm's own sentence described while denying it: `enterRalphPlan`
+    // increments `ralph_round` and writes no checkpoint, so a row can have attempted
+    // planning repeatedly and still show `inner_checkpoint === null`. The old wording said
+    // "nothing was attempted" and then conceded in its next clause that the row may have
+    // spent the rounds itself — a sentence contradicting itself inside one string.
+    //
+    // A test that constructs the state cannot see a defect in how the state is produced.
+    // So this drives the real transitions and lets the graph move the counter.
+    // RED-mutation: restore "nothing was attempted" (or "no build of its own") to arm 3
+    // and this test fails while the constructed arm-3 cases above still pass.
+    let row = await store.create({
+      slug: 'graph-advanced-counter', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, max_ralph_rounds: 2,
+    })
+    expect({ round: row.ralph_round, cp: row.inner_checkpoint }).toEqual({ round: 0, cp: null })
+
+    // Walk the REAL graph until the cap refuses. BOTH `forge-init` and `ralph-plan` need a
+    // REMAINING_TASKS — a planning pass that reports none fails on its own reason and never
+    // reaches the cap, which is how the first draft of this loop stopped at round 1 and
+    // asserted nothing. `ralph-task` takes the empty result and is the hop that re-enters
+    // `enterRalphPlan`, i.e. the hop that advances the counter.
+    const seen: Array<{ phase: string; round: number }> = []
+    let guard = 0
+    for (;;) {
+      if (guard++ > 12) throw new Error('the phase graph did not reach the cap')
+      const needsRemaining = row.phase === 'forge-init' || row.phase === 'ralph-plan'
+      const t = computeTransition(row, needsRemaining ? { remaining: 1 } : {})
+      seen.push({ phase: t.phase, round: t.ralph_round })
+      row = { ...row, phase: t.phase, ralph_round: t.ralph_round }
+      if (t.phase === 'failed') {
+        // THE COUNTER GOT HERE BY BEING ADVANCED, not by being written — asserted, since
+        // that is the whole premise of the test.
+        expect(row.ralph_round).toBe(2)
+        expect(row.inner_checkpoint).toBeNull()
+        expect(seen.filter((x) => x.phase === 'ralph-plan').length).toBeGreaterThan(1)
+
+        expect(t.failure_reason).toContain('max_ralph_rounds')
+        // ARM 3, and it claims nothing about attempts in either direction.
+        expect(t.failure_reason).toContain('no inner_checkpoint on this row')
+        expect(t.failure_reason).toContain('whether anything was attempted')
+        expect(t.failure_reason).not.toContain('nothing was attempted')
+        expect(t.failure_reason).not.toContain('no build of its own')
+        // …nor that this run built anything, which is the mirror overclaim.
+        expect(t.failure_reason).not.toContain('without converging')
+        break
+      }
+    }
   })
 
   test('A CARRIED ROUND UNDER A ZERO CAP is branch 3, not branch 2 — the counter decides, not the cap', async () => {
@@ -1534,11 +1599,11 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     const t = computeTransition({ ...carriedUnderZero, phase: 'ralph-task' }, {})
     expect(t.phase).toBe('failed')
     // BRANCH 3: a budget WAS consumed — five rounds of it — whoever consumed them.
-    expect(t.failure_reason).toContain('the budget is consumed')
-    expect(t.failure_reason).toContain('does not record WHO consumed it')
+    expect(t.failure_reason).toContain('the budget is spent')
+    expect(t.failure_reason).toContain('nor which run spent the rounds')
     // NOT branch 2: "nothing has been spent" is flatly false for a row at ralph_round 5.
-    expect(t.failure_reason).not.toContain('Nothing has been spent')
-    expect(t.failure_reason).not.toContain('no Ralph iteration was ever authorised')
+    expect(t.failure_reason).not.toContain('records ralph_round 0')
+    expect(t.failure_reason).not.toContain('no Ralph iteration could be authorised')
   })
 
   test('THE THIRD COMBINATION IS UNREACHABLE, and that is why there are three arms not four', async () => {

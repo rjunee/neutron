@@ -216,11 +216,19 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  *      READER — `delivery.ts` never parses it and production routes on `phase: 'failed'`
  *      — so it was declined. The checkpoint NAME is in the message and the row is
  *      queryable; an operator who needs more can read the row.
- *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0: no iteration was ever
- *      authorised, so nothing was spent by anyone. Determinable from the row.
- *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget IS consumed, whoever consumed
- *      it; only WHO is open, since this row may have advanced the counter itself through
- *      the phase graph or carried the count in from an earlier run of the card.
+ *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0, so no iteration could be
+ *      authorised at all. The two column values, and that consequence. NOT "this run
+ *      built nothing": a null checkpoint is written out-of-process, so its absence means
+ *      "not recorded", never "did not happen".
+ *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget is spent. NOT that nothing was
+ *      attempted (this function's own caller advances the counter without writing a
+ *      checkpoint, so a row here may have planned repeatedly) and NOT who spent it.
+ *
+ * ALL THREE ARMS CLAIM ONLY COLUMN VALUES AND THE ARITHMETIC OF THE REFUSAL. Read the
+ * function as ONE artefact when changing any arm: six rounds of review each corrected a
+ * single arm's wording, and twice the correction did not travel to the neighbouring arm
+ * of the same `if` — the rule applied to fix a claim is a claim too, and needs applying
+ * everywhere the old rule reached.
  *
  * TAKES PRIMITIVES, NOT A RUN, so this module stays a true leaf that imports nothing —
  * the property its header rests on. `remaining_tasks` is the orchestrator's extra fact
@@ -246,8 +254,26 @@ export function ralphCapFailureReason(row: {
   if (hasCheckpoint) {
     return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round}: the budget is exhausted, so no further iteration could start. This row carries inner_checkpoint '${row.inner_checkpoint}'; whether that work is resumable, and which run produced it, are not recorded here — read the row and the card's earlier runs${tail}`
   }
+  // NO CHECKPOINT AND NO ROUNDS RECORDED. Which, since the refusal fires only when
+  // `ralph_round >= max_ralph_rounds`, means the cap is 0 — so no iteration could ever
+  // have been authorised, whatever else happened. That is the whole claim.
+  //
+  // WHAT THIS ARM USED TO ADD AND NO LONGER DOES: "this run built nothing" and "no
+  // planner to investigate". Both read a null `inner_checkpoint` as proof nothing was
+  // built, which it is not — `checkpoint.sh` writes that column OUT OF PROCESS, so its
+  // absence means "not recorded", never "did not happen". This lane relied on exactly
+  // that fact one round earlier to construct a terminal result with no checkpoint behind
+  // it, and then left the overclaim standing two lines away. Sixth proxy on one string.
   if (row.ralph_round === 0) {
-    return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`
+    return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration could be authorised — with that cap, ralph_round + 1 exceeds it for any counter. This row records ralph_round 0 and no inner_checkpoint. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`
   }
-  return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round already at ${row.ralph_round} and no build of its own on this run (inner_checkpoint is null): the budget is consumed, so there was no iteration left to start and nothing was attempted. This row does not record WHO consumed it — it may have spent the rounds itself through the phase graph, or carried the count forward from an earlier run of this card — so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge${tail}`
+  // NO CHECKPOINT, N ROUNDS RECORDED. The counter is the only thing that moved, and the
+  // row does not say who moved it or whether anything was attempted.
+  //
+  // "NOTHING WAS ATTEMPTED" USED TO BE ASSERTED HERE, and contradicted the next clause of
+  // its own sentence: `enterRalphPlan` — this very function's caller in the phase graph —
+  // ADVANCES `ralph_round` without writing a checkpoint, so a row in exactly this state
+  // may have attempted planning repeatedly. A sentence that concedes a possibility it has
+  // just denied is worse than either half alone.
+  return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round} and no inner_checkpoint on this row: the budget is spent, so no further iteration could start. Neither is recorded here: whether anything was attempted (the phase graph advances this counter without writing a checkpoint, and the checkpoint is written out-of-process, so its absence establishes neither), nor which run spent the rounds — read the row and the card's earlier runs${tail}`
 }

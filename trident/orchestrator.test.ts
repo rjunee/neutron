@@ -4388,7 +4388,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       // THIS assertion fails while the arm-1 block above still passes — which is exactly
       // how the divergence survived, and the failure mode of every extraction (the helper
       // exists; one call site does not use it).
-      expect(final.failure_reason ?? '').toContain('no build of its own on this run')
+      expect(final.failure_reason ?? '').toContain('no inner_checkpoint on this row')
       expect(final.failure_reason ?? '').not.toContain('are not recorded here')
       // The classification token is unchanged on both arms, so nothing downstream shifts.
       expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
