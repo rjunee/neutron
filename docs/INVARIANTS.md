@@ -433,7 +433,7 @@ with cross-references noted inline.
     reached — but the CLEARING write does NOT: it brings no review at all, and a NULLed verdict
     beside preserved findings is the one atomic write's two guarded columns disagreeing about
     whether a review happened, so it is frozen on the same terms (Argus r21; this card's as-built record,
-    `.trident/as-built/trident/1-measured-cost-97-of-160-rejection.md`, "AND THE CLEARING WRITE IS AN ERASURE TOO"). The BOUND-REVIEW executor obeys the same rule for the same
+    `docs/as-built/1-measured-cost-97-of-160-rejection.md`, "AND THE CLEARING WRITE IS AN ERASURE TOO"). The BOUND-REVIEW executor obeys the same rule for the same
     reason (`trident/orchestrator.ts`, `recorded_verdict`): its verdict comes from the panel's
     `inner_result` JSON while its findings come from the panel's column, so the two can disagree,
     and the store's throw would otherwise keep the run non-terminal and re-run the whole review on
@@ -456,7 +456,7 @@ with cross-references noted inline.
     dispatch may resume" (`ralph-task-built` sits there WITH a commit, because the workflow
     rebuilds that shape by design). The classifier is mode-blind so an offline count of the
     historical table never turns on a flag, and the offline SQL published in this card's as-built record
-    (`.trident/as-built/trident/1-measured-cost-97-of-160-rejection.md`) is
+    (`docs/as-built/1-measured-cost-97-of-160-rejection.md`) is
     executed against it rather than asserted (`trident/as-built-disposition-sql.test.ts`).
     (d) A built-but-never-reviewed terminal SEEDS the next dispatch of the same card
     (`builtButNeverReviewedSeed`, `trident/run-disposition.ts`; chokepoint
@@ -558,7 +558,7 @@ with cross-references noted inline.
     as a rejection AND an APPROVED one never is either (`trident/delivery.ts`, `interpretFailure`).
     Protects: **P10** (Trident checkpoint hardening; cross-ref #20, #112) and the
     trustworthy-rejection-count query recorded in the 2026-08-31 as-built entry
-    (`.trident/as-built/trident/1-measured-cost-97-of-160-rejection.md`).
+    (`docs/as-built/1-measured-cost-97-of-160-rejection.md`).
 
 ## 4. Duplication / consolidation seams (`critic-duplication.md`)
 

@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**23 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
+**24 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -41,6 +41,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: pinned sha, origin/<base> when it resolves, else bare | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
+| [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
 

@@ -24,6 +24,8 @@ import {
   readSpecItem,
   readSpecItems,
   renderIndex,
+  countStructure,
+  checkDeclaredStructure,
 } from '../spec-items-index.ts'
 
 const DIR = join(import.meta.dir, '..', '..', SPEC_ITEMS_DIR)
@@ -150,5 +152,111 @@ describe('the validator rejects what it should', () => {
 
   test('quoted frontmatter values are unquoted', () => {
     expect(parseFrontmatter('---\nlegacy_ref: "a b"\n---\n', 'x').legacy_ref).toBe('a b')
+  })
+
+  // The failure this pins: an edit that replaced "from a heading to end of file" dropped a
+  // whole trailing section, and every other check here still passed. A declared structure
+  // makes truncation fail at the moment of the edit.
+  describe('declared structure', () => {
+    const body = ['## A', '- [ ] one', '- [ ] two', '1. **c one**', '2. **c two**', '## B', 'x'].join('\n')
+
+    test('counts sections, criteria and contract items', () => {
+      expect(countStructure(body)).toEqual({ sections: 2, criteria: 2, contract_items: 2 })
+    })
+
+    test('an item that declares nothing is unconstrained', () => {
+      expect(() => checkDeclaredStructure('x', {}, body)).not.toThrow()
+    })
+
+    test('a matching declaration passes', () => {
+      expect(() =>
+        checkDeclaredStructure('x', { sections: '2', criteria: '2', contract_items: '2' }, body),
+      ).not.toThrow()
+    })
+
+    test('a dropped trailing section fails, naming both numbers', () => {
+      const truncated = body.slice(0, body.indexOf('## B'))
+      expect(() => checkDeclaredStructure('x', { sections: '2' }, truncated)).toThrow(
+        /declares sections: 2 but the body has 1/,
+      )
+    })
+
+    test('a removed criterion fails', () => {
+      expect(() => checkDeclaredStructure('x', { criteria: '2' }, body.replace('- [ ] two\n', ''))).toThrow(
+        /declares criteria: 2 but the body has 1/,
+      )
+    })
+
+    test('a non-integer declaration is refused rather than ignored', () => {
+      expect(() => checkDeclaredStructure('x', { sections: 'two' }, body)).toThrow(/must be an integer/)
+    })
+
+    // The counter is an instrument, so it needs adversarial inputs for COUNTING — not only a
+    // replay of the one edit it was built to catch. Markdown-shaped text inside a fence is not
+    // structure; counting it lets a dropped section be BALANCED BACK by an example.
+    describe('fenced code is not structure', () => {
+      const F = '```'
+
+      test('look-alikes inside a fence count for nothing', () => {
+        expect(countStructure(`${F}\n## fake\n- [ ] fake\n1. **fake**\n${F}`)).toEqual({
+          sections: 0,
+          criteria: 0,
+          contract_items: 0,
+        })
+      })
+
+      test('real structure around a fence still counts', () => {
+        expect(countStructure(`## real\n${F}\n## fake\n${F}\n- [ ] real\n1. **real**`)).toEqual({
+          sections: 1,
+          criteria: 1,
+          contract_items: 1,
+        })
+      })
+
+      test('a tilde fence encloses too, and does not close a backtick fence', () => {
+        expect(countStructure(`~~~\n## fake\n~~~\n## real`).sections).toBe(1)
+        expect(countStructure(`${F}\n## fake\n~~~\n## fake2\n${F}`).sections).toBe(0)
+      })
+
+      test('a fence may be indented up to three spaces', () => {
+        expect(countStructure(`   ${F}\n## fake\n   ${F}`).sections).toBe(0)
+      })
+
+      test('a shorter run does not close a longer fence, and an info string never closes one', () => {
+        expect(countStructure(`${F}\`\n## fake\n${F}\n## fake2\n${F}\`\n## real`).sections).toBe(1)
+        expect(countStructure(`${F}\n## fake\n${F}bash\n## fake2\n${F}\n## real`).sections).toBe(1)
+      })
+
+      // An unterminated fence under-counts without limit, which is the same miscount in the
+      // more dangerous direction, so it is a loud failure rather than a silent zero.
+      test('an unterminated fence throws instead of swallowing the rest of the file', () => {
+        expect(() => countStructure(`${F}\n## fake\n## fake2`)).toThrow(/unterminated code fence/)
+        expect(() => checkDeclaredStructure('x', { sections: '1' }, `${F}\n## fake`)).toThrow(
+          /x: unterminated code fence/,
+        )
+      })
+
+      test('an item declaring nothing is unaffected by an unterminated fence', () => {
+        expect(() => checkDeclaredStructure('x', {}, `${F}\n## fake`)).not.toThrow()
+      })
+
+      // The partner to the positive control: it is not enough that removing a section fails —
+      // removing it and replacing it with a fenced look-alike must fail too, or the guard's
+      // own subject can forge its evidence.
+      test('a dropped section replaced by a fenced look-alike still fails', () => {
+        const forged = body.replace('## B', `${F}\n## B\n${F}`)
+        expect(countStructure(forged).sections).toBe(1)
+        expect(() => checkDeclaredStructure('x', { sections: '2' }, forged)).toThrow(
+          /declares sections: 2 but the body has 1/,
+        )
+      })
+
+      test('a dropped criterion replaced by a fenced look-alike still fails', () => {
+        const forged = body.replace('- [ ] two', `${F}\n- [ ] two\n${F}`)
+        expect(() => checkDeclaredStructure('x', { criteria: '2' }, forged)).toThrow(
+          /declares criteria: 2 but the body has 1/,
+        )
+      })
+    })
   })
 })
