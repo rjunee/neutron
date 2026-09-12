@@ -1,9 +1,12 @@
 #!/usr/bin/env bun
 // DIFF-BASE gate — a REGRESSION ALARM for #546's class, not a proof of its absence.
 //
-// The INVARIANT is "a base BRANCH NAME may never be a rev-range operand". This file
-// does not establish that; it makes a relapse loud. What establishes it is structural
-// and is described two sections down — read that before trusting a green run.
+// The INVARIANT is "a base BRANCH NAME reaches a rev-range operand ONLY where no
+// remote-tracking ref for it exists". Not "never": a repository with no origin has
+// `refs/heads/<base>` as its base of record and there is no better answer, so that one
+// case is legitimate, tested, and listed with the blind spots below. This file does not
+// establish the invariant either way; it makes a relapse loud. What establishes it is
+// structural, two sections down — read that before trusting a green run.
 //
 // ── THE BUG THIS GUARDS AGAINST ───────────────────────────────────────
 // `git diff main..<head>` in a shared build checkout diffs against whatever
@@ -23,8 +26,10 @@
 //   * #546 — reviewers read 149 files where the branch changed 30.
 //
 // ── WHAT ACTUALLY GUARANTEES THE INVARIANT — AND IT IS NOT THIS FILE ──
-// The invariant is "no code path composes a rev-range from a base BRANCH NAME",
-// and what enforces it is STRUCTURAL, not textual:
+// What enforces it is STRUCTURAL, not textual. (This section used to open "the invariant
+// is NO CODE PATH composes a rev-range from a base BRANCH NAME" — an absolute that the
+// same file then contradicted by requiring the bare name as a fallback. The fallback is
+// real; the absolute was not.):
 //
 //   * ONE BINDING PER BOUNDARY. `diffBase` in `trident/inner-workflow.mjs` and the
 //     exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a
@@ -34,6 +39,13 @@
 //     operand directly in `orchestrator.ts` and `merge.ts`. Every one of those is a
 //     SHA, which is the property that matters — a sha cannot go stale the way a branch
 //     name can — so the narrower claim is the true one and the wider one was false.
+//   * A RESOLUTION MADE AGAINST THE REPOSITORY, NOT THE MERGE MODE. `diffBase`'s
+//     unpinned arm is a shell substitution that asks whether `refs/remotes/origin/<base>`
+//     exists and prefers it when it does — in LOCAL mode exactly as in pr mode. It used
+//     to hand local mode the bare name outright on the theory that a local-mode run has
+//     no origin to be behind; `merge_mode: 'local'` means the outer loop merges locally
+//     and says nothing about remotes, and the review-diff fixture measured that mistake
+//     at five files where the branch changed one.
 //   * AN ARGV BOUNDARY THAT CARRIES A RESOLVED REF. `trident/codex-build.sh` takes the
 //     base as argv `$2` and holds no base-branch-name binding at all: its default is
 //     EMPTY (`"${2:-}"`), and an empty value skips the last-resort diff entirely, so
@@ -89,6 +101,11 @@
 //     measured, zero hits. A balanced-brace parse would close this; a character class
 //     cannot, and this file previously asserted "every real site here is one call or
 //     one ternary deep" instead of listing the gap.
+//   * THE LEGITIMATE NO-REMOTE FALLBACK. When `refs/remotes/origin/<base>` does not
+//     resolve, `refs/heads/<base>` IS the base of record and a bare name there is
+//     correct — so the gate cannot distinguish that from the defect by reading source,
+//     and does not try. `inner-workflow.mjs` decides it in the shell, per repository,
+//     at the moment the range is built.
 //   * ANY SPELLING NOT ENUMERATED ABOVE. That set is open, and the next member of
 //     it will be found the same way the last two were — by mutating the fix and
 //     checking the gate reddens, never by reading this list and feeling covered.

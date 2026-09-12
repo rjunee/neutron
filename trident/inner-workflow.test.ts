@@ -110,7 +110,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     '/harness/trident/checkpoint.sh',
     'trident/prompt-pin',
     'main',
-    'origin/main',
+    "'origin/main'",
     'pr',
     '/codex-home',
     '',
@@ -868,7 +868,8 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       '/codex-home',
       '/harness/trident/codex-review.sh',
       'main',
-      'origin/main',
+      // PRE-QUOTED by `diffBase`, which is what the wrapper argv receives verbatim.
+      "'origin/main'",
       '',
       '',
       '',

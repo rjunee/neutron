@@ -1390,15 +1390,36 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *    `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build if
  *    that fetch or its rev-parse fails, so in pr mode this ref exists and is as fresh
  *    as launch. The same choice `planProbeRef` makes for the branch side.
- *  • the bare name in local mode — the ONE world where it is right rather than merely
- *    tolerated: a local-mode run has no origin to be behind, and the launcher pins
- *    `base_sha` from `refs/heads/<base>` itself on that path.
+ *  • `origin/<base>` in LOCAL mode TOO, when that ref resolves. This arm used to hand
+ *    local mode the bare name outright, on the theory that "a local-mode run has no
+ *    origin to be behind". That theory is false: `merge_mode: 'local'` means the OUTER
+ *    LOOP MERGES LOCALLY, not that the repository has no remote — and this file's own
+ *    `branchLogBase` has said since before #546 that "a plain local base branch may be
+ *    stale in NON-PR mode". The review-diff fixture makes it concrete: local `main`
+ *    four commits behind `origin/main` yields FIVE files where the branch changed ONE,
+ *    in local mode exactly as in pr mode. So local mode gets the same preference, and
+ *    the shell decides per-repository whether the ref exists.
+ *  • the bare name ONLY when there is genuinely no remote — no `refs/remotes/origin/
+ *    <base>` to read. That is the one case left, it is stated rather than assumed, and
+ *    it is the only case this whole change cannot improve on.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
  * here, so the next site cannot re-introduce the class by forgetting.
  */
-const diffBase = pinnedBase !== null ? pinnedBase : isPr ? `origin/${baseBranch}` : baseBranch
+const diffBase =
+  pinnedBase !== null
+    ? shSingleQuote(pinnedBase)
+    : // NO REMOTE IS A QUESTION ONLY THE REPOSITORY CAN ANSWER, so this arm is a SHELL
+      // EXPRESSION rather than a name chosen here. A 40-hex pin needs no probe and gets
+      // none; everything else asks git once, at the moment the range is built, in the
+      // repository the range is built against. That is what lets local mode have the
+      // same preference as pr mode without breaking a repository that has no origin.
+      //
+      // Every consumer of `diffBase` is a shell word — the two codex wrappers' argv and
+      // the commands in the prompts — so the substitution is evaluated exactly where the
+      // diff runs. It is pre-quoted for that reason, and consumers must NOT re-quote it.
+      `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
 
 function forgeStep1(reenter) {
   return reenter
@@ -1963,7 +1984,7 @@ ${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(diffBase)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${diffBase} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -5125,7 +5146,7 @@ async function writeResumeDiff(headOid) {
   const fetchStep = isPr
     ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
     : ''
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${shSingleQuote(diffBase)}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${diffBase}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
   const res = await agent(
     `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.
 ${cmd}`,
@@ -6185,7 +6206,7 @@ function codexReviewerPrompt(diffFile) {
   // how GPT-5 worded its answer.
   return `You are the CODEX ${opts.adversarial === true ? 'ADVERSARIAL' : 'CROSS-MODEL'} REVIEW bridge for trident (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(diffBase)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
+  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${diffBase} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.

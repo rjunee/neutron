@@ -1032,7 +1032,7 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     const sha = 'a'.repeat(40)
     const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
     expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
-    expect(prompt).toContain(`git diff ${sha}..HEAD`)
+    expect(prompt).toContain(`git diff '${sha}'..HEAD`)
   })
 
   test('falls back to the unpinned create-or-re-enter branch and diff when baseSha is absent', async () => {
@@ -1046,21 +1046,19 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     // re-enter clause landed, while the behaviour it guards was still correct.
     expect(prompt).toContain('git switch -c trident/test-run 2>/dev/null || git switch trident/test-run')
     expect(prompt).not.toContain('as observed at launch')
-    // LOCAL MODE (this harness's default) is the one world where the bare base name is
-    // RIGHT rather than merely tolerated: there is no origin for `refs/heads/main` to be
-    // behind, and `origin/main` would not resolve at all. The pr-mode complement is the
-    // next test — the resolution is git-mode aware, not an unconditional `origin/` prefix.
-    expect(prompt).toContain('git diff main..HEAD')
+    // UNPINNED, IN EITHER MODE: the base is a shell substitution that asks the
+    // repository whether `refs/remotes/origin/<base>` exists, prefers it when it does,
+    // and falls back to the bare name only when it does not. This used to hand LOCAL
+    // mode the bare name outright — `merge_mode: 'local'` means the outer loop merges
+    // locally, not that the repository has no remote, and the review-diff fixture shows
+    // that mistake costing five files where the branch changed one.
+    expect(prompt).toContain("printf %s 'origin/main' || printf %s 'main'")
+    expect(prompt).not.toContain('git diff main..HEAD')
   })
 
-  test('PR MODE, unpinned: the reviewer diff names origin/<base>, never the bare local ref (#546)', async () => {
-    // The fallback used to read `git diff main..HEAD` in EVERY mode, so a shared
-    // checkout whose `refs/heads/main` sat behind `origin/main` handed the reviewers
-    // every commit merged into the base since as this branch's work — measured at 149
-    // files where the branch changed 30. `origin/main` is the remote-tracking ref the
-    // launch path fetches and refuses to start the build without.
+  test('PR MODE, unpinned: the same resolution — the preference is not git-mode dependent', async () => {
     const prompt = forgeBuildPrompt((await runWorkflow('', { mergeMode: 'pr' })).captured)
-    expect(prompt).toContain('git diff origin/main..HEAD')
+    expect(prompt).toContain("printf %s 'origin/main' || printf %s 'main'")
     expect(prompt).not.toContain('git diff main..HEAD')
   })
 })

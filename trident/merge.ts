@@ -219,23 +219,32 @@ export async function detectBaseBranch(
  * `diffBase` and `probeCiBase`'s ref use:
  *  1. `base_sha` — the sha `origin/<base>` held AT LAUNCH, which the launcher observed
  *     and cut the build branch from. A sha cannot go stale and it IS the cut point.
- *  2. `origin/<base>` in pr mode — the remote-tracking ref. The launch path fetches
+ *  2. `origin/<base>` WHENEVER THAT REF RESOLVES — the remote-tracking ref, in either
+ *     merge mode. In pr mode the launch path fetches
  *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build
- *     when that fetch or its rev-parse fails, so in pr mode the ref exists and is as
- *     fresh as launch.
- *  3. the bare name in local mode ONLY — the one world where it is right rather than
- *     merely tolerated: a local-mode run has no origin to be behind, and the launcher
- *     pins `base_sha` from `refs/heads/<base>` itself there.
+ *     when that fetch or its rev-parse fails, so there it exists and is as fresh as
+ *     launch; elsewhere the caller asks (`originBaseResolves`).
+ *  3. the bare name ONLY when that ref does not resolve — a repository with no remote,
+ *     where `refs/heads/<base>` IS the base of record and there is no better answer.
  *
- * DELIBERATELY PURE — no `run_host`, no probe. The three inputs are all already in
- * hand at every call site, so the resolution cannot fail, cannot be skipped for cost,
- * and is trivially testable. `scripts/ci/diff-base-check.mjs` fails CI on a rev-range
- * whose base bypasses this.
+ * THE THIRD PARAMETER WAS `merge_mode` AND THAT WAS A BUG, not just an imprecision.
+ * This doc used to justify it as "the bare name in local mode ONLY — a local-mode run
+ * has no origin to be behind". `merge_mode: 'local'` means the OUTER LOOP MERGES
+ * LOCALLY; it says nothing about whether the repository has a remote. Measured in
+ * `review-diff-base-realgit.test.ts` on the mjs twin of this function: local mode
+ * against a `main` four commits behind `origin/main` produced FIVE files where the
+ * branch changed ONE — the same inflation as pr mode. So the question is now "does the
+ * ref resolve", asked of the repository, and never inferred from the merge mode.
+ *
+ * STILL PURE — no `run_host`, no probe. The probe is `originBaseResolves` below, so a
+ * caller that already knows the answer does not pay for it twice and this function stays
+ * trivially testable. `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base
+ * bypasses this.
  */
 export function diffBaseRef(
   base_branch: string,
   base_sha: string | null | undefined,
-  merge_mode: string,
+  origin_base_resolves: boolean,
 ): string {
   if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
@@ -245,7 +254,34 @@ export function diffBaseRef(
   // a different question with a plausible-looking answer. Hand it back untouched and
   // let the caller's own diff fail loudly instead.
   if (name.length === 0) return base_branch
-  return merge_mode === 'pr' ? `origin/${name}` : name
+  return origin_base_resolves ? `origin/${name}` : name
+}
+
+/**
+ * Does `refs/remotes/origin/<base>` name a commit in this repository?
+ *
+ * The one input `diffBaseRef` cannot derive from what a caller already holds, split out
+ * so that function stays pure. Fail-closed toward the BARE NAME: a probe that cannot run
+ * answers false, which yields the behaviour this repository had before #546 rather than a
+ * range against a ref that may not exist — an unresolvable base makes `git diff` fail and
+ * the caller reports "could not be read", which is louder but wrong more often.
+ */
+export async function originBaseResolves(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base_branch: string,
+): Promise<boolean> {
+  const name = base_branch.trim()
+  if (name.length === 0 || name.startsWith('-')) return false
+  try {
+    const res = await run_host(
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${name}^{commit}`],
+      repo_path,
+    )
+    return res.ok && /^[0-9a-f]{40}$/.test(res.stdout.trim().toLowerCase())
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------

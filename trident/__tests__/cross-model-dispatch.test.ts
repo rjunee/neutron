@@ -1252,16 +1252,19 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // remote) hard-deferred at the baseline before codex launched, every round.
     const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
     expect(local).toContain(
-      // arg $2 is the RESOLVED diff base (#546): the bare local name in local mode,
-      // where there is no origin for `refs/heads/main` to be behind.
-      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'local'`,
+      // arg $2 is the RESOLVED diff base (#546) — a shell substitution that prefers
+      // `origin/<base>` and falls back to the bare name only when that ref does not
+      // resolve. The SAME in local mode as in pr mode: `local` means the outer loop
+      // merges locally, not that the repository has no remote.
+      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 && printf %s 'origin/main' || printf %s 'main')" 'local'`,
     )
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    // …and `origin/<base>` in pr mode, which is the half #546 was about: the wrapper's
-    // last-resort `git diff <base>..HEAD` ran against whatever `refs/heads/main` held.
-    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'origin/main' 'pr'`)
+    // …and the identical substitution in pr mode, which is the half #546 was about: the
+    // wrapper's last-resort `git diff <base>..HEAD` ran against whatever `refs/heads/main`
+    // held. The bare name is never a literal operand in either mode.
+    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 && printf %s 'origin/main' || printf %s 'main')" 'pr'`)
     expect(pr).not.toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.

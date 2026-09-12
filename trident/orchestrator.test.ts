@@ -6684,7 +6684,10 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // the stage-1 test set, so a stale `refs/heads/<base>` adds every file the base has
     // moved past to that set. `NO_DRIFT_SHA` is what this harness answers the launch
     // `rev-parse` with, so it is the sha the run carries by fire time.
-    const resolvedBase = diffBaseRef(marker, NO_DRIFT_SHA, 'local')
+    // `false` = "origin/<base> does not resolve", which is now the ONLY thing that
+    // selects the bare name. It used to be `'local'`, keyed on the merge mode — the
+    // defect the fifth review round found.
+    const resolvedBase = diffBaseRef(marker, NO_DRIFT_SHA, false)
     expect(resolvedBase).toBe(NO_DRIFT_SHA)
     const detail = buildTestStrategyDetail(repo, {
       cores: budget.cores,

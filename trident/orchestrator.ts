@@ -101,6 +101,7 @@ import {
   buildMergeCleanupDeps,
   detectBaseBranch,
   diffBaseRef,
+  originBaseResolves,
   MAX_CONFLICT_ROUNDS,
   runWorktreePath,
   TridentBaseDriftHold,
@@ -2327,6 +2328,19 @@ export function buildTridentOrchestrator(
     return detectBaseBranch(opts.run_host, run.repo_path)
   }
 
+  /**
+   * The LEFT-HAND SIDE of any rev-range this orchestrator builds (#546): the
+   * launch-pinned sha, else `origin/<base>` when that ref resolves, else the bare name.
+   *
+   * The remote question is asked of the REPOSITORY, never inferred from `merge_mode` —
+   * `local` means the outer loop merges locally, not that there is no remote, and keying
+   * the fallback on it was the last place this defect lived.
+   */
+  async function resolvedDiffBase(run: TridentRun): Promise<string> {
+    const base = await resolveBase(run)
+    return diffBaseRef(base, run.base_sha, await originBaseResolves(opts.run_host, run.repo_path, base))
+  }
+
   /** Best-effort probe for an existing PR on the run's branch (idempotent resume
    *  — never open a duplicate). Only meaningful in `pr` mode; never throws. */
   async function detectExistingPr(run: TridentRun): Promise<number | null> {
@@ -2700,7 +2714,7 @@ export function buildTridentOrchestrator(
     const baseRef =
       rebased.baseSha !== ''
         ? rebased.baseSha
-        : diffBaseRef(await resolveBase(run), run.base_sha, run.merge_mode)
+        : await resolvedDiffBase(run)
     const changed = await opts.run_host(
       // `--no-renames` HERE, not only on the group diffs below (Argus r17). This
       // listing is what BUILDS the path universe the groups are restricted to, so
@@ -3253,7 +3267,7 @@ export function buildTridentOrchestrator(
       // makes `rev-list --count <base>..<localHead>` count the base's own unmerged history
       // as this lane's commits, and this count is what decides whether a stranded run built
       // anything worth salvaging.
-      const baseRef = diffBaseRef(await resolveBase(run), run.base_sha, run.merge_mode)
+      const baseRef = await resolvedDiffBase(run)
       const ahead = await opts.run_host(
         ['git', '-C', run.repo_path, 'rev-list', '--count', `${baseRef}..${localHead}`],
         run.repo_path,
@@ -4379,7 +4393,11 @@ export function buildTridentOrchestrator(
         // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
         // test set; a stale `refs/heads/main` adds every file the base moved past to
         // that set, which is the wasteful direction of the same defect.
-        base_branch: diffBaseRef(base, base_sha, launchRun.merge_mode),
+        base_branch: diffBaseRef(
+          base,
+          base_sha,
+          await originBaseResolves(opts.run_host, pinnedRun.repo_path, base),
+        ),
       })
       test_strategy = detail.block
       test_strategy_intermediate = detail.intermediate_block
@@ -5007,7 +5025,7 @@ export function buildTridentOrchestrator(
       // <base>...<ref>`, and the three-dot form resolves the merge-base — so a stale
       // `refs/heads/main` (which IS an ancestor of the branch) puts every file the base
       // moved past into the blast radius the mutation nomination is scored against.
-      const baseBranch = diffBaseRef(await resolveBase(run), run.base_sha, run.merge_mode)
+      const baseBranch = await resolvedDiffBase(run)
       const committed =
         result.mutation_claim === null || result.mutation_claim === undefined
           ? await readCommittedMutationClaim(opts.run_host, run.repo_path, {

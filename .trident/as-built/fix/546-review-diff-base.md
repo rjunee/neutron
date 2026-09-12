@@ -27,6 +27,10 @@ So the unit of this change is the rule.
 The invariant is **no code path composes a rev-range from a base branch NAME**, and it is
 carried by the STRUCTURE, not by the gate. Stated in the order of how much it proves:
 
+0. **The bare name is reached only with no remote.** `diffBase`'s unpinned arm asks git
+   whether `refs/remotes/origin/<base>` resolves, in either merge mode. Where it does not,
+   `refs/heads/<base>` IS the base of record and there is no better answer — that case is
+   legitimate, tested, and the only one left.
 1. **`codex-build.sh`: unconstructable.** It takes the base as argv `$2`
    (`BASE_DIFF_REF="${2:-}"`), its default is EMPTY, and an empty value skips the
    last-resort diff entirely — so no base branch name can reach a range there at all.
@@ -151,6 +155,40 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### The headline claim was the title, and the audit walked past it
+
+A fifth round found the largest overclaim of the five, in the one place the audit had not
+looked: **the spec item's title**. It promised every base resolves to a pinned sha or
+`origin/<base>`; the body then said "a bare local branch name is **never** the left-hand
+side of a rev-range" and "**no code path** composes a rev-range from a base branch NAME" —
+while two sections further down *requiring* the bare name in local mode. Two absolutes and
+their own exception in one document.
+
+It survived because a title reads as a name rather than as an assertion, and it is exactly
+the sentence someone quotes when deciding whether a problem is solved. **The claim most
+likely to be wrong is the one nobody files as a claim.**
+
+And the contradiction was not only editorial — the defect was still live under it:
+
+* `diffBase` keyed its fallback on the MERGE MODE, handing local mode the bare name
+  outright. `merge_mode: 'local'` means the outer loop merges locally; it says nothing
+  about whether the repository has a remote — and this file's own `branchLogBase` comment
+  had said since before #546 that "a plain local base branch may be stale in NON-PR mode".
+* Measured in the review-diff fixture: local mode against a `main` four commits behind
+  `origin/main` produced **five files where the branch changed one** — the same number the
+  pr-mode test proves, in the same fixture, eight lines away.
+* The local-mode test could not see it because it asserted the **command shape**
+  (`toContain("git diff 'main'..")`) and never the files. Proxy versus claim, surviving in
+  the last place the defect lived.
+
+Fixed by making the unpinned arm a **shell substitution**: ask the repository whether
+`refs/remotes/origin/<base>` resolves, prefer it when it does, and fall back to the bare
+name only when it does not — the same in both modes, decided per repository at the moment
+the range is built rather than inferred from the merge mode. That is the branch's own
+principle applied once more: one fewer place where a base branch name can be a range
+operand at all. Local mode now yields one file; mutating the fallback back to the bare name
+reddens the test, and a separate no-remote fixture proves the fallback is still reached.
 
 ### Three claims outran their instrument, and the audit is the lesson
 

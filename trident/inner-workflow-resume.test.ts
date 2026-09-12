@@ -315,12 +315,14 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
   test('the regenerated diff is taken from the OID, never from the branch name', async () => {
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
     const cmd = promptFor(out, 'resume-diff')
-    // LOCAL MODE (`runResume`'s default), so the base is the bare name — there is no
-    // origin to be behind. The RIGHT-hand side is what this test is about.
-    expect(cmd).toContain(`git diff 'main'..'${RECORDED}'`)
+    // THE RIGHT-HAND SIDE is what this test is about: the recorded OID, never the
+    // branch name. The left-hand side is a shell substitution (the base is resolved
+    // against the repository at run time) and is covered by the test below and, for
+    // its OUTPUT, by `review-diff-base-realgit.test.ts`.
+    expect(cmd).toContain(`..'${RECORDED}'`)
     // A branch-name diff would silently swap the code under review if anything
     // pushed between the head comparison and this command.
-    expect(cmd).not.toContain("git diff 'main'..'trident/resume-run'")
+    expect(cmd).not.toContain("..'trident/resume-run'")
   })
 
   test('the regenerated diff resolves its BASE too — origin/<base> in pr mode (#546)', async () => {
@@ -329,9 +331,17 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // reviewers every commit merged into the base since. Measured at 149 files where the
     // branch changed 30. `trident/review-diff-base-realgit.test.ts` proves the effect
     // against real git with a deliberately stale local ref; this pins the composed form.
-    const prCmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true }), 'resume-diff')
-    expect(prCmd).toContain(`git diff 'origin/main'..'${RECORDED}'`)
-    expect(prCmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
+    // UNPINNED: the base is a shell substitution that prefers `origin/<base>` and falls
+    // back to the bare name ONLY when that ref does not resolve — the same in local mode
+    // as in pr mode, because `merge_mode: 'local'` means the outer loop merges locally,
+    // not that the repository has no remote. Pinned here as the composed text; the
+    // real-git suite asserts what it RESOLVES TO and the files it produces.
+    for (const pr of [true, false]) {
+      const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
+      expect({ pr, resolves: cmd.includes("printf %s 'origin/main' || printf %s 'main'") }).toEqual({ pr, resolves: true })
+      // …and never the bare local name as a literal operand.
+      expect(cmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
+    }
 
     // And the LAUNCH-PINNED sha outranks even that: it is the commit the branch was
     // actually cut from, and a sha cannot go stale.

@@ -147,6 +147,28 @@ async function filesInRange(repo: string, range: string): Promise<string[]> {
   return out === '' ? [] : out.split('\n').sort()
 }
 
+/**
+ * THE BASE THE COMPOSED COMMAND ACTUALLY RESOLVES TO, evaluated in the fixture.
+ *
+ * The unpinned arm of `diffBase` is a shell substitution — it asks the repository
+ * whether `refs/remotes/origin/<base>` exists — so the base is not a literal in the
+ * command text and cannot be asserted by reading it. This runs the same substitution in
+ * the same repo and returns what git picked, which is what lets the tests below pin the
+ * RESOLUTION as a value alongside the file list that pins the OUTCOME.
+ */
+async function resolvedBase(repo: string, command: string): Promise<string> {
+  const at = command.indexOf('"$(')
+  if (at === -1) {
+    // A pinned base is a literal, not a substitution: read it straight out of the range.
+    const lit = /git diff '([^']+)'\.\./.exec(command)
+    return lit?.[1] ?? ''
+  }
+  const end = command.indexOf(')"', at)
+  const expr = command.slice(at + 1, end + 1)
+  const res = await spawnCapture(['bash', '-c', `printf %s ${expr}`], repo)
+  return res.stdout.trim()
+}
+
 /** The `+++`/`---` file headers of a materialised diff file, sorted. */
 function filesInDiffFile(path: string): string[] {
   return readFileSync(path, 'utf8')
@@ -273,15 +295,11 @@ describe('the review diff is taken against the resolved base, not the stale loca
     const w = await seedWorld('unpinned-pr')
     const out = await runResumeDiff(w, { pr: true })
 
-    // The RANGE FORM is pinned as a value, both halves: the base it chose AND the
-    // base it refused. `not.toContain` alone would pass on a command that diffed
-    // nothing at all.
-    expect(out.resumeDiffCommand).toContain(`git diff 'origin/main'..'${w.head}'`)
-    expect(out.resumeDiffCommand).not.toContain(`git diff 'main'..'${w.head}'`)
-
-    // …and what git actually produced for it: one file, named, and a non-empty diff
-    // (bytes==0 is how `writeResumeDiff` reports failure, which would otherwise make
-    // the assertion above true of a command that silently did nothing).
+    // THE RESOLUTION, as a value — which ref the substitution actually picked…
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
+    // …and THE OUTCOME, which is the claim that matters: one file, named. `bytes > 0`
+    // because 0 is how `writeResumeDiff` reports failure, and a command that silently
+    // did nothing would otherwise satisfy a file-list assertion over an empty diff.
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
     expect(out.bytes).toBeGreaterThan(0)
   })
@@ -305,14 +323,51 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 
-  test('LOCAL MODE, unpinned: the bare name is kept — there is no origin to be behind', async () => {
-    // The one world where the bare local name is RIGHT rather than tolerated. Without
-    // this, a fix that unconditionally prefixed `origin/` would look correct and would
-    // have broken every local-mode run in a repo with no remote.
-    const w = await seedWorld('local-mode')
+  test('LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file', async () => {
+    // THE DEFECT LIVED HERE UNTIL THE FIFTH ROUND OF REVIEW, and the reason it survived
+    // is instructive: this test asserted the COMMAND SHAPE (`toContain("git diff
+    // 'main'..")`) and never the files. The fixture it runs against is the same one in
+    // which the pr-mode test above proves that exact range yields FIVE files where the
+    // branch changed ONE — so the evidence of the bug sat a few lines above the test
+    // that could not see it. Proxy versus claim, in the last place the defect lived.
+    //
+    // `merge_mode: 'local'` means the OUTER LOOP MERGES LOCALLY. It does NOT mean the
+    // repository has no remote, which is what the old fallback assumed.
+    const w = await seedWorld('local-with-remote')
     const out = await runResumeDiff(w, { pr: false })
-    expect(out.resumeDiffCommand).toContain(`git diff 'main'..'${w.head}'`)
-    expect(out.resumeDiffCommand).not.toContain('origin/main')
+
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
+    expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
+    expect(out.bytes).toBeGreaterThan(0)
+
+    // THE BOUNDARY, stated as the numbers: the bare local ref this used to take would
+    // have produced five. Asserted from git in the same repo, so the contrast is
+    // measured rather than remembered.
+    expect(await filesInRange(w.consumer, `main..${w.head}`)).toEqual(
+      [BRANCH_FILE, ...w.staleFiles].sort(),
+    )
+    expect((await filesInRange(w.consumer, `main..${w.head}`)).length).toBe(STALE_COMMITS + 1)
+  })
+
+  test('NO REMOTE: the bare name is the fallback, and it is the only case left', async () => {
+    // The genuine no-remote world, which is now the ONLY case the bare name is used in.
+    // Without this the fix would be "always prefer origin/", which breaks every repo
+    // that has none — and nothing in the with-remote tests above could detect that.
+    const w = await seedWorld('no-remote')
+    await git(w.consumer, 'remote', 'remove', 'origin')
+    const refs = await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')
+    for (const ref of refs.split('\n').filter((r) => r !== '')) {
+      await git(w.consumer, 'update-ref', '-d', ref)
+    }
+    expect(await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).toBe('')
+
+    const out = await runResumeDiff(w, { pr: false })
+    // The substitution asked, git said no such ref, and the bare name is what is left.
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('main')
+    // And it still produces a real diff rather than failing closed — in a repo with no
+    // origin, `refs/heads/main` IS the base of record and there is no better answer.
+    expect(out.bytes).toBeGreaterThan(0)
+    expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 
   test('FRESH local ref: the resolved base and the bare name AGREE, file for file', async () => {
@@ -339,7 +394,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
     await git(w.consumer, 'merge', '-q', '--ff-only', 'origin/main')
 
     const out = await runResumeDiff(w, { pr: true })
-    expect(out.resumeDiffCommand).toContain(`git diff 'origin/main'..'${w.head}'`)
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
   })
 })

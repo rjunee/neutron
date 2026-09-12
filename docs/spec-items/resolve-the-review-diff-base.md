@@ -1,5 +1,5 @@
 ---
-title: Resolve every rev-range base to the pinned sha or origin/<base>
+title: "Rev-range base: pinned sha, origin/<base>, bare only when no remote"
 group: trident
 status: open
 priority: P0
@@ -7,7 +7,18 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**A bare local branch name is never the left-hand side of a rev-range.** `git diff main..<head>`
+**Every rev-range base resolves to the launch-pinned sha, or to `origin/<base>` when that ref
+resolves, and to a bare local branch name only when the repository has no remote** — which is
+stated, tested, and the one case this change cannot improve on.
+
+An earlier draft of this item said "a bare local branch name is **never** the left-hand side of a
+rev-range" and, below, "**no code path** composes a rev-range from a base branch NAME" — while the
+same document *required* the bare name in local mode. Two absolutes and their own exception, in one
+file. That contradiction survived an audit that corrected four other overstatements, because the
+title reads as a name rather than as a claim, and it is in fact the sentence someone quotes when
+deciding whether this problem is solved. It is written narrowly and truly above.
+
+`git diff main..<head>`
 in a shared build checkout diffs against whatever `refs/heads/main` happens to hold, and that ref
 is only as fresh as the last time something on the box pulled it. Every commit merged into the
 base since then is then presented as this branch's own work.
@@ -30,8 +41,9 @@ boundary that depends on the next author noticing the right form thirty lines aw
 mode `docs/agent-legible-architecture.md` §1 names explicitly. So the unit of the fix is the
 **rule**, not the call sites.
 
-**What enforces this is structural, not a grep.** The invariant is *no code path
-composes a rev-range from a base branch NAME*, and it is carried by two things:
+**What enforces this is structural, not a grep.** The invariant is *a base branch NAME reaches a
+rev-range operand only where no remote-tracking ref for it exists*, and it is carried by two
+things:
 
 - **one binding per boundary** — `diffBase` in `trident/inner-workflow.mjs` and the
   exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a base
@@ -59,12 +71,22 @@ The resolution order is evidence-first, and is the same at every site:
 
 1. the **launch-pinned base sha** — the commit `origin/<base>` held when the launcher observed it
    and cut the build branch. A sha cannot go stale, and it IS the cut point;
-2. **`origin/<base>` in pr mode** — the remote-tracking ref. The launch path fetches
-   `+refs/heads/<base>:refs/remotes/origin/<base>` and refuses to start the build if that fetch
-   or its rev-parse fails, so the ref exists and is as fresh as launch;
-3. the **bare name in local mode only** — the one world where it is right rather than tolerated:
-   a local-mode run has no origin to be behind, and the launcher pins `base_sha` from
-   `refs/heads/<base>` itself there.
+2. **`origin/<base>` whenever that ref resolves, in EITHER merge mode** — the remote-tracking
+   ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
+   refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
+   as launch; in local mode it is preferred too, whenever the repository has one;
+3. the **bare name only when `refs/remotes/origin/<base>` does not resolve** — a repository with
+   no remote, where `refs/heads/<base>` is the base of record and there is no better answer.
+
+   This step used to read "the bare name in **local mode** only — the one world where it is right
+   rather than tolerated: a local-mode run has no origin to be behind". **That was false, and it
+   was the last place the defect lived.** `merge_mode: 'local'` means the OUTER LOOP MERGES
+   LOCALLY; it says nothing about whether the repository has a remote — and this file's own
+   `branchLogBase` comment had said since before #546 that "a plain local base branch may be stale
+   in NON-PR mode". Measured in the review-diff fixture: local mode against a `main` four commits
+   behind `origin/main` produced **five files where the branch changed one**, exactly as pr mode
+   did. Step 2 is therefore not pr-mode-specific, and the question "is there a remote?" is asked of
+   the repository at the moment the range is built rather than inferred from the merge mode.
 
 ## Acceptance
 
@@ -89,10 +111,20 @@ The resolution order is evidence-first, and is the same at every site:
       not a hard-wired preference for `origin/<base>`. Verified by "A PINNED BASE THAT IS THE
       STALE SHA IS STILL HONOURED" — which a fix that unconditionally reached for
       `origin/<base>` would fail while passing every other stale-case test.
-- [ ] **Local mode keeps the bare name.** Verified by "LOCAL MODE, unpinned: the bare name is
-      kept" and by `trident/inner-workflow-assembly.test.ts`'s local/pr pair. Prefixing
-      `origin/` unconditionally would break every run in a repo with no remote, and no
-      stale-case test can see that.
+- [ ] **Local mode gets the SAME resolution as pr mode, and the bare name is reached only with
+      no remote.** The fallback was `merge_mode`-keyed, which is the last place this defect
+      lived: local mode against a stale `main` produced five files where the branch changed one.
+      Verified by "LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file", which
+      asserts the resolved base AND the file list AND the five-file contrast measured from git in
+      the same repo — the previous version of this test asserted the command *shape* and could
+      not see the bug in the fixture it ran against. Mutating the fallback back to the bare name
+      reddens it.
+- [ ] **The no-remote fallback is reached, and is the only case the bare name is used in.**
+      Verified by "NO REMOTE: the bare name is the fallback", which removes the remote and every
+      `refs/remotes/` ref from the fixture, asserts the substitution resolves to `main`, and
+      asserts it still produces a real diff. Without it the fix would be "always prefer
+      `origin/`", which breaks every repository that has none and which no with-remote test can
+      detect.
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
       4 of 7 tests fail, and the two agreement/complement tests stay green.
@@ -116,7 +148,8 @@ The resolution order is evidence-first, and is the same at every site:
       came from (`resolveBase()`, `detectBaseBranch()`, a `base_branch` field), or through
       an alias chain to a fixpoint. **This criterion does NOT claim every rev-range**, and
       the gate's header enumerates what it cannot see (a range assembled across statements,
-      a computed name, a helper taking the base as a `string` parameter, any unenumerated
+      a computed name, a nested interpolation, a helper taking the base as a `string`
+      parameter, the legitimate no-remote fallback, any unenumerated
       spelling). A pass means "none of the enumerated spellings is present".
 - [ ] **Every spelling the gate has been caught missing is now matched, and each fix is
       independently load-bearing.** The four known ones: the name inside a call
