@@ -1026,6 +1026,12 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       const { asked, evidence } = await askedWith(run.id, host)
       outcomes[name] = asked
       if (!asked) continue
+      // AND THE CLAIM IS MADE ONLY WHERE IT IS TRUE. The completeness sentence is written by
+      // the same function that refuses when a part is missing, so every evidence the judge
+      // ever receives carries it — and no evidence exists that does not.
+      expect(evidence, `${name}: the completeness claim rides the evidence`).toContain(
+        'EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE',
+      )
       // THE MEASUREMENT IS ON THE WHOLE PROMPT STRING, not on a slice of it. Slicing out
       // "the hunk section" and bounding that is exactly how labels, prefixes and notices
       // rode free for five rounds — the budget governs what the arbiter was handed, so the
@@ -1115,6 +1121,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       onDiff?: () => HostCommandResult | never
       onBlob?: () => HostCommandResult | never
       onNumstat?: () => HostCommandResult | never
+      onLog?: () => HostCommandResult | never
       stages?: readonly number[]
     }
     const shapes: Shape[] = [
@@ -1220,6 +1227,15 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         onDiff: () => ok('Binary files a/x and b/y differ\n'),
       },
       { name: 'numstat exits non-zero', conflicted: 'a.ts', onNumstat: () => fail('fatal: bad object') },
+      { name: 'git log exits non-zero', conflicted: 'a.ts', onLog: () => fail('fatal: bad revision') },
+      {
+        name: 'git log throws',
+        conflicted: 'a.ts',
+        onLog: () => {
+          throw new Error('spawn failed')
+        },
+      },
+      { name: 'git log is empty (a side with no commits)', conflicted: 'a.ts', onLog: () => ok('') },
     ]
 
     const asked: Record<string, boolean> = {}
@@ -1229,7 +1245,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       const wt = wtOf('/shared', run)
       let reported = 0
       const host: RunHostCommand = async (cmd) => {
-        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) {
+          return shape.onLog === undefined ? ok('aaa1 x\n\u0000') : shape.onLog()
+        }
         if (isUnmergedQuery(cmd)) {
           return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
         }
@@ -1280,6 +1298,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(asked['ordinary two-sided conflict'], 'an ordinary conflict must be judged').toBe(true)
     expect(asked['genuinely one-sided (stage 3 only)'], 'a one-sided conflict must be judged').toBe(true)
     expect(asked['two stages, identical content'], 'a zero exit with empty output is a fact').toBe(true)
+    // ESTABLISHED EMPTINESS IS EVIDENCE. Only an unasked question is missing — otherwise
+    // refusing on an empty history would be indistinguishable from refusing on a broken one.
+    expect(asked['git log is empty (a side with no commits)'], 'an empty history is a fact').toBe(true)
     for (const name of [
       'diff exits non-zero',
       'diff throws',
@@ -1299,6 +1320,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'enormous diff',
       'binary pair',
       'numstat exits non-zero',
+      'git log exits non-zero',
+      'git log throws',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
     }
@@ -1627,22 +1650,64 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     expect(evidence).not.toContain('\u2028')
   })
 
-  test('a history git will not give up does NOT fail the merge — the arbitration is just thinner', async () => {
+  test('A HISTORY GIT WILL NOT GIVE UP IS UNKNOWN — the judge is not asked', async () => {
+    // THIS TEST USED TO PRESERVE THE DEFECT, and it is the fourth time on this branch that a
+    // test written to describe a seam ended up defending a hole in it. It asserted that a
+    // failed `git log` produced `(history unavailable)` IN THE EVIDENCE and that arbitration
+    // proceeded — "the arbitration is just thinner". But a read failure is not evidence that
+    // no history exists, the placeholder sits beside real commits as though it were data, and
+    // the prompt told the judge nothing had been left out.
+    //
+    // A history we could not read is UNKNOWN, so the judge is not asked; the merge still ends
+    // on the ordinary owner path with the resolver's own question, which is what the old test
+    // was really protecting and is asserted below unchanged.
     const run = localRun('feat-nohist')
     const wt = wtOf('/shared', run)
     const { host } = historyHost(wt, () => fail('fatal: bad revision'))
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      // Still the ordinary owner path with the resolver's question — NOT a git error.
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // The stub would have GRANTED a retry, so zero calls is the property and not an accident.
+    expect(seen.length, 'the judge must not be asked on a history we could not read').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=evidence-unreadable',
+    )
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
+  })
+
+  test('A SIDE WITH NO COMMITS IS STILL EVIDENCE — established emptiness is not absence', async () => {
+    // THE COMPLEMENT, and the distinction the placeholder destroyed. git answering "this side
+    // adds nothing" is a definite fact and must still reach the judge; only a question we
+    // could not ask is missing. Without this, refusing on an empty history would look
+    // identical to refusing on a broken one.
+    const run = localRun('feat-emptyhist')
+    const wt = wtOf('/shared', run)
+    const { host } = historyHost(wt, () => ok(''))
     const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
       resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
       arbitrate,
     })
-    // Still the ordinary owner path with the resolver's question — NOT a git error.
-    await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
-      name: 'TridentMergeConflictEscalation',
-      question: RESOLVER_QUESTION,
-    })
-    expect(seen[0]?.evidence).toContain('(history unavailable)')
+    await cleanupAfterMerge(run, deps).catch(() => {})
+    expect(seen.length, 'an empty history is established, so the judge is asked').toBe(1)
+    expect(seen[0]?.evidence).toContain('(no commits in range)')
+    // And the completeness claim is still made, because every part really is present.
+    expect(seen[0]?.evidence).toContain('EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE')
   })
 })
 

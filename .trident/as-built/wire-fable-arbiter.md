@@ -995,6 +995,68 @@ The rebase brought the floors; both failing gates were then reproduced locally a
 `GUARD_BASE_SHA`/`GUARD_HEAD_SHA` let the guard run outside CI, which is how it should have
 been checked in the first place.
 
+### ROUND 19 — the fourth variant, and the seam that stops the fifth
+
+`sideHistory` converted both a thrown call and a non-zero `git log` into the string
+`(history unavailable)`, and arbitration carried on. **A placeholder that reads as data**: it
+sat in the evidence beside real commit records, under a prompt telling the judge nothing had
+been left out, and the judge had no way to tell *"this side has no commits"* from *"we could
+not ask"*. A read failure is not evidence that no history exists.
+
+**Four components, one sentence:**
+
+| component | what was passed off as evidence |
+|---|---|
+| the conflict diff | a **failed** read → `complete` (round 15) |
+| a one-sided conflict | a **description** instead of the surviving content (round 17) |
+| a binary conflict | a successful but **contentless** diff (round 18) |
+| the commit history | a **failed** read → a placeholder string (round 19) |
+
+Every one is `ok && stdout` standing in for *"the evidence is readable"*, and every one ends at
+a prompt that asserts completeness. **That is a property of the module, not four slips**, and
+the fix for a property is not a fifth patch.
+
+**THE SEAM: one owner decides presence, and the sentence is computed from the same structure.**
+
+Each component is now an `EvidencePart` — `present` with text, or `missing` with a reason.
+There is no third state and no placeholder. `assembleEvidence` is the only place an evidence
+string is constructed, it walks the parts, and **it returns `{missing}` the moment any one of
+them is absent** — so the completeness claim has no rendering that can appear beside an
+absence. Not a boolean that could drift from the text: the text and the claim are produced by
+one function, from one value, in one pass.
+
+That is the round-12 invariant — *recording is emitting* — applied to **completeness** rather
+than to withholding. And it is the same move as round 14, which made `arbiter-prompt.ts` the
+one place the prompt exists in final form so it could be MEASURED there; this does it for the
+CONTENTS rather than the size.
+
+**The generic template stopped asserting what it cannot check.** `arbiter-prompt.ts` carried
+"nothing has been shortened, summarised or left out" as a CONSTANT. It is generic over callers
+and receives the evidence already rendered, so it has no way to be right about that — and **a
+constant cannot be wrong about a value it never reads**, which is exactly how four components
+came to be laundered past it. It now tells the judge to read what the evidence block says about
+its own completeness, and the claim is written where it is known.
+
+**An established emptiness is still evidence.** git answering "this side adds nothing" is a
+definite fact and is shown (`(no commits in range)`); only a question we could not ask is
+missing. Without that distinction, refusing on an empty history would be indistinguishable from
+refusing on a broken one — and the mutation that conflates them reds fourteen tests.
+
+**And for the fourth time, a test I wrote was defending the hole.**
+`a history git will not give up does NOT fail the merge — the arbitration is just thinner`
+asserted the placeholder reached the evidence and that arbitration proceeded. What it was
+really protecting — that a broken `git log` must not turn into a git error for the owner — is
+preserved and still asserted; what it was accidentally pinning is gone.
+
+**Four mutations, all red:**
+
+| # | mutation | result |
+|---|---|---|
+| M91 | a failed history read becomes a placeholder again | **red**, 2 tests |
+| M92 | `assembleEvidence` renders a missing part instead of refusing | **red**, 2 tests |
+| M93 | an empty history is treated as missing (over-refusal) | **red**, 14 tests |
+| M94 | the completeness claim is dropped from the assembled evidence | **red**, 2 tests |
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -1235,7 +1297,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Ninety mutations reverted one at a time, each proved a test red. Eight survived a
+Ninety-four mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
