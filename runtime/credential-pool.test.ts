@@ -282,15 +282,32 @@ describe('no report can park a credential past the ceiling', () => {
     // ms, six hours to eleven, with every other ceiling assertion still green.
     const pool = one()
     const YEAR = 365 * 24 * 60 * 60_000
-    const t0 = Date.now()
-    reportFailure(pool, 'only', 429, YEAR)
+    // PIN THE CLOCK ACROSS THE PARK THAT ESTABLISHES THE ANCHOR. `t0` and the
+    // `Date.now()` inside `reportFailure` that becomes `cooldown_started_at` must be
+    // the SAME instant, because the assertion below measures the ceiling against `t0`
+    // while the product derives it from the anchor (`credential-pool.ts:334`). Read
+    // separately, a millisecond boundary crossing between them makes `first - t0`
+    // exactly `MAX_PARK_MS + 1` and reds a test about a six-hour bound — which is what
+    // happened on CI, and is a defect in this test rather than in the ceiling. The
+    // second half of this case already pins the clock for the same reason; this half
+    // was reading it twice and subtracting.
+    const realNow = Date.now
+    const t0 = realNow.call(Date)
+    Date.now = () => t0
     const c = pool.credentials[0]!
+    try {
+      reportFailure(pool, 'only', 429, YEAR)
+    } finally {
+      Date.now = realNow
+    }
     const first = c.cooldown_until!
     expect(first - t0).toBeLessThanOrEqual(MAX_PARK_MS)
+    // NON-VACUITY: a park was actually established. Without this, pinning the clock
+    // would also satisfy the bound if `reportFailure` had parked nothing at all.
+    expect(first - t0).toBe(MAX_PARK_MS)
 
     // A second in-flight report, five hours into the park, proposing the same
-    // over-ceiling window.
-    const realNow = Date.now
+    // over-ceiling window. `realNow` is the one captured above.
     Date.now = () => t0 + 5 * 60 * 60_000
     try {
       reportFailure(pool, 'only', 429, YEAR)
