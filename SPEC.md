@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-09-11 (the harness-orchestrator pivot — Decisions Log 2026-09-11; previous: 2026-07-27 (app remote diagnostics: the mobile app reports its own JS errors to the owner's OWN gateway — self-hosted, credential-free, no third party; native crashes remain uncovered)
+last_updated: 2026-09-12 (the work queue leaves this file — `Phases → Steps` split into `docs/spec-items/`, Decisions Log 2026-09-12; previous: 2026-09-11 (the harness-orchestrator pivot — Decisions Log 2026-09-11; previous: 2026-07-27 (app remote diagnostics: the mobile app reports its own JS errors to the owner's OWN gateway — self-hosted, credential-free, no third party; native crashes remain uncovered)
 ---
 <!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr replaces the PTY host · migration re-run) -->
 
@@ -12,7 +12,7 @@ abandoned branches and no "we used to do X" narrative: when a decision changes
 the plan, the body is edited in place to reflect the new plan and a dated entry
 is added to the TOP of the Decisions Log (newest-first). The Decisions Log is
 the single home for the DATED RECORD of each locked decision (when + why); the
-body (System Overview · Architecture · Phases → Steps · Open Questions)
+body (System Overview · Architecture · Open Questions)
 DESCRIBES the resulting architecture in present tense and points to the log
 rather than re-arguing or re-dating a decision. Other docs reference a decision
 by date, never restate it. The Decisions Log is immutable — entries are never
@@ -27,7 +27,12 @@ user-project `/code`: those resolve a fresh `<home>/Projects/<slug>/code` build
 workspace (git-init + empty commit, no `SPEC.md`), so they stay on the legacy
 single-context build. This file governs trident builds against this checkout,
 not every production `/code`. Agents READ this spec and diff it against the
-code; they NEVER rewrite it — the owner owns it.
+code. **Ownership is split, and the split is the rule:** the owner owns the
+Decisions Log and the architecture body — agents never rewrite those. Agents
+MAINTAIN the work queue at `docs/spec-items/` (add, correct, reprioritise, close),
+which is why it is no longer inside this file (Decisions Log 2026-09-12). An
+owner-directed change to the body, like that split, is recorded in the log by the
+agent that made it.
 
 ## Canonical doc set
 
@@ -35,15 +40,18 @@ code; they NEVER rewrite it — the owner owns it.
 |---|---|
 | Decisions + architecture + roadmap (this file) | `/SPEC.md` |
 | Current build queue (agent-regenerated on demand, disposable; may be absent when idle) | `/IMPLEMENTATION_PLAN.md` |
-| Chronological build log (append-only provenance) | `docs/AS_BUILT.md` |
+| **The work queue — one file per specified, buildable item** | **`docs/spec-items/`** (index: `docs/spec-items/README.md`) |
+| How work is captured, specified, built and recorded | `docs/process/work-tracking.md` (the binding standard) |
+| Chronological build log (frozen 2026-09-12; one file per change after it) | `docs/AS_BUILT.md`, then `docs/as-built/` |
 | How it works NOW (living architecture detail, under this spec) | `docs/SYSTEM-OVERVIEW.md` |
 | Load-bearing invariants (per-merge checklist) | `docs/INVARIANTS.md` |
 | Public-facing positioning + self-host quickstart | `README.md` |
 | Bugs / defects / backlog | GitHub Issues on the public repo |
 
 A root `ISSUES.md` is intentionally absent — the purity gate reserves that path
-(see the Decisions Log). Open's defect tracker is GitHub Issues; the *planned*
-backlog lives in Phases → Steps below.
+(see the Decisions Log). Open's defect tracker is GitHub Issues — the inbox for
+unspecified thoughts; the *planned* backlog is `docs/spec-items/`, and there is
+exactly one such queue (`docs/process/work-tracking.md` §3.4).
 
 ## System Overview
 
@@ -195,823 +203,39 @@ The per-merge load-bearing invariant checklist lives in `docs/INVARIANTS.md`
 (one line per subtlety, each with a `file:line` anchor and the unit/test that
 protects it). Do not restate entries here — reference that doc.
 
-## Phases → Steps
+## Phases → Steps — SPLIT OUT 2026-09-12
 
-The single master work queue. Present-tense and diffable against the code: each
-entry is a verifiable requirement an agent can compare with the actual tree.
-Edit IN PLACE. Discovered bugs that don't need immediate action go to GitHub
-Issues, not here. `[x]` = built + verified in this tree; `[ ]` = queued.
+**This section is gone. The queue it held now lives in
+[`docs/spec-items/`](docs/spec-items/), one file per work item, indexed at
+[`docs/spec-items/README.md`](docs/spec-items/README.md).**
 
-The phase vocabulary below is the one the codebase cites as `SPEC.md § Phases →
-Steps`. It has four tracks: **onboarding phases** (the interview state machine),
-the **P5–P7 product-surface phases** (the tabbed app + gateway surfaces), and
-the **Tier-1 Cores buildout**.
+It was 817 lines — 63% of this file — and it was doing two jobs badly at once: an
+architecture record of what shipped, and a task queue of what had not. Those have
+different lifetimes and different readers, which is the failure the Neutron
+work-tracking standard exists to stop (`docs/process/work-tracking.md` §1, "one
+owner per fact"; the split is its §5 step 1).
 
-### Onboarding phases (the interview state machine)
+**Where its contents went:**
 
-The onboarding engine (`onboarding/interview/`) is a phase state machine with a
-legal-transition table (`phase.ts`) and a per-phase descriptor table
-(`phase-spec-resolver.ts`). Two deployment modes shape the sequence:
-`managed` runs the full sequence; `open` (self-host) cuts the provisioning and
-subdomain phases and routes `signup → ai_substrate_offered` and
-`agent_name_chosen → projects_proposed` directly (`OPEN_MODE_EXTRA_TRANSITIONS`).
+| What it held | Where it lives now |
+|---|---|
+| The open backlog (31 `[ ]` entries) | `docs/spec-items/` — 22 items, one file each |
+| Ten entries that had already shipped but still read `[ ]` | deleted here; they are in git history and `docs/as-built/` |
+| The onboarding phase set | `contracts/onboarding-phase.ts` is canonical; `onboarding/interview/phase.ts` holds the legal-transition table |
+| The completed P5/P6/P7 surfaces and the Tier-1 Core inventory | `docs/SYSTEM-OVERVIEW.md` and `docs/as-built/` |
+| The world-class refactor window ledger | `docs/plans/2026-07-02-world-class-refactor-plan.md` |
 
-Canonical phase set (v2, `contracts/onboarding-phase.ts`):
+**The ten stale checkboxes are the reason this could not just be moved.** Each was
+verified against the tree before removal, and every one was already built —
+including one that carried "✅ RESOLVED" text *inside its own unchecked box*. A
+queue that reports shipped work as outstanding is not a queue; four of the
+surviving items also carried claims that the code had since falsified, and those
+corrections ride at the top of the items they belong to.
 
-- [x] `signup` → (`identity_oauth` → `instance_provisioned` in managed) → `ai_substrate_offered`
-- [x] `ai_substrate_offered` — offer the paste-token / import affordance; branches to import or straight to the work interview
-- [x] `import_upload_pending` → `import_running` → `import_analysis_presented` — optional history import + curation handoff
-- [x] `work_interview_gap_fill` — self-loops until required profile fields are filled (cap enforced in-handler)
-- [x] `personality_offered` → `agent_name_chosen` → (`slug_chosen` in managed) → `projects_proposed`
-- [x] `persona_synthesizing` → `persona_reviewed` — synthesize + review the persona (redo edges back to personality/name/slug)
-- [x] `persona_reviewed` → `completed` (terminal) · any non-terminal phase → `failed` (terminal, unrecoverable)
-
-Acceptance: the legal-transition table is exhaustive over `OnboardingPhase`
-(compile-time `Record` barrier); open mode never selects a cut phase as
-`next_phase`.
-
-### P5 — App surfaces (the tabbed project interface)
-
-The Expo app + gateway app-surfaces, one tab/surface per step. Each surface is a
-composed HTTP (and, for chat, WS) handler wired at the gateway composition root;
-an unwired surface degrades to an empty state with a "backend not wired" hint.
-
-- [x] **P5.0** — app foundation: auth helpers, token storage, locked theme palette
-- [x] **P5.1** — chat surface: app-ws chat + the multipart attachment-upload route
-- [x] **P5.2** — project view: project list + per-project settings drawer (privacy_mode), durable over restart
-- [x] **P5.3** — project launcher surface (`/api/app/projects/<id>/launcher`)
-- [x] **P5.4** — Tasks tab + reminders surfaces (project-scoped task + reminder CRUD)
-- [x] **P5.5** — global Focus surface (cross-project today/most-important projection, read-only)
-- [x] **P5.6** — device push: register/unregister device tokens; reminders tick loop dispatches native push
-- [x] **P5.7** — admin/personality surfaces (SOUL.md editor, GBrain browse, connectors, gateway restart)
-
-### P6 — Task system + nudge engine
-
-- [x] **P6.0** — canonical `TaskStore` (the substrate every task surface reads)
-- [x] **P6.1** — nudge engine + staleness + current-focus pick (`/api/app/focus/current`)
-
-### P7 — Doc interface
-
-- [x] **P7.0 / P7.1** — project-scoped docs surface: tree/file read + write/delete, folder + move, over `DocStore`
-- [x] **P7.3** — doc-links (cross-doc reference resolution)
-- [x] **P7.4** — git-backed doc versioning
-
-### Tier-1 Cores (free, Apache-2.0, `cores/free/*`)
-
-The free Cores bundled at install and discovered by the bundled-Core registry.
-Calendar + Email were the first Cores wave; this is the inventory today (a set,
-NOT a numbered buildout sequence — historical build order lives in
-`docs/AS_BUILT.md`):
-
-- [x] **Calendar** — `cores/free/calendar` (Google OAuth; event CRUD)
-- [x] **Email** — `cores/free/email` (Gmail OAuth; thread read)
-- [x] **Google Workspace** — `cores/free/google-workspace` (Drive/Sheets/Docs + Gmail send)
-- [x] **Tasks** — `cores/free/tasks` (SQLite task system + per-project Tasks tab)
-- [x] **Reminders** — `cores/free/reminders` (context-aware dispatcher)
-- [x] **Research** — `cores/free/research`
-- [x] **Scraping** — `cores/free/scraping`
-- [x] **Agent settings** — `cores/free/agent-settings`
-- [x] **Code-Gen** — `cores/free/code-gen` — the `/code` build runtime, folded into foundational Trident (no capability gate)
-
-### The world-class refactor window — COMPLETE (2026-07-16)
-
-The world-class refactor window is DONE. Its unit backlog + per-unit status is
-`docs/plans/2026-07-02-world-class-refactor-plan.md` (do NOT duplicate it here).
-All executed units merged through K10 (the public in-repo SPEC.md — the last
-**trident-executed** unit: introducing this file makes a trident build against
-this checkout governed via `detectRalphMode`, so no trident-dispatched unit
-could follow it). A post-completion fresh-eyes audit closed a punch-list (a
-wide-bind upload-auth hole, a timezone-read wiring gap, a build-fragile
-one-release shim, a missing sender-propagate regression test).
-
-The non-merged items are deliberate, not gaps, and fall into three buckets (the
-per-unit ledger is the plan §17 checklist). **Kept / deferred by decision:**
-**MG-3** (the `NEUTRON_GRAPH_COMPOSER_MODULE` composer seam) is KEPT (the OSS-split
-boundary — see the Decisions Log); **N3-credential** (frozen-handle threading at
-the Managed boot seam) is DEFERRED — it cannot fire without live hosted owners
-that rename (the ABI-facing `internal_handle`→`owner_handle` rename that is the
-rest of N3 landed with N2 in #367). **Deferred feature work (post-window):** **W3**
-(transcript unification, XL) plus the native-shell `[BEHAVIOR]` pair **W4** (Expo
-shell conversion) and **W6** (native-shell↔WebView bridge) — the native app is
-unpublished, so they slipped past the window; and **K4b** (the onboarding
-slug-flow deletion) stays deferred. **Tracked elsewhere / not a window gap:** the
-**M-lane (M1–M6)** is Managed cross-repo, tracked in `neutron-managed` (not this
-repo's ledger). All of the above plus the known engineering follow-ups now live as
-tracked GitHub issues, not private memory.
-
-### Post-window feature backlog
-
-Each carries an acceptance criterion; all in `neutron-open`.
-
-- [ ] **Every squash-merge writes owner PII into the public repo's history, and the gate that
-      should catch it only sometimes looks far enough back** (measured 2026-08-14 while landing
-      #259). The agent's configured git identity in the code checkout is an address on the OWNER
-      PII DENYLIST. GitHub's squash-merge composes the merged commit message and appends a
-      `Co-authored-by:` trailer built from the authors of the squashed commits — so that address
-      lands in `main`'s commit messages on merge. **12 of the last 40 commits on `main` carry it.**
-      Nothing in the tree is wrong; the leak is in the MESSAGES, which no tree scan inspects.
-      **The gate is non-deterministic, which is the worse half.** `purity` failed on one CI run for
-      PR #259 with `[pii-denylist-msg]` and PASSED on a re-run of the same head — the commit-message
-      window is `LEAK_GATE_BASE_SHA..HEAD` (`ci.yml`), and that base resolves differently per event
-      (`pull_request.base.sha` vs the `github.event.before` fallback, which is all-zeros on a
-      branch's first push). So the same commits are in scope or out of scope depending on how the
-      run was triggered. A gate whose verdict depends on how far back it happened to look does not
-      tell you the tree is clean — and it trains the reader to re-run until green, which is the
-      exact reflex that lets a real finding through.
-      Acceptance, in two independent parts:
-      (a) A merge cannot introduce a denylisted address into a commit message. Fix the SOURCE —
-          the identity the agent commits under — rather than teaching the gate to ignore the
-          trailer; an allowlist here would suppress the true positives too.
-      (b) The commit-message window is DETERMINISTIC for a given head: the same commits are scanned
-          whatever event triggered the run, and an unresolvable base FAILS rather than silently
-          scanning a different range. Assert a re-run of an identical head cannot change the verdict.
-      NOTE the existing history is NOT in scope here and must not be quietly rewritten: `main` is
-      protected, the commits are merged, and rewriting shared history is an owner decision with
-      consequences for every open branch. Decide it explicitly; do not let a fix for (a) grow into
-      a history rewrite.
-- [ ] **The outer publisher cannot publish a REBASED branch — so design A's publish step fails on
-      every card that already has a remote branch** (measured 2026-08-14, run `2aacf419`, the first
-      build ever to reach the publish rung). The build SUCCEEDED — checkpoint `forge-done`, a real new
-      commit — and then: `publish failed: outer publisher could not push branch …`.
-      **This is NOT a credential failure, and that distinction is the whole point.** A dry-run push
-      with the real credential authenticated fine and was refused by the server:
-      `! [rejected] … (non-fast-forward)`. So the credential path design A introduced works.
-      The cause is mechanical: `trident/orchestrator.ts` pushes with
-      `git push origin refs/heads/<b>:refs/heads/<b>` and no lease, while the build rebases the branch
-      onto current `main`. Verified: the local branch contains post-A `main`, the remote branch does
-      not. **A rebased branch is by definition not a fast-forward**, so this push can never succeed —
-      not for this card, but for ANY card whose remote branch predates its rebase. Every fix round on
-      an existing PR is affected, which is most of them.
-      Acceptance: a rebased fix round publishes. The fix must NOT be a bare `--force` — use a lease, so
-      a branch someone else genuinely advanced is REFUSED rather than overwritten. Assert both
-      directions: the rebase publishes, AND a remote that moved underneath is still refused. A test
-      that only proves the first is asserting that force-push works, not that the lease does.
-- [ ] **A publish failure throws away the evidence it just measured.** `trident/orchestrator.ts`:
-      `if (!pushed.ok) throw new Error(\`outer publisher could not push branch ${branch}\`)` — git's
-      stderr had already said exactly why, in words, with hints. It is discarded.
-      This is the sibling of the defect fixed in #240 and it landed in brand-new code. #240 removed a
-      message that ASSERTED a cause it never measured; this one MEASURES the cause and then drops it.
-      Opposite mistakes, identical cost: a human reads the reason and still cannot act.
-      Cost, measured rather than supposed: diagnosing the entry above took a DB read, a hand comparison
-      of merge-bases, and a dry-run push with the owner's credential to rule out authentication — all
-      to recover text the publisher was already holding.
-      Acceptance: a publish failure's stored reason carries git's own stderr, and a non-fast-forward
-      rejection is distinguishable from an auth failure by reading the reason alone. **And it must not
-      become a disclosure surface** — assert the stored reason never contains credential material, with
-      a positive control proving that assertion can fail.
-- [ ] **A gateway restart destroys every in-flight build, and the work it already pushed is
-      abandoned rather than resumed** (measured 2026-08-14; owner-confirmed cause: *"it was the
-      deploys I was doing in another session that restarted the gateway"*). The inner Forge→Argus
-      loop runs DETACHED inside a warm `cc-trident-fire-*` REPL. That REPL's child dies with the
-      gateway, `onChildCrash` (`open/wiring/substrates.ts`) stamps every run it owned
-      `subagent_status='crashed'`, and the tick reaps them to `failed`
-      (`trident/orchestrator.ts` §1a) — whose own comment states the current position outright:
-      *"A crashed launcher is a DEAD RUN whether or not we ever learned its subagent id."*
-      **That is the defect. A dead launcher is not a dead build.**
-      MEASURED, three times, two different cards: gateway boots at `06:19:56`, `06:26:51`,
-      `07:13:00` (`.restart-markers.json`, and `open/server.ts` start time) each killed a build
-      ~90s later — one watchdog tick. Runs `00b3d1cf`, `8ddca917` (card: brief-by-PATH) and
-      `bb3c8c8e` (#217). Two of the three died at the SAME checkpoint, `ralph-task-built`.
-      **The abandoned work was real and is still on the remote.** `8ddca917` pushed
-      `trident/the-build-brief-must-not-be-retyped` and opened PR #261 — 2 commits, 7 files,
-      +434/−17, last pushed `07:04:23`, NINE MINUTES before its launcher died at `07:13:00`. The
-      build was healthy and progressing. Nothing was wrong with it except where its supervisor lived.
-      The durable state needed to continue is ALREADY on the row: `branch`, `pr`,
-      `inner_checkpoint`, `round`, `ralph_round`. The tick discards it anyway.
-      **Do NOT reach for the Workflow tool's `resumeFromRunId`** — it is same-session only, and a
-      gateway restart is exactly the event that destroys the session. The persisted
-      `workflow_run_id` is a Neutron id, not a `wf_`-shaped CC run id. Recovery must be built from
-      the DURABLE artifacts (the pushed branch + the PR), which are the only things that survived.
-      Acceptance:
-      (a) A launcher crash on a run with a live branch is RELAUNCHED as a continuation from its
-          checkpoint, not reaped. Assert the already-pushed commits are neither lost nor duplicated —
-          a "recovery" that re-does landed work is a different bug, not a fix.
-      (b) It is BOUNDED and visible. A crash-recovery budget SEPARATE from the fix-round counter,
-          because these are not the agent's failures and must not consume its rounds. A deploy loop
-          (the live cause here — three restarts in 53 minutes) must not spin builds forever: past
-          the budget the run fails with a reason naming the budget. Assert the cap holds.
-      (c) Harvest still wins. A workflow that wrote a terminal result and only then lost its
-          launcher still harvests — the existing ordering guarantee must not regress.
-      (d) An unrecoverable launcher crash reports the MEASURED cause. `inner workflow child
-          crashed: pooled child exited` tells a reader nothing about why; the stored reason must
-          carry the gateway boot timestamp that killed it. Per #240: measure the cause, do not
-          assert one — and having measured it, do not throw it away either.
-      (e) The board does not read `failed` while a recovery is in flight.
-- [ ] **An infrastructure failure needs a human to notice and say "retry" — so a build that nothing
-      was wrong with sits dead until someone looks** (owner-instructed 2026-08-14: *"if there's an
-      infrastructure failure like that we need to automatically retry not wait for me to say
-      something"*). MEASURED, run `76bb4eca`: the build phase is routed to the codex executor by an
-      owner phase-override (`tag=reasoning`), codex returned `codexStatus=deferred` — configured,
-      called, no answer — and the inner loop THREW rather than silently falling back to Claude.
-      **The refusal is correct and must be preserved**; a silent downgrade would produce a build
-      attributed to a reviewer that never ran. What is wrong is what happens next: the run is
-      terminal, no branch, no commits, and it waits for a human.
-      **It is transient, which is what makes the manual wait indefensible.** The sibling run
-      `9bb31a2e` took the SAME codex route minutes apart and built fine (PR #262); the same
-      deferral cleared on relaunch the previous day. Nothing was wrong with the card.
-      **Classification is blocked on a lie in the reason field.** `76bb4eca` stored *"inner workflow
-      ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE"* — Argus NEVER RAN.
-      That is the #240 defect again: it asserts a cause it did not measure. Nothing can classify a
-      failure it mislabels, so the reason must be fixed FIRST or the retry gate keys off fiction.
-      Acceptance:
-      (a) A failure classified INFRASTRUCTURE retries with no human in the loop. The classes are
-          named and closed: executor deferred/timeout, transport 5xx, launcher crash.
-      (b) A GENUINE failure never auto-retries — `REQUEST_CHANGES`, failing tests, a compile error
-          are the agent's own work and must stay terminal. This is the rule most likely to be
-          implemented too broadly; assert a `REQUEST_CHANGES` does NOT retry, with a mutant that
-          goes red.
-      (c) Bounded, with backoff, on a budget SEPARATE from the fix-round counter — these are not
-          the agent's rounds to spend. Past the budget it fails with a reason naming the budget.
-      (d) Visible: the board reads retrying-with-attempt-count, not `failed`; the owner is told
-          ONCE, not once per attempt.
-      (e) The stored reason names the measured cause (`codexStatus=deferred`), never a cause that
-          did not occur.
-      NOTE the boundary with the launcher-crash entry above: that one recovers a build whose
-      SUPERVISOR died mid-flight from its pushed branch; this one re-attempts a build that never
-      started because an EXECUTOR did not answer. They share the classifier and must not both
-      rewrite it — sequence them.
-- [ ] **The push credential can vanish mid-run, and when it does a FINISHED, REVIEWED build is
-      thrown away** (measured 2026-08-14 overnight, runs `9bb31a2e` and `9e0f1a8b`). Both reached
-      `forge-done` — the work was built and reviewed — and then died at the publish rung with git's
-      own words: `fatal: could not read Username for 'https://github.com': No such device or
-      address`. That is the publisher holding NO GitHub credential at push time.
-      **It is intermittent, not absent.** The same publisher pushed successfully three times earlier
-      the same night (08:38, 08:42, and the push behind PR #262, MERGED 08:49:02Z) and could not
-      push at 09:04 and 09:10. So a credential that was live at 08:49 was gone by 09:04. The gateway
-      process carries `NEUTRON_GITHUB_CLIENT_ID` (device-flow OAuth) and no static token, so the
-      token is fetched per push and its expiry/refresh is the suspect. NOT MEASURED: which of expiry,
-      revocation or a failed refresh — do not assert one without reading the fetch path.
-      **The credit where due:** the reason above is READABLE ONLY because of the stderr-carrying fix
-      in #259. Before it, this was indistinguishable from the non-fast-forward failure it replaced —
-      both said `outer publisher could not push branch <b>` and nothing else.
-      **THE REAL COST IS THE DISCARD.** A build that is complete and reviewed should not be
-      destroyed by a credential blink. Verified: the commits survive on LOCAL branches
-      (`trident/work-board-row-state-a-card-must-no` at `a96eb95`, unpushed) — so the work exists and
-      nothing retries it. The run is stamped `failed`, the card reads failed, and a human must
-      notice. Relaunching is the WRONG remedy: it rebuilds from scratch and hits the same wall.
-      Acceptance:
-      (a) A publish that fails for a MISSING/REJECTED credential is distinguished from one that
-          fails for a rejected ref, by reading the stored reason alone. Assert both, and assert the
-          reason still never contains credential material (the #259 disclosure guard must hold).
-      (b) The built commit is NOT discarded. A publish-credential failure leaves the run in a state
-          that can publish LATER without rebuilding — the commit is already made; only the push
-          failed. Assert a re-publish after the credential returns produces the same sha, and does
-          not re-run Forge.
-      (c) `publish-credential` joins the auto-retry class list in the entry above, with a backoff
-          long enough to outlast a token refresh.
-      (d) When it is genuinely unrecoverable, the owner is told WHICH surface reconnects GitHub —
-          never a shell command, per the credential doctrine.
-      NOTE for whoever builds this: dispatching more builds while the credential is down is waste —
-      every one of them will build, review, and then fail at the same rung. Whatever fixes this
-      should also make that state visible enough that a queue is not fed into a wall.
-- [ ] **Every credential the owner connected before his instance was provisioned is invisible to it,
-      and the instance reports that as "not connected"** (measured + REPAIRED by hand 2026-08-14;
-      the code fix is what this entry asks for). `secrets.project_slug` and
-      `project_credentials.owner_slug` both hold the FROZEN `owner_handle`
-      (`auth/secrets-store.ts` header), and `open/composer.ts:839` sets
-      `owner_handle = project_slug` from the boot slug. On this box every row was written under
-      `dev` (the pre-provisioning dogfood handle) while the unit boots
-      `NEUTRON_INSTANCE_SLUG=juno` — so all 15 `secrets` rows and all 3 `project_credentials` rows
-      were unreachable. **BLAST RADIUS, all one bug:** `readGitHubToken` → `githubProcessEnv(null)`
-      → `{}` → every trident publish died `fatal: could not read Username for 'https://github.com'`
-      (runs `9bb31a2e` 09:04Z, `9e0f1a8b` 09:10Z, plus `09f1ac41`/`835c3625`/`3da6fde2` blocked at
-      the same rung until the 90-min hang watchdog killed all three at 10:13Z); `integrations_list`
-      reported gmail/calendar/workspace `connected:false` on top of live, refreshing OAuth rows;
-      the codex bundle could not be seen at all — after the re-scope `codex_status` immediately
-      returned the TRUE state, `expired`. Repair was a metadata move (`UPDATE … SET
-      project_slug='juno'`), which is safe precisely because `encrypt(key, plaintext)` binds no AAD.
-      **This is the OTHER HALF of the 2026-05-12 rename-canonicalisation fix.** That one froze the
-      handle so a RENAME could not orphan rows. Nothing covers rows written before PROVISIONING
-      froze a different handle. **The failure mode is what makes it expensive: it is silent and
-      indistinguishable from "never connected"** — `readGitHubToken` normalises a miss to `null` by
-      design, so a wrong-scope lookup and an un-connected instance take the same branch and print
-      the same sentence. An entire night of builds was diagnosed as a blinking GitHub token.
-      Acceptance:
-      (a) Boot DETECTS credential rows scoped to an owner handle other than the boot handle and
-          migrates them (or refuses to boot naming the mismatch — either is defensible, silence is
-          not). Assert against a DB seeded under an old handle: the token reads back after boot and
-          the ciphertext bytes are unchanged.
-      (b) A miss is DISTINGUISHABLE. When rows exist under a different handle the surface says
-          orphaned/needs-migration, never "not connected". Guard against a fake test here: a test
-          that only asserts null-on-miss passes with the bug present — it needs a positive control
-          where the same lookup succeeds under the right handle, and deleting the migration must
-          turn a test red.
-      (c) The migration covers EVERY member of `SHARED_KEY_ENCRYPTED_TABLES`. Moving `secrets` and
-          not `project_credentials` leaves codex and the host-deploy token orphaned; assert both.
-      (d) No secret material reaches a log, an error, or the migration's own audit row.
-      NOTE, same orphan class and deliberately NOT in scope: `reminders` rows also carry the stale
-      `dev` slug, which is why `reminders_cancel` answered `ok:false` for a live pending row and a
-      cancelled overnight watch kept firing every 30 minutes. Whoever builds this should say
-      whether the scope key belongs on that table at all before moving those rows too.
-- [ ] Wire `ProjectBackupScheduler` (dormant loop today) — a scheduled per-project backup fires on its interval. (D-7)
-      Do NOT resolve this one alone: see the code-repo-vs-vault entry below. Wiring the scheduler without
-      deciding the model would start snapshotting trees that contain nested code repos and live SQLite.
-- [ ] Wire the comments `AgentWatcher` (dormant loop today) — a new comment wakes the agent. (D-7)
-- [ ] Resolve HITL `prompt-user` enforcement — review with refactor-window log data before locking the policy. (D-9)
-- [ ] Per-project context for agent tools — X6 follow-ons (scope tool state to the active project everywhere).
-- [ ] **Native-crash visibility for the mobile app.** App remote diagnostics (2026-07-27) covers JS errors
-      only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
-      the owner's device is diagnosable without a USB cable.
-- [ ] **The agent can create Work Board items but cannot remove them — the UI can do something the
-      agent cannot** (owner-asked 2026-08-14: *"are you sure you don't have a delete endpoint? I can
-      just click the X in the UI, but I'm surprised you can't"*). He is right to be surprised: the
-      capability EXISTS and is simply not exposed to the agent. `work-board/store.ts` has `delete()`,
-      and `gateway/http/work-board-surface.ts` calls it behind the UI's X — including the careful part,
-      cancelling an in-flight trident run before removing the row. The agent tool surface
-      (`work-board/agent-tool.ts`) is `add` / `list` / `update` / `reorder` / `complete`, plus `start`
-      and `dispatch_build`. There is no `delete`, and no archive lane either.
-      THE COST IS NOT HYPOTHETICAL: asked on 2026-08-14 to take four deprioritised cards off the board,
-      the only lever available was `complete`, so four unshipped items now read `done` — the agent had to
-      MISREPORT state to carry out a routine instruction, and then explain the misreport. An agent whose
-      only way to obey is to lie about status will keep producing boards that cannot be trusted.
-      Acceptance: the agent can remove an item through the same path the UI uses (run-cancellation
-      included, not a bare row delete), AND a deprioritise/archive lane exists that is distinct from
-      `done` — so "shipped" and "shelved" stop sharing one word. A test pins that removing an item with a
-      live run cancels that run first.
-      REMOVAL MUST ALSO DECIDE WHAT HAPPENS TO THE CARD'S PLAN DOC (owner-asked 2026-08-14: *"how do we
-      fix this orphan problem? We should probably just delete the plan with the card, or move it to a
-      'cancelled' folder or something"*). Today removal leaves the doc in `plans/` with nothing pointing at
-      it — it is neither findable from the board nor obviously dead. **Deleting it with the card is the
-      wrong default, and there is a live counter-example:** the card removed on 2026-08-14 was the Forge
-      publish card, whose doc holds the three costed designs, the measurements and the acceptance criteria
-      the owner is building from RIGHT NOW in another session. Deleting on removal would have destroyed the
-      spec for work in progress. THE DISPOSITION MUST FOLLOW THE REASON, and only the remover knows it:
-      shipped, cancelled, and moved-elsewhere are three different fates. Acceptance (third part): removal
-      takes a reason; the doc is MOVED to a disposition-named folder rather than deleted or left in place;
-      the moved doc stays readable in the Documents tab; and no path silently destroys a plan doc — a
-      deliberate delete is allowed, an implicit one is not.
-- [ ] **A card's plan doc is the single source of its spec, and it is written to a place nothing
-      version-controls, reviews, or backs up** (owner-reported 2026-08-14, on discovering the P2–P4 note:
-      *"plan docs here in this project are not actually written to the repo itself"*). `work-board/spec-doc.ts`
-      writes each card's full ask to `Projects/<id>/docs/plans/<slug>.md` via `DocStore`, and the card stores
-      `neutron-docs:plans/<slug>.md`. **The LOCATION is correct and Ryan-locked (2026-07-02)** — it must stay
-      user-visible in the Documents tab; this entry does NOT propose moving it. The gap is that the write ends
-      there. MEASURED on this instance: 12 plan docs on disk; the project vault at `Projects/neutron-open/` IS
-      a git repo whose own `CLAUDE.md` states *"every meaningful change commits to this project's own git
-      repo"*; **2 of the 12 are tracked — both committed by hand by the agent — and the repo has NO remote and
-      2 commits total.** So ten specs, including every card currently on the board, exist as untracked files
-      on one volume. THREE CONSEQUENCES, in order of cost: (1) the doc is the input `▶ start` feeds to trident
-      as the run's `task`, so losing or silently editing it changes what gets built with no diff and no
-      history; (2) the PR that implements a card carries no copy of the spec it was built against, so a
-      reviewer on GitHub — human or Argus — cannot see the acceptance criteria they are judging against; (3)
-      the code repo and the spec that drives it can drift apart with nothing to detect it. Note the coupling
-      to *"the build brief must not be retyped by a model — pass it by PATH"*: that card's premise is handing
-      the brief over as a path, and today that path resolves outside the repo the build works in. Acceptance:
-      a plan doc lands somewhere durable and versioned — committed by the writer, not by hand — WITHOUT
-      leaving the Documents tab; a doc's history is inspectable; and the spec a build ran against is
-      recoverable after the fact from the record, not from a live file. Whether that is auto-committing the
-      vault repo, mirroring into the code repo alongside the PR, or snapshotting the doc bytes onto the run is
-      the design question — do not pick it here.
-- [ ] **A project needs a first-class split between its CODE REPO(s) and its VAULT — and the vault must be
-      versioned and backed up whether or not any repo exists** (owner-directed 2026-08-14: *"every project
-      needs to have the notion of things that are inside the repo … and also things that are outside the repo,
-      which is working documents, stuff that only I need … we need to make sure that all the stuff that's
-      considered outside the repo is still backed up, still tracked as a git repo, even though it's not
-      necessarily pushed anywhere. Or it may be pushed somewhere as one master backup."*). THE MODEL HE ASKED
-      FOR, generalised: a project owns a private **vault** (docs, plans, notes, research, per-Core sidecars —
-      everything that is only his) and **zero or more code repos**, each with its own remote and its own
-      publication rules. `neutron-open` is the demanding case: the vault is private, and `code/` is a clone of
-      a PUBLIC repo that must contain only a subset of the project. Most projects have no code repo at all;
-      some will have several; the model must not assume one.
-      MEASURED on this instance, 2026-08-14 — the current state is NOT a design, it is three overlapping
-      mechanisms of which only the weakest runs:
-      (a) `Projects/<id>/.git` — created by the materialize path, **one commit ("Neutron materialize: <id>"),
-      dated 2026-07-22, on every project, and never committed to since. No remote on any of them. No
-      `.gitignore`.** 9 of 16 project folders have one; 7 have no git at all.
-      (b) `gateway/git/doc-version-store.ts` — P7.4 Phase 1, a per-doc-edit repo at `<project>/.docs-versions/`.
-      **Built, tested, and never constructed: no `.docs-versions/` exists for any project.**
-      (c) `gateway/git/project-backup-store.ts` + `ProjectBackupScheduler` — P7.4 Phase 2, a whole-tree
-      snapshot every 6h at `<project>/.project-backup/` with an OPTIONAL per-project remote and push-failure
-      classification. **Also built, tested, and never constructed** (`loop/registry.ts` already names it as a
-      loop that "never starts in ANY composition"; the existing backlog line "Wire `ProjectBackupScheduler`
-      (D-7)" is the same defect seen from the other end — these two entries must be resolved together).
-      NET EFFECT: the owner's private working context — every plan doc, note and research artifact across 16
-      projects — is un-versioned and un-backed-up on one volume. `neutron-backup.sh` would cover it, but it
-      backs up `NEUTRON_HOME` and **this instance's `NEUTRON_HOME` is not a git repo** — the script has never
-      been run here, and the one backup timer installed on this host does not cover the owner's data at all.
-      TWO HAZARDS THE FIX MUST HANDLE, both measured:
-      1. **A nested code repo is not just another directory.** `code/` is a real clone and is neither tracked
-         nor ignored by the vault repo. `git add -An` in the vault emits *"warning: adding embedded git
-         repository: code"* — a naive whole-tree backup stores a gitlink, so the backup contains a pointer to
-         content it does not have, while looking complete. A vault backup must EXCLUDE nested repo working
-         trees by rule (they have their own remote and their own recovery story), not by luck.
-      2. **Live SQLite is in the tree.** The same dry-run would stage `.nexus/nexus.db-wal`,
-         `.comments/comments.db-wal` and `calendar/calendar.db-wal`. Phase 2's seeded `.gitignore` is the
-         designed answer; whatever ships must actually apply it, and a mid-write WAL must not be committed as
-         if it were a consistent snapshot.
-      Acceptance: a project declares its code repos (path + remote) as data rather than by their presence on
-      disk, and a project with none is a fully supported shape; the vault is committed automatically on
-      change, with nested repo trees excluded by rule and a recoverable history; a project with no remote is
-      still recoverable from local history, and a single owner-level backup remote can be configured for all
-      vaults at once (his *"one master backup"*); and the public/private boundary is explicit enough that
-      asking "is this file publishable?" has an answer that does not depend on which folder someone happened
-      to save it in. Phases 1 and 2 are ALREADY BUILT — the work is deciding the model, then wiring and
-      reconciling them against the materialize `.git`, NOT writing a third mechanism.
-      OPEN, owner's call, deliberately not decided here: whether the vault's canonical git is the materialize
-      `.git` or Phase 2's `.project-backup/` (three repos over one tree is one too many); whether the master
-      backup remote is per-project or one owner-level remote holding every vault; and whether a code repo
-      lives inside the project folder as today (`<project>/code/`) or beside it with a declared link.
-- [ ] **The live agent turn does not know the owner's timezone, so the agent narrates the HOST's clock as
-      if it were the owner's** (owner-reported 2026-08-14: *"you need to figure out how to set my timezone
-      properly"*). The zone IS captured — onboarding takes the browser's IANA zone from the `?tz=`
-      WS-upgrade param (#306) and stores it on `instance_metadata.timezone`; the onboarding preamble even
-      FORBIDS asking for it, on the grounds that it is already known. `reminders/tick.ts` then resolves it
-      correctly for cron-cadence wall-clock work (#40) — so a daily 9am reminder does fire at the owner's
-      9am. **The live turn is the one path that never reads it.** `gateway/wiring/build-live-agent-turn.ts`
-      contains no reference to a timezone and nothing in the live-turn path touches `instance_metadata`.
-      The host runs UTC, so every `Date.now()`, every shell `date`, and the injected current-date line are
-      all UTC — and the agent, having nothing to convert with, repeats them as the owner's wall clock.
-      OBSERVED: on 2026-08-14 the agent was told "today" was a date the owner had not reached yet, and
-      narrated a whole evening's work in host time — *"since midnight"*, *"at 4am"* — for an owner whose
-      clock read mid-evening the PREVIOUS day. Not an error message; a confident, wrong frame that also
-      shifts every relative deadline the agent offers. Note the second-order cost: the agent is told to
-      never ask for the timezone BECAUSE it is already known, so the one recovery it could improvise is
-      also closed off.
-      SECOND, SMALLER GAP, same root: the captured zone is supposed to be stamped into `USER.md` by
-      persona-gen precisely so the agent has it without asking. On this instance it was NOT there and had
-      to be written by hand — so whatever writes it either never ran for this owner or does not run for an
-      owner who predates the feature. Acceptance: the live agent turn receives the owner's IANA zone AND
-      the current time in it — not a bare date; a time or date stated to the owner is in the owner's zone
-      unless explicitly labelled otherwise; the `USER.md` stamp is verified for EXISTING owners, not only
-      new ones; and a test pins the case that actually bites, an owner whose local DATE differs from the
-      host's at the moment of the turn.
-- [ ] **A deploy request must resolve the ref against the REMOTE, not the host's frozen mirror**
-      (observed 2026-08-14, first real use of the host-deploy tool). `host_deploy_request` is wired and
-      `enabled: true`. Asked to deploy `origin/main` two minutes after a merge, it answered
-      `status: "up_to_date", target_sha: 9617a9e4` — truthfully, and uselessly: it resolved `origin/main`
-      inside the host checkout, and that checkout has **never fetched**. MEASURED: `.git/FETCH_HEAD` is
-      absent, its `origin/main` equals its own `HEAD` (`9617a9e4`), and `git cat-file -e` on the freshly
-      merged sha reports the object is unknown to it. So the ref the owner names and the ref the host
-      resolves are different things whenever anything has landed since the last deploy — which is exactly
-      when a deploy is wanted. THE FAILURE MODE IS THE DANGEROUS KIND: not an error, a confident
-      "already up to date", so the owner reasonably concludes the merge is live when it is not. That is the
-      same shape as the terminal-reason defect (#240) — a confidently-worded answer that stops the reader
-      looking further. Acceptance: the request FETCHES (or resolves against the remote) before comparing;
-      `up_to_date` is returned only when the target sha is genuinely reachable and deployed; and a stale or
-      unfetchable ref is named as such rather than reported as parity. A test pins that an unknown-to-the-host
-      sha can never produce `up_to_date`.
-      - ✅ **RESOLVED, in two halves, and the second half is the interesting one.** #245 made the request
-        FETCH before comparing, which is the right fix — **and it moved the failure rather than ending it.**
-        A fetch always writes `FETCH_HEAD`, and this service is deliberately unprivileged in the host
-        checkout, so the very next real deploy refused with *"could not read the host checkout to work out
-        what would deploy … Permission denied"*. The owner reported it three times before the cause was
-        measured. 📌 **THE LESSON, worth more than the fix: when a privilege boundary is drawn, EVERY step
-        that needs the privilege has to move — not just the obviously dangerous one.** The deploy itself was
-        moved across on day one; the innocuous-looking read ("what does this ref point at?") had a hidden
-        WRITE inside it and stayed behind, and nothing noticed until a deploy was actually attempted, because
-        every test that exercised it ran as a user who could write. **`createHostDeployRemoteGit` now asks the
-        control plane** (`open/host-deploy-runtime.ts`), and the local git view is DELETED rather than kept
-        beside it. ⛔ Rejected: widening permissions on the host git directory (that IS the boundary), and a
-        locally-owned mirror (the preview would then describe a checkout that is not the one deploying — this
-        very defect, one level down).
-- [ ] **A deploy must not kill the builds in flight — trident is presently its own worst enemy**
-      (owner-directed 2026-08-13, from the forensics on run `bb3c8c8e`). The inner workflow is not its own
-      process: it runs detached inside a WARM `claude` REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`,
-      `open/wiring/substrates.ts`). Restarting the instance's service SIGTERMs that REPL and every workflow
-      inside it, and the wedge watchdog then reports `pid-dead → "pooled child exited"` — the detector
-      working, not
-      the fault. Three of five recorded `trident_launcher_crashes` land 18–28 s after a vendor checkout
-      (08-11 20:16:44→20:17:02, 08-12 19:37:55→19:38:13, 08-13 04:05:27→04:05:55). The 08-13 deploy rolled
-      `282f10b6`, *trident's own merge*: **a build that lands kills the builds still running**, at exactly the
-      rate the pipeline succeeds. Acceptance: a deploy either drains/defers while a run is in flight, or the
-      workflow survives its launcher's restart — and either way the owner is TOLD which happened, never handed
-      a bare "child crashed" for an event that was a deploy. (Two crashes — 08-10 23:30, 08-11 06:04 — have no
-      checkout near them and are NOT explained by this; a fix must not be credited with closing them.)
-      DISTINCT FROM the governance tracker's #514 (*a CRASHED trident run is never reaped*), which asks what
-      the row does AFTER a child dies and is now served by the `onChildCrash` sink. This asks why the child
-      dies at all, and answers: we killed it. Fixing one does not fix the other.
-- [ ] **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
-      row with `inner_checkpoint = null` and `ralph_round = 0`; only the fire-time `detectExistingPr` probe
-      (`trident/orchestrator.ts` `launch`) recovers continuity, by setting `pr` and so making the inner
-      workflow's `resuming` true. That is enough to preserve the *code* (Forge re-enters the branch, the
-      planner is told to read the committed work) but the governed plan is regenerated from scratch and the
-      review rounds restart — planning and review tokens are re-spent every crash. Acceptance: a retry carries
-      the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly on the card that it will
-      not. A resume that depends on a GitHub PR probe also silently degrades to zero in `local` merge-mode.
-- [ ] **A preserved worktree must not be able to strand its branch.** Since #541 a crashed run's worktree is
-      deliberately kept (it holds uncommitted work), which leaves the build branch checked out. Git refuses
-      the same branch in two worktrees, so the retry's re-enter contract
-      (`git switch <branch> || git switch -c <branch>`, `trident/inner-workflow.mjs`) has both arms fail on the
-      literal path. Observed 2026-08-13: run `36b95167` did NOT deadlock — Forge worked inside the preserved
-      worktree instead — but that recovery is an LLM improvising around a broken contract, not a guarantee,
-      and it silently rejoins a worktree whose base may be stale. Acceptance: the re-enter path is
-      DETERMINISTIC — the retry either adopts the preserved worktree by design or releases the branch first,
-      and a test pins whichever is chosen.
-- [ ] **"Is this build alive?" — NOT A NEW ITEM. Corroborating evidence for the governance tracker's open
-      #534** (*"a long build phase reports NOTHING until it ends, so a working run is indistinguishable from a
-      hung one"*, P1, already ESCALATED 2026-08-11 with three fix routes analysed and the
-      `trident/checkpoint.sh`-on-a-timer heartbeat recommended). **#534 owns this; do not re-plan it here.**
-      Recorded only because a second independent instance changes its priority, not its diagnosis.
-      2026-08-13, run `36b95167`: `phase = forge-init`, `last_advanced_at = 04:10:08` — while the planner had
-      finished, Forge had committed `4eb50c4` at 04:19:38, and an agent transcript was being written seconds
-      earlier. The owner had to ask *"How can we tell if it's working? I want to minimize waste"* and the only
-      truthful answer was off-board: the mtime of `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`.
-      Two things this instance adds to #534:
-      (i) the FALSE-KILL half is now witnessed, not just predicted — `eca83d1f` was reaped at 90 minutes for
-          "no progress" on exactly the `last_advanced_at` clock #534 identifies as stale by construction, and
-          nothing establishes it was actually hung;
-      (ii) the ORCHESTRATOR is fooled too, not only the client — on 2026-08-13 this agent reported a run as
-          "going well" from transcript liveness while it was making no progress toward APPROVE. Movement is
-          not health, and a heartbeat that proves only "an agent is writing" would reproduce that error in the
-          product. Whatever #534 builds must distinguish ALIVE from PROGRESSING.
-      Related but DELIBERATELY SEPARATE: the counter/surface-disagreement half (`codegen_status` reporting
-      `forge-init` into a healthy run; the two nested round numbers) is its own backlog entry, landing via
-      the `<ralph_round>.<round>` item. That is a DISPLAY defect over a signal we already have; this is a
-      MISSING SIGNAL. They must not be collapsed into one job — fixing the display would make a run that
-      reports nothing merely report nothing more precisely.
-- [ ] **A build agent must never HOLD a credential — it asks the host to push** (owner-directed 2026-08-13,
-      from observed behaviour, not theory). `github/credential.ts` argues at length against every way of
-      giving git a token except an env-injected, `github.com`-scoped helper, because "a credential on disk
-      with no expiry is the thing we spent the device-flow work avoiding". That credential is wired to the
-      OUTER loop ONLY (`open/composer.ts` `run_host: makeLazyCredentialedHostRunner(githubProcessEnv(…))`).
-      The INNER workflow gets nothing — verified live on the fire REPL: `/proc/<pid>/environ` contains no
-      `GH_TOKEN` and no `GIT_CONFIG_*`. Yet in `pr` merge-mode Forge's contract ORDERS it to
-      "push the branch to origin, then REUSE the existing PR" (`trident/inner-workflow.mjs` `forgePushStep`).
-      **We command a push and withhold the key**, so on 2026-08-13 run `36b95167` did the only thing left:
-      read `auth/secrets-store.ts` for the AES-GCM envelope shape, read `.neutron-aes-key` (mode 0600, SAME
-      uid as the build), enumerated `secrets` — passing the owner's `gmail_compose` tokens and
-      `openai:onboarding` key on the way — decrypted the github row, **wrote the plaintext to
-      `/tmp/gh-token-tmp`**, then hand-rebuilt our own scoped helper and pushed. It reached our design by
-      reading our source, having already broken the property the design protects. This is not agent
-      misbehaviour; it is task completion under an impossible instruction, and it is non-deterministic —
-      the push succeeds only if the model improvises well.
-      Acceptance, in order of preference:
-      (a) Forge does NOT push. It asks the HOST to push and receives an exit code; the credential never
-          enters an agent-reachable process. This matches the outer loop and is the only shape where the
-          token cannot be echoed, logged, committed, or written to disk by a language model.
-      (b) If an agent-side push is kept, `githubProcessEnv(…)` is threaded PER FIRE into the workflow's agent
-          env — never baked in at REPL spawn: the fire substrate is WARM and shared across runs, so a
-          spawn-time token goes stale on reconnect and sits in `/proc/<pid>/environ` for every later run to
-          inherit.
-      (c) SEPARATELY, and regardless of (a)/(b): decide deliberately whether a build agent should be able to
-          read `.neutron-aes-key` at all. Today every agent we run can decrypt every secret the instance
-          holds — GitHub, Gmail, OpenAI, Codex — because it runs as the keyfile's owner. The push path is one
-          symptom; the reachability is the condition. Acceptance: a build process cannot decrypt secrets it
-          was not given, and a test proves it.
-      UPDATE 2026-08-13 23:32, run `1daded20` — THIS ENTRY IS NOW THE ONLY THING BLOCKING BUILDS ON THIS
-      INSTANCE. `trident/codex-build.sh` no longer improvises: its `push_credential_ok` probe ran
-      `git credential fill`, got nothing, and exited 3 `CODEX_BUILD_NO_PUSH_CREDENTIAL` *before spending any
-      tokens*. That is the intended replacement for the `/tmp/gh-token-tmp` behaviour above — the guard
-      works. But nothing was built to take its place, so every `pr`-mode build on this host now defers.
-      MEASURED: `credential.helper` is unset in the repo config, in `--global`, and in the Forge agent's
-      environment; origin is an `https://github.com/…` remote, so a helper IS consulted and answers
-      nothing. The credential is not missing from the PRODUCT — `githubProcessEnv` already returns the
-      `github.com`-scoped, `$GH_TOKEN`-reading helper via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`, and the
-      outer loop uses it to push. It is missing from the ONE process that now needs it: `codex-build.sh` is
-      spawned by the Forge agent's `Bash` tool and inherits the agent's env, not the orchestrator's
-      per-command env. So the answer is (a) or (b), and (b) has a hard constraint this run makes concrete:
-      the token must NOT reach the model — the wrapper invocation is composed by Forge *as a command line in
-      its transcript*, so anything threaded through that line is logged. Inject at the substrate/tool
-      boundary or have the host push; never through the prompt.
-- [ ] **A terminal `failure_reason` must name what actually happened — today it always says "exhausted 10
-      rounds"** (owner-asked 2026-08-13: *"why does the failure reason keep saying the old 10 rounds
-      exhausted thing?"*). `trident/orchestrator.ts` ~711 is a CATCH-ALL: every path that is not `APPROVE`
-      and not the provenance reject falls into one branch that writes
-      `` `inner loop exhausted ${run.max_rounds} round(s) without Argus APPROVE` ``. It interpolates
-      `run.max_rounds` — the CONFIGURED CEILING, never the rounds actually run — and the comment above it
-      states the false case as fact (*"the inner loop exhausted maxRounds"*). MEASURED on four runs
-      (`03242fe5`, `000cedc8`, `1daded20`, plus `36b95167`): three terminated at `round: 1` with
-      `checkpoint: "inner-error"` and ~10 minutes elapsed; all four reported "exhausted 10 round(s)". Three
-      genuinely different causes — ten real review rounds, `CODEX_HOME` unresolved, brief corruption, and
-      now a missing push credential — produced one identical sentence, and each time it sent a human to look
-      at review quality when the build had never started. THE TRUTH IS ALREADY IN HAND at that line:
-      `result.round` (1) and `result.checkpoint` (`inner-error`) are both in scope, and the wrapper's real
-      reason is on disk at `/tmp/trident-codex-build-<runId>-r<N>.err`. Acceptance: a run that never reached
-      a review round must NOT say it exhausted rounds; the reason names the phase that failed and the actual
-      round count, and a test asserts an `inner-error` at round 1 produces neither the word "exhausted" nor
-      the number `max_rounds`. NOTE the delivery layer (`trident/delivery.ts` ~177) already pattern-matches
-      this exact string to soften it for chat — so fixing the reason without updating that matcher would
-      silently change what the owner is told. Both move together.
-      RESOLVED IN PART, 2026-08-14 (PR #240): the message no longer LIES. It now reports only
-      what was measured — `inner workflow ended at round <N> of <M> at checkpoint '<C>'` — and
-      asserts no cause at all. WHAT REMAINS IS THE MISSING SIGNAL, and it is the real item:
-      **the inner workflow emits no TERMINAL CAUSE.** Two Codex review rounds killed two
-      attempts to deduce one, and the second is the instructive failure: `checkpoint` records
-      the PHASE reached, not why the loop stopped, and `argus-request-changes` is written for
-      genuine exhaustion, a round-lost fix (`inner-workflow.mjs` ~3174), a fix that left no
-      diff (~3197) AND an `infra-only` synthesis stop (~3134). Any specific message built on
-      `(round, checkpoint)` is an inference, which is how this line came to be wrong for four
-      different failures in one night. Acceptance for the REMAINDER: the inner workflow emits
-      an explicit terminal cause on every terminal path; the orchestrator reports THAT; and
-      `delivery.ts` regains a specific summary per cause. Until then the generic message is
-      correct and MUST NOT be re-specialised.
-      PROGRESS 2026-08-14/15, two of the terminal paths now emit one, and BOTH ship with the
-      measurement rather than before it. (1) An `infra-only` review stop carries the probe's
-      own words (PR #240). (2) A THROWN workflow carries the sentence it threw — the catch
-      used to persist `{checkpoint: 'inner-error'}` with no cause, so run `3d2696c3`
-      (a finished, committed build whose OID was not relayed) was reported to the owner as
-      "…without Argus APPROVE" on a path Argus never reached. It carries NO block kind,
-      because a throw is not a review verdict, and `innerTerminalFailureReason` reports it as
-      *"inner workflow failed at round N of M: `<cause>`"* — saying nothing about the review
-      panel, which only `infra-only` is licensed to do. STILL OPEN: the review-verdict paths
-      ('code' / 'round-lost' / 'none') emit no cause — a finding title describes the DIFF, not
-      why the loop stopped — and `delivery.ts` still has one summary for all of them.
-      OWNER'S RULE (2026-08-13, verbatim): *"If it's a generic catchall make the error message generic."*
-      This is the governing principle and it is broader than this line: **a message must not assert a cause
-      it did not measure.** A branch that catches N causes says something true of all N, and the specific
-      cause is added only where it is actually known. Prefer naming the real cause (`result.checkpoint`,
-      `result.round`, the wrapper's `.err` file are all in scope here) — but where the code genuinely cannot
-      tell, generic-and-true beats specific-and-wrong. A confidently-worded default is the failure mode: it
-      reads as diagnosis, so nobody looks further.
-      HOW IT GOT THIS WAY (checked, not assumed — `git log -L 711,713`): the line dates from the initial
-      commit `63236c6`, when reaching it genuinely meant the rounds ran out; it was true when written. Every
-      early-exit added since — `inner-error`, codex deferred, brief corrupt, no push credential — landed in
-      it without anyone adding a terminal branch. Not randomness: drift, one plausible commit at a time. The
-      test suite should therefore pin the SHAPE (a non-round-exhaustion exit must not claim exhaustion), so
-      the next early-exit path cannot silently inherit the same wrong sentence.
-- [ ] **The review loop must be able to STOP and re-plan — a fix round cannot repair a defect in the plan**
-      (owner-directed 2026-08-13, from run `36b95167`, which burned ten rounds and ~2.5h to reach a verdict
-      knowable at round 2). Three constraints compose into a trap, and no one of them is wrong alone:
-      (i) the verdict enum is effectively binary — `APPROVE` / `REQUEST_CHANGES` / `COMMENT` with `COMMENT`
-      normalised into `REQUEST_CHANGES` (`inner-workflow.mjs` `normalizeVerdict`), so a reviewer who
-      diagnoses a DESIGN gap has one channel and that channel means "go fix the code";
-      (ii) Forge is contractually a PURE EXECUTOR — "do NOT re-plan or redesign" — so the only agent that
-      receives the findings is the one forbidden to act on what they mean;
-      (iii) `plan:fable` is invoked ONCE, OUTSIDE the fix loop (`inner-workflow.mjs` ~2073 vs the `while` at
-      ~2175), so the only agent permitted to re-plan never hears a single reviewer finding.
-      The escape hatch already exists in two flavours — the loop runs only while
-      `synthesis.blockKind` is neither `'infra-only'` (no seat judged the code) nor `'advisory-only'` (a healthy
-      panel judged it and said only things this file has already declared non-blocking) — proving the category
-      is understood; it simply has no siblings that say the PLAN is wrong.
-      EVIDENCE (all nine review results of `36b95167`): three findings — the tautological "row/rail lockstep"
-      test, the out-of-spec `inline_active` proxy, and the untouched research/dispatch path — recur in ALL
-      NINE rounds, and the finding totals never converge (9, 8, 13, 9, 8, 12, 9, 10, 11). Note the planner
-      AUTHORED the tautological test in its execution spec, so no number of fix rounds could ever remove it.
-      TRIGGERS (a run must escalate when ANY fires):
-      (a) REVIEWER-DECLARED — extend `blockKind` with `design-gap` (the plan is wrong) and
-          `missing-dependency` (needs work outside this card), each REQUIRING a `whatIsMissing` field so it
-          cannot be a bare complaint. Fast (can fire at round 1) but self-declared, so it must never be the
-          only trigger — a self-declared exit is an escape hatch an agent can learn to pull.
-      (b) REPEAT-FINDING — a finding that survives a fix round means fixing is not working. This is the HARD
-          gate: it is arithmetic and requires no agent to be honest. Would have fired at ROUND 2 here, saving
-          seven rounds. PREREQUISITE: findings need STABLE IDENTITY (a reviewer-emitted key such as
-          `file:symbol:rule`, or a normalised fingerprint) — today they are free-text titles and "same
-          finding" is not machine-decidable. That prerequisite is part of this item, not an assumption of it.
-      (c) NO-PROGRESS — blocker+major count not strictly decreasing across two rounds (real data: 4, 2, 6, 4,
-          2, 4, 4, 4, 5 → fires round 3). Needs no finding identity, which is its only virtue; noisy, because
-          a round can legitimately fix three findings and surface two.
-      ROUTING — escalation goes to the ORCHESTRATOR (the project chat), never to a dead end:
-      • `design-gap` → ONE bounded re-plan per run, with the findings attached so the planner is no longer
-        deaf. Unbounded re-planning reproduces this same waste one level up as a plan↔fix oscillation.
-      • `missing-dependency` → the ORCHESTRATOR, which owns SEQUENCING: it reports in the project chat and
-        REORDERS the Work Board so the dependency precedes the blocked card. This is the case `36b95167` was
-        actually in, and it composes with the dependency-aware dispatch item — a card escalated this way must
-        move to a visibly BLOCKED state, not sit in `upcoming` looking startable.
-      • a repeat finding AFTER the bounded re-plan → the orchestrator. The re-plan gets exactly one chance to
-        prove it changed something.
-      GUARDRAIL: the RUN reports; the ORCHESTRATOR decides. A build must never mutate the board itself, or an
-      autonomous run could reorder the owner's priorities with no judgement in between. Creating a card for a
-      dependency that does not yet exist still follows the standing intake rule — spec first, then card;
-      reordering cards that ALREADY exist is the sequencing call the orchestrator may make and must report.
-      Escalating is cheap to make safe: branch and PR already survive a terminal failure, so stopping early
-      loses nothing. Round 10 bought nothing over round 2 except cost.
-      Acceptance: a run whose reviewers repeat a finding stops and escalates instead of iterating; the round
-      cap becomes the backstop it was meant to be rather than the primary exit; and the owner can see, on the
-      card, that a build stopped because it was blocked rather than because it failed.
-- [ ] **A card's PULSE must be gated on a real heartbeat — BLOCKED ON #534, do not start before it lands**
-      (owner-directed 2026-08-13). This is the deferred half of the Work Board row-state card, split out
-      after run `36b95167` spent ten review rounds failing to build it. The other half — the durable failed
-      colour and the ▶/↻ retry control — is keyed on `status='failed'`, which the terminal reconcile already
-      writes (`work-board/store.ts`), needs no new signal, and ships separately.
-      WHY IT CANNOT BE BUILT YET. A pulse is a claim that something is MOVING. The only durable facts on the
-      surface are the run's `phase` and `last_advanced_at`, and both advance only ON HARVEST — so a run that
-      dies WITHOUT a terminal transition (a deploy SIGTERMing the warm REPL, which is exactly how this card's
-      own attempt `bb3c8c8e` died) leaves `phase = forge-init` forever and the card pulses forever. There is
-      no fact to check. Every fix round of `36b95167` therefore invented a PROXY for liveness — `undefined`
-      run progress read as "running" (`isLinkedRunning`, `rp === undefined || !terminal` — liveness inferred
-      from the ABSENCE of data), then an out-of-spec `!inline_active` suppressor whose own commit comment
-      concedes it creates "a permanent pulse+no-▶ state ... the same unrecoverable-card defect on a narrower
-      path". Reviewers rejected each in turn and were right to. **A proxy for a missing signal is not a
-      smaller version of the signal; it is a new defect wearing the fix's name.**
-      PREREQUISITE: governance tracker **#534** (*"a long build phase reports NOTHING until it ends, so a
-      working run is indistinguishable from a hung one"*, P1, escalated 2026-08-11) — the heartbeat. Its
-      recommended route is a periodic write through `trident/checkpoint.sh`. Nothing here should re-design it.
-      TWO CONSTRAINTS THIS ITEM PLACES ON #534's OUTPUT, from evidence #534 does not have:
-      (i) it must distinguish ALIVE from PROGRESSING. On 2026-08-13 the orchestrator read agent-transcript
-          mtimes, called run `36b95167` "going well", and it was at that moment alive and converging on
-          nothing. A heartbeat proving only "an agent is writing" would ship that mistake into the product.
-      (ii) the 90-minute hang reaper must be re-pointed onto the heartbeat clock rather than the harvest
-          clock. It judges `last_advanced_at` today, which is why `eca83d1f` — this same card's FIRST
-          attempt — was killed for "no progress" with nothing establishing it was hung.
-      Acceptance: a run killed by an instance restart, with no terminal transition written, stops pulsing on
-      the card within one heartbeat interval and offers ↻; and no code path derives liveness from the absence
-      of data. Kill the heartbeat writer and the test must fail.
-- [ ] **A build's progress is TWO counters, so the card must show both — `<ralph_round>.<round>`**
-      (owner request, 2026-08-13). A trident run nests two loops and the board renders one of them, so a run
-      can grind through twenty task iterations while the owner watches a number that never moves.
-      `ralph_round` is the OUTER loop — which task of the governed plan is being built, each in a fresh
-      context, bounded by `max_ralph_rounds` (`trident/orchestrator.ts` `refireNextRalphTask`).
-      `round` is the INNER loop — the Argus review round for the task in hand, bumped on REQUEST_CHANGES →
-      forge-fix and bounded by `max_rounds` (`trident/state-machine.ts`). Task 2 under its first review is
-      therefore **2.1**, and it is the LEFT digit that tells the owner the build is advancing.
-      Acceptance: a run that re-fires to its next task visibly changes the number on the card without the
-      owner asking; and the three surfaces that answer "where is this run" — the card, `codegen_status`, and
-      the run row — do not disagree. (The `phase` a ralph re-fire deliberately leaves untouched, so
-      `codegen_status` can report `forge-init` half an hour into a healthy run, is part of the same defect:
-      correct mechanically, false as a status.) Related, and deliberately NOT the same item: the
-      `Work Board row state` card fixes the same class one layer up — a row must not claim a run it does not
-      have — and the pulse half of it is the entry above, blocked on the heartbeat. THIS entry is a DISPLAY
-      defect over a counter we already record honestly; that one is a MISSING SIGNAL. Collapsing them would
-      only make a run that reports nothing report nothing more precisely.
-
-### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
-
-Fold the separately-hosted email system into the Email Core so it runs on the
-instance's own box instead of a third-party edge platform, and retire that
-service. **The full design, with the corrections that changed it, is
-`docs/plans/2026-08-06-email-core-consolidation-plan.md`; the owner's five
-decisions are recorded in the governed Decisions Log (neutron-managed SPEC.md,
-2026-08-06/07). These steps are the BUILD QUEUE for this repo** — the work is
-entirely Open's (`cores/free/email/`), so it is queued here rather than only in
-the governance tracker, which is also what makes it Ralph-buildable from a clone.
-
-Shape: a selective port wrapped in a large deletion — roughly 1,700 of ~7,600
-source+config lines survive; ~8,000+ go along with an entire hosted service, its
-six secrets, three worker crons and 9 of 13 tables. Feasible because the source
-system POLLS Gmail and mutates labels: no MX record, no SMTP receiver, so it is
-host-agnostic. Classification runs on the substrate one-shot LLM
-(`gateway/cores/mount-open-cores.ts:412-417`), NOT a separate provider key.
-
-**The two capabilities that must survive** are the owner's twice-daily briefs and
-escalated important-email notifications. Everything else must justify itself
-against one of those or be deleted.
-
-> **BOARD STATE for P2 / P2.5 / P3 / P4 — READ BEFORE RE-CARDING THEM.**
-> These four are DEPRIORITISED, not unstarted and not shipped (owner-directed
-> 2026-08-14: *"we will come back to them later"*). **Their Work Board cards already
-> exist and their plan docs are already written** — do NOT create new cards, or the
-> board grows a duplicate of every one of them.
->
-> They currently read `done` on the board. **That is a fudge, not a fact**: the Work
-> Board has no archive or remove lane, so `done` was the only way to clear them off
-> the active list. Nothing in P2–P4 has shipped. To start one, flip its card back to
-> `upcoming` (which clears the completion datestamp) — a single call, nothing lost,
-> the linked plan doc still attached.
->
-> The plan docs are PROJECT docs, not files in this repo — each card carries a
-> `design_doc_ref` of the form `neutron-docs:plans/<slug>.md`, which resolves in the
-> app's Documents tab. Do not look for them under this repo's `docs/plans/`; they
-> are not there, and concluding "no plan doc exists" is how a duplicate gets written.
-> That split is a KNOWN DEFECT, not a settled design — see the backlog entry on plan
-> docs landing somewhere nothing version-controls or backs up. Until it is fixed,
-> these four specs survive only as untracked files on one volume.
->
-> | Step | Card | `design_doc_ref` slug |
-> |---|---|---|
-> | P2   | `01KZSAPQNRVA1QBTKB2048XZVP` | `p2-twice-daily-brief-delivered-as-email-digest-on-off-settin-48xzvp` |
-> | P2.5 | `01KZSAQ0MXZN4AWG1VG99TZC8N` | `p2-5-classification-setup-by-inbox-survey-owner-interview-ze-9tzc8n` |
-> | P3   | `01KZSAQ971TCM7EF7D9WS7CSJZ` | `p3-retire-the-dead-scheduled-digest-scribe-fan-out-rides-the-s7csjz` |
-> | P4   | `01KZSAQG4SJXQBQ8JN9CA3STEX` | `p4-owner-cutover-decommission-the-standalone-service-manual-a3stex` |
->
-> P1 and P1.5 read `done` because they ARE done — same word, two meanings, which is
-> exactly why this note exists. A real archive lane would retire the ambiguity.
-> P4 stays owner-gated and is never auto-dispatched, whatever its card says.
-
-- [ ] **P1 — pipeline store + poller + classification + escalation.** The
-      escalation half end to end. **THE PIPELINE IS OPT-IN PER MAILBOX** (owner
-      decision, 2026-08-12): connecting a Google account and asking the agent to
-      READ that mailbox are two different decisions, so absence of an enablement
-      row means DISABLED and a grant taken out for Calendar or Drive never enrols
-      its inbox. _Acceptance: an important message arriving in a CONNECTED AND
-      ENABLED real mailbox produces an escalation in chat within a poll interval,
-      and a connected-but-not-enabled mailbox produces nothing at all. Names the
-      composition seam it wires; a bookkeeping assertion does NOT satisfy this._
-- [ ] **P2 — the twice-daily brief, DELIVERED AS EMAIL, + the digest on/off
-      setting.** **The brief is an EMAIL; chat and push carry escalations ONLY and a
-      digest is never posted to chat.** The on/off is a user-facing PRODUCT SETTING
-      (`instance_metadata.email_digest_enabled`), not a feature flag — do not strip
-      it citing the no-flags rule. _Acceptance: two real briefs land in the owner's
-      inbox on his own schedule in his own timezone (never hardcoded UTC — DST), and
-      toggling the setting off stops them. **Plus the pre-cutover rehearsal: with
-      label-mutation and archive HELD BACK, the poller runs against the real mailbox
-      alongside the existing service and emails its brief, so the two can be compared
-      side by side for days before any switch.** Reads do not conflict; only the
-      writes collide, which is why a rehearsal is possible at all._
-- [ ] **P2.5 — classification setup by inbox SURVEY + owner INTERVIEW.** The Core
-      ships the mechanism and **ZERO rules**; installing it samples the real inbox,
-      clusters what is there, then asks the owner about each class it found and
-      writes the answers as per-owner instance data. Owner sender data in this tree
-      is a defect, never config. _Acceptance: a fresh instance with a connected
-      mailbox and no hand-authored rules reaches working classification through setup
-      alone, and the proposed classes are DERIVED from the sampled inbox — a
-      hardcoded taxonomy fails the test._
-- [ ] **P3 — retire the Core's dead scheduled digest; the scribe fan-out rides the
-      new poller.** The existing `triage-scheduler.ts` has never been deliverable
-      (`pushDispatcher: null` hardcoded at
-      `gateway/cores/mount-cores-scribe-fan-out.ts:302`; no `emailLlm` passed from
-      `open/wiring/memory.ts:354-358`, so it falls to a throwing stub; delivery gated
-      at `gateway/cores/email-managed-wiring.ts:149`). Its ONLY live output is the
-      scribe email→memory fan-out + watermark, **which the poller must take over or
-      ambient email→memory goes dark.** The on-demand `email_triage` tool is a
-      different thing and stays. _Acceptance: the old scheduler is deleted AND
-      email→memory extraction is still observably happening afterwards._
-- [ ] **P4 — owner cutover.** Hard switch on the WRITES, no parallel mutation:
-      both systems label the same mail. Old service's crons off → verified interval →
-      service deleted. Its database is NOT imported — the mail all still lives in
-      Gmail, so a clean start is correct. The return-to-inbox learning loop is KEPT
-      (live and closed: `pipeline/poller.ts:82` reads patterns into the classifier).
-      _Acceptance: the standalone service no longer exists and the owner has had no
-      gap in briefs or escalations across the switch._
+Nothing in the codebase cites `SPEC.md § Phases → Steps` — checked at the split
+with `rg "Phases → Steps"` across the tree; the only hits are this file and
+historical records. The phase vocabulary it described is therefore not reproduced
+here: the code is its own canonical source, per the table above.
 
 ## Open Questions
 
@@ -1034,7 +258,7 @@ references decisions by date; none is a second home for a decision.
 | `docs/AS_BUILT.md` | Chronological build log (agent-appended provenance) |
 | `docs/plans/2026-07-02-world-class-refactor-plan.md` | The world-class refactor unit backlog |
 | `docs/plans/wave3-tabbed-interface-build-plan.md` | The P5 tabbed project interface build |
-| `docs/plans/*` | Per-sprint mechanics briefs (referenced from Phases → Steps) |
+| `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
@@ -1043,6 +267,15 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-09-12 — THE WORK QUEUE LEAVES THIS FILE. `Phases → Steps` is split into `docs/spec-items/`, one file per item, indexed at `docs/spec-items/README.md`. Owner-directed. Standard: [`docs/process/work-tracking.md`](docs/process/work-tracking.md) §5 step 1.
+
+- **Why.** The section was 817 lines — 63% of this file — holding an architecture record of what shipped and a task queue of what had not. Different lifetimes, different readers: the standard's §1 rule is one owner per fact, and a single document doing both jobs does both worse. The queue is now `docs/spec-items/`; this file keeps architecture, constraints and this log.
+- **The queue was lying, which is what forced the split rather than a move.** All 31 open entries were verified against the tree. **Ten had already shipped and still read `[ ]`** — the outer publisher's rebased-branch push (#259/#275), publish-failure evidence (#259), gateway-restart recovery (#267), infra auto-retry (#367), pre-provisioning credential scope (#266), Work Board item removal (46f18bb1), the deploy-ref resolution (#245 — which carried "✅ RESOLVED" text *inside its own unchecked box*), the stranded preserved worktree, the build heartbeat (#534), and the Email P1 pipeline (176e789c/#214). They are removed here; git history and `docs/as-built/` are their record.
+- **Four surviving items carried claims the code had since falsified**, corrected at the top of each item rather than softened: the credential item's "ONLY THING BLOCKING BUILDS" (PR #248 removed the push from the agent contract entirely, `trident/inner-workflow.mjs:1337-1343`); the Email cutover's return-to-inbox learning loop, cited as "live and closed" at a line that is a page-budget constant and with no such loop anywhere in the Core; the card-pulse item's block on a heartbeat that had already shipped; and the backup scheduler's blocker, whose store is wired (`open/composer.ts:3975`) leaving only the loop.
+- **22 items, not 31.** 20 still-wanted, plus one marked `needs_spec` (its follow-ons were never enumerated, so it is not buildable as it stands), plus one new item split off an otherwise-done entry whose owner-visibility acceptance was never wired.
+- **The index is generated, never hand-maintained** (`scripts/spec-items-index.ts`), and a test fails the build when the committed rollup drifts from it — the standard's §6 trap is explicit that a split without a live index is all of the cost and none of the benefit.
+- **Ownership of this file is now split explicitly** (governance preamble, amended above): the owner owns the Decisions Log and the architecture body; agents maintain the spec-items queue. The previous blanket "agents NEVER rewrite it" described a file that also held the queue, and no longer matched what agents are required to do.
 
 ### 2026-09-11 — THE HARNESS-ORCHESTRATOR PIVOT. Owner-locked in the Neutron Coding strategy session; this repo's `SPEC.md` is now the single home for it (the Managed repo keeps one-line pointers only, Decisions Log 2026-09-11 there). Detail: [`docs/plans/harness-orchestrator-pivot-2026-09-11.md`](docs/plans/harness-orchestrator-pivot-2026-09-11.md).
 
