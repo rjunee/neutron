@@ -1045,15 +1045,41 @@ export function probeLauncherGenerationAlive(
       }
     }
     // NOT THE CURRENT GENERATION OF ANY ROW — which is exactly what a QUARANTINED
-    // child looks like once its replacement has spawned over the session key. The
-    // pid loop above cannot answer for it (the row's pid belongs to the replacement),
-    // but a gateway-shutdown entry is BETTER evidence than a pid probe: it is a
-    // record that WE terminated that generation, written by the process that did it,
-    // before it did it. Without this the quarantined child — the one quarantined
-    // precisely BECAUSE it hosts live work — stays 'unknown' forever and its build
-    // waits out the 90-minute reaper.
+    // child looks like once its replacement has spawned over the session key. Without
+    // this arm such a child stays 'unknown' forever and its build waits out the
+    // 90-minute reaper, which is a hole older than the shutdown marker itself.
+    //
+    // THE MARKER ATTRIBUTES A DEATH; IT DOES NOT ESTABLISH ONE. It is written BEFORE
+    // `kill()`, and `kill()` can throw or the process can die between the two — so an
+    // entry means "we intended to kill a child we had observed alive", never "this
+    // child is gone". The only thing that knows whether the kill landed is the process
+    // table, so death is confirmed HERE, against the pid the entry carries, and the
+    // marker is used only to EXPLAIN a death already observed. That is also what makes
+    // "the marker never manufactures a death" true rather than aspirational — an
+    // earlier revision returned the attribution from the entry alone, which would
+    // crash a run whose child was still alive.
+    //
+    // The row's own `pid` cannot serve: for a superseded generation it belongs to the
+    // replacement child. Hence the pid on the entry.
     for (const record of Object.values(loadRegistry(replRegistryPath))) {
-      if (gatewayShutdownKillEntryFor(record, generationKey) !== undefined) {
+      const entry = gatewayShutdownKillEntryFor(record, generationKey)
+      if (entry === undefined) continue
+      const pid = entry.pid
+      // No usable pid (an entry from a build before the field existed) → we cannot
+      // confirm, so we do not conclude. UNKNOWN, never an implicit death.
+      if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return 'unknown'
+      try {
+        process.kill(pid, 0)
+        // STILL RUNNING. Either the kill never landed, or this pid has been recycled
+        // onto something unrelated — and neither can be told apart from here. Both mean
+        // there is no positive death evidence, which is 'unknown' rather than 'alive':
+        // claiming life for a pid that may not be ours would be the same over-claim in
+        // the other direction.
+        return 'unknown'
+      } catch (err) {
+        // EPERM is positive evidence the pid EXISTS under another uid — same
+        // conservative reading as the branch above.
+        if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'unknown'
         return 'killed-by-gateway-shutdown'
       }
     }

@@ -276,6 +276,7 @@ export function markKilledByGatewayShutdown(
   sessionKey: string,
   childGeneration: string,
   at: number,
+  pid?: number,
 ): boolean {
   if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
   try {
@@ -291,7 +292,14 @@ export function markKilledByGatewayShutdown(
     const entries =
       gatewayShutdownKillEntryFor(existing, childGeneration) !== undefined
         ? prior
-        : [...prior, { generation: childGeneration, at }].slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)
+        : [
+            ...prior,
+            // The pid travels WITH the entry so a later reader can confirm the death
+            // against the process table rather than trusting this record. See the
+            // field's docblock: writing the entry attributes a death, it does not
+            // establish one.
+            { generation: childGeneration, at, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
+          ].slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)
     patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
     return gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration) !== undefined
   } catch {
@@ -355,6 +363,8 @@ export interface PendingShutdownKillReport {
   sessionKey: string
   childGeneration: string
   at: number
+  /** The dead child's OS pid, recorded so the death can be confirmed later. */
+  pid?: number
   /** True when the shutdown demonstrably killed a live child. */
   attributed: boolean
   liveness: ShutdownLivenessSample
@@ -383,6 +393,7 @@ export function recordGatewayShutdownKill(
   childGeneration: string,
   at: number,
   liveness: ShutdownLivenessSample,
+  pid?: number,
 ): PendingShutdownKillReport | null {
   // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
   // ALIVE was killed by this shutdown; anything else is reported as undetermined.
@@ -393,7 +404,7 @@ export function recordGatewayShutdownKill(
     // ours to own. Writing it for a child that was already gone would excuse a fault,
     // and it would also close the crash edge — silencing the next boot's honest
     // report of the very fault we are refusing to claim.
-    durablyRecorded = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
+    durablyRecorded = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at, pid)
     if (!durablyRecorded) {
       // The row is gone, or unwritable. A best-effort write that quietly did nothing is
       // the silence this module exists to remove, so it is said out loud — AND carried
@@ -407,7 +418,16 @@ export function recordGatewayShutdownKill(
     }
   }
   if (options.onChildCrash === undefined) return null
-  return { options, sessionKey, childGeneration, at, attributed, liveness, durablyRecorded }
+  return {
+    options,
+    sessionKey,
+    childGeneration,
+    at,
+    attributed,
+    liveness,
+    durablyRecorded,
+    ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
+  }
 }
 
 /**
@@ -528,7 +548,8 @@ export async function reportGatewayShutdownKill(
   childGeneration: string,
   at: number,
   liveness: ShutdownLivenessSample,
+  pid?: number,
 ): Promise<void> {
-  const owed = recordGatewayShutdownKill(options, sessionKey, childGeneration, at, liveness)
+  const owed = recordGatewayShutdownKill(options, sessionKey, childGeneration, at, liveness, pid)
   if (owed !== null) await deliverShutdownKillReports([owed])
 }

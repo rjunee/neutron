@@ -72,7 +72,13 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       one, and reporting THAT as a deploy is this item's own defect running backwards — the
       worse direction, because a fault absorbed into "a deploy did it" is a fault nobody
       investigates. A child already gone, or one whose liveness could not be read, is
-      reported `cause: 'unknown'`: not a deploy, and not a crash verdict either. Checks:
+      reported `cause: 'unknown'`: not a deploy, and not a crash verdict either.
+      AND ON THE READ SIDE, the same question asked of the record rather than the sample:
+      a record ATTRIBUTES a death, it does not ESTABLISH one — it is written before
+      `kill()`, which can throw, so the reader confirms the death against the pid the
+      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1065-1084`). A
+      revision that returned the attribution from the record alone would have crashed a
+      run whose launcher was still alive. Checks:
       `__tests__/gateway-shutdown-kill.test.ts` ("only a child observed ALIVE is attributed
       to the shutdown", both arms) and `__tests__/poison-eviction-live-work-guard.test.ts`
       ("a child that was ALREADY DEAD when teardown arrived is not a deploy kill"). Every deploy case is paired with its
@@ -81,9 +87,16 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       `trident-child-crash-sink.test.ts` ("THE COMPLEMENT — a genuine crash with no deploy
       near it still reads as a crash", the 08-10/08-11 shape),
       `dead-repl-detector.test.ts`, `tick-liveness.test.ts` T6 and
-      `launcher-liveness-attribution.test.ts`. A stale marker naming a superseded
+      `launcher-liveness-attribution.test.ts`. A record naming a superseded generation
+      cannot be read as describing the current child, because an entry names its own
+      generation (`gatewayShutdownKillEntryFor`). ~~A stale marker naming a superseded
       generation is refused (`wasKilledByGatewayShutdown`), and `spawn.ts` clears both
-      fields on a new spawn.
+      fields on a new spawn.~~ SUPERSEDED (round 5): the refusal guard and the
+      clear-on-respawn were both DELETED when the marker became a per-generation list —
+      the invariant they enforced twice is now a property of the shape, and the record
+      MUST outlive its generation because a quarantined child depends on it. And a
+      record never establishes a death on its own: the reader confirms the death against
+      the pid the entry carries and uses the record only to explain it (round 6).
 - [x] **This does not subsume #514 (a CRASHED run is never reaped), which asks what the row
       does AFTER a child dies. Fixing one must not be credited with the other.** #514's
       mechanism — the `onChildCrash` sink latching the runs a dead generation owned — is
@@ -98,7 +111,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:992`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
 - TWO CORRECT FIXES LEFT A HOLE BETWEEN THEM, and it swallowed exactly the child that
   matters most. The row-scoping refusal (round 2) and the best-effort delivery phase (round 4)
@@ -153,14 +166,18 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:961`, then `pool.ts:985`).
+  spawn took it over — and they share one registry row (`pool.ts:961`, then `pool.ts:989`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink
-  throwing). `markKilledByGatewayShutdown` now refuses to mark a generation the row does not
+  throwing). ~~`markKilledByGatewayShutdown` now refuses to mark a generation the row does not
   currently name, which costs nothing — both consumers match on the row's CURRENT
   `child_generation`, so such a marker could never have been read back — and the refusal is
-  reported rather than silent.
+  reported rather than silent.~~ SUPERSEDED (round 5), and the refusal is exactly what the
+  next finding was about: refusing left a QUARANTINED generation with no durable record at
+  all. The row now keeps a per-generation list and permits every generation it killed; see
+  the entry above. Kept here rather than rewritten because the refusal is how the next
+  defect arrived.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the

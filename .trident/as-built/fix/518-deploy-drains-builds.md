@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:992`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:996`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -130,7 +130,7 @@ somebody can find beats an unbounded one nobody knows about.
 **The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
 generations on one session key — the pooled child, and a quarantined child that held the key
 before a fresh spawn took it over — and they share one registry row (`pool.ts:961`, then
-`pool.ts:985`). The later write replaced the earlier one, so the row named one generation
+`pool.ts:989`). The later write replaced the earlier one, so the row named one generation
 beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
 disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
 now refuses a generation the row does not currently name — free, because both consumers match
@@ -183,9 +183,16 @@ must outlive the generation it describes, which is the whole reason it exists.
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
 
-The entry scan is positive evidence, not absence read as death: it is a record that WE
-terminated that generation, written by the process that did it, before it did it. A generation
-nobody recorded still answers `unknown`.
+The entry scan looks up a generation nobody recorded and still answers `unknown` — absence is
+never death.
+
+~~It is positive evidence, not absence read as death: a record that WE terminated that
+generation, written by the process that did it, before it did it.~~ CORRECTED (round 6): that
+sentence was the defect. "Before it did it" is precisely why the record is NOT proof — the kill
+can throw, or the process can die between the write and the kill. The record attributes a
+death; the process table establishes one. The scan therefore confirms against the pid the entry
+carries and uses the record only to explain a death it has already observed, which is what
+makes "the marker never manufactures a death" true rather than aspirational.
 
 **The delivery claim is now conditional.** `PendingShutdownKillReport` carries
 `durablyRecorded`, and the operator line for an undelivered report says either "the next boot
@@ -306,23 +313,46 @@ to `'dead'` at the composition seam (`gateway/composition/build-core-modules.ts`
 reason written down, because the 15-second liveness loop latches the run terminal long
 before the 90-minute watchdog could look at it.
 
-### The marker cannot outlive the child it describes
+### The marker cannot be read as describing the wrong child — or as proving a death
 
-That is the mutation that would make this lie in the one direction the spec item forbids —
+> SUPERSEDED IN PART, twice, and left standing because the round order is how the design got
+> here. The two paragraphs below describe the **round-2** single-slot marker. Round 5 replaced
+> it with a per-generation list and DELETED both guards they name; round 6 added the
+> confirmation step the read side was missing. The reconciled statement follows them.
+
+~~That is the mutation that would make this lie in the one direction the spec item forbids —
 a genuine fault credited to a deploy — so it is guarded twice. `wasKilledByGatewayShutdown`
 demands the marker name the row's CURRENT `child_generation`, and `spawn.ts` drops both
 fields when it writes a new generation, exactly as it already dropped
-`child_crash_notified_at`. Both guards have their own red mutation.
+`child_crash_notified_at`. Both guards have their own red mutation.~~
 
-`child_crash_notified_at` is stamped by the marker write for a concrete reason:
+~~`child_crash_notified_at` is stamped by the marker write for a concrete reason:
 `crashRunningByLauncher` upserts with
 `ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`, and
 `saveIfActive` reads that tombstone back — so a late bare "pooled child exited" from the
-next boot's watchdog would have laundered the deploy attribution away.
+next boot's watchdog would have laundered the deploy attribution away.~~
+
+**As built.** The record is a per-generation list, so an entry NAMES the generation it
+describes and cannot be read as describing another — no guard, no clear-on-respawn, and the
+record deliberately OUTLIVES its child because a quarantined generation has nothing else.
+`child_crash_notified_at` is not written by the marker at all: it is written by
+`closeCrashReportEdge` after a sink commit (round 4), which is why a failed report leaves the
+edge open for the next boot. The upsert hazard that paragraph described is gone for a
+different reason than it claimed — the next boot's report now carries the SAME deploy
+attribution, because it reads the same record, so a second write rewrites an identical
+sentence rather than laundering a bare one over it.
+
+**And the record never proves a death.** It is written before `kill()`, and `kill()` can
+throw, so an entry means "we intended to kill a child we had observed alive". The reader
+confirms the death against the pid the entry carries and answers UNKNOWN when it cannot
+(`supervision.ts:1065-1084`). Round 6's finding was this exact over-claim arriving on the read
+side: round 3 refused to claim a deploy for a child that might already have been dead, and the
+per-generation scan then claimed a death for a child that might still be alive. Same missing
+question — *what does this record actually establish?*
 
 ### Measured
 
-39 mutations applied one at a time, each reverted after: **39 red, 0 survivors.** Every
+43 mutations applied one at a time, each reverted after: **43 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
@@ -333,6 +363,10 @@ rather than confirming them:
 - **M15** (delete the quarantine report) initially SURVIVED. The assertion said "at least one
   report, all of them deploys", which the *pooled* child's report satisfied on its own. It now
   names the quarantined generation explicitly.
+- **M43** is the round-6 bug exactly: return the attribution from the entry without the
+  `process.kill(pid, 0)` confirmation. It is the code round 5 shipped, and it reddens the new
+  alive-process boundary while every earlier attribution case stays green — which is what
+  makes the pair a check rather than prose.
 - Three mutations were RETIRED rather than retargeted: M18, M22 and M23 targeted the
   round-2 refusal guard and clear-on-respawn, which the per-generation list deletes. A
   mutation for a guard that no longer exists is not coverage, and keeping the guards alive to

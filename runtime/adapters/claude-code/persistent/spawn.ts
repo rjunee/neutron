@@ -965,6 +965,10 @@ export function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): Pe
       generation,
       shutdownAt,
       sampleLivenessBeforeShutdownKill(() => entry.session.hasChildExited()),
+      // Recorded so this generation's death can be CONFIRMED later rather than assumed
+      // from the entry — and a quarantined generation needs it most, because the row's
+      // own pid belongs to the replacement child that spawned over it.
+      entry.session.child.pid,
     )
     if (report !== null) owed.push(report)
     try {

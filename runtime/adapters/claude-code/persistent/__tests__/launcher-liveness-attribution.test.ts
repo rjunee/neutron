@@ -61,31 +61,52 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('dead')
   })
 
-  it('a superseded generation does not excuse the current one — but IS still findable', () => {
-    // Two claims, and they used to be in tension because the row held one marker.
-    //
+  it('a superseded generation does not excuse the current one — and needs its OWN death confirmed', () => {
     // (a) The NEW child's genuine crash is not excused by the old child's kill. RED-
     //     mutation: have `wasKilledByGatewayShutdown` ignore which generation an entry
     //     names — the negative criterion, failing.
     const path = registry()
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000)
+    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000, DEAD_PID)
     patchRecord(path, KEY, { child_generation: 'gen-2', pid: DEAD_PID })
     expect(probeLauncherGenerationAlive('gen-2', path)).toBe('dead')
 
-    // (b) The SUPERSEDED generation is still attributable, which is new and is the
-    //     point: this is exactly the shape of a QUARANTINED child once its replacement
-    //     has spawned over the session key, and it is the child most likely to have
-    //     been hosting live work. It used to answer 'unknown' and its build waited out
-    //     the 90-minute reaper.
+    // (b) The SUPERSEDED generation is attributable — the shape of a QUARANTINED child
+    //     once its replacement has spawned over the session key, and the child most
+    //     likely to have been hosting live work. It used to answer 'unknown' forever.
     //
-    //     This is NOT "absence read as death" — the rule that arm still obeys. It is a
-    //     POSITIVE record, written by the process that did the killing, before it did
-    //     it. RED-mutation: delete the entry scan in `probeLauncherGenerationAlive` and
-    //     this returns to 'unknown'.
+    //     BUT ONLY WITH ITS OWN DEATH CONFIRMED, against the pid the entry carries.
+    //     Here that pid is dead, so the attribution is earned.
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('killed-by-gateway-shutdown')
 
-    // And a generation nobody ever recorded is still 'unknown' — absence, unchanged.
+    // And a generation nobody recorded is still 'unknown' — absence, unchanged.
     expect(probeLauncherGenerationAlive('gen-never-seen', path)).toBe('unknown')
+  })
+
+  it('A MARKED GENERATION WHOSE PROCESS IS STILL ALIVE IS NOT REPORTED DEAD', () => {
+    // THE BOUNDARY AN EARLIER REVISION GOT WRONG, AND IT COULD KILL A LIVE RUN. The
+    // entry is written BEFORE `kill()`; `kill()` can throw, and the process can die
+    // between the two. So an entry means "we intended to kill a child we had observed
+    // alive" — it ATTRIBUTES a death, it does not ESTABLISH one. A revision that
+    // returned the attribution from the entry alone would crash an active build whose
+    // launcher was still running.
+    //
+    // RED-mutation: return `'killed-by-gateway-shutdown'` from the entry without the
+    // `process.kill(pid, 0)` confirmation — exactly the code this replaced.
+    const path = registry({ pid: DEAD_PID })
+    // Marked, with a pid that IS alive (this test process), then superseded.
+    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000, LIVE_PID)
+    patchRecord(path, KEY, { child_generation: 'gen-2' })
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
+  })
+
+  it('a marked generation with NO pid on its entry is unknown, not dead', () => {
+    // An entry written before the pid field existed cannot be confirmed, and "I cannot
+    // check" must not read as "it is gone". RED-mutation: fall back to returning the
+    // attribution when the pid is missing.
+    const path = registry()
+    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000) // no pid
+    patchRecord(path, KEY, { child_generation: 'gen-2' })
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
   })
 
   it('a LIVE pid is alive, marker or no marker — the marker never manufactures a death', () => {

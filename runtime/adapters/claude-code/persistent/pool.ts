@@ -964,6 +964,10 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
           session.childGeneration,
           shutdownAt,
           sampleLivenessBeforeShutdownKill(() => session.hasChildExited()),
+          // The pid goes ON the durable entry so a later reader can confirm this death
+          // against the process table instead of trusting the entry. Read before the
+          // kill, while the handle is certainly still valid.
+          session.child.pid,
         )
         if (owed !== null) owedReports.push(owed)
       } else {

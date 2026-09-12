@@ -61,6 +61,19 @@ export interface GatewayShutdownKillEntry {
   generation: string
   /** Epoch ms the kill was recorded — before the kill, by the process making it. */
   at: number
+  /** The OS pid of that generation's child.
+   *
+   *  CARRIED SO A LATER READER CAN CONFIRM THE DEATH INSTEAD OF TAKING THIS ENTRY'S
+   *  WORD FOR IT. The entry is written BEFORE `kill()`, and `kill()` can throw or the
+   *  process can die between the two — so the entry records that we INTENDED to kill a
+   *  child we had observed alive, which attributes a death without establishing one.
+   *  The only thing that knows whether the kill landed is the process table, and for a
+   *  SUPERSEDED generation the row's own `pid` field belongs to the replacement, so
+   *  the pid has to travel with the entry or the confirmation is impossible.
+   *
+   *  Absent on an entry written before this field existed: a reader that cannot
+   *  confirm reports UNKNOWN rather than assuming either way. */
+  pid?: number
 }
 
 /** One persisted REPL supervision row. */
