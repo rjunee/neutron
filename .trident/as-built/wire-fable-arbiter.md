@@ -217,6 +217,25 @@ frozen-ceiling gap where a relation to a constant could not detect the constant 
 Ten instances of a test passing for the wrong reason were found in this lane in one
 session, and mutation — not reading — found every one of them.
 
+**The two that matter most for the next lane: the boundary was fixed three times as call
+sites before it was fixed as a boundary, and the eighth failure was a cap asserted through
+a proxy four times looser than the cap.** Five untrusted inputs reach the arbiter's prompt;
+the resolver question, the histories and the filenames were each hardened correctly and
+separately, and precisely because the fix was a list of call sites rather than a property,
+the fourth and fifth (`branch` and `base` — git permits Unicode line separators in a ref
+name) went in raw with nothing able to say so. It is fixed now at the assembler, where
+every scalar is folded regardless of who supplied it, and pinned by one test that drives
+EVERY field hostile and asserts no forgery codepoint survives anywhere in the output — a
+property, so a new field that skips the fold fails without anyone remembering the test
+exists. That test immediately found a hole in my own first version of it, where I had
+declared `evidence` a caller responsibility; an exemption dressed as a contract is how the
+next one gets in, so the fold now runs line by line and there is no exception. Alongside
+it, the advertised 2 KiB-per-side history cap was never enforced — the omission marker was
+appended outside the budget — and the tests could not see it because they asserted the
+whole evidence stayed under 8,000 bytes: a bound four times looser than the claim, which
+passes for any implementation that is merely not catastrophic. The cap is now enforced on
+the returned value and asserted at the cap and at cap+1.
+
 Two smaller distinctions worth keeping from round 5. Folding **per name rather than over
 the join** is what stops one 60 KB path silently erasing its siblings; the joined form is
 bounded and defanged and still loses data. And a **heterogeneous fixture** is what makes
