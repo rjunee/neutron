@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
-# scripts/ci/as-built-write-guard.sh — enforce the as-built log's one-writer
-# rule on pull requests and merge-queue commits.
+# scripts/ci/as-built-write-guard.sh — docs/AS_BUILT.md is FROZEN. No branch
+# may touch it, on a pull request or in the merge queue.
 #
-# Branches that prepend to docs/AS_BUILT.md all edit the same offset and
-# therefore conflict by construction. GitHub does not run merge drivers
-# server-side, so branch entries are staged under .trident/as-built/ instead;
-# the outer loop folds them into the canonical log on main after merge.
+# The file is the record up to 2026-09-12 and nothing appends to it again (see
+# the note at its top). Records for later changes are one file per change under
+# docs/as-built/: a branch stages exactly one entry at
+# .trident/as-built/<branch>.md, and the outer loop promotes it to
+# docs/as-built/<slug>.md on the base after the merge lands.
 #
 # WHERE THE EVENT FILTER LIVES, AND WHY IT IS HERE RATHER THAN IN ci.yml.
 # The first design put the base/head shas and the pull_request-or-merge_group
@@ -28,8 +29,8 @@
 #   GITHUB_EVENT_NAME    'pull_request' / 'merge_group' / 'push' / ...
 #   GITHUB_EVENT_PATH    the event payload the shas are read from
 #
-# EXIT: 0 = branch does not write the log, or there is no guarded diff to read,
-#       1 = branch writes the log,
+# EXIT: 0 = branch does not write the frozen log, or there is no guarded diff,
+#       1 = branch writes the frozen log,
 #       2 = missing/unresolvable input or an indeterminate diff.
 
 set -uo pipefail
@@ -68,12 +69,13 @@ if [ -z "${GUARD_BASE_SHA:-}" ] && [ -z "${GUARD_HEAD_SHA:-}" ]; then
       GUARD_HEAD_SHA="$(event_sha merge_group.head_sha)"
       ;;
     *)
-      # Push-to-main and every non-branch event: the outer-loop appender is the
-      # canonical log's one legitimate writer, so there is nothing to guard.
+      # Push-to-main and every non-branch event: the frozen log has no writer
+      # at all, and the outer-loop appender writes docs/as-built/ rather than
+      # this path, so there is nothing on a non-branch event to guard.
       # OUTSIDE Actions this is also how a developer running the gate by hand
       # gets a pass — but INSIDE Actions a guarded event with no shas must NEVER
       # land here, which is what the strict branch below enforces.
-      echo "as-built-write-guard: event '${GITHUB_EVENT_NAME:-<none>}' is not a branch proposal — the outer-loop appender is the log's legitimate writer. Nothing to guard."
+      echo "as-built-write-guard: event '${GITHUB_EVENT_NAME:-<none>}' is not a branch proposal. Nothing to guard."
       exit 0
       ;;
   esac
@@ -138,23 +140,23 @@ if ! changed_paths="$(git -C "$ROOT" diff --name-only --no-renames "${GUARD_BASE
   exit 2
 fi
 
-council_warn() {
+council_fail() {
   {
-    echo "as-built-write-guard: WARNING — this branch writes docs/AS_BUILT.md."
-    echo "Branches prepend at the same offset, and GitHub does not run merge drivers server-side,"
-    echo "so two branches that both append can conflict there."
-    echo "Prefer staging .trident/as-built/<branch>.md; the outer loop folds it onto main after the merge lands."
+    echo "as-built-write-guard: FAILED — this branch writes docs/AS_BUILT.md, which is FROZEN."
+    echo "That file is the record up to 2026-09-12 and takes no further entries; its 405 existing"
+    echo "entries are cited by other documents and must stay byte-for-byte."
+    echo "Stage your entry at .trident/as-built/<branch>.md instead; after the merge lands the outer"
+    echo "loop promotes it to docs/as-built/<slug>.md. Format: docs/as-built/README.md."
     echo 'See CONTRIBUTING § "The as-built log has ONE writer".'
-    echo "This is ADVISORY. It does not fail the build — see the note in this script for why."
   } >&2
 }
 
-# WHY THIS WARNS INSTEAD OF FAILING — MEASURED 2026-08-19, AND THE MEASUREMENT
-# REVERSED THE ORIGINAL DESIGN.
+# WHY THIS IS A HARD FAILURE AGAIN, AND WHY THE 2026-08-19 MEASUREMENT NO LONGER
+# APPLIES.
 #
-# This guard was written as a hard `exit 1` on the premise that AS_BUILT.md is
-# what makes build PRs conflict. That premise was tested against the live
-# backlog before landing it, and it did not survive:
+# This guard shipped as `exit 1`, was downgraded to advisory on a measurement of
+# the live backlog, and is a veto again because the thing that was measured has
+# ceased to exist. The measurement was:
 #
 #     open PRs                     45
 #     touch docs/AS_BUILT.md       31
@@ -163,21 +165,67 @@ council_warn() {
 #       conflict on other files    34
 #       blocked SOLELY by it        0
 #
-# Not one open PR is blocked by this file. Every conflicting branch has a real
-# code conflict elsewhere — orchestrator.ts, controller.ts, migrations/runner.ts
-# — and AS_BUILT.md merely rides along in 6 of 34. The `merge=union` attribute
-# this repo already ships is evidently doing its job.
+# The argument it supported was a cost/benefit one: failing 31 of 45 open PRs to
+# eliminate a conflict class blocking none of them is a large certain cost for a
+# benefit of zero. Every one of those 31 PRs was appending a legitimate entry to
+# an append-only log, and the `merge=union` attribute was absorbing the overlap.
 #
-# So a hard failure would have refused 31 of 45 open PRs to eliminate a conflict
-# class that is currently blocking none of them: a large, certain cost against a
-# benefit measured at zero. The detection is still worth having — 6 of 34 do
-# co-conflict here, and the day the union attribute stops working this is the
-# check that will say so — but it earns a warning, not a veto.
+# Neither half is true now. The log is FROZEN, so there is no legitimate write
+# left to refuse — a branch touching this path is unambiguously wrong rather than
+# merely inconvenient, and the count of correct PRs a veto would cost is zero by
+# construction. And `merge=union` is GONE from .gitattributes (see the comment
+# there): union never reports a conflict, so on a file nobody may write it would
+# silently double an edit instead of stopping it. Warning about a write that
+# nothing downstream will now catch is the failure mode this gate exists to
+# prevent.
 #
-# Restoring the veto is a one-line change (`council_warn` then `exit 1`), and the
-# evidence for whether it is deserved will be sitting in the CI logs.
+# The refusals above (exit 2) are untouched: "I looked and found a write" and "I
+# could not look" remain different failures.
+
+# THE FREEZE IS READ FROM THE BASE, NOT ASSUMED — AND THAT IS WHAT MAKES THE VETO
+# LANDABLE AT ALL.
+#
+# This guard's message asserts that docs/AS_BUILT.md is frozen. Asserting it
+# blindly has one immediate consequence and one lasting one. The immediate one:
+# the change that INSTALLS the freeze necessarily writes the freeze note into
+# this very file, so a blind veto reds the only PR that can ever make its own
+# claim true — a gate that cannot be introduced is not a strict gate, it is a
+# broken one. The lasting one: pointed at a governed repo whose log is still
+# append-only (Managed keeps AS-BUILT.md), it would refuse correct work.
+#
+# So the precondition is READ: does the log AT THE BASE already carry the freeze
+# note? If it does, the freeze is in force on every branch cut from that base and
+# any write to it is wrong. If it does not, this diff is the change installing it,
+# and the guard says so out loud rather than passing silently.
+#
+# This is not an escape hatch a branch can take. Removing the note is itself a
+# diff that touches this path, and it is judged against the BASE, which still has
+# it. And it cannot rot quietly: `scripts/ci/as-built-write-guard.test.ts` pins
+# that this repo's real docs/AS_BUILT.md carries the note, so a reformat that
+# dropped it would red the suite rather than silently disarm this veto.
+#
+# NO PIPE INTO `grep -q` HERE, AND THAT IS NOT STYLE. This script runs under `set
+# -o pipefail`, and `grep -q` exits the instant it matches — which closes the pipe
+# under a `git show` that is still writing, killing it with SIGPIPE (141). Under
+# pipefail the PIPELINE then reports that failure, so the function answers "not
+# frozen" on precisely the inputs that ARE frozen. Measured against this repo's
+# real 2.0 MB log: the veto did not fire. It DID fire on a small fixture, because
+# git finishes writing before grep can exit — so the bug was invisible to a small
+# test and visible only on the file the gate exists to protect. The match is done
+# in the shell instead, with no second process to race.
+frozen_at_base() {
+  case "$(git -C "$ROOT" show "${GUARD_BASE_SHA}:docs/AS_BUILT.md" 2>/dev/null)" in
+    *'FROZEN as of'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ -n "$changed_paths" ]; then
-  council_warn
+  if frozen_at_base; then
+    council_fail
+    exit 1
+  fi
+  echo "as-built-write-guard: docs/AS_BUILT.md at the base carries no freeze note, so this diff is the change that installs it. Passing THIS diff only; every branch cut after it is vetoed." >&2
   exit 0
 fi
 

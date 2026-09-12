@@ -6676,6 +6676,22 @@ calls `detectRalphMode`) is PR-5.
 
 ## Concurrent publishes and the AS_BUILT log — the entry-aware merge driver (`scripts/git/`)
 
+> **SUPERSEDED IN PART, 2026-09-12 — the conflict this section solves no longer
+> exists.** `docs/AS_BUILT.md` is FROZEN (`docs/AS_BUILT.md:5`): nothing appends
+> to it, and the record for a change that lands after that date is its own file
+> under `docs/as-built/` (`docs/as-built/README.md`). Two separate files do not
+> conflict with each other, so there is nothing left for either driver to merge.
+> Concretely: `trident/as-built-appender.ts:161` writes `docs/as-built/<slug>.md`
+> instead of rewriting the log; `scripts/ci/as-built-write-guard.sh:226` FAILS any
+> branch whose diff touches the frozen path; and the tracked
+> `docs/AS_BUILT.md merge=union` line is DELETED from `.gitattributes` — union can
+> never report a conflict, which was right for an append-only file and dangerous
+> on a frozen one, so `scripts/ci/check-governed-repo-attributes.ts` now fails if
+> any tracked rule assigns that path a merge driver at all. The entry-aware driver
+> and its installer are still in the tree and still described below, and the
+> reasoning about git's attribute precedence is still correct as a description of
+> git; what is no longer true is that this repo needs any of it.
+
 Concurrent builds used to conflict on two shared documents. One is closed: each
 build writes its plan to `.trident/plans/<branch>.md` (#302), so there is no
 shared plan file left to fight over. The other is `docs/AS_BUILT.md`, which is
@@ -6862,16 +6878,19 @@ The fix is a git merge driver that works on **whole entries**:
   `--check` has no programmatic caller (`CONTRIBUTING.md:118-120` and this
   document describe it as a human command), so no build gates on that verdict.
 
-**What "the repo merges exactly as it does today" means here, precisely.** It is
-**not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
-which never conflicts and interleaves the two sides line by line. The driver's
-attribute lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE
-the tracked `.gitattributes` (measured with `git check-attr merge -- <path>` with
-both present), so a successful install genuinely displaces `union`; an
-unsuccessful one leaves `union` in charge, which is worse than a conflict and is
-the honest floor. The tracked line stays, because removing it would hand every
-fresh clone, outside contributor and CI job the conflict storm it was added to
-stop.
+**What "the repo merges exactly as it does today" meant here, precisely — and
+what changed.** It was **not** a conflict: `.gitattributes` used to give
+`docs/AS_BUILT.md` `merge=union`, which never conflicts and interleaves the two
+sides line by line. The driver's attribute lives in
+`$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE the tracked
+`.gitattributes` (measured with `git check-attr merge -- <path>` with both
+present), so a successful install genuinely displaced `union`; an unsuccessful
+one left `union` in charge, which is worse than a conflict and was the honest
+floor. That tracked line is GONE as of 2026-09-12 (see the note at the head of
+this section): the file is frozen, nothing appends to it, and an attribute that
+can never raise would silently double an edit that should have stopped somebody.
+The floor a fresh clone now gets is git's default text merge, which conflicts
+loudly — and no branch may write the path at all.
 
 `rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
 replays a branch, so build lanes get this without anyone remembering.

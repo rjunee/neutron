@@ -3,11 +3,12 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
+  AS_BUILT_DIR,
   findDuplicateEntryHeadings as findDuplicateEntryHeadingsFromCore,
-  foldEntriesIntoLog,
-  foldEntryIntoLog,
   parseLog,
   serializeLog,
+  shardStagedEntries,
+  shardStagedEntry,
 } from '@neutronai/trident/as-built-log.ts'
 // This cross-package import is the subject of the shim-identity pin below.
 // eslint-disable-next-line import/no-relative-packages
@@ -39,63 +40,87 @@ describe('as-built entry model', () => {
   })
 })
 
-describe('foldEntryIntoLog', () => {
-  test('inserts a normalized entry first and preserves every existing log byte', () => {
-    const originalEntries =
-      '## 2026-08-15 — older\n\nolder body\n\n## 2026-08-14 — oldest\n\noldest body\n'
-    const log = PREAMBLE + originalEntries
-    const staged = '## 2026-08-17 — newest\n\nnew body\n\n\n'
-    const expected = PREAMBLE + '## 2026-08-17 — newest\n\nnew body\n\n' + originalEntries
-
-    const result = foldEntryIntoLog(log, staged)
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.log).toBe(expected)
-    expect(result.heading).toBe('## 2026-08-17 — newest')
-    expect(result.retitled).toBe(false)
-    expect(parseLog(result.log).entries[0]!.lines[0]).toBe('## 2026-08-17 — newest')
+describe('the frozen log', () => {
+  test('carries the freeze note above every entry, and the entries are still there', () => {
+    const text = readFileSync(REAL_LOG_PATH, 'utf8')
+    const parsed = parseLog(text)
+    // The note is PREAMBLE, not an entry: it must not become the newest record.
+    expect(parsed.preamble.join('\n')).toContain('FROZEN as of 2026-09-12')
+    expect(parsed.entries.length).toBeGreaterThan(400)
+    expect(parsed.entries[0]!.lines[0]).toMatch(/^## \d{4}-\d{2}-\d{2} — /)
+    expect(findDuplicateEntryHeadingsFromCore(text)).toEqual([])
   })
 
-  test('appends after an entryless preamble without changing its bytes', () => {
-    const log = '# AS_BUILT\n\nNo entries yet.\n\n'
-    const result = foldEntryIntoLog(log, '## 2026-08-17 — first\n\nfirst body')
+  test('no as-built writer targets it any more', () => {
+    // The appender is the only thing that ever wrote it, and the absence of that
+    // write is the property — a reintroduced one would typecheck perfectly. Read
+    // with comments stripped, because this module's own docblock has to be able
+    // to NAME the file it stopped writing.
+    const appender = readFileSync(join(import.meta.dir, 'as-built-appender.ts'), 'utf8')
+    const code = appender.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+    expect(code).not.toContain('AS_BUILT.md')
+    expect(code).toContain('AS_BUILT_DIR')
+  })
+})
+
+describe('shardStagedEntry', () => {
+  const NONE: ReadonlySet<string> = new Set()
+
+  test('names the file from the staged slug and keeps the entry verbatim', () => {
+    const result = shardStagedEntry(
+      '.trident/as-built/trident/some-spec-item-slug.md',
+      '## 2026-09-12 — newest\n\nnew body\n\n\n',
+      NONE,
+    )
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.log).toBe(`${log}## 2026-08-17 — first\n\nfirst body\n`)
-
-    const empty = foldEntryIntoLog('', '## 2026-08-17 — first')
-    expect(empty.ok).toBe(true)
-    if (!empty.ok) return
-    expect(empty.log).toBe('## 2026-08-17 — first\n')
+    expect(result.name).toBe('some-spec-item-slug.md')
+    expect(result.suffixed).toBe(false)
+    // Trailing blank lines normalised to exactly one newline; nothing else touched.
+    expect(result.text).toBe('## 2026-09-12 — newest\n\nnew body\n')
+    expect(parseLog(result.text).entries).toHaveLength(1)
   })
 
-  test('uses the first free numeric suffix for colliding headings', () => {
-    const heading = '## 2026-08-17 — same title'
-    const once = foldEntryIntoLog(`${PREAMBLE}${heading}\n\noriginal\n`, `${heading}\n\nincoming`)
+  test('a body of any shape survives, including a heading quoted in a fence', () => {
+    const entry = '## 2026-09-12 — quotes a heading\n\n```md\n## 2000-01-01 — sample\n```\n'
+    const result = shardStagedEntry('.trident/as-built/x.md', entry, NONE)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.text).toBe(entry)
+  })
+
+  test('a COLLIDING FILENAME takes the first free suffix and the TITLE is left alone', () => {
+    // This is the one rule that had to change shape rather than move. In the
+    // monolith two identical headings were one ambiguous key, so the incoming
+    // entry was RETITLED ' (2)'. Here the key is the path, so the title — which
+    // is content — is preserved and the NAME is what gets suffixed.
+    const heading = '## 2026-09-12 — same title'
+    const once = shardStagedEntry('.trident/as-built/dup.md', `${heading}\n\nincoming`, new Set(['dup.md']))
     expect(once.ok).toBe(true)
     if (!once.ok) return
-    expect(once.heading).toBe(`${heading} (2)`)
-    expect(once.retitled).toBe(true)
-    expect(findDuplicateEntryHeadingsFromCore(once.log)).toEqual([])
+    expect(once.name).toBe('dup-2.md')
+    expect(once.suffixed).toBe(true)
+    expect(once.text).toBe(`${heading}\n\nincoming\n`)
 
-    const occupied = `${PREAMBLE}${heading}\n\noriginal\n\n${heading} (2)\n\nsecond\n`
-    const twice = foldEntryIntoLog(occupied, `${heading}\n\nincoming`)
+    const twice = shardStagedEntry(
+      '.trident/as-built/dup.md',
+      `${heading}\n\nincoming`,
+      new Set(['dup.md', 'dup-2.md']),
+    )
     expect(twice.ok).toBe(true)
     if (!twice.ok) return
-    expect(twice.heading).toBe(`${heading} (3)`)
-    expect(twice.retitled).toBe(true)
-    expect(findDuplicateEntryHeadingsFromCore(twice.log)).toEqual([])
+    expect(twice.name).toBe('dup-3.md')
   })
 
   test.each([
     {
       name: 'two headings',
-      staged: '## 2026-08-17 — one\n\nbody\n\n## 2026-08-16 — two\n\nbody',
-      reasons: ['must be exactly one entry; found 2', '## 2026-08-16 — two'],
+      staged: '## 2026-09-12 — one\n\nbody\n\n## 2026-09-11 — two\n\nbody',
+      reasons: ['must be exactly one entry; found 2', '## 2026-09-11 — two'],
     },
     {
       name: 'prose before the heading',
-      staged: 'not an entry\n\n## 2026-08-17 — valid\n\nbody',
+      staged: 'not an entry\n\n## 2026-09-12 — valid\n\nbody',
       reasons: ["content before the '## ' heading", 'not an entry'],
     },
     {
@@ -108,56 +133,64 @@ describe('foldEntryIntoLog', () => {
       staged: '##bad',
       reasons: ["content before the '## ' heading", '##bad'],
     },
-  ])('refuses $name and leaves the log byte-unchanged', ({ staged, reasons }) => {
-    const log = `${PREAMBLE}## 2026-08-10 — existing\n\nbody\n`
-    const result = foldEntryIntoLog(log, staged)
+  ])('refuses $name', ({ staged, reasons }) => {
+    const result = shardStagedEntry('.trident/as-built/some-branch.md', staged, NONE)
     expect(result.ok).toBe(false)
     if (result.ok) return
     for (const reason of reasons) expect(result.reason).toContain(reason)
 
-    const batch = foldEntriesIntoLog(log, [staged])
-    expect(batch.log).toBe(log)
-    expect(batch.folded).toEqual([])
+    const batch = shardStagedEntries([{ path: '.trident/as-built/some-branch.md', text: staged }], NONE)
+    expect(batch.shards).toEqual([])
     expect(batch.refused).toEqual([{ index: 0, reason: result.reason }])
+  })
+
+  test('refuses a staged name that is not a usable filename', () => {
+    // A branch name can legally carry characters a record name must not: a name
+    // with a slash in it would quietly become a subdirectory the collision check
+    // never looks in.
+    for (const bad of ['.hidden.md', '..md', 'has space.md', '-leading.md']) {
+      const result = shardStagedEntry(`.trident/as-built/${bad}`, '## 2026-09-12 — t\n\nb\n', NONE)
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toContain('not a usable record name')
+    }
   })
 })
 
-describe('foldEntriesIntoLog', () => {
-  test('folds in landing order, leaves the last entry topmost, and skips a malformed middle entry', () => {
-    const existing = '## 2026-08-10 — existing\n\nbody\n'
-    const oldestLanded = '## 2026-08-15 — first landed\n\nfirst body'
-    const malformed = 'prose is not an entry'
-    const newestLanded = '## 2026-08-16 — last landed\n\nlast body'
-
-    const result = foldEntriesIntoLog(PREAMBLE + existing, [oldestLanded, malformed, newestLanded])
-    expect(parseLog(result.log).entries.map((entry) => entry.lines[0])).toEqual([
-      '## 2026-08-16 — last landed',
-      '## 2026-08-15 — first landed',
-      '## 2026-08-10 — existing',
-    ])
-    expect(result.folded).toEqual([
-      { heading: '## 2026-08-15 — first landed', retitled: false },
-      { heading: '## 2026-08-16 — last landed', retitled: false },
+describe('shardStagedEntries', () => {
+  test('shards in landing order, suffixes within the pass, and skips a malformed middle entry', () => {
+    const result = shardStagedEntries(
+      [
+        { path: '.trident/as-built/same.md', text: '## 2026-09-10 — first landed\n\nfirst body' },
+        { path: '.trident/as-built/broken.md', text: 'prose is not an entry' },
+        { path: '.trident/as-built/same.md', text: '## 2026-09-11 — last landed\n\nlast body' },
+      ],
+      new Set(),
+    )
+    // Two entries claiming one slug in ONE pass: the second is suffixed against
+    // the first, not against the directory it has not been written to yet.
+    expect(result.shards.map((s) => [s.index, s.name, s.suffixed])).toEqual([
+      [0, 'same.md', false],
+      [2, 'same-2.md', true],
     ])
     expect(result.refused).toHaveLength(1)
     expect(result.refused[0]!.index).toBe(1)
     expect(result.refused[0]!.reason).toContain('prose is not an entry')
   })
 
-  test('folds over the real log without changing a byte below the inserted block', () => {
-    const realLog = readFileSync(REAL_LOG_PATH, 'utf8')
-    const parsed = parseLog(realLog)
-    expect(parsed.entries.length).toBeGreaterThan(300)
+  test('suffixes against names already in the directory', () => {
+    const result = shardStagedEntries(
+      [{ path: '.trident/as-built/taken.md', text: '## 2026-09-12 — t\n\nb\n' }],
+      new Set(['taken.md', 'taken-2.md', 'README.md']),
+    )
+    expect(result.shards.map((s) => s.name)).toEqual(['taken-3.md'])
+  })
 
-    const staged = '## 2099-01-01 — synthetic fold probe'
-    const result = foldEntryIntoLog(realLog, staged)
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-
-    const preamble = `${parsed.preamble.join('\n')}\n`
-    const existingEntries = serializeLog({ preamble: [], entries: parsed.entries })
-    expect(result.log).toBe(`${preamble}${staged}\n\n${existingEntries}`)
-    expect(findDuplicateEntryHeadingsFromCore(result.log)).toEqual([])
+  test('AS_BUILT_DIR is the directory the records actually live in', () => {
+    expect(AS_BUILT_DIR).toBe('docs/as-built')
+    expect(readFileSync(join(import.meta.dir, '..', AS_BUILT_DIR, 'README.md'), 'utf8')).toContain(
+      'one file per change',
+    )
   })
 })
 

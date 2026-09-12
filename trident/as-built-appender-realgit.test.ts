@@ -12,8 +12,9 @@ import { spawnCapture } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
 
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
-const HEADER = '# AS_BUILT\n\nRunning log of what shipped, newest first. One entry per merged change.\n\n'
+const HEADER = '# AS_BUILT\n\nFROZEN. One entry per merged change, up to the freeze.\n\n'
 const HISTORY = '## 2026-08-14 — history that must survive\n\nold body\n\n'
+const FROZEN_LOG = HEADER + HISTORY
 const created: string[] = []
 
 interface World {
@@ -52,8 +53,14 @@ async function seedWorld(label: string): Promise<World> {
   await git(checkout, 'config', 'user.name', 'Ambient Checkout Person')
   await git(checkout, 'config', 'user.email', 'ambient-person@example.test')
   await git(checkout, 'remote', 'add', 'origin', origin)
-  mkdirSync(join(checkout, 'docs'), { recursive: true })
-  writeFileSync(join(checkout, 'docs', 'AS_BUILT.md'), HEADER + HISTORY)
+  mkdirSync(join(checkout, 'docs', 'as-built'), { recursive: true })
+  writeFileSync(join(checkout, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
+  // The live record directory, with one file already in it, so a promotion has
+  // something real to not disturb and something real to collide with.
+  writeFileSync(
+    join(checkout, 'docs', 'as-built', 'already-here.md'),
+    '## 2026-08-13 — already recorded\n\nprior body\n',
+  )
   await git(checkout, 'add', '-A')
   await git(checkout, ...GIT_ID, 'commit', '-q', '-m', 'base')
   await git(checkout, 'push', '-q', '-u', 'origin', 'main')
@@ -81,11 +88,11 @@ async function queuePaths(world: World): Promise<string[]> {
   return listed === '' ? [] : listed.split('\n')
 }
 
-describe('foldStagedAsBuiltEntries with real git', () => {
-  test('folds a merged staged entry in one neutral-identity commit, then becomes a no-op', async () => {
-    const world = await seedWorld('fold')
-    const stagedPath = '.trident/as-built/fold-after-merge.md'
-    const entry = '## 2026-08-17 — fold after merge\n\nnew body\n'
+describe('foldStagedAsBuiltEntries with real git — staged entries become files under docs/as-built/', () => {
+  test('promotes a merged staged entry to its OWN file in one neutral-identity commit, then becomes a no-op', async () => {
+    const world = await seedWorld('promote')
+    const stagedPath = '.trident/as-built/trident/promote-after-merge.md'
+    const entry = '## 2026-08-17 — promote after merge\n\nnew body\n'
     await mergeStagedEntry(world, stagedPath, entry)
     const before = await originOutput(world, 'rev-parse', 'main')
 
@@ -95,13 +102,16 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     const after = await originOutput(world, 'rev-parse', 'main')
     expect(after).not.toBe(before)
     expect(await originOutput(world, 'rev-list', '--count', `${before}..${after}`)).toBe('1')
+    // The whole commit: one record ADDED, one staging file deleted. The frozen
+    // log is not in it, and that absence is the point of this change.
     expect(
       (await originOutput(world, 'diff-tree', '--no-commit-id', '--name-status', '-r', after)).split('\n').sort(),
-    ).toEqual([`D\t${stagedPath}`, 'M\tdocs/AS_BUILT.md'])
+    ).toEqual([`A\tdocs/as-built/promote-after-merge.md`, `D\t${stagedPath}`])
 
-    const log = await originOutput(world, 'show', 'main:docs/AS_BUILT.md')
-    expect(log.startsWith(`${HEADER}${entry.trimEnd()}\n\n${HISTORY.trimEnd()}`)).toBe(true)
-    expect(log).toContain('## 2026-08-17 — fold after merge')
+    // The record is the staged entry verbatim, under the staged file's own slug.
+    expect(await originOutput(world, 'show', 'main:docs/as-built/promote-after-merge.md')).toBe(entry.trimEnd())
+    // The frozen log's blob is byte-identical to the one that was committed.
+    expect(await originOutput(world, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
     expect(await originOutput(world, 'show', '-s', '--format=%cn%n%ce', 'main')).toBe(
       `${AS_BUILT_COMMITTER_NAME}\n${AS_BUILT_COMMITTER_EMAIL}`,
     )
@@ -110,6 +120,45 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     const again = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
     expect(again).toEqual({ ok: true, folded: 0 })
     expect(await originOutput(world, 'rev-parse', 'main')).toBe(after)
+  }, 60_000)
+
+  test('a COLLIDING FILENAME is suffixed, and the record already there is untouched', async () => {
+    const world = await seedWorld('collide')
+    const priorBlob = await originOutput(world, 'rev-parse', 'main:docs/as-built/already-here.md')
+    const stagedPath = '.trident/as-built/already-here.md'
+    const entry = '## 2026-08-17 — a different change, same slug\n\nsecond body\n'
+    await mergeStagedEntry(world, stagedPath, entry)
+
+    const result = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
+
+    expect(result).toEqual({ ok: true, folded: 1 })
+    const after = await originOutput(world, 'rev-parse', 'main')
+    expect(
+      (await originOutput(world, 'diff-tree', '--no-commit-id', '--name-status', '-r', after)).split('\n').sort(),
+    ).toEqual(['A\tdocs/as-built/already-here-2.md', `D\t${stagedPath}`])
+    expect(await originOutput(world, 'show', 'main:docs/as-built/already-here-2.md')).toBe(entry.trimEnd())
+    // The occupant is not rewritten, not merged into, not retitled.
+    expect(await originOutput(world, 'rev-parse', 'main:docs/as-built/already-here.md')).toBe(priorBlob)
+  }, 60_000)
+
+  test('two entries landing in ONE pass each get their own file, in landing order', async () => {
+    const world = await seedWorld('two')
+    await mergeStagedEntry(world, '.trident/as-built/first.md', '## 2026-08-16 — first\n\nfirst body\n')
+    await mergeStagedEntry(world, '.trident/as-built/second.md', '## 2026-08-17 — second\n\nsecond body\n')
+
+    const result = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
+
+    expect(result).toEqual({ ok: true, folded: 2 })
+    const after = await originOutput(world, 'rev-parse', 'main')
+    expect(
+      (await originOutput(world, 'diff-tree', '--no-commit-id', '--name-status', '-r', after)).split('\n').sort(),
+    ).toEqual([
+      'A\tdocs/as-built/first.md',
+      'A\tdocs/as-built/second.md',
+      'D\t.trident/as-built/first.md',
+      'D\t.trident/as-built/second.md',
+    ])
+    expect(await queuePaths(world)).toEqual([])
   }, 60_000)
 
   test('does nothing when the resolved base tree has no staged entries', async () => {
@@ -129,7 +178,6 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     const stagedPath = '.trident/as-built/malformed.md'
     await mergeStagedEntry(world, stagedPath, '## not-a-date — malformed\n\nbody\n')
     const before = await originOutput(world, 'rev-parse', 'main')
-    const logBlobBefore = await originOutput(world, 'rev-parse', 'main:docs/AS_BUILT.md')
 
     const result = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
 
@@ -139,7 +187,6 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     expect(result.reason).toContain(stagedPath)
     expect(result.reason).toContain("does not match '## YYYY-MM-DD — title'")
     expect(await originOutput(world, 'rev-parse', 'main')).toBe(before)
-    expect(await originOutput(world, 'rev-parse', 'main:docs/AS_BUILT.md')).toBe(logBlobBefore)
     expect(await queuePaths(world)).toEqual([stagedPath])
   }, 60_000)
 
@@ -147,7 +194,7 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     const world = await seedWorld('nonff')
     const stagedPath = '.trident/as-built/race.md'
     await mergeStagedEntry(world, stagedPath, '## 2026-08-17 — raced fold\n\nbody\n')
-    const logBlobBefore = await originOutput(world, 'rev-parse', 'main:docs/AS_BUILT.md')
+    const treeBefore = await originOutput(world, 'rev-parse', 'main^{tree}')
     const helper = join(world.root, 'helper')
     await git(world.root, 'clone', '-q', world.origin, helper)
     await git(helper, 'config', 'user.name', 'Race Helper')
@@ -175,7 +222,12 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     if (result.ok) return
     expect(result.folded).toBe(0)
     expect(result.reason).toMatch(/fetch first|non-fast-forward|rejected/i)
-    expect(await originOutput(world, 'rev-parse', 'main:docs/AS_BUILT.md')).toBe(logBlobBefore)
+    // Nothing of ours reached the remote: the helper's own commit moved the tree,
+    // so the record directory is checked directly rather than by tree identity.
+    expect(treeBefore).not.toBe('')
+    expect(
+      await originOutput(world, 'ls-tree', '-r', '--name-only', 'main', '--', 'docs/as-built/'),
+    ).toBe('docs/as-built/already-here.md')
     expect(await queuePaths(world)).toEqual([stagedPath])
     const pushes = calls.filter((cmd) => cmd.includes('push'))
     expect(pushes).toHaveLength(1)
@@ -198,23 +250,27 @@ describe('foldStagedAsBuiltEntries with real git', () => {
     await git(integrator, ...GIT_ID, 'commit', '-q', '-m', 'stage on newer origin')
     await git(integrator, 'push', '-q', 'origin', 'main')
 
-    writeFileSync(join(world.checkout, 'docs', 'AS_BUILT.md'), `${HEADER}dirty shared bytes\n${HISTORY}`)
+    writeFileSync(join(world.checkout, 'docs', 'as-built', 'already-here.md'), 'dirty shared bytes\n')
     writeFileSync(join(world.checkout, 'untracked-local.txt'), 'must survive\n')
     const statusBefore = await output(world.checkout, 'status', '--short')
-    const sharedLogBefore = readFileSync(join(world.checkout, 'docs', 'AS_BUILT.md'), 'utf8')
+    const sharedRecordBefore = readFileSync(join(world.checkout, 'docs', 'as-built', 'already-here.md'), 'utf8')
 
     const result = await foldStagedAsBuiltEntries(spawnCapture, world.checkout, 'pr', 'main')
 
     expect(result).toEqual({ ok: true, folded: 1 })
     expect(await output(world.checkout, 'rev-parse', 'refs/heads/main')).toBe(localMainBefore)
     expect(await output(world.checkout, 'status', '--short')).toBe(statusBefore)
-    expect(readFileSync(join(world.checkout, 'docs', 'AS_BUILT.md'), 'utf8')).toBe(sharedLogBefore)
+    expect(readFileSync(join(world.checkout, 'docs', 'as-built', 'already-here.md'), 'utf8')).toBe(
+      sharedRecordBefore,
+    )
     expect(readFileSync(join(world.checkout, 'untracked-local.txt'), 'utf8')).toBe('must survive\n')
     const worktrees = await output(world.checkout, 'worktree', 'list', '--porcelain')
     expect(worktrees.split('\n').filter((line) => line.startsWith('worktree '))).toEqual([
       `worktree ${world.checkout}`,
     ])
     expect(await queuePaths(world)).toEqual([])
-    expect(await originOutput(world, 'show', 'main:docs/AS_BUILT.md')).toContain('## 2026-08-17 — newer origin wins')
+    expect(await originOutput(world, 'show', 'main:docs/as-built/from-newer-origin.md')).toContain(
+      '## 2026-08-17 — newer origin wins',
+    )
   }, 60_000)
 })

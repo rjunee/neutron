@@ -1,16 +1,21 @@
-# AS_BUILT.md is an append-only log: every change adds an entry at the top, so
-# two open PRs conflict by construction rather than by subject. Every resolution
-# has been the same mechanical "keep both" — five rebases in one evening across
-# four unrelated PRs at the worst of it, which is what motivated the (now
-# reversed) one-file-per-entry split.
+# `docs/AS_BUILT.md merge=union` USED TO LIVE HERE, AND IT IS GONE ON PURPOSE.
 #
-# `union` is git's built-in driver for exactly this shape: it takes both sides of
-# a conflicting hunk instead of raising. Verified with a control before landing —
-# the same two-branch merge conflicts without this line and resolves with it,
-# both entries intact.
+# Union is git's built-in "keep both sides of a conflicting hunk, never report a
+# conflict" driver. That was correct for exactly as long as the file was
+# APPEND-ONLY: every change added an entry at the top, so two branches conflicted
+# by construction rather than by subject and "keep both" was always the right
+# resolution.
 #
-# It is correct here ONLY because the file is append-only. Union NEVER reports a
-# conflict, so a change that genuinely rewrites existing lines gets silently
-# doubled rather than flagged. A restructuring pass over this file wants a real
-# review, not a merge driver.
-docs/AS_BUILT.md merge=union
+# `docs/AS_BUILT.md` is now FROZEN (see the note at its top, `docs/AS_BUILT.md:5`),
+# and the live record is one file per change under `docs/as-built/`. Two separate
+# files never conflict with each other, so there is nothing left for union to
+# resolve — and on a frozen file the attribute is actively harmful: union NEVER
+# raises, so any edit that reaches this file at all would be silently doubled
+# instead of stopping someone. A file nobody may write wants the LOUDEST merge
+# behaviour available, which is git's default.
+#
+# The rule that replaces it is not an attribute at all, because attributes are
+# not run server-side by GitHub: `scripts/ci/as-built-write-guard.sh` fails any
+# branch whose base…head diff touches `docs/AS_BUILT.md`, and
+# `scripts/ci/check-governed-repo-attributes.ts` fails if a tracked attributes
+# rule ever assigns that path a merge driver again.
