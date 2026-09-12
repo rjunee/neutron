@@ -6,13 +6,29 @@ something on the box pulled it. Every commit merged into the base since then is
 presented as this branch's own work. Git exits 0, the extra files are real code, and
 nothing downstream can tell the inflated diff from a genuinely large one.
 
-> **RECONCILED AGAINST THE FINAL CODE IN A SINGLE PASS (round nine),** after three
-> separate rounds found this file lagging a correction: a stale `diffBaseRef` signature, a
-> superseded title, and a superseded fallback condition. The pattern was consistent — each
-> round fixed the artefact the finding pointed at, and this file was never the artefact
-> pointed at. The narrative sections below are kept in round order because the sequence is
-> the point; where a round's text asserted something a later round replaced, the correction
-> is marked inline rather than silently rewritten.
+> **RECONCILED AGAINST THE FINAL CODE, AND THE SWEEP RUNS LAST** — first in round nine,
+> after three separate rounds found this file lagging a correction (a stale `diffBaseRef`
+> signature, a superseded title, a superseded fallback condition), and re-run as the final
+> act of every round since. Each earlier round fixed the artefact its finding pointed at, and
+> this file was never the artefact pointed at.
+>
+> **The "reconciled" claim is the expensive part, so it has a rule now.** Round sixteen found
+> three final-tree citations wrong by a uniform six lines — they had been derived once and
+> carried forward while this banner said they had not, and a claim of reconciliation is
+> exactly what stops the next reader checking. Every final-tree `file:line` here is
+> re-derived BY CONTENT (grep the construct, take the line the tree reports) at the end of the
+> round that last touched the code, never by adjusting an old number: a uniform offset is a
+> hypothesis, and these files take unrelated edits. A round that adds or deletes lines
+> invalidates a line number exactly as it invalidates a behavioural claim.
+>
+> Citations labelled *"on the tree this branch was cut from"*, *"as filed"* or *"round nine
+> measured"* are historical by design and are NOT re-derived; they were verified once against
+> that tree (`git show 0db9e922:trident/inner-workflow.mjs`) and are kept because the drift
+> they record is part of the story.
+>
+> The narrative sections below are kept in round order because the sequence is the point;
+> where a round's text asserted something a later round replaced, the correction is marked
+> inline rather than silently rewritten.
 
 Measured twice on this repo: Argus r4 / run `25b2327d` — local `main` 8 merges behind
 `origin/main`, a 15,154-line / ~100-file review artifact for a branch whose own work was
@@ -21,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5410` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5416` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -58,7 +74,7 @@ Stated in the order of how much it proves:
    last-resort diff entirely, so the wrapper never invents or improves a base. But item 0
    above *requires* the bare name when `refs/remotes/origin/<base>` does not resolve, that
    name is passed as this argv, and it reaches
-   `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:809`). Measured
+   `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:819`). Measured
    through the shipped line in `trident/codex-wrapper-bare-base.test.ts`: with no remote it
    yields the branch's own single file, and handed a stale `main` where `origin/main` is 4
    commits ahead it yields five files — the wrapper is incapable of repairing a bad base,
@@ -150,7 +166,7 @@ runs before the tree is touched; an empty scan exits 1.
 ### The gate's own verification had the gate's own bug
 
 CodeQL `js/useless-regexp-character-escape`, HIGH, two alerts, both at
-`scripts/ci/diff-base-check.test.ts:176` (that line is `:260` as merged) — *"The escape sequence `\$` is equivalent to
+`scripts/ci/diff-base-check.test.ts:176` as filed (the same construct is `:261` on the final tree) — *"The escape sequence `\$` is equivalent to
 just `$`, so the sequence may still represent a meta-character when it is used in a
 regular expression."*
 
@@ -202,7 +218,41 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
-### Round sixteen: the instrument under suspicion got fixed; the one written beside it did not
+### Round sixteen: a claim of reconciliation is what stops the next reader checking
+
+Three final-tree citations in this record were wrong by a **uniform six lines**, in a document
+whose own banner said its final-tree locations had been reconciled. The uniformity was the
+tell: something earlier in each file had grown by six lines after the numbers were taken,
+which means they were **derived once and carried forward**, not re-derived. That is worse than
+an unreconciled record — the assertion of reconciliation is precisely what stops the next
+reader checking.
+
+Swept all **22** `file:line` citations across the record and the spec item, by content rather
+than by adjusting each number by six (a uniform offset is a hypothesis, and both files had
+taken unrelated edits). **Five had moved**, one more than the three reported:
+
+| citation | was | is | how it was re-derived |
+|---|---|---|---|
+| `probeCiBase`, final tree | `:5410` | **`:5416`** | `grep -n 'async function probeCiBase'` |
+| the wrapper range (as-built) | `codex-build.sh:809` | **`:819`** | `grep -nF 'git diff --end-of-options "${BASE_DIFF_REF}..HEAD"'` |
+| the wrapper range (spec item) | `codex-build.sh:809` | **`:819`** | same |
+| the mutated resume range | `inner-workflow.mjs:5243` | **`:5249`** | `grep -nF` on the composed `cmd` |
+| the CodeQL escape, "as merged" | `:260` | **`:261`**, and relabelled | `grep -n '\${'` for the construct |
+
+The other **17** are historical by design — *"on the tree this branch was cut from"*, *"as
+filed"*, *"round nine measured"* — and every one of them verifies against the tree it names:
+`git show 0db9e922:trident/inner-workflow.mjs` puts the resume diff at `:5078`, the forge
+contract at `:1426`, `branchLogBase` at `:2229`, the planner hint at `:2160` and
+`probeCiBase`'s pinned-ref line at `:5247`, exactly as written.
+
+The banner now says the sweep runs LAST, because that is the only time the claim can be true.
+
+**And one citation shape that cannot drift**: `diff-base-option-shaped.test.ts`'s
+`OUT_OF_REACH` list carries the six surviving ranges as `file:line` entries and then asserts
+them against what the scan actually found. A `file:line` in an executable assertion is
+re-derived on every run; one in prose is re-derived when someone remembers.
+
+### Round sixteen (b): the instrument under suspicion got fixed; the one written beside it did not
 
 The unpinned half of the ordering criterion was a fixture shortcut.
 `orchestrator.test.ts`'s "A PINNED dispatch issues NO origin-ref probe" asserted the absence
@@ -874,7 +924,7 @@ fallback (the bare name is kept when `origin/<base>` does not resolve — prefix
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5243`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5249`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

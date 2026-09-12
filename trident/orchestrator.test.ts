@@ -3206,7 +3206,12 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       // run would quietly carry a pin again — which is exactly what the first draft of this
       // test did, and what the `pin: null` assertion below now catches.
       hostResponder: (cmd) =>
-        cmd.join(' ') === BASE_PIN_READ ? { ok: false, stdout: '', stderr: 'fatal: not a valid ref', exit_code: 128 } : undefined,
+        cmd.join(' ') === BASE_PIN_READ
+          ? { ok: false, stdout: '', stderr: 'fatal: not a valid ref', exit_code: 128 }
+          : // `ok()` — an empty-but-ok answer — is this harness's "no opinion", which its own
+            // fallthrough treats exactly as `undefined`. The responder's declared type has no
+            // `undefined` in it.
+            ok(),
     })
     const run = await createRun({ merge_mode: 'local' as MergeMode })
 

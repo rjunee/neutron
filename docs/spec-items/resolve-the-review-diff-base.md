@@ -104,7 +104,7 @@ things:
   An earlier draft called a bare-base range there *unconstructable*: **that was false.** The
   legitimate fallback above — no resolving `refs/remotes/origin/<base>` — is a bare NAME, it is
   passed as that argv, and it reaches `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`
-  (`codex-build.sh:809`), which `trident/codex-wrapper-bare-base.test.ts` now exercises through
+  (`codex-build.sh:819`), which `trident/codex-wrapper-bare-base.test.ts` now exercises through
   the shipped line. **If a claim says something cannot be built, it has to name the mechanism
   that prevents it**; the mechanism here prevents the wrapper *choosing* a base, not a bare name
   arriving at one. `trident/codex-review.sh` is weaker still: its argv default is the literal
