@@ -294,25 +294,49 @@ export function explainDuplicateEntryHeadings(
 /** The canonical form required of newly staged as-built entries. */
 export const AS_BUILT_ENTRY_HEADING = /^## \d{4}-\d{2}-\d{2} — .+/
 
-export type FoldResult =
-  | { ok: true; log: string; heading: string; retitled: boolean }
+/** Where a promoted record lives. One file per change; see `docs/as-built/README.md`. */
+export const AS_BUILT_DIR = 'docs/as-built'
+
+/**
+ * A filename this directory may carry. Deliberately narrow: the name is derived from a branch
+ * name, which may legally contain `/`, and a `/` here would silently create a subdirectory that
+ * `promoteStagedEntries` would then not see when it checks for collisions.
+ */
+const SHARD_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+export type ShardResult =
+  | { ok: true; name: string; text: string; suffixed: boolean }
   | { ok: false; reason: string }
 
-/** Fold one staged entry directly below the log preamble. */
-export function foldEntryIntoLog(log: string, entry: string): FoldResult {
+/**
+ * Validate one staged entry and decide the file it becomes under {@link AS_BUILT_DIR}.
+ *
+ * Pure, so the rule is testable without a repo: the caller reads the staged file and writes the
+ * result. `taken` is every name already present in the directory — the caller passes the ones it
+ * has just chosen too, so two entries promoted in the same pass cannot both claim one name.
+ *
+ * THE COLLISION IS RESOLVED ON THE FILENAME, NOT ON THE HEADING, AND THAT IS THE WHOLE DIFFERENCE
+ * FROM THE MONOLITH. When both records lived in one file, two identical `## ` headings were one
+ * ambiguous key, so the incoming entry was RETITLED with a ` (n)` suffix to keep the key unique.
+ * Here the key is the path: two files may carry the same heading without either becoming
+ * ambiguous, and retitling a record to fit a filesystem would corrupt what it says. So the TITLE
+ * is preserved verbatim and the NAME takes the first free `-2`, `-3`, … suffix.
+ */
+export function shardStagedEntry(stagedPath: string, entry: string, taken: ReadonlySet<string>): ShardResult {
+  const slug = stagedPath.split('/').at(-1)!.replace(/\.md$/, '')
+  if (!SHARD_NAME.test(slug)) {
+    return { ok: false, reason: `'${slug}' is not a usable record name; expected [A-Za-z0-9._-] with no leading dot` }
+  }
+
   const parsed = parseLog(entry)
   const preambleContent = parsed.preamble.find((line) => line.trim() !== '')
   if (preambleContent !== undefined) {
-    return {
-      ok: false,
-      reason: `content before the '## ' heading: '${preambleContent}'`,
-    }
+    return { ok: false, reason: `content before the '## ' heading: '${preambleContent}'` }
   }
 
   if (parsed.entries.length !== 1) {
     const offendingLine =
       parsed.entries[1]?.lines[0]?.trimEnd() ??
-      parsed.preamble.find((line) => line.trim() !== '') ??
       entry.split('\n').find((line) => line.trim() !== '') ??
       '(empty input)'
     return {
@@ -322,67 +346,53 @@ export function foldEntryIntoLog(log: string, entry: string): FoldResult {
   }
 
   const staged = parsed.entries[0]!
-  const originalHeading = staged.lines[0]!.trimEnd()
-  if (!AS_BUILT_ENTRY_HEADING.test(originalHeading)) {
-    return {
-      ok: false,
-      reason: `heading '${originalHeading}' does not match '## YYYY-MM-DD — title'`,
-    }
+  const heading = staged.lines[0]!.trimEnd()
+  if (!AS_BUILT_ENTRY_HEADING.test(heading)) {
+    return { ok: false, reason: `heading '${heading}' does not match '## YYYY-MM-DD — title'` }
   }
 
-  const parsedLog = parseLog(log)
-  const headings = new Set(parsedLog.entries.map((existing) => existing.lines[0]!.trimEnd()))
-  let heading = originalHeading
-  let retitled = false
-  if (headings.has(heading)) {
+  let name = `${slug}.md`
+  let suffixed = false
+  if (taken.has(name)) {
     let n = 2
-    while (headings.has(`${originalHeading} (${n})`)) n += 1
-    heading = `${originalHeading} (${n})`
-    staged.lines[0] = heading
-    staged.key = `${heading} 1`
-    retitled = true
+    while (taken.has(`${slug}-${n}.md`)) n += 1
+    name = `${slug}-${n}.md`
+    suffixed = true
   }
 
-  while (staged.lines.length > 0 && staged.lines.at(-1)!.trim() === '') staged.lines.pop()
-  staged.lines.push('')
-
-  // `split('\n')` retains the final empty sentinel. When an entryless preamble already ends in a
-  // newline, that sentinel is replaced by serializeLog's boundary newline so the old bytes remain
-  // a literal prefix rather than gaining an extra blank line.
-  if (
-    parsedLog.entries.length === 0 &&
-    (log === '' || log.endsWith('\n')) &&
-    parsedLog.preamble.at(-1) === ''
-  ) {
-    parsedLog.preamble.pop()
-  }
-  parsedLog.entries.unshift(staged)
-
-  return { ok: true, log: serializeLog(parsedLog), heading, retitled }
+  // The heading is the file's first line and the body follows it verbatim; only trailing blank
+  // lines are normalised away, so the file ends in exactly one newline whatever the branch wrote.
+  const lines = [...staged.lines]
+  while (lines.length > 0 && lines.at(-1)!.trim() === '') lines.pop()
+  return { ok: true, name, text: `${lines.join('\n')}\n`, suffixed }
 }
 
-/** Fold staged entries in landing order; each successful fold becomes the new first entry. */
-export function foldEntriesIntoLog(
-  log: string,
-  entries: readonly string[],
+/**
+ * Shard staged entries in landing order, accumulating the names each one claims.
+ *
+ * A malformed entry is REFUSED by index rather than aborting the pass: its well-formed siblings
+ * still land, and the malformed staging file stays queued as the durable repair signal.
+ */
+export function shardStagedEntries(
+  entries: readonly { path: string; text: string }[],
+  existing: ReadonlySet<string>,
 ): {
-  log: string
-  folded: { heading: string; retitled: boolean }[]
+  shards: { index: number; name: string; text: string; suffixed: boolean }[]
   refused: { index: number; reason: string }[]
 } {
-  let foldedLog = log
-  const folded: { heading: string; retitled: boolean }[] = []
+  const taken = new Set(existing)
+  const shards: { index: number; name: string; text: string; suffixed: boolean }[] = []
   const refused: { index: number; reason: string }[] = []
 
   for (const [index, entry] of entries.entries()) {
-    const result = foldEntryIntoLog(foldedLog, entry)
+    const result = shardStagedEntry(entry.path, entry.text, taken)
     if (result.ok) {
-      foldedLog = result.log
-      folded.push({ heading: result.heading, retitled: result.retitled })
+      taken.add(result.name)
+      shards.push({ index, name: result.name, text: result.text, suffixed: result.suffixed })
     } else {
       refused.push({ index, reason: result.reason })
     }
   }
 
-  return { log: foldedLog, folded, refused }
+  return { shards, refused }
 }

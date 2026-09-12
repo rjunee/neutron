@@ -1,30 +1,37 @@
 /**
- * @neutronai/trident — does a governed repo's build log resolve to `merge=union`?
+ * @neutronai/trident — does a tracked attributes rule still assign a merge
+ * driver to a governed repo's FROZEN build log?
  *
- * A governed repo (one with a `SPEC.md` at its git root) keeps an append-only
- * as-built log, and every change adds an entry at the TOP of it. So two open
- * PRs conflict by construction rather than by subject, and the resolution is
- * always the same mechanical "keep both". At the worst of it that cost five
- * rebases in one evening across four unrelated PRs, and it is what motivated
- * splitting the log into one file per entry — a split that bought merge quiet
- * and spent discoverability, and was reversed.
+ * A governed repo (one with a `SPEC.md` at its git root) keeps an as-built log.
+ * This module used to answer the opposite question — "does that log resolve to
+ * `merge=union`?" — because the log was APPEND-ONLY: every change added an entry
+ * at the TOP, two open PRs conflicted by construction rather than by subject,
+ * and the resolution was always the same mechanical "keep both". At the worst of
+ * it that cost five rebases in one evening across four unrelated PRs. `union` is
+ * git's built-in driver for exactly that shape: on a conflicting hunk it takes
+ * BOTH sides instead of raising.
  *
- * `union` is git's built-in driver for exactly this shape: on a conflicting
- * hunk it takes BOTH sides instead of raising. `.gitattributes` is committed,
- * so the rule travels to every clone and every agent rather than living in one
- * machine's config.
+ * ⚠️ THAT SCOPE LIMIT WAS ALWAYS THE LOAD-BEARING PART, AND IT IS WHAT REVERSED
+ * THE RULE. Union NEVER reports a conflict. That is precisely right for a file
+ * whose changes only ever ADD, and precisely wrong everywhere else: pointed at a
+ * file whose existing lines get rewritten, it silently doubles the rewrite
+ * instead of flagging it. `docs/AS_BUILT.md` is now FROZEN — it is the record up
+ * to 2026-09-12 and takes no further entries (`docs/AS_BUILT.md:5`), and new
+ * records are one file per change under `docs/as-built/`. Two separate files
+ * never conflict with each other, so union has nothing left to resolve; and on a
+ * file nobody may write, an attribute that can never raise is strictly worse than
+ * git's default, which conflicts loudly.
  *
- * ⚠️ THE SCOPE LIMIT IS THE LOAD-BEARING PART. Union NEVER reports a conflict.
- * That is precisely right for a file whose changes only ever ADD, and precisely
- * wrong everywhere else: pointed at a file whose existing lines get rewritten,
- * it silently doubles the rewrite instead of flagging it. So the convention
- * covers the append-only log and NOTHING else — never `SPEC.md`, never
- * `ISSUES.md`, both of which are edited in place and want a real conflict.
+ * So the floor this module reports on is now ABSENCE: no tracked attributes rule
+ * may assign the log a merge driver at all. Nothing else about the reading
+ * changed — the same candidate paths, the same isolated `git check-attr` probe,
+ * the same committed-tree-not-index discipline — only the verdict the caller
+ * draws from it (`scripts/ci/check-governed-repo-attributes.ts`).
  *
  * ⚠️ THE VERDICT COMES FROM GIT. `mergeRulesFor` below reads text, which
  * answers "what does this file SAY" — a different question from "what will git
  * DO", and the difference is not academic. It is used ONLY to compose
- * suggestion text that can point at a line number. The pass/fail answer comes
+ * remediation text that can point at a line number. The pass/fail answer comes
  * from {@link resolveTrackedMergeDrivers}, which runs `git check-attr`.
  */
 
@@ -34,9 +41,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 
 /**
- * Filenames a governed repo's append-only build log is known to use. Both
- * spellings and both locations are real: Managed keeps `AS-BUILT.md` at the
- * root, Open keeps `docs/AS_BUILT.md`.
+ * Filenames a governed repo's build log is known to use. Both spellings and both
+ * locations are real: Managed keeps `AS-BUILT.md` at the root, Open keeps
+ * `docs/AS_BUILT.md`. The list is unchanged by the freeze: what is gated is
+ * whether a merge rule reaches one of these paths, and a path that no longer
+ * grows still must not be union-merged.
  */
 export const AS_BUILT_CANDIDATES = [
   'AS_BUILT.md',
@@ -44,11 +53,6 @@ export const AS_BUILT_CANDIDATES = [
   'docs/AS_BUILT.md',
   'docs/AS-BUILT.md',
 ] as const
-
-/** The `.gitattributes` line that marks one log union-merged. */
-export function unionAttributeLine(logPath: string): string {
-  return `${logPath} merge=union`
-}
 
 /**
  * The merge drivers git implements itself. Anything else must be defined by a

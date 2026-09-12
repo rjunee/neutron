@@ -1,16 +1,30 @@
 /**
- * Fold the durable `.trident/as-built/` queue into the canonical log.
+ * Promote the durable `.trident/as-built/` queue into the per-change record under `docs/as-built/`.
  *
  * This is deliberately a git-tree operation, not a checkout operation. The outer publisher can
  * be running beside a dirty or stale shared checkout, so it resolves one base tip, reads the queue
- * from that tree, and makes the append + queue deletion in one detached scratch-worktree commit.
+ * from that tree, and makes the promotion + queue deletion in one detached scratch-worktree commit.
+ *
+ * IT NO LONGER WRITES `docs/AS_BUILT.md`. That file is frozen (`docs/AS_BUILT.md:5`): it is the
+ * record up to 2026-09-12 and nothing appends to it again. A staged entry becomes its OWN file,
+ * `docs/as-built/<slug>.md`, named from the staged file's own basename — which is the branch's
+ * slug, and the spec-item slug where the change has one. Everything else about this module is
+ * unchanged, and deliberately so: the atomic base-tip resolution, the detached scratch worktree,
+ * the single commit, the deletion of the consumed staging file, and the plain (never forced) push
+ * are what make a fold safe to lose and safe to retry, and none of that depended on the
+ * destination being one file.
+ *
+ * THE EXPORTED NAMES STILL SAY "FOLD" AND THAT IS DELIBERATE. `foldStagedAsBuiltEntries` and its
+ * `folded` count are the seam `trident/tick.ts:170` and `trident/orchestrator.ts:2182` call and
+ * report on; what is folded is the QUEUE, and where it folds to is this module's business alone.
+ * Renaming the seam would have touched the orchestrator for no behavioural reason.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { foldEntriesIntoLog } from './as-built-log.ts'
+import { AS_BUILT_DIR, shardStagedEntries } from './as-built-log.ts'
 import type { RunHostCommand } from './merge.ts'
 import type { MergeMode } from './store.ts'
 
@@ -119,7 +133,7 @@ export async function foldStagedAsBuiltEntries(
       if (!added.ok) {
         result = gitFailure(`could not create the as-built scratch worktree`, added)
       } else {
-        result = await foldInScratch(run_host, repo_path, scratch, merge_mode, base, expectedTip, landed)
+        result = await promoteInScratch(run_host, repo_path, scratch, merge_mode, base, expectedTip, landed)
       }
     } finally {
       const removed = await run_host(['git', '-C', repo_path, 'worktree', 'remove', '--force', scratch], repo_path)
@@ -144,7 +158,7 @@ export async function foldStagedAsBuiltEntries(
   }
 }
 
-async function foldInScratch(
+async function promoteInScratch(
   run_host: RunHostCommand,
   repo_path: string,
   scratch: string,
@@ -158,28 +172,33 @@ async function foldInScratch(
     landedAt,
     text: readFileSync(join(scratch, path), 'utf8'),
   }))
-  const logPath = join(scratch, 'docs', 'AS_BUILT.md')
-  const originalLog = readFileSync(logPath, 'utf8')
-  const folded = foldEntriesIntoLog(
-    originalLog,
-    entries.map((entry) => entry.text),
-  )
-  const refusedIndexes = new Set(folded.refused.map((item) => item.index))
+  const recordDir = join(scratch, AS_BUILT_DIR)
+  mkdirSync(recordDir, { recursive: true })
+  // The names already on the base tip. Read from the scratch worktree, which IS the resolved tip —
+  // the same tree every other read in this function comes from — so a record added by a concurrent
+  // pass that this one has not fetched cannot be silently overwritten: it is not in this tree, this
+  // push is plain, and a moved base rejects it.
+  const existing = new Set(readdirSync(recordDir).filter((name) => name.endsWith('.md')))
+  const promoted = shardStagedEntries(entries, existing)
+  const refusedIndexes = new Set(promoted.refused.map((item) => item.index))
   const consumed = entries.filter((_, index) => !refusedIndexes.has(index))
-  const refused = folded.refused.map((item) => ({ path: entries[item.index]!.path, reason: item.reason }))
+  const refused = promoted.refused.map((item) => ({ path: entries[item.index]!.path, reason: item.reason }))
 
   if (consumed.length === 0) {
     return { ok: false, folded: 0, reason: malformedReason(refused) }
   }
 
-  writeFileSync(logPath, folded.log)
+  for (const shard of promoted.shards) writeFileSync(join(recordDir, shard.name), shard.text)
   const removed = await run_host(
     ['git', '-C', scratch, 'rm', '--', ...consumed.map((entry) => entry.path)],
     scratch,
   )
   if (!removed.ok) return gitFailure('could not remove consumed staged as-built entries', removed)
-  const added = await run_host(['git', '-C', scratch, 'add', '--', 'docs/AS_BUILT.md'], scratch)
-  if (!added.ok) return gitFailure('could not stage the folded as-built log', added)
+  const added = await run_host(
+    ['git', '-C', scratch, 'add', '--', ...promoted.shards.map((shard) => `${AS_BUILT_DIR}/${shard.name}`)],
+    scratch,
+  )
+  if (!added.ok) return gitFailure('could not stage the promoted as-built records', added)
 
   const committed = await run_host(
     [
@@ -194,14 +213,14 @@ async function foldInScratch(
       'commit.gpgsign=false',
       'commit',
       '-m',
-      `docs(as-built): fold ${consumed.length} staged ${consumed.length === 1 ? 'entry' : 'entries'}`,
+      `docs(as-built): record ${consumed.length} staged ${consumed.length === 1 ? 'entry' : 'entries'}`,
     ],
     scratch,
   )
-  if (!committed.ok) return gitFailure('could not commit the folded as-built entries', committed)
+  if (!committed.ok) return gitFailure('could not commit the promoted as-built records', committed)
 
   const head = await run_host(['git', '-C', scratch, 'rev-parse', 'HEAD'], scratch)
-  if (!head.ok) return gitFailure('could not resolve the folded as-built commit', head)
+  if (!head.ok) return gitFailure('could not resolve the promoted as-built commit', head)
   const newTip = head.stdout.trim()
 
   if (merge_mode === 'pr') {
@@ -212,7 +231,7 @@ async function foldInScratch(
       scratch,
     )
     if (!pushed.ok) {
-      const failed = gitFailure(`could not land folded as-built entries on '${base}'`, pushed)
+      const failed = gitFailure(`could not land promoted as-built records on '${base}'`, pushed)
       return { ...failed, folded: 0 }
     }
   } else {

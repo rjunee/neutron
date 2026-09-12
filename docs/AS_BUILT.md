@@ -2,6 +2,19 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+> **FROZEN as of 2026-09-12. Nothing is appended here again.**
+>
+> This file remains the record for every change up to that date — the 405 entries
+> below are unchanged and are still what other documents cite. Records for changes
+> that land AFTER it are one file per change under `docs/as-built/`; the format is
+> `docs/as-built/README.md`.
+>
+> Two things enforce the freeze. `trident/as-built-appender.ts` promotes a staged
+> `.trident/as-built/**` entry to `docs/as-built/<slug>.md` rather than folding it
+> in here (`promoteInScratch`, `trident/as-built-appender.ts:161`), and
+> `scripts/ci/as-built-write-guard.sh:213` FAILS any branch whose base…head diff
+> touches this path.
+
 ## 2026-09-01 — switching back into a conversation lands at the bottom again
 
 A kept-alive conversation surface is `.car-conv[hidden]`, and `chat-react.html` gives that

@@ -13,7 +13,8 @@ import { TridentRunStore } from './store.ts'
 import { buildAsBuiltCatchup, TridentTickLoop } from './tick.ts'
 
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
-const HEADER = '# AS_BUILT\n\nRunning log of what shipped, newest first. One entry per merged change.\n\n'
+const HEADER = '# AS_BUILT\n\nFROZEN. One entry per merged change, up to the freeze.\n\n'
+const FROZEN_LOG = `${HEADER}## 2026-08-17 — history\n\nold body\n`
 
 let root: string
 let db: ProjectDb
@@ -38,13 +39,13 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 describe('as-built outer-loop wiring with real git', () => {
-  test('a successful APPROVE merge folds its staged entry on the base', async () => {
+  test('a successful APPROVE merge records its staged entry as a file on the base', async () => {
     const repo = join(root, 'approve-repo')
     mkdirSync(join(repo, 'docs'), { recursive: true })
     await git(root, 'init', '-q', '--initial-branch=main', repo)
     await git(repo, 'config', 'user.name', 'Test Setup')
     await git(repo, 'config', 'user.email', 'setup@neutron.local')
-    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), `${HEADER}## 2026-08-17 — history\n\nold body\n`)
+    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
     await git(repo, 'add', '-A')
     await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'base')
 
@@ -93,13 +94,16 @@ describe('as-built outer-loop wiring with real git', () => {
     expect(outcome.run.phase).toBe('done')
     expect(outcome.run.failure_reason).toBeNull()
     expect(outcome.note).toContain('as-built: folded 1')
-    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toStartWith(
-      `${HEADER}## 2026-08-18 — folded after approve\n\nshipped body\n\n`,
+    // The record is a NEW FILE named from the staged slug, and the frozen log is
+    // not in the commit at all.
+    expect(await git(repo, 'show', 'main:docs/as-built/approve-fold.md')).toBe(
+      '## 2026-08-18 — folded after approve\n\nshipped body',
     )
+    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
     expect(await git(repo, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')).toBe('')
     expect(
       (await git(repo, 'diff-tree', '--no-commit-id', '--name-status', '-r', 'main')).split('\n').sort(),
-    ).toEqual([`D\t${stagedPath}`, 'M\tdocs/AS_BUILT.md'])
+    ).toEqual(['A\tdocs/as-built/approve-fold.md', `D\t${stagedPath}`])
   }, 60_000)
 
   test('a fold failure leaves the merged run done and its staged entry queued', async () => {
@@ -108,7 +112,7 @@ describe('as-built outer-loop wiring with real git', () => {
     await git(root, 'init', '-q', '--initial-branch=main', repo)
     await git(repo, 'config', 'user.name', 'Test Setup')
     await git(repo, 'config', 'user.email', 'setup@neutron.local')
-    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), `${HEADER}## 2026-08-17 — history\n\nold body\n`)
+    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
     await git(repo, 'add', '-A')
     await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'base')
 
@@ -167,16 +171,15 @@ describe('as-built outer-loop wiring with real git', () => {
     expect(await git(repo, 'show', `main:${stagedPath}`)).toBe(
       '## 2026-08-18 — queued after failure\n\nshipped body',
     )
-    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(
-      `${HEADER}## 2026-08-17 — history\n\nold body`,
-    )
+    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
+    expect(await git(repo, 'ls-tree', '-r', '--name-only', 'main', '--', 'docs/as-built/')).toBe('')
   }, 60_000)
 
-  test('a later ordinary tick folds a missed entry and an empty queue creates no commit', async () => {
+  test('a later ordinary tick records a missed entry and an empty queue creates no commit', async () => {
     const repo = join(root, 'repo')
     mkdirSync(join(repo, 'docs'), { recursive: true })
     await git(root, 'init', '-q', '--initial-branch=main', repo)
-    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), `${HEADER}## 2026-08-17 — history\n\nold body\n`)
+    writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
     await git(repo, 'add', '-A')
     await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'base')
 
@@ -206,13 +209,14 @@ describe('as-built outer-loop wiring with real git', () => {
     expect((await loop.runOnce()).advanced).toBe(0)
     const foldedTip = await git(repo, 'rev-parse', 'main')
     expect(foldedTip).not.toBe(queuedTip)
-    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toStartWith(
-      `${HEADER}## 2026-08-18 — caught up later\n\nnew body\n\n`,
+    expect(await git(repo, 'show', 'main:docs/as-built/missed-after-merge.md')).toBe(
+      '## 2026-08-18 — caught up later\n\nnew body',
     )
+    expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
     expect(await git(repo, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')).toBe('')
     expect((await git(repo, 'diff-tree', '--no-commit-id', '--name-status', '-r', foldedTip)).split('\n').sort()).toEqual([
+      'A\tdocs/as-built/missed-after-merge.md',
       `D\t${stagedPath}`,
-      'M\tdocs/AS_BUILT.md',
     ])
 
     expect((await loop.runOnce()).advanced).toBe(0)

@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 /**
- * CI conformance check: a governed repo marks its append-only build log
- * `merge=union`.
+ * CI conformance check: a governed repo leaves its FROZEN build log with no
+ * merge driver at all.
  *
  * A governed repo is one with a `SPEC.md` at its git root (the Spec-Drift
  * Guardrails convention, the same test `detectRalphMode` uses). Those repos
- * keep an as-built log that every change appends to at the top, so two open PRs
- * conflict by construction rather than by subject.
+ * keep an as-built log. While that log was APPEND-ONLY this gate required it to
+ * resolve `merge=union`, because two open PRs conflicted by construction rather
+ * than by subject and "keep both" was always the right resolution.
+ *
+ * THE LOG IS FROZEN NOW (`docs/AS_BUILT.md:5`) and the live record is one file
+ * per change under `docs/as-built/`, so the requirement is inverted rather than
+ * dropped. Union NEVER reports a conflict; on a file nobody may write, that
+ * turns an edit that should have stopped someone into a silent doubling. Two
+ * per-change files never conflict with each other, so there is nothing union
+ * would still buy. The gate therefore fails when ANY tracked rule assigns the
+ * log a merge driver, and passes when git resolves the path as unspecified.
  *
  * This is a CHECK, not a fixer, and deliberately so. The alternative considered
  * was having the build dispatch write `.gitattributes` into a repo when it
@@ -50,7 +59,6 @@ import {
   mergeRulesAcross,
   presentAsBuiltLogs,
   resolveTrackedMergeDrivers,
-  unionAttributeLine,
   untrackedOverlayAttributes,
 } from '@neutronai/trident/as-built-union-attribute.ts'
 
@@ -186,13 +194,18 @@ if (!isGoverned) {
 const present = presentAsBuiltLogs(root)
 
 if (present.length === 0) {
-  console.log('governed-repo attributes: no append-only build log found — nothing to enforce')
+  console.log('governed-repo attributes: no build log found — nothing to enforce')
   process.exit(0)
 }
 
 const attributesFiles = collectTrackedAttributesFiles(root, present)
 const tracked = resolveTrackedMergeDrivers({ attributesFiles, paths: present })
-const failing = present.filter((path) => tracked.get(path) !== 'union')
+// `null` is `git check-attr` reporting `unspecified` — no rule reaches the path,
+// which is the whole requirement now. Every other answer is a rule to delete,
+// including the attribute STATES `set`/`unset`: a bare `<path> merge` and a
+// `<path> -merge` are both somebody deciding how this file merges, and nobody
+// gets to decide that about a file nobody may write.
+const failing = present.filter((path) => tracked.get(path) !== null)
 
 /**
  * The local clone's view, reported but never decisive — and credited to the
@@ -268,18 +281,18 @@ function localNote(): string[] {
 }
 
 if (failing.length === 0) {
-  const detail = present.map((p) => `${p} (merge=union)`).join(', ')
-  console.log(`✅ governed-repo attributes OK — git resolves ${detail} from the tracked files`)
+  const detail = present.map((p) => `${p} (merge unspecified)`).join(', ')
+  console.log(`✅ governed-repo attributes OK — no tracked rule assigns a merge driver to ${detail}`)
   for (const line of localNote()) console.log(line)
   process.exit(0)
 }
-
-console.error('❌ governed-repo attributes: the append-only build log is not union-merged.')
+console.error('❌ governed-repo attributes: the FROZEN build log still has a merge driver.')
 console.error('')
-console.error('   Every change appends an entry at the top of this file, so two open PRs')
-console.error('   conflict by construction rather than by subject, and the resolution is')
-console.error('   always the same mechanical "keep both". git has a built-in driver for')
-console.error('   that shape, and the tracked rule is the floor every fresh clone gets.')
+console.error('   This log no longer grows — it is the record up to its freeze date and new')
+console.error('   records are one file per change under docs/as-built/. A merge attribute on it')
+console.error('   can only do harm now: `union` never reports a conflict, so an edit that should')
+console.error('   have stopped somebody gets silently doubled instead, and no other driver is any')
+console.error('   safer on a file nobody is allowed to write. git\'s default is the loud one.')
 console.error('')
 console.error('   git check-attr, over the tracked attributes files alone, resolves:')
 console.error(
@@ -293,77 +306,55 @@ for (const path of failing) {
   console.error('')
   console.error(`     ${path} → merge=${driver ?? 'unspecified'}`)
 
-  if (driver === null) {
-    console.error(`       No rule reaches this path. Add to .gitattributes:`)
-    console.error(`         ${unionAttributeLine(path)}`)
-  } else if ((MERGE_ATTRIBUTE_STATES as readonly string[]).includes(driver)) {
-    // `set`/`unset` are attribute STATES, not driver names. Saying "no
-    // merge.set.driver config" sends the reader after a config key git has
-    // never had.
+  if (driver !== null && (MERGE_ATTRIBUTE_STATES as readonly string[]).includes(driver)) {
+    // `set`/`unset` are attribute STATES, not driver names. Saying "delete the
+    // merge=set rule" sends the reader looking for a token nobody wrote: `set`
+    // comes from a bare `<path> merge`, and `unset` from `<path> -merge` OR from
+    // the built-in `binary` MACRO, which expands to `-diff -merge -text` and
+    // contains no `merge` token at all.
     console.error(`       '${driver}' is not a driver name — it is the attribute STATE git reports.`)
-    if (driver === 'set') {
-      console.error(`       It comes from a bare '<path> merge' rule. Measured on git 2.50.1: that is`)
-      console.error(`       the ordinary text merge, so this log still conflicts with markers on every`)
-      console.error(`       concurrent append.`)
-    } else {
-      // Do NOT tell the reader they wrote `-merge`. Measured on git 2.50.1, the
-      // built-in `binary` MACRO expands to `-diff -merge -text`, so it reports
-      // `merge: unset` from a line containing no `merge` token at all — and
-      // sending someone to grep for `-merge` in that repo finds nothing.
-      console.error(`       It comes from a rule that UNSETS merge — spelled '<path> -merge', or via the`)
-      console.error(`       built-in 'binary' MACRO, which expands to '-diff -merge -text'. Measured on`)
-      console.error(`       git 2.50.1: git then treats the file as BINARY — 'Cannot merge binary files',`)
-      console.error(`       ours kept whole, the other side's entries dropped from the working file`)
-      console.error(`       entirely.`)
-    }
-    console.error(`       Write the driver out in full:`)
-    console.error(`         ${unionAttributeLine(path)}`)
-  } else if ((BUILT_IN_MERGE_DRIVERS as readonly string[]).includes(driver)) {
-    console.error(`       '${driver}' is a built-in driver, but it is not union: this log still`)
-    console.error(`       conflicts on every concurrent append. Make the winning rule:`)
-    console.error(`         ${unionAttributeLine(path)}`)
-  } else {
-    console.error(`       '${driver}' is a CUSTOM driver, and naming one in the TRACKED file does`)
-    console.error(`       not give a fresh clone union behaviour. Measured on git 2.50.1: a clone`)
-    console.error(`       with no merge.${driver}.* config falls back to the ordinary text merge —`)
-    console.error(`       an exit-1 content conflict with markers, which is the thing this rule is`)
-    console.error(`       supposed to prevent. (The fatal 'lacks command line' abort is a different`)
-    console.error(`       case: merge.${driver}.name defined with no .driver.)`)
-    console.error(`       Bind a custom driver in the UNTRACKED $GIT_COMMON_DIR/info/attributes`)
-    console.error(`       instead (scripts/install-merge-drivers.sh), which outranks .gitattributes`)
-    console.error(`       where installed and is absent where it is not, and keep the tracked line:`)
-    console.error(`         ${unionAttributeLine(path)}`)
+    console.error(
+      driver === 'set'
+        ? `       It comes from a bare '<path> merge' rule.`
+        : `       It comes from '<path> -merge', or from the built-in 'binary' MACRO, which`,
+    )
+    if (driver !== 'set') console.error(`       expands to '-diff -merge -text'.`)
+  } else if (driver !== null && (BUILT_IN_MERGE_DRIVERS as readonly string[]).includes(driver)) {
+    console.error(`       '${driver}' is one of git's built-in drivers. It was correct here while this`)
+    console.error(`       log was append-only; it is not correct on a frozen one.`)
+  } else if (driver !== null) {
+    console.error(`       '${driver}' is a CUSTOM driver, bound in a TRACKED attributes file — which`)
+    console.error(`       does not even give a fresh clone that behaviour. Measured on git 2.50.1: a`)
+    console.error(`       clone with no merge.${driver}.* config falls back to the ordinary text merge.`)
+    console.error(`       Either way, this log takes no rule at all.`)
   }
+  console.error(`       DELETE the rule. No replacement line goes in its place.`)
 
-  // Name the lines that are actually in the files. When the union line IS there
-  // and something later beats it, "add this line" is unactionable advice — the
-  // line is already there and the reader needs to be shown the override.
-  //
-  // "the LAST wins" is only true when the last EXACT-path rule is in fact what
-  // git resolved. A later WILDCARD outranks every exact rule collected here, and
-  // printing the list under that heading points at the wrong line: the reader
-  // edits the last exact rule, the wildcard still wins, and the gate stays red
-  // for a reason its own output denied.
+  // Name the lines that are actually in the files, so the reader can find the
+  // rule to delete. "the LAST wins" is only true when the last EXACT-path rule is
+  // in fact what git resolved: a later WILDCARD outranks every exact rule
+  // collected here, and printing the list under that heading points at the wrong
+  // line.
   const rules = mergeRulesAcross(attributesFiles, path)
   const last = rules.length > 0 ? rules[rules.length - 1] : undefined
   const listRules = () => {
     for (const rule of rules) console.error(`         ${rule.file} line ${rule.line}: ${rule.text}`)
   }
-  if (last !== undefined && last.driver === driver) {
-    if (rules.length > 1) {
-      console.error(`       ${rules.length} tracked rules assign this exact path; the LAST wins:`)
-      listRules()
-    }
-  } else if (last !== undefined) {
-    if (rules.length === 1) {
-      console.error(`       ${last.file} line ${last.line} says '${last.text}', but a later`)
-      console.error(`       or broader pattern overrides it — git's answer above is the one that counts.`)
-    } else {
-      console.error(`       ${rules.length} tracked rules assign this exact path and NONE of them is what`)
-      console.error(`       git resolved, so a later or broader pattern overrides them all:`)
-      listRules()
-      console.error(`       git's answer above is the one that counts.`)
-    }
+  if (rules.length === 0) {
+    console.error(`       No exact-path rule assigns it, so a WILDCARD in one of the files above`)
+    console.error(`       reaches this log — git's answer is the one that counts.`)
+  } else if (last !== undefined && last.driver === driver) {
+    console.error(
+      rules.length > 1
+        ? `       ${rules.length} tracked rules assign this exact path; the LAST wins:`
+        : `       The rule is here:`,
+    )
+    listRules()
+  } else {
+    console.error(`       ${rules.length} tracked rule(s) assign this exact path and NONE of them is what`)
+    console.error(`       git resolved, so a later or broader pattern overrides them all:`)
+    listRules()
+    console.error(`       git's answer above is the one that counts.`)
   }
 }
 

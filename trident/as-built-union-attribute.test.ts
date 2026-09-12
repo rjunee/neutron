@@ -38,7 +38,6 @@ import {
   presentAsBuiltLogs,
   relevantAttributesPaths,
   resolveTrackedMergeDrivers,
-  unionAttributeLine,
   untrackedOverlayAttributes,
 } from './as-built-union-attribute.ts'
 
@@ -207,9 +206,13 @@ describe('AS_BUILT_CANDIDATES', () => {
   })
 })
 
-describe('unionAttributeLine', () => {
-  it('is the line a maintainer can paste', () => {
-    expect(unionAttributeLine(LOG)).toBe(`${LOG} merge=union`)
+describe('the tracked floor this repo actually ships', () => {
+  it('assigns the frozen log NO merge driver', () => {
+    // The gate's own subject, read from the repo it ships in. `merge=union` used
+    // to be REQUIRED here; it is now forbidden, because the log is frozen and
+    // union never reports a conflict (see the module docblock).
+    const attributes = readFileSync(join(REPO_ROOT, '.gitattributes'), 'utf8')
+    expect(mergeRulesFor(attributes, LOG)).toEqual([])
   })
 })
 
