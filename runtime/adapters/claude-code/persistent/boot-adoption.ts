@@ -70,7 +70,7 @@ import {
   type OrphanAdoptionDeps,
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
-import { hostSupportsAdoption, type AdoptableHost } from './pty-host.ts'
+import { hostSupportsAdoption, type AdoptableHost, type PtyChild } from './pty-host.ts'
 import { getRecord, loadRegistry, patchRecord, withRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
@@ -586,7 +586,7 @@ async function adoptRow(
   sink.register(record.sessionId, session)
 
   let liveHandle: LiveProcessHandle | undefined
-  let scanChild: import('./pty-host.ts').PtyChild | undefined
+  let scanChild: PtyChild | undefined
   // THE TRAP (#539, and the one defect here that ACTS rather than fails): every latch
   // is in-memory, so the first screen of an adopted pane would look like a rising edge
   // for whatever is already on it — including a tool-approval prompt the owner was
@@ -595,8 +595,30 @@ async function adoptRow(
   // of everything already present, and fires nothing. Detectors act only on what the
   // pane emits AFTER we arrived, which is the only output this gateway can claim to
   // have caused.
+  /**
+   * EVERYTHING THIS FUNCTION INSTALLED, TAKEN BACK — then the pane closed.
+   *
+   * The two halves are separate obligations and both are ours. The registration must
+   * go or a credential stays authorised for a session with no child, which is the
+   * standing-grant orphan the credential model exists to refuse. And the PANE must go
+   * because by this point it has been verified as our child on our transcript: the
+   * rule is adopt or close, and "leave it and report a failure" is how a cold spawn
+   * ends up as a second owner of a live transcript.
+   */
+  const unwind = async (reason: string, attached?: PtyChild): Promise<RowAdoptionOutcome> => {
+    sink.unregisterIf(record.sessionId, session)
+    if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
+    pool.delete(sessionKey)
+    session.sizeWatchdog?.stop()
+    session.deadTurnWatcher?.stop()
+    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
+    return closed
+      ? { kind: 'closed-unadoptable', sessionKey, reason }
+      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+  }
+
   let primed = false
-  let child: import('./pty-host.ts').PtyChild
+  let child: PtyChild
   try {
     child = await host.attach(handle, {
       cwd: record.cwd,
@@ -630,73 +652,75 @@ async function adoptRow(
   } catch (e) {
     // The attach failed, so nothing is attached — but we ALREADY registered the
     // session, which would leave a credential authorised for a session with no child.
-    sink.unregisterIf(record.sessionId, session)
-    return {
-      kind: 'undecided',
-      sessionKey,
-      reason: `attach to pane ${handle} failed: ${e instanceof Error ? e.message : String(e)}`,
-    }
+    // And the pane itself is still running, still verified as ours: by the rule this
+    // module keeps, it is adopted or CLOSED, never left for a cold spawn to race.
+    return await unwind(`attach to pane ${handle} failed: ${e instanceof Error ? e.message : String(e)}`)
   }
   // CHECKED AGAIN, AFTER THE AWAIT. The attach is a socket round trip and the budget
   // can expire inside it — the window between the check above and this line is the
-  // one thing that check cannot cover. Unwind fully: the registration goes, and the
-  // pane we have now attached to is closed rather than left running beside whatever
-  // the released gate spawned.
+  // one thing that check cannot cover.
   if (signal.abandoned) {
-    sink.unregisterIf(record.sessionId, session)
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
-    const reason = 'the spawn gate was released while the attach was in flight'
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    return await unwind('the spawn gate was released while the attach was in flight', child)
   }
   scanChild = child
   session.attachChild(child)
   childByKey.set(sessionKey, child)
-  liveHandle = registerLiveProcessSafe({
-    name: sessionKey,
-    pid: child.pid,
-    tool_name: 'cc-repl',
-    meta: { session_id: record.sessionId, channel: record.channelName },
-  })
-  session.liveHandle = liveHandle
-  wireChildExit({
-    session,
-    child,
-    sessionKey,
-    sessionId: record.sessionId,
-    liveHandle: () => liveHandle,
-    label: 'boot-adoption.exit',
-  })
-  // Only NOW may screens flow: the scan target and the activity handle both exist.
-  child.beginOutput?.()
+  try {
+    liveHandle = registerLiveProcessSafe({
+      name: sessionKey,
+      pid: child.pid,
+      tool_name: 'cc-repl',
+      meta: { session_id: record.sessionId, channel: record.channelName },
+    })
+    session.liveHandle = liveHandle
+    wireChildExit({
+      session,
+      child,
+      sessionKey,
+      sessionId: record.sessionId,
+      liveHandle: () => liveHandle,
+      label: 'boot-adoption.exit',
+    })
+    // Only NOW may screens flow: the scan target and the activity handle both exist.
+    child.beginOutput?.()
 
-  const projectsDir = options.projectsDir
-  session.deadTurnWatcher = startApi5xxDeadTurnWatcher({
-    jsonlPath: sessionJsonlPath(record.sessionId, record.cwd, projectsDir),
-    notify:
-      options.onDeadTurnNotice ??
-      ((notice: DeadTurnNotice): void => {
-        process.stderr.write(
-          `[repl-api5xx] dead turn on session=${record.sessionId.slice(0, 8)} matched=${notice.matched} — user should resend last message\n`,
-        )
-      }),
-  })
-  session.sizeWatchdog = startSessionSizeWatchdog({
-    readSize: () => measurePostCompactSize(sessionJsonlPath(record.sessionId, record.cwd, projectsDir)),
-    surface: (severity, sizeBytes) => surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
-    writeKey: (key) => child.writeKey?.(key),
-    write: (data) => child.write(data),
-    isIdle: () =>
-      session.activeTurn === undefined &&
-      Date.now() - session.lastDataAt >= (options.sizeCompactIdleQuiesceMs ?? SESSION_COMPACT_IDLE_QUIESCE_MS),
-    ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
-  })
+    const projectsDir = options.projectsDir
+    session.deadTurnWatcher = startApi5xxDeadTurnWatcher({
+      jsonlPath: sessionJsonlPath(record.sessionId, record.cwd, projectsDir),
+      notify:
+        options.onDeadTurnNotice ??
+        ((notice: DeadTurnNotice): void => {
+          process.stderr.write(
+            `[repl-api5xx] dead turn on session=${record.sessionId.slice(0, 8)} matched=${notice.matched} — user should resend last message\n`,
+          )
+        }),
+    })
+    session.sizeWatchdog = startSessionSizeWatchdog({
+      readSize: () => measurePostCompactSize(sessionJsonlPath(record.sessionId, record.cwd, projectsDir)),
+      surface: (severity, sizeBytes) => surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
+      writeKey: (key) => child.writeKey?.(key),
+      write: (data) => child.write(data),
+      isIdle: () =>
+        session.activeTurn === undefined &&
+        Date.now() - session.lastDataAt >= (options.sizeCompactIdleQuiesceMs ?? SESSION_COMPACT_IDLE_QUIESCE_MS),
+      ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
+    })
 
-  // In the pool LAST, because being in the pool is what makes this session servable:
-  // until every line above has run, a turn that found it here would inject into a
-  // session whose exit wiring, watchers or scan target were still missing.
-  pool.set(sessionKey, Promise.resolve(session))
+    // In the pool LAST, because being in the pool is what makes this session servable:
+    // until every line above has run, a turn that found it here would inject into a
+    // session whose exit wiring, watchers or scan target were still missing.
+    pool.set(sessionKey, Promise.resolve(session))
+  } catch (e) {
+    // A WATCHER THAT WOULD NOT START MUST NOT STRAND A LIVE CHILD. Everything between
+    // the attach and the pool insert can throw — a host's `beginOutput`, a watcher
+    // whose transcript path is unreadable — and until `pool.set` runs, nothing owns
+    // this session: the next turn would spawn over a child that is attached,
+    // registered and invisible. Unwind, close, and say what happened.
+    return await unwind(
+      `wiring the adopted session failed: ${e instanceof Error ? e.message : String(e)}`,
+      child,
+    )
+  }
 
   // WHAT THE ROW NOW HOLDS, read back, not what we asked it to hold. The pid is the
   // one field adoption can legitimately correct — the child is the same process, so a

@@ -280,14 +280,33 @@ describe('the refuse directions — one owner per transcript, always', () => {
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 
-  it('an attach that fails undoes the sink registration it had already made', async () => {
+  it('an attach that fails undoes the sink registration AND closes the pane', async () => {
     const f = fixture()
     f.host.attachError = new Error('transport died')
     const credential = deriveChildSinkToken(sink.token, GENERATION)
     const outcome = await run(f)
-    expect(outcome.kind).toBe('undecided')
+    // Verified as ours and not adopted, so it is closed — the same rule as every
+    // other unadoptable case. Leaving it would let the cold spawn that follows become
+    // a second owner of this transcript.
+    expect(outcome.kind).toBe('closed-unadoptable')
+    expect(f.host.closed).toEqual([HANDLE])
     // A standing authorization for a session with no child is exactly the orphan the
     // credential model exists to refuse.
+    expect(await postReply(credential)).toBe(401)
+  })
+
+  it('a failure AFTER the attach unwinds everything it installed, and closes', async () => {
+    // Anything between the attach and the pool insert can throw. Until `pool.set`
+    // runs nothing owns the session, so a half-wired child would be attached,
+    // registered and invisible — and the next turn would spawn over it.
+    const f = fixture()
+    f.host.beginOutputError = new Error('the consumer could not be wired')
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('closed-unadoptable')
+    expect(f.host.closed).toEqual([HANDLE])
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(childByKey.get(KEY)).toBeUndefined()
     expect(await postReply(credential)).toBe(401)
   })
 })

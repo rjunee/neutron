@@ -41,6 +41,9 @@ export class FakeAdoptableHost implements AdoptableHost {
   attachError: Error | undefined
   /** Make `closeHandle` reject — a close that closes nothing. */
   closeError: Error | undefined
+  /** Make the attached child's `beginOutput` throw, standing in for anything between
+   *  the attach and the pool insert that can fail after a child exists. */
+  beginOutputError: Error | undefined
   /** Held until released, so a test can drive the in-flight window. */
   private attachHold: Promise<void> | undefined
   private releaseAttach: (() => void) | undefined
@@ -95,6 +98,7 @@ export class FakeAdoptableHost implements AdoptableHost {
       hasExited: () => exited,
       wasKilledByUs: () => killed,
       beginOutput: () => {
+        if (this.beginOutputError !== undefined) throw this.beginOutputError
         for (const s of pane.screens) opts.onScreen?.(s)
       },
       push: (screen: string) => opts.onScreen?.(screen),
