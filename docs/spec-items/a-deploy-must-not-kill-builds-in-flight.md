@@ -24,6 +24,17 @@ DISTINCT FROM the governance tracker's #514 (*a CRASHED trident run is never rea
 the row does AFTER a child dies and is now served by the `onChildCrash` sink. This asks why the child
 dies at all, and answers: we killed it. Fixing one does not fix the other.
 
+## Scope of the work landed so far
+
+PR #642 ADVANCES THIS ITEM AND DOES NOT CLOSE IT, and the issue stays open on purpose.
+What it delivers is the reporting half: every launcher this gateway kills on its way down
+is recorded and reported as a deploy/restart rather than as a crash. The item's primary
+behaviour — a deploy that drains or defers, or a workflow that survives its launcher's
+restart — is NOT delivered: every pooled and quarantined launcher is still killed during
+shutdown, for the reasons under criterion 1 below. Criteria 1 and 2 remain unticked; 3 and
+4 are met. The marker moves when the behaviour does; moving the item instead is how work
+disappears.
+
 ## Acceptance
 
 - [ ] **A deploy either drains/defers while a run is in flight, OR the workflow survives its
@@ -111,7 +122,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       AND ON THE READ SIDE, the same question asked of the record rather than the sample:
       a record ATTRIBUTES a death, it does not ESTABLISH one — it is written before
       `kill()`, which can throw, so the reader confirms the death against the pid the
-      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1106-1128`). A
+      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1123-1163`). A
       revision that returned the attribution from the record alone would have crashed a
       run whose launcher was still alive. Checks:
       `__tests__/gateway-shutdown-kill.test.ts` ("only a child observed ALIVE is attributed
@@ -148,6 +159,36 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:993`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- AN HONEST VALUE WAS DELIVERED DOWN A CHANNEL THAT LIES, and it inverted this item's own
+  subject. A child whose kill did not land was reported with `cause: 'unknown'` — accurate
+  — to `onChildCrash`, whose production sink latches `crashRunningByLauncher` and marks
+  every still-running run on that launcher `crashed`. The child that SURVIVED the deploy
+  had its live build marked crashed by the change meant to protect it. A death sink is now
+  told only where a death is ESTABLISHED (`alive-and-killed`, `already-gone`); an
+  unestablished disposition goes to the notify-only seam and leaves the crash edge open.
+  Pinned against the real store: the run stays `running`.
+- ABANDONED IS NOT CANCELLED. A sink that timed out could still COMMIT a moment later,
+  while the crash edge — keyed on our having waited — stayed open, so the next boot
+  reported the same death over the top of a reason that had already landed. A late success
+  now closes the edge; a late failure does not.
+- EVERY BOUND IN THE SHUTDOWN WAS ALSO A FLOOR. `Promise.race([work, sleep(ms)])` settles
+  when the work wins and leaves the timer running, and a pending timer keeps the runtime
+  alive (measured: a race against `Bun.sleep(2000)` takes 2.01 s to exit). So a shutdown
+  whose sinks answered instantly still burned the full per-sink budget inside a deadline
+  systemd owns. Both waits are now cancellable handles released in a `finally`. The
+  deterministic cases could not see it because they injected a wait that resolved at once,
+  which made the BUDGET observable and the TIMER unobservable: A FAKE THAT REPLACES THE
+  MECHANISM REMOVES THE PROPERTY THE MECHANISM HAS. Pinned in a subprocess, against elapsed
+  process lifetime, with a leak control proving the measurement can fail.
+- A PID IS AN IDENTIFIER, NOT A HANDLE. Kill entries stay eligible for four hours and the
+  kernel reissues pids well inside that, while every reader confirmed a death against a
+  stored NUMBER — so a reissued pid read as a live launcher (the multi-hour hang this item
+  exists to remove, arriving through the process table), and an absent one was treated as
+  evidence about our child when it could have been evidence about a stranger. Entries now
+  carry the process identity the kernel maintains (`/proc/<pid>/stat` start ticks + boot
+  id): a matching identity is ours, a differing one proves ours let the pid go, another
+  boot is not comparable, and NO identity means the death may still be established but the
+  cause may NOT be attributed.
 - THE RETENTION BACKSTOP WAS THE PRIMARY RULE UNDER LOAD, and evicted inside the window it
   guaranteed. With more entries than the cap all genuinely young, it dropped the oldest
   still-live attribution — the loss this item exists to prevent, at the load that makes it
@@ -270,7 +311,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:734`), so a
+  (`supervision.ts:1059`), which a replacement spawn overwrites (`spawn.ts:734`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control

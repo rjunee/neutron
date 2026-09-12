@@ -30,6 +30,10 @@ import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { interpretFailure } from '@neutronai/trident/delivery.ts'
 import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { buildTridentChildCrashSink } from '../trident-child-crash-sink.ts'
+import {
+  deliverShutdownKillReports,
+  type PendingShutdownKillReport,
+} from '@neutronai/runtime/adapters/claude-code/persistent/gateway-shutdown-kill.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -287,5 +291,76 @@ describe('an UNDETERMINED death is neither a deploy nor a crash verdict', () => 
     // It refuses BOTH confident readings, in the owner's own copy.
     expect(interp.summary).toContain('cannot tell you a deploy did it')
     expect(interp.input_needed).toContain('Reply to retry')
+  })
+})
+
+/**
+ * THE CONSUMER, NOT THE VALUE (#518, round 17).
+ *
+ * The rest of this file asks what the sink WRITES. These two ask something the earlier
+ * cases never did: whether the sink is CALLED AT ALL for a disposition that does not
+ * establish a death. `onChildCrash` is a death sink — the arm above proves it marks the
+ * run `crashed` — so a child that SURVIVED the deploy, the one case this item exists to
+ * protect, must never reach it. An honest `cause: 'unknown'` does not help: the
+ * destination asserts the death whatever the value says.
+ *
+ * Driven through the real delivery phase against the real store, because the property is
+ * a composition of the two: the gate is in `deliverShutdownKillReports` and the damage is
+ * in `crashRunningByLauncher`.
+ */
+describe('a launcher that may still be running is not reported dead', () => {
+  const pending = (
+    generation: string,
+    observed: 'alive-when-reached' | 'could-not-sample' | 'already-gone' | 'alive-and-killed',
+  ): PendingShutdownKillReport => ({
+    options: {
+      substrate_instance_id: 'i',
+      cwd: '/repo',
+      onChildCrash: sink(),
+    } as unknown as PendingShutdownKillReport['options'],
+    sessionKey: 'cc-trident-fire-o-abc /repo',
+    childGeneration: generation,
+    at: OBSERVED.getTime(),
+    observed,
+    liveness: 'alive',
+    durablyRecorded: observed,
+  })
+
+  test('THE RUN STAYS RUNNING when the kill could not be established', async () => {
+    // RED-mutation: delete the `deathIsEstablished` gate in `deliverShutdownKillReports`.
+    // The sink then latches `crashRunningByLauncher` for a live launcher and this row
+    // reads `crashed` — a still-running build marked failed by the very change that
+    // exists to stop deploys from killing builds.
+    await seedRunning('survivor-1', 'gen-survivor')
+    const tally = await deliverShutdownKillReports([pending('gen-survivor', 'alive-when-reached')])
+
+    expect(tally.withheld).toBe(1)
+    expect(tally.delivered).toBe(0)
+    const row = store.get('survivor-1')
+    expect(row?.subagent_status).toBe('running')
+    expect(row?.failure_reason ?? null).toBeNull()
+  })
+
+  test('could-not-sample is withheld too', async () => {
+    await seedRunning('survivor-2', 'gen-blind')
+    await deliverShutdownKillReports([pending('gen-blind', 'could-not-sample')])
+    expect(store.get('survivor-2')?.subagent_status).toBe('running')
+  })
+
+  test('THE COMPLEMENT — an ESTABLISHED death still reaches the row', async () => {
+    // Without this pair, withholding EVERYTHING passes the two cases above and restores
+    // the silence this whole change removes. Both establishing observations are here:
+    // the confirmed kill, and the child that was already gone when we arrived.
+    await seedRunning('killed-1', 'gen-killed')
+    await deliverShutdownKillReports([pending('gen-killed', 'alive-and-killed')])
+    expect(store.get('killed-1')?.subagent_status).toBe('crashed')
+    expect(store.get('killed-1')?.failure_reason ?? '').toContain('deploy')
+
+    await seedRunning('gone-1', 'gen-gone')
+    await deliverShutdownKillReports([pending('gen-gone', 'already-gone')])
+    const gone = store.get('gone-1')
+    expect(gone?.subagent_status).toBe('crashed')
+    // Dead, but not by us: the row says so rather than naming a deploy.
+    expect(gone?.failure_reason ?? '').not.toContain('killed by a gateway restart or deploy')
   })
 })

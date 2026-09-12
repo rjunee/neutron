@@ -19,6 +19,7 @@ import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watch
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
 import { gatewayShutdownKillEntryFor, observationOf } from './gateway-shutdown-kill.ts'
+import { classifyRecordedPid } from './process-identity.ts'
 import type { GatewayShutdownObservation } from './repl-registry.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
@@ -1060,6 +1061,21 @@ export function probeLauncherGenerationAlive(
       // malformed pid must not turn process.kill's EINVAL/TypeError into positive
       // death evidence for a potentially healthy launcher.
       if (typeof record.pid !== 'number' || !Number.isInteger(record.pid) || record.pid <= 0) return 'unknown'
+      // IDENTITY FIRST, WHERE THERE IS ONE. A pid is an identifier, not a handle: a
+      // shutdown entry stays eligible for four hours and a recycled pid answers
+      // `process.kill(pid, 0)` exactly like a live launcher, so the raw look below
+      // reports a dead child as ALIVE and its build waits out the 90-minute reaper —
+      // this item's own lag defect, arriving through the process table.
+      const currentEntry = gatewayShutdownKillEntryFor(record, generationKey)
+      const verdict = currentEntry === undefined ? 'unverifiable' : classifyRecordedPid(currentEntry.pid ?? record.pid, currentEntry.identity)
+      if (verdict === 'ours-alive') return 'alive'
+      if (verdict === 'confirmed-gone' || verdict === 'not-comparable') {
+        // Both establish that the recorded process is gone: a reissued pid means ours
+        // released it, and an entry from an earlier boot cannot have a live process
+        // behind it. What KILLED it still comes from the observation, never from here.
+        const observed = observationOf(currentEntry)
+        return observed === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
+      }
       // EPERM is positive evidence that this PID exists under another uid. Keep
       // that conservative interpretation scoped to this destructive liveness
       // decision; changing the shared watchdog primitive would alter unrelated
@@ -1078,11 +1094,12 @@ export function probeLauncherGenerationAlive(
         //
         // Absent ⇒ the shutdown never reached this generation ⇒ an ordinary crash.
         const observed = observationFor(record)
-        return observed === undefined
-          ? 'dead'
-          : observed === 'alive-and-killed'
-            ? 'killed-by-gateway-shutdown'
-            : 'dead-cause-undetermined'
+        // UNVERIFIABLE PID, so this look established a DEATH and cannot attribute one:
+        // with no stored identity the number may have been reissued and released again
+        // between the kill and now, which makes its absence an observation about a
+        // number rather than about our child. An entry that cannot be tied to a process
+        // is not evidence that we killed that process.
+        return observed === undefined ? 'dead' : 'dead-cause-undetermined'
       }
     }
     // NOT THE CURRENT GENERATION OF ANY ROW — which is exactly what a QUARANTINED
@@ -1109,6 +1126,22 @@ export function probeLauncherGenerationAlive(
       // No usable pid (an entry from a build before the field existed) → we cannot
       // confirm, so we do not conclude. UNKNOWN, never an implicit death.
       if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return 'unknown'
+      // THE IDENTITY IS WHAT TIES THIS RECORD TO A PROCESS. Without it the pid look is
+      // about a number: four hours is long enough for the kernel to reissue it, and a
+      // stranger holding it is indistinguishable from our launcher still running.
+      switch (classifyRecordedPid(pid, entry.identity)) {
+        case 'ours-alive':
+          // Still the process we recorded, still running. Nothing to conclude.
+          return 'unknown'
+        case 'confirmed-gone':
+        case 'not-comparable':
+          // Gone, positively: either the pid has been reissued (a running process keeps
+          // its pid, so ours released it) or the entry predates this boot. Only now may
+          // the record explain the death it did not establish.
+          return observationOf(entry) === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
+        case 'unverifiable':
+          break
+      }
       try {
         process.kill(pid, 0)
         // STILL RUNNING. Either the kill never landed, or this pid has been recycled
@@ -1121,10 +1154,13 @@ export function probeLauncherGenerationAlive(
         // EPERM is positive evidence the pid EXISTS under another uid — same
         // conservative reading as the branch above.
         if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'unknown'
-        // Positively gone. The record says whether that death is ours to claim — and
-        // `already-gone` / `could-not-sample` mean the shutdown reached this child and
-        // did NOT kill it, so the death is confirmed and its cause is not.
-        return observationOf(entry) === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
+        // Positively gone — and this is the UNVERIFIABLE path, reached only when no
+        // identity was stored (a pre-upgrade entry, or a host with no `/proc`). The
+        // death is established; the attribution is NOT, because the absent pid cannot
+        // be shown to be the one we killed rather than one reissued and released since.
+        // `already-gone` / `could-not-sample` land here too: the shutdown reached this
+        // child and did not kill it.
+        return 'dead-cause-undetermined'
       }
     }
     return 'unknown'

@@ -48,6 +48,7 @@ import { createLogger } from '@neutronai/logger'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
 import { registryLockPath, withFlockSync } from './registry-lock.ts'
+import type { ProcessIdentity } from './process-identity.ts'
 
 const log = createLogger('repl-registry')
 
@@ -151,6 +152,21 @@ export interface GatewayShutdownKillEntry {
    *  Absent on an entry written before this field existed: a reader that cannot
    *  confirm reports UNKNOWN rather than assuming either way. */
   pid?: number
+  /**
+   * WHICH PROCESS THAT PID WAS, sampled from the kernel before the kill.
+   *
+   * A pid on its own is an identifier, not a handle. This entry stays eligible for four
+   * hours ({@link GATEWAY_SHUTDOWN_KILL_RETENTION_MS}) and pids are recycled well inside
+   * that on a busy box, so a later reader asking `process.kill(pid, 0)` may be asking
+   * about a stranger and cannot tell. `start_ticks` + `boot_id` is the pair the kernel
+   * maintains that a recycled pid cannot reproduce — see `process-identity.ts`.
+   *
+   * Absent where it could not be sampled (no `/proc`: macOS self-host, a container
+   * without it) or on an entry from a build before the field existed. A reader without
+   * it can still establish a DEATH, but it must not ATTRIBUTE one — the pid look cannot
+   * be tied to the process this entry describes.
+   */
+  identity?: ProcessIdentity
 }
 
 /** One persisted REPL supervision row. */

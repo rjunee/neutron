@@ -143,6 +143,8 @@ import {
   type GatewayShutdownObservation,
   type ReplRegistryRecord,
 } from './repl-registry.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { readProcessIdentity, type ProcessIdentity } from './process-identity.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 
 /**
@@ -515,6 +517,45 @@ export interface ShutdownExitWatch {
   signalDelivered: boolean
 }
 
+/**
+ * A bounded wait THAT CAN BE TAKEN BACK.
+ *
+ * `Promise.race([work, sleep(ms)])` settles as soon as the work wins — and leaves the
+ * timer running. A pending timer keeps the runtime alive (measured: `Promise.race([
+ * Promise.resolve(), Bun.sleep(2000)])` takes 2.01 s to exit), so every bound in this
+ * module was also a FLOOR: a shutdown whose sinks answered instantly still sat out the
+ * full budget, inside a deadline owned by systemd rather than by us. RACING IS NOT
+ * CANCELLING.
+ *
+ * The injectable seam has the same shape for a reason. The previous tests replaced the
+ * wait with an instantly-resolving function, which made the requested budget observable
+ * and the TIMER unobservable — a fake that replaces the mechanism removes the property
+ * the mechanism has. A fake `BoundedWait` still has a `cancel` that a test can watch.
+ */
+export interface BoundedWait {
+  /** Resolves when the bound is reached. */
+  expired: Promise<void>
+  /** Releases the underlying timer. Idempotent, and safe after expiry. */
+  cancel: () => void
+}
+
+/** How a bounded wait is made. Production uses {@link cancellableWait}. */
+export type WaitFactory = (ms: number) => BoundedWait
+
+export function cancellableWait(ms: number): BoundedWait {
+  let id: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<void>((resolve) => {
+    id = setTimeout(resolve, ms)
+  })
+  return {
+    expired,
+    cancel: () => {
+      if (id !== undefined) clearTimeout(id)
+      id = undefined
+    },
+  }
+}
+
 /** How long every signalled child together gets to exit before the escalation, and
  *  again after it. Mirrors `CHILD_KILL_GRACE_MS`, which is what the tree's own safe
  *  termination helper waits — shared across the phase rather than spent per child,
@@ -540,18 +581,26 @@ export const SHUTDOWN_EXIT_GRACE_MS = 2_000
  */
 export async function confirmShutdownExits(
   watches: readonly ShutdownExitWatch[],
-  opts: { graceMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  opts: { graceMs?: number; wait?: WaitFactory } = {},
 ): Promise<void> {
   if (watches.length === 0) return
   const graceMs = opts.graceMs ?? SHUTDOWN_EXIT_GRACE_MS
-  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms))
+  const wait = opts.wait ?? cancellableWait
   const settle = async (): Promise<void> => {
     const pending = watches.filter((w) => !w.child.hasExited())
     if (pending.length === 0) return
-    await Promise.race([
-      Promise.all(pending.map((w) => w.child.exited.catch(() => undefined))),
-      sleep(graceMs),
-    ]).catch(() => undefined)
+    // CANCELLED WHEN THE EXITS WIN. The grace is a ceiling on how long we wait for
+    // children that are slow to die, not a period the teardown must serve even when
+    // every child is already gone.
+    const bound = wait(graceMs)
+    try {
+      await Promise.race([
+        Promise.all(pending.map((w) => w.child.exited.catch(() => undefined))),
+        bound.expired,
+      ]).catch(() => undefined)
+    } finally {
+      bound.cancel()
+    }
   }
   await settle()
   for (const w of watches) {
@@ -580,6 +629,10 @@ export function recordGatewayShutdownOutcome(
   observed: GatewayShutdownObservation,
   pid?: number,
   stillReferenced?: (generation: string) => boolean,
+  /** WHICH PROCESS that pid is, sampled while it is still alive. Absent where the
+   *  kernel cannot be asked; the entry then records a pid a later reader may not
+   *  attribute a death to. */
+  identity?: ProcessIdentity,
 ): boolean {
   if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
   try {
@@ -602,7 +655,17 @@ export function recordGatewayShutdownOutcome(
               // against the process table rather than trusting this record. See the
               // field's docblock: writing the entry attributes a death, it does not
               // establish one.
-              { generation: childGeneration, at, observed, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
+              {
+                generation: childGeneration,
+                at,
+                observed,
+                ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
+                // AND WHICH PROCESS THAT PID IS. Stored beside the pid, never instead of
+                // it: the pid is how a reader looks, the identity is how it knows the
+                // look was about our child rather than about whatever inherited the
+                // number in the four hours this entry stays eligible.
+                ...(identity !== undefined ? { identity } : {}),
+              },
             ],
             at,
             stillReferenced,
@@ -723,6 +786,9 @@ export function recordGatewayShutdownKill(
   at: number,
   liveness: ShutdownLivenessSample,
   pid?: number,
+  /** Seam for tests only. Production samples the kernel here, PRE-KILL, because that is
+   *  the last moment the process is certainly still the one we are about to kill. */
+  readIdentity: (pid: number) => ProcessIdentity | undefined = readProcessIdentity,
 ): PendingShutdownKillReport {
   // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
   // ALIVE was killed by this shutdown; anything else is reported as undetermined.
@@ -730,6 +796,16 @@ export function recordGatewayShutdownKill(
   // reachable only from `confirmShutdownKill`, after `kill()` returns.
   const observed: GatewayShutdownObservation =
     liveness === 'alive' ? 'alive-when-reached' : liveness === 'already-gone' ? 'already-gone' : 'could-not-sample'
+  // SAMPLED BEFORE THE KILL, for the same reason the liveness sample is: afterwards the
+  // pid may be free, and a free pid cannot tell anyone which process used to hold it. A
+  // failure to sample is recorded as absence — a reader without an identity declines to
+  // attribute rather than attributing to a pid it cannot vouch for.
+  let identity: ProcessIdentity | undefined
+  try {
+    identity = typeof pid === 'number' && pid > 0 ? readIdentity(pid) : undefined
+  } catch {
+    identity = undefined
+  }
   let durablyRecorded: GatewayShutdownObservation | null = null
   if (options.replRegistryPath !== undefined) {
     // AN ENTRY IS WRITTEN FOR EVERY OUTCOME, not only for a kill — and that is the
@@ -761,6 +837,7 @@ export function recordGatewayShutdownKill(
               return false
             }
           },
+      identity,
     )
     durablyRecorded = wrote ? observed : null
     if (!wrote) {
@@ -831,26 +908,71 @@ function recoveryConsequence(report: PendingShutdownKillReport): string {
   )
 }
 
+/**
+ * IS THE CHILD ESTABLISHED DEAD? — which is NOT the same question as "what killed it",
+ * and answering only the second is how an honest value reached a destination that lies.
+ *
+ * `onChildCrash` is a DEATH sink: its production implementation latches
+ * `crashRunningByLauncher`, which marks every still-running trident run on that launcher
+ * `crashed`. Calling it with `cause: 'unknown'` makes the CAUSE honest and the CHANNEL
+ * false — the report says "nobody established why" and the destination asserts "it died"
+ * anyway. For the one child this item exists to protect, the one that SURVIVED the
+ * deploy because our kill never landed, that marks a live build crashed. The same error
+ * as the `attributed` boolean, one layer out: there the value was derivable before the
+ * act, here the destination asserts death regardless of what the value says.
+ *
+ * Only two observations establish a death:
+ *   - `alive-and-killed` — the exit was observed, after a signal we delivered.
+ *   - `already-gone`     — the child was gone before the shutdown reached it.
+ * `alive-when-reached` and `could-not-sample` do NOT: the child may still be running.
+ * Those are reported on a NOTIFY-ONLY path and leave the crash edge open, so if the
+ * child does die, the next boot's watchdog — which confirms the death against the
+ * process table first — is the one that reports it.
+ */
+function deathIsEstablished(observed: GatewayShutdownObservation): boolean {
+  return observed === 'alive-and-killed' || observed === 'already-gone'
+}
+
+/** Tell the operator about a disposition nothing may act on, WITHOUT touching a run row.
+ *  `postWedgeAlert` is the tree's existing notify-only seam (stderr by default). */
+function notifyUndeterminedDisposition(report: PendingShutdownKillReport): void {
+  const text =
+    `gateway shutdown could not establish what happened to generation=${report.childGeneration.slice(0, 8)} ` +
+    `(${report.observed}) — NOT reported as a death: the child may still be running, and ` +
+    `${recoveryConsequence(report)} once its death is confirmed against the process table`
+  const post = report.options.postWedgeAlert
+  if (post !== undefined) {
+    try {
+      post(text)
+      return
+    } catch {
+      /* fall through to stderr — a notify seam that throws must not lose the notice */
+    }
+  }
+  process.stderr.write(`[repl] ${text}\n`)
+}
+
 export async function deliverShutdownKillReports(
   reports: readonly PendingShutdownKillReport[],
   opts: {
     perSinkMs?: number
     phaseBudgetMs?: number
     now?: () => number
-    /** The bounded wait, injectable. Production passes `Bun.sleep`; a test passes one
-     *  that RECORDS the budget it was asked for and resolves at once, so the bound is
-     *  asserted from what the code computed rather than from elapsed wall-clock. That
-     *  is not merely tidier: a real timer racing a never-settling sink is at the mercy
-     *  of a loaded event loop, and these cases failed only in a 206-file process. */
-    sleep?: (ms: number) => Promise<void>
+    /** The bounded wait, injectable AND CANCELLABLE. A test passes one that RECORDS the
+     *  budget it was asked for, resolves only if asked to, and reports whether it was
+     *  CANCELLED — so the bound is asserted from what the code computed rather than from
+     *  elapsed wall-clock (a real timer racing a never-settling sink is at the mercy of a
+     *  loaded event loop, and these cases failed only in a 206-file process) WITHOUT the
+     *  fake quietly removing the cancellation the real one needs. See {@link BoundedWait}. */
+    wait?: WaitFactory
   } = {},
-): Promise<{ delivered: number; timedOut: number; failed: number; skipped: number }> {
+): Promise<{ delivered: number; timedOut: number; failed: number; skipped: number; withheld: number }> {
   const perSinkMs = opts.perSinkMs ?? SHUTDOWN_REPORT_PER_SINK_MS
   const phaseBudgetMs = opts.phaseBudgetMs ?? SHUTDOWN_REPORT_PHASE_BUDGET_MS
   const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms))
+  const wait = opts.wait ?? cancellableWait
   const phaseDeadline = now() + phaseBudgetMs
-  const tally = { delivered: 0, timedOut: 0, failed: 0, skipped: 0 }
+  const tally = { delivered: 0, timedOut: 0, failed: 0, skipped: 0, withheld: 0 }
 
   // UNBACKED REPORTS GO FIRST. Delivery is best-effort BECAUSE a durable record sits
   // behind it — but that is a property of the individual report, and for one whose record
@@ -876,6 +998,15 @@ export async function deliverShutdownKillReports(
       )
       continue
     }
+    if (!deathIsEstablished(report.observed)) {
+      // WITHHELD FROM THE DEATH SINK, and it costs no budget: there is nothing to tell a
+      // consumer that can only record a death. The durable entry stays, and the crash
+      // edge stays OPEN, so a death that does happen is still reported — by the reader
+      // that confirms it first.
+      tally.withheld += 1
+      notifyUndeterminedDisposition(report)
+      continue
+    }
     const sink = report.options.onChildCrash
     if (sink === undefined) {
       tally.skipped += 1
@@ -884,8 +1015,11 @@ export async function deliverShutdownKillReports(
     const budget = Math.min(perSinkMs, remaining)
     const TIMED_OUT = Symbol('timed-out')
     let settled: unknown
+    // DECLARED OUT HERE because the timed-out branch still needs it: a bound we stopped
+    // waiting on does not stop the work behind it.
+    let call: Promise<void> = Promise.resolve()
     try {
-      const call = Promise.resolve(
+      call = Promise.resolve(
         sink({
           sessionKey: report.sessionKey,
           generationKey: report.childGeneration,
@@ -897,12 +1031,20 @@ export async function deliverShutdownKillReports(
               ? gatewayShutdownKillDetail(report.at)
               : undeterminedShutdownDetail(report.observed, report.at),
         }),
-      )
+      ).then(() => undefined)
       // A sink we abandon must not become an unhandled rejection later. Attaching the
       // catch here — to the ORIGINAL promise, not to the race — is what makes
       // abandoning it safe.
       call.catch(() => undefined)
-      settled = await Promise.race([call.then(() => undefined), sleep(budget).then(() => TIMED_OUT)])
+      // CANCELLED THE MOMENT THE SINK WINS. Left running, this timer holds the whole
+      // runtime open for the rest of the budget — so an instant report cost the
+      // shutdown its full per-sink bound anyway, out of a deadline systemd is counting.
+      const bound = wait(budget)
+      try {
+        settled = await Promise.race([call, bound.expired.then(() => TIMED_OUT)])
+      } finally {
+        bound.cancel()
+      }
     } catch (err) {
       tally.failed += 1
       process.stderr.write(
@@ -916,6 +1058,29 @@ export async function deliverShutdownKillReports(
       process.stderr.write(
         `[repl] onChildCrash sink did not answer within ${budget}ms for generation=${report.childGeneration.slice(0, 8)} ` +
           `— abandoned; ${recoveryConsequence(report)}\n`,
+      )
+      // ABANDONED IS NOT CANCELLED. The sink call is still in flight and may COMMIT a
+      // moment after we stopped waiting — and the production sink's commit is a durable
+      // write to the run row. Leaving the edge open then means the next boot reports the
+      // SAME death again, over the top of a reason that already landed, straight into
+      // the last-writer-wins hazard this module documents. So a late success closes the
+      // edge exactly as an on-time one does; a late failure leaves it open, which is
+      // what the backstop is for.
+      fireAndForget(
+        'gateway-shutdown-kill.late-sink-commit',
+        // ONE ARM ONLY. A late FAILURE is not a late commit — the edge stays open,
+        // which is what the next boot's backstop is for — and swallowing it here with a
+        // second `.then` arm would hide it from the wrapper that exists to log it.
+        call.then(() => {
+          process.stderr.write(
+            `[repl] the abandoned onChildCrash sink for generation=${report.childGeneration.slice(0, 8)} ` +
+              `COMMITTED after its ${budget}ms bound — closing the crash edge so the next boot does not ` +
+              `report this death a second time over the reason that landed\n`,
+          )
+          if (report.options.replRegistryPath !== undefined) {
+            closeCrashReportEdge(report.options.replRegistryPath, report.sessionKey, report.childGeneration, report.at)
+          }
+        }),
       )
       continue
     }

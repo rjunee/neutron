@@ -31,8 +31,18 @@ import {
   recordGatewayShutdownOutcome,
   reportGatewayShutdownKill,
   wasKilledByGatewayShutdown,
+  type WaitFactory,
 } from '../gateway-shutdown-kill.ts'
 import { detectReplWedged } from '../dead-repl-detector.ts'
+
+/** A bound that is already up — and that still HAS a `cancel`, because a fake without
+ *  one cannot show the code takes its bound back. */
+const instantWait: WaitFactory = () => ({
+  expired: (async () => {
+    await Promise.resolve()
+  })(),
+  cancel: () => {},
+})
 
 /** Synchronous sibling of `captureStderr`, for pure functions. */
 function captureStderrSync<T>(fn: () => T): { result: T; lines: string[] } {
@@ -399,7 +409,10 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
     )
   })
 
-  for (const liveness of ['already-gone', 'could-not-sample'] as const) {
+  // ONLY `already-gone` GOES TO THE DEATH SINK, and that is the whole distinction: it is
+  // an OBSERVED death whose cause nobody established. `could-not-sample` is not a death at
+  // all — see the withholding cases below.
+  for (const liveness of ['already-gone'] as const) {
     it(`${liveness} → cause UNKNOWN, recorded AS undetermined, not as a kill`, async () => {
       // RED-mutation: make `attributed` unconditionally true in
       // `reportGatewayShutdownKill`. A fault that landed moments before teardown is
@@ -438,6 +451,91 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
       expect(record?.child_crash_notified_at).toBe(700)
     })
   }
+
+  it('AN UNESTABLISHED DEATH IS WITHHELD FROM THE DEATH SINK (#518)', async () => {
+    // THE SUBJECT OF THIS ITEM, INVERTED. `onChildCrash` is a DEATH sink: the production
+    // implementation latches `crashRunningByLauncher`, which marks every still-running
+    // trident run on that launcher `crashed`. A child whose kill never landed may still be
+    // RUNNING — it is the one case this item exists to protect — so telling that sink
+    // anything about it marks a live build crashed. An honest `cause: 'unknown'` does not
+    // help: the CHANNEL asserts the death whatever the value says.
+    //
+    // RED-mutation: delete the `deathIsEstablished` gate. This case reddens while the
+    // `already-gone` case above (a death that WAS observed) stays green.
+    const path = registryPath()
+    seed(path)
+    const seen: ChildCrashInfo[] = []
+    const alerts: string[] = []
+    const options = { ...optsFor(path, seen), postWedgeAlert: (t: string) => alerts.push(t) }
+    await reportGatewayShutdownKill(options, 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive', {
+      killed: false,
+    })
+
+    expect(seen).toHaveLength(0)
+    // TOLD, NOT SILENT — on the notify-only seam, which touches no run row.
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toContain('could not establish')
+    expect(alerts[0]).toContain('may still be running')
+    // AND THE EDGE STAYS OPEN, so a death that does happen is still reported later by a
+    // reader that confirms it against the process table first.
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
+    // The durable record still says what was observed: withholding a REPORT is not
+    // forgetting the OUTCOME.
+    expect(observationOf(gatewayShutdownKillEntryFor(getRecord(path, 'cc-trident-fire-o-abc /repo'), 'gen-live'))).toBe(
+      'alive-when-reached',
+    )
+  })
+
+  it('could-not-sample is withheld too — and falls back to stderr with no alert seam', async () => {
+    // The second unestablished observation, asserted separately so the mutation run shows
+    // each killing the mutant on its own. Also pins the fallback: a substrate with no
+    // `postWedgeAlert` still says it out loud.
+    const path = registryPath()
+    seed(path)
+    const seen: ChildCrashInfo[] = []
+    const { lines } = await captureStderr(() =>
+      reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'could-not-sample', {
+        killed: false,
+      }),
+    )
+    expect(seen).toHaveLength(0)
+    expect(lines.join('')).toContain('could not establish')
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
+  })
+
+  it('a kill we could not sample BEFOREHAND is never promoted to a deploy', async () => {
+    // THE FIELDS ARE NOT INTERCHANGEABLE, and this is the direction that matters: a child
+    // we never saw alive is not claimed as our kill just because it is gone afterwards —
+    // `confirmShutdownKill` promotes only from `alive-when-reached`. Combined with the
+    // withholding gate, that is why nothing delivered can disagree with its pre-kill
+    // sample, and why the mutation that swapped the two fields is now EQUIVALENT rather
+    // than uncaught (see the as-built).
+    //
+    // RED-mutation: drop the `report.observed !== 'alive-when-reached'` guard in
+    // `confirmShutdownKill`. A child whose liveness could not be read is then reported as
+    // killed by the deploy on the strength of an exit we never tied to our signal.
+    const path = registryPath()
+    seed(path)
+    const seen: ChildCrashInfo[] = []
+    await reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'could-not-sample', {
+      killed: true,
+    })
+    expect(seen).toHaveLength(0)
+    expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(false)
+  })
+
+  it('THE COMPLEMENT — a CONFIRMED kill still reaches the death sink', async () => {
+    // Without this pair the gate above is satisfied by code that withholds everything,
+    // which would restore the silence this whole change removes.
+    const path = registryPath()
+    seed(path)
+    const seen: ChildCrashInfo[] = []
+    await reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive', {
+      killed: true,
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.cause).toBe('gateway-shutdown')
+  })
 
   it('the two undetermined sentences say WHICH of the two happened', () => {
     // A single "undetermined" blur would lose the distinction between an observation
@@ -766,7 +864,7 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
     const { watch, signals } = watchFor(report, { exitsOnSigterm: false, exitsOnSigkill: false })
 
     // The signal was already sent by the shutdown loop; this pass escalates and confirms.
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: instantWait })
 
     // It escalated, exactly as the tree's own safe termination helper does...
     expect(signals).toContain('SIGKILL')
@@ -784,7 +882,7 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
     const report = pendingFor(path, 'gen-live')
     const { watch, signals } = watchFor(report, { exitsOnSigterm: false, exitsOnSigkill: true })
 
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: instantWait })
 
     expect(signals).toContain('SIGKILL')
     expect(report.observed).toBe('alive-and-killed')
@@ -803,7 +901,7 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
     watch.child.kill()
     watch.signalDelivered = true
 
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: instantWait })
 
     expect(signals).toEqual(['SIGTERM'])
     expect(report.observed).toBe('alive-and-killed')
@@ -854,7 +952,7 @@ describe('what the owner gets when BOTH channels fail', () => {
 
     // And the live channel fails too.
     const { lines } = await captureStderr(() =>
-      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, sleep: async () => {} }),
+      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, wait: instantWait }),
     )
     expect(delivered).toEqual([])
     // The operator is told the recovery is WEAKER than the report, not that it is fine.
@@ -897,7 +995,7 @@ describe('what the owner gets when BOTH channels fail', () => {
 
     expect(report.durablyRecorded).toBe('alive-and-killed')
     await captureStderr(() =>
-      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, sleep: async () => {} }),
+      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, wait: instantWait }),
     )
     // The next boot reads the record and names the deploy, with no live report at all.
     expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
@@ -935,7 +1033,7 @@ describe('what the owner gets when BOTH channels fail', () => {
       deliverShutdownKillReports([mk('gen-backed', 'alive-and-killed'), mk('gen-unbacked', 'alive-when-reached')], {
         perSinkMs: 5,
         phaseBudgetMs: 5_000,
-        sleep: async () => {},
+        wait: instantWait,
       }),
     )
     expect(attempted[0]).toBe('gen-unbacked')
@@ -1020,7 +1118,7 @@ describe('an exit that happened anyway is not our kill (#518)', () => {
       },
     }
     // It dies during the grace, of something else entirely.
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => { exited = true } })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: () => ({ expired: (async () => { exited = true })(), cancel: () => {} }) })
 
     expect(watch.child.hasExited()).toBe(true)
     expect(report.observed).toBe('alive-when-reached')
@@ -1046,7 +1144,7 @@ describe('an exit that happened anyway is not our kill (#518)', () => {
       signalDelivered: true,
       child: { exited: Promise.resolve(0), hasExited: () => exited, kill: () => { exited = true } },
     }
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: instantWait })
     expect(report.observed).toBe('alive-and-killed')
     expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
   })
@@ -1079,7 +1177,122 @@ describe('an exit that happened anyway is not our kill (#518)', () => {
         },
       },
     }
-    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    await confirmShutdownExits([watch], { graceMs: 1, wait: instantWait })
     expect(report.observed).toBe('alive-and-killed')
+  })
+})
+
+/**
+ * #518 — ABANDONED IS NOT CANCELLED.
+ *
+ * The per-sink bound stops us WAITING; it does not stop the sink. The production sink's
+ * commit is a durable write to the run row, so a call that lands a moment after its bound
+ * has committed a failure reason — while the crash edge, keyed on our having waited, is
+ * still open. The next boot then reports the same death again, over the top of a reason
+ * that already landed, into the last-writer-wins hazard this module documents.
+ *
+ * The existing bound cases cover "never settles". This is the boundary they do not reach:
+ * BOTH paths run, in order.
+ */
+describe('a sink that commits just after its bound still closes the edge', () => {
+  it('the late commit closes the crash edge', async () => {
+    // RED-mutation: delete the `void call.then(...)` late handler in the TIMED_OUT branch.
+    // The edge then stays open behind a commit that happened.
+    const path = registryPath()
+    seed(path)
+    recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive-and-killed')
+    let release: () => void = () => {}
+    const arrived = new Promise<void>((r) => {
+      release = r
+    })
+    const report: PendingShutdownKillReport = {
+      options: {
+        substrate_instance_id: 'i',
+        cwd: '/repo',
+        replRegistryPath: path,
+        onChildCrash: () => arrived,
+      } as PersistentReplSubstrateOptions,
+      sessionKey: 'cc-trident-fire-o-abc /repo',
+      childGeneration: 'gen-live',
+      at: 700,
+      observed: 'alive-and-killed',
+      liveness: 'alive',
+      durablyRecorded: 'alive-and-killed',
+    }
+
+    const { result: tally, lines } = await captureStderr(() =>
+      deliverShutdownKillReports([report], { perSinkMs: 5, phaseBudgetMs: 50, wait: instantWait }),
+    )
+    expect(tally.timedOut).toBe(1)
+    // Not yet: nothing has committed, so nothing may say the report happened.
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
+
+    // ...and now it lands.
+    const late = captureStderr(async () => {
+      release()
+      await arrived
+      await Bun.sleep(1)
+    })
+    const { lines: lateLines } = await late
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBe(700)
+    expect(lateLines.join('')).toContain('COMMITTED after')
+    void lines
+  })
+
+  it('THE COMPLEMENT — a sink that never lands leaves the edge OPEN', async () => {
+    // Which is what the next boot's backstop is for. Without this pair, closing the edge
+    // unconditionally after a timeout would pass the case above and silence the backstop
+    // in exactly the case it exists for.
+    const path = registryPath()
+    seed(path)
+    recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive-and-killed')
+    const report: PendingShutdownKillReport = {
+      options: {
+        substrate_instance_id: 'i',
+        cwd: '/repo',
+        replRegistryPath: path,
+        onChildCrash: () => new Promise<void>(() => {}),
+      } as PersistentReplSubstrateOptions,
+      sessionKey: 'cc-trident-fire-o-abc /repo',
+      childGeneration: 'gen-live',
+      at: 700,
+      observed: 'alive-and-killed',
+      liveness: 'alive',
+      durablyRecorded: 'alive-and-killed',
+    }
+    await captureStderr(() => deliverShutdownKillReports([report], { perSinkMs: 5, phaseBudgetMs: 50, wait: instantWait }))
+    await Bun.sleep(5)
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
+  })
+
+  it('a sink that REJECTS after its bound leaves the edge open', async () => {
+    // A late failure is not a late commit. RED-mutation: close the edge from the late
+    // handler regardless of outcome.
+    const path = registryPath()
+    seed(path)
+    recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive-and-killed')
+    let fail: (e: Error) => void = () => {}
+    const pendingCall = new Promise<void>((_, rej) => {
+      fail = rej
+    })
+    const report: PendingShutdownKillReport = {
+      options: {
+        substrate_instance_id: 'i',
+        cwd: '/repo',
+        replRegistryPath: path,
+        onChildCrash: () => pendingCall,
+      } as PersistentReplSubstrateOptions,
+      sessionKey: 'cc-trident-fire-o-abc /repo',
+      childGeneration: 'gen-live',
+      at: 700,
+      observed: 'alive-and-killed',
+      liveness: 'alive',
+      durablyRecorded: 'alive-and-killed',
+    }
+    await captureStderr(() => deliverShutdownKillReports([report], { perSinkMs: 5, phaseBudgetMs: 50, wait: instantWait }))
+    fail(new Error('sqlite busy'))
+    await pendingCall.catch(() => undefined)
+    await Bun.sleep(1)
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
   })
 })

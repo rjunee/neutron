@@ -3,6 +3,14 @@
 Spec item: `docs/spec-items/a-deploy-must-not-kill-builds-in-flight.md` (#518, P0, cutover
 milestone 2).
 
+**#518 IS NOT DELIVERED BY THIS WORK, and the issue stays open.** The item asks that a
+deploy not kill the builds in flight; every pooled and quarantined launcher is still killed
+during shutdown, and criterion 1's own analysis says why nothing inside this process can
+change that while the REPL lives in the gateway's cgroup (#538/#539 move it). What landed
+is the PREREQUISITE: the killing is now reported honestly instead of surfacing as a bare
+crash, and a death nobody established is no longer reported as a death at all. Criteria 1
+and 2 are unticked; 3 and 4 are met.
+
 ### What was actually happening
 
 A trident inner workflow is not its own process: it runs detached inside a warm `claude`
@@ -187,7 +195,7 @@ instead of a rule enforced in two places. The clear-on-respawn had to go regardl
 must outlive the generation it describes, which is the whole reason it exists.
 
 **And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
-`record.child_generation` (`supervision.ts:1058`), which a replacement spawn overwrites
+`record.child_generation` (`supervision.ts:1059`), which a replacement spawn overwrites
 (`spawn.ts:734`) — so a quarantined generation has never been locatable in the registry, and
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
@@ -361,7 +369,7 @@ sentence rather than laundering a bare one over it.
 **And the record never proves a death.** It is written before `kill()`, and `kill()` can
 throw, so an entry means "we intended to kill a child we had observed alive". The reader
 confirms the death against the pid the entry carries and answers UNKNOWN when it cannot
-(`supervision.ts:1106-1128`). Round 6's finding was this exact over-claim arriving on the read
+(`supervision.ts:1123-1163`). Round 6's finding was this exact over-claim arriving on the read
 side: round 3 refused to claim a deploy for a child that might already have been dead, and the
 per-generation scan then claimed a death for a child that might still be alive. Same missing
 question — *what does this record actually establish?*
@@ -413,6 +421,130 @@ attributed/reported conflation in one pass instead of three rounds.
 
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
+
+### This advances #518; it does not close it
+
+Recorded here because the temptation is to move the ITEM rather than the marker. The item
+is "a deploy must not kill the builds in flight". What landed is the reporting: every
+launcher this gateway kills on its way down says so, instead of surfacing as a crash. The
+killing itself is unchanged — `shutdownAllPersistentRepls` and `shutdownQuarantinedChildren`
+still terminate every pooled and quarantined child — and criterion 1's own analysis says
+why nothing inside this process can change that while the REPL lives in the gateway's
+cgroup. So the PR carries no `Closes`, the issue stays open against the drain/survive half
+(#538/#539), and criteria 1 and 2 stay unticked.
+
+### An honest value, delivered down a channel that lies
+
+The report for a child whose kill did not land carried `cause: 'unknown'` — accurate, and
+sent to `onChildCrash`, whose production implementation latches `crashRunningByLauncher`
+and marks every still-running trident run on that launcher `crashed`. So THE CHILD THAT
+SURVIVED THE DEPLOY — the one case this item exists to protect — had its live build
+durably marked crashed by the change that exists to stop deploys from killing builds.
+
+This is the `attributed` defect one layer out. There a claim was derivable before the act;
+here the DESTINATION asserts death regardless of what the value says. A death sink may not
+be called until a death is established, and only two observations establish one:
+`alive-and-killed` (an exit observed after a signal we delivered) and `already-gone` (the
+child was gone before we arrived). `alive-when-reached` and `could-not-sample` do not — the
+child may still be running. Those are now WITHHELD from the sink, reported instead on
+`postWedgeAlert`, the tree's existing notify-only seam, which touches no run row; the crash
+edge stays OPEN so a death that does happen is still reported by a reader that confirms it
+against the process table first. The tally grew a `withheld` arm, because a report nobody
+was told must be distinguishable from one that was.
+
+Pinned end-to-end against the REAL store in `open/wiring/__tests__/`: an unestablished
+disposition leaves `subagent_status = 'running'` and `failure_reason` null, with the
+complement that a confirmed kill still writes the deploy reason and an `already-gone` child
+still lands a row — withholding everything would restore the silence this change removes.
+
+### The consumer sweep
+
+The root finding was not the sink; it was that this work made the ATTRIBUTION careful and
+left every CONSUMER of it unexamined. So they were swept — who reads an outcome, and does
+any of them treat a report as proof of what it declines to assert:
+
+| Consumer | Reads | Does it assert a death nobody established? |
+|---|---|---|
+| `onChildCrash` (prod: `open/wiring/trident-child-crash-sink.ts` → `crashRunningByLauncher`) | the shutdown report's `cause` | IT DID — fixed above by gating the CHANNEL, not the value |
+| `deliverShutdownKillReports` → `closeCrashReportEdge` | delivery, not verdict | No — and a late commit now closes it too (below) |
+| `detectReplWedged` (`dead-repl-detector.ts:96`) | `shutdownObserved` | No — every dead-child arm sits under `!probe.childAlive`, a liveness fact, and the observation only picks the SENTENCE |
+| `probeLauncherGenerationAlive` (`supervision.ts:1035`) | the durable entry | No — the pid + identity check must independently say gone; the entry only explains |
+| `open/wiring/trident-launcher-liveness.ts` | two verdicts | No — `DEAD_VERDICTS` gates the merge and a non-observation never overrides an observation |
+| `trident/tick.ts:648` liveness loop | the merged verdict | No — it acts only on a dead verdict, which the probe established |
+
+One finding fell out of the sweep that is NOT this PR's and is NOT fixed here: the
+supervision watchdog calls the crash sink for ANY wedged verdict
+(`supervision.ts:497-503`), including `no-port-listener` — a child that is ALIVE but
+silent — and on an `alert-only` / `cap-hit-alert` tick nothing then kills it, so a live
+launcher's runs are latched `crashed`. It is identical on `origin/main` (verified against
+`git show origin/main:runtime/adapters/claude-code/persistent/supervision.ts`, same
+`action.kind !== 'ignore' && verdict.wedged` gate), i.e. it is #514's reaping design rather
+than anything this branch introduced, and changing it changes what #514 delivers. Recorded,
+and filed as **#655**, rather than folded in, because widening this PR into a second item is the error
+the scope ruling above just corrected.
+
+### Abandoned is not cancelled
+
+The per-sink bound stops us WAITING; it does not stop the sink. The call is still in
+flight, and the production sink's commit is a durable write to the run row — so a sink that
+answered a moment after its bound committed a failure reason while the crash edge, keyed on
+our having waited, stayed open. The next boot then reported the same death again, over the
+top of a reason that had already landed, straight into the last-writer-wins hazard this
+record documents two sections down. The timeout tests covered "never settles", which is the
+case where the two paths do NOT both run.
+
+A late SUCCESS now closes the edge exactly as an on-time one does, and says so on stderr; a
+late FAILURE leaves it open, which is what the backstop is for. Three cases, because the
+pair alone is satisfied by closing unconditionally.
+
+### A bound that is also a floor is not a bound
+
+`Promise.race([work, sleep(ms)])` settles the AWAIT when the work wins. It does not stop
+the timer, and a pending timer holds the runtime open — measured at 2.01 s for a race
+against `Bun.sleep(2000)`. Both waits in this module were therefore floors as well as
+ceilings: a shutdown whose children were already gone and whose sinks answered instantly
+still sat out the grace and the per-sink budget, inside a `TimeoutStopSec` systemd is
+counting and the rest of the teardown shares. Both are now `BoundedWait` handles
+(`expired` + `cancel`) released in a `finally`, and the injectable seam has the same shape.
+
+WHY EVERY EXISTING CASE MISSED IT, which is the transferable half: the deterministic tests
+injected a wait that resolved at once and recorded the requested budget. That made the
+BOUND observable and the TIMER unobservable — a fake that replaces the mechanism removes
+the property the mechanism has. Process liveness is only observable in a process, so the
+new case runs the real code in a subprocess and measures how long that process lives, with
+a LEAK CONTROL (the same script plus one uncancelled race) that must take the full budget.
+Without the control a fast machine would "prove" cancellation on code that never cancelled.
+
+### A pid is an identifier, not a handle
+
+Every reader that confirmed a launcher's death confirmed it against a stored NUMBER, while
+the entry carrying that number stays eligible for four hours — and pids are reissued well
+inside that on a busy box. Two different wrong answers followed. A reissued pid answered
+`process.kill(pid, 0)` exactly like a live launcher, so a DEAD child read as alive and its
+build waited out the 90-minute reaper: this item's own lag defect, arriving through the
+process table. And an absent pid was read as evidence about our child when the number may
+have been handed on and released since.
+
+`process-identity.ts` stores what the kernel maintains and a reissued pid cannot reproduce:
+`/proc/<pid>/stat` field 22 (start ticks) plus `/proc/sys/kernel/random/boot_id`. Start
+ticks are counted FROM boot, so without the boot id two processes from different boots can
+share a pid and a start time and the comparison silently compares two clocks. The verdicts
+are four, not two: `ours-alive`, `confirmed-gone` (a reissued pid proves ours released it —
+a running process keeps its pid), `not-comparable` (another boot: nothing behind that entry
+can still be running), and `unverifiable`. An UNREADABLE boot id is `unverifiable`, never
+`not-comparable`, because "this host cannot answer" and "that process cannot be alive" are
+different facts — the `false`/`unknown` split this item has now paid for three times.
+
+The consequence for attribution is the conservative one: with no stored identity (an entry
+from an older build, or a host with no `/proc`) an absent pid still establishes a DEATH but
+attributes nothing, so the death is reported `dead-cause-undetermined` rather than as a
+deploy. Verification comes before the ESRCH evidence is used, which is what the blocker
+asked for; the stamped path keeps the attribution because the identity ties the record to
+the process and the observation behind it was promoted only by an observed exit.
+
+Field 22 is parsed from the LAST `)` in the line, not the first: `comm` is attacker- and
+accident-controlled (a process can call itself `claude (repl) 1`) and a naive split reads a
+number out of the name and stamps a WRONG identity — worse than none, because it compares.
 
 ### The backstop was the primary rule under load
 
@@ -775,7 +907,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-69 mutations applied one at a time, each reverted after: **69 red, 0 survivors.** Every
+93 mutations applied one at a time, each reverted after: **93 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
@@ -797,6 +929,29 @@ rather than confirming them:
   now covered by M36 (single-slot marker restored → the quarantined generation disappears),
   M40 (spawn clears the history → the quarantined record is lost) and M39 (the probe matches
   any entry rather than this generation → absence read as attribution).
+- **M68 became EQUIVALENT and was replaced rather than counted as a pass.** It derived the
+  delivered `cause` from the PRE-kill liveness sample instead of the confirmed observation,
+  and it used to red on the unkillable-host case. With the withholding gate that case no
+  longer reaches the sink at all — and on every report that DOES, the two expressions
+  agree, because `confirmShutdownKill` promotes only from `alive-when-reached`. A mutation
+  whose output cannot differ is not a surviving mutant; it is a mutation the design has
+  subsumed. It is now "report every delivered outcome as a deploy", which the already-gone
+  case reds, plus **M97** on the promotion guard itself, which is where the property
+  actually lives now.
+- **M86** (drop the boot-id comparison) SURVIVED, and the reason is the finding: a second,
+  redundant boot comparison after the `/proc` read could never fail, and a check that
+  cannot fail MASKS the one that can. Deleting the real guard left every case green. The
+  redundant line is gone; the mutation reds.
+- **M39** (match any entry rather than this generation) survived once the fake children
+  became real processes: the complement case probed before the killed pid had actually
+  left the process table, so the wrong entry read as `ours-alive` and the case passed for
+  the wrong reason. It now waits for the real exits — a race this test file creates and
+  production does not, because production's reader is the next boot.
+- **M55** (the current-row presence test again) survived the identity work until the two
+  UNDETERMINED current-row cases were stamped with an identity: unstamped, they exercised
+  the unverifiable fallback and left the confirmed-gone branch covered only by cases whose
+  observation was `alive-and-killed`, where the mutation gives the same answer. Every new
+  state has to be checked against every case whose path predates it.
 - **M65 RETIRED**, not counted: it targeted the `survivors` slice in the old backstop,
   which no longer exists now that the threshold evicts nothing. Its property — never evict
   a referenced entry — is subsumed by **M79** (restore the eviction), which is strictly

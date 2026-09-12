@@ -49,6 +49,7 @@ import {
 import { quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
 import {
   deliverShutdownKillReports,
+  type WaitFactory,
   gatewayShutdownKillEntryFor,
   observationOf,
   recordGatewayShutdownOutcome,
@@ -67,8 +68,29 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/**
+ * EVERY FAKE CHILD IS BACKED BY A REAL PROCESS, and that is load-bearing rather than
+ * decorative. The registry now stores a process IDENTITY beside the pid (`/proc` start
+ * ticks + boot id) so a reader can tell our launcher from whatever inherited its pid,
+ * and an invented pid like `430000 + n` has no identity to sample — with one, these
+ * cases would have exercised the unverifiable fallback while claiming to cover the
+ * production path. A `sleep` we spawn and kill has a real identity, dies when the
+ * shutdown kills it, and leaves the pid genuinely absent afterwards.
+ */
+const realChildren: { kill: () => void; killed: () => boolean; exited: Promise<number> }[] = []
+
+/** Wait until every real child this file has killed is GONE FROM THE PROCESS TABLE.
+ *  `hasExited()` on the fake flips synchronously inside `kill()`, while the kernel
+ *  needs a moment — and a reader that looks in between sees the pid still live, which
+ *  is a race this file creates and production does not: the reader there is the NEXT
+ *  boot, minutes later. */
+async function realKillsSettled(): Promise<void> {
+  await Promise.all(realChildren.filter((c) => c.killed()).map((c) => c.exited.catch(() => 0)))
+}
+
 afterEach(async () => {
   await shutdownAllPersistentRepls()
+  for (const c of realChildren.splice(0)) c.kill()
 })
 
 function makeWedgeOnceHost(): {
@@ -88,7 +110,23 @@ function makeWedgeOnceHost(): {
       const incarnation = spawns
       argvs.set(incarnation, [...argv])
       let messagesOnThisChild = 0
-      const pid = 430000 + spawns
+      // A real, killable process — see `realChildren`. `sleep` is POSIX and is already
+      // relied on by this tree's e2e cases.
+      const proc = Bun.spawn(['sleep', '300'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
+      const killReal = (): void => {
+        try {
+          proc.kill('SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+      let killedReal = false
+      realChildren.push({ kill: killReal, killed: () => killedReal, exited: proc.exited })
+      // REAPED, or the pid survives its process as a zombie and every identity check
+      // sees it alive. Production does not have this: the next gateway is not the dead
+      // launcher's parent, so init has already reaped it by the time anything probes.
+      void proc.exited.catch(() => undefined)
+      const pid = proc.pid
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
@@ -145,6 +183,10 @@ function makeWedgeOnceHost(): {
         kill() {
           if (hasExited) return
           hasExited = true
+          // The REAL process dies first: a reader that confirms this death against the
+          // process table must find the pid gone, exactly as it would in production.
+          killedReal = true
+          killReal()
           try {
             server.stop(true)
           } catch {
@@ -985,16 +1027,35 @@ describe('no child’s marker or kill sits behind another child’s sink (#518)'
  *  `Bun.sleep` against a never-settling sink and failed only inside a 206-file
  *  process, which made the assertion a report on event-loop load rather than on the
  *  bound. */
-function fakeClock(): { sleep: (ms: number) => Promise<void>; now: () => number; waits: number[] } {
+function fakeClock(): {
+  wait: WaitFactory
+  now: () => number
+  waits: number[]
+  cancelled: number[]
+} {
   const waits: number[] = []
+  const cancelled: number[] = []
   let t = 1_000_000
   return {
     waits,
+    cancelled,
     now: () => t,
-    sleep: async (ms: number) => {
+    // STILL A BOUNDED WAIT, not a bare resolved promise: it records the budget it was
+    // asked for AND whether the caller took the bound back. The previous fake had no
+    // `cancel` at all, which is why a real leaked timer was invisible to every one of
+    // these cases — a fake that replaces the mechanism removes the property the
+    // mechanism has.
+    wait: (ms: number) => {
       waits.push(ms)
       t += ms
-      await Promise.resolve()
+      return {
+        expired: (async () => {
+          await Promise.resolve()
+        })(),
+        cancel: () => {
+          cancelled.push(ms)
+        },
+      }
     },
   }
 }
@@ -1024,7 +1085,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
             seen.push('ok')
           }),
         ],
-        { perSinkMs: 20, phaseBudgetMs: 5_000, now: clock.now, sleep: clock.sleep },
+        { perSinkMs: 20, phaseBudgetMs: 5_000, now: clock.now, wait: clock.wait },
       ),
     )
     expect(result.timedOut).toBe(1)
@@ -1042,7 +1103,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
     const hung = Array.from({ length: 10 }, (_, i) => pending(`h${i}`, () => new Promise<void>(() => {})))
     const clock = fakeClock()
     const { result } = await captureStderr(() =>
-      deliverShutdownKillReports(hung, { perSinkMs: 20, phaseBudgetMs: 45, now: clock.now, sleep: clock.sleep }),
+      deliverShutdownKillReports(hung, { perSinkMs: 20, phaseBudgetMs: 45, now: clock.now, wait: clock.wait }),
     )
     expect(result.timedOut + result.skipped).toBe(10)
     // The phase gave up rather than paying 10 × 20ms: most were never attempted.
@@ -1073,7 +1134,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
           pending('a', () => new Promise<void>(() => {})),
           pending('b', () => new Promise<void>(() => {})),
         ],
-        { perSinkMs: 500, phaseBudgetMs: 520, now: clock.now, sleep: clock.sleep },
+        { perSinkMs: 500, phaseBudgetMs: 520, now: clock.now, wait: clock.wait },
       ),
     ).then(() => {
       // First gets the full per-sink bound; the second is clamped to what is left.
@@ -1148,6 +1209,8 @@ describe('a quarantined child whose report fails is still recoverable on the nex
     const row = loadRegistry(registryPath)[key]
     expect(killedGenerations(row).sort()).toEqual([pooledGeneration, quarantinedGeneration].sort())
 
+    await realKillsSettled()
+
     // AND THE PROBE FINDS THE QUARANTINED ONE, which is what a still-running build on
     // that launcher asks. Before this it answered 'unknown' forever.
     expect(probeLauncherGenerationAlive(quarantinedGeneration, registryPath)).toBe('killed-by-gateway-shutdown')
@@ -1169,6 +1232,11 @@ describe('a quarantined child whose report fails is still recoverable on the nex
     await abandonFirstTurn(sub, messagesSeen)
     await captureStderr(() => drain(sub.start(spec('turn-2'))))
     await captureStderr(() => shutdownAllPersistentRepls())
+    // The real children must be GONE before the probe looks, or an entry that is still
+    // live reads as `ours-alive` and this case passes for the wrong reason — which is
+    // exactly what happened: the wrong-generation mutation below survived, masked by a
+    // pid that had not finished dying.
+    await realKillsSettled()
 
     expect(probeLauncherGenerationAlive('a-generation-nobody-killed', registryPath)).toBe('unknown')
   })
@@ -1198,7 +1266,7 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
           { ...base, sessionKey: 'k1', childGeneration: 'gen-durable', durablyRecorded: 'alive-and-killed' as const },
           { ...base, sessionKey: 'k2', childGeneration: 'gen-lost', durablyRecorded: null },
         ],
-        { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, sleep: clock.sleep },
+        { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, wait: clock.wait },
       ),
     )
     const all = lines.join('')
@@ -1235,7 +1303,7 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
             durablyRecorded: 'alive-when-reached' as const,
           },
         ],
-        { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, sleep: clock.sleep },
+        { perSinkMs: 5, phaseBudgetMs: 5_000, now: clock.now, wait: clock.wait },
       ),
     )
     const line = lines.find((l) => l.includes('gen-weak')) ?? ''
@@ -1411,8 +1479,10 @@ describe('a kill that throws never attributes a deploy (#518)', () => {
     const { host, messagesSeen } = makeUnkillableHost()
     const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-unkillable-')), 'repl-registry.json')
     const seen: Array<{ cause: string; detail: string }> = []
+    const alerts: string[] = []
     const options = opts(host, {
       replRegistryPath: registryPath,
+      postWedgeAlert: (text: string) => alerts.push(text),
       onChildCrash: (info) => {
         seen.push({ cause: info.cause, detail: info.detail })
       },
@@ -1424,12 +1494,20 @@ describe('a kill that throws never attributes a deploy (#518)', () => {
 
     await captureStderr(() => shutdownAllPersistentRepls())
 
-    // The child is still running, so nothing may claim we ended it.
-    expect(seen).toHaveLength(1)
-    expect(seen[0]?.cause).not.toBe('gateway-shutdown')
-    expect(seen[0]?.cause).toBe('unknown')
-    expect(seen[0]?.detail).toContain('COULD NOT TERMINATE')
-    expect(seen[0]?.detail).toContain('UNDETERMINED')
+    // THE CHILD IS STILL RUNNING, SO THE DEATH SINK IS NOT TOLD AT ALL. An honest
+    // `cause: 'unknown'` does not make `onChildCrash` a safe destination: its production
+    // implementation latches `crashRunningByLauncher`, which marks this launcher's
+    // still-running builds `crashed`. The value was careful and the CHANNEL asserted the
+    // death anyway — this item's own subject, inverted. See the end-to-end pair in
+    // `open/wiring/__tests__/trident-child-crash-sink.test.ts`, which drives the real
+    // sink against a real run row.
+    expect(seen).toHaveLength(0)
+    // Told on the notify-only seam instead, which touches no run row.
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toContain('could not establish')
+    expect(alerts[0]).toContain('alive-when-reached')
+    // The edge stays open, so a later CONFIRMED death is still reported.
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeUndefined()
 
     // And no excuse on disk either: the durable record stops at what was established.
     const row = loadRegistry(registryPath)[key]
@@ -1508,10 +1586,13 @@ describe('a signal that failed does not become a deploy kill when the child dies
 
     await captureStderr(() => shutdownAllPersistentRepls())
 
-    expect(seen).toHaveLength(1)
-    expect(seen[0]?.cause).not.toBe('gateway-shutdown')
-    expect(seen[0]?.cause).toBe('unknown')
-    // And nothing on disk claims the deploy did it.
+    // Dead, and not by us — so the death sink hears nothing (we did not establish this
+    // death; the next boot's watchdog confirms it against the process table and reports
+    // it) and nothing on disk claims the deploy did it.
+    expect(seen).toHaveLength(0)
     expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(false)
+    expect(observationOf(gatewayShutdownKillEntryFor(loadRegistry(registryPath)[key], loadRegistry(registryPath)[key]?.child_generation as string))).not.toBe(
+      'alive-and-killed',
+    )
   }, 20_000)
 })
