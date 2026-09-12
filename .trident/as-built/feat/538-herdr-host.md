@@ -1527,6 +1527,32 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The row that was missing is the one that is well-formed
+
+Every request sent `id: "r"`; `classifyReply` accepted any string id. So
+`{"id":"wrong","result":{"type":"ok"}}` resolved the call successfully — a stray or
+drifted response taken as acknowledgement, including of `pane.close`, which is the one
+operation this branch spent four rounds making trustworthy.
+
+The envelope table had fifteen cases and missed this one, and the reason is structural
+rather than carelessness: **every other row is MALFORMED, and a mismatched id is
+perfectly well-formed.** It is simply not ours. A table built around "reject what is
+broken" has no natural place for "reject what is fine but unrelated", so the shape of the
+table hid the shape of the defect.
+
+Why it still matters on a one-request-per-connection transport, since the obvious
+objection is that no other reply can arrive: **that is the server's guarantee, and this
+is the client's own check that it holds.** This branch is itself the argument for
+distrusting exactly that kind of assumption — the protocol moved 20 → 22 in nineteen days
+with no server-side version check of any kind, and the persistent multiplexing design
+that assumed a server matching its description could not execute at all. One comparison
+removes a class.
+
+One constant is used by both the request and the check, so the two cannot drift into two
+facts that happen to agree today; M203 mutates the request side alone and reddens. M202
+is the pair that stops the check being satisfied by rejecting everything — it fails
+twelve cases, which is what "nothing correlates" should look like.
+
 ### An unfalsifiable check is believed rather than tested
 
 M145 — moving the frame bound after the copy — survived every round for eight days, and
@@ -2472,6 +2498,10 @@ Run against the named suites.
 | M197 | the whole delivery is copied, coalesced surplus included | RED 2 (first attempt adjusted the counter and survived — a mutation must break the property, not just look like it) |
 | M198 | the pty DROPS the screen it held past the exit | RED 2 — invisible until the conformance assertion stopped being conditional |
 | M199 | herdr delivers a FAILED read as an empty screen | RED 1 — which is what makes its ZERO an asserted outcome rather than an absent one |
+| M200 | any string id is accepted again (no correlation) | RED 1 |
+| M201 | the id check is dropped entirely | RED 3 |
+| M202 | PAIR: the check is over-strict — nothing correlates | RED 12 |
+| M203 | the REQUEST sends an id the check does not expect (they drift) | RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

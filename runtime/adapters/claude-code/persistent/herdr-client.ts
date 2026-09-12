@@ -122,12 +122,30 @@ function asObject(v: unknown): Record<string, unknown> | undefined {
  * success and stays valid; a primitive, `null`, an array, a missing outcome, or BOTH
  * outcomes are unknowns and must be refused.
  */
+/**
+ * The id every request carries, and the id every reply must carry back.
+ *
+ * ONE CONSTANT, USED BY BOTH THE REQUEST AND THE CHECK, so the two cannot drift. A
+ * literal in each place would be two facts that happen to agree today.
+ */
+const HERDR_REQUEST_ID = 'r'
+
 function classifyReply(
   parsed: unknown,
+  expectedId: string,
 ): { ok: true; result: Record<string, unknown> } | { ok: false; error: Record<string, unknown> } | undefined {
   const o = asObject(parsed)
   if (o === undefined) return undefined
-  if (typeof o['id'] !== 'string') return undefined
+  // THE ANSWER MUST BE TO THE QUESTION WE ASKED. One connection carries one request, so
+  // the obvious objection is that no other reply can arrive — but that is the SERVER'S
+  // guarantee, and this is the client's own check that it holds. This branch learned two
+  // days ago what it costs to rely on the server being as described: the protocol moved
+  // 20 → 22 in nineteen days with no server-side version check of any kind, and the
+  // persistent multiplexing design that assumed otherwise could not execute at all.
+  // A correlation check is one comparison and it removes a class — including a stray or
+  // drifted response being taken as the acknowledgement of `pane.close`, which is the
+  // one operation this branch spent four rounds making trustworthy.
+  if (o['id'] !== expectedId) return undefined
   const hasResult = 'result' in o
   const hasError = 'error' in o
   if (hasResult === hasError) return undefined
@@ -273,7 +291,7 @@ export async function herdrCall(
   const socketPath = resolveSocketPath(opts)
   const timeoutMs = opts.timeoutMs ?? HERDR_RPC_TIMEOUT_MS
   const maxFrameBytes = opts.maxFrameBytes ?? HERDR_MAX_FRAME_BYTES
-  const frame = `${JSON.stringify({ id: 'r', method, params })}\n`
+  const frame = `${JSON.stringify({ id: HERDR_REQUEST_ID, method, params })}\n`
 
   let settled = false
   let socket: SocketLike | undefined
@@ -341,12 +359,12 @@ export async function herdrCall(
       )
       return
     }
-    const outcome = classifyReply(parsed)
+    const outcome = classifyReply(parsed, HERDR_REQUEST_ID)
     if (outcome === undefined) {
       fail(
         new Error(
-          `herdr: reply to '${method}' matched no known envelope (an id plus exactly one ` +
-            `object-valued result or error): ${line.slice(0, 200)}`,
+          `herdr: reply to '${method}' matched no known envelope (id '${HERDR_REQUEST_ID}' plus ` +
+            `exactly one object-valued result or error): ${line.slice(0, 200)}`,
         ),
       )
       return

@@ -322,6 +322,15 @@ describe('the reply envelope — exactly one well-formed outcome', () => {
     ['a bare string', '"hello"'],
     ['an id with no outcome', '{"id":"r"}'],
     ['an outcome with no id', '{"result":{"type":"ok"}}'],
+    // A WELL-FORMED ANSWER TO A DIFFERENT QUESTION. Every other row here is malformed;
+    // this one is perfectly shaped and simply is not ours, which is why it was the row
+    // missing. One connection carries one request, so nothing but the server's own
+    // discipline stops a stray or drifted response arriving — and the server is the
+    // thing this branch measured as undisciplined: no version check of any kind, and a
+    // protocol that moved 20 → 22 in nineteen days. Resolving on it would report a
+    // `pane.close` as acknowledged when nothing acknowledged it.
+    ['a MISMATCHED id — well-formed, but not our answer', '{"id":"wrong","result":{"type":"ok"}}'],
+    ['a NUMERIC id where ours is a string', '{"id":0,"result":{"type":"ok"}}'],
     ['BOTH result and error', '{"id":"r","result":{},"error":{"code":"x"}}'],
     ['a string error', '{"id":"r","error":"refused"}'],
     ['a null error', '{"id":"r","error":null}'],
@@ -340,6 +349,12 @@ describe('the reply envelope — exactly one well-formed outcome', () => {
       expect((e as Error).message).toMatch(/no known envelope|unparseable/)
     })
   }
+
+  it('CONTROL — the MATCHING id resolves, so correlation is a check and not a refusal', async () => {
+    // Without this, "reject a mismatched id" is satisfied by rejecting every id, which
+    // would fail every call ever made.
+    expect(await call('{"id":"r","result":{"type":"ok"}}\n')).toEqual({ type: 'ok' })
+  })
 
   it('CONTROL — an EMPTY result object is a real success', async () => {
     // `{}` is what a client with no envelope check invents when it cannot read an

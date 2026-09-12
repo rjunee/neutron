@@ -893,6 +893,23 @@ not-new. That is accepted and recorded here rather than hidden.
       against `PtyHost` and never against either by name, and the two are not
       interchangeable.
       verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is the restored backend and its test, an archive, an explicitly dated historical note, or the divergence note; none asserts either backend is the sole one
+- [ ] **A reply must be the answer to the question we asked.** Every request carries an
+      id and the client REQUIRES it back — one constant used by both the request and the
+      check, so the two cannot drift into two facts that happen to agree. The obvious
+      objection is that one connection carries one request, so no other reply can arrive:
+      that is THE SERVER'S guarantee, and this is the client's own check that it holds.
+      This item is the reason to distrust exactly that kind of assumption — the protocol
+      moved 20 → 22 in nineteen days with no server-side version check of any kind, and
+      the persistent multiplexing design that assumed a described server could not
+      execute at all. One comparison removes a class, including a stray or drifted
+      response being taken as the acknowledgement of `pane.close` — the one operation
+      this item spent four rounds making trustworthy.
+      THE ROW THAT WAS MISSING IS THE ONE THAT IS WELL-FORMED. Every other envelope case
+      is malformed; a mismatched id is perfectly shaped and simply is not ours, which is
+      why a table built around "reject what is broken" did not contain it. Needs the
+      CONTROL in the same run — a matching id resolves — or "reject a mismatched id" is
+      satisfied by rejecting every id, which fails every call ever made.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **A reply carries EXACTLY ONE well-formed outcome.** `result` and `error` must
       each be a plain object; a primitive, `null`, an array, a missing outcome, and BOTH
       outcomes present all reach the malformed-frame teardown. Presence of the key is
