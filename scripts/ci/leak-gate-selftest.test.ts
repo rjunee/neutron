@@ -254,8 +254,11 @@ describe('G8 leak-gate — planted findings FAIL', () => {
         rmSync(dir, { recursive: true, force: true })
       }
     }
-    // Four full gate runs in one case. bun's 5s default is the wrong budget for
-    // a test that shells out repeatedly (same reasoning as ci-workflow.test.ts).
+    // THREE full gate runs in one case — one per retained entry. It was four
+    // until `AGENTS.md` was un-banned (Decisions Log 2026-09-12); the count moves
+    // with the list, so it is stated as "one per entry" rather than a number that
+    // silently goes stale. bun's 5s default is the wrong budget for a test that
+    // shells out repeatedly (same reasoning as ci-workflow.test.ts).
   }, 60_000)
 
   test('RT1: a root SPEC.md is allowed (K10 intentionally introduced one)', () => {

@@ -94,7 +94,9 @@ const SLUG_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/
 export function readSpecItem(dir: string, filename: string): SpecItem {
   const slug = filename.replace(/\.md$/, '')
   if (!SLUG_RE.test(slug)) throw new Error(`${slug}: slug must match ${SLUG_RE} (no leading dot)`)
-  const fm = parseFrontmatter(readFileSync(join(dir, filename), 'utf8'), slug)
+  const text = readFileSync(join(dir, filename), 'utf8')
+  const fm = parseFrontmatter(text, slug)
+  checkDeclaredStructure(slug, fm, text)
   const title = fm.title
   if (title === undefined || title === '') throw new Error(`${slug}: missing required frontmatter 'title'`)
   if (title.length > 70) throw new Error(`${slug}: title is ${title.length} chars, max 70`)
@@ -108,6 +110,97 @@ export function readSpecItem(dir: string, filename: string): SpecItem {
     priority: must(slug, 'priority', fm.priority, PRIORITIES),
     cutover,
     needs_spec,
+  }
+}
+
+/**
+ * Counts of a spec item's load-bearing structure: `## ` sections, `- [ ] ` acceptance
+ * criteria, and top-level numbered contract items.
+ *
+ * WHY THIS EXISTS. An editing script that replaced "from this heading to end of file"
+ * silently dropped a whole trailing section of a spec item, and nothing noticed until an
+ * unrelated tool threw on the missing heading. Truncation is invisible to every other check
+ * here: the frontmatter still parses, the index still renders, and the remaining prose still
+ * reads correctly. An item that declares its own shape turns that class of edit into a
+ * failure at the moment it happens, which is the only kind of guard worth having.
+ */
+export interface SpecItemStructure {
+  sections: number
+  criteria: number
+  contract_items: number
+}
+
+/**
+ * FENCE-AWARE ON PURPOSE. Raw line-prefix matching counts Markdown-shaped text inside a code
+ * fence as real structure — `countStructure('```\n## fake\n```')` reported one section — so a
+ * dropped section could be BALANCED BACK by an example in a fence and the declaration would
+ * still pass. Spec items quote commands and file excerpts, so that is the likely shape of an
+ * edit rather than a contrived one.
+ *
+ * Fence rules follow CommonMark closely enough for this purpose: an opener is three or more
+ * backticks or tildes after at most three spaces of indent; it closes on a run of the SAME
+ * character, at least as long, carrying no info string. A fence-shaped line inside a fence is
+ * content.
+ *
+ * AN UNTERMINATED FENCE THROWS rather than silently swallowing the rest of the file — which is
+ * the same miscount in the other direction, and the more dangerous one because it under-counts
+ * without limit. `checkDeclaredStructure` only calls this for an item that declares a count, so
+ * a document with an unterminated fence and no declaration is still unconstrained.
+ */
+export function countStructure(text: string): SpecItemStructure {
+  const out: SpecItemStructure = { sections: 0, criteria: 0, contract_items: 0 }
+  let fence: string | null = null
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/^ {0,3}/, '')
+    const fenceMatch = /^(`{3,}|~{3,})(.*)$/.exec(line)
+    if (fenceMatch !== null) {
+      const run = fenceMatch[1]!
+      const info = fenceMatch[2]!
+      if (fence === null) {
+        fence = run
+      } else if (run[0] === fence[0] && run.length >= fence.length && info.trim() === '') {
+        fence = null
+      }
+      continue
+    }
+    if (fence !== null) continue
+    if (line.startsWith('## ')) out.sections += 1
+    else if (line.startsWith('- [ ] ')) out.criteria += 1
+    else if (/^[0-9]+\. \*\*/.test(line)) out.contract_items += 1
+  }
+  if (fence !== null) {
+    throw new Error('unterminated code fence: every structure count after it would be unreliable')
+  }
+  return out
+}
+
+/**
+ * Verify an item whose frontmatter DECLARES its structure. Opt-in per item: an item with
+ * none of the three keys is unconstrained, so this cannot make ordinary edits fail. An
+ * item that declares a count and drifts from it fails loudly, naming both numbers.
+ */
+export function checkDeclaredStructure(slug: string, fm: Record<string, string>, text: string): void {
+  const keys = ['sections', 'criteria', 'contract_items'] as const
+  // Opt-in: count nothing for an item that declares nothing, so neither a miscount nor an
+  // unterminated fence can fail an item that never asked to be checked.
+  if (keys.every((k) => fm[k] === undefined)) return
+  let actual: SpecItemStructure
+  try {
+    actual = countStructure(text)
+  } catch (error) {
+    throw new Error(`${slug}: ${(error as Error).message}`)
+  }
+  for (const key of keys) {
+    const declared = fm[key]
+    if (declared === undefined) continue
+    const want = Number(declared)
+    if (!Number.isInteger(want)) throw new Error(`${slug}: frontmatter '${key}' is '${declared}', must be an integer`)
+    if (actual[key] !== want) {
+      throw new Error(
+        `${slug}: declares ${key}: ${want} but the body has ${actual[key]}. ` +
+          `If the change is intended, update the frontmatter in the same commit.`,
+      )
+    }
   }
 }
 

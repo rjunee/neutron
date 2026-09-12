@@ -104,6 +104,10 @@ const PRELUDE = [
   extractFn('isCodeWorkFinding'),
   extractConst('usableStatus'),
   extractConst('CORE_SEAT_STATUS_KEY'),
+  // `retryDeferredPeers` asks this to decide whether a deferral is a provider REFUSAL
+  // (HTTP 429), which an immediate re-call cannot clear. Loaded from the same source
+  // rather than restated, for the same reason as every other entry here.
+  extractFn('crossModelRateLimited'),
 ].join('\n')
 
 const load = <T>(name: string, isAsync = false): T =>
@@ -114,8 +118,12 @@ const load = <T>(name: string, isAsync = false): T =>
 
 type Verdict = Record<string, unknown>
 type RetryFn = (input: {
-  verdicts: Verdict[]
-  slots: Array<{ name: string; slot: number | null; statusKey: string }>
+  // `Verdict | null`, because a DEAD SEAT really is null — that is the case
+  // `retryDeferredPeers` treats as "configured, dispatched, produced nothing" and
+  // retries. Declaring it `Verdict[]` made the honest fixture a type error (TS2322),
+  // which is the type lying about the function rather than the fixture being wrong.
+  verdicts: Array<Verdict | null>
+  slots: Array<{ name: string; slot: number | null; statusKey: string; rateLimitKey?: string | null }>
   invoke: (name: string) => Promise<Verdict | null>
   attempts?: number
   log?: (m: string) => void
@@ -641,5 +649,88 @@ describe('retryDeferredPeers — a dead CORE seat is retried, not written off', 
     // is that the retry is told WHICH peer it is retrying — assert that, not the literal.
     expect(slots).toContain("{ name: 'argus:codex', slot: codexSlot, statusKey:")
     expect(slots).toContain("slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus'")
+  })
+})
+
+/**
+ * #542 — A PROVIDER THAT ANSWERED HTTP 429 IS NOT RE-CALLED INSTANTLY.
+ *
+ * This retry is IMMEDIATE by design: there is no backoff between the first call and the
+ * second, because the failures it exists for (an agent that died, a dropped socket) are
+ * cleared by simply asking again. A 429 is the one deferral for which asking again
+ * MILLISECONDS later is known in advance to fail — the provider has just said it is
+ * serving too many requests — and on a per-minute limiter the extra call is itself
+ * billable attention that can extend the window. The remedy that works is one level up:
+ * the run-level `infra_retries` backoff (1m/5m/15m) that `classifyInnerFailure` routes an
+ * 'infra-only' block to. So the lane keeps its original refusal and lets that do the
+ * waiting.
+ *
+ * Both directions, because the skip must be scoped to the MEASURED 429 and nothing else:
+ * narrow it wrongly and a dead lane loses the cheapest remedy it has.
+ */
+describe('#542 a 429 refusal skips the immediate lane retry', () => {
+  test('HEADLINE: the lane retry does NOT re-call a provider that just answered 429', async () => {
+    // The lane retry is IMMEDIATE by design — no backoff — because the failures it was
+    // written for (a dead agent, a dropped socket) are cleared by asking again. A 429 is
+    // the one deferral where asking again milliseconds later is known in advance to fail:
+    // the provider has just said it is serving too many requests. Worse, on a per-minute
+    // limiter the extra call can extend the window. The remedy that works is the
+    // run-level backoff this block already routes to, so the lane keeps its refusal.
+    const calls: string[] = []
+    const logs: string[] = []
+    const refused = [{ verdict: 'REQUEST_CHANGES', findings: [], kimiStatus: 'deferred', kimiRateLimited: true }]
+    const out = await retryDeferredPeers({
+      verdicts: refused,
+      slots: [{ name: 'argus:kimi', slot: 0, statusKey: 'kimiStatus', rateLimitKey: 'kimiRateLimited' }],
+      attempts: 1,
+      log: (m: string) => logs.push(m),
+      invoke: async (n: string) => {
+        calls.push(n)
+        return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
+      },
+    })
+    expect(calls).toEqual([])
+    // ...and the original refusal is KEPT, so the gate still blocks and the row still
+    // names the 429. Skipping the retry must not soften the outcome.
+    expect(out[0]).toEqual(refused[0])
+    // AND THE SKIP SAYS SO IN THE LOG. A lane that silently does not retry is
+    // indistinguishable from a lane that retried and failed when someone reads the run
+    // back — and this was the second surviving mutation: the whole log call could be
+    // deleted with every test still green. It names the seat, the status code, and why an
+    // immediate re-call cannot help, because that last part is the non-obvious bit.
+    const skip = logs.find((l) => l.includes('SKIPPED'))
+    expect(skip).toBeDefined()
+    expect(skip).toContain('argus:kimi')
+    expect(skip).toContain('HTTP 429')
+    expect(skip).toContain('immediate re-call cannot clear a rate limit')
+  })
+
+  test('...but an ORDINARY deferral is still retried immediately, exactly as before', async () => {
+    // The skip is scoped to the measured 429 and nothing else. A dead lane keeps the
+    // cheapest possible remedy — this is the behaviour the retry exists for.
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [{ verdict: 'REQUEST_CHANGES', findings: [], kimiStatus: 'deferred' }],
+      slots: [{ name: 'argus:kimi', slot: 0, statusKey: 'kimiStatus', rateLimitKey: 'kimiRateLimited' }],
+      attempts: 1,
+      invoke: async (n: string) => {
+        calls.push(n)
+        return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
+      },
+    })
+    expect(calls).toEqual(['argus:kimi'])
+    expect(out[0]!['kimiStatus']).toBe('connected')
+    // A seat with no rate-limit key at all (a core claude seat) is retried too.
+    const core: string[] = []
+    await retryDeferredPeers({
+      verdicts: [null],
+      slots: [{ name: 'argus:claude', slot: 0, statusKey: 'verdict', rateLimitKey: null }],
+      attempts: 1,
+      invoke: async (n: string) => {
+        core.push(n)
+        return { verdict: 'APPROVE', findings: [] }
+      },
+    })
+    expect(core).toEqual(['argus:claude'])
   })
 })
