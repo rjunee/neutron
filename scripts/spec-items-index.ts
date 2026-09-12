@@ -130,13 +130,48 @@ export interface SpecItemStructure {
   contract_items: number
 }
 
+/**
+ * FENCE-AWARE ON PURPOSE. Raw line-prefix matching counts Markdown-shaped text inside a code
+ * fence as real structure — `countStructure('```\n## fake\n```')` reported one section — so a
+ * dropped section could be BALANCED BACK by an example in a fence and the declaration would
+ * still pass. Spec items quote commands and file excerpts, so that is the likely shape of an
+ * edit rather than a contrived one.
+ *
+ * Fence rules follow CommonMark closely enough for this purpose: an opener is three or more
+ * backticks or tildes after at most three spaces of indent; it closes on a run of the SAME
+ * character, at least as long, carrying no info string. A fence-shaped line inside a fence is
+ * content.
+ *
+ * AN UNTERMINATED FENCE THROWS rather than silently swallowing the rest of the file — which is
+ * the same miscount in the other direction, and the more dangerous one because it under-counts
+ * without limit. `checkDeclaredStructure` only calls this for an item that declares a count, so
+ * a document with an unterminated fence and no declaration is still unconstrained.
+ */
 export function countStructure(text: string): SpecItemStructure {
-  const lines = text.split('\n')
-  return {
-    sections: lines.filter((l) => l.startsWith('## ')).length,
-    criteria: lines.filter((l) => l.startsWith('- [ ] ')).length,
-    contract_items: lines.filter((l) => /^[0-9]+\. \*\*/.test(l)).length,
+  const out: SpecItemStructure = { sections: 0, criteria: 0, contract_items: 0 }
+  let fence: string | null = null
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/^ {0,3}/, '')
+    const fenceMatch = /^(`{3,}|~{3,})(.*)$/.exec(line)
+    if (fenceMatch !== null) {
+      const run = fenceMatch[1]!
+      const info = fenceMatch[2]!
+      if (fence === null) {
+        fence = run
+      } else if (run[0] === fence[0] && run.length >= fence.length && info.trim() === '') {
+        fence = null
+      }
+      continue
+    }
+    if (fence !== null) continue
+    if (line.startsWith('## ')) out.sections += 1
+    else if (line.startsWith('- [ ] ')) out.criteria += 1
+    else if (/^[0-9]+\. \*\*/.test(line)) out.contract_items += 1
   }
+  if (fence !== null) {
+    throw new Error('unterminated code fence: every structure count after it would be unreliable')
+  }
+  return out
 }
 
 /**
@@ -145,8 +180,17 @@ export function countStructure(text: string): SpecItemStructure {
  * item that declares a count and drifts from it fails loudly, naming both numbers.
  */
 export function checkDeclaredStructure(slug: string, fm: Record<string, string>, text: string): void {
-  const actual = countStructure(text)
-  for (const key of ['sections', 'criteria', 'contract_items'] as const) {
+  const keys = ['sections', 'criteria', 'contract_items'] as const
+  // Opt-in: count nothing for an item that declares nothing, so neither a miscount nor an
+  // unterminated fence can fail an item that never asked to be checked.
+  if (keys.every((k) => fm[k] === undefined)) return
+  let actual: SpecItemStructure
+  try {
+    actual = countStructure(text)
+  } catch (error) {
+    throw new Error(`${slug}: ${(error as Error).message}`)
+  }
+  for (const key of keys) {
     const declared = fm[key]
     if (declared === undefined) continue
     const want = Number(declared)

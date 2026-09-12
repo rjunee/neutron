@@ -373,6 +373,32 @@ on this document now produces *"declares sections: 4 but the body has 3"*. Six t
 including the dropped-section case and a non-integer declaration being refused rather than
 ignored.
 
+**And the guard's own counter was wrong, which is the more useful lesson than the guard.** Raw
+line-prefix matching counted Markdown-shaped text **inside code fences** as real structure — a
+fenced `## fake` plus `- [ ] fake` plus `1. **fake**` reported one of each. So a dropped section
+could be **balanced back** by an example in a fence and the declaration would still pass. Spec
+items quote commands and file excerpts, so that is the likely shape of an edit rather than a
+contrived one. (Measured: *this* item happens to contain **zero** fenced blocks, so the counts
+4/10/8 were right and the defect was latent — it would have activated the first time a criterion
+cited a command, which several nearly do.)
+
+The trap is worth naming precisely, because the verification looked sound. The guard was built to
+catch an edit that silently dropped a section, and was verified **against that exact failure** —
+replaying the edit produced the right error. That proves the guard **fires**; it says nothing
+about whether it **counts**. An instrument that is a counter needs adversarial inputs for
+*counting*, and its positive control needs a partner: it is not enough that removing a section
+fails — **removing it and replacing it with a fenced look-alike must fail too**, or the guard's
+own subject can forge its evidence. That is question 7 arriving inside the tool rather than the
+thing measured.
+
+Counting is now fence-aware (backtick and tilde openers, up to three spaces of indent, closing
+only on a same-character run at least as long carrying no info string), and **an unterminated
+fence throws** rather than silently swallowing the rest of the file — the same miscount in the
+more dangerous direction, because it under-counts without limit. Opt-in is preserved by returning
+before counting, so neither a miscount nor an unterminated fence can fail an item that never
+asked to be checked. Nine tests cover the boundaries; **mutation-checked by restoring the naive
+counter, which fails 8 of the 9** — the ninth guards opt-in and correctly passes either way.
+
 **An instrument must also be unforgeable by its subject — question 6 does not ask that.**
 The long-lived-process check has now named three instruments and each failed differently.
 The process group could not see a `setsid`/double-forked descendant: **too little reach**.
