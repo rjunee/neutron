@@ -69,21 +69,26 @@
  *      standing in a path bearing its `workflow_run_id`. This is the gate for the
  *      real race the DB cannot see: the row went terminal (hang watchdog, cancel,
  *      crash latch) while the detached workflow is still running.
- *   9. The ref still points at the sha the enumeration read. A ref that MOVED in
- *      between is a ref something just wrote to — the delete is compare-and-swapped
- *      against it and refuses.
- *  10. A salvage ref was created AND verified first. 67 of the 79 measured refs carry
- *      commits origin does not have, so the delete would otherwise be the only copy's
- *      last reference. `refs/trident-reaped/<slug>/<sha>` keeps them reachable —
- *      outside `refs/heads` so it can never re-enter a launch, and outside `refs/tags`
- *      so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
- *      `git branch <name> <sha>`. Salvage failing REFUSES the delete.
- *  11. `git branch -D` itself agrees. It is used rather than `git update-ref -d`
- *      precisely because it carries git's own independent refusal for a branch a
- *      worktree, rebase or bisect holds (measured on git 2.43: `branch -D` exits 1
- *      with "cannot delete branch 'feat' used by worktree at ...", while
- *      `update-ref -d` deletes it without a word). Gate 4 should already have
- *      refused; this is the gate that does not depend on gate 4 being right.
+ *   9. A salvage ref was CREATED first — create-only, never a blind set. 67 of the 79
+ *      measured refs carry commits origin does not have, so the delete would otherwise
+ *      be the only copy's last reference. `refs/trident-reaped/<slug>/<sha>` keeps them
+ *      reachable — outside `refs/heads` so it can never re-enter a launch, and outside
+ *      `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push.
+ *      Recovery is `git branch <name> <sha>`. Salvage failing REFUSES the delete.
+ *  10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP: `git update-ref -d <ref>
+ *      <expected-sha>` checks the old value and unlinks the ref under one ref lock, so a
+ *      branch that has advanced since the enumeration cannot be deleted at all. There is
+ *      no read-then-delete window, because there is no separate read.
+ *
+ *      THIS IS WHERE THE FIRST CUT OF THIS MODULE WAS WRONG, and it is worth saying so
+ *      here rather than only at the call site. It used to `rev-parse` the sha and then
+ *      run `git branch -D`, and call the pair a compare-and-swap. Anything could advance
+ *      the branch between the two commands, `branch -D` has no old-value check at any
+ *      price, and the commit that had just arrived went with it — while the salvage above
+ *      preserved the OLD tip. `branch -D` was chosen for a real measurement (git 2.43: it
+ *      refuses a branch a worktree holds, where `update-ref -d` does not) that answered
+ *      the wrong question: holder safety is gates 4 and 4b, which do not depend on the
+ *      delete primitive, whereas atomicity can only come FROM the primitive.
  */
 
 import {
@@ -693,60 +698,85 @@ async function reapBranchRefs(
       continue
     }
 
-    // GATE 9 — compare-and-swap. `git branch -D` has no old-value check of its own, so
-    // the sha is re-read here: a ref that moved since the enumeration is a ref something
-    // just wrote to, and that is evidence of life the store never saw.
-    let current
-    try {
-      current = await opts.run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', ref], repo)
-    } catch (error) {
-      report.refs_kept.push({ ref, reason: `sha-unreadable: ${errText(error)}` })
-      continue
-    }
-    if (!current.ok || current.stdout.trim() !== sha) {
-      report.refs_kept.push({ ref, reason: 'ref-moved: it no longer points at the sha enumerated' })
-      continue
-    }
-
-    // GATE 10 — salvage FIRST, and prove it landed. `update-ref` is exact: a re-reap of
-    // the same tip writes the same ref, and a reap at a new tip adds a sibling rather
-    // than overwriting the older one.
+    // GATE 9 — SALVAGE FIRST, CREATE-ONLY. `refs/trident-reaped/<slug>/<sha>` embeds the
+    // sha it carries, so the name is a function of its own value: two sweeps reaping the
+    // same slug write the SAME ref when the tip matches and DIFFERENT refs when it does
+    // not, and neither can overwrite the other's. The write is still made create-only
+    // (`update-ref <ref> <new> ''`, whose empty old-value means "must not exist"; measured
+    // on git 2.43: exit 128 "reference already exists") rather than an unconditional set,
+    // so the one case the naming cannot rule out — an existing salvage at some OTHER sha —
+    // is refused instead of clobbered.
+    //
+    // A refusal falls through to a read, and that read cannot be harmfully stale: it is
+    // reached only because the ref already exists, and all it has to establish is that
+    // what already exists is this tip. The CREATE path needs no read at all.
     const salvage = `${SALVAGE_REF_PREFIX}${short.slice('trident/'.length)}/${sha}`
     let saved
     try {
-      saved = await opts.run_host(['git', '-C', repo, 'update-ref', salvage, sha], repo)
+      saved = await opts.run_host(['git', '-C', repo, 'update-ref', salvage, sha, ''], repo)
     } catch (error) {
       report.refs_kept.push({ ref, reason: `salvage-failed: ${errText(error)}` })
       continue
     }
     if (!saved.ok) {
-      report.refs_kept.push({ ref, reason: `salvage-failed: ${hostText(saved)}` })
-      continue
-    }
-    let confirmed
-    try {
-      confirmed = await opts.run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', salvage], repo)
-    } catch (error) {
-      report.refs_kept.push({ ref, reason: `salvage-unverified: ${errText(error)}` })
-      continue
-    }
-    if (!confirmed.ok || confirmed.stdout.trim() !== sha) {
-      report.refs_kept.push({ ref, reason: 'salvage-unverified: the salvage ref does not carry the tip' })
-      continue
+      let confirmed
+      try {
+        confirmed = await opts.run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', salvage], repo)
+      } catch (error) {
+        report.refs_kept.push({ ref, reason: `salvage-unverified: ${errText(error)}` })
+        continue
+      }
+      if (!confirmed.ok || confirmed.stdout.trim() !== sha) {
+        report.refs_kept.push({
+          ref,
+          reason: `salvage-unverified: ${salvage} does not carry the tip (${hostText(saved)})`,
+        })
+        continue
+      }
     }
 
-    // GATE 11 — git's own independent refusal for a branch a worktree, rebase or bisect
-    // holds. `update-ref -d` would delete it silently; `branch -D` will not.
+    // GATE 10 — THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP, and that is the whole reason
+    // `update-ref -d` is the primitive here rather than `git branch -D`.
+    //
+    // THE BUG THIS REPLACES (cross-model review of PR #606). This used to be a
+    // `rev-parse` re-read followed by a SEPARATE `git branch -D`, described as a
+    // compare-and-swap. It was not one: anything could advance the branch in the window
+    // between the two commands, and `branch -D` — which has no old-value check at any
+    // price — would then delete the commit that had just arrived. 67 of the 79 refs
+    // measured on 2026-09-12 carried commits that exist nowhere else, so that window
+    // destroyed work, and the salvage written above would have preserved the OLD tip
+    // while the new one went with the branch.
+    //
+    // WHY GIVING UP `branch -D`'s HOLDER REFUSAL COSTS NOTHING. The measurement that put
+    // it here was real (git 2.43: `branch -D` exits 1 with "cannot delete branch 'feat'
+    // used by worktree at ...", `update-ref -d` deletes without a word) but it answered
+    // the wrong question. Holder safety and atomicity are separate axes: holder safety is
+    // already established by the worktree listing, the rebase/bisect read and this
+    // sweep's own detach memory above, three gates that do not depend on the delete
+    // primitive — while atomicity is a thing `branch -D` cannot supply from any of them.
+    // `update-ref -d <ref> <expected-sha>` checks the old value and unlinks the ref under
+    // ONE ref lock (measured on git 2.43: a stale expected sha exits 1 with "cannot lock
+    // ref ... is at X but expected Y" and the ref survives), so there is no window left
+    // to lose a commit in.
+    //
+    // EACH REF IS INDEPENDENTLY SAFE, which is what makes the per-sweep deletion cap and
+    // a mid-sweep death harmless. One ref's work is exactly: create its salvage, then CAS
+    // away its branch. A process that dies between the two leaves a salvage and an intact
+    // branch — the next sweep confirms that salvage and finishes. A process that dies
+    // after leaves the intended end state. Nothing spans two refs, so there is no
+    // partially-applied state for a crash to leave behind.
     deletionBudget.attempts += 1
     let deleted
     try {
-      deleted = await opts.run_host(['git', '-C', repo, 'branch', '-D', short], repo)
+      deleted = await opts.run_host(['git', '-C', repo, 'update-ref', '-d', ref, sha], repo)
     } catch (error) {
-      report.refs_kept.push({ ref, reason: `git-refused: ${errText(error)}` })
+      report.refs_kept.push({ ref, reason: `delete-refused: ${errText(error)}` })
       continue
     }
     if (!deleted.ok) {
-      report.refs_kept.push({ ref, reason: `git-refused: ${hostText(deleted)}` })
+      // The overwhelmingly likely cause is the CAS losing — the ref moved, so something
+      // is alive on it. Reported with git's own words rather than as a diagnosis.
+      report.refs_kept.push({ ref, reason: `delete-refused: ${hostText(deleted)}` })
       continue
     }
     report.refs_deleted.push({ ref, sha, salvage })

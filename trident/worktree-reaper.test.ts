@@ -289,24 +289,32 @@ describe('sweepTridentWorktrees — real git', () => {
 /**
  * #547 CHANGED ONE CLAUSE OF THIS INVARIANT AND HARDENED THE REST.
  *
- * The reaper now deletes a branch ref, so "never `-D`" is the behaviour the issue
- * ordered reversed — it cannot stand, and pretending it does by hiding the delete in a
- * sibling module would leave a test asserting the opposite of what the module does. The
- * two bans that were never in question stay (force removal, killing a process), and the
- * delete ban is replaced by something stricter than counting to zero: there is EXACTLY
- * ONE `-D` in the file, so a second, unguarded delete cannot be added without this test
- * saying so. That it is the guarded one is proven by the refusal cases below, not here.
+ * The reaper now deletes a branch ref, so "never delete a branch" is the behaviour the
+ * issue ordered reversed — it cannot stand, and pretending it does by hiding the delete
+ * in a sibling module would leave a test asserting the opposite of what the module does.
+ * The two bans that were never in question stay (force removal, killing a process).
+ *
+ * WHAT REPLACES THE DELETE BAN IS A BAN ON THE NON-ATOMIC PRIMITIVE. The first cut used
+ * `git branch -D` after a separate `rev-parse`, which is a read-then-delete window an
+ * arriving commit can be lost in (see the call site). `git branch -D` can never be
+ * compare-and-swapped, so its absence from this file is now itself an invariant — and
+ * there is EXACTLY ONE deletion, so a second, unguarded one cannot be added silently.
+ * That the one deletion is the GUARDED one is proven by the refusal cases below.
  */
-test('the reaper can never force or kill, and has exactly ONE branch delete', () => {
+test('the reaper can never force or kill, and its ONE delete is an atomic CAS', () => {
   const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
   expect(source).not.toContain('--force')
   expect(source).not.toContain('--delete')
   expect(source).not.toContain("'kill'")
-  expect(source.match(/'-D'/g) ?? []).toHaveLength(1)
-  expect(source).toContain("['git', '-C', repo, 'branch', '-D', short]")
-  // And `update-ref -d` is never the primitive: it deletes a branch a worktree holds
-  // without a word (measured on git 2.43), which is the gate `branch -D` is chosen for.
-  expect(source).not.toContain("'update-ref', '-d'")
+  // `git branch -D` cannot carry an expected old value, so it is banned outright — as a
+  // command and as a bare flag, since `-D` reaches nothing else here.
+  expect(source).not.toContain("'branch', '-D'")
+  expect(source).not.toContain("'-D'")
+  // ONE deletion, and it names the expected sha (the CAS) rather than just the ref.
+  expect(source.match(/'update-ref', '-d'/g) ?? []).toHaveLength(1)
+  expect(source).toContain("['git', '-C', repo, 'update-ref', '-d', ref, sha]")
+  // The salvage write is create-only: the trailing '' is `update-ref`'s "must not exist".
+  expect(source).toContain("['git', '-C', repo, 'update-ref', salvage, sha, '']")
 })
 
 test('buildWorktreeReaperLoop is immediate and uses the default descriptor', async () => {
@@ -421,6 +429,12 @@ async function seedRef(repo: string, branch: string, marker: string): Promise<st
   return sha
 }
 
+/** Every spelling of "delete this ref" a sweep could reach for. */
+function isADelete(cmd: readonly string[]): boolean {
+  const joined = cmd.join(' ')
+  return joined.includes('update-ref -d') || joined.includes('branch -D')
+}
+
 async function refExists(repo: string, ref: string): Promise<boolean> {
   const result = await spawnCapture(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', ref], repo)
   return result.ok && result.stdout.trim() !== ''
@@ -529,10 +543,15 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(holder, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('trident/held-live')
   }, 30_000)
 
-  test("git's OWN refusal is the last gate, and it does not depend on ours being right", async () => {
-    // Every gate above is blinded: the holder listing is rewritten to drop the entry, so
-    // the sweep believes the ref is unheld and reaches the delete. `git branch -D` still
-    // refuses, which is precisely why it is the primitive rather than `update-ref -d`.
+  test('a LIVE holder hidden from the listing is still caught by the run-process gate', async () => {
+    // The holder listing is rewritten to drop the entry, so gate 4 is blinded and the
+    // sweep believes the ref is unheld. It must still refuse — and it does, one gate
+    // later, because a process is standing in the worktree the owning run recorded.
+    //
+    // This test used to assert that `git branch -D`'s own holder refusal caught it. That
+    // refusal is real but it cannot be compare-and-swapped, and the delete had to become
+    // a CAS (see THE BOUNDARY above), so the backstop is now a gate of ours rather than
+    // git's. The owner row names the worktree, which is what the real store records.
     const { root, repo } = await makeRepo()
     const holder = await addWorktree(repo, 'wf_hidden-holder', 'trident/hidden')
     const proc = makeProc(root)
@@ -540,7 +559,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const before = await git(repo, 'rev-parse', 'refs/heads/trident/hidden')
 
     const report = await sweepTridentWorktrees({
-      store: stubStore(repo, [], [owner('trident/hidden', { phase: 'failed' })]),
+      store: stubStore(repo, [], [owner('trident/hidden', { phase: 'failed', worktree: holder })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
         if (cmd.includes('-z') && cmd.includes('list')) {
@@ -555,7 +574,9 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(report.refs_deleted).toEqual([])
     expect(
       report.refs_kept.some(
-        (k) => k.ref === 'refs/heads/trident/hidden' && k.reason.startsWith('git-refused:'),
+        (k) =>
+          k.ref === 'refs/heads/trident/hidden' &&
+          (k.reason.startsWith('run-worktree-present:') || k.reason.startsWith('run-process-live:')),
       ),
       JSON.stringify(report.refs_kept),
     ).toBe(true)
@@ -770,46 +791,156 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
   }, 30_000)
 
-  test('a ref that MOVED since the enumeration is not deleted', async () => {
+  test('THE BOUNDARY: a commit arriving in the instant before the delete survives', async () => {
+    // THE TEST THAT WAS MISSING, and the reason the delete is a CAS.
+    //
+    // The first cut read the sha with `rev-parse` and then deleted with `git branch -D`,
+    // and the test for it moved the ref before the RE-READ — the harmless side of the
+    // window. This moves it on the other side: the branch advances after every gate has
+    // passed and immediately before the delete command runs, which is exactly what a
+    // concurrent lane committing to its own branch does. With a non-atomic `branch -D`
+    // the arriving commit is deleted and the sweep reports success; with
+    // `update-ref -d <ref> <expected-sha>` git refuses under its own ref lock.
     const { root, repo } = await makeRepo()
-    const branch = 'trident/moving'
-    await seedRef(repo, branch, 'moving')
-    let moved = false
+    const branch = 'trident/raced-at-the-boundary'
+    const before = await seedRef(repo, branch, 'raced')
+    let raced: string | null = null
 
     const report = await sweepTridentWorktrees({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
-      // Something commits to the branch between the enumeration and the delete. The
-      // host seam is the only place that race can be made deterministic.
       run_host: async (cmd, cwd) => {
-        if (!moved && cmd.includes('rev-parse') && cmd.includes(`refs/heads/${branch}`)) {
-          moved = true
-          await spawnCapture(['git', '-C', repo, 'commit', '--allow-empty', '-m', 'raced'], repo)
+        // Fire on the DELETE itself — the last possible moment, so no amount of
+        // re-checking earlier in the sweep could have seen it.
+        //
+        // THE TRIGGER IS PRIMITIVE-AGNOSTIC ON PURPOSE. Keyed on `update-ref -d` alone it
+        // would never fire against a `git branch -D` implementation, so the test would
+        // "catch" that mutation only by noticing the trigger never ran — passing over the
+        // very loss it exists to demonstrate. Matching either spelling means the branch
+        // really does advance in the window under both, and the assertions below then
+        // measure what happened to the arriving commit.
+        if (raced === null && isADelete(cmd)) {
+          await spawnCapture(['git', '-C', repo, 'commit', '--allow-empty', '-m', 'raced in'], repo)
           await spawnCapture(['git', '-C', repo, 'branch', '-f', branch, 'HEAD'], repo)
+          raced = (await spawnCapture(['git', '-C', repo, 'rev-parse', `refs/heads/${branch}`], repo)).stdout.trim()
         }
         return spawnCapture(cmd, cwd)
       },
       proc_root: makeProc(root),
     })
 
-    expect(moved).toBe(true)
+    expect(raced).not.toBeNull()
+    expect(raced).not.toBe(before)
     expect(report.refs_deleted).toEqual([])
-    expect(report.refs_kept).toEqual(
-      expect.arrayContaining([
-        { ref: `refs/heads/${branch}`, reason: 'ref-moved: it no longer points at the sha enumerated' },
-      ]),
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('delete-refused:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    // THE ARRIVING COMMIT IS STILL THERE, on the branch, not merely in the object store.
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(raced)
+    expect(await git(repo, 'log', '-1', '--format=%s', `refs/heads/${branch}`)).toBe('raced in')
+  }, 30_000)
+
+  test('the salvage is create-only and idempotent, so two sweeps cannot clobber one another', async () => {
+    // `refs/trident-reaped/<slug>/<sha>` is named by the value it holds, so a second
+    // sweep of the same slug at the same tip writes the SAME ref and one at a different
+    // tip writes a SIBLING. Neither can overwrite the other's salvage. Proven by reaping,
+    // restoring the branch to the identical tip, and reaping again.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/twice-reaped'
+    const sha = await seedRef(repo, branch, 'twice')
+    const store = stubStore(repo, [], [owner(branch, { phase: 'failed' })])
+    const proc = makeProc(root)
+
+    const first = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+    expect(first.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
+
+    // The card is dispatched again and fails again at the very same commit.
+    await git(repo, 'branch', branch, sha)
+    const second = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+
+    expect(second.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
+    expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
+    // ONE salvage ref, still carrying the tip — not clobbered, not duplicated.
+    expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe(
+      `refs/trident-reaped/twice-reaped/${sha}`,
     )
-    expect(await refExists(repo, `refs/heads/${branch}`)).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/twice-reaped/${sha}`)).toBe(sha)
+  }, 30_000)
+
+  test('a salvage standing at some OTHER sha is refused, never clobbered', async () => {
+    // The one case the sha-in-the-name cannot rule out. Planted by hand, because only a
+    // hash collision could produce it for real — and refusing beats overwriting whatever
+    // is actually under that name.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/impostor'
+    const sha = await seedRef(repo, branch, 'impostor')
+    const other = await git(repo, 'rev-parse', 'refs/heads/main')
+    await git(repo, 'update-ref', `refs/trident-reaped/impostor/${sha}`, other)
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('salvage-unverified:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/impostor/${sha}`)).toBe(other)
+  }, 30_000)
+
+  test('a death between the salvage and the delete leaves the branch intact and finishes next sweep', async () => {
+    // Each ref's work is exactly two steps, and nothing spans two refs — which is what
+    // makes MAX_REF_DELETIONS_PER_SWEEP and a mid-sweep death harmless. Simulated by
+    // failing the delete outright after the salvage has landed.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/half-done'
+    const sha = await seedRef(repo, branch, 'halfdone')
+    const store = stubStore(repo, [], [owner(branch, { phase: 'failed' })])
+    const proc = makeProc(root)
+
+    const interrupted = await sweepTridentWorktrees({
+      store,
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('update-ref') && cmd.includes('-d')) {
+          return { ok: false, stdout: '', stderr: 'the process died here', exit_code: 1 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: proc,
+    })
+
+    expect(interrupted.refs_deleted).toEqual([])
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/half-done/${sha}`)).toBe(sha)
+
+    // The next sweep confirms the existing salvage and finishes the job.
+    const resumed = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+    expect(resumed.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
+    expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/half-done/${sha}`)).toBe(sha)
   }, 30_000)
 
   test('a salvage that cannot be written blocks the delete', async () => {
+    // Only the salvage WRITE is broken, not the delete: a stub that broke both would let
+    // the ref survive for the wrong reason and prove nothing about the ordering.
     const { root, repo } = await makeRepo()
     const branch = 'trident/no-salvage'
     const sha = await seedRef(repo, branch, 'nosalv')
+    let deleteAttempted = false
 
     const report = await sweepTridentWorktrees({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('update-ref')) {
+        if (cmd.includes('update-ref') && cmd.includes('-d')) deleteAttempted = true
+        if (cmd.includes('update-ref') && !cmd.includes('-d')) {
           return { ok: false, stdout: '', stderr: 'refusing to write the salvage ref', exit_code: 1 }
         }
         return spawnCapture(cmd, cwd)
@@ -817,13 +948,21 @@ describe('branch-ref reap — the refusals (#547)', () => {
       proc_root: makeProc(root),
     })
 
+    // A failed write falls through to a read, which finds nothing — so the tip is not
+    // proven reachable anywhere else and the delete is never even attempted.
+    expect(deleteAttempted).toBe(false)
     expect(report.refs_deleted).toEqual([])
-    expect(report.refs_kept).toEqual(
-      expect.arrayContaining([
-        { ref: `refs/heads/${branch}`, reason: 'salvage-failed: refusing to write the salvage ref' },
-      ]),
-    )
+    expect(
+      report.refs_kept.some(
+        (k) =>
+          k.ref === `refs/heads/${branch}` &&
+          k.reason.startsWith('salvage-unverified:') &&
+          k.reason.includes('refusing to write the salvage ref'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    expect(await refExists(repo, `refs/trident-reaped/no-salvage/${sha}`)).toBe(false)
   }, 30_000)
 
   test('refs cannot be enumerated → nothing in that repo is touched', async () => {

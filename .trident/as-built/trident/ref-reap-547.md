@@ -1,4 +1,4 @@
-## 2026-09-12 — a run's branch ref no longer outlives the run, and the delete now rests on eleven pieces of evidence
+## 2026-09-12 — a run's branch ref no longer outlives the run, and the delete now rests on ten pieces of evidence, atomically
 
 Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
 no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
@@ -29,7 +29,7 @@ this loop, so an in-band terminal transition reaps within a tick; an out-of-band
 could drop the one old row that turns "a non-terminal run still owns this" into "every owner is
 terminal", which is the answer that authorises the delete.
 
-**ELEVEN pieces of evidence, and unprovable refuses at every one.** The 2026-09-01 incident
+**TEN pieces of evidence, and unprovable refuses at every one.** The 2026-09-01 incident
 (`docs/as-built/wrong-base-guard-prints-a-destructi.md`) is a guard that composed an unconditional
 `git branch -D` from nothing and aimed it at a branch a live locked worktree was holding. So:
 
@@ -54,18 +54,51 @@ terminal", which is the answer that authorises the delete.
 8. No live process stands in an owning run's worktree, and none stands in a path bearing its
    `workflow_run_id` — the gate for the race the store cannot see, where the row went terminal
    while the detached workflow is still running.
-9. The ref still points at the sha the enumeration read. `branch -D` has no old-value check, so
-   the sha is re-read and compared; a ref that moved is a ref something just wrote to.
-10. A salvage ref was written AND verified first. 67 of the 79 carry commits origin does not have,
-    so the delete would otherwise drop the last reference to them. `refs/trident-reaped/<slug>/<sha>`
-    keeps them reachable — outside `refs/heads` so it can never re-enter a launch, outside
-    `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
-    `git branch <name> <sha>`. Salvage failing refuses the delete.
-11. `git branch -D` itself agrees. Chosen over `git update-ref -d` precisely because it carries
-    git's own refusal for a branch a worktree, rebase or bisect holds — measured on git 2.43:
-    `branch -D` exits 1 with "cannot delete branch 'feat' used by worktree at ...", while
-    `update-ref -d` deletes it without a word. Gate 4 should already have refused; this is the gate
-    that does not depend on gate 4 being right.
+9. A salvage ref was CREATED first, create-only. 67 of the 79 carry commits origin does not have,
+   so the delete would otherwise drop the last reference to them. `refs/trident-reaped/<slug>/<sha>`
+   keeps them reachable — outside `refs/heads` so it can never re-enter a launch, outside
+   `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
+   `git branch <name> <sha>`. Salvage failing refuses the delete.
+10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP — `git update-ref -d <ref> <expected-sha>`, which
+    checks the old value and unlinks the ref under one ref lock. A branch that advanced since the
+    enumeration cannot be deleted at all, because there is no read-then-delete window: there is no
+    separate read. See below for what this replaces.
+
+**THE FIRST CUT'S "COMPARE-AND-SWAP" WAS NOT ATOMIC, and the cross-model review caught it.** The
+delete was a `rev-parse` read of the sha followed by a SEPARATE `git branch -D`, described as a
+compare-and-swap. It was not one. Anything could advance the branch in the window between the two
+commands, `git branch -D` has no old-value check at any price, and the commit that had just arrived
+went with the branch — while the salvage written a moment earlier preserved only the OLD tip. With
+67 of the 79 targets carrying commits that exist nowhere else, that window destroyed work. The
+review's repro is now a test: advance the branch in the instant before the delete command runs, and
+measure what happens to the arriving commit. Against the old primitive the sweep REPORTS SUCCESS
+while the commit is gone; against `update-ref -d <ref> <expected-sha>` git refuses under its own
+ref lock (measured on git 2.43: exit 1, "cannot lock ref ... is at X but expected Y", ref intact).
+
+The measurement that put `branch -D` there was real — git 2.43: it refuses a branch a worktree
+holds, where `update-ref -d` does not — but it answered the wrong question, conflating two axes.
+Holder safety was already established by three gates that do not depend on the delete primitive (the
+worktree listing, the rebase/bisect read, this sweep's own detach memory); atomicity can only come
+FROM the primitive. So the holder refusal is given up and nothing is lost: the test that used to
+lean on git's refusal now blinds the holder listing and shows a gate of OURS catching it one step
+later. `git branch -D` is banned from the file outright, as a command and as a flag, because it can
+never be compare-and-swapped — and the boundary test above is what makes that ban load-bearing
+rather than stylistic.
+
+**The salvage write is create-only for the same reason.** `refs/trident-reaped/<slug>/<sha>` is named
+by the value it holds, so two sweeps of one slug write the SAME ref at the same tip and SIBLING refs
+at different tips — neither can overwrite the other's. The write is still `update-ref <ref> <new> ''`
+(the empty old-value meaning "must not exist"; measured on git 2.43: exit 128, "reference already
+exists") so the one case the naming cannot rule out — an existing salvage at some OTHER sha — is
+refused rather than clobbered. A refusal falls through to a read that cannot be harmfully stale: it
+is reached only because the ref exists, and all it must establish is that what exists is this tip.
+The create path needs no read at all.
+
+**EACH REF IS INDEPENDENTLY SAFE**, which is what makes `MAX_REF_DELETIONS_PER_SWEEP = 50` and a
+mid-sweep death harmless rather than merely unlikely. One ref's whole work is: create its salvage,
+then CAS away its branch. A process dying between the two leaves a salvage and an intact branch, and
+the next sweep confirms that salvage and finishes; dying after leaves the intended end state.
+Nothing spans two refs, so a crash can leave no partially-applied state. Tested in both directions.
 
 **THE BOOT RESCUE GETS FIRST CRACK, and CI is what found that it wasn't.** The stranded-failure
 sweep (`trident/orchestrator.ts:722` `sweepStrandedFailures`, wired at module init) publishes a
@@ -98,5 +131,7 @@ Every terminal and non-terminal phase is enumerated by parsing the shipped
 `TERMINAL_PHASES`, so the table cannot drift from the schema or be guessed. Each of the three
 terminal phases deletes; each of the five active phases keeps. Every refusal above has its own
 test, and each gate was mutation-checked by reverting it and proving the suite reds — including the
-boot-rescue latch, in both halves: dropping it inside the reaper reds the reaper suite, and dropping
-its wiring in the composition reds the stranded-sweep test.
+boot-rescue latch, in both halves (dropping it inside the reaper reds the reaper suite; dropping its
+wiring in the composition reds the stranded-sweep test) and the atomicity of the delete, where
+restoring the exact pre-review primitive reddens the boundary test by REPORTING SUCCESS while the
+arriving commit is gone.
