@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'bun:test'
 import { herdrCall, herdrPing, HerdrError } from '../herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION } from '../herdr-protocol.ts'
+import { newFrameReader } from '../herdr-client.ts'
 
 interface FakeSocket {
   write(data: string): number
@@ -403,5 +404,69 @@ describe('the frame bound', () => {
       connect: replying(`${body}\n`).connect,
     }).catch((x: unknown) => x as Error)
     expect((e as Error).message).toContain('exceeded 64 bytes')
+  })
+})
+
+/**
+ * THE BOUND RUNS BEFORE THE COPY — asserted through the reader, because end-to-end it is
+ * UNFALSIFIABLE.
+ *
+ * Moving the check after the allocation produces the identical observable through
+ * `herdrCall`: the same error, the same failed call, the same timing. So that mutation
+ * SURVIVED every round and the as-built recorded it as surviving while the acceptance
+ * criterion claimed the property. An unfalsifiable check is believed rather than tested.
+ *
+ * Third instance of one lesson today — a pure helper can prove the check works and
+ * cannot prove anything still calls it; neither can prove WHEN it runs unless the thing
+ * it guards is observable. So the reader reports the bytes it has COPIED, and "before"
+ * becomes a number.
+ */
+describe('the frame bound is enforced BEFORE the allocation it exists to prevent', () => {
+  it('an over-cap chunk is refused with NOTHING copied', () => {
+    const reader = newFrameReader(64)
+    const read = reader.push(new TextEncoder().encode('x'.repeat(4096)))
+    expect(read.kind).toBe('oversized')
+    // THE WHOLE POINT. A bound that runs after the grow-and-copy rejects the same frame
+    // with the same message, having already done the work it exists to avoid.
+    expect(reader.copiedBytes()).toBe(0)
+  })
+
+  it('an over-cap frame SPLIT across deliveries copies only what was under the cap', () => {
+    const reader = newFrameReader(64)
+    expect(reader.push(new TextEncoder().encode('y'.repeat(50))).kind).toBe('pending')
+    expect(reader.copiedBytes()).toBe(50) // legitimate so far
+    expect(reader.push(new TextEncoder().encode('y'.repeat(50))).kind).toBe('oversized')
+    // The second delivery crossed the cap, so none of IT was taken.
+    expect(reader.copiedBytes()).toBe(50)
+  })
+
+  it('CONTROL — an acceptable frame IS copied, so the counter measures something', () => {
+    // Without this, `copiedBytes() === 0` is satisfied by a reader that never copies at
+    // all, and every assertion above passes for a reader that does nothing.
+    const reader = newFrameReader(64)
+    const read = reader.push(new TextEncoder().encode('{"id":"r","result":{}}\n'))
+    expect(read.kind).toBe('frame')
+    expect(read.kind === 'frame' ? read.line : '').toBe('{"id":"r","result":{}}')
+    // The frame's own bytes, WITHOUT its terminator — the newline is a delimiter, not
+    // content, and copying it would put it in the decoded line.
+    expect(reader.copiedBytes()).toBe(22)
+  })
+
+  it('a reply EXACTLY at the cap is accepted, terminator included in the budget', () => {
+    const body = '{"id":"r","result":{}}'
+    const exact = Buffer.byteLength(`${body}\n`, 'utf8')
+    const reader = newFrameReader(exact)
+    expect(reader.push(new TextEncoder().encode(`${body}\n`)).kind).toBe('frame')
+  })
+
+  it('a maximal reply COALESCED with a trailing byte is still accepted, and the extra is NOT copied', () => {
+    const body = '{"id":"r","result":{}}'
+    const exact = Buffer.byteLength(`${body}\n`, 'utf8')
+    const reader = newFrameReader(exact)
+    const read = reader.push(new TextEncoder().encode(`${body}\nSURPLUS`))
+    expect(read.kind).toBe('frame')
+    // Per FRAME, not per delivery — and the surplus is dropped unread rather than
+    // buffered for a next frame this connection will never carry.
+    expect(reader.copiedBytes()).toBe(body.length)
   })
 })

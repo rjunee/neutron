@@ -1,6 +1,14 @@
 /**
  * pty-host-conformance.test.ts — ONE suite, run against EVERY `PtyHost`.
  *
+ * THE RULE FOR EVERY CASE ADDED HERE: **every assertion is unconditional for every host
+ * in the table.** A host that legitimately differs declares that difference as its own
+ * ASSERTED expectation (see `Backend.alreadyGoneDelivers`), never as a skipped branch.
+ * An `if (x.length > 0) expect(...)` cannot fail for the participant that produces
+ * nothing, which makes the case two tests wearing one name — and it happened here
+ * within two cases of the suite landing. Cheaper to adopt now, at two cases, than later
+ * at twenty.
+ *
  * WHY THIS FILE EXISTS, stated as the defect that produced it. The readiness gate
  * (`PtyChild.beginOutput`) is part of the SHARED contract: `spawn.ts` cannot assign
  * `scanChild` until `await ptyHost.spawn(...)` returns, and it releases output only
@@ -79,6 +87,23 @@ interface Backend {
    * really did settle the exit, so neither arm passes vacuously.
    */
   spawnAlreadyExiting(onScreen: (s: string) => void): Promise<Spawned>
+  /**
+   * What THIS substrate must hand over at release, after dying as early as it can.
+   *
+   * EVERY CONFORMANCE ASSERTION IS UNCONDITIONAL FOR EVERY HOST. A host that
+   * legitimately differs declares that difference here as its own asserted expectation,
+   * never as a skipped branch — an `if (screens.length > 0)` cannot fail for the host
+   * that produces nothing, so a case written that way is two tests wearing one name.
+   * This field exists to make the difference a claim rather than an escape.
+   */
+  readonly alreadyGoneDelivers: {
+    /** Exactly this many `onScreen` calls after `beginOutput()`. */
+    readonly count: number
+    /** Substring the last one must contain, when there is one. */
+    readonly contains?: string
+    /** Why this substrate delivers that, in its own terms. */
+    readonly why: string
+  }
   /** The text the startup screen contains. */
   readonly startup: string
 }
@@ -88,6 +113,15 @@ const STARTUP = 'Do you trust the files in this folder?'
 const herdrBackend: Backend = {
   name: 'HerdrHost (out-of-process pane, polled)',
   startup: STARTUP,
+  alreadyGoneDelivers: {
+    count: 0,
+    why:
+      'the pane VANISHES taking its output with it. herdr has no raw stream and no ' +
+      'retained buffer of its own: the poll loop reads the pane, and a pane that is gone ' +
+      'answers pane_not_found. A FAILED read is never delivered as a screen — that is the ' +
+      '"a failed read is not an empty screen" rule — so there is genuinely nothing to hand ' +
+      'over, and ZERO is the correct asserted outcome rather than an absent one.',
+  },
   async spawn(onScreen) {
     const server = new FakeHerdrServer()
     server.screen = STARTUP // on screen BEFORE we spawn — the startup-prompt case
@@ -123,6 +157,14 @@ const herdrBackend: Backend = {
 const bunBackend: Backend = {
   name: 'BunTerminalHost (in-process pty, streamed)',
   startup: STARTUP,
+  alreadyGoneDelivers: {
+    count: 1,
+    contains: STARTUP,
+    why:
+      'the pty ACCUMULATED the screen before the process died, and it is the only record ' +
+      'of what the child printed — a snapshot-replace ring never re-delivers it. Holding ' +
+      'it past the exit is right; losing it would be the other failure.',
+  },
   async spawn(onScreen) {
     let endProcess: (code: number | null) => void = () => {}
     const exitedPromise = new Promise<number | null>((res) => {
@@ -264,12 +306,20 @@ describe('PtyHost conformance — the readiness gate', () => {
         expect(`${backend.name} exited: ${String(child.hasExited())}`).toBe(
           `${backend.name} exited: true`,
         )
-        // NOT LOST, ONLY HELD. Whatever the substrate produced before it died is the
-        // only record of what the child printed, and a snapshot-replace ring never
-        // re-delivers it — so withholding it forever would be the other failure.
-        // herdr's pane vanishes taking its output with it, so it has nothing to hand
-        // over; the pty accumulated a screen and must.
-        if (screens.length > 0) expect(screens.some((s) => s.includes(backend.startup))).toBe(true)
+        // UNCONDITIONAL, INCLUDING THE ZERO. This assertion was written
+        // `if (screens.length > 0) …`, which cannot fail for the host that produces
+        // nothing — so herdr had no asserted post-release outcome at all and a case
+        // meant to hold both hosts to one contract held one. Each host now DECLARES
+        // what it must hand over and is held to exactly that; the reason is carried in
+        // the failure message, because the interesting half of a conformance failure is
+        // which participant broke which promise.
+        const expected = backend.alreadyGoneDelivers
+        expect(`${backend.name}: ${screens.length} screen(s) — ${expected.why}`).toBe(
+          `${backend.name}: ${expected.count} screen(s) — ${expected.why}`,
+        )
+        if (expected.contains !== undefined) {
+          expect(screens[screens.length - 1]).toContain(expected.contains)
+        }
       })
     })
   }

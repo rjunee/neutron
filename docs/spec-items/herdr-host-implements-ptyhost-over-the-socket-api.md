@@ -259,6 +259,18 @@ not-new. That is accepted and recorded here rather than hidden.
       cannot know until the gate opens. The positive control (`hasExited()`) is therefore
       taken AFTER the release on both, or the assertion would be requiring herdr to break
       its own gate.
+      EVERY CONFORMANCE ASSERTION IS UNCONDITIONAL FOR EVERY HOST IN THE TABLE, and a
+      host that legitimately differs declares that difference as its OWN asserted
+      expectation rather than as a skipped branch. The rule is written down because it
+      was broken within two cases of the suite landing: the already-exited case asserted
+      delivery under `if (screens.length > 0)`, which cannot fail for the participant that
+      produces nothing — so herdr had no asserted post-release outcome at all and a case
+      meant to hold both hosts to one contract held one. **A conformance case whose
+      assertion is optional for one participant is two tests wearing one name.** Each host
+      now declares what it must hand over and is held to exactly that, ZERO included, with
+      its reason carried in the failure message — because the interesting half of a
+      conformance failure is which participant broke which promise. Cheaper to adopt at
+      two cases than at twenty.
       SECOND SHARED CASE, added because it is genuinely non-vacuous on both: `submitLine`
       after the child has exited must REJECT, by different mechanisms on each side —
       herdr learns of the exit by polling a vanished pane, the pty is told by its
@@ -455,13 +467,18 @@ not-new. That is accepted and recorded here rather than hidden.
       unbounded); a reply EXACTLY at the cap accepted; and a maximal reply COALESCED with
       a trailing byte accepted, which is the only case that can tell per-frame from
       per-delivery.
-      RECORDED, because the criterion used to over-claim: the ORDERING of the check
-      against the copy has no runtime observable in this shape — both orders reject with
-      the same message and the same outcome, so a mutation that moves the check after the
-      copy survives every test. What is observable, and is asserted in both directions,
-      is the per-frame bound. The ordering is a structural property of the code, held by
-      the check preceding `append` and by nothing else, and saying so is more useful than
-      a test that appears to cover it.
+      THE ORDERING IS NOW OBSERVABLE, AND THIS CRITERION PREVIOUSLY CONCEDED THAT IT WAS
+      NOT. It said the check's position relative to the copy had no runtime observable —
+      both orders reject with the same message and the same outcome — and recorded the
+      mutation that moves it as SURVIVING. That was a criterion standing over a mutation
+      known to survive, which is a claim nothing holds: an unfalsifiable check is
+      believed rather than tested. The remedy is the one `writeAllOrThrow` got — make the
+      guarded thing an observable. The framing is extracted as a `FrameReader` that
+      reports the bytes it has COPIED, so "before" is a number: an over-cap chunk is
+      refused with `copiedBytes() === 0`, and an over-cap frame split across deliveries
+      keeps only what was legitimately under the cap. The CONTROL is what stops that
+      being satisfied by a reader that never copies: an acceptable frame IS copied, its
+      terminator excluded, and a coalesced surplus is NOT.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **A successful settlement REQUIRES a result — refused by the type, not by a check.**
       The client must not settle a success with a defaulted `{}`: "there was no result"

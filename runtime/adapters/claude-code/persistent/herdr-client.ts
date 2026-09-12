@@ -166,6 +166,89 @@ function resolveSocketPath(opts: HerdrCallOpts): string {
   return socketPath
 }
 
+/**
+ * How one delivery ended for {@link FrameReader}.
+ *
+ * `oversized` is a separate outcome from a failure so the reader stays a pure
+ * description of the bytes — it says the frame cannot be accepted; the caller decides
+ * what that does to the call.
+ */
+export type FrameRead =
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'frame'; readonly line: string }
+  | { readonly kind: 'oversized' }
+
+/** Reassembles ONE newline-terminated frame out of however many chunks it arrives in. */
+export interface FrameReader {
+  push(chunk: Uint8Array): FrameRead
+  /**
+   * Bytes this reader has actually COPIED into its buffer.
+   *
+   * THIS EXISTS SO "BEFORE THE COPY" IS FALSIFIABLE. The criterion is that an over-cap
+   * frame is refused before the allocation it exists to prevent, and for several rounds
+   * nothing could see it: moving the bound after the copy produces the identical
+   * observable — the same error, the same failed call — so that mutation SURVIVED and
+   * was recorded as surviving. An unfalsifiable check is believed rather than tested.
+   * The third instance of one lesson on this branch: a pure helper can prove the check
+   * works and cannot prove anything still calls it, and neither can prove WHEN it runs
+   * unless the thing it guards is observable.
+   */
+  copiedBytes(): number
+}
+
+/**
+ * A reader bounded at `maxFrameBytes`, PER FRAME and BEFORE COPYING.
+ *
+ * Both requirements, and it is easy to satisfy one by breaking the other. Measuring
+ * `buffered + chunk.length` is a bound on the DELIVERY: a peer that coalesces a
+ * perfectly legal reply with the first byte of whatever follows would have its legal
+ * reply rejected, which is a new failure mode rather than a fix. So the first newline in
+ * the incoming chunk is located FIRST — a scan, not an allocation — which is sound
+ * because everything already buffered is newline-free by construction (the reader is
+ * done at the first one).
+ */
+export function newFrameReader(maxFrameBytes: number): FrameReader {
+  // ONE buffer, grown by doubling. A reply may arrive in any number of chunks, and the
+  // fragment count must not become a quantity this code holds: bytes are copied in and
+  // the delivered chunk is dropped.
+  let buf = Buffer.alloc(0)
+  let end = 0
+
+  /** Copy `part` in. Callers bound the size FIRST. */
+  const append = (part: Uint8Array): void => {
+    if (end + part.length > buf.length) {
+      let capacity = Math.max(buf.length * 2, INITIAL_REPLY_BUFFER_BYTES)
+      while (capacity < end + part.length) capacity *= 2
+      const grown = Buffer.allocUnsafe(capacity)
+      buf.copy(grown, 0, 0, end)
+      buf = grown
+    }
+    buf.set(part, end)
+    end += part.length
+  }
+
+  return {
+    copiedBytes: () => end,
+    push(chunk: Uint8Array): FrameRead {
+      const nl = chunk.indexOf(NEWLINE_BYTE)
+      // Bytes of the FIRST frame this delivery contributes: up to and including its
+      // terminator when it is here, otherwise the whole chunk, since all of it belongs
+      // to a frame still waiting for one.
+      const firstFrameBytes = nl < 0 ? chunk.length : nl + 1
+      if (end + firstFrameBytes > maxFrameBytes) return { kind: 'oversized' }
+      if (nl < 0) {
+        append(chunk)
+        return { kind: 'pending' }
+      }
+      // Only the frame's own bytes are copied. Anything the peer coalesced after the
+      // newline is dropped unread: this connection carries ONE reply and is about to be
+      // closed, so there is no next frame to resynchronise to.
+      append(chunk.subarray(0, nl))
+      return { kind: 'frame', line: buf.toString('utf8', 0, end) }
+    },
+  }
+}
+
 /** How one call ended. The pending call is settled by RESOLVING this — never by
  *  rejecting — so the promise cannot be an unhandled rejection during the window
  *  between its creation and the `await` at the bottom of {@link herdrCall}. The
@@ -195,11 +278,7 @@ export async function herdrCall(
   let settled = false
   let socket: SocketLike | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
-  // ONE buffer, grown by doubling. A reply may arrive in any number of chunks, and
-  // the fragment count must not become a quantity this code holds: bytes are copied
-  // in and the delivered chunk is dropped.
-  let buf = Buffer.alloc(0)
-  let end = 0
+  const reader = newFrameReader(maxFrameBytes)
 
   let settle!: (outcome: CallOutcome) => void
   const pending = new Promise<CallOutcome>((resolve) => {
@@ -238,35 +317,10 @@ export async function herdrCall(
     done({ ok: true, result })
   }
 
-  /** Copy `part` into the single growable buffer. Callers bound the size FIRST. */
-  const append = (part: Uint8Array): void => {
-    if (end + part.length > buf.length) {
-      let capacity = Math.max(buf.length * 2, INITIAL_REPLY_BUFFER_BYTES)
-      while (capacity < end + part.length) capacity *= 2
-      const grown = Buffer.allocUnsafe(capacity)
-      buf.copy(grown, 0, 0, end)
-      buf = grown
-    }
-    buf.set(part, end)
-    end += part.length
-  }
-
   const onBytes = (chunk: Uint8Array): void => {
     if (settled) return
-    // THE BOUND IS PER FRAME, AND IT RUNS BEFORE THE COPY. Those are two requirements
-    // and it is easy to satisfy one by breaking the other. Measuring `end +
-    // chunk.length` is a bound on the DELIVERY: a peer that coalesces a perfectly
-    // legal reply with the first byte of whatever follows it would have its legal
-    // reply rejected, which is a new failure mode rather than a fix. So locate the
-    // first newline in the incoming chunk FIRST — a scan, not an allocation —
-    // because everything already buffered is newline-free (we settle on the first
-    // one), which makes the first frame end at that newline or not have arrived yet.
-    const nl = chunk.indexOf(NEWLINE_BYTE)
-    // Bytes of the FIRST frame this delivery contributes: up to and including its
-    // terminator when it is here, otherwise the whole chunk, since all of it belongs
-    // to a frame still waiting for one.
-    const firstFrameBytes = nl < 0 ? chunk.length : nl + 1
-    if (end + firstFrameBytes > maxFrameBytes) {
+    const read = reader.push(chunk)
+    if (read.kind === 'oversized') {
       fail(
         new Error(
           `herdr: reply to '${method}' exceeded ${maxFrameBytes} bytes — refusing to assemble it.`,
@@ -274,15 +328,8 @@ export async function herdrCall(
       )
       return
     }
-    if (nl < 0) {
-      append(chunk)
-      return // reply not complete yet
-    }
-    // Only the frame's own bytes are copied. Anything the peer coalesced after the
-    // newline is dropped unread: this connection carries ONE reply and is about to be
-    // closed, so there is no next frame to resynchronise to.
-    append(chunk.subarray(0, nl))
-    const line = buf.toString('utf8', 0, end)
+    if (read.kind === 'pending') return // reply not complete yet
+    const line = read.line
     let parsed: unknown
     try {
       parsed = JSON.parse(line)

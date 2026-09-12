@@ -1527,6 +1527,51 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### An unfalsifiable check is believed rather than tested
+
+M145 — moving the frame bound after the copy — survived every round for eight days, and
+the as-built recorded it as surviving while the acceptance criterion claimed the
+property. Both orders reject the same frame with the same message and the same outcome,
+so end to end there was nothing to see. **A criterion standing over a mutation known to
+survive is a claim nothing holds**, and the honest options were to make it falsifiable or
+to narrow it.
+
+It is the third instance of one lesson today, and the first two supplied the remedy: a
+pure helper can prove the check works and cannot prove anything still calls it
+(`writeAllOrThrow`), and neither can prove WHEN it runs unless the thing it guards is
+observable. So the framing is extracted as a `FrameReader` that reports the bytes it has
+COPIED, and "before the allocation" becomes a number. An over-cap chunk is refused with
+`copiedBytes() === 0`; an over-cap frame split across deliveries keeps only what was
+legitimately under the cap; and the CONTROL — an acceptable frame IS copied, terminator
+excluded, coalesced surplus not — is what stops all of that being satisfied by a reader
+that never copies anything.
+
+One mutation to note for its own sake: my first attempt at "copy the whole delivery"
+adjusted the byte counter back down afterwards, so it survived. It looked like the defect
+and did not have it. **A mutation has to break the property, not resemble it.**
+
+### A conditional assertion cannot fail for the host that produces nothing
+
+The already-exited conformance case asserted delivery under `if (screens.length > 0)`.
+For the pty that is a real assertion; for herdr, whose pane vanishes taking its output
+with it, zero deliveries passed silently — so the case written to hold both hosts to one
+contract held one. **A conformance case whose assertion is optional for one participant
+is two tests wearing one name**, and it happened within two cases of the suite landing.
+
+Each host now DECLARES what it must hand over — herdr exactly zero, with the reason (a
+failed read is never delivered as a screen, so there is genuinely nothing, and zero is
+the correct asserted outcome rather than an absent one); the pty exactly one containing
+the startup text (it accumulated the screen before the process died and it is the only
+record of what the child printed). Both are held to exactly that, and the reason travels
+in the failure message, because the interesting half of a conformance failure is which
+participant broke which promise. M198 and M199 are the proof: each reddens its own host's
+declared outcome, and M198 was invisible while the branch was conditional.
+
+**The rule is now written into the suite header** rather than left as this round's
+correction: every conformance assertion is unconditional for every host in the table, and
+a host that legitimately differs declares that difference as its own asserted expectation
+rather than as a skipped branch. Cheaper to adopt at two cases than at twenty.
+
 ### A shared suite inherits the blind spots of its shared fixture
 
 Two rounds ago I made `BunTerminalHost` RELEASE its held screen from the exit handler,
@@ -2370,7 +2415,7 @@ Run against the named suites.
 | M142 | PAIR: the door-side exit check is dropped | SURVIVED — unobservable; the post-queue check is strictly stronger |
 | M143 | the bound measures the DELIVERY again (`end + chunk.length`) | RED 1 |
 | M144 | PAIR: no bound at all once the frame is complete | RED 1 |
-| M145 | the bound runs AFTER the copy | SURVIVED — both orders reject identically; ordering has no runtime observable here |
+| M145 | the bound runs AFTER the copy | SURVIVED for eight rounds — both orders rejected identically → framing extracted as a `FrameReader` with a `copiedBytes()` observable → **RED 2** |
 | M146 | settle a SUCCESS with no result | TS2554 at typecheck — refused by the type, not by a test |
 | M147 | the live-proof guard's assignment pattern matches `===` too | RED 1 (it reported all three gated suites as offenders) |
 | M148 | the typed `pane_not_found` from the READ is discarded again | RED 1 |
@@ -2423,6 +2468,10 @@ Run against the named suites.
 | M193 | PAIR: the cleanup runs on SUCCESS too, closing a live pty | RED 5 |
 | M194 | the exit RELEASES the gate again — the microtask race | RED 3, one of them the SHARED suite |
 | M195 | PAIR: the exit disarms the gate WITHOUT releasing (the last screen is lost) | RED 2 |
+| M196 | the frame's terminator is copied into the line | RED 2 |
+| M197 | the whole delivery is copied, coalesced surplus included | RED 2 (first attempt adjusted the counter and survived — a mutation must break the property, not just look like it) |
+| M198 | the pty DROPS the screen it held past the exit | RED 2 — invisible until the conformance assertion stopped being conditional |
+| M199 | herdr delivers a FAILED read as an empty screen | RED 1 — which is what makes its ZERO an asserted outcome rather than an absent one |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
