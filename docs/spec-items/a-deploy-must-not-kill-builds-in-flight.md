@@ -82,7 +82,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       AND ON THE READ SIDE, the same question asked of the record rather than the sample:
       a record ATTRIBUTES a death, it does not ESTABLISH one — it is written before
       `kill()`, which can throw, so the reader confirms the death against the pid the
-      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1065-1084`). A
+      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1101-1123`). A
       revision that returned the attribution from the record alone would have crashed a
       run whose launcher was still alive. Checks:
       `__tests__/gateway-shutdown-kill.test.ts` ("only a child observed ALIVE is attributed
@@ -119,6 +119,22 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- A TWO-VALUED DURABLE RECORD FOR A THREE-VALUED DOMAIN, which is the root the other
+  findings on this item share. The record's vocabulary was *present* / *absent*; the domain is
+  **killed-by-deploy**, **undetermined** and **ordinary crash**. So `undetermined` shared its
+  representation with `ordinary crash` — the exact conflation this item exists to stop — and the
+  next tick read it as the neighbour it resembled, mapping every non-deploy dead child to a
+  confident `child-died`. The honest uncertainty could not survive to a retry because nothing
+  recorded it. Fixed by persisting the classification: each entry carries what the shutdown
+  OBSERVED (`alive-and-killed` / `already-gone` / `could-not-sample`), an entry is written for
+  every outcome rather than only for a kill, and the cause mapping, the wedge verdict and the
+  launcher-liveness verdict each gained the third value the state space needed. **`false` and
+  `unknown` must not share a branch — and that applies to durable representations, not only to
+  code paths.** A field that cannot express "I looked and could not tell" has that state read as
+  whichever neighbour it resembles. Audited once across every durable field this change writes
+  or reads rather than per finding: three of nine findings on this item were this same shape (the
+  quarantined generation with nowhere to put its record; `child_crash_notified_at` conflating
+  attributed with reported; this).
 - THE CRASH EDGE WAS KEYED ON THE VERDICT INSTEAD OF ON THE DELIVERY, so an honest answer
   got overwritten by a confident one. The edge records that a death's report happened; an
   earlier revision closed it only when the report was an ATTRIBUTION, so a successfully
@@ -150,7 +166,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1026`), which a replacement spawn overwrites (`spawn.ts:675`), so a
+  (`supervision.ts:1062`), which a replacement spawn overwrites (`spawn.ts:675`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control

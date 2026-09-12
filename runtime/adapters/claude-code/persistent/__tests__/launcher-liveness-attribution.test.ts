@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { probeLauncherGenerationAlive } from '../supervision.ts'
-import { markKilledByGatewayShutdown } from '../gateway-shutdown-kill.ts'
+import { recordGatewayShutdownOutcome } from '../gateway-shutdown-kill.ts'
 import { patchRecord, upsertRecord, type ReplRegistryRecord } from '../repl-registry.ts'
 
 const KEY = 'cc-trident-fire-o-abc /repo'
@@ -49,7 +49,7 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     // RED-mutation: return a bare `'dead'` from the ESRCH arm. The probe still reaps
     // the run, and reaps it with the crash sentence — the defect the spec item names.
     const path = registry()
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed')
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('killed-by-gateway-shutdown')
   })
 
@@ -66,7 +66,7 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     //     mutation: have `wasKilledByGatewayShutdown` ignore which generation an entry
     //     names — the negative criterion, failing.
     const path = registry()
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000, DEAD_PID)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed', DEAD_PID)
     patchRecord(path, KEY, { child_generation: 'gen-2', pid: DEAD_PID })
     expect(probeLauncherGenerationAlive('gen-2', path)).toBe('dead')
 
@@ -94,7 +94,27 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     // `process.kill(pid, 0)` confirmation — exactly the code this replaced.
     const path = registry({ pid: DEAD_PID })
     // Marked, with a pid that IS alive (this test process), then superseded.
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000, LIVE_PID)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed', LIVE_PID)
+    patchRecord(path, KEY, { child_generation: 'gen-2' })
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
+  })
+
+  it('an UNDETERMINED entry with a dead pid is dead-cause-undetermined, not a deploy', () => {
+    // Death confirmed, cause not. RED-mutation: return `'killed-by-gateway-shutdown'`
+    // for any entry regardless of what it observed — the shutdown would then claim a
+    // death it explicitly recorded as not its own, and the deploy case above still
+    // passes, which is why this pair is the test.
+    for (const observed of ['already-gone', 'could-not-sample'] as const) {
+      const path = registry()
+      recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, observed, DEAD_PID)
+      patchRecord(path, KEY, { child_generation: 'gen-2' })
+      expect(probeLauncherGenerationAlive('gen-1', path)).toBe('dead-cause-undetermined')
+    }
+  })
+
+  it('an UNDETERMINED entry whose pid is still ALIVE is unknown — no death to report', () => {
+    const path = registry()
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'already-gone', LIVE_PID)
     patchRecord(path, KEY, { child_generation: 'gen-2' })
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
   })
@@ -104,7 +124,7 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     // check" must not read as "it is gone". RED-mutation: fall back to returning the
     // attribution when the pid is missing.
     const path = registry()
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000) // no pid
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed') // no pid
     patchRecord(path, KEY, { child_generation: 'gen-2' })
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
   })
@@ -113,7 +133,7 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     // RED-mutation: consult the marker before the `process.kill(pid, 0)` probe.
     const path = registry({ pid: LIVE_PID })
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('alive')
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed')
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('alive')
   })
 
@@ -121,7 +141,7 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     // "I cannot tell" must never launder into an answer. A row with no pid cannot
     // support ANY death claim, attributed or otherwise.
     const path = registry({}, { noPid: true })
-    markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed')
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
   })
 

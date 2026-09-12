@@ -55,10 +55,37 @@ const log = createLogger('repl-registry')
  *  for why a small bound is sufficient rather than merely convenient. */
 export const GATEWAY_SHUTDOWN_KILL_HISTORY = 16
 
-/** One child generation this session key had terminated by a gateway shutdown. */
+/**
+ * WHAT THE SHUTDOWN OBSERVED about one generation when it reached it.
+ *
+ * THREE VALUES FOR THREE STATES, and the third is why this field exists. The domain
+ * is: we killed it / it was already gone / we could not tell — plus a FOURTH state,
+ * "the shutdown never reached this generation at all", which is the ABSENCE of an
+ * entry. An earlier revision encoded the domain as entry-present vs entry-absent, so
+ * `undetermined` shared its representation with `ordinary crash`, and the next tick
+ * read it as the neighbour it resembled: a confident `child-died`. A field that cannot
+ * express "I looked and could not tell" has that state read as whichever neighbour it
+ * looks like, and here that was the worst one.
+ */
+export type GatewayShutdownObservation =
+  /** Observed ALIVE and then terminated by the shutdown. A deploy killed it. */
+  | 'alive-and-killed'
+  /** Already gone when the shutdown reached it — so the shutdown did NOT kill it, and
+   *  nothing here establishes what did. */
+  | 'already-gone'
+  /** The liveness probe itself failed: we could not even look. Distinct from
+   *  `already-gone`, because "it was dead" and "I could not check" are different
+   *  facts and only one is an observation. */
+  | 'could-not-sample'
+
+/** One child generation the gateway shutdown reached on this session key. */
 export interface GatewayShutdownKillEntry {
-  /** The `child_generation` that was killed. */
+  /** The `child_generation` this entry is about. */
   generation: string
+  /** What the shutdown established about it. ABSENT on an entry written before this
+   *  field existed, and read as `'alive-and-killed'` then — sound rather than
+   *  assumed, because the only path that wrote an entry at all was the kill path. */
+  observed?: GatewayShutdownObservation
   /** Epoch ms the kill was recorded — before the kill, by the process making it. */
   at: number
   /** The OS pid of that generation's child.
@@ -144,9 +171,12 @@ export interface ReplRegistryRecord {
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
   /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
-   *  deliberately terminated (`shutdownAllPersistentRepls`, reached from the SIGTERM
-   *  handler: a service restart or a deploy). Written just before each kill, read
-   *  back so the death is reported as the deploy it was instead of a bare crash.
+   *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
+   *  or a deploy). Written just before each kill, read back so the death is reported as
+   *  what was actually established — a deploy, or an honest "cause not established" —
+   *  instead of a bare crash. See {@link GatewayShutdownObservation}: an entry records
+   *  WHAT WAS OBSERVED, so an undetermined outcome is durable rather than sharing its
+   *  representation with an ordinary crash.
    *
    *  A LIST, KEYED BY GENERATION, AND THAT IS THE POINT. One teardown reaches two
    *  generations on one session key: the POOLED child, and a QUARANTINED child that

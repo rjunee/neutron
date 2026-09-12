@@ -520,6 +520,40 @@ describe('T6 — a gateway-shutdown death is reported as a deploy, and only that
     expect(after.failure_reason ?? '').not.toContain('crashed')
   })
 
+  test('dead-cause-undetermined is reaped, and its reason asserts NEITHER a deploy nor a crash', async () => {
+    // THE THIRD DEAD-FLAVOURED VERDICT. The launcher is positively gone and the durable
+    // record says the shutdown did not kill it, so neither confident sentence is
+    // available. Folding it into `'dead'` would have the tick compose "inner workflow
+    // launcher crashed" for a fault nobody observed.
+    //
+    // RED-mutation: drop the `dead-cause-undetermined` arm of the reason ternary in
+    // `livenessBody`. The run is still reaped — and reaped with the crash sentence.
+    const { latch, calls } = recordingLatch()
+    const { probe } = fixedProbe('dead-cause-undetermined')
+    await seedInFlight('undetermined-launcher', 'gen-undet')
+    const loop = new TridentTickLoop({
+      store,
+      step: idleStep,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: latch,
+    })
+
+    await loop.runLivenessOnce()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.key).toBe('gen-undet')
+    const reason = calls[0]?.reason ?? ''
+    expect(reason).toContain('cause NOT established')
+    expect(reason).toContain('gen-unde')
+    // Not a crash verdict...
+    expect(reason).not.toContain('crashed')
+    // ...and not a deploy either.
+    expect(reason).not.toContain('killed by a gateway restart or deploy')
+    // And still free of the tokens `delivery.ts` routes on.
+    expect(reason.toLowerCase()).not.toContain('exhausted')
+    expect(reason.toLowerCase()).not.toContain('stalled')
+  })
+
   test('alive and unknown still change nothing — the attribution did not widen the trigger', async () => {
     for (const answer of ['alive', 'unknown'] as const) {
       const { latch, calls } = recordingLatch()

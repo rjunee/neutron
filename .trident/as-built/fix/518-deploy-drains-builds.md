@@ -185,7 +185,7 @@ instead of a rule enforced in two places. The clear-on-respawn had to go regardl
 must outlive the generation it describes, which is the whole reason it exists.
 
 **And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
-`record.child_generation` (`supervision.ts:1026`), which a replacement spawn overwrites
+`record.child_generation` (`supervision.ts:1062`), which a replacement spawn overwrites
 (`spawn.ts:675`) — so a quarantined generation has never been locatable in the registry, and
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
@@ -253,13 +253,20 @@ is deliberately false now. It asserts the property that replaced it — the dura
 already on disk when the report is attempted — and that the child is already dead by then, on
 purpose.
 
-**On the clamp, and a test that could not exist as a count.** `Math.min(perSinkMs, remaining)`
-has exactly one observable effect: elapsed time. It never changes which reports are attempted,
-only how long the last one may hold the phase, so a count-based assertion cannot discriminate
-it — measured, not assumed: a count-based version left the mutation alive. The gate's own
-opt-out (`WALL-CLOCK-BOUND-OK`) exists for bounds with no deterministic substitute and this is
-one, so it is used with the margin argued: ~60 ms clamped against ~500 ms unclamped, threshold
-at 250 ms.
+**On the clamp, and an opt-out that turned out not to be needed.** `Math.min(perSinkMs,
+remaining)` changes no count — never which reports are attempted, only how long the last one
+may hold the phase — so a count-based assertion cannot discriminate it, measured rather than
+assumed: a count-based version left the mutation alive. It was first pinned with an elapsed-time
+assertion and a `WALL-CLOCK-BOUND-OK` opt-out, argued on the grounds that the clamp's only
+observable effect IS elapsed time.
+
+~~That opt-out stands.~~ It does not. The bounded wait is now INJECTED, so a test can hand in
+one that records the budget it was asked for and resolves at once — the clamp became directly
+observable and the opt-out was removed rather than justified. The gate's count went 13 → 12.
+The prompt for that was not tidiness: five bound-related cases passed in their own directory and
+failed inside a 206-file process, because racing a real timer against a never-settling sink
+measures event-loop load rather than the bound. A deterministic assertion was available after
+all, which is exactly what that gate asks anyone claiming otherwise to check.
 
 ### A tombstone is written after the thing it attests to
 
@@ -352,10 +359,58 @@ sentence rather than laundering a bare one over it.
 **And the record never proves a death.** It is written before `kill()`, and `kill()` can
 throw, so an entry means "we intended to kill a child we had observed alive". The reader
 confirms the death against the pid the entry carries and answers UNKNOWN when it cannot
-(`supervision.ts:1065-1084`). Round 6's finding was this exact over-claim arriving on the read
+(`supervision.ts:1101-1123`). Round 6's finding was this exact over-claim arriving on the read
 side: round 3 refused to claim a deploy for a child that might already have been dead, and the
 per-generation scan then claimed a death for a child that might still be alive. Same missing
 question — *what does this record actually establish?*
+
+### The root: a two-valued record for a three-valued domain
+
+Nine findings landed on this change, and three were the same shape. The record's vocabulary was
+*an entry exists* / *no entry*. The domain is **killed-by-deploy**, **undetermined**, and
+**ordinary crash** — so `undetermined` shared its representation with `ordinary crash`, which is
+precisely the conflation this change exists to stop.
+
+The consequence was reachable through the round-7 fix: keeping the crash edge open for retry was
+right, and the retry then reported a confident `child-died`, because `pid-dead` was mapped
+unconditionally onto that cause and nothing recorded that the shutdown had reached the child
+without killing it. The honest uncertainty could not survive the retry because there was nowhere
+to keep it.
+
+**The fix is to persist the classification.** Each entry now carries what the shutdown OBSERVED
+— `alive-and-killed`, `already-gone`, or `could-not-sample` — and an entry is written for EVERY
+outcome, not only for a kill. That reverses an earlier decision deliberately: the old reasoning
+was that a record would EXCUSE a death we did not cause, and that was right about a record which
+can only say "we killed this". It is wrong about one that says what was observed. An
+`already-gone` entry excuses nothing; it records that the shutdown reached a child that had
+already died.
+
+**The rule, which is bigger than this change:** `false` and `unknown` must not share a branch —
+and that applies to durable representations, not only to code paths. A field that cannot express
+"I looked and could not tell" will have that state read as whichever neighbour it resembles, and
+here it resembled the worst one.
+
+**Audited once rather than per finding.** For every durable field this change writes or reads,
+the states the code can be in versus the states the field can express:
+
+| field / union | states needed | verdict |
+|---|---|---|
+| `killed_by_gateway_shutdown[]` presence | killed, undetermined, never-reached | **2 for 3 — fixed by `observed`** |
+| `.pid` | confirmed-dead, confirmed-alive, cannot-confirm | ok (reader is three-valued) |
+| `child_crash_notified_at` | reported, not-reported | ok — the domain IS two-valued |
+| `ChildCrashCause` | child-died, gateway-shutdown, unknown | ok |
+| `ShutdownLivenessSample` | alive, already-gone, could-not-sample | ok |
+| `WedgeReason` dead-child arm | crash, deploy, undetermined | **2 for 3 — fixed** |
+| `LauncherLiveness` | alive, unknown, dead, deploy-killed, undetermined | **missing 1 — fixed** |
+| `durablyRecorded` | recorded, not | ok — the domain IS two-valued |
+| `trident_launcher_crashes.failure_reason` | precedence between writers | deferred → #648 |
+
+Three gaps, three fixes, and the two that were already three-valued needed nothing. That table
+is the question that would have caught this finding, the quarantined-generation gap and the
+attributed/reported conflation in one pass instead of three rounds.
+
+`markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
+named for killing that also records "already gone" is a name whose plain reading is false.
 
 ### The edge is keyed on delivery, never on the verdict
 
@@ -393,7 +448,7 @@ rather than anything specific to deploy attribution.
 
 Measured reachability, so the deferral is informed rather than convenient: the run row's own
 reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1118`) and the
-pull half skips terminal runs (`trident/tick.ts:637`) — but `saveIfActive`'s veto path re-reads
+pull half skips terminal runs (`trident/tick.ts:648`) — but `saveIfActive`'s veto path re-reads
 the tombstone and stamps it onto the row (`trident/store.ts:1719-1730`), guarded only by the
 CALLER'S SNAPSHOT of `subagent_status`, not by the row's current value, so an
 overwrite can reach a row given that race. This change closes the duplicate-report routes into
@@ -401,7 +456,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-45 mutations applied one at a time, each reverted after: **45 red, 0 survivors.** Every
+51 mutations applied one at a time, each reverted after: **51 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

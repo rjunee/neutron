@@ -37,7 +37,7 @@
  * terminal runs.
  */
 
-import { deployRestartKillReason } from './deploy-kill-reason.ts'
+import { deployRestartKillReason, undeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
@@ -146,7 +146,18 @@ export interface TridentTransitionHook {
  * that into one of the others, and folding it into `'dead'` is how a
  * healthy build gets killed by a registry hiccup.
  */
-export type LauncherLiveness = 'alive' | 'dead' | 'unknown' | 'killed-by-gateway-shutdown'
+export type LauncherLiveness =
+  | 'alive'
+  | 'dead'
+  | 'unknown'
+  | 'killed-by-gateway-shutdown'
+  /** POSITIVELY gone, and the durable record says the gateway shutdown did NOT kill it
+   *  — it was already gone when the shutdown arrived, or unsampleable. Death
+   *  established, cause NOT. Acted on identically to `'dead'`; it exists so the reason
+   *  says "cause not established" instead of asserting a crash nobody observed
+   *  (#518). Folding it into `'dead'` is what made an honest uncertainty read as a
+   *  confident fault on every retry. */
+  | 'dead-cause-undetermined'
 
 /**
  * EXTERNAL liveness of a run's launcher generation — the signal that does not
@@ -661,7 +672,8 @@ export class TridentTickLoop {
       // removes. What the probe cannot see is still covered by the 90-min
       // `NO_ADVANCE_HANG_MS` reaper and the 2-h `DEFAULT_MAX_INFLIGHT_MS` ceiling,
       // both retained.
-      if (verdict !== 'dead' && verdict !== 'killed-by-gateway-shutdown') continue
+      if (verdict !== 'dead' && verdict !== 'killed-by-gateway-shutdown' && verdict !== 'dead-cause-undetermined')
+        continue
       // The reason names the launcher (not the detached build) and generation, and
       // must never contain the token `exhausted` — `delivery.ts` routes that
       //     into the review-unresolved class ("the reviewer still had blocking
@@ -682,7 +694,17 @@ export class TridentTickLoop {
               detail: 'its launcher was terminated by a gateway shutdown while this build was in flight',
               observedAt: new Date(this.now()),
             })
-          : `inner workflow launcher crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()})`
+          : verdict === 'dead-cause-undetermined'
+            ? // THE THIRD STATE. The launcher is positively gone and the durable record
+              // says the shutdown did not kill it, so neither confident sentence is
+              // available: not a deploy, and not a crash we observed.
+              undeterminedLauncherDeathReason({
+                generationKey: key,
+                detail:
+                  'its launcher was already gone when the gateway shut down, so the shutdown did not end it',
+                observedAt: new Date(this.now()),
+              })
+            : `inner workflow launcher crashed: generation ${key} is dead (external liveness probe at ${new Date(this.now()).toISOString()})`
       try {
         await latch(key, reason)
         // The latch changed durable state; wake the expensive sweep directly so

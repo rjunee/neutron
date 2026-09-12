@@ -719,7 +719,9 @@ export function buildCoreModules(
           // before the 90-minute hang watchdog could look at it.
           orchestratorOpts.probe_run_alive = async (run) => {
             const verdict = await launcherProbe(run)
-            return verdict === 'killed-by-gateway-shutdown' ? 'dead' : verdict
+            return verdict === 'killed-by-gateway-shutdown' || verdict === 'dead-cause-undetermined'
+              ? 'dead'
+              : verdict
           }
         }
         if (tridentWiring.on_orphaned_session !== undefined) {

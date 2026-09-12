@@ -29,7 +29,7 @@ describe('detectReplWedged — detection table', () => {
     // RED-mutation: delete the `killedByGatewayShutdown` branch. The verdict falls
     // back to `pid-dead` / "pooled child exited" and the deploy is reported as a
     // crash — the defect the spec item names.
-    const v = detectReplWedged({ ...base, childAlive: false, healthOk: false, killedByGatewayShutdown: true })
+    const v = detectReplWedged({ ...base, childAlive: false, healthOk: false, shutdownObserved: 'alive-and-killed' as const })
     expect(v).toMatchObject({ wedged: true, reason: 'pid-dead-gateway-shutdown' })
     expect(v).toMatchObject({ wedged: true })
     if (v.wedged) {
@@ -46,26 +46,50 @@ describe('detectReplWedged — detection table', () => {
     //
     // RED-mutation: make the branch unconditional (`if (true)`) — this reddens while
     // the deploy case above still passes.
-    const explicitlyFalse = detectReplWedged({
-      ...base,
-      childAlive: false,
-      healthOk: false,
-      killedByGatewayShutdown: false,
-    })
-    expect(explicitlyFalse).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
+    const notReached = detectReplWedged({ ...base, childAlive: false, healthOk: false })
+    expect(notReached).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
     // ABSENT, not merely false: a probe built before #518 (or one whose registry read
     // could not answer) must land on the crash arm, never the deploy arm.
     const fieldAbsent = detectReplWedged({ ...base, childAlive: false, healthOk: false })
     expect(fieldAbsent).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
   })
 
+  it('child exited and the shutdown reached it WITHOUT killing it → pid-dead-cause-undetermined', () => {
+    // THE THIRD STATE. Two values could not hold three, so `undetermined` shared
+    // `pid-dead` with an ordinary crash and the retry reported a fault nobody observed.
+    // RED-mutation: delete this arm — the verdict falls back to `pid-dead` /
+    // "pooled child exited", and the deploy case above still passes.
+    for (const observed of ['already-gone', 'could-not-sample'] as const) {
+      const v = detectReplWedged({ ...base, childAlive: false, healthOk: false, shutdownObserved: observed })
+      expect(v).toMatchObject({ wedged: true, reason: 'pid-dead-cause-undetermined' })
+      if (v.wedged) {
+        expect(v.detail).toContain('UNDETERMINED')
+        // Neither confident sentence is available for this state.
+        expect(v.detail).not.toContain('a service restart or a deploy')
+        expect(v.detail).not.toBe('pooled child exited')
+      }
+    }
+    // The two sub-states say WHICH: an observation is not a failure to observe.
+    const gone = detectReplWedged({ ...base, childAlive: false, healthOk: false, shutdownObserved: 'already-gone' })
+    const blind = detectReplWedged({
+      ...base,
+      childAlive: false,
+      healthOk: false,
+      shutdownObserved: 'could-not-sample',
+    })
+    expect(gone.wedged && blind.wedged && gone.detail !== blind.detail).toBe(true)
+    expect(buildWedgeAlertText({ sessionKey: 'k', reason: 'pid-dead-cause-undetermined' })).toContain(
+      'cause not established',
+    )
+  })
+
   it('a shutdown marker on a LIVE child manufactures nothing', () => {
     // The marker EXPLAINS a death; it may never create one. RED-mutation: hoist the
     // `killedByGatewayShutdown` check above the `childAlive` test.
-    expect(detectReplWedged({ ...base, killedByGatewayShutdown: true })).toEqual({ wedged: false })
+    expect(detectReplWedged({ ...base, shutdownObserved: 'alive-and-killed' as const })).toEqual({ wedged: false })
     // ...and a marked, alive-but-silent child is still the dev-channel verdict.
     expect(
-      detectReplWedged({ ...base, healthOk: false, killedByGatewayShutdown: true }),
+      detectReplWedged({ ...base, healthOk: false, shutdownObserved: 'alive-and-killed' as const }),
     ).toMatchObject({ wedged: true, reason: 'no-port-listener' })
   })
 

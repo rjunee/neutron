@@ -139,6 +139,7 @@ import {
   getRecord,
   patchRecord,
   type GatewayShutdownKillEntry,
+  type GatewayShutdownObservation,
   type ReplRegistryRecord,
 } from './repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
@@ -180,10 +181,22 @@ export function sampleLivenessBeforeShutdownKill(hasExited: () => boolean): Shut
  * child's genuine crash is never excused as a deploy.
  */
 export function wasKilledByGatewayShutdown(record: ReplRegistryRecord | undefined): boolean {
-  if (record === undefined) return false
-  const current = record.child_generation
+  const current = record?.child_generation
   if (typeof current !== 'string' || current.length === 0) return false
-  return gatewayShutdownKillEntryFor(record, current) !== undefined
+  return observationOf(gatewayShutdownKillEntryFor(record, current)) === 'alive-and-killed'
+}
+
+/**
+ * What the shutdown observed about this entry's generation. An entry with no
+ * `observed` field predates it and can only have come from the kill path, which is the
+ * one path that wrote an entry at all — so that is what it is read as.
+ */
+export function observationOf(
+  entry: GatewayShutdownKillEntry | undefined,
+): GatewayShutdownObservation | undefined {
+  if (entry === undefined) return undefined
+  const o = entry.observed
+  return o === 'already-gone' || o === 'could-not-sample' || o === 'alive-and-killed' ? o : 'alive-and-killed'
 }
 
 /**
@@ -271,11 +284,12 @@ export function undeterminedShutdownDetail(liveness: ShutdownLivenessSample, at:
  * evidence that anything was recorded. A no-op that reported success here would put
  * the next boot back to reporting our own kill as a crash, with nothing saying so.
  */
-export function markKilledByGatewayShutdown(
+export function recordGatewayShutdownOutcome(
   registryPath: string,
   sessionKey: string,
   childGeneration: string,
   at: number,
+  observed: GatewayShutdownObservation,
   pid?: number,
 ): boolean {
   if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
@@ -298,7 +312,7 @@ export function markKilledByGatewayShutdown(
             // against the process table rather than trusting this record. See the
             // field's docblock: writing the entry attributes a death, it does not
             // establish one.
-            { generation: childGeneration, at, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
+            { generation: childGeneration, at, observed, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
           ].slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)
     patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
     return gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration) !== undefined
@@ -398,13 +412,26 @@ export function recordGatewayShutdownKill(
   // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
   // ALIVE was killed by this shutdown; anything else is reported as undetermined.
   const attributed = liveness === 'alive'
+  const observed: GatewayShutdownObservation =
+    liveness === 'alive' ? 'alive-and-killed' : liveness === 'already-gone' ? 'already-gone' : 'could-not-sample'
   let durablyRecorded = false
-  if (attributed && options.replRegistryPath !== undefined) {
-    // The marker is an EXCUSE for a death, so it is written only where the death is
-    // ours to own. Writing it for a child that was already gone would excuse a fault,
-    // and it would also close the crash edge — silencing the next boot's honest
-    // report of the very fault we are refusing to claim.
-    durablyRecorded = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at, pid)
+  if (options.replRegistryPath !== undefined) {
+    // AN ENTRY IS WRITTEN FOR EVERY OUTCOME, not only for a kill — and that is the
+    // correction to an earlier revision, which wrote nothing unless we had killed the
+    // child. Its reasoning was that a record would EXCUSE a death we did not cause,
+    // and that reasoning was right about a record that can only say "we killed this".
+    // It is wrong about one that says WHAT WAS OBSERVED: an `already-gone` entry
+    // excuses nothing, it records that the shutdown reached a child that had already
+    // died. Writing nothing left `undetermined` sharing its representation with an
+    // ordinary crash, so a retry reported the honest uncertainty as a confident crash.
+    durablyRecorded = recordGatewayShutdownOutcome(
+      options.replRegistryPath,
+      sessionKey,
+      childGeneration,
+      at,
+      observed,
+      pid,
+    )
     if (!durablyRecorded) {
       // The row is gone, or unwritable. A best-effort write that quietly did nothing is
       // the silence this module exists to remove, so it is said out loud — AND carried
@@ -465,11 +492,22 @@ function recoveryConsequence(report: PendingShutdownKillReport): string {
 
 export async function deliverShutdownKillReports(
   reports: readonly PendingShutdownKillReport[],
-  opts: { perSinkMs?: number; phaseBudgetMs?: number; now?: () => number } = {},
+  opts: {
+    perSinkMs?: number
+    phaseBudgetMs?: number
+    now?: () => number
+    /** The bounded wait, injectable. Production passes `Bun.sleep`; a test passes one
+     *  that RECORDS the budget it was asked for and resolves at once, so the bound is
+     *  asserted from what the code computed rather than from elapsed wall-clock. That
+     *  is not merely tidier: a real timer racing a never-settling sink is at the mercy
+     *  of a loaded event loop, and these cases failed only in a 206-file process. */
+    sleep?: (ms: number) => Promise<void>
+  } = {},
 ): Promise<{ delivered: number; timedOut: number; failed: number; skipped: number }> {
   const perSinkMs = opts.perSinkMs ?? SHUTDOWN_REPORT_PER_SINK_MS
   const phaseBudgetMs = opts.phaseBudgetMs ?? SHUTDOWN_REPORT_PHASE_BUDGET_MS
   const now = opts.now ?? Date.now
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms))
   const phaseDeadline = now() + phaseBudgetMs
   const tally = { delivered: 0, timedOut: 0, failed: 0, skipped: 0 }
 
@@ -508,7 +546,7 @@ export async function deliverShutdownKillReports(
       // catch here — to the ORIGINAL promise, not to the race — is what makes
       // abandoning it safe.
       call.catch(() => undefined)
-      settled = await Promise.race([call.then(() => undefined), Bun.sleep(budget).then(() => TIMED_OUT)])
+      settled = await Promise.race([call.then(() => undefined), sleep(budget).then(() => TIMED_OUT)])
     } catch (err) {
       tally.failed += 1
       process.stderr.write(

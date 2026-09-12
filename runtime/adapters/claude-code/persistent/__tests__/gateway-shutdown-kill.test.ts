@@ -22,11 +22,12 @@ import { join } from 'node:path'
 import {
   closeCrashReportEdge,
   gatewayShutdownKillEntryFor,
+  observationOf,
   sampleLivenessBeforeShutdownKill,
   undeterminedShutdownDetail,
   gatewayShutdownKillAt,
   gatewayShutdownKillDetail,
-  markKilledByGatewayShutdown,
+  recordGatewayShutdownOutcome,
   reportGatewayShutdownKill,
   wasKilledByGatewayShutdown,
 } from '../gateway-shutdown-kill.ts'
@@ -71,7 +72,7 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     // reverts to "pooled child exited" for a death the gateway caused.
     const path = registryPath()
     seed(path)
-    markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000)
+    recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000, 'alive-and-killed')
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(wasKilledByGatewayShutdown(record)).toBe(true)
     expect(gatewayShutdownKillAt(record)).toBe(1_700_000_000_000)
@@ -93,7 +94,7 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     // generation it describes.
     const path = registryPath()
     seed(path)
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000, 'alive-and-killed')).toBe(true)
     patchRecord(path, 'cc-trident-fire-o-abc /repo', { child_generation: 'gen-NEXT' })
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     // The old generation's record SURVIVES the respawn — that is the point of it...
@@ -125,7 +126,7 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
   })
 })
 
-describe('markKilledByGatewayShutdown', () => {
+describe('recordGatewayShutdownOutcome', () => {
   it('records the CAUSE, and deliberately does NOT close the crash-report edge', () => {
     // The two are different facts and the ordering between them is load-bearing. The
     // attribution is knowable before the kill ("we are about to terminate a child we
@@ -140,7 +141,7 @@ describe('markKilledByGatewayShutdown', () => {
     // this case only pins the split.
     const path = registryPath()
     seed(path)
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 555)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 555, 'alive-and-killed')).toBe(true)
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live'])
     expect(killedAt(record, 'gen-live')).toBe(555)
@@ -172,17 +173,18 @@ describe('markKilledByGatewayShutdown', () => {
     // RED-mutation: `return true` after `patchRecord` instead of reading the row back.
     const path = registryPath()
     seed(path)
-    expect(markKilledByGatewayShutdown(path, 'a-key-with-no-row', 'gen-live', 1)).toBe(false)
+    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBe(false)
     // And nothing was invented for the row that DOES exist.
     expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(false)
   })
 
   it('reports false rather than throwing when the registry file cannot be reached', () => {
-    const wrote = markKilledByGatewayShutdown(
+    const wrote = recordGatewayShutdownOutcome(
       join(tmpdir(), 'neutron-gsk-does-not-exist', 'nested', 'registry.json'),
       'k',
       'g',
       1,
+      'alive-and-killed',
     )
     expect(wrote).toBe(false)
   })
@@ -353,7 +355,7 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
   })
 
   for (const liveness of ['already-gone', 'could-not-sample'] as const) {
-    it(`${liveness} → cause UNKNOWN, no marker, and the crash edge is LEFT OPEN`, async () => {
+    it(`${liveness} → cause UNKNOWN, recorded AS undetermined, not as a kill`, async () => {
       // RED-mutation: make `attributed` unconditionally true in
       // `reportGatewayShutdownKill`. A fault that landed moments before teardown is
       // then reported as a deploy and excused on disk — while the ALIVE case above
@@ -372,10 +374,16 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
       expect(seen[0]?.detail).not.toContain('pooled child exited')
 
       const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
-      // NO EXCUSE ON DISK: a marker here would tell the next boot that a deploy
-      // explains this death.
+      // NO EXCUSE ON DISK: nothing here may tell the next boot that a deploy explains
+      // this death.
       expect(wasKilledByGatewayShutdown(record)).toBe(false)
-      expect(killedGenerations(record)).toEqual([])
+      // BUT THE OUTCOME IS RECORDED, and this assertion was inverted before — it
+      // demanded NO entry at all, which left `undetermined` sharing its representation
+      // with an ordinary crash, so the retry reported it as a confident `child-died`.
+      // An `already-gone` entry excuses nothing; it records that the shutdown reached a
+      // child that had already died. RED-mutation: write no entry unless we killed it.
+      expect(killedGenerations(record)).toEqual(['gen-live'])
+      expect(observationOf(gatewayShutdownKillEntryFor(record, 'gen-live'))).toBe(liveness)
       // AND THE EDGE IS CLOSED, because the report was DELIVERED. This case used to
       // assert the opposite, and that was the defect: the edge records that a report
       // happened, not what it said, so a delivered "undetermined" closes it exactly as
@@ -426,9 +434,9 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     // and this reddens on the first assertion.
     const path = registryPath()
     seed(path) // row names 'gen-live'
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe(true)
     // The quarantined generation the row has already moved past.
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-QUARANTINED', 600)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-QUARANTINED', 600, 'alive-and-killed')).toBe(true)
 
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live', 'gen-QUARANTINED'])
@@ -447,8 +455,8 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     // and the recorded time drifts away from the kill it describes.
     const path = registryPath()
     seed(path)
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500)).toBe(true)
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 900)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 900, 'alive-and-killed')).toBe(true)
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live'])
     expect(killedAt(record, 'gen-live')).toBe(500)
@@ -462,7 +470,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     const path = registryPath()
     seed(path)
     for (let i = 0; i < GATEWAY_SHUTDOWN_KILL_HISTORY + 5; i++) {
-      markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', `gen-${i}`, 1_000 + i)
+      recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', `gen-${i}`, 1_000 + i, 'alive-and-killed')
     }
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toHaveLength(GATEWAY_SHUTDOWN_KILL_HISTORY)
@@ -473,7 +481,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
   it('a row that does not exist is still refused — a no-op is not a success', () => {
     const path = registryPath()
     seed(path)
-    expect(markKilledByGatewayShutdown(path, 'a-key-with-no-row', 'gen-live', 1)).toBe(false)
-    expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', '', 1)).toBe(false)
+    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBe(false)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', '', 1, 'alive-and-killed')).toBe(false)
   })
 })

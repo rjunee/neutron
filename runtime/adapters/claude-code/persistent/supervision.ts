@@ -18,7 +18,12 @@ import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnR
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
-import { gatewayShutdownKillAt, gatewayShutdownKillEntryFor, wasKilledByGatewayShutdown } from './gateway-shutdown-kill.ts'
+import {
+  gatewayShutdownKillAt,
+  gatewayShutdownKillEntryFor,
+  observationOf,
+} from './gateway-shutdown-kill.ts'
+import type { GatewayShutdownObservation } from './repl-registry.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
@@ -391,6 +396,14 @@ export interface ReplWatchdog {
  *  pool is the authoritative source when it holds the session; otherwise (after
  *  a crash evicted it, or across a gateway restart) the registry's recorded
  *  `pid` is the liveness anchor — exactly Nova's "topic-map pid" fallback. */
+/** What the gateway shutdown established about the generation this row CURRENTLY
+ *  names, or undefined when it never reached it. */
+function observationFor(record: ReplRegistryRecord | undefined): GatewayShutdownObservation | undefined {
+  const current = record?.child_generation
+  if (typeof current !== 'string' || current.length === 0) return undefined
+  return observationOf(gatewayShutdownKillEntryFor(record, current))
+}
+
 async function probeReplLiveness(
   sessionKey: string,
   record: ReplRegistryRecord | undefined,
@@ -421,14 +434,17 @@ async function probeReplLiveness(
   // Pass the recorded session id so the default probe can reject a recycled port
   // serving a DIFFERENT session (port-recycle guard).
   const healthOk = port !== undefined ? await healthProbe(port, record?.sessionId) : false
+  const observed = observationFor(record)
   return {
     hasChild,
     childAlive,
     healthOk,
     ccReady: record?.first_ready_at !== undefined,
-    // #518 — generation-scoped: a marker naming a SUPERSEDED generation answers
-    // false, so the next child's genuine crash is never excused as a deploy.
-    killedByGatewayShutdown: wasKilledByGatewayShutdown(record),
+    // #518 — generation-scoped: a record naming a SUPERSEDED generation is not read as
+    // describing this child, so the next child's genuine crash is never excused.
+    // Undefined when the shutdown never reached this generation, which is the state an
+    // ordinary crash is in.
+    ...(observed !== undefined ? { shutdownObserved: observed } : {}),
   }
 }
 
@@ -495,7 +511,16 @@ export async function runReplWatchdogTick(
           generationKey: record.child_generation,
           // #518 — WHY it is gone travels as a field, not as a phrase the consumer
           // has to pattern-match back out of `detail`.
-          cause: verdict.reason === 'pid-dead-gateway-shutdown' ? 'gateway-shutdown' : 'child-died',
+          // THREE REASONS, THREE CAUSES. An earlier revision mapped everything that was
+          // not a deploy onto `child-died`, so an honest undetermined outcome was
+          // reported as a confident fault on every retry — the conflation this whole
+          // change exists to remove, surviving in the one place nothing recorded it.
+          cause:
+            verdict.reason === 'pid-dead-gateway-shutdown'
+              ? 'gateway-shutdown'
+              : verdict.reason === 'pid-dead-cause-undetermined'
+                ? 'unknown'
+                : 'child-died',
           detail: verdict.detail,
         })
         patchRecord(registryPath, sessionKey, { child_crash_notified_at: now })
@@ -520,7 +545,9 @@ export async function runReplWatchdogTick(
         continue
       }
       const trigger: RespawnTrigger =
-        action.verdict.reason === 'pid-dead' || action.verdict.reason === 'pid-dead-gateway-shutdown'
+        action.verdict.reason === 'pid-dead' ||
+        action.verdict.reason === 'pid-dead-gateway-shutdown' ||
+        action.verdict.reason === 'pid-dead-cause-undetermined'
           ? 'crash-watchdog'
           : 'wedge-watchdog'
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
@@ -962,7 +989,16 @@ export async function peekSizeWatchdogForTest(
  *  runtime layer may not import trident, so the two are kept identical by name
  *  and a compile-time check at the wiring seam
  *  (`open/wiring/trident-launcher-liveness.ts`). */
-export type LauncherGenerationLiveness = 'alive' | 'dead' | 'unknown' | 'killed-by-gateway-shutdown'
+export type LauncherGenerationLiveness =
+  | 'alive'
+  | 'dead'
+  | 'unknown'
+  | 'killed-by-gateway-shutdown'
+  /** Positively gone, and the shutdown recorded that it did NOT kill it — already gone
+   *  when the shutdown arrived, or unsampleable. Death established, cause not. A third
+   *  dead-flavoured value because folding it into `'dead'` makes the caller compose a
+   *  crash sentence for a fault nobody observed. */
+  | 'dead-cause-undetermined'
 
 /**
  * Is the launcher child identified by `generationKey` still a LIVE process?
@@ -1080,7 +1116,10 @@ export function probeLauncherGenerationAlive(
         // EPERM is positive evidence the pid EXISTS under another uid — same
         // conservative reading as the branch above.
         if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'unknown'
-        return 'killed-by-gateway-shutdown'
+        // Positively gone. The record says whether that death is ours to claim — and
+        // `already-gone` / `could-not-sample` mean the shutdown reached this child and
+        // did NOT kill it, so the death is confirmed and its cause is not.
+        return observationOf(entry) === 'alive-and-killed' ? 'killed-by-gateway-shutdown' : 'dead-cause-undetermined'
       }
     }
     return 'unknown'
