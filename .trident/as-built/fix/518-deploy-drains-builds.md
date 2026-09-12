@@ -140,6 +140,43 @@ stderr rather than failing quietly.
 The multi-generation test asserted only the emitted callbacks while reading as though it
 covered the durable half; it now asserts the final registry row.
 
+### A tombstone is written after the thing it attests to
+
+The third correction, and the sharpest, because it is this change's own subject turned
+against it. `child_crash_notified_at` was stamped in the same patch as the attribution
+marker — before the sink ran. The sink's failure is caught and discarded, so a transient
+failure left the edge CLOSED with nothing reported; the next boot's watchdog skipped the
+death on that field, the respawn cleared the marker, and the pull probe then answered
+`unknown` for the dead generation. The owner received **no failure reason at all**. In a
+change that exists because a deploy-caused death surfaced as a bare crash, that is the same
+defect one step further on: it surfaced as nothing.
+
+The reasoning was already written down one branch away. On the unattributed path the edge is
+deliberately left OPEN, because closing it would silence the next boot's honest report of a
+death we had just declined to claim. That argument applies identically to the attributed
+path; one branch got the careful treatment and its neighbour got the optimistic one.
+
+Only one of the two facts is knowable before the kill. The ATTRIBUTION — we are about to
+terminate a child we observed alive — is knowable then and must be written then, because
+afterwards this process may get no further turn. That the death was REPORTED is not knowable
+until the sink commits. So they are split: `markKilledByGatewayShutdown` records the cause,
+`closeCrashReportEdge` closes the edge after the await.
+
+That ordering alone delivers retry-with-attribution, with no second state to carry it: a
+throwing sink leaves the marker on disk and the edge open, so the next boot's watchdog finds
+the dead pid, reads the marker, and emits `cause: 'gateway-shutdown'` with the deploy detail.
+The owner learns it was a deploy, late, rather than getting a generic crash or silence. The
+de-duplication the early write provided is preserved by closing the edge after success, and
+the complement pins it: a sink that succeeds is not reported twice.
+
+**The general rule, which is why this is worth the space:** anywhere a marker means *this was
+reported*, the write belongs after the commit that makes it true. Written first it records an
+intention as an outcome. Same class as #577's "return what is on disk, not what you wrote".
+
+The test gap that let it through is the shape of the M8 note: the throwing-sink case asserted
+that the marker EXISTS — the artifact — never that the backstop the marker is for fires. The
+sequence is now driven end to end.
+
 ### The owner's copy cannot depend on a length accident
 
 The undetermined reason first relied on `interpretFailure`'s fallback arm, which prints an
@@ -178,7 +215,7 @@ next boot's watchdog would have laundered the deploy attribution away.
 
 ### Measured
 
-26 mutations applied one at a time, each reverted after: **26 red, 0 survivors.** Every
+29 mutations applied one at a time, each reverted after: **29 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
@@ -189,6 +226,9 @@ rather than confirming them:
 - **M15** (delete the quarantine report) initially SURVIVED. The assertion said "at least one
   report, all of them deploys", which the *pooled* child's report satisfied on its own. It now
   names the quarantined generation explicitly.
+- **M27** (restore the early `child_crash_notified_at` stamp) reddens ONLY the new sequence
+  test. Every shutdown-half assertion still passes under it — the marker is written, the
+  throw is caught — which is precisely why an artifact-shaped test could not see the defect.
 - **M8** (have `markKilledByGatewayShutdown` return `true` instead of reading the row back)
   survived once the row-scoping guard landed, because the guard now returns first for every
   case the test could construct. The read-back is NOT redundant — it still catches a save

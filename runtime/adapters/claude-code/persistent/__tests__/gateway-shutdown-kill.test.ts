@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  closeCrashReportEdge,
   sampleLivenessBeforeShutdownKill,
   undeterminedShutdownDetail,
   gatewayShutdownKillAt,
@@ -107,19 +108,40 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
 })
 
 describe('markKilledByGatewayShutdown', () => {
-  it('records the generation, the timestamp, and the crash-notified edge', () => {
-    // The third field is not incidental: the caller notifies the durable crash sink
-    // itself, and `crashRunningByLauncher` UPSERTS the failure reason, so the next
-    // boot's watchdog re-notifying the same pid edge would OVERWRITE the deploy
-    // attribution with its own bare sentence.
-    // RED-mutation: drop `child_crash_notified_at` from the patch.
+  it('records the CAUSE, and deliberately does NOT close the crash-report edge', () => {
+    // The two are different facts and the ordering between them is load-bearing. The
+    // attribution is knowable before the kill ("we are about to terminate a child we
+    // observed alive"); that the death was REPORTED is not knowable until the sink
+    // commits. Writing them together — as an earlier revision did — records an
+    // intention as an outcome, and a transient sink failure then becomes permanent
+    // silence: the next boot skips the edge, the respawn clears the marker, and the
+    // owner gets no reason at all.
+    //
+    // RED-mutation: add `child_crash_notified_at: at` back to this patch. The
+    // sequence test in `poison-eviction-live-work-guard.test.ts` is what catches it —
+    // this case only pins the split.
     const path = registryPath()
     seed(path)
     expect(markKilledByGatewayShutdown(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 555)).toBe(true)
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(record?.killed_by_gateway_shutdown_generation).toBe('gen-live')
     expect(record?.killed_by_gateway_shutdown_at).toBe(555)
-    expect(record?.child_crash_notified_at).toBe(555)
+    expect(record?.child_crash_notified_at).toBeUndefined()
+  })
+
+  it('closeCrashReportEdge closes it, and only for the generation the row names', () => {
+    // RED-mutation: drop the generation check in `closeCrashReportEdge` — a superseded
+    // generation then silences a report nobody has made for the CURRENT child.
+    const path = registryPath()
+    seed(path)
+    expect(closeCrashReportEdge(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 777)).toBe(true)
+    expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBe(777)
+
+    // A superseded generation may not close the edge of the one the row now names.
+    const other = registryPath()
+    seed(other)
+    expect(closeCrashReportEdge(other, 'cc-trident-fire-o-abc /repo', 'gen-OLD', 888)).toBe(false)
+    expect(getRecord(other, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
   })
 
   it('reports FALSE for the silent no-op — an absent row is patched by nobody', () => {
@@ -223,7 +245,12 @@ describe('reportGatewayShutdownKill — one call, both records', () => {
       902,
       'alive',
     )
-    expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(true)
+    const row = getRecord(path, 'cc-trident-fire-o-abc /repo')
+    expect(wasKilledByGatewayShutdown(row)).toBe(true)
+    // AND THE EDGE IS LEFT OPEN. This is what makes the marker a backstop rather than
+    // a decoration: the next boot's watchdog must still be free to report this death.
+    // RED-mutation: close the edge before the sink call instead of after it.
+    expect(row?.child_crash_notified_at).toBeUndefined()
   })
 
   it('AWAITS an async sink — the gateway closes its database right after', async () => {
@@ -299,7 +326,10 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
       () => {
         expect(seen[0]?.cause).toBe('gateway-shutdown')
         expect(seen[0]?.detail).toContain('deploy')
-        expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(true)
+        const row = getRecord(path, 'cc-trident-fire-o-abc /repo')
+        expect(wasKilledByGatewayShutdown(row)).toBe(true)
+        // The sink committed, so — and only so — the edge is closed behind it.
+        expect(row?.child_crash_notified_at).toBe(700)
       },
     )
   })
@@ -378,7 +408,6 @@ describe('markKilledByGatewayShutdown refuses a generation the row has moved pas
     // The pooled generation's marker SURVIVES, intact, including its timestamp.
     expect(record?.killed_by_gateway_shutdown_generation).toBe('gen-live')
     expect(record?.killed_by_gateway_shutdown_at).toBe(500)
-    expect(record?.child_crash_notified_at).toBe(500)
     expect(wasKilledByGatewayShutdown(record)).toBe(true)
   })
 

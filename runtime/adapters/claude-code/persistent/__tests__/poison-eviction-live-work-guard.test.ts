@@ -49,6 +49,7 @@ import {
 import { quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
 import { markKilledByGatewayShutdown, wasKilledByGatewayShutdown } from '../gateway-shutdown-kill.ts'
 import { childByKey } from '../pool-state.ts'
+import { runReplWatchdogTick } from '../supervision.ts'
 import { loadRegistry, patchRecord } from '../repl-registry.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -719,5 +720,110 @@ describe('a child that was ALREADY DEAD when teardown arrived is not a deploy ki
     // RED-mutation: stamp `child_crash_notified_at` on the unattributed path.
     expect(row?.child_crash_notified_at).toBeUndefined()
     expect(deadGeneration).toBeDefined()
+  })
+})
+
+/**
+ * #518 — A TRANSIENT SINK FAILURE MUST NOT BECOME PERMANENT SILENCE.
+ *
+ * The marker's whole purpose is to be the backstop when the direct report does not
+ * land. The first cut wrote `child_crash_notified_at` in the SAME patch as the
+ * attribution marker — before the sink ran — so a throwing sink left the edge closed,
+ * the next boot's watchdog skipped it, the respawn cleared the marker, and the pull
+ * probe answered `unknown` for the dead generation. The owner then received no
+ * failure reason AT ALL: not a wrong one, none.
+ *
+ * The existing throwing-sink case asserts only that the marker exists, which is the
+ * artifact rather than the property the artifact is for. This drives the sequence the
+ * marker exists to enable.
+ */
+describe('the durable backstop actually backs up a failed report (#518)', () => {
+  it('sink throws at shutdown → the NEXT boot delivers the attributed deploy report', async () => {
+    // RED-mutation: restore `child_crash_notified_at: at` to the patch in
+    // `markKilledByGatewayShutdown`. The shutdown half still passes — the marker is
+    // there, the throw is caught — and the next-boot tick reports NOTHING, because the
+    // watchdog's `record?.child_crash_notified_at === undefined` gate skips the edge.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-backstop-')), 'repl-registry.json')
+
+    let sinkWorks = false
+    const delivered: Array<{ cause: string; detail: string; generation: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        if (!sinkWorks) throw new Error('sqlite busy')
+        delivered.push({ cause: info.cause, detail: info.detail, generation: info.generationKey })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const generation = loadRegistry(registryPath)[key]?.child_generation as string
+    expect(childAlive(1)).toBe(true)
+
+    // The deploy. The child is alive, so the death IS ours — and the sink refuses it.
+    await captureStderr(() => shutdownAllPersistentRepls())
+    expect(delivered).toEqual([])
+    expect(childAlive(1)).toBe(false)
+
+    const afterShutdown = loadRegistry(registryPath)[key]
+    // The attribution survived: it is a fact about the kill, written before it.
+    expect(afterShutdown?.killed_by_gateway_shutdown_generation).toBe(generation)
+    // And the crash edge is OPEN, because nothing was reported. This is the assertion
+    // the first cut failed: a tombstone must not be written before the thing it
+    // attests to.
+    expect(afterShutdown?.child_crash_notified_at).toBeUndefined()
+
+    // The next boot. The recorded pid is dead and the watchdog reaches the edge.
+    sinkWorks = true
+    await runReplWatchdogTick(options, {
+      healthProbe: async () => false,
+      isPidAlive: () => false,
+      now: () => Date.now() + 120_000,
+      postAlert: () => {},
+    })
+
+    // THE PROPERTY: the owner is told, and told the ATTRIBUTED thing. A late generic
+    // crash would be a lesser failure of the same kind — the retry carries the
+    // attribution because the attribution is on disk.
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]?.generation).toBe(generation)
+    expect(delivered[0]?.cause).toBe('gateway-shutdown')
+    expect(delivered[0]?.detail).toContain('deploy')
+    expect(delivered[0]?.detail).not.toContain('pooled child exited')
+    // ...and NOW the edge is closed, so a third pass says nothing further.
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeGreaterThan(0)
+  })
+
+  it('THE COMPLEMENT — a sink that SUCCEEDS at shutdown is not reported twice', async () => {
+    // Moving the write must not lose the de-duplication it provided. RED-mutation:
+    // delete the `closeCrashReportEdge` call after the successful sink commit — the
+    // next boot re-reports the same death and this reddens.
+    const { host, messagesSeen } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-backstop-ok-')), 'repl-registry.json')
+    const delivered: string[] = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        delivered.push(info.cause)
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+    expect(delivered).toEqual(['gateway-shutdown'])
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeGreaterThan(0)
+
+    await runReplWatchdogTick(options, {
+      healthProbe: async () => false,
+      isPidAlive: () => false,
+      now: () => Date.now() + 120_000,
+      postAlert: () => {},
+    })
+    expect(delivered).toEqual(['gateway-shutdown'])
   })
 })

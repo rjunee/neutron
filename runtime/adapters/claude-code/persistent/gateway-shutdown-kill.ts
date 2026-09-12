@@ -182,13 +182,16 @@ export function undeterminedShutdownDetail(liveness: ShutdownLivenessSample, at:
  * Record the deliberate kill on the durable registry row, BEFORE the child is
  * killed — after it, the process may not get another scheduler turn.
  *
- * Also stamps `child_crash_notified_at`: the caller notifies the durable crash
- * sink itself (it is the only place that still has one), and the next boot's
- * watchdog would otherwise re-notify the SAME pid edge with its own bare detail.
- * That second write is not harmless — `crashRunningByLauncher` upserts
- * `ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`
- * (`trident/store.ts`), so a late bare "pooled child exited" would overwrite the
- * deploy attribution in the tombstone that `saveIfActive` reads back.
+ * It records the CAUSE only. Closing the crash-report edge is
+ * {@link closeCrashReportEdge}'s job and happens after the sink commits — see the
+ * note there for the silence that ordering prevents.
+ *
+ * A second report from the next boot is no longer a hazard worth pre-empting, and
+ * that is a consequence of this marker rather than of the edge: the watchdog reads
+ * the marker, so its report carries the SAME deploy attribution. Where it once would
+ * have overwritten the reason with a bare "pooled child exited" through
+ * `crashRunningByLauncher`'s `ON CONFLICT … DO UPDATE SET failure_reason`
+ * (`trident/store.ts`), it now rewrites the identical sentence.
  *
  * Best-effort by construction: a registry write must never brick a shutdown.
  *
@@ -218,9 +221,45 @@ export function markKilledByGatewayShutdown(
     patchRecord(registryPath, sessionKey, {
       killed_by_gateway_shutdown_generation: childGeneration,
       killed_by_gateway_shutdown_at: at,
-      child_crash_notified_at: at,
     })
     return wasKilledByGatewayShutdown(getRecord(registryPath, sessionKey))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Close this pid edge's crash report — `child_crash_notified_at`, the field the
+ * supervision watchdog reads to decide it has nothing left to say about this death.
+ *
+ * CALLED ONLY AFTER A SINK COMMIT, NEVER BEFORE. An earlier revision wrote it in the
+ * same patch as the attribution marker above, i.e. before the report it claims had
+ * happened. That records an INTENTION AS AN OUTCOME, and it converted a transient
+ * sink failure into permanent silence: the next boot's watchdog skipped the edge
+ * because the field was set, then respawned the child, and the respawn cleared the
+ * marker — so the pull probe answered `unknown` for the old generation and the owner
+ * received NO failure reason at all. Not a wrong reason: none. In a change that
+ * exists because a deploy-caused death surfaced as a bare crash, that is the same
+ * defect one step further on.
+ *
+ * The same reasoning already guarded the unattributed path, where leaving this field
+ * OPEN is what lets the next boot report the death we declined to claim. It belongs
+ * on both branches: a "notified" tombstone is written after the notification.
+ *
+ * Generation-scoped for the same reason the marker is — the row outlives the child,
+ * and closing the edge of a generation the row has moved past would silence a report
+ * nobody has made.
+ */
+export function closeCrashReportEdge(
+  registryPath: string,
+  sessionKey: string,
+  childGeneration: string,
+  at: number,
+): boolean {
+  try {
+    if (getRecord(registryPath, sessionKey)?.child_generation !== childGeneration) return false
+    patchRecord(registryPath, sessionKey, { child_crash_notified_at: at })
+    return getRecord(registryPath, sessionKey)?.child_crash_notified_at === at
   } catch {
     return false
   }
@@ -236,6 +275,20 @@ export function markKilledByGatewayShutdown(
  * this exists to produce. A throwing sink is logged to stderr and does not stop
  * the shutdown — the registry marker is the backstop that gets the next boot to
  * the same answer.
+ *
+ * THE ORDER OF THE TWO WRITES IS THE WHOLE DESIGN:
+ *   1. the ATTRIBUTION marker, BEFORE the kill, because it records a fact we know at
+ *      that moment (we are about to terminate a child observed alive) and after the
+ *      kill this process may get no further turn;
+ *   2. the crash-report edge, AFTER the sink commits, because it records that the
+ *      report HAPPENED — and a tombstone written before the thing it attests to is
+ *      an intention dressed as an outcome.
+ *
+ * Split that way, a throwing sink degrades into exactly the behaviour worth having:
+ * the marker survives, the edge stays open, and the next boot's watchdog finds the
+ * dead pid, reads the marker, and delivers the ATTRIBUTED report — a deploy, late,
+ * rather than a generic crash or nothing at all. The retry carries the attribution
+ * because the attribution is on disk; no second state is needed to preserve it.
  */
 export async function reportGatewayShutdownKill(
   options: PersistentReplSubstrateOptions,
@@ -272,6 +325,13 @@ export async function reportGatewayShutdownKill(
       cause: attributed ? 'gateway-shutdown' : 'unknown',
       detail: attributed ? gatewayShutdownKillDetail(at) : undeterminedShutdownDetail(liveness, at),
     })
+    // COMMITTED — and only now is the edge closed, so the next boot does not report
+    // this death a second time. The unattributed path deliberately never reaches here:
+    // it leaves the edge open so the next boot CAN report the death we declined to
+    // claim. Both branches now obey the same rule from opposite sides.
+    if (attributed && options.replRegistryPath !== undefined) {
+      closeCrashReportEdge(options.replRegistryPath, sessionKey, childGeneration, at)
+    }
   } catch (err) {
     process.stderr.write(
       `[repl] onChildCrash sink threw on gateway-shutdown kill generation=${childGeneration.slice(0, 8)}: ${String(err)}\n`,

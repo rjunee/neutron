@@ -57,7 +57,10 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       `__tests__/poison-eviction-live-work-guard.test.ts` ("a gateway shutdown reports its
       own kills as a deploy"), `__tests__/repl-supervision.test.ts` (#518, the next-boot
       watchdog path), `__tests__/gateway-shutdown-kill.test.ts`,
-      `__tests__/launcher-liveness-attribution.test.ts`.
+      `__tests__/launcher-liveness-attribution.test.ts`. And the backstop is exercised as a
+      SEQUENCE rather than as an artifact — "the durable backstop actually backs up a failed
+      report" drives sink-throws-at-shutdown → next boot → the attributed deploy report is
+      delivered. Asserting that the marker exists never showed that it works.
 - [x] **The two unexplained crashes (08-10 23:30, 08-11 06:04) have no checkout near them and
       are NOT closed by this fix. A change that claims them fails review.** Nothing in this
       change correlates a death with a deploy: attribution exists ONLY where the gateway
@@ -97,6 +100,20 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:957`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- A "notified" tombstone written BEFORE the notification turned a transient failure into
+  permanent silence, in the change whose whole subject is a death being reported wrongly.
+  An earlier revision stamped `child_crash_notified_at` in the same patch as the attribution
+  marker, i.e. before the sink ran. A throwing sink then left the edge CLOSED, so the next
+  boot's watchdog skipped the death, the respawn cleared the marker, and the pull probe
+  answered `unknown` for the old generation — the owner received no failure reason at all.
+  Not a wrong one: none. The two are different facts and only one is knowable before the
+  kill: the ATTRIBUTION (we are terminating a child observed alive) is; that the death was
+  REPORTED is not. Split accordingly — marker before the kill, edge after the sink commits
+  (`closeCrashReportEdge`) — a throwing sink now degrades into the behaviour worth having:
+  the next boot reads the marker and delivers the ATTRIBUTED report, late, rather than a
+  generic crash or nothing. The retry carries the attribution because the attribution is on
+  disk. The rule generally: anywhere a marker means *this was reported*, the write belongs
+  after the commit that makes it true.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
