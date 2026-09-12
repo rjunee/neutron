@@ -94,6 +94,16 @@ function mergingHost(conflictRounds: number): { host: HostRunner; calls: string[
       return fail('CONFLICT (content): Merge conflict in docs/NOTES.md')
     }
     if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('docs/NOTES.md')
+    // THE INDEX VIEW. `conflictEvidence` reads `ls-files --unmerged` to tell a genuinely
+    // one-sided conflict from a read it could not perform (#541 round 15), and a stub that
+    // omits the query does not under-test that path — it silently answers "no unmerged
+    // stages", which is the one-sided branch. Omitting it here made the arbiter unreachable
+    // and this test red, which is the stub failure mode being fixed, not a new requirement.
+    if (cmd.includes('ls-files') && cmd.includes('--unmerged')) {
+      return ok(
+        [1, 2, 3].map((stage) => `100644 ${'a'.repeat(40)} ${stage}\tdocs/NOTES.md`).join('\u0000') + '\u0000',
+      )
+    }
     // Every ref resolves to the same commit: fork point == tip == head, so the
     // base-drift gate measures no movement.
     if (cmd.includes('rev-parse') || cmd.includes('merge-base')) return ok(HEAD_SHA)

@@ -732,6 +732,16 @@ whatever the default branch returns**, which here was "no unmerged stages", i.e.
 Twelve stub hosts needed the index wired in, and the orchestrator's own conflict host too. A
 missing stub answer is not a gap in coverage; it is a *wrong answer* asserted confidently.
 
+**AND THE STUB LESSON HAS A SECOND HALF I LEARNED THE EXPENSIVE WAY: my local gate was
+narrower than CI's.** I ran `bun test trident/` and reported it green. The stub omission also
+existed in `gateway/composition/build-core-modules-trident-arbiter-wiring.test.ts` — a
+composition test *outside* that directory — so CI's shard 7 went red on a push I had called
+verified. The same class of mistake as the code it was fixing: **a check is only about what it
+checked.** `bun test trident/` is not `bash scripts/run-tests.sh`, and a change to a function
+that any composed surface reaches has to be verified against the whole suite, not the directory
+where the edit happened. Fixed, and the rule for this lane is now to run the CI runner itself
+before claiming the suite is green.
+
 **The seam property, which is the generalisation this round is really for.** Round 14 removed a
 per-line cap on the grounds that the guarantee is about the seam and not the mechanism, and
 pinned it with a mutation that inserted a *different* mechanism in the same place. This is the
