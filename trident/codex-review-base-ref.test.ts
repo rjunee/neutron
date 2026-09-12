@@ -261,6 +261,38 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     expect(await git(w.repo, 'rev-parse', got)).toBe(w.remote)
   })
 
+  test('THE OTHER FAILURE DIRECTION, audited: what each arm turns away, and its remedy', async () => {
+    // Prompted by the remote-only bug: a classifier has two failure directions, and five
+    // rounds of sweeping only ever exercised the permissive one. So each refusing arm is
+    // asked the same question — **is there a legitimate input it now turns away?** — and the
+    // answer is recorded as a test rather than as a claim. Three refuse deliberately, and
+    // each names the way through in its own message; the fourth (remote-only) was a bug.
+    const w = await seedWorld()
+    await git(w.repo, 'update-ref', 'refs/heads/release', w.remote) // branch AND tag: ambiguous
+    const cases: Array<{ arg: string; remedy: string }> = [
+      // An operator who means the BRANCH when a tag shares its name.
+      { arg: 'release', remedy: 'refs/heads/release' },
+      // An operator who means the TAG. (Seeded below on a name with no branch.)
+      { arg: 'solo-tag', remedy: 'refs/tags/solo-tag' },
+      // A SHORT sha — refused on purpose: git prefers a REF of that name over the object, so
+      // an abbreviation is a namespace lookup like any other bare word.
+      { arg: (w.remote as string).slice(0, 8), remedy: w.remote },
+    ]
+    await git(w.repo, 'tag', 'solo-tag', w.local)
+    for (const { arg, remedy } of cases) {
+      const refused = await runBlock(w.repo, arg)
+      expect({ arg, ok: refused.ok }).toEqual({ arg, ok: false })
+      // THE REMEDY WORKS, which is what makes the refusal a redirection rather than a wall.
+      const through = await runBlock(w.repo, remedy)
+      expect({ arg, remedy, ok: through.ok, base: through.stdout }).toEqual({
+        arg,
+        remedy,
+        ok: true,
+        base: remedy,
+      })
+    }
+  })
+
   test('THE SHAPE PROPERTY: what reaches git is an object name or begins with refs/', async () => {
     // THE TERMINATING CONDITION, asserted as a property of the VALUE rather than as a list of
     // inputs — which is what makes it exhaustive. A classifier mistake upstream can no longer
@@ -335,6 +367,37 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     await git(w.repo, 'branch', 'solo', w.local)
     expect(await promote(w.repo, 'solo')).toBe('refs/heads/solo')
     expect(await git(w.repo, 'rev-parse', await promote(w.repo, 'solo'))).toBe(w.local)
+  })
+
+  test('REMOTE-ONLY — the ordinary CI checkout — promotes, with no local branch at all', async () => {
+    // THE FIRST FAILURE IN THE OTHER DIRECTION. Every earlier position of this defect accepted
+    // too much; this one REFUSED too much: the promotion arm required `refs/heads/<x>` to
+    // resolve as well, so a detached or fresh checkout — which carries
+    // `refs/remotes/origin/main` and no local `main`, the ordinary state — fell through the
+    // chain, kept the bare name, and was refused by the shape guard. The default standalone
+    // review was broken in the most common environment it runs in.
+    //
+    // A classifier has TWO failure directions and the sweep only ever exercised the permissive
+    // one, because the defect that prompted it was permissive.
+    const w = await seedWorld()
+    await git(w.repo, 'switch', '-q', '--detach', w.remote)
+    await git(w.repo, 'branch', '-D', 'main')
+    expect(await git(w.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/main')).toBe('')
+    expect(await git(w.repo, 'rev-parse', 'refs/remotes/origin/main')).toBe(w.remote)
+
+    const got = await promote(w.repo, 'main')
+    expect(got).toBe('refs/remotes/origin/main')
+    expect(await git(w.repo, 'rev-parse', got)).toBe(w.remote)
+    // …and the wrapper's own DEFAULT argument is exactly this input, so the default review in
+    // a CI checkout resolves rather than refusing.
+    const dflt = await runBlock(w.repo, '')
+    expect({ ok: dflt.ok, base: dflt.stdout }).toEqual({ ok: true, base: 'refs/remotes/origin/main' })
+    // THE COMPLEMENT, so the arm is not "promote whatever resolves": a TAG of that name with a
+    // remote branch beside it is still NOT promoted — the by-kind regression stays fixed.
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/release', w.remote)
+    const tagged = await runBlock(w.repo, 'release')
+    expect({ ok: tagged.ok }).toEqual({ ok: false })
+    expect(tagged.stderr).toContain('a tag is not a base branch')
   })
 
   test('a repository with no remote-tracking refs at all still names the local branch in full', async () => {

@@ -106,9 +106,13 @@ boundary that depends on the next author noticing the right form thirty lines aw
 mode `docs/agent-legible-architecture.md` §1 names explicitly. So the unit of the fix is the
 **rule**, not the call sites.
 
-**What enforces this is structural, not a grep.** The invariant is *a base branch NAME reaches a
-rev-range operand only where no remote-tracking ref for it exists*, and it is carried by two
-things:
+**What enforces this is structural, not a grep.** The invariant is *every value that reaches a
+rev-range operand is a full object name or begins with `refs/`* — **a base branch NAME never
+reaches one at all.** (This sentence read "a base branch NAME reaches a rev-range operand only
+where no remote-tracking ref for it exists" until round twenty-six: that was the rule through
+round eighteen, and round nineteen replaced the bare fallback with `refs/heads/<base>` and a
+refusal. It contradicted this item's own headline and `trident/merge.ts`'s order list — binding
+acceptance text describing a fallback the code no longer has.) It is carried by two things:
 
 - **one binding per boundary** — `diffBase` in `trident/inner-workflow.mjs` and the
   exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a base

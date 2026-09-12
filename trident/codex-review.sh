@@ -90,8 +90,20 @@ if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2
   # but the review could not run" — which is the honest answer and is never a silent APPROVE.
   printf '%s\n' "codex-review.sh: base ref '${BASE_REF}' is AMBIGUOUS — both refs/heads/${BASE_REF} and refs/tags/${BASE_REF} exist, and git would resolve the bare name to the TAG. Pass refs/heads/${BASE_REF} or refs/tags/${BASE_REF} explicitly." >&2
   exit 3
-elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
+elif ! git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+  # THE REMOTE-TRACKING REF WHEN ONE EXISTS — and INDEPENDENTLY OF WHETHER A LOCAL BRANCH
+  # DOES. This arm required `refs/heads/${BASE_REF}` to resolve as well until round
+  # twenty-six, which rejected the ORDINARY state of a CI checkout: detached or fresh, it
+  # carries `refs/remotes/origin/main` and no local `main`, so the chain fell through, left
+  # the bare name, and the shape guard refused it. **Every earlier position of this defect
+  # accepted too much; that one refused too much** — a classifier has two failure directions
+  # and the sweep only ever exercised the permissive one.
+  #
+  # `refs/tags/${BASE_REF}` must still NOT resolve: a name that is a TAG is not promoted to a
+  # remote branch of the same name, which is the by-kind regression this block exists for
+  # (tag `release` at A, `origin/release` at B — promoting reviewed B, silently).
+  #
   # THE REF THAT WAS VERIFIED, fully qualified. Storing `origin/${BASE_REF}` after verifying
   # `refs/remotes/origin/${BASE_REF}` left a gap a tag named `origin/main` walks straight
   # into: git prefers refs/tags/ over refs/remotes/ and resolves the shorthand to the TAG,

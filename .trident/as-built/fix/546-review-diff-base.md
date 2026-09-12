@@ -232,6 +232,37 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-six: the first failure in the OTHER direction
+
+The promotion arm required `refs/heads/<x>` AND `refs/remotes/origin/<x>` to resolve — so a
+**detached or fresh checkout**, which carries the remote-tracking ref and no local branch, fell
+through the chain, kept the bare name, and was refused by the shape guard. That is the ORDINARY
+state of a CI checkout, and the wrapper's own default argument (`main`) is exactly the input
+that hit it: **the default standalone review was broken in the most common environment it
+runs in.**
+
+**Every one of the six earlier positions accepted too much; this one refused too much.** A
+classifier has two failure directions, and five rounds of sweeping only ever exercised the
+permissive one — because the defect that prompted the sweeping was permissive. Fixed by
+promoting on the remote-tracking ref independently of whether a local branch exists, with
+`refs/tags/<x>` still required NOT to resolve so the by-kind regression (tag `release` at A,
+`origin/release` at B) stays fixed. Mutation: restoring the `refs/heads` conjunct reds the new
+remote-only case.
+
+**And the other arms were audited for the same asymmetry**, as a test rather than a claim:
+each refusing arm is asked *is there a legitimate input it now turns away?*, and where the
+answer is yes the REMEDY is asserted to work — an ambiguous branch/tag name redirects to
+`refs/heads/<x>`, a tag-only name to `refs/tags/<x>`, and a SHORT sha to the full object name
+(refused on purpose: git prefers a REF of that name over the object, so an abbreviation is a
+namespace lookup like any other bare word). A refusal that names a way through is a redirection;
+one that does not is a wall.
+
+Also this round: the spec's structural invariant still said *"a base branch NAME reaches a
+rev-range operand only where no remote-tracking ref for it exists"* — the rule through round
+eighteen, contradicting this item's own headline and `merge.ts`'s order list. Binding acceptance
+text describing a fallback the code no longer has; corrected, with the round that replaced it
+named.
+
 ### Round twenty-five: six positions, and every one was a DECIDER
 
 The exemption's replacement pattern was **unanchored**. `/refs\/[A-Za-z0-9_\-./]*$/` matches
