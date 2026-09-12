@@ -42,3 +42,22 @@ free `-2`, `-3`, … suffix rather than overwriting or merging into what is ther
 Splitting the 405 existing entries would have rewritten text that other
 documents cite by content. The frozen file keeps every one of those entries
 byte-for-byte; only new records take the new shape.
+
+## Why `.trident/as-built/.gitkeep` exists — do not delete it
+
+The staging directory must never become empty in a tracked tree. When a
+promotion consumes the last staged record, git sees a directory that lost every
+file and infers a **rename**: every open PR that stages a record then conflicts
+with `CONFLICT (file location) … added in <sha> inside a directory that was
+renamed`, and git helpfully suggests moving the branch's staged record straight
+into `docs/as-built/`. Accepting that suggestion writes a shard from a branch,
+which is precisely what the one-writer rule forbids — the promotion happens on
+the base, after the merge, or not at all.
+
+Measured 2026-09-12: one promotion emptied the directory and two of seven open
+PRs immediately acquired that conflict. The placeholder costs nothing and the
+failure it prevents is a silent invitation to resolve a conflict the wrong way.
+
+It is deliberately **not** a `.md` file. Both promoters glob the staging
+directory for `*.md` (`trident/as-built-appender.ts:101`), so a `README.md` here
+would be picked up and promoted as though it were a record.
