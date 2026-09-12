@@ -80,15 +80,30 @@ everything, which is how a security fix becomes an outage.
       *Verified by* the "sink port — per instance, never ephemeral" cases, and
       `classifySpawnError` mapping the bind failure to a fatal class.
 - [ ] **A token path that is not a regular file is refused WITHOUT BLOCKING.** FIFO,
-      directory, socket, device: each is replaced and the gateway starts. The
-      non-blocking qualifier is the criterion, not a detail — a blocking `open` on a
-      FIFO with no writer never returns, so the type check that would reject it cannot
-      run and startup hangs instead of recovering. A validation downstream of an
-      operation the invalid input can block is not a validation.
+      directory and socket: each is replaced and the gateway starts. The non-blocking
+      qualifier is the criterion, not a detail — a blocking `open` on a FIFO with no
+      writer never returns, so the type check that would reject it cannot run and
+      startup hangs instead of recovering. A validation downstream of an operation the
+      invalid input can block is not a validation.
       *Verified by* the non-regular cases in `sink-restart-survival.test.ts`, each in a
       subprocess under a hard deadline so a hang fails AS a hang, and each asserting the
-      REASON the operator is told (a device is excluded only because creating one needs
-      privileges the suite does not have).
+      REASON the operator is told.
+
+      **Character and block DEVICES are deliberately outside this criterion, and are
+      therefore not claimed.** Creating one needs `CAP_MKNOD`, which this suite does not
+      have — measured, with a positive control: `mknod` of a character device returns
+      `EPERM` for the service user while `mkfifo` on the same directory succeeds. An
+      earlier revision of this criterion enumerated `device` alongside the other three
+      and relegated the exclusion to a parenthetical in its *Verified by* line, which
+      made the checkbox assert coverage the suite does not provide. The parenthetical
+      is not the criterion; the sentence is.
+
+      What can be said, and is only an argument: a device reaches the same
+      `!st.isFile()` branch as the three verified types, through the same non-blocking
+      open, which is exactly what `O_NONBLOCK` exists to guarantee for a device that
+      would otherwise wait on a carrier. That is reasoning about shared code, not a
+      measurement, and it does not become one by being persuasive. Closing the gap
+      needs a privileged fixture; until one exists the gap stays named here.
 - [ ] **The token file is owner-only, and a stricter file is still usable.** A token
       granting group or other access is refused and re-minted; 0400/0500/0700 are
       accepted as they are. An exact-equality mode check fails closed against a safer
