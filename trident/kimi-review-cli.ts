@@ -22,12 +22,21 @@
  *   10  not_connected — no credential; the GRACEFUL path, never blocking
  *   3   deferred      — configured but failed/timed out/answerless. BLOCKS.
  *
+ * A QUOTA EXHAUSTION (HTTP 429) IS EXIT 3 TOO, and deliberately not a fourth
+ * exit code: the exit-code vocabulary is shared with `codex-review.sh` so the two
+ * panelist prompts can stay near-identical, and "did a configured reviewer produce
+ * a review" is answered `no` either way. What distinguishes it is the
+ * KIMI_REVIEW_QUOTA_EXHAUSTED token on STDERR, which the review bridge greps —
+ * the same mechanism the codex bridge already uses for
+ * CODEX_REVIEW_DIFF_TRUNCATED, for the same reason: the workflow cannot act on a
+ * fact only a model read.
+ *
  * Usage: bun run trident/kimi-review-cli.ts <diff-file> [task...]
  */
 
 import { readFileSync } from 'node:fs'
 
-import { reviewWithKimi } from './kimi-review.ts'
+import { KIMI_QUOTA_TOKEN, reviewWithKimi } from './kimi-review.ts'
 
 const EXIT_CONNECTED = 0
 const EXIT_USAGE = 2
@@ -63,6 +72,12 @@ async function main(): Promise<number> {
     process.stdout.write(result.text)
     return EXIT_CONNECTED
   }
+  // THE QUOTA TOKEN IS WRITTEN FROM THE FACT FIELD, not from the wording of
+  // `reason`. Both end up on stderr, but only one of them is a contract: the
+  // review bridge greps for this exact token, and deriving it from the field means
+  // rewording the human sentence below can never silently unhook that grep. Its
+  // own line, so a `grep -q` cannot be defeated by where the sentence wraps.
+  if (result.quotaExhausted === true) process.stderr.write(`${KIMI_QUOTA_TOKEN}\n`)
   // The reason goes to stderr so the panelist can quote it as evidence without
   // it being mistaken for review text on stdout.
   process.stderr.write(`${result.reason ?? result.status}\n`)

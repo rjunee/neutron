@@ -531,7 +531,22 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       ? `Rebase or merge the base branch into the PR branch, then retry. ${notRejected}`
       : /required check .* has not run/.test(c)
         ? `Trigger the required check (or re-run CI on the PR), then retry. ${notRejected}`
-        : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
+        // A CROSS-MODEL PROVIDER REFUSED ON QUOTA (HTTP 429). The generic line below —
+        // "retry once the infrastructure is healthy" — is not merely vague here, it is
+        // WRONG ADVICE: nothing is unhealthy, the account has no allowance left, and a
+        // retry reaches the same refusal until somebody waits or pays. The measured cause
+        // says which provider and how, so the advice can name the two real remedies. The
+        // CLASS is untouched, exactly as this mapping's docblock requires — only the
+        // advice changes, and only over a cause that states the fact.
+        //
+        // BOTH HALVES MUST MOVE TOGETHER: the matched phrase is authored by
+        // `quotaExhaustedPeer` in `trident/inner-workflow.mjs`, whose TITLE becomes this
+        // `cause` (`infraTerminalCause` → `terminal_cause` → `deriveInfraBlock`), and
+        // nowhere else. A test asserts the real title matches this predicate, because a
+        // reworded title would silently restore the retry-forever line.
+        : c.includes('quota exhausted')
+          ? `Wait for the provider's rate-limit window to reset, or top the account up — then retry. Retrying before that reaches the same refusal. ${notRejected} ${saved}`
+          : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
     return {
       klass: 'infra-blocked',
       summary:

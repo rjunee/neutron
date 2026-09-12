@@ -983,7 +983,7 @@ function loadRealGate(): {
     verdict: string
     findings: Array<{ kind?: string; title?: string; severity?: string; evidence?: string }>
   } | null
-  deferredCrossModelPeers: (statuses: unknown, routes?: unknown) => Peer[]
+  deferredCrossModelPeers: (statuses: unknown, routes?: unknown, exhausted?: unknown) => Peer[]
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
   coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
@@ -1046,6 +1046,10 @@ function loadRealGate(): {
       grabConst('usableStatus'),
       grabConst('CORE_SEAT_STATUS_KEY'),
       grab('enforceCrossModelGate'),
+      // `deferredCrossModelPeers` delegates its QUOTA arm to this row (#542), so the
+      // extraction has to carry it or calling the gate with an exhausted seat throws a
+      // ReferenceError from inside a test rather than failing an assertion.
+      grab('quotaExhaustedPeer'),
       grab('deferredCrossModelPeers'),
       grab('crossModelPeerStatus'),
       grab('hasUsableVerdict'),

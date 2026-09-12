@@ -67,6 +67,29 @@ export const KIMI_DEFAULT_MODEL = 'kimi-k3'
  */
 export const KIMI_DEFAULT_MAX_TOKENS = 20_000
 
+/**
+ * The HTTP status a provider returns when the account has no allowance left to
+ * spend. It covers BOTH a per-minute rate limit and an empty balance, and the
+ * response does not reliably say which — so nothing here claims to know. Named
+ * rather than written inline because two readers share it (the classifier below
+ * and its test) and a bare `429` in a condition is indistinguishable from a typo.
+ */
+export const QUOTA_EXHAUSTED_HTTP = 429
+
+/**
+ * THE MACHINE TOKEN A QUOTA FAILURE CARRIES ON STDERR.
+ *
+ * `status` stays `deferred` for a 429 (see `quotaExhausted` below), so the
+ * WORKFLOW needs some way to act on "this was quota" that is not reading prose.
+ * It already has the pattern: the codex bridge greps its wrapper's stderr for
+ * `CODEX_REVIEW_DIFF_TRUNCATED` rather than asking a model what the review said,
+ * because "a disclosure only the model sees is a disclosure the WORKFLOW cannot
+ * act on". This is that token for this lane. `kimi-review-cli.ts` writes it to
+ * stderr FROM THE FACT FIELD — never from the wording of `reason` — so rewording
+ * the human sentence can never silently unhook the grep.
+ */
+export const KIMI_QUOTA_TOKEN = 'KIMI_REVIEW_QUOTA_EXHAUSTED'
+
 /** Mirrors `codexStatus` so the panel has ONE vocabulary for cross-model peers. */
 export type CrossModelStatus =
   /** Ran, returned review text. */
@@ -86,6 +109,26 @@ export interface KimiReviewResult {
    * timeout, or a provider message — never from the request.
    */
   reason?: string
+  /**
+   * THE ACCOUNT HAD NOTHING LEFT TO SPEND — a FACT about the failure, not a
+   * status of its own.
+   *
+   * DELIBERATELY NOT a fourth member of `CrossModelStatus`. `deferred` already
+   * carries the only thing the review panel asks of this result — "a configured
+   * reviewer produced no review" — and that is exactly as true of a 429 as of a
+   * timeout. A new member would have to be threaded through every
+   * `=== 'deferred'` comparison in `trident/inner-workflow.mjs`
+   * (`crossModelPeerStatus`, `retryDeferredPeers`, `deferredCrossModelPeers`,
+   * `codexPanelLine`) and each one missed is a gate that silently stops blocking:
+   * the fail-OPEN direction, which is the one that ships unreviewed code. So the
+   * STATUS BLOCKS and this FIELD NAMES — the same division of labour
+   * `codexTruncated` already uses for "this verdict covers only part of the diff".
+   *
+   * ABSENT MEANS "not known to be quota", never "known not to be quota". Every
+   * consumer's fallback for absent is the generic deferral row, which blocks
+   * identically and says less. Unknown authorises nothing.
+   */
+  quotaExhausted?: boolean
 }
 
 export type KimiFetch = (
@@ -184,10 +227,39 @@ export async function reviewWithKimi(input: KimiReviewInput): Promise<KimiReview
   }
 
   if (!ok) {
-    // 401/403 is a rejected key and 429 is no credit. Both are still DEFERRED
-    // rather than a distinct 'auth' status: the panel's only question is whether
-    // a configured reviewer produced a review, and neither of these did. The
-    // status code goes in the reason so the operator can tell them apart.
+    // 401/403 is a rejected key and 429 is no allowance left. Both are still
+    // DEFERRED rather than a distinct 'auth' status: the panel's only question is
+    // whether a configured reviewer produced a review, and neither of these did.
+    // The status code goes in the reason so the operator can tell them apart.
+    //
+    // A 429 ALSO GETS A FACT FIELD, because the status alone made quota
+    // exhaustion UNREPORTABLE. Downstream, a deferred cross-model seat becomes a
+    // LANE finding whose TITLE is the run's whole terminal cause
+    // (`inner-workflow.mjs` `infraTerminalCause`), and that title said
+    // "DEFERRED — refusing to silently APPROVE" over an evidence line offering
+    // "the call failed, timed out, or returned no answer text". None of those is
+    // what happened: nothing failed and nothing timed out, the account is simply
+    // out of allowance — so the operator read a transport fault and went looking
+    // at the network instead of at the balance. The field lets the workflow write
+    // the honest row instead. It does NOT relax the block.
+    //
+    // WHAT THIS DOES NOT CLAIM. The provider uses one code for a per-minute rate
+    // limit and for an empty account, and this code does not inspect the body to
+    // guess which — so the reason says both are possible and says the provider did
+    // not tell us. A confident sentence about an unmeasured cause is the failure
+    // mode this repo has paid for before.
+    if (status === QUOTA_EXHAUSTED_HTTP) {
+      return {
+        status: 'deferred',
+        text: '',
+        quotaExhausted: true,
+        reason:
+          `Kimi API returned HTTP ${status} — the account has no allowance left to spend. ` +
+          'That code covers BOTH a per-minute rate limit and an exhausted balance and the ' +
+          'provider did not say which, so no review was performed and retrying will only ' +
+          'help if it was the rate limit.',
+      }
+    }
     return { status: 'deferred', text: '', reason: `Kimi API returned HTTP ${status}` }
   }
 

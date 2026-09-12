@@ -916,6 +916,25 @@ const CODEX_VERDICT_SCHEMA = {
 
 // Same shape as the codex peer's, with its own status field so the two can never
 // be confused for one another (see the positional-indexing note in the panel).
+//
+// `kimiQuotaExhausted` is the ONE thing 'deferred' could not say. A rate-limited or
+// out-of-credit provider (HTTP 429) is a deferral in every way the gate cares about
+// — a configured reviewer produced no review — but it is NOT the failure the
+// deferral row describes ("the call failed, timed out, or returned no answer
+// text"), and that row's TITLE is the run's entire terminal cause
+// (`infraTerminalCause`). So the panel was paid for in full and then reported a
+// transport fault over a billing fact. The remedy is a FIELD, not a fourth status
+// member: the status is what BLOCKS and this is what NAMES, exactly as
+// `codexTruncated` names a scope the verdict enum cannot carry. See
+// `trident/kimi-review.ts` `quotaExhausted` for why a new enum member would have
+// been the fail-OPEN change.
+//
+// NOT IN `required`, unlike `codexTruncated`. The flag is a REFINEMENT of a row
+// that already blocks, so an absent one costs nothing but detail — whereas making
+// it required puts every ordinary kimi verdict at risk of being rejected wholesale
+// by a bridge that forgot one field, converting working reviews into deferrals.
+// Absent therefore reads as "not known to be quota" and falls back to the generic
+// deferral row: unknown authorises nothing, and here it authorises no weaker block.
 const KIMI_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -924,6 +943,13 @@ const KIMI_VERDICT_SCHEMA = {
     verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
     findings: VERDICT_SCHEMA.properties.findings,
     kimiStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
+    kimiQuotaExhausted: {
+      type: 'boolean',
+      description:
+        'true when the CLI reported KIMI_REVIEW_QUOTA_EXHAUSTED (HTTP 429 — the account is ' +
+        'rate-limited or out of credit). Copy the KIMI_QUOTA line from the command output ' +
+        'VERBATIM; it is a measured grep result, never your reading of the review.',
+    },
   },
 }
 
@@ -2847,6 +2873,15 @@ function enforceSeverityGate(synthesis) {
 // in one place and the classifier silently reads every lane blocker as a code
 // finding, sending the fix loop off to re-Forge a network timeout.
 const LANE_FINDING_KIND = 'lane'
+
+// THE STDERR TOKEN `trident/kimi-review-cli.ts` WRITES WHEN THE PROVIDER REFUSED ON
+// QUOTA. Retyped here rather than imported because this file is a Workflow body with
+// no module resolution — the same reason every other cross-file contract in it is a
+// literal. It must equal `KIMI_QUOTA_TOKEN` in `trident/kimi-review.ts`, and a test
+// asserts exactly that so the two halves cannot drift apart silently: a token that
+// stops matching makes every quota failure decay into the generic deferral row, which
+// is the safe direction but also the whole bug.
+const KIMI_QUOTA_TOKEN = 'KIMI_REVIEW_QUOTA_EXHAUSTED'
 
 /**
  * IS THERE CODE WORK IN THIS FINDING? The COMPLETE predicate, in one place, because two
@@ -5641,6 +5676,60 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
 }
 
 /**
+ * DID THIS SEAT FAIL BECAUSE THE ACCOUNT IS OUT OF ALLOWANCE? Read off the seat's own
+ * verdict, in exactly the same shape as `crossModelPeerStatus` above, so the two facts
+ * about one seat are gathered the same way and neither is re-derived at a call site.
+ *
+ * ONLY A LITERAL `true` COUNTS, and that is the load-bearing line. This fact travels
+ * through a bridge agent copying a grepped `KIMI_QUOTA=` line into a schema field — the
+ * same route, with the same honesty, as `codexTruncated`. So a missing field, a
+ * stringified 'true', a null, a dead seat that produced no verdict at all: every one of
+ * those is a flag that did not arrive, and an unknown cause must fall back to the row
+ * that assumes LESS. The fallback (the generic deferral row) blocks identically; the
+ * only thing at stake is whether the run reports a billing fact or a transport fault,
+ * and asserting a billing fact nobody measured is the same defect wearing the other hat.
+ *
+ * TWO OPERATORS, NO BRANCHES, AND THAT IS DELIBERATE — the first draft opened with
+ * `if (slot === null …) return false` and `if (quotaKey === null) return false`, mirroring
+ * `crossModelPeerStatus` above. Those guards are load-bearing THERE, because that function
+ * has to answer 'not_connected' versus 'deferred' and the slot is the only thing that knows
+ * which. Here they were unfalsifiable: a mutation deleting either one left every test green,
+ * because JS indexing already answers both cases — `verdicts[null]` is `undefined`, so
+ * `Boolean(verdict)` is false for an unconfigured or dead seat, and `verdict[null]` is
+ * `undefined`, so `!== true` for a claude seat that has no quota field. This file's own rule
+ * (see `corePanelLine`) is that a guard a reverting mutation cannot fail is not a guard, so
+ * they are gone rather than kept as reassurance. What remains is total over every input the
+ * call site can produce, and every line of it reds under mutation.
+ */
+function crossModelQuotaExhausted(slot, verdicts, quotaKey) {
+  const verdict = verdicts[slot]
+  return Boolean(verdict) && verdict[quotaKey] === true
+}
+
+/**
+ * WHICH QUOTA FIELD THIS SEAT'S VERDICT CARRIES, decided by the MODEL FAMILY the slot
+ * resolved to — never by the slot's NAME.
+ *
+ * The seats are `review_cross_1`/`review_cross_2` and either can hold either family, so
+ * `codexSlot` holding a kimi tier is an ordinary configuration, not an edge case. Its
+ * verdict then fills `KIMI_VERDICT_SCHEMA` and carries `kimiQuotaExhausted`; reading
+ * `codexQuotaExhausted` off it would find nothing and every quota failure on that slot
+ * would decay into the generic deferral row — the bug, restored by a hard-coded key.
+ * This is the exact mistake the file already documents for positional indexing, and the
+ * remedy is the same: derive it from the route, next to the `statusKey` that is derived
+ * from the route for the same reason and must always agree with it.
+ *
+ * `null` FOR A CLAUDE SEAT, and that is a fact rather than a gap. A claude-family slot
+ * fills `VERDICT_SCHEMA`, which has no quota field and no provider to be refused by —
+ * its credential is the session's own. So there is nothing to read, and `null` says so
+ * instead of reading a field that will never exist and calling the absence a measurement.
+ */
+function seatQuotaKey(group) {
+  if (group === 'claude') return null
+  return group === 'kimi' ? 'kimiQuotaExhausted' : 'codexQuotaExhausted'
+}
+
+/**
  * THE CORE SEATS — always dispatched, and until now never checked.
  *
  * `argus:claude` and `argus:adversarial` are pushed unconditionally, so unlike the
@@ -5735,14 +5824,109 @@ function corePanelLine(letter, label, verdict) {
     : `Verdict ${letter} (${label}): DID NOT COMPLETE — this reviewer was dispatched and returned NO verdict (its agent died, timed out, or returned a malformed result). It raised nothing because it NEVER RAN, which is NOT the same as finding nothing. The panel is incomplete: do NOT return APPROVE.`
 }
 
+/**
+ * THE HONEST ROW FOR A SEAT THE PROVIDER REFUSED ON QUOTA.
+ *
+ * `name` is the seat as the panel labels it, so one row serves every slot and family
+ * rather than four near-identical sentences drifting apart (this file's standing rule:
+ * two sites sharing one message format is a contract nothing enforces).
+ *
+ * THE TITLE IS THE RUN'S TERMINAL CAUSE, so every word in it is load-bearing:
+ *
+ *  - It says QUOTA EXHAUSTED and names HTTP 429, which is the fact. `terminal_cause`
+ *    is what `delivery.ts` renders into the operator's summary, and the requirement
+ *    this row exists to meet is that a 429 is reportable AS ITSELF.
+ *  - It says NO REVIEW WAS PERFORMED rather than anything resembling a verdict.
+ *    `recordedTerminalVerdict` (trident/store.ts) already records this run as
+ *    REVIEW_NOT_RUN because the block kind is 'infra-only'; the title must not
+ *    contradict the column.
+ *  - It does NOT contain the word "deferred". A deferral is a review that declined to
+ *    be given; this is a reviewer that was never reachable, and the two have different
+ *    remedies.
+ *
+ * IT MUST NOT READ AS A DECLINED REVIEW, AND THAT IS NOT ONLY ABOUT WORDING.
+ * `delivery.ts` narrates a terminal reason containing the token 'exhausted' as "the
+ * reviewer still had blocking findings" — but only on a `not-terminal` disposition, and
+ * only after two earlier branches. This row lands on neither: an 'infra-only' block with
+ * a measured cause is derived STRUCTURALLY by `deriveInfraBlock` (trident/infra-block.ts)
+ * from the harvested columns, which `interpretFailure` checks FIRST and answers with
+ * `klass: 'infra-blocked'` — 🚧, not ❌, and the words "Nothing about the code was
+ * rejected — it was never reviewed." The string arm is unreachable from here. A test
+ * pins that, because the safety is an ORDERING and orderings are what get edited.
+ *
+ * WHAT HAPPENS NEXT IS THE EXISTING INFRASTRUCTURE PATH, DELIBERATELY, and no new
+ * concept beside it. 'infra-only' plus a non-empty cause is what
+ * `classifyInnerFailure` (trident/orchestrator.ts) already reads as `infrastructure`,
+ * which spends a bounded `infra_retries` unit against INFRA_RETRY_BACKOFF_MS
+ * (1m/5m/15m, three attempts). That is the right destination for BOTH halves of what a
+ * 429 can mean and the reason the code cannot tell them apart is the reason it should
+ * not choose: a per-minute rate limit clears inside that window and costs nothing to
+ * wait out, and an empty balance does not — it burns three bounded retries and then
+ * terminates carrying a cause that names quota, which is the operator's signal. The
+ * alternative — refusing to retry — would make every transient rate limit a terminal
+ * failure, a strictly worse trade for the only case the provider does not let us
+ * distinguish. Quota exhaustion is an infrastructure cause, not a review opinion, and
+ * it routes exactly where the other infrastructure causes already route.
+ */
+function quotaExhaustedPeer(name) {
+  return {
+    name,
+    title: `${name} cross-model review QUOTA EXHAUSTED (HTTP 429) — no review was performed`,
+    evidence:
+      `the ${name} seat was configured and dispatched, and the provider refused the call with ` +
+      'HTTP 429: the account has no allowance left to spend. NOTHING failed and nothing timed ' +
+      'out — the review was never performed, so there is no verdict to read and nothing in the ' +
+      'diff to fix. That status code covers BOTH a per-minute rate limit and an exhausted ' +
+      'balance and the provider does not say which, so both remedies are live: wait for the ' +
+      'window to reset, or top the account up. Re-running the build without doing one of those ' +
+      'reaches the same refusal. The panel cannot APPROVE with a seat that never reviewed, and ' +
+      'switching this seat to another model family would answer a spending question by ' +
+      'spending somewhere else without being asked.',
+  }
+}
+
 // Which cross-model peers were configured but failed. Kept separate from the gate
 // so the mapping status → blocker text is readable and testable on its own.
-function deferredCrossModelPeers(statuses, routes) {
+//
+// `exhausted` IS A THIRD, OPTIONAL INPUT: `{ codex, kimi }`, true when that seat's
+// failure was the provider refusing on QUOTA (HTTP 429 — rate-limited or out of
+// credit) rather than a call that failed. It changes only WHICH ROW IS WRITTEN, never
+// whether one is: a quota-exhausted seat is still a deferred seat, still forces
+// REQUEST_CHANGES through `enforceCrossModelGate`, still lands 'infra-only' out of
+// `classifyBlock`, and still refuses the merge. What it buys is the one thing the
+// deferral rows could not say.
+//
+// WHY THAT MATTERS ENOUGH TO BE A ROW AT ALL. This function's TITLES are the run's
+// entire terminal cause — `infraTerminalCause` picks the first LANE finding's title and
+// that becomes `terminal_cause`, which the orchestrator quotes into `failure_reason`
+// and `delivery.ts` renders to the operator. Over a 429 that title said "DEFERRED —
+// refusing to silently APPROVE" above an evidence line offering "the review call
+// failed, timed out, or returned no answer text (the thinking-budget case)". Every one
+// of those is false: nothing failed, nothing timed out, the answer was never asked for
+// because the account had nothing left to spend. So the panel ran in full, paid for
+// itself, refused the merge, and then pointed the operator at the network.
+//
+// AND THE ROW SAYS ONLY WHAT WAS MEASURED. The provider uses one status code for a
+// per-minute rate limit and for an empty balance and does not say which, so neither
+// does this — because "wait" and "top up" are different actions and guessing between
+// them is how a confident sentence gets written about an unmeasured cause.
+//
+// BOTH SEATS ARE SPELLED, ONE PATH. `codex-review.sh` does not emit a quota token today
+// (its own 429 lands on exit 5, the generic call-failed path — see its precheck note),
+// so `exhausted.codex` is false on every live run and the arm is reached by tests only.
+// That is deliberate: the quota row is one function of one flag, and the codex lane
+// starts reporting honestly the moment its wrapper learns to set it, with no second
+// code path to add. Inventing a codex producer here without a wrapper that measures one
+// would have been the fabrication this row exists to remove.
+function deferredCrossModelPeers(statuses, routes, exhausted) {
   routes = routes || {}
+  exhausted = exhausted || {}
   const out = []
   if (statuses.codex === 'deferred') {
     const family = routes.codex?.group || 'codex'
-    out.push(family === 'codex' ? {
+    out.push(exhausted.codex === true ? quotaExhaustedPeer(
+      family === 'codex' ? 'Codex' : `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
+    ) : family === 'codex' ? {
       name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
       evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong), or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     } : {
@@ -5753,7 +5937,9 @@ function deferredCrossModelPeers(statuses, routes) {
   }
   if (statuses.kimi === 'deferred') {
     const family = routes.kimi?.group || 'kimi'
-    out.push(family === 'kimi' ? {
+    out.push(exhausted.kimi === true ? quotaExhaustedPeer(
+      family === 'kimi' ? 'Kimi K3' : `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'})`,
+    ) : family === 'kimi' ? {
       name: 'Kimi K3',
       title: 'Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
@@ -5884,11 +6070,12 @@ function kimiReviewerPrompt(diffFile) {
   // and the reviewer could approve without having reviewed the change.
   return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+  ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"; if grep -q ${shSingleQuote(KIMI_QUOTA_TOKEN)} ${shSingleQuote(errFile)}; then echo "KIMI_QUOTA=1"; else echo "KIMI_QUOTA=0"; fi
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
-- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, or returned no answer text). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Kimi review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
+- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the account is out of allowance). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Kimi review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
+- kimiQuotaExhausted: copy the KIMI_QUOTA line VERBATIM — 1 → true, 0 → false. It is a grep result, NOT your judgement call and NOT something to infer from the error text: it says whether the provider refused on QUOTA (HTTP 429 — rate-limited or out of credit) rather than failing. The status still blocks either way; this only decides whether the run reports a billing fact or a transport fault, so reporting it wrongly sends the operator to the wrong place.
 Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
 }
 
@@ -6232,6 +6419,18 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus }, {
     codex: slotOneRoute,
     kimi: slotTwoRoute,
+  }, {
+    // READ OFF THE SEATS' OWN VERDICTS, beside the statuses, by the same reader shape and
+    // from the SAME ROUTE the `statusKey` above comes from — never re-derived from the
+    // findings text a bridge wrote, and never keyed by the slot's name (either slot can
+    // hold either family; see `seatQuotaKey`). The flag only refines a row that already
+    // blocks, so a seat that produced nothing at all reports false and gets the generic
+    // deferral row: unknown authorises nothing, and here it authorises no weaker block.
+    // `codexQuotaExhausted` has no producer yet — `codex-review.sh` folds its own 429 into
+    // the generic exit 5 — so a codex-family seat reports false on every live run; read the
+    // note on `deferredCrossModelPeers` before adding one.
+    codex: crossModelQuotaExhausted(codexSlot, verdicts, seatQuotaKey(slotOneRoute.group)),
+    kimi: crossModelQuotaExhausted(kimiSlot, verdicts, seatQuotaKey(slotTwoRoute.group)),
   })
   // THE CI GATE, folded into the SAME gate rather than added beside it.
   //
