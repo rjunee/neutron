@@ -37,6 +37,7 @@ import {
   SINK_TOKEN_MIN_LEN,
   defaultSinkTokenLock,
   defaultSinkTokenPath,
+  deriveChildSinkToken,
   deriveSinkPort,
   loadOrCreateSinkToken,
   parseSinkPortOverride,
@@ -635,12 +636,28 @@ describe('sink port — per instance, never ephemeral (#537)', () => {
     const second = await startSink({ port, tokenPath })
     expect(second.port).toBe(bakedPort)
     expect(second.token).toBe(rootBefore)
-    // The new gateway re-derives the SAME credential for that child from the persisted
-    // root and the generation — no secret moved, nothing was stored.
-    expect(credentialOn(second, generation)).toBe(childCredential)
+    // THE ACCEPTANCE OF THIS ITEM, and it is about COORDINATES: the new gateway
+    // re-derives the same child credential from the persisted root and the generation.
+    // No secret moved and nothing was stored — and this is asserted WITHOUT registering
+    // anything, because `credentialOn` registers a session as a side effect and would
+    // manufacture the very state the next assertion is about.
+    expect(deriveChildSinkToken(second.token, generation)).toBe(childCredential)
 
-    // THE ACCEPTANCE: the child baked by process #1 is authorized by process #2 with
-    // the credential it has held all along.
+    // WHAT IS NOT YET TRUE, asserted rather than assumed: a survivor is REFUSED after
+    // the restart. Authorization runs credential -> session and the new sink has
+    // registered nothing, so the credential resolves to no session and the request stops
+    // at 401. Re-adopting the survivor — RE-REGISTERING it, not merely reconnecting — is
+    // ISSUES #539. Until then this line is the honest state of the world, and an earlier
+    // revision of this test hid it by calling `credentialOn(second, …)` first, which
+    // registered a synthetic session and made the acceptance below pass for a reason
+    // production does not have.
+    expect((await postWithToken(bakedPort, childCredential, `sid-${generation}`)).status).toBe(401)
+
+    // …and once something DOES register that session — standing in by hand for what
+    // #539 will do — the credential baked into the child at spawn is accepted, which is
+    // what makes adoption possible at all. Without this line the 401 above is satisfied
+    // by a sink that refuses everything.
+    expect(credentialOn(second, generation)).toBe(childCredential)
     const afterRestart = await postWithToken(bakedPort, childCredential, `sid-${generation}`)
     expect(afterRestart.status).toBe(200)
 

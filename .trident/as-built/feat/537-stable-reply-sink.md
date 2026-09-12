@@ -696,6 +696,37 @@ same sweep found one more of the species in code — `createTokenIfAbsent`'s hea
 still said `rename` was "still right for REPLACING an untrusted file, where clobbering
 is the point", which the quarantine publish had already made false.
 
+### The acceptance was met by the test performing the adoption production does not
+
+The headline criterion said a request carrying the first instance's token is accepted
+by the second. It passed. It passed because the test's credential helper,
+`credentialOn(second, generation)`, **registers a session as a side effect** before
+returning the credential — so the line asserting acceptance was measuring a sink that
+had just been handed the very state the restart is supposed to be about. Production
+registers nothing on restart; a survivor is refused 401.
+
+Three instances of one shape have now been found on this branch, which is what makes
+it worth a section rather than a bullet:
+
+1. the respawn test called `unregisterIf` before registering a replacement, walking
+   around the production path where nothing does;
+2. the composition stub did not answer `ls-files --unmerged`, so it silently returned
+   the one-sided branch instead of the state under test;
+3. this helper registered a session while being asked only to derive a credential.
+
+**A fixture that performs the step under test converts a missing implementation into a
+passing test, and it does it silently** — nothing is asserted falsely, the arrangement
+is simply richer than production's. The tell in all three is a helper doing more than
+its name says: `credentialOn` derives *and registers*, and only the first verb is in
+the name.
+
+The criterion is now scoped to what this item actually delivers — reproducible
+coordinates, with the credential re-derived through `deriveChildSinkToken` and no
+registration on the way — and the 401 is asserted rather than avoided, with the paired
+acceptance kept so the refusal cannot be met by a sink that refuses everything. Which
+is the honest statement of #537: durable coordinates make adoption possible; they are
+not adoption. #539 must RE-REGISTER a survivor, not merely reconnect to it.
+
 ### The lock this change introduced was not held to the standard the token was
 
 `readSinkToken` was given `O_NOFOLLOW` and a same-fd `fstat` because a token path is

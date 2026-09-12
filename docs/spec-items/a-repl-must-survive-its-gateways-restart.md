@@ -37,12 +37,30 @@ Each criterion names the check that verifies it. All are bidirectional: a refusa
 asserted without its paired acceptance is satisfied by a guard that refuses
 everything, which is how a security fix becomes an outage.
 
-- [ ] **RESTART SURVIVAL — the coordinates are reproducible.** A sink started, stopped,
+- [ ] **RESTART SURVIVAL — the COORDINATES are reproducible.** A sink started, stopped,
       and started again against the same instance state dir binds the SAME port and
-      presents the SAME token, and a request carrying the FIRST instance's token is
-      accepted by the second.
+      presents the SAME root token, and the second instance RE-DERIVES the same
+      per-child credential for the same `childGeneration` — no secret moved, nothing
+      stored beyond the root.
       *Verified by* `runtime/adapters/claude-code/persistent/__tests__/sink-restart-survival.test.ts`
-      — "sequential sink instances agree on port AND token".
+      — "sequential sink instances agree on port AND token", with the credential
+      re-derived through `deriveChildSinkToken` rather than through a helper that
+      registers a session on the way.
+
+      **This item does NOT claim the survivor is accepted after the restart.** It is
+      refused with 401, and the test asserts that refusal rather than stepping around
+      it: authorization runs credential -> session and a restarted sink has registered
+      nothing. An earlier revision of this criterion said "a request carrying the FIRST
+      instance's token is accepted by the second", and the test met it only because its
+      credential helper REGISTERED a synthetic session first — manufacturing the state
+      the criterion was supposed to be measuring. Adoption is `ISSUES #539`, and it must
+      RE-REGISTER a survivor rather than merely reconnect to it.
+
+      The paired acceptance, so the 401 is not satisfied by a sink that refuses
+      everything: once a session IS registered — done by hand in the test, standing in
+      for what #539 will do — the credential baked into the child at spawn is accepted.
+      That is precisely what durable coordinates buy: they make adoption possible, they
+      are not adoption.
 - [ ] **…and a foreign token is still refused** (401), or the criterion above is met by
       a sink that authenticates nothing.
       *Verified by* the same test's final assertion.
