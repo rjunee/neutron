@@ -262,6 +262,24 @@ stated as a value** — `mutation-claim-artifact.test.ts`'s shared `diffArgv` bu
 marker to be present for the mock to answer at all, so dropping it in production reds them
 too — a second, independent alarm that nobody had to design.
 
+**And the rebase that arrived with the same shape attached.** `origin/main` moved three times
+during this round (#636, #650, #628) and the PR went DIRTY. Two of the three conflicts were
+instructive:
+
+* `docs/spec-items/README.md` is a GENERATED rollup whose test asserts the committed file is
+  byte-identical to the renderer's output, so a hand-merge would look resolved and fail CI.
+  Regenerated after every merge, drift re-checked at 0.
+* **A file-location conflict resolved AGAINST git's suggestion.** Promoting the previously
+  staged as-built records to `docs/as-built/` shards had DRAINED `.trident/as-built/`, so git
+  inferred a directory rename from an absence and proposed moving this branch's staged record
+  into `docs/as-built/`. Refused: a branch never writes into `docs/as-built/` — the base
+  promotes after the merge — and origin/main's own `AGENTS.md` still says to stage at
+  `.trident/as-built/<branch>.md`. The second merge was reported CLEAN, which is the case
+  worth naming: a silent rename would have moved the file with no conflict to notice, so the
+  merged TREE was checked for both paths rather than the merge's exit status trusted. **A
+  conflict is not a claim about the branch; it is an inference, and an inference from an
+  absence can be confidently wrong** — round thirteen's lesson at a different altitude.
+
 **The lesson, one level out from round thirteen.** Four sweeps had looked at prose — rules,
 numbers, completeness words, absolutes. None looked at the *checkers*. A search pattern is a
 claim too, and it is the one claim that silently narrows everything built on top of it:
