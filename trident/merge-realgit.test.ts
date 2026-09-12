@@ -27,6 +27,7 @@ import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
 import {
   buildMergeCleanupDeps,
+  conflictHunks,
   runWorktreePath,
   worktreeFingerprint,
   TridentBaseDriftHold,
@@ -928,4 +929,81 @@ describe('REAL git — the arbiter integrity baseline actually SEES a mutation (
     created.push(dir)
     expect(await worktreeFingerprint(spawnCapture, dir)).toBeNull()
   }, 20_000)
+})
+
+describe('REAL git — the arbiter is actually SHOWN both sides of the conflict (#541)', () => {
+  /**
+   * WHY REAL GIT. Round 8 removed every tool from the arbiter on the stated ground that the
+   * caller already supplied everything it needed. That was asserted rather than checked, and
+   * it was false — the caller sent filenames and histories, not the conflict. A scripted-host
+   * test cannot catch that class: it would happily confirm that whatever I chose to script
+   * arrives. Only real git can say whether `git diff :2:<path> :3:<path>` yields the two
+   * sides at all, which is the assumption the whole design now rests on.
+   */
+  test('both sides of a real conflicted file reach the evidence, labelled and quoted', async () => {
+    const repo = await makeBaseRepo()
+    // Two incompatible edits to the SAME line, so a rebase leaves real stages 2 and 3.
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'flush: DROP-THE-OLDEST-ENTRY\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edit')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'flush: BLOCK-UNTIL-SPACE\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main edit')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    const reb = await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(reb.ok).toBe(false)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const hunks = await conflictHunks(spawnCapture, repo, ['README.md'])
+
+    // BOTH SIDES ARE PRESENT — this is the assertion round 8 shipped without.
+    expect(hunks).toContain('BLOCK-UNTIL-SPACE') // the base's version (`-`)
+    expect(hunks).toContain('DROP-THE-OLDEST-ENTRY') // the branch's version (`+`)
+    // Labelled so the judge knows which is which.
+    expect(hunks).toContain('README.md')
+    expect(hunks).toContain('= base')
+    // EVERY line is quote-prefixed: no untrusted line begins a line of the prompt.
+    for (const line of hunks.split('\n')) {
+      expect(line.startsWith('| '), line.slice(0, 60)).toBe(true)
+    }
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a path that exists on only ONE side says so instead of pretending to a diff', async () => {
+    const repo = await makeBaseRepo()
+    const hunks = await conflictHunks(spawnCapture, repo, ['never-existed.ts'])
+    expect(hunks).toContain('no two-sided diff')
+    // Still quoted, still not a crash, still not silence.
+    expect(hunks.split('\n').every((l) => l.startsWith('| '))).toBe(true)
+  }, 20_000)
+
+  test('an ENORMOUS conflict is bounded and the truncation is VISIBLE to the judge', async () => {
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-big')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // ~200 KB of differing content on each side of the same file.
+    writeFileSync(join(fwt, 'README.md'), Array.from({ length: 4000 }, (_, k) => `feat line ${k}`).join('\n'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat big')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), Array.from({ length: 4000 }, (_, k) => `main line ${k}`).join('\n'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main big')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const hunks = await conflictHunks(spawnCapture, repo, ['README.md'])
+    // BOUNDED — the cap is enforced on the returned value, code-point safe.
+    expect(Buffer.byteLength(hunks, 'utf8')).toBeLessThanOrEqual(4_096)
+    // AND THE JUDGE IS TOLD. A silent truncation would invite a judgement on a fragment,
+    // which is worse than the escalation the prompt asks for in that case.
+    expect(hunks).toContain('truncated')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
 })

@@ -55,13 +55,57 @@ choose?
 - **PR-mode: GitHub would not name the base** / **the head lives in a fork.** The
   missing fact is in a GitHub API response, not in the tree. The arbiter's prompt
   confines every path it may read to `input.repo_path` (`arbiter.ts:134`), so it would
-  be adjudicating something it cannot inspect — worse than not being asked.
+  be adjudicating something it cannot see — worse than not being asked. (As of round 8 it
+  inspects nothing at all: it sees only what the caller folds into the evidence.)
 
 Also left: `rebaseOntoObservedBase`'s replay-path conflict in `orchestrator.ts`. It is a
 genuine candidate (its tree holds the markers too) but a different seam in a different
 file; one seam per change. And `on_infra_retry` (`orchestrator.ts:387`), which is the
 other never-passed production option — issue #535 owns it, and this change does not
 silently expand into it.
+
+### The toolless judge was not being SHOWN the conflict — round 9
+
+Removing the tools was right and the justification given for it was false. The stated
+ground was that "the caller already assembles every piece of evidence the arbiter sees";
+that was asserted rather than checked, and what the caller actually sent was filenames,
+commit histories and the resolver's question — **metadata about the conflict, never its
+contents**. So the turn was choosing retry-versus-escalate without knowing what either side
+says, while the evidence still told it to "Read the conflicted files themselves" and the
+grant forbade exactly that. Not a thin win: an empty one. Shipped as-is, the honest
+description would have been a coin flip with a model attached, and the instrumentation would
+eventually have measured that.
+
+Fixed the way this class is supposed to be fixed — **add the field, never restore the
+tool.** `conflictHunks` sends `git diff :2:<path> :3:<path>`, the two conflict stages as
+blobs, so `-` lines are the base's version and `+` lines the branch's: exactly the question
+being adjudicated, in unified-diff form, so only the differing region plus context travels.
+Verified against real git rather than assumed, because that assumption is what failed last
+round.
+
+Bounded per file and in total, with the omission marker's bytes reserved before content is
+admitted and every truncation stated, because a judgement on a silent fragment is worse than
+an escalation — and the prompt now says that a conflict too large to show is a reason to
+escalate.
+
+**QUOTE-PREFIXING IS PART OF THE BOUNDARY, not formatting.** Folding collapses each line so
+no untrusted newline survives, but a line whose whole content IS `OPTIONS:` would still land
+at column 0 and forge a heading, because the evidence legitimately contains ASCII newlines.
+Every untrusted line — hunks and commit records alike — is now prefixed with `| `, so no
+untrusted text ever begins a line of the prompt. That closed the same hole in the histories,
+which had it all along.
+
+TWO OF MY FIRST MUTATIONS FOR THIS FIX SURVIVED, both for the lane's signature reason: my
+tests called `conflictHunks` directly, so disabling the call that feeds its output into the
+evidence changed nothing — testing the primitive is not testing the delivery — and the
+total-budget case used one file, where the per-file cap binds first and the total cap never
+engages. Both now assert through the composed merge path, and the budget is asserted as a
+PROPERTY across adversarial shapes rather than as one case.
+
+One mutation is expected to survive and is labelled in the code: the final `headBytes` on
+the hunk payload is an unconditional backstop the loop's own accounting already makes
+redundant. A redundant guard that survives mutation is the correct outcome; manufacturing a
+test that fails only for it would be testing the implementation instead of the guarantee.
 
 ### THE ARBITER HAS NO TOOLS — and the test that said otherwise was pinning the bug
 
@@ -116,6 +160,15 @@ ASCII.
 
 ### The read-only property, and the two wrong answers before it
 
+> **SUPERSEDED by "THE ARBITER HAS NO TOOLS" above.** This section is kept as written
+> because it is correct as HISTORY — it records what round 3 decided and why — but it is
+> misleading as CURRENT STATE: the grant is now `[]`, not `['Read','Glob','Grep']`. Round 8
+> found that removing write tools does not prevent disclosure, so the read tools went too,
+> and the conflict contents are sent in the folded evidence instead. That distinction —
+> correct as history, misleading as current state — is the one `#574` had to draw, and a
+> document contradicting itself about a security boundary is worse than one merely out of
+> date, so the contradiction is marked rather than silently rewritten.
+
 THE ENFORCEMENT IS THE TOOL SURFACE. `ARBITER_TOOL_NAMES` is `['Read','Glob','Grep']`.
 No `Bash`, no `Edit`, no `Write`. `--tools` is a real CLI-level gate and — this is the
 part all of us had wrong — **it survives `--dangerously-skip-permissions`**, which
@@ -148,7 +201,7 @@ hooks, `ext::` helpers, `credential.helper`) may write anywhere and is executed 
 caller's own `rebase --continue`, with no arbiter process alive to reap.
 
 WHAT BASH WAS FOR, AND WHERE IT COMES FROM NOW. The conflict markers are in the files,
-which Read/Grep reach. Bash's unique contribution was each side's HISTORY — why a change
+which Read/Grep reached AT THE TIME (round 8 removed those too — see above). Bash's unique contribution was each side's HISTORY — why a change
 exists, not what it says. The CALLER now runs that `git log` itself (`sideHistory`,
 `--max-count=20`, subjects and bodies only) and quotes both directions into the evidence.
 
@@ -267,6 +320,19 @@ the oversized-filename test passing because the huge path happened to come last,
 frozen-ceiling gap where a relation to a constant could not detect the constant moving.
 Ten instances of a test passing for the wrong reason were found in this lane in one
 session, and mutation — not reading — found every one of them.
+
+**THE LANE'S STANDING LESSON: test the platform's behaviour before reasoning about the code
+that wraps it.** `--tools` was a real, enforced gate that survives
+`--dangerously-skip-permissions` for the whole of this PR, while three reviewers and I
+reasoned instead about `SubstrateProfile` fields frozen until phase B/D and concluded
+confinement was unavailable. One `claude -p --tools Read` invocation would have settled it at
+any point. It was the cheapest available step in every round and nobody took it.
+
+**And a premise handed to you is still a premise to test.** Round 8's tool removal rested on
+"the caller already sends everything the judge needs", which arrived as an instruction and
+was wrong; I implemented it without checking the evidence payload against it. When a whole
+design rests on one claim, verify the claim even when it comes from the person reviewing you
+— being contradicted is cheaper than agreeing and shipping an empty feature.
 
 **The two that matter most for the next lane: the boundary was fixed three times as call
 sites before it was fixed as a boundary, and the eighth failure was a cap asserted through
