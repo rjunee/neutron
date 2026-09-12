@@ -109,11 +109,24 @@ touches was audited rather than just this one:
 | `store.ts` `checkpointRound(...) ?? 0`, `crash_recoveries ?? 0`, `infra_retries ?? 0` | Not this class. Nullish-only coalescing on genuinely nullable columns, where `0` IS the correct absent value and no permissive default is involved. |
 
 **WHAT IS STILL NOT TRUE, and `#629` holds it.** `max_ralph_rounds` is not a bound on
-the CARD. The spend rides `linked_run_id`, so any dispatch without one starts at zero:
-`onboarding/overnight/register.ts` creates governed runs with no card, and an owner who
-re-cuts a card gets a new slug and no prior. The spend is also read from ONE prior row
-(`latestTerminalBySlug`) rather than accumulated, so a gap in the chain loses everything
-before it. The row is recreated by every dispatch, so a per-row counter is one reset away
+the CARD, and the escape is far cheaper than two drafts of this record claimed. Both
+described it as needing the SLUG lost — "no card at all"
+(`onboarding/overnight/register.ts`) or "a re-cut card (new title, new slug)". The real
+one is ONE CLICK: `work-board/store.ts` NULLs `linked_run_id` when a card leaves the
+`failed` lane (`nextStatus('failed')` to `'upcoming'`, the ordinary status-dot advance)
+and again on `done` to `upcoming`. Measured: link cleared, `card_names_no_run`, a full
+fresh budget — same card, same slug, same title, same branch, nothing re-cut. A limit
+described as requiring a rename when it actually requires a click is the kind of wrong
+that gets the guard removed later as redundant, which is why the correction is recorded
+rather than quietly applied.
+
+A fourth door, and it is not the "gap in the chain" `#629` already names: AN INTERVENING
+NON-GOVERNED RUN LAUNDERS THE WHOLE SPEND. Measured: a card at 20/20, one dispatch with
+ralph off (row born at 0, non-governed), that row dies, `latestTerminalBySlug` returns
+IT, and the next governed dispatch is 0/20. That row is present, terminal and perfectly
+readable — it is simply not governed, so `carriedRalphBudget` answers null on
+`run.ralph !== true`. A present row is not a gap. The spend is also read from ONE prior
+row rather than accumulated, so a real gap loses everything before it. The row is recreated by every dispatch, so a per-row counter is one reset away
 by construction; holding the spend on the card is the durable fix. `#629` carries the
 measurement. All three of the spec item's acceptance boxes are UNTICKED and the item
 stays `open` — every one of them was ticked at some point in this PR and every tick was
@@ -165,3 +178,60 @@ where the prior cap differs from BOTH the default and the dispatch value. And th
 tests now dispatch with NO injection against a git repo built on disk with no origin and
 a recording `gh` shim, for a present ref and an absent one, so "works without gh or a
 remote" is measured.
+
+**AN EDGE VALUE IS NOT AN UNSET VALUE — the FOURTH defect of that shape, in the field
+beside the third.** The cap got a three-way classification; the COUNTER next to it still
+normalised anything it did not understand to `0`, which is the most permissive answer
+available, because a row at `{ 0, 20 }` is authorised for the whole budget. Measured: a
+governed prior at `{ ralph_round: NaN, max_ralph_rounds: 20 }` produced `{ 0, 20 }` — the
+budget reset, restored for malformed persisted data, through a different door, and
+contradicting the helper's own stated FAIL-CLOSED contract.
+
+The counter now takes the same split, with one asymmetry that matters: for a CAP,
+"carry nothing" leaves the dispatch's own cap in place and costs nothing; for a COUNTER
+there is no such fallback, because carrying nothing IS the reset. So an unreadable
+counter — or an unreadable prior cap, since the pair is indivisible — REFUSES the
+dispatch, with a `dispatch_budget_unreadable` warning and a message naming the run and
+the column so the repair is a one-line UPDATE. `unknown` authorises nothing.
+
+Measured rather than assumed: `code_trident_runs` is STRICT with both columns
+`INTEGER NOT NULL`, so sqlite itself rejects `NaN` (binds as NULL, hits NOT NULL), the
+infinities and fractionals ("cannot store REAL value in INTEGER"). The PERSISTED surface
+is therefore negatives and unsafe magnitudes; those are covered through the real
+database, and the three sqlite cannot store are covered through the real dispatch
+chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
+duplicated, and not pretending the schema is weaker than it is.
+
+**THE PATTERN, AND THE LINE THAT MATTERS MOST IN THIS RECORD.** Four boundary defects
+landed in this lane and all four were one mistake: the at-cap round reset to a fresh row,
+the cap not carried at all, an explicit `0` cap read as `20`, and an unreadable counter
+normalised to `0`. Every one treated an EDGE value as an UNSET value and reached for the
+permissive default. The audit that caught the third was aimed only at the cap, which is
+why the fourth — one field over — survived it.
+
+And the most expensive defect is not in that list. THE PROPERTY THIS CHANGE ADVERTISES AS
+ITS CENTRAL FIX WAS ASSERTED IN PROSE, PINNED BY POSITION, AND LEFT UNPINNED IN
+SUBSTANCE. The claim was "the line now states what was WRITTEN, not what was intended"; a
+mutation proving the line's POSITION was red, while mutations changing the SOURCE of its
+values survived the entire suite. No amount of reading found that — a mutation did. A
+test that reacts to its subject while the claim is about something else reads as coverage
+and is worth less than no test.
+
+The same holds for the five tests in this session that documented a defect AS CORRECT
+BEHAVIOUR — including one asserting that a malformed counter becomes zero, which is
+precisely the budget reset this change exists to close. A test pinning wrong behaviour is
+strictly more expensive than no test: it converts the next correct fix into an apparent
+regression, and whoever hits it will most likely change the fix rather than the test. The
+disposition here was to INVERT each one, with a docblock recording what it used to assert
+and why that was wrong, rather than delete it quietly.
+
+**MUTATION-CHECKED — thirty-seven mutations across the lane, every one red and restored,**
+and deliberately in BOTH directions: failing-open (carry the permissive value) and
+failing-closed (refuse a legitimate one), because a suite that only ever mutates toward
+permissiveness passes when the code becomes too strict — and a suite that only covers
+positive values cannot tell round-vs-cap from round-vs-default, which is how the second
+and third defects hid. Two of the reviewer's log-line mutations are provably INERT rather
+than uncaught: the row is written from the same objects the line would otherwise read, so
+`budget?.ralph_round ?? 0` and the row's value cannot differ and no test can separate
+them. That is reported as an inert mutation rather than papered over with a pin, the same
+disposition taken for two inert mutations of my own earlier in the lane.
