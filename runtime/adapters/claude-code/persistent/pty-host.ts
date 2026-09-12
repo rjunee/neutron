@@ -40,16 +40,18 @@ import type { Key } from './keystrokes.ts'
  * {@link PtyChild.exited}), so this is the only thing that distinguishes the routes
  * — and one of them is not a child event at all.
  *
- *  - `pane-exited`    — herdr sent `pane_exited`: the process in the pane ended.
  *  - `closed-by-us`   — we closed the pane (evict / respawn / cancel / shutdown).
- *  - `pane-vanished`  — reads failed and herdr no longer knows the pane.
- *  - `transport-lost` — THE CHANNEL DIED, NOT THE CHILD. The socket to the herdr
- *    server closed, so nothing about the process changed; what changed is that we
- *    can no longer observe or drive it. It is terminal because an unobservable REPL
- *    is unusable and the pool must recycle it — but it is NOT evidence the child
- *    exited, and nothing may report it as one.
+ *  - `pane-vanished`  — herdr positively reports the pane does not exist, which is
+ *    how a process that ended on its own is discovered.
+ *
+ * TWO WERE DELETED RATHER THAN LEFT UNREACHABLE. `pane-exited` came from a
+ * `pane_exited` subscription event, and `transport-lost` from a long-lived socket
+ * closing. The herdr transport is one request per connection — measured — so there is
+ * no persistent socket to lose and no subscription to receive on: a connection ending
+ * is how every exchange ends, not an event. Both routes now arrive as the same fact,
+ * `pane_not_found` on a poll, and one fact deserves one name.
  */
-export type PtyExitCause = 'pane-exited' | 'closed-by-us' | 'pane-vanished' | 'transport-lost'
+export type PtyExitCause = 'closed-by-us' | 'pane-vanished'
 
 /** A spawned child attached to a terminal. The lifecycle/supervision logic
  *  consumes exactly this shape regardless of the underlying backend. */
@@ -156,9 +158,9 @@ export interface PtyChild {
    * WHY this child became terminal, once it has. `undefined` while it is alive.
    *
    * Exists because `exited` cannot carry it: herdr reports no exit status, so every
-   * death resolves `null` and the four routes to it are otherwise indistinguishable
-   * — including {@link PtyExitCause} `'transport-lost'`, which is not a child event
-   * at all. OPTIONAL, so a lightweight test fake may omit it; a caller that needs to
+   * death resolves `null` and the routes to it are otherwise indistinguishable — a
+   * pane we closed deliberately looks exactly like one whose process ended on its own.
+   * OPTIONAL, so a lightweight test fake may omit it; a caller that needs to
    * tell the routes apart must treat `undefined` as "not known", never as a default.
    */
   readonly exitCause?: () => PtyExitCause | undefined

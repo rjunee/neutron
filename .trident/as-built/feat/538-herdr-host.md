@@ -1404,6 +1404,153 @@ position to notice. That is a design question about the transport, not a defect 
 this round's blocker, and it is worth a decision before the cutover rather than a patch
 inside it.
 
+### The transport was rebuilt to the shape the server actually implements
+
+Review r19, and this is the largest change on the branch: **one request, one reply, one
+connection.**
+
+The persistent multiplexing client could not execute against the server we run, and
+**no test could have told us** — every fake modelled a persistent connection and the
+live proofs are opt-in and skipped in CI. That is the clearest instance yet of "merged
+is not done": a REPL host that cannot drive a REPL, with a green suite.
+
+**Measured, on herdr 0.8.2 / protocol 20:**
+
+| question | answer |
+|---|---|
+| requests per connection | exactly ONE, then the server closes it |
+| two pings pipelined in one tick | ONE reply, socket gone 1 ms later — not an idle timeout |
+| any method as the FIRST request | works (`layout.apply`, `pane.read`, `pane.close`, `pane.get`, `pane.process_info`, `pane.list`) |
+| cost of a fresh connection | **2.02 ms** (mean of 60: connect + send + reply + close) |
+| a SUCCESSFUL `events.subscribe` | connection STAYS OPEN and streams events |
+| `pane.close` on a missing pane | `pane_not_found` — positive absence |
+| `process_info` identity token | none (no start time) |
+
+The exact subscribe frame and what came back, since the design turned on it:
+
+```
+{"id":"sub1","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.exited"}]}}
+  +1ms    {"id":"sub1","result":{"type":"subscription_started"}}        ← socket STAYS OPEN
+  +2ms    {"event":"pane_exited","data":{"pane_id":"w6:pD",...}}        ← a pane that had ALREADY exited
+  +1604ms {"event":"pane_exited","data":{"pane_id":"w6:pE",...}}        ← the pane created during the probe
+```
+
+Note the second line: **a fresh subscriber is delivered an exit that happened before it
+subscribed.** That is a replay hazard a subscription design would have had to defend
+against, and it argues for the decision that was taken.
+
+**What the rewrite DELETES rather than leaves unreachable**, because there is no
+long-lived socket: the transport-loss exit cause, post-close dispatch, teardown-of-
+pending, the pending-by-id map, the event envelope, `events.subscribe`, the
+`pane-exited` cause, and the reconnect-and-close-by-pane-id path added one round
+earlier. Three rounds of hardening on the transport-loss branch are gone with the branch
+— which is the point: *a connection ending is how every exchange ends, not an event.*
+
+`PtyExitCause` collapses from four to **two**: `closed-by-us` and `pane-vanished`. A
+process that ends on its own is now discovered exactly as a vanished pane is, because it
+IS one — and one fact deserves one name.
+
+**What is KEPT, because it is still about a single reply:** the frame bound enforced
+before the bytes are copied, one decode per complete line at a known character boundary,
+and an envelope carrying exactly one well-formed outcome. The version gate MOVED rather
+than went — one `ping` at spawn instead of per call, because pinging every call would
+double every operation, and the protocol cannot change under a running host without
+restarting herdr, whose panes are its children.
+
+Tests were deleted rather than left passing: the subscription and transport-loss suites
+described a client that could not run, against a fake that agreed with it. The
+`herdr-protocol-gate` suite was rewritten around the new seam (31 cases), and the
+`isClosed()` assertions went with the socket they guarded — the leak they protected
+against cannot exist when nothing outlives a request, which is a structural guarantee
+rather than an asserted one.
+
+### The connect is awaited, and the call settles by resolving
+
+The first cut of the one-connection client fired the connect into
+`void connect(...).then(...).catch(...)`. The fire-and-forget gate rejected it, and the
+gate was right about more than style. Voiding that chain put the call's ENTIRE
+resolution inside a promise nobody held: `finish` was reachable from a timer, from two
+socket callbacks and from a `.catch`, none of which the caller was awaiting.
+
+It is now a plain `await` in the function body — a refused connect, a thrown write and a
+short write all reach `finish` through one `try`/`catch` — and the pending call settles
+by RESOLVING a `CallOutcome` record rather than by rejecting. That second half is the
+part worth keeping: the deadline can fire while the connect is still in flight, which is
+a window in which nothing is holding the call's promise. A rejection there is unobserved,
+and Bun's process net treats an unobserved rejection as fatal (`logger/fire-and-forget.ts`
+says so in its own header). A promise that is only ever resolved cannot enter that state;
+the failure becomes a `throw` at the single `await` that hands the outcome back, where a
+handler provably exists.
+
+The test asserts the ABSENCE, not the presence: it registers an `unhandledRejection`
+listener, drives a 1 ms deadline against a 40 ms connect, and requires both the right
+error and an empty listener log.
+
+### Three tests were fast because the code was broken
+
+Fixing the transport broke four tests, and the reason is worth more than the fix.
+
+`unconditional-persistent`, `select-substrate` and `repl-home-normalization` assert
+substrate SELECTION, not spawning — but they call `start()`, which reaches the real
+`HerdrHost`. They passed in milliseconds because **the client could not get past its own
+protocol ping**: the spawn failed immediately and the assertions (about the handle's
+identity) held anyway. With the transport fixed, those same tests connected to the
+DEVELOPER'S LIVE HERDR SERVER, created real panes running `/usr/bin/false`, and sat out
+the 5 s pid timeout.
+
+Two things follow, and I would not have seen either without breaking them:
+
+- **A green test can be green because of the defect.** These were not testing the spawn,
+  so nothing about their assertions changed — only their speed and their side effects.
+  "Fast and passing" concealed "never reached the code".
+- **A unit suite that can touch a live server is not hermetic**, and nothing said so.
+  They now point `HERDR_SOCKET_PATH` at a path that does not exist, so the spawn fails
+  at connect rather than on a real machine's panes. That guard is new information the
+  suite did not previously carry.
+
+I checked the live server afterwards: four panes, all the owner's own `claude` and
+`gh dash` sessions, none mine. The probe panes I created were closed explicitly, and the
+timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
+an earlier round doing exactly its job, observed in the wild rather than in a fake.
+
+### Rewriting the transport left twelve criteria describing code that no longer exists
+
+I replaced ONE acceptance criterion when the transport was rewritten — the one that
+named the shape — and left the rest. That was the same mistake in a different file:
+deleting the code and keeping the sentence that mandates it. Eleven more criteria still
+described the multiplexing client, and their verify commands all still PASSED, because
+the tests they named had been deleted alongside the code. A criterion whose verify runs a
+suite that no longer contains the case is not weak evidence, it is evidence of the wrong
+thing entirely.
+
+Swept, with what happened to each:
+
+| criterion | disposition |
+| --- | --- |
+| transport loss terminates the pid it learned at spawn | DELETED — contradicted the one-connection criterion two entries above it |
+| every entry point consults `closed` | DELETED — no flag, no long-lived client |
+| `data` is part of the event envelope (5 shapes + control) | DELETED, its RULE re-pointed at the reply envelope |
+| a CLOSED transport accepts nothing | REWRITTEN as "a SETTLED CALL accepts nothing further" |
+| a `pane_exited` while our close is in flight is ours | REWRITTEN to the polling form (`pane_not_found` mid-close) |
+| teardown is an action, healthy exchange ends the socket ZERO times | REWRITTEN — the control INVERTED: exactly ONCE now, or a descriptor leaks per call |
+| a malformed frame is terminal (and poisons the next call) | REWRITTEN — the next call is a new connection, which is stronger |
+| every RPC bounded by a clock, reaching `teardown` | REWRITTEN + extended with the mid-connect deadline |
+| a frame that parses but matches no envelope is torn down (`isClosed()`) | REWRITTEN — assert the envelope message, not a flag |
+| inbound buffering is linear, proved by a 200k-delivery load case | REWRITTEN — the load case is RETIRED with the shape it policed, and the retirement is recorded rather than silent |
+| retention is measured as ALLOCATION (`subarray` view) | FOLDED into the above — there is no leftover to retain |
+| the frame limit's "many valid frames in one delivery" case | REWRITTEN — one connection carries one reply |
+| short write routes to `'transport-lost'` | REWRITTEN — the cause is gone; the property is not |
+| a failed spawn closes the pane ("the subscription refusing") | REWRITTEN — at this version the only post-creation failure is the pid never arriving |
+| nothing is built on `output_changed` (control: "the subscription that IS used") | REWRITTEN — the positive control named a subscription that no longer exists |
+
+Three of the rewrites needed NEW tests rather than new prose, because the property
+survived the rewrite but nothing asserted it any more: a settled call accepting nothing
+further, every terminal route closing the connection exactly once, and a deadline firing
+mid-connect leaving no unobserved rejection. The first two of those are where M132–M136
+came from.
+
+The count went 50 → 49, which is the least interesting fact about the sweep.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1553,6 +1700,22 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M120 | any rejection counted as confirmed, not just `pane_not_found` | RED 1 |
 | M120b | PAIR: `pane_not_found` NOT counted as confirmed | SURVIVED (fake returned ok) → fake corrected → RED 1 |
 | M121 | the fake stops rejecting close on a missing pane | RED 4 |
+| M122 | the frame bound runs AFTER the copy | RED 1 |
+| M123 | a close before the reply resolves empty instead of failing | RED 1 |
+| M124 | a short write accepted as a sent request | RED 1 |
+| M125 | presence-only outcome check (no shape validation) | RED 5 |
+| M126 | the per-call timeout never fires | RED 1 |
+| M127 | the version gate accepts any protocol | RED 2 |
+| M128 | the socket is never closed after a call | RED 1 |
+| M129 | the call settles by REJECTING, restoring the unobserved-rejection window | RED 1 |
+| M130 | a failed outcome returns `{}` instead of throwing | RED 24 |
+| M130b | PAIR: a SUCCESSFUL outcome throws too | RED 8 |
+| M131 | the connect is fired and forgotten again — its rejection dropped | RED 2 (both by hanging to the 5s default) |
+| M132 | settlement is not once-only (`if (settled) return` dropped from `finish`) | SURVIVED — absorbed by the `onBytes` guard |
+| M133 | bytes after settlement are still accumulated (guard dropped from `onBytes`) | SURVIVED — absorbed by the `finish` guard |
+| M134 | COMBINED: BOTH settlement guards removed | RED 1 |
+| M135 | the socket is closed only on SUCCESS, never on a failure route | RED 1 |
+| M136 | PAIR: the socket is closed TWICE on the healthy route | RED 3 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
@@ -1560,6 +1723,16 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M75c | accept ONLY an array `data` | RED 1 (its own case) |
 | M75d | accept ONLY a string `data` | RED 1 (its own case) |
 | M75e | accept ONLY a number `data` | RED 1 (its own case) |
+
+M132 and M133 both SURVIVED, and the reason is the answer rather than a gap: the two
+settlement guards are redundant, so each absorbs the other, and a single mutation of
+either leaves the behaviour intact. M134 removes both and reddens. The criterion is
+therefore the PAIR, not either line — and this is the third time on this branch that a
+survivor meant "something else is holding the property" rather than "the test is weak".
+Worth naming too: the resolve-only settlement makes the OUTCOME structurally
+unoverwritable (a resolved promise ignores a second settle), so the only observable that
+can see a second settlement at all is the socket end count. M135/M136 bracket that count
+from both sides.
 
 M75a–M75e are the individual-case proof: each leaks exactly ONE shape past the guard
 and reddens exactly that shape's row, so no case in the `data` table is redundant.

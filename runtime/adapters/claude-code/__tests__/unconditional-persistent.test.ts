@@ -19,6 +19,14 @@ import { join } from 'node:path'
 import { createClaudeCodeSubstrateAuto } from '../index.ts'
 import { shutdownAllPersistentRepls } from '../persistent/persistent-repl-substrate.ts'
 
+// HERMETIC: these tests assert substrate SELECTION and wiring, not spawning — but
+// `start()` reaches the real `HerdrHost`, which now works. Pointing the socket at a
+// path that does not exist makes the spawn fail immediately instead of creating REAL
+// PANES on the developer's herdr server and waiting out the pid timeout. Before the
+// transport was fixed these tests were fast by accident: the client could not get past
+// its own protocol ping, so nothing was ever spawned.
+process.env['HERDR_SOCKET_PATH'] = '/nonexistent/herdr-test-must-not-connect.sock'
+
 const PRIOR_FLAG = process.env['NEUTRON_PERSISTENT_REPL']
 const PRIOR_SUP = process.env['NEUTRON_PERSISTENT_REPL_SUPERVISION']
 

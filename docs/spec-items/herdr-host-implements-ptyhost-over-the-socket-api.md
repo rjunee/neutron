@@ -184,14 +184,15 @@ not-new. That is accepted and recorded here rather than hidden.
       `'ctrl-c'` → `'ctrl+c'`, since that is the one our own `Key` union spells
       with a hyphen and the live server rejects.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
-- [ ] Nothing is built on `pane.output_changed` — no `events.subscribe` or
-      `events.wait` names it. The only permitted hit is the `herdr-host.ts` docstring
-      recording WHY it is refused; a grep that simply finds nothing would also pass
-      against a tree where the reasoning had been deleted, so the criterion is "one
-      hit, and it is prose".
+- [ ] Nothing is built on `pane.output_changed` — and after the transport rewrite nothing
+      is built on herdr EVENTS at all. The only permitted `output_changed` hit is the
+      `herdr-host.ts` docstring recording WHY it was refused; a grep that simply finds
+      nothing would also pass against a tree where the reasoning had been deleted, so the
+      criterion is "one hit, and it is prose".
       verify: `rg -n "output_changed" runtime --type ts` returns exactly the
-      `herdr-host.ts` comment, while the positive control
-      `rg -n "pane.exited" runtime --type ts` finds the subscription that IS used.
+      `herdr-host.ts` comment, and `rg -n "call\('events\." runtime --type ts` returns
+      NOTHING, against the positive control `rg -n "call\('pane\." runtime --type ts`
+      which finds the 8 request sites that ARE used.
 - [ ] The `sendKey`/`sendKeys` byte fallback is provably unreachable for the real
       backend: `HerdrHost`'s child provides BOTH `writeKey` and `writeKeys`. The
       fallback writes `encodeKey('enter')` = `\r`, which this backend's `write()`
@@ -242,26 +243,27 @@ not-new. That is accepted and recorded here rather than hidden.
       calls and a pane that is actually closed. Control: a successful close settles,
       latches, and closes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **Inbound buffering is linear in bytes, not quadratic in deliveries.** The frame
-      cap bounds RETENTION and says nothing about CPU, which is the resource a
-      fragmenting peer actually exhausts — one-byte deliveries against an 8 MiB cap force
-      ~35 TB of copying before the cap trips. Neither the append nor the frame loop may
-      re-copy the accumulation. The single-chunk boundary cases cannot see this: what
-      distinguishes the implementations is the number of DELIVERIES, so the case must
-      fragment. The load must be chosen by MEASUREMENT and the margin recorded — a first
-      attempt at 200k×1 byte under 4 s let the quadratic mutant pass; at 200k×8 bytes the
-      separation is 44 ms against 21,433 ms on the reference host. Pair it with proof the
-      work was done rather than skipped (bytes still buffered, transport still open) and
-      with reassembly of a frame delivered one byte at a time, or "fast" is satisfied by
-      dropping input.
+- [ ] **Inbound buffering is linear in bytes — now by CONSTRUCTION, and the measured load
+      case is retired with the shape it policed.** The frame cap bounds RETENTION and says
+      nothing about CPU, which is the resource a fragmenting peer actually exhausts. Three
+      rounds of defects lived here — re-copying the accumulation, a `subarray` leftover
+      whose view pinned its whole 2 MB parent while its logical length truthfully reported
+      1, and an unbounded allocation COUNT — and each was answered by narrowing a
+      behaviour. The transport rewrite answered the class instead: ONE growable buffer per
+      call, doubled in place, each delivered chunk copied in exactly once and dropped,
+      nothing concatenated, nothing retained as a view, and the buffer discarded with the
+      connection that owns it. A quadratic variant is no longer expressible without
+      reintroducing an accumulation list. The 200k×8-byte load case (44 ms against
+      21,433 ms for the quadratic mutant on the reference host) is therefore RETIRED
+      rather than silently dropped, and this criterion records that it was, and why.
+      What holds the property now: reassembly of a frame delivered one byte at a time
+      asserting the exact decoded content, and the absence of the operations that made the
+      old defects possible.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
-- [ ] **Retention is measured as ALLOCATION, not as logical length.** A `subarray` tail is
-      a view that pins its whole parent, so a 1-byte remainder of a 2 MB delivery holds
-      2 MB while the logical length truthfully reports 1. The leftover must be copied,
-      and the assertion must read the allocation — a logical-length observable cannot see
-      the defect at all (verified: view + logical-length accessor is green with the bug
-      present).
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+      and `rg -n "concat|subarray" runtime/adapters/claude-code/persistent/herdr-client.ts`
+      returns nothing, against the positive control `rg -c "Buffer\." <same file>` which
+      finds the 3 buffer operations that ARE there — so the empty result is an absence in
+      a file the pattern can reach, not a mistyped path.
 - [ ] **The output gate fails open AND loudly — both halves asserted.** "The screen
       eventually arrived" is IMPLIED BY failing open and says nothing about loudly, so a
       test asserting only delivery passes with the warning silenced. Capture stderr and
@@ -270,49 +272,53 @@ not-new. That is accepted and recorded here rather than hidden.
       protected by two guards (`beginOutput` clears the timer; the timer checks
       `released`), so only a mutation disabling BOTH shows it discriminates.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **The frame limit is enforced BEFORE the allocation it exists to prevent.** A
-      single oversized delivery must be refused without copying a byte — validation is a
-      scan of the incoming chunk, measuring each FRAME (including bytes already buffered
-      that belong to its first one), never the delivery's total size. Needs three cases,
-      because each is satisfied by an implementation that fails the others: one huge
-      chunk against a small cap refused with an EMPTY buffer; a delivery far larger than
-      the cap made of many valid frames ACCEPTED; and an oversized frame SPLIT across two
-      deliveries still refused. Fragmented accumulation and one-byte-over cannot see any
-      of this.
+- [ ] **The frame limit is enforced BEFORE the allocation it exists to prevent.** The
+      bound exists to stop us allocating for a reply we will not accept, so it cannot run
+      after the allocation it guards: the check is `end + chunk.length > max` taken on the
+      INCOMING chunk, before the grow-and-copy. The "many valid frames in one delivery"
+      case that used to sit here is gone with the multiplexing client — one connection
+      carries one reply — and what remains needs BOTH directions or either is satisfied
+      alone: an over-cap reply accumulated across deliveries refused with nothing copied,
+      and a reply EXACTLY at the cap accepted, because a bound that rejects a legitimate
+      maximal frame is a new failure mode rather than a fix.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
-- [ ] **Transport loss closes the pane BY ID over a fresh connection — it never signals
-      a PID.** Of the three defensible dispositions, THIS is the one implemented, and
-      the reasons are measured on the live server (0.8.2, protocol 20), not assumed:
-      the server answers exactly ONE request per connection and then closes it (two
-      pipelined pings get one reply, socket gone 1 ms later), so a fresh connection is
-      always available while the server lives and `pane.close` by id on one returns
-      `ok`; and `pane.process_info` carries no start time or identity token, so binding
-      an identity to the PID inside the protocol is not available at this version.
-      Direct PID signalling is DELETED rather than narrowed: the reuse window sits
-      between `process_info` returning the integer and anything the host can read about
-      it, so no re-read closes it. A pane id is an identity herdr maintains atomically.
-      Only `ok` or `pane_not_found` confirms closure; an unreachable server or a refused
-      close is UNKNOWN and must settle nothing, because a pane's process may be
-      reparented and survive its server. The fake must REJECT `pane.close` on a pane it
-      reports as gone, as the real server does — otherwise the `pane_not_found` branch
-      is never reached and its mutation survives.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **Transport loss never settles a child that may still be running.** A closed
-      socket is not evidence the process exited (`pty-host.ts` says so), yet settlement
-      runs the ordinary death handling in `spawn.ts` — sink unregistered, pool entry
-      dropped, configs deleted — which authorises a replacement `claude` against the
-      same transcript and breaks one-process-per-transcript, an invariant enforced ONLY
-      by killing the old process. So the host must TERMINATE the pid it learned at
-      spawn (adoption is #539 and unbuilt) and settle only on CONFIRMED death, with
-      escalation SIGTERM → SIGKILL. When death cannot be confirmed it must NOT settle,
-      because a stuck session is recoverable and two live processes on one transcript
-      are not. Inject the process primitives: the default probe answers ESRCH for a fake
-      pid, so an uninjected test proves "already dead" trivially and never attempts the
-      kill — the arrangement must not perform the step under test. The liveness probe
-      needs its own direct case: EPERM means the process EXISTS and is not ours, and
-      reading it as dead reports a live child terminated exactly when we have least
-      authority over it.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **One request, one reply, one connection — and no persistent socket anywhere.**
+      MEASURED on herdr 0.8.2 / protocol 20: the server answers exactly ONE request per
+      connection and then closes it (two pings pipelined in the same tick get one reply,
+      socket gone 1 ms later; sending again raises a broken pipe). A persistent
+      multiplexing client is therefore not a design choice, it is a design that cannot
+      execute — and no test could have said so, because every fake modelled a persistent
+      connection and the live proofs are opt-in and skipped in CI.
+      COST, measured not estimated: **2.02 ms per call** (mean of 60: connect + send +
+      reply + close over the unix socket). At the 250 ms poll interval that is ~0.8% of
+      one REPL's wall clock, and the poll is one call per tick.
+      What must be DELETED rather than left unreachable, because there is no long-lived
+      socket: the transport-loss exit cause, post-close dispatch, teardown-of-pending,
+      the event envelope, `events.subscribe`, and the `pane-exited` cause. Exit is
+      discovered by polling `pane_not_found`, which cannot be missed while nobody is
+      listening, cannot be replayed (a fresh subscriber IS delivered recent exits —
+      measured), and cannot arrive for another pane.
+      The version gate moves to ONE `ping` at spawn rather than per call: pinging every
+      call would double every operation, and the server's protocol cannot change under a
+      running host without restarting herdr, whose panes are its children.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **There is no "transport loss" to handle, and the criterion that described one is
+      DELETED rather than left standing.** It required the host to terminate the pid it
+      learned at spawn when the socket died. Both halves are gone: a connection ending is
+      how EVERY exchange ends now, so it carries no information about the child, and PID
+      signalling was deleted a round earlier because a pid is an identifier, not a handle
+      (`pane.process_info` carries no start time at this protocol, so the reuse window
+      cannot be closed by re-reading). What survives it is stated above and below — exit
+      settles only on CONFIRMED closure, and only a typed `pane_not_found` proves absence.
+      A criterion still demanding a kill path would contradict the one-connection
+      criterion two entries up, and a contradicted criterion is worse than a missing one.
+      verify: `rg -n "transport-lost" runtime/adapters/claude-code/persistent/pty-host.ts
+      runtime/adapters/claude-code/persistent/herdr-host.ts` returns exactly ONE hit, and
+      it is the `pty-host.ts` prose recording the deletion — the same "one hit, and it is
+      prose" shape used for `output_changed`, because a grep finding nothing would also
+      pass against a tree where the reasoning had been deleted. Paired with
+      `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+      for what replaced it.
 - [ ] **Every live caller performs the readiness handshake.** Each converted E2E proof
       must call `beginOutput()` after wiring its consumers, and at least one live
       boundary test must assert NO fail-open warning across the whole run. Without it
@@ -320,46 +326,46 @@ not-new. That is accepted and recorded here rather than hidden.
       normalise the fail-open — a guard can be thoroughly unit-tested while every real
       caller sits on the wrong side of it, and only a live assertion catches that.
       verify: `grep -c 'beginOutput' runtime/adapters/claude-code/persistent/__tests__/dev-channel-pty-bind.e2e.test.ts runtime/adapters/claude-code/persistent/__tests__/ritual-write-containment.e2e.test.ts reminders/bundled-rituals.e2e.test.ts` — each ≥ 1
-- [ ] **A CLOSED transport accepts nothing.** After `close()`, `onBytes` must neither
-      dispatch nor buffer: a post-close frame must not reach a subscription handler
-      (`pane_exited` is the one that would re-open a settled exit), and repeated chunks
-      must leave the buffer teardown released at zero. Both halves need their own case —
-      a guard placed after the append refuses to dispatch while still accumulating, and
-      passes the first test alone. Both need a control taken on the SAME client with the
-      SAME bytes while open, or "not delivered" is satisfied by a malformed frame or an
-      unwired handler. The buffer must be observable for the accumulation half to be
-      assertable at all.
+- [ ] **A SETTLED CALL accepts nothing further.** There is no `close()` and no client
+      flag to consult any more; what replaces both is that settlement is once-only and
+      bytes arriving after it are DROPPED rather than accumulated. A second complete
+      frame in the same connection must leave the FIRST result standing and must end the
+      socket exactly once — once per settlement, not once per delivery. RECORDED because
+      it changes how the case must be mutated: the two guards (`if (settled) return` in
+      `onBytes`, and again at the top of `finish`) are redundant, so each absorbs the
+      other and neither survives alone as a single mutation. Only the COMBINED mutation
+      reddens, and the criterion is the pair rather than either line.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
-- [ ] **Every entry point consults `closed`, not just the field existing.** The surface is
-      walked as a class rather than patched at the reported door: report the count
-      examined against the count changed. A rejected `subscribe` must leave no handler
-      behind — registering before the acknowledgement is deliberate (an event can arrive
-      in that window, and the host subscribes so a startup exit is still seen), which
-      makes removal on failure the obligation rather than late registration. NOTE what is
-      NOT a criterion: the order of `closed = true` against `failAll` is unobservable,
-      because `failAll` only calls `p.reject()` and rejection handlers run as microtasks
-      — a mutation moving that line survives, so any test asserting the ordering passes
-      for both implementations.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **The `closed`-flag sweep is DELETED with the flag.** It required every entry point
+      of a long-lived client to consult `closed`, and a rejected `subscribe` to leave no
+      handler behind. There is no long-lived client, no shared flag and no subscription:
+      a client is one connection, and its only state is one call's settlement. The
+      surviving obligation is the entry above. Kept as a deletion record rather than
+      quietly dropped, because "walk the surface as a class" is the habit, not the flag.
+      verify: `rg -n "isClosed|closed = " runtime/adapters/claude-code/persistent/herdr-client.ts`
+      returns nothing, against the positive control `rg -c "settled"` on the same file,
+      which finds the 7 uses of the per-call state that replaced it.
 - [ ] **A settled terminal state is IMMUTABLE.** No later path may rewrite `exitCause`,
       `hasExited()` or `wasKilledByUs()` once the exit has settled — including the
-      rejection of an RPC that the settlement itself caused, since `settleExit` closes
-      the client and closing it fails every call still in flight. The assertion must be
+      rejection of an RPC that the settlement itself caused — a poll already in flight
+      when the pane vanishes rejects AFTER the exit has settled. The assertion must be
       taken AFTER the last handler runs: releasing the held call and draining a macrotask
       turn, then re-asserting. Asserting while the call is still held measures an
       intermediate state and passes with the defect present. Pair it with the case that
       the flag DOES still clear while the child is unsettled, or "immutable" is satisfied
       by never clearing it at all — which re-breaks the failed-close requirement above.
-      Note the fake must fail in-flight calls on `close()` as the real transport does; a
-      forgiving fake makes this defect invisible (verified: host defect plus forgiving
-      fake is green).
+      Note the fake must be able to FAIL a method while a call is in flight, as the real
+      server does when the pane goes; a forgiving fake makes this defect invisible
+      (verified: host defect plus forgiving fake is green).
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **A `pane_exited` arriving while OUR close is in flight is ours.** With the close
-      genuinely held mid-flight, an exit event must classify as intentional
-      (`wasKilledByUs()` true); with no kill in flight the same event must classify as
+- [ ] **A pane that VANISHES while OUR close is in flight is ours.** The event form of
+      this race is gone with the subscription, but the race is not: the poll can observe
+      `pane_not_found` while our own `pane.close` is still unanswered. With the close
+      genuinely held mid-flight the vanishing must classify as intentional
+      (`wasKilledByUs()` true); with no kill in flight the same vanishing must classify as
       a crash. The held-call form is load-bearing — a fake that answers instantly
-      collapses the in-flight window to nothing and makes the property vacuous — and
-      the crash control is what stops a flag that is simply always true.
+      collapses the in-flight window to nothing and makes the property vacuous — and the
+      crash control is what stops a flag that is simply always true.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **The read cap is enforced AT its boundary, in both directions.** The request
       must clamp to `HERDR_READ_LINE_CAP` at a viewport of
@@ -369,8 +375,8 @@ not-new. That is accepted and recorded here rather than hidden.
       shrunken content window must be reported, not silently absorbed.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-poll-bounds.test.ts`
 - [ ] **A failed spawn leaves no pane running.** Every initialization failure AFTER
-      `layout.apply` returns — the pid never arriving, the subscription refusing —
-      must send `pane.close`; the obligation starts when the pane exists, not when
+      `layout.apply` returns — at this version, the pid never arriving — must send
+      `pane.close`; the obligation starts when the pane exists, not when
       the spawn succeeds. Assert the opposite direction too: a failure of
       `layout.apply` ITSELF must close nothing, and a successful spawn must close
       nothing, or a cleanup that fires unconditionally passes.
@@ -382,8 +388,9 @@ not-new. That is accepted and recorded here rather than hidden.
       stops being readable keeps the last MEASURED height, not the fallback constant.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-poll-bounds.test.ts`
 - [ ] **A short write is terminal, not a hang.** `write` returns bytes ACCEPTED; a
-      socket taking 0 or half a frame must fail the call AND the connection, routing
-      to `'transport-lost'`. The comparison must be against BYTE length — comparing
+      socket taking 0 or half a frame must FAIL the call and end the connection, because
+      the server frames on newlines and a truncated request can never be answered. The
+      comparison must be against BYTE length — comparing
       `String.length` is too lax for non-ASCII, so a test must land in the gap
       (accepted > UTF-16 units, accepted < bytes) and prove the gap is real. The fake
       transport must NOT return `d.length` unconditionally, or the class is
@@ -403,18 +410,22 @@ not-new. That is accepted and recorded here rather than hidden.
       settle with `'pane-vanished'`, or an implementation that never concludes
       absence passes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **A malformed inbound frame is terminal.** Assert BOTH halves — the pending
-      call rejects AND a later call is refused without reaching the wire — because
-      rejecting the pending call was already true before the fix. Control: a
-      well-formed frame leaves the connection usable, or a client that closed on
-      every frame would pass.
+- [ ] **A malformed inbound frame fails the call, and cannot poison the next one.** The
+      old second half — "a later call is refused without reaching the wire" — was a
+      property of a shared connection and is DELETED with it. Its replacement is stronger
+      and is the reason the one-connection shape is safe: the next call is a new
+      connection, so a stream whose position is no longer known is discarded rather than
+      resynchronised. Control: a well-formed frame resolves normally on an otherwise
+      identical fake, or a client that failed every frame would pass.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
-- [ ] **Teardown is an ACTION, reached by every terminal route.** All three — a
-      malformed frame, a short write, a THROWN write — must end the socket exactly
-      once and reject EVERY pending request, not just the newest. Assert the observed
-      `end` count, never `isClosed()` alone: the flag is the symptom, and asserting it
-      cannot distinguish a teardown from a relabelling. Control: a healthy exchange
-      ends the socket zero times, and teardown is idempotent.
+- [ ] **Closing the socket is an ACTION, reached by every route — including the healthy
+      one.** Every terminal route ends the connection exactly once: a malformed frame, a
+      short write, a THROWN write, a deadline, a close before the reply, AND a successful
+      call. The control INVERTED with the transport: it used to be "a healthy exchange
+      ends the socket zero times", and it is now "a healthy exchange ends it exactly once",
+      because the connection is per call and leaving it to the GC leaks a descriptor per
+      request. Assert the observed `end` count, never a flag: the flag is the symptom, and
+      asserting it cannot distinguish a close from a relabelling.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Inbound bytes are decoded exactly once, at a known-complete boundary.**
       `onBytes` takes bytes, buffers bytes, and decodes one complete line. A
@@ -428,13 +439,19 @@ not-new. That is accepted and recorded here rather than hidden.
       reverse, since the defect has appeared in both directions and in a length
       comparison.
       verify: `rg -n "toString\(|Buffer\.from|Buffer\.byteLength|TextDecoder|TextEncoder" runtime/adapters/claude-code/persistent --type ts`
-- [ ] **Every RPC is bounded by a clock, and the clock reaches `teardown`.** A socket
-      that accepts the whole frame and never replies — no error, no close, no event —
-      must fail the call and tear the transport down, INCLUDING `connectHerdr`'s
-      handshake `ping` (an unbounded wait there means the gateway never starts).
-      Assert the opposite direction too: a reply cancels the clock, so a healthy
-      connection is never torn down — a timeout that always fires would pass the
-      first case alone.
+- [ ] **Every RPC is bounded by its own clock, and the deadline can fire before the
+      socket even exists.** A peer that accepts the whole frame and never replies must
+      fail the call and end the connection, INCLUDING the spawn-time handshake `ping` (an
+      unbounded wait there means the gateway never starts). Assert the opposite direction
+      too: a reply cancels the clock, so a healthy connection is not failed — a timeout
+      that always fires would pass the first case alone. And assert the ABSENCE the shape
+      depends on: the deadline can fire while the connect is still in flight, which is a
+      window in which nothing yet holds the call's promise. The call therefore settles by
+      RESOLVING an outcome record and never by rejecting one, because an unobserved
+      rejection is fatal under Bun's process net (`logger/fire-and-forget.ts` states the
+      policy). The test registers an `unhandledRejection` listener and requires both the
+      right error and an EMPTY listener log — asserting the error alone passes with the
+      hazard present.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Only TERMINAL operations latch `wasKilledByUs`.** `kill('SIGINT')` is an
       interrupt, not a termination: it must leave `wasKilledByUs()` false, record
@@ -445,17 +462,16 @@ not-new. That is accepted and recorded here rather than hidden.
       discriminator; a test asserting the child is alive AND killed-by-us is
       documenting a contradiction rather than refusing it, and is not a criterion.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
-- [ ] **`data` is part of the event envelope, and each way of not being an object is
-      its own case.** Absent, `null`, an array, a bare string and a bare number must
-      each reach the malformed-frame teardown — listed and mutated INDIVIDUALLY, since
-      they take different branches (`in`, `typeof null === 'object'`, `Array.isArray`,
-      primitive `typeof`) and a partial check passes some while failing others.
-      Coercing any of them to `{}` is the defect: the frame validates, handlers run
-      with an empty object, `pane_exited`'s `pane_id` comparison fails, and the exit is
-      SILENTLY DROPPED. Pair it with the control that `data:{}` — genuinely empty and
-      known — stays VALID, or "require data" is satisfiable by rejecting anything
-      falsy, which breaks a legitimate fieldless event.
+- [ ] **The event-envelope `data` criterion is DELETED with the events — but its RULE is
+      not, and moved to the reply envelope.** It required each way of not being an object
+      (absent, `null`, an array, a bare string, a bare number) to be its own case, because
+      they take different branches and a partial check passes some while failing others,
+      with the control that a genuinely empty `{}` stays VALID. There are no events to
+      validate. The same discipline now covers `result`/`error` in the reply envelope,
+      fifteen cases plus the empty-result control — see the envelope criterion below.
+      Recorded rather than dropped so the rule is not re-learned from the same defect.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+      — the fifteen envelope cases plus the empty-result control are where the rule lives now.
 - [ ] **No document still mandates the deleted backend.** Deleting a backend is
       narrowing a guard, so every document asserting the old rule is fixed in the same
       change — above all the per-directory `runtime/adapters/claude-code/AGENTS.md`,
@@ -501,21 +517,23 @@ not-new. That is accepted and recorded here rather than hidden.
       if disabling it changes no test, the tests that depend on it were passing for some
       other reason.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/`
-- [ ] **A frame that PARSES but matches no envelope is torn down.** "Malformed" must
-      be defined by the protocol's requirement, not by the parser throwing: `null`,
-      `[]`, `{}`, bare primitives, an id with no outcome and an outcome with no id all
-      have to reach the same teardown, and none may throw out of `onBytes`. Assert
-      `isClosed()` SYNCHRONOUSLY with a long RPC clock — with a short one the timeout
-      tears the connection down anyway and the test passes without the validation
-      existing (M53 survived exactly that way). Control: both legitimate envelopes
-      still work, or a validator that rejects everything passes.
+- [ ] **A frame that PARSES but matches no envelope FAILS the call.** "Malformed" must be
+      defined by the protocol's requirement, not by the parser throwing: `null`, `[]`,
+      `{}`, bare primitives, an id with no outcome and an outcome with no id all have to
+      fail the same way, and none may throw out of `onBytes`. The clock must be LONG
+      enough that the deadline cannot be what failed the call — with a short one the
+      timeout fails it anyway and the test passes without the validation existing (M53
+      survived exactly that way), so each case asserts the ENVELOPE message rather than
+      merely that something rejected. Control: both legitimate envelopes still work, or a
+      validator that rejects everything passes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Inbound framing is size-bounded.** A peer that never sends `0x0A` must be torn
       down rather than buffered to exhaustion — this is the UNDECLARED half of the
       protocol-drift risk the `ping` gate covers only when the server announces it.
       Test exactly AT the limit (a legitimate maximal frame must still complete — a
       bound that rejects one is a new failure mode), one byte over, and accumulation
-      one byte at a time so the limit is on what has gathered rather than per chunk.
+      across MULTIPLE deliveries so the limit is on what has gathered rather than on any
+      one chunk.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **No screen is delivered before the caller's consumer can exist.** The host must
       not poll at all until `beginOutput()`, and the criterion is **a first screen that
@@ -526,11 +544,14 @@ not-new. That is accepted and recorded here rather than hidden.
       immediately-resolving fake, removing the gate still passes. Assert the fail-open
       too (a forgotten call delivers LATE, never never) and idempotence.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
-- [ ] **The frame bound runs BEFORE the frame is decoded or dispatched.** A guard after
-      the thing it guards is not a guard: checking the remaining UNTERMINATED bytes let
-      every oversized frame that arrived with its newline through. Test a COMPLETE
-      one-byte-over frame, an oversized frame followed by a valid one (proving teardown
-      rather than resynchronisation), and a COMPLETE frame exactly at the limit.
+- [ ] **The frame bound runs BEFORE the frame is copied, decoded or dispatched.** A guard
+      after the thing it guards is not a guard — an earlier round checked the remaining
+      UNTERMINATED bytes and let every oversized frame that arrived with its newline
+      through, and a later one ran the check after the grow-and-copy it exists to prevent.
+      The "oversized frame followed by a valid one" case is gone with the shared
+      connection (there is no resynchronisation to prove, and no second frame to accept).
+      What remains: an over-cap reply refused with nothing copied, and a COMPLETE reply
+      exactly at the limit accepted.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] `resize` is optional on `PtyChild` and unimplemented by `HerdrHost`, with
       the reason recorded — not a silent no-op that reports success.

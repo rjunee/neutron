@@ -10,7 +10,7 @@
  * new fails loudly here rather than being silently accommodated.
  */
 
-import { HerdrError, type HerdrEventHandler, type HerdrRpc } from '../herdr-client.ts'
+import { HerdrError, type HerdrRpc } from '../herdr-client.ts'
 import { HERDR_PANE_NOT_FOUND } from '../herdr-protocol.ts'
 
 export interface FakeHerdrServerOpts {
@@ -33,7 +33,6 @@ export interface RecordedCall {
 export class FakeHerdrServer implements HerdrRpc {
   readonly calls: RecordedCall[] = []
   readonly paneId: string
-  private readonly handlers = new Map<string, Set<HerdrEventHandler>>()
   private closed = false
   /** MUTABLE: a pane can be resized at any time, and the bridge must notice. */
   viewportRows: number | null
@@ -52,10 +51,6 @@ export class FakeHerdrServer implements HerdrRpc {
    *  The pane is still there; the QUESTION failed. These must never be read as
    *  absence. */
   transientFailure = false
-  /** When set, `events.subscribe` REJECTS — an initialization failure AFTER the
-   *  pane already exists, which is where the leak lived. */
-  subscribeFails = false
-
   /**
    * PER-METHOD FAILURE INJECTION, as a first-class property of this fake.
    *
@@ -151,17 +146,12 @@ export class FakeHerdrServer implements HerdrRpc {
     return this.calls.filter((c) => c.method === method)
   }
 
-  /** Fire a subscription event at the host, as the real server would. */
-  emit(kind: string, data: Record<string, unknown>): void {
-    for (const h of [...(this.handlers.get(kind) ?? [])]) h(data)
-  }
-
-  /** The pane exits: herdr sends `pane_exited` and forgets the pane. Note what it
-   *  does NOT send — any exit status. */
+  /** The pane's process ends. NOTHING IS ANNOUNCED — the server has no way to tell a
+   *  host that holds no long-lived connection, so this is discovered on the next poll
+   *  as `pane_not_found`, which is exactly how the real one behaves. */
   exitPane(): void {
     this.paneGone = true
     this.readFails = true
-    this.emit('pane_exited', { type: 'pane_exited', pane_id: this.paneId, workspace_id: 'w9' })
   }
 
   async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -219,9 +209,6 @@ export class FakeHerdrServer implements HerdrRpc {
           },
         }
       }
-      case 'events.subscribe':
-        if (this.subscribeFails) throw new Error('fake-herdr: subscribe refused')
-        return { type: 'ok' }
       case 'pane.send_text':
       case 'pane.send_keys':
         return { type: 'ok' }
@@ -247,41 +234,11 @@ export class FakeHerdrServer implements HerdrRpc {
     }
   }
 
-  async subscribe(
-    kind: string,
-    subscription: Record<string, unknown>,
-    handler: HerdrEventHandler,
-  ): Promise<() => void> {
-    this.calls.push({ method: 'events.subscribe', params: subscription })
-    if (this.closed) throw new Error('fake-herdr: subscribe on a closed connection')
-    const injectedSub = this.failures.get('events.subscribe')
-    if (injectedSub !== undefined) throw injectedSub
-    if (this.subscribeFails) throw new Error('fake-herdr: subscribe refused')
-    let set = this.handlers.get(kind)
-    if (set === undefined) {
-      set = new Set()
-      this.handlers.set(kind, set)
-    }
-    set.add(handler)
-    return () => {
-      set?.delete(handler)
-    }
-  }
-
-  isClosed(): boolean {
-    return this.closed
-  }
-
+  /** No longer part of {@link HerdrRpc} — kept only so existing arrangements can mark
+   *  a fake unusable. Each real call opens and closes its own connection, so there is
+   *  no shared transport to lose. */
   close(): void {
     this.closed = true
-    // FAIL EVERY IN-FLIGHT CALL, exactly as the real client's teardown does
-    // (`herdr-client.ts` `failAll`). Closing a connection does not leave the
-    // requests already on it in limbo — it ends them, and code downstream has to
-    // cope with a rejection arriving for a call it made before the close.
-    for (const { fail } of [...this.holds.values()]) {
-      fail(new Error('fake-herdr: connection closed with a call in flight'))
-    }
-    this.holds.clear()
   }
 }
 

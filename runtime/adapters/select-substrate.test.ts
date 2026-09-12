@@ -9,6 +9,14 @@ import { createClaudeCodeSubstrateAuto } from './claude-code/index.ts'
 import { createGptResponsesApiSubstrate } from './openai-responses/index.ts'
 import { createCodexCliSubstrate } from './codex-cli/index.ts'
 
+// HERMETIC: these tests assert substrate SELECTION and wiring, not spawning — but
+// `start()` reaches the real `HerdrHost`, which now works. Pointing the socket at a
+// path that does not exist makes the spawn fail immediately instead of creating REAL
+// PANES on the developer's herdr server and waiting out the pid timeout. Before the
+// transport was fixed these tests were fast by accident: the client could not get past
+// its own protocol ping, so nothing was ever spawned.
+process.env['HERDR_SOCKET_PATH'] = '/nonexistent/herdr-test-must-not-connect.sock'
+
 describe('select-substrate', () => {
   test("select('anthropic') returns the Claude Code factory VERBATIM (default backend, unchanged)", () => {
     const sel = selectSubstrateFactory('anthropic')

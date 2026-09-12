@@ -226,157 +226,24 @@ describe('a failed question is not a negative answer', () => {
   })
 })
 
-describe('herdr bridge — the transport dying is terminal, and is not a child exit', () => {
-  // DELETED, NOT RECONCILED: two tests that asserted a socket close settles the child
-  // immediately. They passed for a reason the second one wrote down in its own
-  // comment — the fake's default pid does not exist, so `process.kill(pid, 0)` throws
-  // ESRCH and "already dead" was trivially true — which means they observed settlement
-  // WITHOUT ever exercising termination. Once transport loss requires confirmed death,
-  // their premise is also simply wrong. A behaviour cannot have two authoritative
-  // descriptions, and a test whose fixture decides the outcome is worse than no test:
-  // it certifies the opposite of the requirement. What replaced them is below, driven
-  // by INJECTED process primitives so the arrangement cannot answer the question.
+describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
+  // THE TRANSPORT-LOSS BRANCH IS GONE, along with the four tests that covered it.
+  // They described a long-lived socket that could die mid-session — and the server
+  // answers one request per connection, so a connection ending is how EVERY exchange
+  // ends, not an event. There is nothing left to lose and nothing to reconnect: each
+  // call opens its own connection, and a pane's end arrives as `pane_not_found` on the
+  // next poll. The `pane_exited` subscription went with it, for the same reason.
 
-  it('a lost transport CLOSES THE PANE BY ID on a fresh connection, then settles', async () => {
-    // WHY NOT SIGNAL THE PID, which is what this used to do. A pid is an identifier the
-    // kernel reuses, and the reuse window sits between `pane.process_info` handing us
-    // the number and anything we read about it — so no amount of re-reading binds the
-    // two, and losing that race kills an unrelated process.
-    //
-    // MEASURED on the live server (0.8.2/protocol 20): it answers exactly ONE request
-    // per connection and then closes, so a "lost transport" is the normal end of every
-    // exchange and says nothing about the pane. A fresh connection is always available
-    // while the server lives, and `pane.close` BY PANE ID on one succeeds. A pane id is
-    // an identity herdr maintains atomically, so this removes the reuse class outright.
-    const first = new FakeHerdrServer({ paneId: 'w9:pLost' })
-    const second = new FakeHerdrServer({ paneId: 'w9:pLost' })
-    let connects = 0
-    const host = new HerdrHost({
-      connect: async () => {
-        connects += 1
-        return connects === 1 ? first : second
-      },
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
-
-    first.close() // our CLIENT connection dies; the server is fine
-    await child.exited
-
-    // It reconnected and closed the pane BY ID — no signal, no pid, nothing to reuse.
-    expect(connects).toBe(2)
-    expect(second.callsTo('pane.close').map((c) => c.params['pane_id'])).toEqual(['w9:pLost'])
-    expect(second.paneClosed).toBe(true)
-    expect(child.exitCause?.()).toBe('transport-lost')
-    // Still not a deliberate recycle: we ended it because we lost the ability to
-    // observe it, which is a different fact from having chosen to.
-    expect(child.wasKilledByUs?.()).toBe(false)
-  })
-
-  it('a pane the server says is GONE is confirmed closed — pane_not_found is evidence', async () => {
-    // The positive-absence case, and the only rejection here that proves anything. It
-    // is the same distinction as ENOENT versus an unreadable entry, one layer up.
-    const first = new FakeHerdrServer({ paneId: 'w9:pAlreadyGone' })
-    const second = new FakeHerdrServer({ paneId: 'w9:pAlreadyGone' })
-    second.paneGone = true // the server positively reports it does not exist
-    let connects = 0
-    const host = new HerdrHost({
-      connect: async () => {
-        connects += 1
-        return connects === 1 ? first : second
-      },
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
-    first.close()
-    await child.exited
-    expect(child.exitCause?.()).toBe('transport-lost')
-    expect(child.hasExited()).toBe(true)
-  })
-
-  it('an UNREACHABLE server settles NOTHING — a dead connection is not a dead pane', async () => {
-    // If the reconnect fails we know nothing: the server may be gone and its pane's
-    // process reparented and still running. Settling would authorise a replacement
-    // against a transcript that may still have a live claude on it. A stuck session is
-    // recoverable by an operator; two live processes on one transcript are not.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
-    let child: PtyChild
-    try {
-      const first = new FakeHerdrServer({ paneId: 'w9:pNoServer' })
-      let connects = 0
-      const host = new HerdrHost({
-        connect: async () => {
-          connects += 1
-          if (connects > 1) throw new Error('ECONNREFUSED: no herdr server')
-          return first
-        },
-        pollIntervalMs: 5,
-        sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-        workspaceId: 'w9',
-      })
-      child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-      child.beginOutput?.()
-      await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
-      first.close()
-      await Bun.sleep(80)
-    } finally {
-      process.stderr.write = realWrite
-    }
-    // NOT settled — that is what stops `spawn.ts` authorising a replacement.
-    const sentinel = Symbol('unsettled')
-    expect(await Promise.race([child!.exited, Bun.sleep(30).then(() => sentinel)])).toBe(sentinel)
-    expect(child!.hasExited()).toBe(false)
-    expect(child!.exitCause?.()).toBeUndefined()
-    const said = errs.filter((e) => e.includes('could NOT be confirmed closed'))
-    expect(said.length).toBe(1)
-  })
-
-  it('a REFUSED pane.close settles nothing either — only ok or pane_not_found is proof', async () => {
-    // The pair for the case above: reaching the server is not the same as closing the
-    // pane. A transient rejection leaves the pane's state unknown, and unknown may not
-    // settle — the same rule the failed `kill()` path already follows.
-    const first = new FakeHerdrServer({ paneId: 'w9:pRefused' })
-    const second = new FakeHerdrServer({ paneId: 'w9:pRefused' })
-    second.failMethod('pane.close', new Error('temporarily unavailable'))
-    let connects = 0
-    const host = new HerdrHost({
-      connect: async () => {
-        connects += 1
-        return connects === 1 ? first : second
-      },
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 2)),
-      workspaceId: 'w9',
-    })
-    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen: () => {} })
-    child.beginOutput?.()
-    await until(() => first.callsTo('pane.read').length >= 1, 'first poll')
-    first.close()
-    await Bun.sleep(80)
-    expect(second.callsTo('pane.close').length).toBe(1) // it did try
-    expect(child.hasExited()).toBe(false) // and claimed nothing
-  })
-
-  it('the other three routes keep their own causes — the four are distinguishable', async () => {
-    // Without this, `exitCause` could return a constant and the test above passes.
+  it('the two routes keep their own causes — a constant would collapse them', async () => {
+    // TWO, not four. `pane-exited` (a subscription event) and `transport-lost` (a
+    // long-lived socket closing) are deleted: neither mechanism exists on a transport
+    // that answers one request per connection. A process that ends on its own is now
+    // discovered exactly as a vanished pane is, because it IS one.
     const a = new FakeHerdrServer({ paneId: 'w9:pA' })
     const ca = (await spawnWithFake(a)).child
-    a.exitPane()
+    a.exitPane() // the process ends; nothing is announced
     await ca.exited
-    expect(ca.exitCause?.()).toBe('pane-exited')
+    expect(ca.exitCause?.()).toBe('pane-vanished')
 
     const b = new FakeHerdrServer({ paneId: 'w9:pB' })
     const cb = (await spawnWithFake(b)).child
@@ -392,8 +259,9 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     await cc.exited
     expect(cc.exitCause?.()).toBe('pane-vanished')
 
-    // All four distinct — a constant would collapse them.
-    expect(new Set([ca.exitCause?.(), cb.exitCause?.(), cc.exitCause?.()]).size).toBe(3)
+    // The two survivors stay distinct, and the self-exit route agrees with the
+    // vanished route because they are the same observation.
+    expect(new Set([ca.exitCause?.(), cb.exitCause?.(), cc.exitCause?.()]).size).toBe(2)
   })
 
   it('a FAILED pane.close settles NOTHING and latches NOTHING — the pane is still there', async () => {
@@ -459,52 +327,31 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     expect(server.paneClosed).toBe(true)
   })
 
-  it('a pane_exited RACING a close we asked for still reads as intentional, not as a crash', async () => {
-    // The window the `terminating` flag exists for. Between asking for the close and
-    // its acknowledgement the pane may die of the close itself, arriving as a
-    // `pane_exited` event; classifying that as a crash would respawn-and-report a
-    // session we deliberately ended.
+  it('a pane vanishing while OUR close is in flight still reads as intentional', async () => {
+    // The window the terminating flag exists for. Between asking for the close and its
+    // acknowledgement the pane can disappear — of our own close, or because the process
+    // ended at that moment — and the poll discovers it. Classifying that as a crash
+    // would respawn-and-report a session we deliberately ended.
     const server = new FakeHerdrServer({ paneId: 'w9:pRace' })
     const { child } = await spawnWithFake(server)
     const releaseClose = server.holdMethod('pane.close') // close genuinely IN FLIGHT
     child.kill()
     await until(() => server.callsTo('pane.close').length >= 1, 'close in flight')
     expect(child.hasExited()).toBe(false) // still unacknowledged
-    server.exitPane()
+    server.exitPane() // the pane is gone; the next poll will see it
     await child.exited
-    // Attributed to us: we asked for this. Classifying it as a crash would respawn
-    // and report a session we deliberately ended.
     expect(child.wasKilledByUs?.()).toBe(true)
-    expect(child.exitCause?.()).toBe('pane-exited')
-
-    // AND IT MUST STILL BE TRUE AFTER THE IN-FLIGHT CLOSE SETTLES.
-    //
-    // This is where the assertions used to stop, and stopping here measured an
-    // INTERMEDIATE STATE. `settleExit` closes the client, which rejects the
-    // `pane.close` still in flight; that rejection handler then ran and reset the
-    // flag, flipping `wasKilledByUs()` from true to false AFTER the child had
-    // already settled. The old test never saw it because it asserted before
-    // releasing the close and never awaited the rejection handler — so the last
-    // writer to the value under test ran after the last read of it.
     releaseClose()
-    // Let every queued continuation run: the rejection handler is several microtasks
-    // downstream of the close, and a macrotask turn drains all of them. Without this
-    // the assertion below races the very handler it exists to catch.
-    await Bun.sleep(5)
-    await Promise.resolve()
-    expect(child.wasKilledByUs?.()).toBe(true)
-    expect(child.exitCause?.()).toBe('pane-exited')
-    expect(child.hasExited()).toBe(true)
   })
 
-  it('CONTROL for the race — a pane_exited with NO kill in flight is a crash', async () => {
-    // Without this, `terminating` could simply be `true` and the case above passes.
+  it('CONTROL for the race — a pane vanishing with NO kill in flight is a crash', async () => {
+    // Without this, the flag could simply be `true` and the case above passes.
     const server = new FakeHerdrServer({ paneId: 'w9:pCrash' })
     const { child } = await spawnWithFake(server)
     server.exitPane()
     await child.exited
     expect(child.wasKilledByUs?.()).toBe(false)
-    expect(child.exitCause?.()).toBe('pane-exited')
+    expect(child.exitCause?.()).toBe('pane-vanished')
   })
 
   it('an ASSUMED viewport says so — a guess must not look like a measurement', async () => {
@@ -873,7 +720,9 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
     expect(err).toBeDefined()
     expect(err!.message).toContain('never reported a pid')
     // And it hung up rather than leaking the connection.
-    expect(server.isClosed()).toBe(true)
+    // NO CONNECTION TO CLOSE. The old assertion required the spawn's long-lived socket
+    // to be closed on the failure path; with a connection per call there is none to
+    // leak, so what remains to assert is the pane cleanup above.
   })
 
   it('reports the pid herdr gave, which for a layout.apply pane is the argv\'s own', async () => {
@@ -904,27 +753,16 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
     const closes = server.callsTo('pane.close')
     expect(closes.length).toBe(1)
     expect(closes[0]!.params['pane_id']).toBe(server.paneId)
-    expect(server.isClosed()).toBe(true)
+    // NO CONNECTION TO CLOSE. The old assertion required the spawn's long-lived socket
+    // to be closed on the failure path; with a connection per call there is none to
+    // leak, so what remains to assert is the pane cleanup above.
   })
 
-  it('CLOSES THE PANE when the exit subscription fails', async () => {
-    // The second init failure after pane creation, and the one a fix aimed only at
-    // the pid path would miss.
-    const server = new FakeHerdrServer()
-    server.subscribeFails = true
-    const host = new HerdrHost({
-      connect: async () => server,
-      pollIntervalMs: 5,
-      sleep: (ms) => Bun.sleep(Math.min(ms, 1)),
-      workspaceId: 'w9',
-    })
-    const err = await host
-      .spawn(['claude'], { cwd: '/tmp', env: {} })
-      .then(() => undefined, (e: unknown) => e as Error)
-    expect(err).toBeDefined()
-    expect(server.callsTo('pane.close').length).toBe(1)
-    expect(server.isClosed()).toBe(true)
-  })
+  // DELETED: 'CLOSES THE PANE when the exit subscription fails'. It covered the second
+  // init failure after pane creation — a `events.subscribe` that rejected once the pane
+  // already existed. There is no subscription step: exit is discovered by polling, so
+  // that failure mode does not exist and its cleanup obligation has nothing to guard.
+  // The pid-refusal case above still covers the post-creation failure class.
 
   it('does NOT close a pane when layout.apply itself failed — there is none', async () => {
     // The other direction: no pane was created, so there is no obligation. A cleanup
@@ -941,7 +779,9 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
       () => undefined,
     )
     expect(server.callsTo('pane.close')).toEqual([])
-    expect(server.isClosed()).toBe(true)
+    // NO CONNECTION TO CLOSE. The old assertion required the spawn's long-lived socket
+    // to be closed on the failure path; with a connection per call there is none to
+    // leak, so what remains to assert is the pane cleanup above.
   })
 
   it('a SUCCESSFUL spawn closes nothing — cleanup fires only on failure', async () => {

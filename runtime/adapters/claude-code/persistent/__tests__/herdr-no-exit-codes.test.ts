@@ -119,24 +119,18 @@ describe('no exit codes exist in herdr', () => {
     child.beginOutput?.()
     server.exitPane()
     await child.exited
-    // A second `pane_exited` for the same pane (a duplicate event, or a close racing
-    // the event) must not double-report a death.
-    server.emit('pane_exited', { type: 'pane_exited', pane_id: server.paneId, workspace_id: 'w9' })
+    // A close racing the discovery must not double-report a death.
     child.kill()
     await Bun.sleep(20)
     expect(seen).toEqual([null])
   })
 
-  it('an exit for a DIFFERENT pane is ignored', async () => {
-    const server = new FakeHerdrServer({ paneId: 'w9:pMine' })
-    const child = await spawn(server)
-    // The subscription is server-wide, so every pane's exit arrives here. A host
-    // that did not filter would declare its own REPL dead on a neighbour's exit.
-    server.emit('pane_exited', { type: 'pane_exited', pane_id: 'w9:pSomeoneElse', workspace_id: 'w9' })
-    await Bun.sleep(20)
-    expect(child.hasExited()).toBe(false)
-    child.kill()
-  })
+  // DELETED: 'an exit for a DIFFERENT pane is ignored'. It guarded a server-wide
+  // subscription, where every pane's exit arrived on our socket and had to be filtered
+  // by `pane_id`. There is no subscription: each poll asks about OUR pane by id, so a
+  // neighbour's exit is not something this host can be told about. The hazard is gone
+  // rather than handled — which is also why a fresh subscriber being delivered another
+  // pane's recent exit (MEASURED) can no longer reach us.
 
   it('kill() records intent BEFORE the close lands, so a race cannot read as a crash', async () => {
     const server = new FakeHerdrServer()
@@ -156,8 +150,9 @@ describe('no exit codes exist in herdr', () => {
     server.exitPane()
     await child.exited
     expect(child.hasExited()).toBe(true)
-    // One connection per REPL, so the connection has to die with it or a long-lived
-    // gateway accumulates a socket per respawn.
-    await until(() => server.isClosed(), 'connection closed')
+    // NOTHING TO CLOSE. The old assertion required the REPL's long-lived socket to die
+    // with it, or a gateway would accumulate one per respawn. With a connection per
+    // call there is no socket outliving a request, so the leak it guarded cannot
+    // exist — the guarantee is now structural rather than asserted.
   })
 })

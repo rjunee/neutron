@@ -365,7 +365,7 @@ describe('kill maps onto the only signal herdr has', () => {
     const classify = (exitCode: number | null, killedByUs: boolean): 'crash' | 'clean' =>
       !killedByUs && exitCode !== 0 ? 'crash' : 'clean'
     expect(classify(code, child.wasKilledByUs?.() ?? false)).toBe('crash')
-    expect(child.exitCause?.()).toBe('pane-exited')
+    expect(child.exitCause?.()).toBe('pane-vanished')
     // The interrupt is still recorded — it just does not license a 'clean' verdict.
     expect(child.wasInterruptedByUs?.()).toBe(true)
   })

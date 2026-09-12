@@ -66,7 +66,7 @@ import {
   type HerdrPaneRead,
   type HerdrProcessInfo,
 } from './herdr-protocol.ts'
-import { connectHerdr, HerdrError, type HerdrRpc } from './herdr-client.ts'
+import { createHerdrRpc, herdrPing, HerdrError, type HerdrRpc } from './herdr-client.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** How long to wait for herdr to report the spawned pane's pid before refusing
@@ -177,9 +177,18 @@ export class HerdrHost implements PtyHost {
     const pollMs = this.deps.pollIntervalMs ?? HERDR_POLL_INTERVAL_MS
     const sleep = this.deps.sleep ?? ((ms: number) => Bun.sleep(ms))
 
-    // `connectHerdr` is where the protocol version is checked, and it THROWS on a
-    // mismatch. A spawn that cannot verify the protocol does not happen.
-    const client = await (this.deps.connect ?? (() => connectHerdr()))()
+    // ONE RPC HANDLE, whose every call is its OWN connection — the shape the server
+    // implements (it answers one request per connection and then closes it).
+    const client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
+
+    // THE VERSION GATE, ONCE. It used to live in `connectHerdr`, which pinged as part
+    // of connecting; with a connection per call that would double the cost of every
+    // operation. Pinging here instead is not a weakening: the server's protocol cannot
+    // change under a running host without restarting herdr, and herdr's panes are its
+    // children — a restart takes the REPLs with it, so there is no drift to detect
+    // mid-session that would leave a REPL to supervise. It still THROWS on a mismatch,
+    // so a spawn that cannot verify the protocol does not happen.
+    if (this.deps.connect === undefined) await herdrPing()
 
     // THE CLEANUP OBLIGATION STARTS HERE, NOT AT THE END OF A SUCCESSFUL SPAWN.
     // The pane — and the `claude` process in it — exists the moment `layout.apply`
@@ -254,18 +263,16 @@ export class HerdrHost implements PtyHost {
       }
       exitResolve(null)
       if (gateTimer !== undefined) clearTimeout(gateTimer)
-      client.close()
     }
 
-    // Subscribe BEFORE the first poll so an exit during startup is still observed.
-    try {
-      await client.subscribe('pane_exited', { type: 'pane.exited' }, (data) => {
-        if (data['pane_id'] === paneId) settleExit('pane-exited')
-      })
-    } catch (e) {
-      await this.abandonPane(client, paneId)
-      throw e instanceof Error ? e : new Error(String(e))
-    }
+    // NO SUBSCRIPTION. A `pane.exited` event needs a connection that outlives a
+    // request, and there is no longer one to keep: every call is its own connection.
+    // Exit is discovered by POLLING instead — `pane.read` answering `pane_not_found`
+    // is the same fact, arriving on the tick after it becomes true rather than as a
+    // push. That trade is deliberate: a poll cannot be missed while we are not
+    // listening, cannot be replayed (a fresh subscription is delivered recent exits —
+    // MEASURED: a subscriber saw a `pane_exited` for a pane that had already gone
+    // before it subscribed), and cannot arrive for somebody else's pane.
 
     // THE OUTPUT GATE. The poll loop must not deliver a screen before the caller has
     // wired the consumer, which it cannot do until this `spawn` resolves. See
@@ -513,7 +520,6 @@ export class HerdrHost implements PtyHost {
         // which is exactly when the spawn was failing anyway.
       }
     }
-    client.close()
   }
 
   /** Poll `pane.process_info` until herdr reports a pid for the pane. */
@@ -572,54 +578,6 @@ export class HerdrHost implements PtyHost {
     let warnedForRows: number | undefined
     const refreshMs = this.deps.viewportRefreshMs ?? HERDR_VIEWPORT_REFRESH_MS
     while (!hasExited()) {
-      if (client.isClosed()) {
-        // THE FOURTH ROUTE TO A TERMINAL CHILD, and the one that is not a child
-        // event: the transport died. NOTHING ABOUT THE PROCESS CHANGED — the channel
-        // we would learn through vanished. `pty-host.ts` says so in the interface,
-        // twenty lines from where this code used to contradict it.
-        //
-        // THE DEFECT THIS REPLACES: `settleExit('transport-lost')`, alone, right
-        // here. Settlement runs the ordinary death handling in `spawn.ts` — session
-        // marked dead, sink unregistered, pool entry dropped, temp configs deleted —
-        // so the next request spawns ANOTHER `claude` against the same session id and
-        // the same transcript while the original is still running. That breaks
-        // one-process-per-transcript, the invariant this substrate is built on and
-        // which is enforced ONLY by killing the old process, and it leaves a
-        // credential-bearing process alive with nothing managing it.
-        //
-        // It is the settled-state rule with the sign flipped: the earlier rows
-        // REWROTE a settled state, this one settled on the ABSENCE OF EVIDENCE.
-        // "The socket closed" and "the process exited" are different facts, and
-        // `transport-lost` is an UNKNOWN disposition being consumed as a definite
-        // one — the `?? {}` defect promoted from a field to a lifecycle.
-        //
-        // WHY TERMINATION RATHER THAN ADOPTION. Re-attaching to a surviving pane
-        // across a new socket is #539 (a gateway restart bringing REPLs back), which
-        // is not built; until it is, the only disposition that preserves the
-        // invariant is ending the process. And it must be CONFIRMED, not attempted,
-        // because this branch already has a row for a kill reported as successful
-        // when it failed. `process.kill` is exactly the right tool here precisely
-        // BECAUSE it does not need the herdr transport that just died.
-        const ended = await this.closeLostPane(paneId)
-        if (!ended) {
-          // COULD NOT CONFIRM CLOSURE, so we do not get to claim one. Either the
-          // server was unreachable — which says nothing about the pane, whose process
-          // may have been reparented and survived — or it refused the close. Settling
-          // would authorise a replacement against a transcript that may still have a
-          // live claude on it; a stuck session is recoverable by an operator, two live
-          // processes on one transcript are not.
-          process.stderr.write(
-            `[herdr-host] pane ${paneId}: transport lost and the pane could NOT be confirmed ` +
-              `closed — a reconnect or pane.close did not succeed. NOT settling the child: ` +
-              `reporting an exit would let the pool spawn a second claude against this session's ` +
-              `transcript while the first may still be running. This session needs manual ` +
-              `attention.\n`,
-          )
-          return
-        }
-        settleExit('transport-lost')
-        return
-      }
       // RE-READ THE GEOMETRY PERIODICALLY. A pane can be resized after the first
       // read, and a stale height makes every request the wrong size — silently
       // returning nothing at all when the pane grew. Not cached forever.
@@ -721,65 +679,6 @@ export class HerdrHost implements PtyHost {
     }
   }
 
-  /**
-   * End a child whose CLIENT transport is gone, and report whether closure was
-   * CONFIRMED — by asking the server to close the pane, on a fresh connection.
-   *
-   * WHY NOT SIGNAL THE PID, which is what stood here. A pid is an identifier the
-   * kernel reuses, and nothing the host can do after being handed a bare integer binds
-   * it to a process: the reuse window sits between `pane.process_info` returning the
-   * number and anything we read about it. Narrowing that window is not closing it, and
-   * the cost of losing the race is killing an unrelated process.
-   *
-   * MEASURED against the live server (0.8.2, protocol 20) rather than assumed:
-   *
-   *  • The server answers exactly ONE request per connection and then closes it —
-   *    two frames pipelined in the same tick get one reply, and the socket is gone 1 ms
-   *    later. So a "lost transport" is a lost CLIENT CONNECTION, which is the normal
-   *    end of every exchange, and is NOT evidence about the server or the pane.
-   *  • A fresh connection is therefore always available while the server lives, and
-   *    `pane.close` BY PANE ID on one returns `{type:'ok'}`, after which `pane.get`
-   *    answers `pane_not_found`.
-   *  • `pane.process_info` carries `shell_pid`, `foreground_process_group_id` and
-   *    `foreground_processes[]` — and NO start time or identity token. So closing the
-   *    race inside the protocol is not available at this version; it would be a
-   *    protocol change, and this protocol moved 20→22 in nineteen days with no
-   *    server-side version check.
-   *
-   * A pane id is an identity herdr maintains atomically and does not recycle out from
-   * under us, so asking its owner to close it removes the PID-reuse class outright
-   * instead of narrowing it a third time.
-   *
-   * And if the server is gone, a fresh connection fails — which is UNKNOWN, not death:
-   * a pane's process may have been reparented and survived. The caller settles nothing.
-   */
-  private async closeLostPane(paneId: string): Promise<boolean> {
-    const connect = this.deps.connect ?? ((): Promise<HerdrRpc> => connectHerdr())
-    let client: HerdrRpc
-    try {
-      client = await connect()
-    } catch {
-      // The server is unreachable. That is not proof the pane is gone.
-      return false
-    }
-    try {
-      await client.call('pane.close', { pane_id: paneId })
-      return true
-    } catch (e) {
-      // ALREADY GONE IS CONFIRMED CLOSURE. `pane_not_found` is the server positively
-      // telling us the pane does not exist — the same distinction as ENOENT versus an
-      // unreadable entry, and the only rejection here that is evidence.
-      if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) return true
-      return false
-    } finally {
-      try {
-        client.close()
-      } catch {
-        /* the connection is single-use anyway */
-      }
-    }
-  }
-
   /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */
   private async readViewportRows(client: HerdrRpc, paneId: string): Promise<number | undefined> {
     try {
@@ -809,10 +708,10 @@ export class HerdrHost implements PtyHost {
       // `'pane-vanished'`, a claim nothing had observed.
       //
       // The cost of being strict here is that a pane we cannot ask about keeps being
-      // polled rather than being declared dead. That is the correct side to err on:
-      // the connection dying is already terminal via `'transport-lost'`, and a turn
-      // against an unresponsive REPL is ended by the inactivity watchdog above. What
-      // must not happen is a confident wrong answer.
+      // polled rather than being declared dead. That is the correct side to err on: a
+      // turn against an unresponsive REPL is ended by the inactivity watchdog above,
+      // and a server that is briefly unreachable recovers on the next tick. What must
+      // not happen is a confident wrong answer.
       return e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND
     }
   }
