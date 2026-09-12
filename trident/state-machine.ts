@@ -41,6 +41,7 @@
  * ─────────────────────────────────────────────────────────────────────
  */
 
+import { ralphCapFailureReason } from './ralph-budget.ts'
 import type { TridentPhase, TridentRun, WorkflowColumnsSeen } from './store.ts'
 
 /** The phases the loop never advances out of. */
@@ -213,11 +214,26 @@ function enterRalphPlan(
 ): { phase: TridentPhase; round: number; ralph_round: number; failure_reason: string | null; note: string } {
   const nextRalphRound = run.ralph_round + 1
   if (nextRalphRound > run.max_ralph_rounds) {
+    // THE SENTENCE IS OWNED BY `ralphCapFailureReason` (ralph-budget.ts), NOT WRITTEN
+    // HERE — and this comment is deliberately SHORT because the last four versions of it
+    // were not. When the sentence moved to a shared owner, its whole derivation was left
+    // behind here and went stale within one round: it still described arm 1 as "this run
+    // built something ... 'without converging' is accurate for it, unchanged", which the
+    // very next fix made false, and it still credited `delivery.ts` with reading the
+    // string, which it never has. A duplicated rationale is the same defect as a
+    // duplicated rule — it drifts, and it drifts silently because nothing compiles it.
+    //
+    // What belongs here is the LOCAL fact this function contributes, and nothing else:
+    // the refusal fires iff `ralph_round + 1 > max_ralph_rounds`, so at this point
+    // `ralph_round >= max_ralph_rounds`. Everything about WHICH arm that produces, why
+    // there are three and not four, and what each may and may not claim, lives with the
+    // function that writes it.
+    const failure_reason = ralphCapFailureReason(run)
     return {
       phase: 'failed',
       round: run.round,
       ralph_round: run.ralph_round,
-      failure_reason: `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`,
+      failure_reason,
       note: 'ralph loop → failed (max ralph rounds reached)',
     }
   }

@@ -78,6 +78,7 @@ import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
+import { ralphCapFailureReason } from './ralph-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
@@ -4614,16 +4615,25 @@ export function buildTridentOrchestrator(
     const nextRalphRound = run.ralph_round + 1
 
     if (nextRalphRound > run.max_ralph_rounds) {
-      // Non-convergence cap: fail loudly. No out-of-band clear needed — the run goes
-      // TERMINAL (`saveIfActive` commits `phase='failed'`), and `listNonTerminal`
-      // never reloads a terminal row, so the stale `inner_result` is inert. (If a
-      // crash beats that commit, the next tick re-harvests, re-enters here, and fails
-      // again — idempotent.)
+      // Cap reached: fail loudly. No out-of-band clear needed — the run goes TERMINAL
+      // (`saveIfActive` commits `phase='failed'`), and `listNonTerminal` never reloads a
+      // terminal row, so the stale `inner_result` is inert. (If a crash beats that
+      // commit, the next tick re-harvests, re-enters here, and fails again — idempotent.)
+      //
+      // THE REASON IS NOT WRITTEN HERE (#519, final gate). This site emitted "without
+      // converging" UNCONDITIONALLY while `enterRalphPlan` (state-machine.ts) had already
+      // been given a three-arm wording, so the inaccurate diagnosis stayed live on
+      // exactly the path a RESUMED seeded run takes — reached after review when
+      // `remaining_tasks > 0`, which is the shape most likely to arrive at the cap having
+      // run no iteration of its own. Both sites now call the single author,
+      // `ralphCapFailureReason` (ralph-budget.ts); fixing the string twice would have
+      // re-created the two-copies divergence that module exists to prevent. `remaining`
+      // is this path's own fact — the state machine does not know it — so it is passed in
+      // rather than dropped.
       const failed: TridentRun = {
         ...failedRun(
           run,
-          `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging ` +
-            `(${remaining} task(s) still unbuilt)`,
+          ralphCapFailureReason({ ...run, remaining_tasks: remaining }),
           false,
         ),
         pr,
