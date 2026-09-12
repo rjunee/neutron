@@ -151,10 +151,11 @@ the adapter's.
    holds across processes, because the lock that enforces it is codex's, not ours.
    **There is no unconditional "the second caller waits".** Overlap has two cases and
    they get different answers, because only one of them is ours to coordinate:
-   - **In-process overlap waits.** A second call on a thread already in flight queues
-     on a per-thread queue keyed by thread id, bounded by a timeout. It does not get a
-     fresh thread silently — that would abandon the conversation the caller asked to
-     continue. On timeout it gets the typed conflict outcome.
+   - **In-process overlap waits, under a bound that is a real setting.** A second call
+     on a thread already in flight queues on a per-thread queue keyed by thread id. The
+     wait is bounded by a **configured, inspectable timeout** — not an implicit one and
+     not none — and on expiry the caller gets the typed conflict outcome. It never gets
+     a fresh thread silently; that would abandon the conversation it asked to continue.
    - **Cross-process overlap does not wait; it returns the typed conflict
      immediately.** Two adapter processes sharing one thread id is a **design
      violation, not a supported case** — the rule above is one thread id per lane. The
@@ -284,29 +285,42 @@ form; the "kills:" note names what the earlier form let through.
       the simpler one those failures pointed at: production never puts one account in
       two homes, so there is no sharing mechanism to get right.
 
-- [ ] **In-process overlap on one thread id waits; cross-process overlap returns the
-      typed conflict; different thread ids never block each other.** verify three cases,
-      and the second must use **two real adapter processes**, not an injected error:
-      (i) **in-process** — start call A, and while it is in flight start call B on the
-      **same** id in the same process; assert B's turn began no earlier than A's
-      completion and both returned their own result.
-      (ii) **cross-process** — spawn **two real adapter processes** sharing one
+- [ ] **In-process overlap on one thread id waits under a configured bound;
+      cross-process overlap returns the typed conflict inside a fixed latency ceiling;
+      different thread ids never block each other.** verify four cases. Case (ii) must
+      use **two real adapter processes**, not an injected error.
+      (i) **in-process, within the bound** — start call A, and while it is in flight
+      start call B on the **same** id in the same process; assert B's turn began no
+      earlier than A's completion and both returned their own result.
+      (ii) **in-process, bound exceeded** — set the queue bound to a **small configured
+      value** and make A outlast it; assert B returns the **conflict-specific** outcome
+      (not a generic error, not a success) and that it returns **within that configured
+      bound plus a stated tolerance**, measured against the *configured value* and never
+      against A's duration. The bound must be a real, inspectable setting: a test that
+      cannot name the number it is asserting is testing nothing.
+      (iii) **cross-process** — spawn **two real adapter processes** sharing one
       `CODEX_HOME` and one thread id, with A's turn long enough to still be running when
-      B starts; assert B returns the **conflict-specific typed outcome** and that it did
-      **not** wait for A (B returns while A is still in flight). Forcing a writer-lock
-      error would only test the handling of a symptom the test injected; two processes
-      test whether the symptom arises at all and whether the outcome matches the
-      contract.
-      (iii) **different ids** — two calls on **different** thread ids must overlap in
+      B starts; assert B returns the **conflict-specific typed outcome** in **≤ 2
+      seconds of wall time, as an absolute ceiling independent of A's duration**.
+      *Why that number, stated so it does not drift on the first flake:* codex detects
+      the thread-store conflict and errors in **0.44 s** measured on this CLI, so 2 s is
+      roughly 4.5× the observed detection cost — ample headroom for a loaded box and
+      process startup — while the **shortest successful turn observed anywhere in the
+      spike was 3.2 s**, so an implementation that waits for even one turn before giving
+      up cannot pass. Asserting only "B returned before A finished" would be satisfied
+      by B waiting nine minutes while A ran ten.
+      (iv) **different ids** — two calls on **different** thread ids must overlap in
       time.
       Every conflict outcome must be distinguishable from the adapter's generic failure
       outcome and from success.
       *kills:* swallowing the conflict and retrying silently; reporting it as an ordinary
       failure; a single global lock, which passes (i) while serializing every unrelated
-      call — (iii) separates a per-thread queue from a process-wide one; and **an
-      implementation that serializes in-process and fails every cross-process overlap
-      while the spec promised waiting unconditionally** — the promise and its exception
-      sat in adjacent sentences, and only (ii) can tell which one the code implements.
+      call — (iv) separates a per-thread queue from a process-wide one; an
+      implementation that serializes in-process and fails every cross-process overlap,
+      which only (iii) can distinguish; **an unbounded in-process queue, and one that
+      returns a generic error on expiry** — both passed while (ii) was missing; and **a
+      cross-process arm that waits almost as long as A**, which the earlier
+      relative-to-A comparison could not fail.
 
 - [ ] **An escalation is either not requested or completed explicitly — never silently
       refused mid-task.** verify: for build-shaped work the argv matches what ships

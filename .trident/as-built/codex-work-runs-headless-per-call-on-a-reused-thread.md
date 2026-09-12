@@ -227,6 +227,31 @@ now spawns **two real adapter processes** sharing a `CODEX_HOME` and a thread id
 a writer-lock error tests the handling of a symptom the test injected; two processes test
 whether the symptom arises at all.
 
+**And one more, of a kind the other four cannot reach.** The cross-process arm asserted
+that B returns *before A finishes*. That is satisfied by B waiting nine minutes while A
+runs ten: the promise was "immediately" and the assertion scaled with A's duration. The
+case was present, the mechanism was right, and **the comparison could not fail for the
+reason it existed** — its looseness invisible precisely because a comparison against a
+real quantity looks like a real constraint. The in-process arm had the mirror gap: a
+bounded timeout was promised and only successful serialization tested, so an unbounded
+queue passed.
+
+Both now assert against numbers the test controls. The cross-process ceiling is **2
+seconds absolute**, chosen from measurement rather than taste: codex detects the
+thread-store conflict and errors in **0.44 s** on this CLI, so 2 s is ~4.5× the observed
+detection cost — headroom for a loaded box — while the **shortest successful turn
+anywhere in this spike was 3.2 s**, so an implementation that waits for even one turn
+before giving up cannot pass. The rationale is recorded beside the number because a bound
+without one drifts at the first flake. The in-process case sets a small configured bound,
+makes A outlast it, and asserts the conflict-specific outcome arrives within *that
+configured value* — a bound the test cannot name is a bound it is not testing.
+
+So: **does this assertion's strength depend on something the test does not control?**
+Swept across the other nine, it caught nothing — every remaining assertion is an equality,
+an absence, a count or a causal ordering rather than a magnitude, and ordering is the
+claim itself in the serialization case rather than a proxy for it. First sweep of this PR
+to come back empty, which is the only reason to believe the section is converging.
+
 **This is a fourth audit question, and it points at documentation rather than
 environment.** The path verified in the spike was single-process, so the criterion
 inherited a boundary the prose had already named: *what does this criterion assume that
@@ -237,6 +262,7 @@ learned:
 2. What would the correct implementation necessarily do that this forbids? — *permits too little*
 3. What does this criterion assume about how the system behaves, and have I measured it? — *true only in an environment that does not exist*
 4. What does this criterion assume that the surrounding prose has already contradicted? — *the document disagrees with itself*
+5. Does this assertion's strength depend on something the test does not control? — *the comparison cannot fail for the reason it exists*
 
 ### The third audit question
 
