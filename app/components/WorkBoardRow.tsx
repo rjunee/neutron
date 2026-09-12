@@ -129,7 +129,7 @@ function WorkBoardRowImpl({
   const [dragging, setDragging] = useState(false);
 
   const dot = dotState(item);
-  const tag = stepTag(item.run_progress);
+  const tag = stepTag(item);
   const round = roundText(item.run_progress);
   const notice = runNotice(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);

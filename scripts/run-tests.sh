@@ -47,6 +47,24 @@
 #     few times before the run is declared failed (the `withTransientBootRetry`
 #     classifier inside boot-pglite-brain.ts self-heals most boots; this lane
 #     retry is the belt-and-braces for the rest).
+# IN-PROCESS BROWSER-BUNDLE LANE
+# ------------------------------
+# `createLandingServer` LAZILY `Bun.build`s three browser bundles on first request
+# (`/chat-react.js` is React + assistant-ui + chat-core, ~0.9 MB). Mixed into a
+# general chunk that build starts failing once enough other files have run in the
+# same process — MEASURED here as `AggregateError: Bundle failed` whose messages
+# are `EBADF reading file: …/react/index.js` and friends: a BAD FILE DESCRIPTOR,
+# not a compile error. Some earlier file in the chunk closes a descriptor it does
+# not own and the number is reused under the bundler's reads. The landing server
+# then returns 404 for `/chat-react.js` and six tests red for a reason that has
+# nothing to do with them or with whatever change moved the chunk boundary.
+#
+# Reproduced on an UNMODIFIED main at the same chunk size, so this is a latent
+# landmine that any PR adding test files can step on, not a property of one branch.
+# The fd owner is worth finding; until it is, these files run in their own process
+# where no other file's descriptors exist. Same shape as the device lane, no retry
+# budget: the failure is deterministic for a given chunk, not flaky.
+#
 # The lane membership is content-derived (any test file that mentions `pglite`),
 # so a new PGLite test is quarantined automatically — no allowlist to maintain.
 # Coverage is unchanged: lane files are still counted in the audit (RAN_TOTAL).
@@ -94,6 +112,8 @@
 #   NEUTRON_TEST_NO_PGLITE_LANE      set =1 to fold PGLite files back into general
 #                                    chunks (the pre-quarantine behaviour)
 #   --- device-harness isolation lane ---
+#   NEUTRON_TEST_NO_BUNDLE_LANE      set =1 to fold the landing-server files back
+#                                    into general chunks (the pre-lane behaviour)
 #   NEUTRON_TEST_NO_DEVICE_LANE      set =1 to fold the mobile-harness files back
 #                                    into general chunks. Expect cross-file DOM /
 #                                    module-registry collisions if you do.
@@ -209,6 +229,8 @@ PGLITE_TIMEOUT="${NEUTRON_TEST_PGLITE_TIMEOUT:-90000}"
 NO_PGLITE_LANE="${NEUTRON_TEST_NO_PGLITE_LANE:-0}"
 # Device-harness isolation lane (see header). Its own process; normal timeout.
 NO_DEVICE_LANE="${NEUTRON_TEST_NO_DEVICE_LANE:-0}"
+# The in-process browser-bundle lane (see the header). Own process, no retry.
+NO_BUNDLE_LANE="${NEUTRON_TEST_NO_BUNDLE_LANE:-0}"
 
 # --- 1. Discover the canonical real-source test set --------------------------
 # Shared with the deploy gate so the two can never drift (the dot-dir exclusion
@@ -284,16 +306,26 @@ fi
 # else; the lane runs last, serially, with its own retry budget (see header).
 PGLITE_FILES=()
 DEVICE_FILES=()
+BUNDLE_FILES=()
 GENERAL_FILES=()
 # One batched grep per lane over the discovered set (well under ARG_MAX for ~1100
 # files). `|| true` so a zero-match grep (exit 1) doesn't trip `set -o pipefail`/`-e`.
 PGLITE_MATCH=""
 DEVICE_MATCH=""
+BUNDLE_MATCH=""
 if [ "$NO_PGLITE_LANE" != "1" ]; then
   PGLITE_MATCH="$(LC_ALL=C grep -lEi 'pglite' "${FILES[@]}" 2>/dev/null || true)"
 fi
 if [ "$NO_DEVICE_LANE" != "1" ]; then
   DEVICE_MATCH="$(LC_ALL=C grep -lE 'installNativeHarness' "${FILES[@]}" 2>/dev/null || true)"
+fi
+if [ "$NO_BUNDLE_LANE" != "1" ]; then
+  # `createLandingServer` is the ONE constructor that owns all three lazy
+  # `Bun.build` calls, so "constructs a landing server" is exactly "can bundle a
+  # browser bundle in this process". Derived from the call, not from a marker
+  # comment, for the same reason the device lane greps `installNativeHarness`:
+  # a new test that constructs one joins the lane without anyone remembering to.
+  BUNDLE_MATCH="$(LC_ALL=C grep -lE 'createLandingServer' "${FILES[@]}" 2>/dev/null || true)"
 fi
 for f in "${FILES[@]}"; do
   # PGLite wins a tie: a hypothetical file in both would need the WASM lane's
@@ -303,6 +335,13 @@ for f in "${FILES[@]}"; do
   esac
   case $'\n'"${DEVICE_MATCH}"$'\n' in
     *$'\n'"$f"$'\n'*) DEVICE_FILES+=("$f") ; continue ;;
+  esac
+  # Checked LAST of the three: a file that also needs the WASM lane's retry budget
+  # or the device lane's DOM isolation needs that more than it needs a clean fd
+  # table, and the bundle lane's only property is being a separate process — which
+  # those lanes already give it.
+  case $'\n'"${BUNDLE_MATCH}"$'\n' in
+    *$'\n'"$f"$'\n'*) BUNDLE_FILES+=("$f") ; continue ;;
   esac
   GENERAL_FILES+=("$f")
 done
@@ -521,11 +560,16 @@ if [ -n "$SHARD_SPEC" ]; then
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"})
   PGLITE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
   _shard_cursor=$(( _shard_cursor + _lane_n ))
+  _lane_n=${#DEVICE_FILES[@]}
   _tmp=()
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
   DEVICE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+  _shard_cursor=$(( _shard_cursor + _lane_n ))
+  _tmp=()
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${BUNDLE_FILES[@]+"${BUNDLE_FILES[@]}"})
+  BUNDLE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
 
-  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device of ${TOTAL} discovered"
+  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device + ${#BUNDLE_FILES[@]} bundle of ${TOTAL} discovered"
   # The estimated general-lane cost per shard, printed by every shard so a future
   # imbalance is visible in the log rather than only in the wall-clock.
   if [ -s "$SHARD_WEIGHT_LOG" ]; then
@@ -538,6 +582,7 @@ fi
 
 NPGLITE=${#PGLITE_FILES[@]}
 NDEVICE=${#DEVICE_FILES[@]}
+NBUNDLE=${#BUNDLE_FILES[@]}
 GEN_TOTAL=${#GENERAL_FILES[@]}
 
 # Plan-only seam — print exactly what THIS invocation would execute, then stop.
@@ -547,24 +592,27 @@ GEN_TOTAL=${#GENERAL_FILES[@]}
 if [ "${NEUTRON_TEST_PLAN_ONLY:-0}" = "1" ]; then
   echo "declared files: ${TOTAL}"
   echo "run-tests: PLAN-ONLY BEGIN"
-  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"} ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"}
+  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"} ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"} ${BUNDLE_FILES[@]+"${BUNDLE_FILES[@]}"}
   echo "run-tests: PLAN-ONLY END"
   exit 0
 fi
 
 # What THIS invocation is accountable for executing. Unsharded this is TOTAL, so
 # the audit below is unchanged; sharded it is this shard's slice.
-SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE + NDEVICE ))
+SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE + NDEVICE + NBUNDLE ))
 
 # --- 3. Partition + run -------------------------------------------------------
 NCHUNKS=$(( (GEN_TOTAL + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane + ${NDEVICE}-file device lane"
+echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane + ${NDEVICE}-file device lane + ${NBUNDLE}-file bundle lane"
 echo "run-tests: bun=${BUN} max-concurrency=${CONCURRENCY} timeout=${TIMEOUT}ms jobs=${JOBS}"
 if [ "$NPGLITE" -gt 0 ]; then
   echo "run-tests: PGLite lane → ${NPGLITE} files, serial=${PGLITE_CONCURRENCY}, timeout=${PGLITE_TIMEOUT}ms, retries=${PGLITE_RETRIES}"
 fi
 if [ "$NDEVICE" -gt 0 ]; then
   echo "run-tests: device-harness lane → ${NDEVICE} files, isolated process (DOM + module-alias globals)"
+fi
+if [ "$NBUNDLE" -gt 0 ]; then
+  echo "run-tests: browser-bundle lane → ${NBUNDLE} files, isolated process (in-process Bun.build over a clean fd table)"
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
@@ -637,6 +685,25 @@ run_device_lane() {
   echo "device ${rc} ${NDEVICE} ${ran:-$NDEVICE}" >> "$WORK/results"
 }
 
+# Run the landing-server files in their OWN process. They lazily `Bun.build` a
+# browser bundle in-process, and that build starts throwing `Bundle failed` with
+# `EBADF reading file: …` once enough other files have run in the same process —
+# a descriptor closed by some earlier file and reused under the bundler's reads.
+# See the header. No retry budget: the failure is deterministic for a given chunk.
+run_bundle_lane() {
+  local llog="$WORK/lane-bundle.log"
+  {
+    echo "==== browser-bundle isolation lane: ${NBUNDLE} files (own process) ===="
+    NO_COLOR=1 "$BUN" test "${BUNDLE_FILES[@]}" --timeout="$TIMEOUT" --max-concurrency="$CONCURRENCY" 2>&1
+  } >"$llog" 2>&1
+  local rc=$?
+  local ran; ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+  cat "$llog"
+  # Sentinel idx 'bundle'; `ran` falls back to NBUNDLE so the coverage audit still
+  # accounts for the lane files if bun's count line was eaten by log noise.
+  echo "bundle ${rc} ${NBUNDLE} ${ran:-$NBUNDLE}" >> "$WORK/results"
+}
+
 idx=0
 while [ "$idx" -lt "$NCHUNKS" ]; do
   if [ "$JOBS" -le 1 ]; then
@@ -672,6 +739,10 @@ if [ "$NDEVICE" -gt 0 ]; then
   run_device_lane
 fi
 
+if [ "$NBUNDLE" -gt 0 ]; then
+  run_bundle_lane
+fi
+
 # --- 4. Aggregate + coverage audit -------------------------------------------
 FAILED_CHUNKS=0
 RAN_TOTAL=0
@@ -684,6 +755,8 @@ while read -r r_idx r_rc r_nfiles r_ran; do
       FAIL_LIST="${FAIL_LIST} PGLite-lane"
     elif [ "$r_idx" = "device" ]; then
       FAIL_LIST="${FAIL_LIST} device-lane"
+    elif [ "$r_idx" = "bundle" ]; then
+      FAIL_LIST="${FAIL_LIST} bundle-lane"
     else
       FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
     fi
@@ -700,9 +773,13 @@ if [ "$NDEVICE" -gt 0 ]; then
   LANES=$(( LANES + 1 ))
   LANE_DESC="${LANE_DESC} + device lane"
 fi
+if [ "$NBUNDLE" -gt 0 ]; then
+  LANES=$(( LANES + 1 ))
+  LANE_DESC="${LANE_DESC} + bundle lane"
+fi
 
 echo "---- run-tests coverage audit ----"
-echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite + ${NDEVICE} device)"
+echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite + ${NDEVICE} device + ${NBUNDLE} bundle)"
 echo "lanes: ${LANE_DESC}   failed: ${FAILED_CHUNKS}${FAIL_LIST:+ (${FAIL_LIST# })}"
 if [ "$RAN_TOTAL" -lt "$SHARD_TOTAL" ]; then
   echo "run-tests: FATAL — executed ${RAN_TOTAL} files < ${SHARD_TOTAL} assigned (coverage hole)." >&2

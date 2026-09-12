@@ -981,6 +981,28 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.textContent).toContain('Blocked on a dependency')
     expect(container.querySelector('.cwb-btn-play')).toBeNull()
 
+    // (3) AND IT MUST SAY **BLOCKED**, not "Failed". The reconcile KEEPS the terminal
+    // run link so the reason stays reachable, and that run's `step_label` is `failed`
+    // — so a renderer that derives from the run step paints this card red and tags it
+    // Failed, which is precisely the belief the lane exists to prevent. Measured: it
+    // did. The tag, the dot and the reason line are all asserted, because each is a
+    // separate derivation and each was wrong.
+    const tag = container.querySelector('.cwb-tag')
+    expect(tag?.textContent).toBe('Blocked')
+    expect(tag?.className).toContain('cwb-tag-blocked')
+    expect(tag?.className).not.toContain('cwb-tag-failed')
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-blocked')
+    expect(dot!.className).not.toContain('cwb-dot-failed')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    // The escalation's own sentence is still shown — it is the most useful line on the
+    // card — but not in the failure tone, or the two halves of one row would disagree.
+    const reason = container.querySelector('.cwb-blocked-reason')
+    expect(reason?.textContent).toContain('BLOCKED')
+    expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+
     await act(async () => root.unmount())
   })
 
@@ -1011,6 +1033,11 @@ describe('WorkBoardTab (happy-dom)', () => {
     const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
     expect(playBtn).not.toBeNull()
     expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+    // …and it still says FAILED, in the failure tone. Without this, renaming every tag
+    // to "Blocked" would pass the test above.
+    expect(container.querySelector('.cwb-tag')?.textContent).toBe('Failed')
+    expect(container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')!.className).toContain('cwb-dot-failed')
+    expect(container.querySelector('.cwb-fail-reason')).not.toBeNull()
 
     await act(async () => root.unmount())
   })

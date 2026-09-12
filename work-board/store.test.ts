@@ -824,6 +824,40 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(requeued?.linked_run_id).toBeNull()
   })
 
+  test('a BLOCKED run reconciles onto its own lane, keeping the link and stamping nothing', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'blocked on a dependency' })
+    await store.attachRun(SLUG, a.id, 'run-esc')
+    const blocked = await store.detachRun(SLUG, 'run-esc', 'blocked', { pr: 12, pr_url: 'https://x/pull/12' })
+    // NOT `failed` (wrong word) and NOT `upcoming` (looks startable).
+    expect(blocked?.status).toBe('blocked')
+    // The link is KEPT on purpose: it is how the reported reason stays reachable while
+    // the card waits for a decision.
+    expect(blocked?.linked_run_id).toBe('run-esc')
+    // Nothing completed, so nothing is datestamped as completed.
+    expect(blocked?.completed_at).toBeNull()
+    expect(blocked?.pr).toBe(12)
+    // It is an ACTIVE lane — the card is unfinished work that is waiting, not history.
+    expect(store.listActive(SLUG).map((i) => i.id)).toContain(a.id)
+  })
+
+  test('manually advancing a BLOCKED card off the blocked lane DETACHES the terminal run', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'unblock me' })
+    await store.attachRun(SLUG, a.id, 'run-esc')
+    await store.detachRun(SLUG, 'run-esc', 'blocked', { pr: 12, pr_url: 'https://x/pull/12' })
+    // Leaving the block is the DECISION that ends that run's claim on the card. Without
+    // this the card keeps deriving its tag, its dot and its reason from the escalated
+    // run until some later dispatch happens to replace the binding — an `upcoming` card
+    // still wearing a terminal escalation.
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
+    expect(requeued?.linked_run_id).toBeNull()
+    expect(requeued?.pr).toBeNull()
+    expect(requeued?.pr_url).toBeNull()
+    expect(requeued?.completed_at).toBeNull()
+  })
+
   test('moving a completed card out of history clears its terminal evidence link', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'reopen completed work' })

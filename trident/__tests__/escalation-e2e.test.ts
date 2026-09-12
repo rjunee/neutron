@@ -343,6 +343,72 @@ describe('the bounded re-plan — executed end to end', () => {
   })
 })
 
+describe('a design gap with NO ROUND LEFT to re-plan in', () => {
+  test('HEADLINE: maxRounds 1 — the declaration ESCALATES rather than being dropped', async () => {
+    // The planner runs at the TOP of the next fix round, and `round < maxRounds` means
+    // there is no next fix round. With a cap of 1 there is never one at all. The pending
+    // flag used to be dropped and the run fell through as an ordinary code rejection: a
+    // reviewer said the PLAN is wrong, proved it, and the run reported REQUEST_CHANGES
+    // about the code. That is the silent drop this whole card exists to remove.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 1,
+      rounds: [
+        {
+          findings: [finding('a:b:c')],
+          escalate: { kind: 'design-gap', whatIsMissing: 'the execution spec itself asked for the tautological test' },
+        },
+      ],
+    })
+    // No planner could run, and none was dispatched — the cap is still the cap.
+    expect(labels(captured, 'plan:fable')).toEqual([])
+    expect(labels(captured, 'forge:fix-round-')).toEqual([])
+    // …and the run says what it is, rather than reporting a code rejection.
+    expect(result.blockKind).toBe('design-gap')
+    expect(result.blockKind).not.toBe('code')
+    const escalation = result.escalation as Record<string, unknown>
+    expect(escalation.triggers).toContain('re-plan-unreachable')
+    expect(escalation.whatIsMissing).toBe('the execution spec itself asked for the tautological test')
+    expect(String(escalation.evidence)).toContain('no round for the bounded re-plan')
+  })
+
+  test('a design gap declared on the LAST permitted round escalates the same way', async () => {
+    // The same hole one round further in: the decision is made at the end of round 2 with
+    // a cap of 2, so the `while` will not run a third round for the planner to open.
+    const claim = { kind: 'design-gap', whatIsMissing: 'the plan asked for the thing being flagged' }
+    const { captured, result } = await runWorkflow({
+      maxRounds: 2,
+      rounds: [
+        { findings: [finding('a:b:c'), finding('d:e:f')] },
+        { findings: [finding('g:h:i')], escalate: claim },
+      ],
+    })
+    expect(labels(captured, 'forge:fix-round-')).toEqual(['forge:fix-round-2'])
+    expect(labels(captured, 'plan:fable')).toEqual([])
+    expect(result.blockKind).toBe('design-gap')
+    expect((result.escalation as Record<string, unknown>).triggers).toContain('re-plan-unreachable')
+  })
+
+  test('CONTROL: with a round to spare the same declaration buys the re-plan, not a stop', async () => {
+    // Without this, escalating on EVERY design gap would pass both tests above while
+    // deleting the bounded re-plan entirely.
+    const claim = { kind: 'design-gap', whatIsMissing: 'the plan asked for the thing being flagged' }
+    const { captured, result } = await runWorkflow({
+      maxRounds: 4,
+      // One scripted round PER round the cap allows: `roundFor` clamps to the last
+      // entry, so a short script silently repeats its final round's findings and the
+      // repeat gate fires on the fixture rather than on the behaviour under test.
+      rounds: [
+        { findings: [finding('a:b:c'), finding('d:e:f'), finding('g:h:i'), finding('j:k:l')], escalate: claim },
+        { findings: [finding('m:n:o'), finding('p:q:r'), finding('s:t:u')] },
+        { findings: [finding('v:w:x'), finding('y:z:a')] },
+        { findings: [finding('b:c:d')] },
+      ],
+    })
+    expect(labels(captured, 'plan:fable')).toEqual(['plan:fable'])
+    expect(result.escalation).toBeUndefined()
+  })
+})
+
 describe('a missing-dependency stops immediately — executed end to end', () => {
   test('it fires at ROUND 1 and never dispatches a fix round or a planner', async () => {
     // Re-planning cannot conjure work that lives outside this card; only SEQUENCING can,

@@ -92,39 +92,43 @@ describe('statusLabel', () => {
 });
 
 describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
+  // `stepTag` takes the ITEM now, because the BLOCKED lane wins over the bound run's
+  // step (see its docblock). These cases are all about the step, so the item is the
+  // run wrapped in an ordinary in_progress card.
+  const withRun = (rp: RunProgress): WorkBoardItem => item({ status: 'in_progress', run_progress: rp });
   it('building → "Building" tag + round N', () => {
     const rp = progress({ step_label: 'building', round: 2 });
-    expect(stepTag(rp)).toEqual({ label: 'Building', colorKey: 'build' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Building', colorKey: 'build' });
     expect(roundText(rp)).toBe('round 2');
   });
 
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
-    expect(stepTag(rp)).toEqual({ label: 'Reviewing', colorKey: 'review' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });
     expect(roundText(rp)).toBe('round 3');
   });
 
   it('fixing → "Fixing" tag + round N', () => {
     const rp = progress({ step_label: 'fixing', round: 4 });
-    expect(stepTag(rp)).toEqual({ label: 'Fixing', colorKey: 'fix' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Fixing', colorKey: 'fix' });
     expect(roundText(rp)).toBe('round 4');
   });
 
   it('merging → "Merging" tag + round N', () => {
     const rp = progress({ step_label: 'merging', round: 5 });
-    expect(stepTag(rp)).toEqual({ label: 'Merging', colorKey: 'merge' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Merging', colorKey: 'merge' });
     expect(roundText(rp)).toBe('round 5');
   });
 
   it('done (terminal) → "Merged" tag, NO round', () => {
     const rp = progress({ step_label: 'done' });
-    expect(stepTag(rp)).toEqual({ label: 'Merged', colorKey: 'merge' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Merged', colorKey: 'merge' });
     expect(roundText(rp)).toBeNull();
   });
 
   it('failed (terminal) → "Failed" tag, NO round', () => {
     const rp = progress({ step_label: 'failed' });
-    expect(stepTag(rp)).toEqual({ label: 'Failed', colorKey: 'failed' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Failed', colorKey: 'failed' });
     expect(roundText(rp)).toBeNull();
   });
 
@@ -134,16 +138,16 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     // undefined (which the row would treat as non-null → crash). Codex P2.
     const legacy = progress({ phase_label: 'reviewing', round: 2 });
     delete (legacy as { step_label?: unknown }).step_label;
-    expect(stepTag(legacy)).toEqual({ label: 'Reviewing', colorKey: 'review' });
+    expect(stepTag(withRun(legacy))).toEqual({ label: 'Reviewing', colorKey: 'review' });
     expect(roundText(legacy)).toBe('round 2');
     const legacyMerged = progress({ phase_label: 'merged' });
     delete (legacyMerged as { step_label?: unknown }).step_label;
-    expect(stepTag(legacyMerged)).toEqual({ label: 'Merged', colorKey: 'merge' });
+    expect(stepTag(withRun(legacyMerged))).toEqual({ label: 'Merged', colorKey: 'merge' });
     expect(roundText(legacyMerged)).toBeNull();
   });
 
   it('is null/idle for an unbound item (no run_progress)', () => {
-    expect(stepTag(undefined)).toBeNull();
+    expect(stepTag(item({ status: 'upcoming' }))).toBeNull();
     expect(roundText(undefined)).toBeNull();
   });
 });
@@ -551,6 +555,31 @@ describe('a BLOCKED card offers neither play nor retry', () => {
     const failed = item({ status: 'failed', linked_run_id: 'run-a' });
     expect(canPlay(failed)).toBe(true);
     expect(isRetry(failed)).toBe(true);
+  });
+
+  it('the TAG says Blocked, in a non-failed colour, even with a terminal failed run bound', () => {
+    // The reconcile KEEPS the terminal run link so the reason stays reachable, and that
+    // run's `step_label` is `failed` — so a renderer deriving from the run step tags this
+    // card "Failed" and paints it red, which is exactly the belief the lane exists to
+    // prevent. Measured: it did.
+    const blocked = item({
+      status: 'blocked',
+      linked_run_id: 'run-esc',
+      run_progress: progress({ step_label: 'failed', phase_label: 'failed' }),
+    });
+    expect(stepTag(blocked)).toEqual({ label: 'Blocked', colorKey: 'blocked' });
+    expect(dotState(blocked)).toEqual({ colorKey: 'blocked', pulse: false });
+  });
+
+  it('CONTROL: the same card in the FAILED lane still tags and paints as failed', () => {
+    // Without this, renaming every tag to "Blocked" would pass the test above.
+    const failed = item({
+      status: 'failed',
+      linked_run_id: 'run-esc',
+      run_progress: progress({ step_label: 'failed', phase_label: 'failed' }),
+    });
+    expect(stepTag(failed)).toEqual({ label: 'Failed', colorKey: 'failed' });
+    expect(dotState(failed)).toEqual({ colorKey: 'failed', pulse: false });
   });
 
   it('and the lane is labelled Blocked — a different word from Failed', () => {

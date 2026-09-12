@@ -127,6 +127,71 @@ field by field, so extra keys in the payload (a card id, a position) never reach
 That is asserted with a hostile payload that names another card and a position, and
 mutation-checked: a reconcile that reads the raw JSON and obeys it turns both tests red.
 
+### A STATUS IS NOT A VALUE — it is the set of paths that must agree about it
+
+Three separate findings on this branch had one shape: a new state was added to the
+vocabulary and not to the transitions, the renderers, or the boundaries. So the paths
+were enumerated — decode, render, advance, dispatch, escalate — and each was checked:
+
+- **decode** — the SQL CHECK, the store type, the wire envelope, and BOTH client
+  `parseWorkBoardItems` allowlists (see below).
+- **render** — `statusLabel` and `nextStatus` in both clients; `stepTag`, `dotState` and
+  `runNotice`, where the card's own lane now wins over the bound run's step (below);
+  `formatWorkBoardFragment`, which is the ORCHESTRATOR'S OWN VIEW and was calling a
+  blocked card `·building`.
+- **advance** — `store.update` now clears the stale terminal binding when a card leaves
+  `blocked`, as it already did for `failed`.
+- **dispatch** — the chokepoint refuses (`card_blocked`), the HTTP surface's code union
+  carries it, and neither UI offers a control for it.
+- **escalate** — the reconcile routes it; `detachRun` writes the lane and stamps nothing.
+
+Checked and deliberately UNCHANGED, with the reason: `inline-activity.ts` (a blocked card
+arrives with `inline_active` already cleared by `detachRun`, and the only rule that could
+turn it back on requires `status === 'in_progress'` — so nothing can claim live inline
+work on it); `project-rail.ts` (a blocked card with a bound terminal run raises rail
+ATTENTION, which is correct — it needs the owner; the internal variable is named for
+failure but the signal is "needs you"); `agent-tool.ts` and the HTTP surface's writable
+`STATUS_VALUES` (four values, unchanged — `blocked` is run-driven, like `failed`).
+
+### The renderers were deriving from the run, and the run says "failed"
+
+`detachRun` KEEPS the run link on a blocked card so the reported reason stays reachable —
+and that run's `step_label` is `failed`. Both clients derive the dot and the phase tag
+from `run_progress` BEFORE consulting the card's status, so a blocked card was painted red
+and tagged "Failed": last round the card vanished, this round it lied, both times because
+a status was added to the type and not to the path that renders it. The card's own lane
+now wins over the run step for `blocked` and only for `blocked` — every other state is
+legitimately refined by a live run, and the lane is written by the terminal reconcile from
+the run's own escalation, so it is neither a guess nor older than the step. A `blocked`
+phase colour (orange, not red) was added to both palettes so the styling cannot say
+"failed" while the word says "Blocked".
+
+### A design gap declared with no round left to re-plan in
+
+`decideEscalation` can authorise the bounded re-plan at the end of ANY round, including
+the last one the cap allows — but the planner runs at the TOP of the next fix round, and
+`round < maxRounds` means there is no next fix round (with `maxRounds: 1`, never one at
+all). The pending flag was simply dropped and the run fell through as an ordinary
+`blockKind: 'code'` rejection: a reviewer said the PLAN is wrong, proved it, and the run
+reported a code rejection. That is the silent drop this card exists to remove, reproduced
+by the card's own remedy. It now escalates rather than stretching the cap — the findings
+say the plan is wrong and there is no budget left to act on it, which is exactly what the
+orchestrator needs told.
+
+### A latent CI landmine this branch stepped on, and the lane that closes it
+
+Adding test files moved a chunk boundary and six `landing/__tests__/server.test.ts` tests
+went red on CI — `/chat-react.js` 404ing. The measured cause is not this branch:
+`createLandingServer` lazily `Bun.build`s a ~0.9 MB browser bundle in-process, and that
+build throws `AggregateError: Bundle failed` whose messages are `EBADF reading file:
+…/react/index.js` — a BAD FILE DESCRIPTOR, closed by some earlier file in the chunk and
+reused under the bundler's reads. Reproduced on an UNMODIFIED main with the same file
+list, so any PR that adds a test file can step on it. The fd owner is worth finding and is
+not this card; until it is, those files run in their own process, as a third lane beside
+the PGLite and device lanes the runner already has for exactly this class of problem.
+Membership is content-derived from `createLandingServer`, so a new landing-server test
+joins without anyone remembering to.
+
 ### The client decoders were the other half of "visibly blocked"
 
 Widening a TypeScript union is a compile-time claim; a parser's allowlist is the runtime

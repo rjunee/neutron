@@ -920,7 +920,15 @@ export class WorkBoardStore {
           // `attachRun` clears these too, but a manual re-open never reaches it.
           push('pr', null)
           push('pr_url', null)
-        } else if (current.status === 'failed') {
+        } else if (current.status === 'failed' || current.status === 'blocked') {
+          // ...OR OFF BLOCKED, for the same reason and with the same consequence.
+          // `detachRun` keeps the link on a blocked card too, so the reported reason
+          // stays reachable while the card sits there — and that means a card advanced
+          // out of the blocked lane by hand would keep deriving its tag, its dot and
+          // its reason from the terminal escalated run until some LATER dispatch
+          // happened to replace the binding. Leaving the block is the decision that
+          // ends that run's claim on the card; the link goes with it.
+          //
           // Re-queue OFF failed (nextStatus('failed') → 'upcoming', or a dismiss):
           // DETACH the terminal failed run so the card stops deriving the red dot
           // + 'failed' step_label + failure_reason from it. detachRun keeps the

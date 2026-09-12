@@ -180,7 +180,7 @@ export function dragReorderTarget(
 /* ── M1 redesign — phase color key + dot / tag / round derivations ───────── */
 
 /** The coarse phase color bucket a run step (or terminal state) maps to. */
-export type PhaseColorKey = 'build' | 'review' | 'fix' | 'merge' | 'failed';
+export type PhaseColorKey = 'build' | 'review' | 'fix' | 'merge' | 'failed' | 'blocked';
 
 /** Look up a phase color key's tokens from the theme's `PHASE` map. */
 export type PhaseColorLookup = Record<PhaseColorKey, PhaseColor>;
@@ -194,9 +194,19 @@ export interface PhaseTag {
  * The phase TAG for a bound run's inner step, or null when the item has no run
  * progress (a plain upcoming card shows just the gray dot + title). Sentence-
  * case copy, tinted capsule; failure uses "Didn't finish" (curly apostrophe —
- * matches the web copy exactly).
+ * matches the web copy exactly). *
+ * THE CARD'S OWN LANE WINS OVER THE RUN STEP, for `blocked` and only for `blocked`.
+ * Every other state here is REFINED by the bound run, which is right: a live run knows
+ * more about what is happening than a status column written at dispatch. `blocked` is
+ * the exception because the reconcile KEEPS the terminal run link (so the reported
+ * reason stays reachable), and that run's `step_label` is `failed` — so deriving from
+ * it painted a blocked card red and tagged it "Failed", which is the one thing the lane
+ * exists to stop the owner believing. The lane is written by the terminal reconcile
+ * from the run's own escalation; it is not a guess, and it is more recent than the step.
  */
-export function stepTag(rp: RunProgress | undefined): PhaseTag | null {
+export function stepTag(item: WorkBoardItem): PhaseTag | null {
+  if (item.status === 'blocked') return { label: 'Blocked', colorKey: 'blocked' };
+  const rp = item.run_progress;
   if (rp === undefined) return null;
   switch (resolveStepLabel(rp)) {
     case 'building':
@@ -270,6 +280,8 @@ export interface DotState {
  * outline.
  */
 export function dotState(item: WorkBoardItem): DotState {
+  // See `stepTag` for why the BLOCKED lane wins over the bound run's step.
+  if (item.status === 'blocked') return { colorKey: 'blocked', pulse: false };
   const rp = item.run_progress;
   if (rp !== undefined) {
     switch (resolveStepLabel(rp)) {

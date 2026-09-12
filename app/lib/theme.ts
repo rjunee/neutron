@@ -147,6 +147,9 @@ export interface NeutronPhaseColors {
   fix: PhaseColor;
   merge: PhaseColor;
   failed: PhaseColor;
+  /** BLOCKED is not FAILED — a build that stopped on purpose and needs a decision, not
+   *  one that broke. Orange rather than red so the two never read as one state. */
+  blocked: PhaseColor;
 }
 
 export const PHASE: NeutronPhaseColors = Object.freeze({
@@ -155,6 +158,7 @@ export const PHASE: NeutronPhaseColors = Object.freeze({
   fix: { fg: '#ffd27d', bg: 'rgba(255,210,125,0.14)' },
   merge: { fg: '#7ddf9b', bg: 'rgba(125,223,155,0.14)' },
   failed: { fg: '#ff8a8a', bg: 'rgba(255,138,138,0.14)' },
+  blocked: { fg: '#ffa94d', bg: 'rgba(255,169,77,0.14)' },
 });
 
 export interface TypographyToken {

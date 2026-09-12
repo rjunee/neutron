@@ -8308,6 +8308,35 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     recordRoundForEscalation(round, synthesis)
   }
 
+  // ── AN AUTHORISED RE-PLAN THAT NEVER GOT A ROUND TO RUN IN ──────────────────
+  // `decideEscalation` can authorise the bounded re-plan at the END of any round,
+  // including the LAST one the cap allows — but the planner runs at the TOP of the next
+  // fix round, and `round < maxRounds` means there is no next fix round. With
+  // `maxRounds: 1` there is never one at all. The pending flag was then simply dropped
+  // and the run fell through as an ordinary `blockKind: 'code'` rejection: a reviewer
+  // said the PLAN is wrong, proved it with `whatIsMissing`, and the run reported a code
+  // rejection and stopped. That is the silent-drop this whole card exists to remove,
+  // reproduced by the card's own remedy.
+  //
+  // IT ESCALATES RATHER THAN STRETCHING THE CAP. Running the re-plan anyway would buy a
+  // round the cap refuses, and the decision this leaves is not the run's to make — the
+  // findings say the plan is wrong and there is no budget left to act on it, which is
+  // exactly what the orchestrator needs told.
+  if (escalation === null && rePlanPending) {
+    rePlanPending = false
+    escalation = {
+      action: 'stop',
+      kind: 'design-gap',
+      whatIsMissing: rePlanWhatIsMissing,
+      triggers: ['design-gap', 're-plan-unreachable'],
+      evidence: `a design gap was declared at round ${round} of ${maxRounds}, which leaves no round for the bounded re-plan to run in`,
+      refusedClaim: '',
+      undecidable: [],
+      round,
+    }
+    log(`trident-v2 escalation: STOP at round ${round} kind=design-gap — ${escalation.evidence}`)
+  }
+
   // The MEASURED cause of an infra-only stop, computed once: it goes into the audit
   // log AND the terminal result, and the two must not be able to disagree. Already
   // redacted by `infraTerminalCause`, so it is safe to print.
