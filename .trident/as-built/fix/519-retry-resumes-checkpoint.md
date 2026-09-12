@@ -253,6 +253,41 @@ The test that had pinned the lying wording is corrected too, and it is the sixth
 kind in this lane: it required the phrase "inherited a spent budget", which made a false
 message look verified. A test asserting a claim is only ever as good as the claim.
 
+**AND THE FIX FOR THE FIX OVER-GENERALISED — the mirror of the same error.** Having
+correctly removed a claim that was NOT determinable (inheritance), the replacement
+retreated to the most general wording available and thereby asserted something FALSE
+about the cases that were never ambiguous: a brand-new run configured
+`max_ralph_rounds: 0` was told "the budget was spent before this run began" when nothing
+had ever been allocated, let alone spent. And the test that replaced the first lying
+message excluded only the WORD "inherited", so it blessed the new contradiction — the
+seventh test in this lane to document a defect as correct behaviour.
+
+Keying on a PROXY asserts more than the row establishes. Retreating to the MOST GENERAL
+wording asserts something false about the unambiguous cases. They are the same error
+approached from opposite sides: the message not matching what the row can support. The
+reason now has three arms, and which three was DERIVED rather than guessed. The refusal
+fires iff `ralph_round >= max_ralph_rounds`; `max_ralph_rounds` is written only by
+`create` (it is absent from `TridentRunUpdate`) and `create` refuses any cap that is not
+a non-negative safe integer — so `ralph_round === 0` at that point IMPLIES `cap === 0`,
+and the fourth combination one might expect, round 0 under a positive cap, cannot reach
+the branch at all. That unreachability is itself pinned, so widening the refusal
+condition or letting a negative cap be written reds rather than silently making a fourth
+arm live.
+
+  1. a checkpoint exists — this run built and then ran out: "without converging", the
+     original wording, accurate for it and unchanged;
+  2. no checkpoint and `ralph_round === 0` — therefore cap 0: nothing was ever
+     allocated, so nothing was spent by anyone, stated plainly;
+  3. no checkpoint and `ralph_round > 0` — the budget IS consumed, certainly, whoever
+     consumed it; only WHO is left open, because this row may have advanced the counter
+     itself through the phase graph or carried the count in.
+
+THE DISCRIMINATOR FOR ARM 2 IS THE COUNTER, NOT THE CAP, and a mutation is what
+established the difference. Keying it on `max_ralph_rounds === 0` reads identically on
+every row except one that is reachable — a prior at 5/30 re-dispatched with an explicit
+cap of 0 produces 5/0, where the cap-keyed version says "nothing has been spent" to a row
+whose counter says five. That mutation survived the suite until the case was written.
+
 **AND TWO SPELLINGS OF ABSENT DISAGREED ONE LAYER LOWER.** `create` resolves the cap with
 `??` (null and undefined alike) while the carried-round pair guard checked only
 `=== undefined`, so `{ ralph_round: 5, max_ralph_rounds: null }` passed the guard AND
@@ -292,3 +327,24 @@ than uncaught: the row is written from the same objects the line would otherwise
 `budget?.ralph_round ?? 0` and the row's value cannot differ and no test can separate
 them. That is reported as an inert mutation rather than papered over with a pin, the same
 disposition taken for two inert mutations of my own earlier in the lane.
+
+**A LOAD-BEARING COMMENT ASSERTED THE OPPOSITE OF WHAT THIS CHANGE ESTABLISHED.**
+`ralph-budget.ts`'s header said the Ralph bound "is a property of the CARD rather than of
+whichever attempt happens to be running" and that `max_ralph_rounds` is "unenforceable by
+anyone willing to press ▶ again" without the carry. Both halves are false in the ways this
+very record spent two rounds documenting — one status-dot click clears `linked_run_id`,
+and an intervening non-governed run launders the spend — and it sat in the FILE THAT
+IMPLEMENTS THE RULE, which is where a future reader is most likely to trust it. It was
+written before the escapes were understood, and nothing re-reads a comment you did not
+touch. It now states only what the code delivers: when a governed re-dispatch NAMES the
+governed prior run it is resuming, the spend and the cap travel together and the cap can
+only tighten. Both escapes are named there, with `#629` as the fix.
+
+**THE SWEEP THAT FOUND IT ALSO FOUND AN ASSERTED CONSUMER THAT DOES NOT EXIST.** Reading
+every claim in `ralph-budget.ts`, `state-machine.ts` and the spec item and naming the code
+behind each one turned up a comment crediting `delivery.ts` with keying on the
+`max_ralph_rounds` token; `delivery.ts` does not mention it anywhere. The real dependants
+are three test files, and no production reader parses the string at all — `phase:
+'failed'` is what production routes on, identically on all three arms. Words that assert
+completeness or provenance — "is a property of", "cannot", "always", "spent", "inherited"
+— each need a line behind them or they get narrowed, and two of them here did not.

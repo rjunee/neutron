@@ -253,14 +253,58 @@ function enterRalphPlan(
     // The `max_ralph_rounds` token is present in both spellings — `delivery.ts` and
     // several tests key on it — so only the explanation changes, never the
     // classification.
-    const builtNothingItself = run.inner_checkpoint === null
+    // THREE BRANCHES, BECAUSE THE ROW DISTINGUISHES THREE THINGS — and the previous
+    // revision collapsed two of them (final gate, round three). Having correctly removed
+    // a claim that was NOT determinable (inheritance), it retreated to the most general
+    // wording available and thereby asserted something FALSE about the cases that were
+    // never ambiguous: a brand-new run configured `max_ralph_rounds: 0` was told "the
+    // budget was spent before this run began" when nothing had ever been allocated, let
+    // alone spent. Keying on a proxy asserts more than you know; retreating to the most
+    // general wording asserts something false about the unambiguous cases. Same error,
+    // opposite sides: the message not matching what the row establishes.
+    //
+    // WHAT IS REACHABLE HERE, derived rather than assumed. The refusal fires iff
+    // `ralph_round + 1 > max_ralph_rounds`, i.e. `ralph_round >= max_ralph_rounds`.
+    // `max_ralph_rounds` is written ONLY by `TridentRunStore.create` — it is absent from
+    // `TridentRunUpdate`, so nothing patches it — and `create` refuses any cap that is
+    // not a non-negative safe integer (`isRalphCap`). So `cap >= 0` always, and
+    // `ralph_round === 0` at this point IMPLIES `cap === 0`. The fourth combination one
+    // might expect — round 0 under a positive cap — cannot reach this branch at all,
+    // which is why there are three arms and not four.
+    //
+    //   (1) A CHECKPOINT EXISTS → this run built something and then ran out. "Without
+    //       converging" is accurate for it, and it is the original wording, unchanged.
+    //   (2) NO CHECKPOINT AND ralph_round === 0 → therefore cap 0: no Ralph iteration was
+    //       ever authorised. Nothing was spent, by this run or any other. Determinable
+    //       from the row, so the message says it plainly and claims nothing else.
+    //   (3) NO CHECKPOINT AND ralph_round > 0 → the budget HAS been consumed, and that
+    //       much is certain whoever consumed it. WHO is not: this row may have advanced
+    //       the counter itself through the phase graph (this function bumps it without
+    //       writing a checkpoint) or carried the count in from an earlier run of the
+    //       card. Only THAT question needs the two-possibility wording, and the row's
+    //       inability to answer it is stated rather than resolved by guessing.
+    //
+    // THE `max_ralph_rounds` TOKEN APPEARS IN ALL THREE, so the classification is
+    // unchanged and only the explanation differs. Who actually depends on that, named
+    // rather than assumed (an earlier draft of this line credited `delivery.ts`, which
+    // does not mention `max_ralph_rounds` anywhere — an asserted consumer that does not
+    // exist, found by re-reading the claims in this file against the code behind them):
+    // `ported-fixes.test.ts`, `state-machine.test.ts` and `orchestrator.test.ts` all
+    // assert the token out of `failure_reason`. No PRODUCTION reader parses it today;
+    // `phase: 'failed'` is what production routes on, and that is identical on all three
+    // arms.
+    const builtSomethingItself = run.inner_checkpoint !== null
+    const nothingWasEverAllocated = !builtSomethingItself && run.ralph_round === 0
+    const failure_reason = builtSomethingItself
+      ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`
+      : nothingWasEverAllocated
+        ? `Ralph loop cannot start: max_ralph_rounds is ${run.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build`
+        : `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) with ralph_round already at ${run.ralph_round} and no build of its own on this run (inner_checkpoint is null): the budget is consumed, so there was no iteration left to start and nothing was attempted. This row does not record WHO consumed it — it may have spent the rounds itself through the phase graph, or carried the count forward from an earlier run of this card — so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge`
     return {
       phase: 'failed',
       round: run.round,
       ralph_round: run.ralph_round,
-      failure_reason: builtNothingItself
-        ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) with ralph_round already at ${run.ralph_round} and no build of its own on this run (inner_checkpoint is null): there was no iteration left to start, so nothing was attempted. The budget was spent before this run began — either an earlier run of this card used it up and the count carried forward, or the cap was set this low at dispatch. This row does not record which, so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge`
-        : `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`,
+      failure_reason,
       note: 'ralph loop → failed (max ralph rounds reached)',
     }
   }

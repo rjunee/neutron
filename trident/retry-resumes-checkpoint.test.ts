@@ -1422,11 +1422,18 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     // existed, so the same wording was handed to a brand-new run at its cap (see the
     // fresh-run boundary test below). A test asserting a claim is only as good as the
     // claim; this one made a lying message look verified.
+    // BRANCH 3: the budget IS consumed — that much is certain whoever consumed it —
+    // and only WHO is left open.
     expect(t.failure_reason).toContain('no build of its own')
-    expect(t.failure_reason).toContain('does not record which')
-    // It may NAME inheritance as one of two possibilities; it may not assert it.
+    expect(t.failure_reason).toContain('the budget is consumed')
+    expect(t.failure_reason).toContain('does not record WHO consumed it')
+    // It may NAME the two possibilities; it may not assert either one…
     expect(t.failure_reason).not.toContain('inherited')
+    // …it may not blame a planner that never ran…
     expect(t.failure_reason).not.toContain('without converging')
+    // …and it must NOT claim nothing was allocated, which is branch 2's fact and is
+    // false here. RED-mutation: collapse branch 3 into branch 2 and this fails.
+    expect(t.failure_reason).not.toContain('no Ralph iteration was ever authorised')
 
     // POSITIVE CONTROL — a run that DID build something and then exhausted the loop keeps
     // the convergence wording, because for it that wording is accurate. Without this the
@@ -1440,48 +1447,93 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     expect(ran.failure_reason).not.toContain('no build of its own')
   })
 
-  test('A BRAND-NEW run at its cap is not described as inheriting anything', async () => {
-    // THE FRESH-RUN BOUNDARY, and the reason the first fix for this was also wrong. The
-    // replacement wording keyed on `inner_checkpoint === null` — a PROXY — and then
-    // asserted INHERITANCE, which that proxy does not establish. Measured by the final
-    // gate: a brand-new Ralph run created with `max_ralph_rounds: 0`, transitioned from
-    // `forge-init`, has a null checkpoint and round 0 and was reported as having
-    // inherited a spent budget from a predecessor that does not exist. Worse than vague:
-    // it sends the reader hunting an earlier run rather than at the data.
+  test('A BRAND-NEW run with NO budget allocated is told exactly that — branch 2 of 3', async () => {
+    // THE SECOND CONTRADICTION IN THIS ONE SENTENCE, and the mirror of the first. Having
+    // removed a claim that was not determinable (inheritance), the wording retreated to
+    // the most general phrasing available — "the budget was spent before this run began"
+    // — which is FALSE here: this run was configured `max_ralph_rounds: 0`, so nothing was
+    // ever allocated and nothing was spent by anyone. The test that replaced the first
+    // lying message only excluded the WORD "inherited", so it blessed the new
+    // contradiction: the seventh test in this lane to document a defect as correct.
     //
-    // "WHAT INPUT WOULD A WRONG IMPLEMENTATION GET RIGHT?" — wording that ALWAYS says
-    // "inherited" satisfies a test that drives only the inherited case, which is exactly
-    // what the previous version had. So the two cases are asserted together and the
-    // inheritance claim is asserted ABSENT from both.
-    // RED-mutation: reintroduce "it inherited a spent budget … used by an earlier run of
-    // this card" on the `builtNothingItself` branch and this test fails while the
-    // inherited-case test above still passes — which is how the defect got in.
+    // Keying on a proxy asserts more than the row establishes; retreating to the most
+    // general wording asserts something false about the cases that were never ambiguous.
+    // Same error from opposite sides.
+    // RED-mutation: collapse this branch into branch 3 (drop `nothingWasEverAllocated`)
+    // and this row is told its budget was consumed when none existed.
     const fresh = await store.create({
       slug: 'fresh-at-cap', project_slug: 'proj-1', repo_path: tmp, task: 'x',
       ralph: true, max_ralph_rounds: 0,
     })
-    // A genuinely fresh row: no predecessor, nothing spent, nothing built.
     expect({ round: fresh.ralph_round, cap: fresh.max_ralph_rounds, cp: fresh.inner_checkpoint }).toEqual(
       { round: 0, cap: 0, cp: null },
     )
 
     // `forge-init` in ralph mode needs a REMAINING_TASKS from the bootstrap before it
-    // reaches the cap check at all — without it the transition fails earlier, on its own
-    // reason. `{ remaining: 1 }` is the ordinary "one task still to build" bootstrap, so
-    // this is the real path into `enterRalphPlan` for a brand-new governed run.
+    // reaches the cap check at all, so this is the real path in for a brand-new run.
     const t = computeTransition({ ...fresh, phase: 'forge-init' }, { remaining: 1 })
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('max_ralph_rounds')
-    // IT MUST NOT CLAIM A PREDECESSOR. No form of the word, because the claim is what
-    // was wrong rather than one phrasing of it.
+    // IT SAYS WHAT IS TRUE: nothing was allocated, so nothing was spent.
+    expect(t.failure_reason).toContain('no Ralph iteration was ever authorised')
+    expect(t.failure_reason).toContain('Nothing has been spent')
+    // AND CLAIMS NOTHING ELSE — no predecessor, no consumed budget, no planner.
     expect(t.failure_reason).not.toContain('inherited')
-    expect(t.failure_reason).not.toContain('earlier run of this card spent it')
-    // …and it must still not blame a planner that never ran.
+    expect(t.failure_reason).not.toContain('the budget is consumed')
     expect(t.failure_reason).not.toContain('without converging')
-    // What it DOES say is observable from this row alone, and it names both
-    // possibilities rather than choosing one the row cannot distinguish.
-    expect(t.failure_reason).toContain('no build of its own')
-    expect(t.failure_reason).toContain('does not record which')
+    expect(t.failure_reason).not.toContain('does not record')
+  })
+
+  test('A CARRIED ROUND UNDER A ZERO CAP is branch 3, not branch 2 — the counter decides, not the cap', async () => {
+    // THE DISCRIMINATOR HAS TO BE THE COUNTER. Keying branch 2 on `max_ralph_rounds === 0`
+    // reads identically on every row above EXCEPT this one, and this one is reachable:
+    // a prior at 5/30 re-dispatched with an explicit cap of 0 produces 5/0 (the cap
+    // tightens, the spend travels). Under the cap-keyed version that row is told "nothing
+    // has been spent" while its counter says 5. The mutation survived the suite until
+    // this case was written, which is what "what input would a wrong implementation get
+    // right?" is for: both discriminators agree everywhere else.
+    // RED-mutation: `nothingWasEverAllocated = !builtSomethingItself &&
+    // run.max_ralph_rounds === 0` — the row below is told nothing was spent.
+    const carriedUnderZero = await store.create({
+      slug: 'carried-under-zero-cap', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 5, max_ralph_rounds: 0,
+    })
+    expect({ round: carriedUnderZero.ralph_round, cap: carriedUnderZero.max_ralph_rounds, cp: carriedUnderZero.inner_checkpoint }).toEqual(
+      { round: 5, cap: 0, cp: null },
+    )
+
+    const t = computeTransition({ ...carriedUnderZero, phase: 'ralph-task' }, {})
+    expect(t.phase).toBe('failed')
+    // BRANCH 3: a budget WAS consumed — five rounds of it — whoever consumed them.
+    expect(t.failure_reason).toContain('the budget is consumed')
+    expect(t.failure_reason).toContain('does not record WHO consumed it')
+    // NOT branch 2: "nothing has been spent" is flatly false for a row at ralph_round 5.
+    expect(t.failure_reason).not.toContain('Nothing has been spent')
+    expect(t.failure_reason).not.toContain('no Ralph iteration was ever authorised')
+  })
+
+  test('THE THIRD COMBINATION IS UNREACHABLE, and that is why there are three arms not four', async () => {
+    // Derived rather than assumed, because the arm count depends on it. The refusal fires
+    // iff `ralph_round >= max_ralph_rounds`; `max_ralph_rounds` is written ONLY by
+    // `create` (absent from `TridentRunUpdate`) and `create` refuses any cap that is not a
+    // non-negative safe integer. So `ralph_round === 0` at the refusal implies `cap === 0`
+    // — a round of 0 under a POSITIVE cap can never reach it.
+    // RED-mutation: none applies; this asserts a property of the guard, and it reds if
+    // someone widens the refusal condition (e.g. to `>=`) or lets a negative cap be
+    // written, either of which would make a fourth arm reachable without anyone noticing.
+    const positiveCap = await store.create({
+      slug: 'round-zero-positive-cap', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, max_ralph_rounds: 3,
+    })
+    expect({ round: positiveCap.ralph_round, cap: positiveCap.max_ralph_rounds }).toEqual({
+      round: 0,
+      cap: 3,
+    })
+    // It does NOT fail — it advances, which is the whole content of the claim.
+    const t = computeTransition({ ...positiveCap, phase: 'forge-init' }, { remaining: 1 })
+    expect(t.phase).toBe('ralph-plan')
+    expect(t.ralph_round).toBe(1)
+    expect(t.failure_reason).toBeNull()
   })
 })
 

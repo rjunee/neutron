@@ -10,15 +10,38 @@
  * `checkpoint-round.ts` already take: one concept, no dependencies, shared by
  * every site that has to give the same answer.
  *
- * WHY THEY MUST AGREE (#519). A re-dispatch of a card whose previous run died
- * carries that run's `ralph_round` onto the new row, so the Ralph loop's bound is
- * a property of the CARD rather than of whichever attempt happens to be running —
- * without it, `max_ralph_rounds` is unenforceable by anyone willing to press ▶
- * again. `builtButNeverReviewedSeed` (run-disposition.ts) decides whether a round
- * may be carried; `TridentRunStore.create` (store.ts) refuses one it should not
- * have been offered. Two copies of the rule would let the producer offer exactly
- * the value the write site throws on, which turns a salvageable dispatch into a
+ * WHY THEY MUST AGREE (#519). A re-dispatch of a card THAT NAMES ITS PRIOR RUN
+ * carries that run's `ralph_round` and cap onto the new row, so for that path the
+ * Ralph bound follows the card rather than the attempt. `carriedRalphBudget`
+ * (run-disposition.ts) decides whether the pair may be carried;
+ * `TridentRunStore.create` (store.ts) refuses a pair it should not have been
+ * offered. Two copies of the rule would let the producer offer exactly the value
+ * the write site throws on, which turns a salvageable dispatch into a
  * `backend_error` — the failure mode this file exists to make impossible.
+ *
+ * AND THAT IS THE WHOLE OF THE CLAIM. An earlier version of this paragraph said the
+ * bound "is a property of the CARD" and that `max_ralph_rounds` is not resettable by
+ * pressing ▶ again — which is exactly what this change spent two review rounds
+ * establishing to be FALSE, in the file that implements the rule, where a future
+ * reader is most likely to trust it. It was written before the escapes were
+ * understood and nothing re-reads a comment you did not touch. The escapes, both
+ * measured and both pinned as tests in `retry-resumes-checkpoint.test.ts`:
+ *
+ *   - ONE CLICK CLEARS THE LINK. `work-board/store.ts` NULLs `linked_run_id` when a
+ *     card leaves the `failed` lane (`nextStatus('failed')` to `'upcoming'`, the
+ *     ordinary status-dot advance) and again on `done` to `upcoming`. The carry is
+ *     gated on that link, so the next dispatch inherits nothing: same card, same
+ *     slug, same branch, full fresh budget.
+ *   - AN INTERVENING NON-GOVERNED RUN LAUNDERS THE SPEND. `carriedRalphBudget`
+ *     answers null when either run is not governed, and `latestTerminalBySlug`
+ *     returns only the LATEST terminal row — so one ralph-off dispatch between two
+ *     governed ones drops the count entirely. That row is present and readable; it
+ *     is simply not governed, which is why it is not a "gap in the chain".
+ *
+ * Making the bound genuinely card-level is `#629`, not this file. What this file
+ * guarantees is narrower and worth stating exactly: WHEN a governed re-dispatch
+ * names the governed prior run it is resuming, the spend and the cap travel
+ * together, and the cap can only tighten.
  */
 
 /**
