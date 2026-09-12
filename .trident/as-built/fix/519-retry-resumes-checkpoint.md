@@ -202,6 +202,32 @@ database, and the three sqlite cannot store are covered through the real dispatc
 chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
 
+**FOUR ROUNDS ON ONE SENTENCE, AND THE LAST PROXY WAS IN THE ARM THAT WAS NEVER IN
+DISPUTE.** Arm collapse, cap-versus-counter, the inheritance claim — and then arm 1,
+which nobody had argued about, turned out to rest on the same kind of proxy as the claim
+that started the argument. `ralphCapFailureReason` read a non-null `inner_checkpoint` as
+proof THIS run built something, while the dispatch chokepoint COPIES the prior run's
+checkpoint onto the new row: a re-dispatch of a linked prior at its cap arrives carrying
+`fix-round-3` having run no Ralph iteration at all, and was told it failed to converge.
+The attention goes where the argument is; the defect waits where it isn't.
+
+The earlier analysis in this very record had already reached the answer for a different
+arm — real provenance needs a column, and until it exists the reason must not assert
+per-run authorship — and then let arm 1 assert exactly that. So arm 1 now says what is
+knowable (the budget is exhausted, and a resumable build IS on this row) and claims
+nothing about who produced it. Whether that distinction is worth having is a real
+question — "this run burned 20 rounds" and "this run inherited a spent budget and a
+checkpoint" are different operator situations — but answering it needs a provenance
+column, which is a schema change and belongs with `#629`, not here.
+
+AND THE TESTS SHARED THE DISCRIMINATOR'S BLIND SPOT, which is why three rounds of
+narrowing never reached it: the inherited-spend case WITHHELD the checkpoint and the
+built-something control INJECTED one, so neither could tell an inherited checkpoint from
+an authored one. A fixture that constructs the state cannot see a defect in how the state
+is PRODUCED — the same lesson as the E1 survivor one round earlier. The replacement runs
+the real chokepoint: dispatch a linked prior at cap, let review return remaining work, and
+read the reason the orchestrator's own cap path emits.
+
 **THE QUESTION AFTER ANY CORRECTION IS NOT "IS THIS SITE RIGHT NOW" BUT "WHO ELSE SAYS
 THIS".** Five times on this change a rule was applied to the site in front of the author
 and not to its siblings: the cap got a careful three-way classification while the counter

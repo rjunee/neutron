@@ -1435,16 +1435,25 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     // false here. RED-mutation: collapse branch 3 into branch 2 and this fails.
     expect(t.failure_reason).not.toContain('no Ralph iteration was ever authorised')
 
-    // POSITIVE CONTROL — a run that DID build something and then exhausted the loop keeps
-    // the convergence wording, because for it that wording is accurate. Without this the
-    // assertion above is satisfied by deleting the phrase everywhere.
+    // CONTROL — a row that CARRIES a checkpoint takes the other arm. Note what this
+    // control could NOT see, and did not, for three rounds: it INJECTS the checkpoint,
+    // and the arm-3 case above WITHHOLDS one, so neither could distinguish a checkpoint
+    // this run produced from one the dispatch seed copied forward. The discriminator and
+    // its tests shared a blind spot, which is why the proxy in this arm survived every
+    // round of narrowing. The real-dispatch case that CAN see it lives in
+    // `orchestrator.test.ts` ("a SEEDED run at cap is not told it failed to converge").
+    // So this control now asserts only what a constructed row can honestly establish:
+    // which ARM is taken, never who authored the build.
     const ran = computeTransition(
       { ...row, phase: 'ralph-task', inner_checkpoint: 'ralph-task-built' },
       {},
     )
     expect(ran.phase).toBe('failed')
-    expect(ran.failure_reason).toContain('without converging')
+    expect(ran.failure_reason).toContain('A resumable build IS on this row')
     expect(ran.failure_reason).not.toContain('no build of its own')
+    // AND IT CLAIMS NO AUTHORSHIP, for the same reason arm 3 claims none: the row does
+    // not record it. RED-mutation: restore "without converging" to arm 1.
+    expect(ran.failure_reason).not.toContain('without converging')
   })
 
   test('A BRAND-NEW run with NO budget allocated is told exactly that — branch 2 of 3', async () => {

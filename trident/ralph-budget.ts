@@ -198,8 +198,15 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  * `max_ralph_rounds === 0`, and round 0 under a positive cap cannot reach this code at
  * all.
  *
- *   1. A CHECKPOINT EXISTS — this run built something and then ran out. "Without
- *      converging" is accurate for it and is the original wording, unchanged.
+ *   1. A CHECKPOINT EXISTS — so a RESUMABLE BUILD is on this row. Note what this does
+ *      NOT say: that THIS run produced it. The dispatch chokepoint COPIES a prior run's
+ *      checkpoint onto the new row (`board-dispatch.ts`, the salvage-resume seed), so a
+ *      non-null checkpoint is a proxy for authorship and not proof of it — a re-dispatch
+ *      of a linked prior at its cap arrives here carrying `fix-round-3` having run no
+ *      Ralph iteration at all, and the original wording called that "without
+ *      converging". Authorship needs provenance this row does not record, exactly as it
+ *      does for arm 3; the difference between the arms is whether a build EXISTS, which
+ *      is knowable, not who made it, which is not.
  *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0: no iteration was ever
  *      authorised, so nothing was spent by anyone. Determinable from the row.
  *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget IS consumed, whoever consumed
@@ -224,9 +231,12 @@ export function ralphCapFailureReason(row: {
     typeof row.remaining_tasks === 'number' && Number.isFinite(row.remaining_tasks)
       ? ` (${row.remaining_tasks} task(s) still unbuilt)`
       : ''
-  const builtSomethingItself = row.inner_checkpoint !== null
-  if (builtSomethingItself) {
-    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) without converging${tail}`
+  // A RESUMABLE BUILD IS PRESENT — not necessarily one this run made. See arm 1 above:
+  // `inner_checkpoint` is copied forward by the dispatch seed, so authorship is not
+  // readable from it and is not claimed.
+  const hasResumableBuild = row.inner_checkpoint !== null
+  if (hasResumableBuild) {
+    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round}: the budget is exhausted, so no further iteration could start. A resumable build IS on this row (inner_checkpoint '${row.inner_checkpoint}') — but this row does not record WHO produced it, since a re-dispatch copies the prior run's checkpoint forward, so it may be this run's work or an earlier run's. Check the card's earlier runs and the configured cap${tail}`
   }
   if (row.ralph_round === 0) {
     return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`

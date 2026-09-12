@@ -36,6 +36,8 @@ import {
 } from './mutation-prover.ts'
 import { mutationClaimArtifactPath } from './mutation-claim-artifact.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
+import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
+import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
@@ -4319,11 +4321,16 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     // WHICH ARM IS NATURALLY REACHABLE HERE, measured rather than assumed: a run only
     // reaches this branch after the workflow wrote a terminal result, and the workflow
     // writes an `inner_checkpoint` first — so in the ordinary flow the row HAS a
-    // checkpoint and arm 1 ("without converging") is genuinely accurate. That is why the
-    // first version of this test could not tell the helper from the old hard-coded
-    // string, and why the E1 mutation below survived it: both produce the same sentence
-    // for the only case the harness produced. Asserting the arm that is always right is
-    // the same mistake as a test that reacts to its subject.
+    // checkpoint and takes arm 1. That is why the first version of this test could not
+    // tell the helper from the old hard-coded string, and why the E1 mutation below
+    // survived it: both produced the same sentence for the only case the harness
+    // produced. Asserting the arm that is always right is the same mistake as a test
+    // that reacts to its subject.
+    //
+    // ARM 1 NO LONGER CLAIMS THIS RUN ITERATED. A checkpoint here may have been COPIED
+    // from a prior run by the dispatch seed, so it proves a resumable build exists and
+    // nothing about who made it — see the seeded-at-cap test below, which produces that
+    // row through the real chokepoint rather than constructing it.
     //
     // So the second half drives the case where they DIFFER, and it is a real one: the
     // checkpoint is written out-of-process by `checkpoint.sh`, so a terminal result can
@@ -4335,7 +4342,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       }
     }
 
-    // ── ARM 1, the ordinary flow: a checkpoint exists, so "without converging" is true.
+    // ── ARM 1, the ordinary flow: a checkpoint exists, so a resumable build is present.
     {
       const h = buildHarness({ plan })
       const run = await createRun({
@@ -4349,7 +4356,8 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       expect(final.phase).toBe('failed')
       expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
       expect(final.inner_checkpoint).not.toBeNull() // the precondition for arm 1, asserted
-      expect(final.failure_reason ?? '').toContain('without converging')
+      expect(final.failure_reason ?? '').toContain('A resumable build IS on this row')
+      expect(final.failure_reason ?? '').not.toContain('without converging')
       // This path's OWN fact — how much work is left — survives the extraction. The state
       // machine has no such number, so it is the half a shared helper could quietly drop.
       expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
@@ -4377,11 +4385,98 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       // how the divergence survived, and the failure mode of every extraction (the helper
       // exists; one call site does not use it).
       expect(final.failure_reason ?? '').toContain('no build of its own on this run')
-      expect(final.failure_reason ?? '').not.toContain('without converging')
+      expect(final.failure_reason ?? '').not.toContain('A resumable build IS on this row')
       // The classification token is unchanged on both arms, so nothing downstream shifts.
       expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
       expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
     }
+  })
+
+  test('a SEEDED run at cap is not told it failed to converge — the checkpoint was inherited (#519)', async () => {
+    // THE FOURTH PROXY ON ONE SENTENCE, and it sat in the arm nobody was arguing about.
+    // `ralphCapFailureReason` read a non-null `inner_checkpoint` as proof THIS run built
+    // something. But the dispatch chokepoint COPIES the prior run's checkpoint onto the
+    // new row (`board-dispatch.ts`, the salvage-resume seed), so a re-dispatch of a
+    // linked prior at its cap arrives here carrying `fix-round-3` having run no Ralph
+    // iteration at all — and was told it failed to converge.
+    //
+    // THE ROW IS PRODUCED BY THE REAL DISPATCH, not constructed. That is the whole point:
+    // the two earlier tests for this sentence either WITHHELD the checkpoint or INJECTED
+    // one, so neither could tell an inherited checkpoint from an authored one — the
+    // discriminator and its tests shared a blind spot. A fixture that builds the state
+    // directly cannot see a defect in how the state is produced; same lesson as the E1
+    // survivor.
+    // RED-mutation: restore `inner_checkpoint !== null` as proof of authorship (arm 1
+    // returning "...without converging") and this test fails while the arm-2 and arm-3
+    // cases stay green — so the fix is not a collapse.
+    const CP = 'fix-round-3'
+    const HEAD40 = 'a'.repeat(40)
+    const BASE40 = 'c'.repeat(40)
+    const TASK = 'seeded at cap through the real dispatch chokepoint'
+
+    // A governed prior AT its cap, built-but-never-reviewed on an unmoved tip. The SLUG
+    // must be the one the chokepoint will derive from the task text, or
+    // `latestTerminalBySlug` finds no prior and the dispatch is an ordinary fresh one —
+    // which is how the first version of this test silently stopped testing anything.
+    const SLUG = slugifyTask(TASK)
+    const BRANCH = `trident/${SLUG}`
+    const prior = await createRun({
+      slug: SLUG, task: TASK, branch: BRANCH,
+      ralph: true, ralph_round: 3, max_ralph_rounds: 3, merge_mode: 'pr' as MergeMode,
+    })
+    await store.update(prior.id, {
+      phase: 'failed', inner_checkpoint: CP, inner_checkpoint_head: HEAD40,
+      inner_verdict: 'REVIEW_NOT_RUN', base_sha: BASE40,
+    })
+    const board: TridentBoardBinder = {
+      get: () => ({
+        id: 'ready',
+        title: 'seeded at cap through the real dispatch chokepoint',
+        design_doc_ref: null,
+        linked_run_id: prior.id,
+      }),
+      attachRun: async () => {},
+    }
+    const dispatched = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      {
+        store, board, project_slug: 't1', repo_path: tmp,
+        resolveBuildRepo: async () => '/repo',
+        resolveMergeMode: async () => 'pr',
+        resolveRalph: async () => true,
+        readBranchTip: async () => HEAD40,
+      },
+    )
+    expect(dispatched.ok).toBe(true)
+    if (!dispatched.ok) return
+    // THE SHAPE THE DEFECT NEEDS, asserted rather than assumed: a checkpoint this row
+    // did NOT produce, and a budget already at its cap.
+    expect(dispatched.run.inner_checkpoint).toBe(CP)
+    expect({ round: dispatched.run.ralph_round, cap: dispatched.run.max_ralph_rounds }).toEqual({
+      round: 3, cap: 3,
+    })
+
+    const h = buildHarness({
+      plan: function plannedResult(): SimPlan {
+        return {
+          result: {
+            verdict: 'REQUEST_CHANGES', prNumber: 9,
+            branch: BRANCH, remainingTasks: 4,
+          },
+          argusCheckpoint: CP,
+        }
+      },
+    })
+    const final = await runToTerminal(h, dispatched.run.id, 40)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
+    // IT MUST NOT CLAIM THIS RUN ITERATED. It never did.
+    expect(final.failure_reason ?? '').not.toContain('without converging')
+    // What it MAY say is what the row shows: a resumable build exists, and who made it is
+    // not recorded — which is true whether the checkpoint was inherited or produced.
+    expect(final.failure_reason ?? '').toContain('A resumable build IS on this row')
+    expect(final.failure_reason ?? '').toContain('does not record WHO produced it')
   })
 
   test('the intermediate re-fire never leaves a harvestable inner_result behind (no re-harvest loop)', async () => {
