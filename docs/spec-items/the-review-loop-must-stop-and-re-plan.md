@@ -59,25 +59,47 @@ card, that a build stopped because it was blocked rather than because it failed.
 
 ## Acceptance
 
-- [ ] A run whose reviewers repeat a finding STOPS and escalates instead of iterating. On
+Built on branch `fix/review-loop-stop-and-escalate`; record at
+`.trident/as-built/fix/review-loop-stop-and-escalate.md`.
+
+- [x] A run whose reviewers repeat a finding STOPS and escalates instead of iterating. On
       the recorded data of run `36b95167` this fires at ROUND 2, not round 10.
-- [ ] Findings have STABLE IDENTITY (a reviewer-emitted key such as `file:symbol:rule`, or
+      NOTE ON "the recorded data": that run's reviewers emitted no `key` field (it did not
+      exist), so the test drives the gate with the three recorded findings carried under
+      the identities this item introduces. The counterfactual is the only satisfiable
+      reading — criterion 2 says as much when it calls identity a prerequisite of the item
+      rather than an assumption of it.
+- [x] Findings have STABLE IDENTITY (a reviewer-emitted key such as `file:symbol:rule`, or
       a normalised fingerprint). This is a prerequisite of the item, not an assumption of
       it: with free-text titles "same finding" is not machine-decidable, so a
       repeat-finding gate built on titles does not satisfy this.
-- [ ] The REPEAT-FINDING gate is arithmetic and requires no agent to be honest. A
+      Built as the reviewer-emitted key ONLY, with no title-derived fallback: a fallback
+      would make the gate look like it worked on unkeyed findings while a reword defeated
+      it. An unkeyed finding is UNDECIDABLE, never a fresh one.
+- [x] The REPEAT-FINDING gate is arithmetic and requires no agent to be honest. A
       self-declared `design-gap` / `missing-dependency` exit exists too, but is never the
       ONLY trigger — assert the arithmetic gate fires with the self-declaration suppressed.
-- [ ] `design-gap` and `missing-dependency` each REQUIRE a `whatIsMissing` field, so
+- [x] `design-gap` and `missing-dependency` each REQUIRE a `whatIsMissing` field, so
       neither can be a bare complaint. Assert an escalation without it is refused.
-- [ ] A `design-gap` buys exactly ONE bounded re-plan per run, with the findings attached.
+      Refused in TWO places, because either alone is reversible by the other: the
+      workflow's `validateEscalationClaim`, and `parseInnerEscalation` on the way back out
+      of the database.
+- [x] A `design-gap` buys exactly ONE bounded re-plan per run, with the findings attached.
       Assert a second re-plan is refused — unbounded re-planning reproduces the same waste
       as a plan↔fix oscillation.
-- [ ] **The RUN reports; the ORCHESTRATOR decides.** A build must never mutate the Work
+- [x] **The RUN reports; the ORCHESTRATOR decides.** A build must never mutate the Work
       Board itself. Assert a run cannot reorder cards — a test where the run writes to the
       board must go red.
-- [ ] A card escalated as `missing-dependency` moves to a visibly BLOCKED state, not
+      The inner workflow has no board access at all (absence established by grep with two
+      positive controls — see the as-built record). The only board writer a build can reach
+      is the terminal reconcile, whose interface is `detachRun` and nothing else; a hostile
+      escalation payload naming a card and a position is asserted inert, and a reconcile
+      that obeys it turns two tests red.
+- [x] A card escalated as `missing-dependency` moves to a visibly BLOCKED state, not
       `upcoming` looking startable.
-- [ ] The round cap becomes the backstop rather than the primary exit, and the owner can
+      `work_board_items.status = 'blocked'` (migration 0140) — run-driven, not
+      client-writable, and ACTIVE rather than terminal: the card keeps its `sort_order` and
+      never stamps `completed_at`, because it is unfinished work that is waiting.
+- [x] The round cap becomes the backstop rather than the primary exit, and the owner can
       see on the card that a build stopped because it was BLOCKED rather than because it
       FAILED — two different words, not one.

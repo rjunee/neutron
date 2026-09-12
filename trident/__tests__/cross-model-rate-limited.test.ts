@@ -850,6 +850,9 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
         ok: false,
         verdict: 'REQUEST_CHANGES',
         block_kind: 'infra-only',
+        // NOT ESCALATING — a rate-limited provider is an infrastructure stop, and the
+        // escalation branch must not fire on it.
+        escalation: null,
         terminal_cause: title(),
         round: 1,
         checkpoint: null,

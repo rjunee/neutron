@@ -3144,6 +3144,13 @@ describe('a fully excused CI red still holds the merge', () => {
       'peers',
       'noReviewRan',
       'reviewRecord',
+      // The tail also reads the SEAT'S OWN RAW REPLY now, to pick up a self-declared
+      // escalation before this file's CI advisories are merged in. It is injected rather
+      // than reconstructed: in these fixtures `severityGated` IS what the seat said (the
+      // severity gate returns its input untouched for these shapes), and nothing here
+      // declares an escalation, so the claim is absent — which is what every assertion
+      // below assumes.
+      'synthesisRaw',
       [
         constLine('NON_BLOCKING_SEVERITIES'),
         constLine('ADVISORY_FINDING_KEY'),
@@ -3160,8 +3167,9 @@ describe('a fully excused CI red still holds the merge', () => {
       p: unknown[],
       n: boolean,
       r: string,
+      raw: unknown,
     ) => Record<string, unknown>
-    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.')
+    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.', severityGated)
   }
 
   const seatSaid = (severityGated: Record<string, unknown> | null): Record<string, unknown> =>

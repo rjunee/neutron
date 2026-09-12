@@ -43,7 +43,16 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  *  Shelved section. Unlike `failed` it IS client-writable — it exists precisely
  *  so an agent asked to take a card off the board no longer has to misreport it
  *  as done (2026-08-14). */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
+/** `blocked` (migration 0140) is the SIXTH lane and the second RUN-DRIVEN one: a build
+ *  that STOPPED ON PURPOSE — a reviewer proved the plan was wrong, the card needs work
+ *  that lives outside it, or the same finding survived a fix round — rather than one
+ *  that broke. FAILED and BLOCKED are two different words because they earn opposite
+ *  responses: retry the one, decide or sequence something for the other. Like `failed`
+ *  and unlike `archived` it is NOT client-writable (the run reports; the orchestrator
+ *  decides), and unlike both terminal lanes it is ACTIVE: the card keeps its
+ *  `sort_order`, stays in `listActive`, and never stamps `completed_at` — it is
+ *  unfinished work that is waiting, not work that ended. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived' | 'blocked'
 
 /**
  * The kind of work a card represents — the ▶/play routing discriminator (#379,
@@ -122,8 +131,12 @@ export interface WorkBoardItemUpdate {
   declared_surfaces?: string[] | null
 }
 
-/** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
-export type RunReconcileOutcome = 'done' | 'failed'
+/** Outcome of a bound run reaching a terminal phase (drives the reconcile).
+ *  'blocked' is NOT a third flavour of failure: it is the run reporting that it stopped
+ *  and escalated, which is what keeps the card off the 'failed' lane and out of
+ *  'upcoming', where it would sit looking startable and be dispatched again to re-learn
+ *  the same block. */
+export type RunReconcileOutcome = 'done' | 'failed' | 'blocked'
 
 /**
  * The terminal run's PR provenance, handed to {@link WorkBoardStore.detachRun}
@@ -1156,6 +1169,14 @@ export class WorkBoardStore {
           sets.push('completed_at = ?')
           params.push(this.now())
         }
+      } else if (outcome === 'blocked') {
+        // BLOCKED — the build stopped ON PURPOSE and said why. Same shape as the
+        // failed arm (keep the run link so the retry path can overwrite it, never
+        // stamp `completed_at` — nothing completed), and a DIFFERENT LANE, which is
+        // the entire point: the owner has to be able to tell "this needs a decision"
+        // from "this broke", and leaving it in `upcoming` would put it back at the
+        // top of the active lane looking startable.
+        sets.push("status = 'blocked'", 'completed_at = NULL')
       } else {
         // Failed — FAILED lane, KEEP the run link (see the header). The retry
         // path (`attachRun`) overwrites the link + flips back to in_progress.

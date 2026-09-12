@@ -108,6 +108,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import { escalationStopSentence } from './escalation-block.ts'
 import { infraDeathSentence } from './infra-block.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
@@ -1042,9 +1043,19 @@ export function recordedTerminalVerdict(
   result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint'>,
   rowFindings: string | null,
 ): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
+  // THE ESCALATION KINDS ARE REVIEWED VERDICTS TOO. A run only reaches one from a round a
+  // full panel judged (the escalation ledger records nothing for an infra-only or
+  // advisory-only round), and it carries that panel's findings — so recording
+  // REVIEW_NOT_RUN over it would assert the one thing that is false about this stop: that
+  // nobody read the code. The rest of the gate is unchanged, and still does the work —
+  // Argus provenance plus findings on the row.
   if (
     result.verdict === 'REQUEST_CHANGES' &&
-    (result.block_kind === 'code' || result.block_kind === 'advisory-only') &&
+    (result.block_kind === 'code' ||
+      result.block_kind === 'advisory-only' ||
+      result.block_kind === 'design-gap' ||
+      result.block_kind === 'missing-dependency' ||
+      result.block_kind === 'not-converging') &&
     hasArgusProvenance(result.checkpoint) &&
     parseCheckpointFindings(rowFindings).length > 0
   ) {
@@ -2094,7 +2105,14 @@ export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<
     InnerResult,
-    'ok' | 'verdict' | 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause' | 'findings_present'
+    | 'ok'
+    | 'verdict'
+    | 'round'
+    | 'checkpoint'
+    | 'block_kind'
+    | 'terminal_cause'
+    | 'findings_present'
+    | 'escalation'
   >,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
@@ -2163,6 +2181,20 @@ export function innerTerminalFailureReason(
   // The kind also decides WHICH sentence, because it is the only thing that licenses the
   // claim "review never ran". Without it the reason states the failure and quotes the
   // measurement, and says nothing at all about the review panel.
+  // 2026-09-12 — AND A SECOND MEASURED PATH: a run that STOPPED AND ESCALATED. Like the
+  // infra-only cause below, this is a sentence composed where the fact was KNOWN (the fix
+  // loop, which is the only place that can see two rounds of findings at once) rather than
+  // deduced here from (round, checkpoint) — which is precisely what the paragraphs above
+  // refuse to do. Without it an escalation falls through to the generic catch-all and the
+  // owner is told the build "ended without Argus APPROVE" about a run that stopped
+  // DELIBERATELY and said exactly why.
+  //
+  // GATED ON THE KIND AND THE PAYLOAD AGREEING, the same pairing `deriveEscalationBlock`
+  // requires, so a result carrying half an escalation keeps the generic sentence instead of
+  // quoting a claim whose routing kind says something else.
+  if (result.escalation !== null && result.block_kind === result.escalation.kind) {
+    return escalationStopSentence(result.escalation, ceiling)
+  }
   if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
     const cause = redactPushError(result.terminal_cause).trim()
     if (cause !== '') {
@@ -3824,6 +3856,9 @@ export function buildTridentOrchestrator(
             round: launchRun.round,
             checkpoint: resume_checkpoint,
             block_kind: 'infra-only',
+            // An unreadable resume head is an INFRASTRUCTURE stop, not an escalation: no
+            // panel judged anything here, so there is no plan defect to report.
+            escalation: null,
             terminal_cause: cause,
             findings_present: false,
           }),

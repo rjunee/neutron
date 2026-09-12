@@ -42,6 +42,9 @@ interface Synthesis {
   verdict?: unknown
   blockKind?: string
   findings?: Finding[]
+  /** The SELF-DECLARED escalation, read off the seat's own raw reply. `unknown` because
+   *  it is whatever the model returned — validation happens in the workflow, not here. */
+  escalationClaim?: unknown
 }
 interface Peer {
   name: string
@@ -207,7 +210,19 @@ function reviewAndSynthesizeTail(
   const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
   const panelRejectedWithoutReason =
     real.normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
-  return { ...gated, blockKind: real.classifyBlock(gated, peers, false, panelRejectedWithoutReason) }
+  // The SELF-DECLARED escalation, read off the seat's own raw reply — mirrored here for
+  // the same reason `panelRejectedWithoutReason` is: `gated` has this file's own findings
+  // merged in, so only the raw reply can still say what the REVIEWER declared. A dead seat
+  // (`synthesisRaw === null`) declares nothing, which is the shape every test below uses.
+  const escalationClaim =
+    synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
+      ? ((synthesisRaw as { escalate?: unknown }).escalate ?? null)
+      : null
+  return {
+    ...gated,
+    blockKind: real.classifyBlock(gated, peers, false, panelRejectedWithoutReason),
+    escalationClaim,
+  }
 }
 
 /**
@@ -240,7 +255,11 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
   })
 
   test('it carries NO verdict and NO findings, only `blockKind: code`', () => {
-    expect(reviewAndSynthesizeTail(null)).toEqual({ blockKind: 'code' })
+    // …and `escalationClaim: null`, which is the same statement one field further: a seat
+    // that produced nothing did not diagnose a design gap either, so the escalation
+    // channel is EMPTY rather than absent. A dead seat that arrived carrying a claim would
+    // be a claim this file wrote.
+    expect(reviewAndSynthesizeTail(null)).toEqual({ blockKind: 'code', escalationClaim: null })
   })
 
   test('UNGUARDED that re-Forges — against `JSON.stringify(undefined)`', () => {
@@ -256,7 +275,13 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
     // `reviewRecord` to the same return, which is why the old exact-string assertion
     // broke while everything it actually protected stayed true. The single-`return`
     // check below is what guarantees there is no other exit handing back a bare null.
-    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers')
+    // Stated as its halves, because the return is now a multi-line object literal: it
+    // SPREADS `gated` (so no field of the gated verdict can be silently dropped by
+    // rebuilding the object by hand) and derives `blockKind` from it. The single-`return`
+    // check below is what guarantees there is no other exit handing back a bare null.
+    const ret = grabFn('reviewAndSynthesize').slice(grabFn('reviewAndSynthesize').lastIndexOf('  return {'))
+    expect(ret).toContain('...gated,')
+    expect(ret).toContain('blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason),')
     // One `return`, so there is no other exit that could hand back a bare null.
     const body = grabFn('reviewAndSynthesize')
     expect(body.split('\n').filter((l) => /^ {2}return /.test(l))).toHaveLength(1)

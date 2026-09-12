@@ -38,6 +38,7 @@
 
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import { deriveEscalationBlock } from './escalation-block.ts'
 import { deriveInfraBlock } from './infra-block.ts'
 import { isPublishedUnreviewedReason } from './fire-evidence.ts'
 import { terminalRunDisposition } from './run-disposition.ts'
@@ -105,6 +106,19 @@ export type FailureClass =
    * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
    */
   | 'infra-blocked'
+  /**
+   * THE BUILD STOPPED BECAUSE IT WAS BLOCKED, NOT BECAUSE IT FAILED. A reviewer proved
+   * the PLAN was wrong, the card needs work that lives outside it, or the same finding
+   * survived a fix round — so the run escalated to the orchestrator instead of spending
+   * the rest of its round budget. The SECOND class derived from the STRUCTURED harvested
+   * result (`deriveEscalationBlock`) rather than from the `failure_reason` string, and
+   * the second composed under its own glyph rather than ❌.
+   *
+   * BLOCKED and FAILED are two different words and the owner has to be able to tell them
+   * apart on the card: one means "nothing can build this until a decision is made", the
+   * other means "this build broke". They earn opposite responses.
+   */
+  | 'escalated'
   /**
    * THE WORK WAS BUILT AND PUSHED; ONLY THE REVIEW NEVER RAN. A launcher settle
    * timeout landed on a row that already carried an `outer-published:<sha>:0:<round>`
@@ -676,6 +690,34 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE PLAN WAS WRONG, NOT THE MACHINE AND NOT (ONLY) THE CODE. Checked SECOND, right
+  // behind the infra block and ahead of every string branch, for the same reason that one
+  // is checked first: it is MEASURED (the workflow's own `block_kind` + escalation
+  // payload), and a keyword classifier below would misroute it — `whatIsMissing` is model
+  // prose about a missing dependency and can contain any token the string arms match on.
+  // The two are mutually exclusive by construction (one `block_kind` per result), so the
+  // order between them is for readers, not for correctness.
+  const escalated = deriveEscalationBlock(run)
+  if (escalated !== null) {
+    // A BOUNDED MAPPING OVER THE MEASURED KIND — deterministic and unit-testable like the
+    // rest of this function, and it changes only the ADVICE, never the class. The kinds
+    // earn DIFFERENT advice because they need different things from the owner: a
+    // dependency has to be sequenced ahead of this card, a design gap needs the card's
+    // own spec decided, and the arithmetic kind measured that fixing stopped working and
+    // asserts nothing about why — so its advice must not pretend to know.
+    const input_needed =
+      escalated.kind === 'missing-dependency'
+        ? 'Sequence the missing work ahead of this card (or say it is out of scope), then retry. The card is BLOCKED, not failed — the build stopped on purpose and its branch and PR are intact.'
+        : escalated.kind === 'design-gap'
+          ? 'Decide the plan — the reviewers say no amount of fixing this diff removes the finding. Update the card, then retry. The build stopped on purpose; its branch and PR are intact.'
+          : 'Review the findings and decide whether the plan is right before retrying: the build measured that its fix rounds had stopped converging, which says nothing about WHY. Its branch and PR are intact.'
+    return {
+      klass: 'escalated',
+      summary: `The build stopped and escalated at round ${escalated.round} rather than iterating on a plan that was not working: ${escalated.whatIsMissing}`,
+      input_needed,
+    }
+  }
+
   // THE LAUNCH GUARD REFUSED — no build ran, nothing was merged, and the reason already
   // carries the resolved evidence and remedy. Retrying is the ONE action this class must not
   // suggest: the guard refused precisely because re-dispatching now would build on another
@@ -1139,6 +1181,14 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // "this build finished and pushed its work"; leading them with ❌ told the
       // owner the opposite of the sentence underneath. Same carve-out shape as
       // `infra-blocked` above — every other class keeps the ❌ line byte-identical.
+      // BLOCKED IS NOT FAILED, and the glyph has to say so before the sentence does.
+      // Same carve-out shape as `infra-blocked` above — every other class keeps the ❌
+      // line byte-identical.
+      if (interp.klass === 'escalated') {
+        return {
+          text: `🛑 ${title} — build BLOCKED, not failed. It stopped instead of iterating.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
       if (interp.klass === 'published-unreviewed') {
         return {
           text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}\n${interp.input_needed}${trail}`,

@@ -39,6 +39,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
 import { buildWorkflowArgs } from './inner-loop.ts'
+import { loadEscalationGate } from './testing/load-escalation-gate.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -126,7 +127,13 @@ describe('review-round cap — the value a real lane actually gets', () => {
     // point is to evaluate the predicate, not to have TS fold it to a constant.
     const verdict: string = 'REQUEST_CHANGES'
     const blockKind: string = 'code'
-    while (verdict === 'REQUEST_CHANGES' && round < cap && blockKind !== 'infra-only') {
+    // …and NOT ESCALATING. The escalation clause is what turns this cap back into a
+    // BACKSTOP: a run that stops and escalates never reaches it, so the only way to
+    // visit all nine fix rounds is for every round to have judged the code, produced
+    // no repeated finding, and kept the blocker+major count falling. That is the case
+    // this test still describes, and it is now the UNUSUAL one.
+    const escalation: unknown = null
+    while (verdict === 'REQUEST_CHANGES' && round < cap && escalation === null && blockKind !== 'infra-only') {
       round++ // the script's step — one round per iteration
       visited.push(round)
     }
@@ -178,19 +185,77 @@ describe('review-round cap — the two knobs may not drift apart', () => {
     // rounds, so a lane would get five fix rounds instead of nine while the cap
     // literal still read 10.
     const loop =
-      /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*synthesis\.blockKind !== 'infra-only' &&\s*\n\s*synthesis\.blockKind !== 'advisory-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(
+      /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*escalation === null &&\s*\n\s*synthesis\.blockKind !== 'infra-only' &&\s*\n\s*synthesis\.blockKind !== 'advisory-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(
         SRC,
       )
     // Proved to have MATCHED before anything is concluded from it.
     expect(loop).not.toBeNull()
   })
 
-  test('the loop guards all FOUR clauses — verdict, cap, infra-only, advisory-only', () => {
+  test('the loop guards all FIVE clauses — verdict, cap, escalation, infra-only, advisory-only', () => {
     // Dropping the infra-only clause would spend the (now larger) round budget
     // re-Forging against a review that never ran; dropping the advisory-only clause
     // would spend it re-Forging against findings already declared non-blocking.
     expect(SRC).toContain("finalVerdict === 'REQUEST_CHANGES' &&")
     expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
     expect(SRC).toContain("synthesis.blockKind !== 'advisory-only'")
+    // And dropping the ESCALATION clause would put the cap back where this card found
+    // it: as the PRIMARY exit for a run that cannot converge, buying nine rounds to
+    // learn what the arithmetic knew at round 2 (run 36b95167).
+    //
+    // ASSERTED INSIDE THE LOOP'S OWN SLICE, not anywhere in the file. A bare
+    // `toContain` passed with the clause DELETED from the `while`, because the same
+    // expression appears in `isInfraOnlyStop` further down — a whole-file substring
+    // check cannot tell the two apart, and it is the loop's one that matters.
+    const loopBody = SRC.slice(SRC.indexOf("  while (\n    finalVerdict === 'REQUEST_CHANGES' &&"))
+    expect(loopBody.slice(0, 400)).toContain('escalation === null &&')
+  })
+
+  // ── THE CAP IS A BACKSTOP NOW, NOT THE PRIMARY EXIT ─────────────────────────
+  // Acceptance criterion of `docs/spec-items/the-review-loop-must-stop-and-re-plan.md`.
+  // Everything above measures the cap; this measures that reaching it requires the loop
+  // to have been making progress the whole way.
+  test('a run whose findings REPEAT never reaches the cap — it stops at round 2', () => {
+    // The model above, driven by the REAL decision function rather than a constant, over
+    // the recorded finding identities of run 36b95167: the same three findings recur in
+    // every round. Nothing in this arrangement performs the stop — the loop runs until
+    // `decideEscalation` returns 'stop', and if it never did, `visited` would run to the
+    // cap exactly as the test above asserts it does for a converging run.
+    const { decideEscalation } = loadEscalationGate()
+    const repeated = [
+      { severity: 'blocker', key: 'trident/x.ts:rowRailLockstep:tautological-test' },
+      { severity: 'blocker', key: 'app/y.ts:inlineActive:out-of-spec-proxy' },
+      { severity: 'major', key: 'agent-dispatch/z.ts:research:untouched-path' },
+    ]
+    const visited: number[] = []
+    let round = 1
+    let escalation: unknown = null
+    const history = [repeated]
+    const counts = [3]
+    while (round < 10 && escalation === null) {
+      round++
+      visited.push(round)
+      // every fix round re-reports the same three findings — the recorded behaviour
+      history.push(repeated)
+      // …while the blocker+major count FALLS every round, so the identity-free
+      // no-progress gate can never fire. That isolation is deliberate and was added
+      // because it was missing: with a flat count this test stayed green with the
+      // repeat-finding trigger DELETED (the no-progress gate stopped the run at the
+      // same round), so it proved nothing about the gate it names. The recorded data
+      // of 36b95167 fires both; this asserts the hard one on its own.
+      counts.push(Math.max(0, 4 - round))
+      const d = decideEscalation({
+        round,
+        previousFindings: history[history.length - 2],
+        currentFindings: history[history.length - 1],
+        blockingCounts: counts,
+        claim: null,
+        replansUsed: 0,
+      })
+      if (d.action === 'stop') escalation = d
+    }
+    expect(visited).toEqual([2])
+    expect(round).toBe(2)
+    expect(round < 10).toBe(true)
   })
 })

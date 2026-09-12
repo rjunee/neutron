@@ -34,7 +34,11 @@ import {
 
 /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
  *  and NEVER counted as completed — it is not a quieter `done`. */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived';
+/** `blocked` (migration 0140) is RUN-DRIVEN and ACTIVE: a build stopped ON PURPOSE and
+ *  reported why (the plan was wrong, a dependency is missing, the fix rounds stopped
+ *  converging). It is deliberately a different word from `failed` — one needs a
+ *  decision, the other needs a retry. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived' | 'blocked';
 
 export interface WorkBoardItem {
   id: string;

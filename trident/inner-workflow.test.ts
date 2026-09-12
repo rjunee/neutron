@@ -1881,8 +1881,19 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
   test('APPENDS the reflection guidance AFTER the task on EVERY Forge fix-round prompt too', () => {
     // Each `forge:fix-round-*` is a FRESH agent, so the corrections are re-appended
     // (else Forge loses them while revising) — still after the task, never before.
-    const appendSites = SRC.match(/TASK:\n\$\{task\}\$\{reflectionGuidance\}/g) ?? []
+    //
+    // THE FIX-ROUND SITE NOW CARRIES ONE MORE TRUSTED BLOCK between the two: the bounded
+    // re-plan's revised execution spec (`rePlanNote`), which comes from a `plan:fable`
+    // seat — the SAME authority the task itself has. The invariant this test protects is
+    // unchanged and is stated exactly as before: the UNTRUSTED reflection block is
+    // appended LAST, after the task, never before the contract. Trusted plan material
+    // sitting between them does not weaken that; the assertion below is what stops the
+    // optional group from being used to smuggle anything else in.
+    const appendSites = SRC.match(/TASK:\n\$\{task\}(?:\$\{rePlanNote\})?\$\{reflectionGuidance\}/g) ?? []
     expect(appendSites).toHaveLength(2) // forge:build + the forge:fix-round-* prompt
+    // The build site takes the bare form; the fix site is the one with the re-plan note.
+    expect(appendSites).toContain('TASK:\n${task}${reflectionGuidance}')
+    expect(appendSites).toContain('TASK:\n${task}${rePlanNote}${reflectionGuidance}')
   })
 
   // SECURITY (FIX 1) — the reflection block is UNTRUSTED NL; giving it to a reviewer

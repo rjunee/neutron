@@ -93,6 +93,9 @@ export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'done') return 'Done';
   if (status === 'failed') return 'Failed';
   if (status === 'archived') return 'Shelved';
+  // TWO DIFFERENT WORDS, and that is the whole point of the lane: a blocked card needs
+  // a decision or a dependency, a failed one needs a retry.
+  if (status === 'blocked') return 'Blocked';
   return 'Upcoming';
 }
 
@@ -105,6 +108,10 @@ export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'in_progress') return 'done';
   if (status === 'failed') return 'upcoming';
   if (status === 'archived') return 'upcoming';
+  // BLOCKED → upcoming, like the other two non-linear lanes. Advancing a blocked card
+  // is the owner saying the block is cleared; it must NOT advance to 'done', which
+  // would claim work shipped that never built.
+  if (status === 'blocked') return 'upcoming';
   return 'done';
 }
 
