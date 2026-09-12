@@ -106,7 +106,20 @@ hosted every run's workflows in-process. That design's failure is #8 below.
   (`/root/researcher/summarizer`), `send_message` / `followup_task`, each in its own
   context window and sandbox, with a per-session concurrency cap.
 
-### 3.3 Persistent-per-harness vs one-shot headless: a spike decides
+### 3.3 Persistent-per-harness vs one-shot headless: DECIDED 2026-09-12 — headless
+
+> **Settled by the spike (issue #543).** Recurring cross-model work runs **one-shot
+> headless per call, reusing the thread id** — `codex exec` then `codex exec resume
+> <thread_id>`. All three tests passed on a persistent `codex app-server`, and the
+> decision is headless anyway: the prompt cache is server-side and keyed on the
+> thread prefix, so it survives process exit and a one-shot resumed turn costs the
+> same as a live one (1,141 vs 1,240 uncached input tokens on adjacent turns of one
+> thread). Persistence buys ~1.3–2.5 s of process startup and adds an exclusive
+> per-thread writer lock that strands a conversation when the process wedges. The
+> reasoning below is kept as the question that was asked; `SPEC.md`'s Decisions Log
+> (2026-09-12) is the answer, and
+> `docs/spec-items/codex-work-runs-headless-per-call-on-a-reused-thread.md` is the
+> shape to build.
 
 For recurring cross-model work in a multi-day build (test agents on codex, say), one
 persistent codex REPL beside the Claude one would give codex work warm cache and its own
@@ -122,6 +135,14 @@ or a codex TUI under herdr — that must (a) accept follow-up turns reliably, (b
 gateway restart and resume, (c) complete an approval round-trip. All three with no
 fragility → one active REPL per harness the project uses. Otherwise headless per call.
 About two hours; its result shapes one adapter; nothing else waits on it.
+
+**That outcome rule is SUPERSEDED and no longer governs** (see the box at the top of this
+section, and `SPEC.md`'s Decisions Log 2026-09-12). It never arbitrated: its `→ persistent`
+branch existed to capture a cost saving, and the spike measured that the saving does not
+exist — the prompt cache is server-side and keyed on the thread prefix, so a one-shot
+resumed turn is no more expensive than a live one. All three tests did pass, so read
+top-down this rule points at persistence; the decision is headless. The rule was correct
+given what was believed, and a measurement is what retired it, not a change of mind.
 
 ### 3.4 Owner questions flow from exactly one place
 
