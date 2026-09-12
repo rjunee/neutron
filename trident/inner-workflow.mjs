@@ -3267,10 +3267,15 @@ const WHAT_IS_MISSING_MAX = 500
  * them is a reviewer's judgement about the plan.
  *
  * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT, and the line between the two is
- * narrower than it looks. What survives: surrounding whitespace (a key is a token, and
- * whitespace around it is transport noise) and a leading './' on the path (`./a/b.ts` and
- * `a/b.ts` ARE the same file — a path equivalence, not a discarded difference). At least
- * THREE segments are required — a bare word or a `file:line` pair is not a
+ * narrower than it looks. Exactly two things survive, and each is a fact about the
+ * NOTATION rather than about the content it denotes:
+ *
+ *   - whitespace around a segment, in EVERY slot — a key is a token and the space beside
+ *     it is transport noise;
+ *   - a leading './' on the PATH SEGMENT ONLY — `./a/b.ts` and `a/b.ts` are the same file.
+ *     Nowhere else: `./` inside a symbol or a rule is two characters the reviewer chose.
+ *
+ * At least THREE segments are required — a bare word or a `file:line` pair is not a
  * `file:symbol:rule` identity, and accepting one would let a title masquerade as a key.
  *
  * CASE IS PRESERVED, and it did not used to be. Lower-casing the whole key was the same
@@ -3318,10 +3323,20 @@ function findingIdentity(f) {
   if (typeof f.key !== 'string') return ''
   const segments = f.key
     .split(':')
-    // Per SEGMENT, which also covers whitespace around the whole key — an outer `.trim()`
-    // beside this one is dead work (mutation-checked: removing it changed nothing).
-    .map((seg) => seg.trim().replace(/^\.\//, ''))
+    // TRIM EVERY SEGMENT: whitespace around a token really is transport noise in every
+    // slot. This also covers whitespace around the whole key, so an outer `.trim()` beside
+    // it is dead work (mutation-checked: removing it changed nothing).
+    .map((seg) => seg.trim())
     .filter((seg) => seg !== '')
+    // …BUT STRIP `./` FROM THE PATH SEGMENT ONLY. `./a/b.ts` and `a/b.ts` name the same
+    // file, which makes this a fact about PATH NOTATION — and therefore a fact about
+    // segment zero and about nothing else. Applied to every segment it silently equated
+    // `a.ts:sym:./rule` with `a.ts:sym:rule`, which are two keys a reviewer chose to write
+    // differently, and `repeatVerdict` called them one finding surviving a fix round.
+    // Applied AFTER the empty-segment filter so "segment zero" means the first REAL
+    // segment — on a malformed key like `:a.ts:sym:rule` the file is not index 0 before
+    // filtering, and the path normalisation would have missed it.
+    .map((seg, i) => (i === 0 ? seg.replace(/^\.\//, '') : seg))
   if (segments.length < 3) return ''
   return segments.join(':')
 }

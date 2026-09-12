@@ -82,6 +82,36 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(findingIdentity(f('  ./a/b.ts:sym:rule  '))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
   })
 
+  test('HEADLINE: `./` is stripped from the PATH SEGMENT ONLY — it is content anywhere else', () => {
+    const { findingIdentity, repeatVerdict } = loadEscalationGate()
+    // THE THIRD INSTANCE OF ONE MISTAKE IN THIS FUNCTION, in a third dimension, and in the
+    // same failure direction as the other two. `./a/b.ts` and `a/b.ts` name the same file,
+    // so stripping the prefix is a fact about PATH NOTATION — which makes it a fact about
+    // segment zero and about nothing else. Run on every segment it equated
+    // `a.ts:sym:./rule` with `a.ts:sym:rule`: two keys a reviewer deliberately wrote
+    // differently, read as one finding surviving a fix round, escalating a run that was
+    // CONVERGING. Over-firing is the one way this gate is worse than the cap it replaced.
+
+    // The path segment: still normalised, because there it really is notation.
+    expect(findingIdentity(f('./a/b.ts:sym:rule'))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
+
+    // The symbol and the rule: NOT normalised, because there it is two characters the
+    // reviewer chose.
+    const dotSym = f('a/b.ts:./sym:rule')
+    const plainSym = f('a/b.ts:sym:rule')
+    expect(findingIdentity(dotSym)).not.toBe(findingIdentity(plainSym))
+    expect(repeatVerdict([dotSym], [plainSym]).outcome).not.toBe('repeat')
+
+    const dotRule = f('a/b.ts:sym:./rule')
+    expect(findingIdentity(dotRule)).not.toBe(findingIdentity(plainSym))
+    expect(repeatVerdict([dotRule], [plainSym]).outcome).not.toBe('repeat')
+
+    // A LEADING EMPTY SEGMENT MUST NOT MOVE THE PATH. On `:a/b.ts:sym:rule` the file is
+    // not index 0 until the empties are dropped, so the normalisation is applied after
+    // the filter — otherwise a malformed-but-accepted key silently loses it.
+    expect(findingIdentity(f(':./a/b.ts:sym:rule'))).toBe(findingIdentity(f('a/b.ts:sym:rule')))
+  })
+
   test('HEADLINE: CASE tells two findings apart — different files, different symbols', () => {
     const { findingIdentity, repeatVerdict } = loadEscalationGate()
     // On a case-sensitive filesystem these are genuinely different FILES, and `Handler`

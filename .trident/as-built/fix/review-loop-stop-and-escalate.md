@@ -26,9 +26,24 @@ load-bearing part.
 REQUIRE a `key` — `file:symbol:rule`, machine-read. `findingIdentity` reads that field
 and nothing else; a title-derived fingerprint is exactly what the item rules out, since a
 model that rewords its own sentence between rounds defeats it while the gate reports
-green. Normalisation drops case, whitespace and a leading `./` — SPELLING ONLY, never content —
-and requires three segments so a bare title cannot masquerade as a key. A finding with no
-usable key is `''` — UNDECIDABLE, and never a fresh identity.
+green. Identity is the key COMPARED EXACTLY, and exactly two things are normalised away, each a
+fact about the NOTATION rather than about the content it denotes: whitespace around a
+segment (in every slot — a key is a token and the space beside it is transport noise), and
+a leading `./` on the PATH SEGMENT ONLY (`./a/b.ts` and `a/b.ts` are the same file; `./`
+inside a symbol or a rule is two characters the reviewer chose). Case, numbers, internal
+whitespace and everything else are CONTENT and survive. Three segments are required so a
+bare title cannot masquerade as a key, and a finding with no usable key is `''` —
+UNDECIDABLE, and never a fresh identity.
+
+THAT SENTENCE IS WRITTEN FROM THE CODE, BECAUSE ITS PREVIOUS VERSION OUTLIVED THREE
+CORRECTIONS THAT FALSIFIED IT. It had said "normalisation drops case, whitespace and a
+leading `./` — SPELLING ONLY, never content" while the paragraphs below it were, in turn,
+removing the numeric strip, preserving case, and confining the `./` strip to the path. Each
+correction was written as a NEW PARAGRAPH rather than as an edit to the claim it falsified,
+so the summary at the top of the section kept asserting the behaviour that had just been
+removed — in a record that gets promoted to `docs/as-built/` and read by everyone after
+this. It is the same drift as the source-text assertions in the test files: the claim
+rots where it DESCRIBES, not where it ASSERTS, because only the assertion is executed.
 
 NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction to an earlier cut of this
 branch. Identity used to drop every purely-numeric segment anywhere in the key, reasoning
@@ -48,13 +63,26 @@ consecutive spaces. Case is now content, so the schema says the key is compared 
 INCLUDING case and must stay byte-identical between rounds: the grammar move again, making
 the stable thing explicit rather than subtracting the volatile thing afterwards.
 
-THE GENERAL RULE, since this file got it wrong twice in the same function: EVERY
-NORMALISATION IS A CLAIM THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and
-for an identity derived from free text that claim is almost never safe. What survives is
-only what is a fact about the NOTATION rather than about the content it denotes — a leading
-`./` (the same file by definition) and whitespace around a token (transport noise). An
-outer `.trim()` beside the per-segment one was removed as dead work when mutation showed it
-changed nothing, which is the same standard applied to the guard rather than to the bug.
+AND A THIRD TIME, IN A THIRD DIMENSION: the `./` strip ran on EVERY segment. `./a/b.ts`
+and `a/b.ts` are the same file, which makes the strip a fact about PATH notation — and
+therefore a fact about segment zero and about nothing else. Applied everywhere it equated
+`a.ts:sym:./rule` with `a.ts:sym:rule`, two keys a reviewer chose to write differently.
+Same function, same over-fire direction, three times.
+
+THE GENERAL RULE, which is what all three instances are: EVERY NORMALISATION IS A CLAIM
+THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and for an identity derived
+from free text that claim is almost never safe. Two survive, and each is a fact about the
+NOTATION rather than about the content it denotes: whitespace around a segment, in every
+slot; and a leading `./` on the PATH SEGMENT ONLY. Note how the third instance was the
+SECOND HALF of a rule that was otherwise right — "`./` is notation" is true, and it was
+being applied to three slots where it is not. A normalisation therefore needs a scope as
+well as a justification, and the scope is the half that gets skipped.
+
+Each surviving rule is mutation-checked in BOTH directions, so this did not become
+"normalise nothing": stripping `./` from no segment reds the path case, and dropping the
+per-segment trim reds the verbatim case. An outer `.trim()` beside the per-segment one was
+removed as dead work when mutation showed it changed nothing — the same standard applied to
+the guard rather than to the bug.
 
 THE ASYMMETRY IS WHY THIS ONE MATTERED MORE THAN ITS SIZE. Over-firing stops a run that
 was converging and reports `not-converging` about it — the one way this gate can be WORSE
