@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
+import type { RunHostCommand } from './merge.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import type { TridentBranchOwner, TridentPhase, TridentRun } from './store.ts'
 import {
@@ -639,6 +640,93 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await refExists(repo, 'refs/heads/trident/dirty-past')).toBe(true)
   }, 30_000)
 
+  test('TWO SWEEPS: a DIRTY tree detached by sweep 1 still holds its ref on sweep 2', async () => {
+    // THE DEFECT THIS TEST EXISTS FOR (adversarial review of PR #606, escalated to a
+    // tiebreak and confirmed). `detachedThisSweep` is per-sweep memory: on sweep 2 the
+    // tree is ALREADY detached, `entry.branch` is null, the detach block never runs, the
+    // map is empty — and the ref of a tree sweep 1 deliberately preserved was deleted.
+    // The one-sweep test that shipped could not see it. Gate 4c matches the ref's COMMIT
+    // against the HEAD of every linked tree still on disk, which is durable across sweeps.
+    const { root, repo } = await makeRepo()
+    const holder = await addWorktree(repo, 'wf_dirty-two-sweeps', 'trident/dirty-two')
+    // A real build commit, so the branch tip is NOT main's — otherwise the tip would
+    // coincide with the shared checkout's HEAD and the test could pass by accident.
+    writeFileSync(join(holder, 'built.txt'), 'built\n')
+    await git(holder, 'add', '-A')
+    await git(holder, 'commit', '-m', 'the build')
+    writeFileSync(join(holder, 'only-copy.txt'), 'nowhere else\n')
+    const tip = await git(repo, 'rev-parse', 'refs/heads/trident/dirty-two')
+    expect(tip).not.toBe(await git(repo, 'rev-parse', 'refs/heads/main'))
+    const now = Date.now()
+    backdate(holder, now)
+    const store = stubStore(repo, [], [owner('trident/dirty-two', { phase: 'failed' })])
+    const proc = makeProc(root)
+
+    const first = await sweepTridentWorktrees({
+      store, run_host: spawnCapture, proc_root: proc, now: () => now,
+    })
+    expect(first.detached).toContain(holder)
+    expect(first.refs_deleted).toEqual([])
+    expect(await refExists(repo, 'refs/heads/trident/dirty-two')).toBe(true)
+
+    // SWEEP 2 — nothing about the tree changed; it is simply already detached.
+    const second = await sweepTridentWorktrees({
+      store, run_host: spawnCapture, proc_root: proc, now: () => now,
+    })
+
+    expect(second.detached).toEqual([])
+    expect(second.refs_deleted).toEqual([])
+    expect(second.refs_kept).toEqual(
+      expect.arrayContaining([
+        { ref: 'refs/heads/trident/dirty-two', reason: `held-by-detached-worktree: ${holder}` },
+      ]),
+    )
+    expect(await git(repo, 'rev-parse', 'refs/heads/trident/dirty-two')).toBe(tip)
+    expect(readFileSync(join(holder, 'only-copy.txt'), 'utf8')).toBe('nowhere else\n')
+    // Still held on a third, so this is a property and not an off-by-one.
+    const third = await sweepTridentWorktrees({
+      store, run_host: spawnCapture, proc_root: proc, now: () => now,
+    })
+    expect(third.refs_deleted).toEqual([])
+    expect(await refExists(repo, 'refs/heads/trident/dirty-two')).toBe(true)
+  }, 60_000)
+
+  test('TWO SWEEPS: a tree WITHIN RETENTION detached by sweep 1 still holds its ref', async () => {
+    // The other half of the same defect. Nothing here is dirty — the tree is simply too
+    // young to remove, so sweep 1 detaches it and keeps it, and on sweep 2 the only thing
+    // standing between its ref and a delete is gate 4c.
+    const { root, repo } = await makeRepo()
+    const holder = await addWorktree(repo, 'wf_young-two-sweeps', 'trident/young-two')
+    writeFileSync(join(holder, 'built.txt'), 'built\n')
+    await git(holder, 'add', '-A')
+    await git(holder, 'commit', '-m', 'the build')
+    const tip = await git(repo, 'rev-parse', 'refs/heads/trident/young-two')
+    expect(tip).not.toBe(await git(repo, 'rev-parse', 'refs/heads/main'))
+    const now = Date.now()
+    const store = stubStore(repo, [], [owner('trident/young-two', { phase: 'stopped' })])
+    const proc = makeProc(root)
+
+    const first = await sweepTridentWorktrees({
+      store, run_host: spawnCapture, proc_root: proc, now: () => now,
+    })
+    expect(first.detached).toContain(holder)
+    expect(first.preserved.some((e) => e.path === holder && e.reason === 'within retention')).toBe(true)
+    expect(first.refs_deleted).toEqual([])
+
+    const second = await sweepTridentWorktrees({
+      store, run_host: spawnCapture, proc_root: proc, now: () => now,
+    })
+
+    expect(second.refs_deleted).toEqual([])
+    expect(second.refs_kept).toEqual(
+      expect.arrayContaining([
+        { ref: 'refs/heads/trident/young-two', reason: `held-by-detached-worktree: ${holder}` },
+      ]),
+    )
+    expect(await git(repo, 'rev-parse', 'refs/heads/trident/young-two')).toBe(tip)
+    expect(existsSync(holder)).toBe(true)
+  }, 60_000)
+
   test('once the worktree is GONE, the same sweep may take the ref', async () => {
     // The other half of the rule above: a tree the pass actually removed no longer
     // holds anything, so its ref is free in that very sweep rather than 15 minutes on.
@@ -682,6 +770,227 @@ describe('branch-ref reap — the refusals (#547)', () => {
     )
     expect(await refExists(repo, `refs/heads/${branch}`)).toBe(true)
   }, 30_000)
+
+  test('REAL GIT: a conflicted rebase holds the ref, with nothing injected', async () => {
+    // The shipped rebase test INJECTED `rebase_head`, so it proved the plumbing and not
+    // the fact. This drives a real conflicted rebase and passes no seam at all, so
+    // `readRebaseHead` must read `rebase-merge/head-name` off disk for itself.
+    //
+    // GATE 4c CANNOT SAVE THIS ONE, which is why both gates are kept: mid-rebase git parks
+    // HEAD on the `onto` commit, not on the branch tip, so the commit-keyed gate sees
+    // nothing and the name-keyed gate is the only one that can answer.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/rebasing-for-real'
+    writeFileSync(join(repo, 'f.txt'), 'base\n')
+    await git(repo, 'add', '-A')
+    await git(repo, 'commit', '-m', 'f base')
+    // `rb_` and not `wf_`, so the worktree pass skips it and gate 4 is measured alone.
+    const tree = await addWorktree(repo, 'rb_conflict', branch)
+    writeFileSync(join(tree, 'f.txt'), 'from the build\n')
+    await git(tree, 'commit', '-am', 'build side')
+    const tip = await git(repo, 'rev-parse', `refs/heads/${branch}`)
+    writeFileSync(join(repo, 'f.txt'), 'from main\n')
+    await git(repo, 'commit', '-am', 'main side')
+    const rebase = await spawnCapture(['git', '-C', tree, 'rebase', 'main'], tree)
+    expect(rebase.ok, 'the rebase must CONFLICT for this test to mean anything').toBe(false)
+    // git now reports the tree as DETACHED with no branch attribute, parked on `onto`.
+    expect(await git(repo, 'worktree', 'list', '--porcelain')).toContain('detached')
+    expect(await git(tree, 'rev-parse', 'HEAD')).not.toBe(tip)
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+      // NOTHING INJECTED.
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual(
+      expect.arrayContaining([{ ref: `refs/heads/${branch}`, reason: `held-by-worktree: ${tree}` }]),
+    )
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(tip)
+  }, 60_000)
+
+  test('REAL GIT: a detached bisect holds the ref, with nothing injected', async () => {
+    // `git bisect` detaches HEAD onto a MIDDLE commit and records the branch it left in
+    // `BISECT_START`. So, like the rebase above, the listing says detached, gate 4c sees a
+    // sha that is not the tip, and only `readRebaseHead`'s BISECT_START read answers.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/bisecting-for-real'
+    const tree = await addWorktree(repo, 'bs_bisect', branch)
+    for (const n of [1, 2, 3, 4, 5]) {
+      writeFileSync(join(tree, `c${n}.txt`), `${n}\n`)
+      await git(tree, 'add', '-A')
+      await git(tree, 'commit', '-m', `c${n}`)
+    }
+    const tip = await git(repo, 'rev-parse', `refs/heads/${branch}`)
+    await git(tree, 'bisect', 'start')
+    await git(tree, 'bisect', 'bad', 'HEAD')
+    await git(tree, 'bisect', 'good', 'HEAD~4')
+    expect(await git(tree, 'rev-parse', 'HEAD')).not.toBe(tip)
+    expect(await git(repo, 'worktree', 'list', '--porcelain')).toContain('detached')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'done' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+      // NOTHING INJECTED.
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual(
+      expect.arrayContaining([{ ref: `refs/heads/${branch}`, reason: `held-by-worktree: ${tree}` }]),
+    )
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(tip)
+  }, 60_000)
+
+  test('a PLAINLY checked-out holder is refused by gate 4, which update-ref -d would not be', async () => {
+    // `git branch -D` used to be the delete and carried git's own refusal for this case
+    // for free. `update-ref -d` does NOT, so the refusal has to come from gate 4 — and
+    // this test is what proves gate 4 supplies it rather than assuming so.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/plainly-checked-out'
+    // `co_` not `wf_`: the worktree pass must not detach it, so gate 4 is measured alone.
+    const tree = await addWorktree(repo, 'co_plain', branch)
+    const tip = await git(repo, 'rev-parse', `refs/heads/${branch}`)
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual(
+      expect.arrayContaining([{ ref: `refs/heads/${branch}`, reason: `held-by-worktree: ${tree}` }]),
+    )
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(tip)
+    expect(await git(tree, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(branch)
+    // THE PREMISE, measured rather than asserted: the delete primitive would have gone
+    // through. If a future git starts refusing this, the gate is belt-and-braces and this
+    // line is what will say so.
+    const direct = await spawnCapture(
+      ['git', '-C', repo, 'update-ref', '-d', `refs/heads/${branch}`, tip],
+      repo,
+    )
+    expect(direct.ok, 'update-ref -d is expected NOT to refuse a checked-out branch').toBe(true)
+  }, 60_000)
+
+  test('a listed worktree whose DIRECTORY is gone stands the whole repo down', async () => {
+    // What actually happens to a stale admin entry, pinned because it is the scenario the
+    // stand-down logging exists for, and because it is why gate 4c's `existsSync` cannot be
+    // distinguished by any test (see the note at that line). Normally `worktree prune` drops
+    // such an entry before the ref pass sees it; here prune is denied, so it survives into
+    // the listing — detached, with no directory to read a rebase state out of. That reads as
+    // 'unknown', and unknown freezes every ref in the repo rather than guessing.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/stale-admin-entry'
+    const tree = await addWorktree(repo, 'wf_stale-admin', branch)
+    writeFileSync(join(tree, 'built.txt'), 'built\n')
+    await git(tree, 'add', '-A')
+    await git(tree, 'commit', '-m', 'the build')
+    const tip = await git(repo, 'rev-parse', `refs/heads/${branch}`)
+    const store = stubStore(repo, [], [owner(branch, { phase: 'failed' })])
+    const proc = makeProc(root)
+    const denyPrune: RunHostCommand = async (cmd, cwd) => {
+      if (cmd.includes('prune')) return { ok: false, stdout: '', stderr: 'prune denied', exit_code: 1 }
+      return spawnCapture(cmd, cwd)
+    }
+
+    // Sweep 1 detaches it while the directory is still there.
+    await sweepTridentWorktrees({ store, run_host: denyPrune, proc_root: proc })
+    rmSync(tree, { recursive: true, force: true })
+
+    const report = await sweepTridentWorktrees({ store, run_host: denyPrune, proc_root: proc })
+
+    expect(report.refs_stood_down).toBe(1)
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some((k) => k.reason.startsWith('holder-unprovable:')),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(tip)
+  }, 60_000)
+
+  test('a FAILED salvage verify is not evidence, even when its stdout says the right thing', async () => {
+    // The `!confirmed.ok` half of the salvage check, which the sha compare alone does not
+    // cover: a host that exits non-zero while still printing the expected sha. A command
+    // that failed established nothing, so its output is not proof the salvage landed — and
+    // the salvage is the whole no-data-loss argument.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/lying-host'
+    const sha = await seedRef(repo, branch, 'lyinghost')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        // Break the salvage WRITE so the verify is reached at all...
+        if (cmd.includes('update-ref') && !cmd.includes('-d')) {
+          return { ok: false, stdout: '', stderr: 'write denied', exit_code: 1 }
+        }
+        // ...then have the verify fail while printing exactly the sha being looked for.
+        if (cmd.includes('rev-parse') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          return { ok: false, stdout: `${sha}\n`, stderr: 'verify denied', exit_code: 1 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('salvage-unverified:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('gates 7 and 8 read EVERY claimant, not just the first', async () => {
+    // A re-launched card has several owner rows on one branch. The gates use `find` over
+    // all of them; a first-owner-only read would delete a ref whose SECOND owner is the
+    // one with the surviving tree or the live process.
+    const { root, repo } = await makeRepo()
+    const treeBranch = 'trident/second-owner-tree'
+    const procBranch = 'trident/third-owner-proc'
+    const treeTip = await seedRef(repo, treeBranch, 'secondtree')
+    const procTip = await seedRef(repo, procBranch, 'thirdproc')
+    const stranded = join(root, 'stranded-for-second')
+    mkdirSync(stranded)
+    const generation = '5c1f0d21'
+    const busy = join(root, `wf_${generation}-7`)
+    mkdirSync(busy)
+    const proc = makeProc(root)
+    addProcCwd(proc, 801, busy)
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [
+        owner(treeBranch, { phase: 'failed' }),
+        owner(treeBranch, { phase: 'stopped', worktree: stranded }),
+        owner(procBranch, { phase: 'failed' }),
+        owner(procBranch, { phase: 'failed' }),
+        owner(procBranch, { phase: 'stopped', workflow_run_id: generation }),
+      ]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_kept).toEqual(
+      expect.arrayContaining([
+        { ref: `refs/heads/${treeBranch}`, reason: `run-worktree-present: ${stranded}` },
+      ]),
+    )
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${procBranch}` && k.reason.startsWith('run-process-live:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${treeBranch}`)).toBe(treeTip)
+    expect(await git(repo, 'rev-parse', `refs/heads/${procBranch}`)).toBe(procTip)
+  }, 60_000)
 
   test('a holder whose rebase state cannot be READ freezes every ref in the repo', async () => {
     const { root, repo } = await makeRepo()
@@ -1106,6 +1415,89 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', 'refs/heads/member/pinned-lane')).toBe(pinned)
     expect(await refExists(repo, 'refs/heads/main')).toBe(true)
   }, 30_000)
+})
+
+describe('branch-ref reap — a stand-down is never silent (#547)', () => {
+  // `logSummaryIfActed` returns early unless something was ACTED on, so a ref sweep that
+  // refused every ref logged nothing at all — indistinguishable from a repo with nothing
+  // to reap. That is exactly the state a boot-rescue latch that never lifts, or one
+  // unreadable rebase state file, produces: the whole ref half goes quiet forever. Ordinary
+  // per-ref refusals stay quiet on purpose (`owner-unknown` is the steady state), so the
+  // distinction is carried by `refs_stood_down` rather than by `refs_kept`.
+  test('the latch still shut counts as a stand-down', async () => {
+    const { root, repo } = await makeRepo()
+    await seedRef(repo, 'trident/latched', 'latched')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner('trident/latched', { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+      refs_ready: () => false,
+    })
+
+    expect(report.refs_stood_down).toBe(1)
+  }, 30_000)
+
+  test('an unreadable rebase state counts as a stand-down', async () => {
+    const { root, repo } = await makeRepo()
+    await seedRef(repo, 'trident/opaque-state', 'opaquestate')
+    await addWorktree(repo, 'rb_opaque')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner('trident/opaque-state', { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+      rebase_head: () => ({ kind: 'unknown' }),
+    })
+
+    expect(report.refs_stood_down).toBe(1)
+    expect(report.refs_deleted).toEqual([])
+  }, 30_000)
+
+  test('an enumeration that will not answer counts as a stand-down', async () => {
+    const { root, repo } = await makeRepo()
+    await seedRef(repo, 'trident/dark-refs', 'darkrefs')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner('trident/dark-refs', { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        const result = await spawnCapture(cmd, cwd)
+        if (cmd.includes('for-each-ref')) return { ...result, ok: false, exit_code: 128 }
+        return result
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_stood_down).toBe(1)
+  }, 30_000)
+
+  test('ORDINARY per-ref refusals are NOT stand-downs, so they stay quiet', async () => {
+    // The other half of the contract: an unowned ref is refused every fifteen minutes for
+    // the life of the process, and must not log every fifteen minutes with it.
+    const { root, repo } = await makeRepo()
+    await seedRef(repo, 'trident/hand-made', 'handmade')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_kept.length).toBeGreaterThan(0)
+    expect(report.refs_stood_down).toBe(0)
+  }, 30_000)
+
+  test('the summary log fires for a stand-down and not for a quiet sweep', () => {
+    // The condition itself, since the log call is a side effect this suite cannot observe:
+    // `refs_stood_down` must be one of the things that makes a sweep worth reporting.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    const guard = source.slice(source.indexOf('function logSummaryIfActed'))
+    const condition = guard.slice(0, guard.indexOf('return'))
+    expect(condition).toContain('report.refs_stood_down === 0')
+    expect(condition).toContain('report.refs_deleted.length === 0')
+    // And `refs_kept` is deliberately absent, or the steady state would log forever.
+    expect(condition).not.toContain('refs_kept')
+  })
 })
 
 describe('branch-ref reap — the backlog sweep (#547)', () => {

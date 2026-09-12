@@ -49,26 +49,50 @@
  *   3. `git for-each-ref` and `git worktree list --porcelain -z` both answered for
  *      this repo. Either failing is the ABSENCE of a holder measurement, never the
  *      measurement that there is no holder — so no ref in that repo is touched.
- *   4. No worktree holds the ref. `worktree list` alone is not enough: git reports a
- *      worktree mid-rebase or mid-bisect as DETACHED and prints no `branch`
+ *   4. No worktree holds the ref BY NAME. `worktree list` alone is not enough: git
+ *      reports a worktree mid-rebase or mid-bisect as DETACHED and prints no `branch`
  *      attribute, so every detached entry is asked directly (`readRebaseHead`, the
- *      prior art this reuses rather than re-derives). That read answering 'unknown'
+ *      prior art this reuses rather than re-derives — it reads exactly the four places
+ *      git itself consults: the HEAD symref, `rebase-merge/head-name`,
+ *      `rebase-apply/head-name` and `BISECT_START`). That read answering 'unknown'
  *      refuses every ref in the repo, because what it could not read may name any of
  *      them.
+ *  4c. No DETACHED LINKED worktree still on disk is standing on the ref's commit. Keyed on the
+ *      COMMIT, not a name, which is what makes it survive the sweep boundary: the
+ *      worktree pass's own `checkout --detach` leaves HEAD on the tip, so a tree that
+ *      pass detached and then PRESERVED (dirty, or inside retention) still points at the
+ *      ref however many sweeps later. The per-sweep `detachedThisSweep` map is only a
+ *      nicer refusal reason; THIS is the gate. It does not cover a conflicted rebase —
+ *      there HEAD is the `onto` commit — and does not need to, because gate 4 does. The
+ *      SHARED checkout is excluded (see the loop): it is never a disposable build tree, so
+ *      it is never the tree this protects, and including it only refuses on coincidence.
  *   5. At least one run row in this repo names the branch. NO row is not evidence the
  *      ref is disposable — it is the absence of an owner, so it is kept. That single
  *      rule is what protects a hand-made branch and, measured against the 79, it is
  *      what keeps 6 of them.
  *   6. EVERY run row naming it is in a terminal phase. One non-terminal owner keeps
  *      the ref (`listBranchOwners` is unbounded for exactly this reason — see there).
- *   7. No owning run's recorded worktree still EXISTS on disk. A surviving worktree
- *      is where uncommitted and untracked work lives, and its history is the ref
- *      underneath it; `worktree-cleanup.sh`'s preservation of a dirty tree is
- *      therefore also a preservation of its ref.
+ *   7. No owning run's recorded worktree still EXISTS on disk.
+ *
+ *      CREDIT THIS GATE WITH NOTHING TODAY. Measured read-only against the production
+ *      store on 2026-09-12: 0 of 291 run rows carry a non-null `worktree` (the
+ *      orchestrator writes `worktree: null`), so this gate cannot fire and the
+ *      preservation of a dirty tree's ref rests on gates 4 and 4c, not on this. It is
+ *      kept because it is correct and costs nothing the day that column is populated —
+ *      not because it is load-bearing now. A follow-up populates it at provisioning.
  *   8. No live process is standing in an owning run's worktree path, and none is
- *      standing in a path bearing its `workflow_run_id`. This is the gate for the
- *      real race the DB cannot see: the row went terminal (hang watchdog, cancel,
- *      crash latch) while the detached workflow is still running.
+ *      standing in a path bearing its `workflow_run_id`. The race it is aimed at is
+ *      real — the row goes terminal (hang watchdog, cancel, crash latch) while the
+ *      detached workflow is still running.
+ *
+ *      IT ALSO CANNOT FIRE TODAY, for two reasons, and neither is a licence to delete
+ *      anything. The worktree half is dead for the same reason as gate 7 (no row carries
+ *      a `worktree`). The generation half compares a 36-character run UUID against
+ *      `wf_<8hex>-<3hex>-<n>` basenames: measured 0 of 17 matches, because they are
+ *      different identifiers — which also makes `claimedByNonTerminalRun` above weaker
+ *      than it reads. What actually protects a LIVE workflow is not this gate: its tree
+ *      is `isLive`, so the worktree pass never detaches it, so it still holds its branch
+ *      by name and gate 4 keeps the ref. A follow-up re-keys or drops this witness.
  *   9. A salvage ref was CREATED first — create-only, never a blind set. 67 of the 79
  *      measured refs carry commits origin does not have, so the delete would otherwise
  *      be the only copy's last reference. `refs/trident-reaped/<slug>/<sha>` keeps them
@@ -200,6 +224,14 @@ export interface WorktreeReapReport {
   refs_deleted: { ref: string; sha: string; salvage: string }[]
   /** Every ref the sweep declined to delete, and the gate that declined it. */
   refs_kept: { ref: string; reason: string }[]
+  /**
+   * WHOLE-REPO STAND-DOWNS — a ref sweep that declined to look at a repository at all
+   * (the boot-rescue latch still shut, an unreadable rebase state, an enumeration that
+   * would not answer, a throw). Counted APART from `refs_kept` because these are the
+   * conditions that can persist silently forever, and `logSummaryIfActed` treats them as
+   * action worth logging while ordinary per-ref refusals stay quiet.
+   */
+  refs_stood_down: number
 }
 
 interface WorktreeEntry {
@@ -232,6 +264,7 @@ function emptyReport(): WorktreeReapReport {
     refs_examined: 0,
     refs_deleted: [],
     refs_kept: [],
+    refs_stood_down: 0,
   }
 }
 
@@ -423,9 +456,16 @@ export async function sweepTridentWorktrees(
         // THE DETACH THIS SWEEP JUST PERFORMED FREED THIS REF, and that is not the same
         // thing as the ref having been free (#547). A worktree can be detached here and
         // then PRESERVED below — dirty, or inside the retention window — and its ref is
-        // the history its uncommitted work sits on top of. Recorded so the ref reap can
-        // refuse it for as long as the tree it belongs to is still on disk; the sweep
-        // that finally removes the tree is the sweep that may take the ref.
+        // the history its uncommitted work sits on top of.
+        //
+        // THIS MAP LIVES FOR ONE SWEEP AND IS NOT WHAT HOLDS THAT LINE. It is built per
+        // repo inside `sweepTridentWorktrees`, so on the NEXT sweep the tree is already
+        // detached, `entry.branch` is null, this block never runs, and this map is empty
+        // — which is exactly how a preserved dirty tree lost its ref one sweep later.
+        // GATE 4c in `reapBranchRefs` is the durable answer: it matches the ref's COMMIT
+        // against the HEAD of every listed tree still on disk, and the `--detach` above
+        // leaves HEAD on the tip. All this records is the nicer refusal REASON while the
+        // sweep that performed the detach is still running.
         detachedThisSweep.set(entry.branch, entry.path)
       }
 
@@ -461,14 +501,17 @@ export async function sweepTridentWorktrees(
     }
 
     // THE BRANCH-REF REAP (#547), last in the repo so it reads the world the worktree
-    // pass and the prune just left: a tree that was removed is no longer a holder, and
-    // a tree that was PRESERVED still is. One try/catch for the same reason the prune
-    // has one — a ref sweep that throws in one repo must not abandon the next.
+    // pass and the prune just left: a tree that was removed is no longer a holder, and a
+    // tree that was PRESERVED still is — by its HEAD (gate 4c), which is what makes that
+    // true on every later sweep too and not just on the one that detached it. One
+    // try/catch for the same reason the prune has one: a ref sweep that throws in one
+    // repo must not abandon the next.
     if (!refsReady) {
       report.refs_kept.push({
         ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
         reason: 'awaiting-boot-rescue: the stranded-failure sweep has not settled yet',
       })
+      report.refs_stood_down += 1
       continue
     }
     try {
@@ -478,6 +521,7 @@ export async function sweepTridentWorktrees(
         ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
         reason: `sweep-failed: ${errText(error)}`,
       })
+      report.refs_stood_down += 1
     }
   }
 
@@ -488,7 +532,11 @@ export async function sweepTridentWorktrees(
 
 interface ZHolder {
   path: string
+  /** The branch the entry has checked out BY NAME, absent for a detached tree. */
   branch: string | null
+  /** The commit the entry's HEAD is at — present even when `branch` is not (gate 4c). */
+  head: string | null
+  bare: boolean
 }
 
 /**
@@ -512,9 +560,11 @@ function parseHoldersZ(stdout: string): ZHolder[] {
       close()
       continue
     }
-    holder ??= { path: '', branch: null }
+    holder ??= { path: '', branch: null, head: null, bare: false }
     if (field.startsWith('worktree ')) holder.path = field.slice('worktree '.length)
     else if (field.startsWith('branch ')) holder.branch = field.slice('branch '.length)
+    else if (field.startsWith('HEAD ')) holder.head = field.slice('HEAD '.length)
+    else if (field === 'bare') holder.bare = true
     // `detached` is deliberately NOT read. An entry with no `branch` attribute is asked
     // about its rebase/bisect state whatever else it says, because the SUPERSET is the
     // safe side: a git that stopped printing `detached` for a rebasing worktree would
@@ -581,6 +631,7 @@ async function reapBranchRefs(
     )
   } catch (error) {
     report.refs_kept.push({ ref: `${TRIDENT_REF_PREFIX}* in ${repo}`, reason: `refs-unenumerable: ${errText(error)}` })
+    report.refs_stood_down += 1
     return
   }
   if (!listed.ok) {
@@ -588,6 +639,7 @@ async function reapBranchRefs(
       ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
       reason: `refs-unenumerable: ${hostText(listed)}`,
     })
+    report.refs_stood_down += 1
     return
   }
   const refs = parseRefLines(listed.stdout)
@@ -603,6 +655,7 @@ async function reapBranchRefs(
       ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
       reason: `holders-unenumerable: ${errText(error)}`,
     })
+    report.refs_stood_down += 1
     return
   }
   if (!holderList.ok) {
@@ -610,14 +663,55 @@ async function reapBranchRefs(
       ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
       reason: `holders-unenumerable: ${hostText(holderList)}`,
     })
+    report.refs_stood_down += 1
     return
   }
 
-  // GATE 4 — who holds what. A detached entry is asked directly, because git prints no
-  // `branch` attribute for a worktree mid-rebase or mid-bisect even though it holds one.
+  // GATE 4 — who holds what BY NAME. A detached entry is asked directly, because git
+  // prints no `branch` attribute for a worktree mid-rebase or mid-bisect even though it
+  // holds one, and `readRebaseHead` reads exactly the four places git itself looks:
+  // the HEAD symref, `rebase-merge/head-name`, `rebase-apply/head-name`, `BISECT_START`.
   const readRebase = opts.rebase_head ?? readRebaseHead
+  const holders = parseHoldersZ(holderList.stdout)
   const held = new Map<string, string>()
-  for (const holder of parseHoldersZ(holderList.stdout)) {
+  // GATE 4c — DURABLE HOLDER-BY-HEAD. Keyed on the COMMIT, and it is what makes the
+  // preservation of a detached tree outlive the sweep that detached it.
+  const heads = new Map<string, string>()
+  for (const [index, holder] of holders.entries()) {
+    // LINKED TREES ONLY. `index === 0` is the shared checkout (git-worktree(1): "The main
+    // worktree is listed first"), and it is excluded for the same reason the worktree pass
+    // above excludes it: it is never a disposable build tree, so it can never be the tree
+    // this gate exists to protect — the pass only ever detaches LINKED `wf_*` trees.
+    //
+    // Including it would add nothing but coincidence refusals on the one tree that is
+    // never disposable: `merge.ts` legitimately leaves the shared checkout parked on a
+    // feature branch, and a freshly-cut `trident/*` ref whose build committed nothing has
+    // main's tip, which is exactly where the shared checkout usually stands. Measured
+    // while writing this: with the shared checkout included, two existing cases refused a
+    // ref whose worktree had genuinely been removed. The by-NAME case is not lost — gate 4
+    // does not skip index 0, so a shared checkout holding a `trident/*` branch still keeps
+    // its ref.
+    //
+    // A bare entry has no working tree and no HEAD of its own to stand on.
+    //
+    // `existsSync` HERE IS DEFENCE WITHOUT AN OBSERVABLE CONSEQUENCE, and it is kept
+    // rather than removed. No test can distinguish it, because a listed entry whose
+    // directory is gone is refused either way: if it still holds its branch BY NAME gate 4
+    // takes it, and if it is detached then `readRebaseHead` cannot read a rebase state out
+    // of a missing directory, answers 'unknown', and stands the whole repo down (pinned by
+    // "a listed worktree whose DIRECTORY is gone stands the whole repo down"). Mutating it
+    // away therefore changes no outcome. It stays because it costs one syscall and it keeps
+    // this gate's claim — "a tree still on disk" — true on its own terms rather than by
+    // relying on another gate to cover for it.
+    if (
+      index > 0 &&
+      !holder.bare &&
+      holder.head !== null &&
+      holder.head !== '' &&
+      existsSync(holder.path)
+    ) {
+      if (!heads.has(holder.head)) heads.set(holder.head, holder.path)
+    }
     if (holder.branch !== null) {
       held.set(holder.branch, holder.path)
       continue
@@ -629,13 +723,15 @@ async function reapBranchRefs(
         ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
         reason: `holder-unprovable: cannot read rebase/bisect state in ${holder.path}`,
       })
+      report.refs_stood_down += 1
       return
     }
     if (rebasing.kind === 'branch') held.set(rebasing.ref, holder.path)
   }
-  // A ref THIS sweep freed by detaching its worktree is held for as long as that
-  // worktree survives — see the detach site. The tree is asked for again rather than
-  // assumed, so the refs of trees the pass went on to remove are genuinely free.
+  // THE SAME-SWEEP FAST PATH, no longer load-bearing. It records the ref a detach in
+  // THIS sweep freed, so the refusal reason can name the detach rather than the HEAD.
+  // Gate 4c is what actually holds the line: this map lives for one sweep, and the tree
+  // it remembers is still on disk on the next one.
   for (const [ref, path] of detachedThisSweep) {
     if (!held.has(ref) && existsSync(path)) held.set(ref, path)
   }
@@ -664,6 +760,35 @@ async function reapBranchRefs(
         ref,
         reason: `${freedHere ? 'held-by-preserved-worktree' : 'held-by-worktree'}: ${holder}`,
       })
+      continue
+    }
+
+    // GATE 4c — A DETACHED WORKTREE STANDING ON THIS EXACT COMMIT HOLDS IT, and this is
+    // the gate that survives the sweep boundary.
+    //
+    // THE DEFECT THIS FIXES (adversarial review of PR #606, escalated and confirmed).
+    // `detachedThisSweep` is built inside the per-repo loop, so it is memory for ONE
+    // sweep. On the next sweep the tree is already detached, `entry.branch` is null, the
+    // detach block never runs, nothing is recorded — and a dirty tree the previous sweep
+    // deliberately preserved had its ref deleted anyway. Measured on the repo of record:
+    // 16 `wf_*` trees were already detached by earlier sweeps of shipped main and ALL 16
+    // were dirty (3-67 changed paths), one of them standing exactly on the tip of a
+    // `trident/*` ref whose every other gate passes.
+    //
+    // Keyed on the COMMIT rather than on a name, which is precisely what makes it
+    // durable: `git checkout --detach` in the worktree pass above leaves HEAD at the tip
+    // it was on, so the tree still points at the ref's commit however many sweeps later.
+    // It deliberately does NOT cover a conflicted rebase — there HEAD is the `onto`
+    // commit, not the tip — and it does not need to, because gate 4 reads that state
+    // directly from the rebase's own `head-name`.
+    //
+    // A tip that COINCIDES with some unrelated tree's HEAD is kept too. That is a
+    // nuisance, not a bug, and it is small: measured against the 80 refs on the repo of
+    // record it refuses exactly one. Refusing on a coincidence costs a sweep; deleting a
+    // ref a preserved dirty tree is standing on costs the work in that tree.
+    const standingOn = heads.get(sha)
+    if (standingOn !== undefined) {
+      report.refs_kept.push({ ref, reason: `held-by-detached-worktree: ${standingOn}` })
       continue
     }
 
@@ -785,11 +910,18 @@ async function reapBranchRefs(
 }
 
 function logSummaryIfActed(report: WorktreeReapReport): void {
+  // A SWEEP THAT STOOD DOWN IS NOT A QUIET SWEEP. Without `refs_stood_down` in this
+  // condition, a ref-reap latch that never lifts — or ONE unreadable rebase state file —
+  // silences the whole ref half of this loop forever and logs nothing at all,
+  // indistinguishable from a repository with nothing to reap. Ordinary per-ref refusals
+  // are deliberately NOT here: `owner-unknown` on a hand-made branch is the steady state
+  // and would log every fifteen minutes for the life of the process.
   if (
     !report.skipped_no_liveness &&
     report.detached.length === 0 &&
     report.removed.length === 0 &&
-    report.refs_deleted.length === 0
+    report.refs_deleted.length === 0 &&
+    report.refs_stood_down === 0
   ) {
     return
   }
@@ -805,6 +937,7 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     refs_examined: report.refs_examined,
     refs_deleted: report.refs_deleted.length,
     refs_kept: report.refs_kept.length,
+    refs_stood_down: report.refs_stood_down,
   })
 }
 

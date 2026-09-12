@@ -1,4 +1,4 @@
-## 2026-09-12 — a run's branch ref no longer outlives the run, and the delete now rests on ten pieces of evidence, atomically
+## 2026-09-12 — a run's branch ref no longer outlives the run: eleven checks, a durable holder gate, and an atomic delete
 
 Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
 no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
@@ -42,18 +42,34 @@ terminal", which is the answer that authorises the delete.
 4. No worktree holds the ref — including the ones git calls DETACHED, because a tree mid-rebase or
    mid-bisect prints no `branch` attribute while genuinely holding one. `readRebaseHead` answering
    'unknown' freezes every ref in the repo: what could not be read may name any of them.
-4b. No worktree THIS SWEEP detached still exists. Found by a test rather than by reasoning: the
-   worktree pass detaches a process-free `trident/*` holder BEFORE it decides whether the tree may
-   be removed, so a tree preserved immediately afterwards (dirty, or inside retention) has had its
-   ref freed while its only-copy work sits on top of it. The ref is now kept until the tree is gone
-   — which extends #541's dirty-worktree preservation into the ref namespace instead of undoing it.
+4b. No worktree THIS SWEEP detached still exists — a same-sweep fast path, kept only for the
+   refusal wording. The worktree pass detaches a process-free `trident/*` holder BEFORE it decides
+   whether the tree may be removed, so a tree preserved immediately afterwards (dirty, or inside
+   retention) has had its ref freed while its only-copy work sits on top of it.
+4c. No DETACHED LINKED worktree still on disk is standing on the ref's COMMIT. This is the gate that
+   actually holds that line, and 4b is not — see "GATE 4b HELD FOR EXACTLY ONE SWEEP" below. Keyed
+   on the commit rather than a name, because the worktree pass's own `checkout --detach` leaves HEAD
+   on the tip, so the tree still points at the ref however many sweeps later. It does not cover a
+   conflicted rebase (there HEAD is the `onto` commit) and does not need to, because gate 4 reads
+   the rebase's own `head-name`. The SHARED checkout is excluded: it is never a disposable build
+   tree, so it is never the tree this protects, and including it refuses on coincidence — measured
+   while writing it, two cases refused a ref whose worktree had genuinely been removed.
 5. At least one run row names the branch. NO row is the absence of an owner, not evidence of
    disposability — it is what protects a hand-made branch, and it keeps 6 of the 79.
 6. EVERY row naming it is terminal.
-7. No owning run's recorded worktree still exists on disk.
+7. No owning run's recorded worktree still exists on disk — **which cannot fire today, and this
+   record credited it as evidence when it should not have.** Measured read-only against the
+   production store on 2026-09-12: 0 of 291 run rows carry a non-null `worktree`, because the
+   orchestrator writes `worktree: null`. Kept because it is correct and costs nothing the day that
+   column is populated, not because it is load-bearing now.
 8. No live process stands in an owning run's worktree, and none stands in a path bearing its
-   `workflow_run_id` — the gate for the race the store cannot see, where the row went terminal
-   while the detached workflow is still running.
+   `workflow_run_id`. The race is real — the row goes terminal while the detached workflow is still
+   running — but **this gate cannot fire today either.** The worktree half is dead for the same
+   reason as gate 7; the generation half compares a 36-character run UUID against
+   `wf_<8hex>-<3hex>-<n>` basenames, measured 0 of 17 matches, because they are different
+   identifiers. What actually protects a LIVE workflow is not this gate: its tree is `isLive`, so
+   the worktree pass never detaches it, so it still holds its branch by name and gate 4 keeps the
+   ref. The same mis-keying makes `claimedByNonTerminalRun` weaker than it reads.
 9. A salvage ref was CREATED first, create-only. 67 of the 79 carry commits origin does not have,
    so the delete would otherwise drop the last reference to them. `refs/trident-reaped/<slug>/<sha>`
    keeps them reachable — outside `refs/heads` so it can never re-enter a launch, outside
@@ -63,6 +79,22 @@ terminal", which is the answer that authorises the delete.
     checks the old value and unlinks the ref under one ref lock. A branch that advanced since the
     enumeration cannot be deleted at all, because there is no read-then-delete window: there is no
     separate read. See below for what this replaces.
+
+**GATE 4b HELD FOR EXACTLY ONE SWEEP, NOT "UNTIL THE TREE IS GONE" — and this document said
+otherwise.** `detachedThisSweep` is built inside the per-repo loop, so it is memory for ONE sweep.
+On the next sweep the tree is already detached, its listing entry has no `branch` attribute, the
+detach block never runs, the map is empty, and nothing refuses: the ref of a tree the previous sweep
+deliberately preserved was deleted anyway. The shipped test ran a single sweep and could not see it.
+
+It was live. Measured on the repo of record: 16 `wf_*` worktrees had already been detached by
+earlier sweeps of shipped main and **all 16 were dirty** (3-67 changed paths), one of them standing
+exactly on the tip of a `trident/*` ref whose every other gate passes — so the first sweep after
+this landed would have taken it.
+
+GATE 4c is the fix, and it is durable by construction rather than by bookkeeping: it matches the
+ref's commit against the HEAD of every linked worktree still on disk, and `checkout --detach` leaves
+HEAD on the tip. Regression-tested over TWO sweeps and a third, for the dirty case and the
+within-retention case; both red without it, with the ref deleted on sweep 2.
 
 **THE FIRST CUT'S "COMPARE-AND-SWAP" WAS NOT ATOMIC, and the cross-model review caught it.** The
 delete was a `rev-parse` read of the sha followed by a SEPARATE `git branch -D`, described as a
