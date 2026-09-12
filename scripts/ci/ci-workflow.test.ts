@@ -753,7 +753,19 @@ describe('migration ordinal guard is wired into a gate the repo can own', () => 
     // The status must reach `process.exit`, scoped to THIS guard's body — the
     // as-built guard above carries the identical line, so an unscoped search
     // would stay satisfied after this one's was deleted.
-    const body = source.slice(source.indexOf('function guardMigrationOrdinalCollisions'))
+    //
+    // BOUNDED AT BOTH ENDS, and the second end was not optional. This sliced from
+    // the declaration to END OF FILE, which was sound while this was the last
+    // guard in the gate and broke the moment a THIRD was hosted below it
+    // (`guardStagingFloorDeletion`): the identical propagation line downstream
+    // satisfied the search over a body whose own line had been deleted, and the
+    // 'exit code is discarded' mutation below stopped being caught. Measured, not
+    // foreseen — that mutation test went red when the third guard landed, which is
+    // precisely what this battery is for. The window now ends at this guard's own
+    // top-level call, exactly as the describe above bounds its own.
+    const bodyStart = source.indexOf('function guardMigrationOrdinalCollisions')
+    const bodyEnd = source.search(/^guardMigrationOrdinalCollisions\(\)$/m)
+    const body = bodyStart === -1 || bodyEnd <= bodyStart ? '' : source.slice(bodyStart, bodyEnd)
     if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(body)) {
       return 'the gate does not propagate the guard exit code'
     }
@@ -1207,6 +1219,213 @@ describe('workflow action pins', () => {
       expect(uses.length).toBeGreaterThan(0)
       const unpinned = uses.filter((u) => !/^[^@]+@[0-9a-f]{40}$/.test(u))
       expect(unpinned).toEqual([])
+    })
+  }
+})
+
+/**
+ * THE SAME RELOCATION, FOR THE AS-BUILT STAGING FLOOR GUARD — the third rule
+ * hosted in `check-governed-repo-attributes.ts`, for the reason the two describes
+ * above document at length: `.github/workflows/` is unreachable to every agent in
+ * this system, and `layering` already runs that gate unconditionally at
+ * `fetch-depth: 0`.
+ *
+ * WHAT IT PREVENTS, MEASURED 2026-09-12. A promotion that consumes the last staged
+ * record in a directory under `.trident/as-built/` leaves that directory with no
+ * tracked file, so it stops existing — and the promotion commit is, file for file,
+ * a move out of it into `docs/as-built/`. Git reads the pair as a directory rename
+ * and every open PR staging a record there acquires `CONFLICT (file location) ...
+ * suggesting it should perhaps be moved to docs/as-built/<name>.md`. One promotion
+ * emptied the directory and two of the seven then-open PRs acquired it. The
+ * suggested resolution writes a shard FROM A BRANCH, which the one-writer rule
+ * forbids — a conflict arriving with instructions to break an invariant.
+ *
+ * WHY THE WIRING IS PINNED AT ALL. The rule existed as a paragraph in
+ * `docs/as-built/README.md` first, which is the failure root `AGENTS.md` names: a
+ * rule that lives only in prose is advice to an agent that has never read it. A
+ * guard that is declared and never called is the same failure with more steps, and
+ * this repo has shipped exactly that (see the ordinal guard's five inert days).
+ */
+describe('as-built staging floor guard is wired into a gate the repo can own', () => {
+  const FLOOR_GUARD_PATH = 'scripts/ci/as-built-staging-floor-guard.sh'
+  const FLOOR_GATE_PATH = 'scripts/ci/check-governed-repo-attributes.ts'
+  const floorGuard = readFileSync(join(REPO_ROOT, FLOOR_GUARD_PATH), 'utf8')
+  const floorGate = readFileSync(join(REPO_ROOT, FLOOR_GATE_PATH), 'utf8')
+
+  /** Why the gate would not enforce the floor guard, or `null` when it would. */
+  function whyNotEnforcing(source: string): string | null {
+    if (!source.includes('as-built-staging-floor-guard.sh')) return 'the gate never names the guard'
+    if (!/^guardStagingFloorDeletion\(\)$/m.test(source)) {
+      return 'the guard invocation is declared but never called at top level'
+    }
+    // BOUNDED AT BOTH ENDS. Two other guards in this same gate carry the identical
+    // propagation line, so a window that ran to end of file — or started at the
+    // top of it — would stay satisfied over a gutted body. That is not
+    // hypothetical: it is the defect this file's own mutation battery caught in
+    // the ordinal describe the day this guard was added.
+    const bodyStart = source.indexOf('function guardStagingFloorDeletion')
+    const bodyEnd = source.search(/^guardStagingFloorDeletion\(\)$/m)
+    const body = bodyStart === -1 || bodyEnd <= bodyStart ? '' : source.slice(bodyStart, bodyEnd)
+    if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(body)) {
+      return 'the gate does not propagate the guard exit code verbatim'
+    }
+    // Before the attribute verdict's early exits, or a repo with no as-built log
+    // on disk returns 0 without the tree ever being read.
+    const firstExit = source.indexOf('process.exit(0)')
+    const callAt = source.search(/^guardStagingFloorDeletion\(\)$/m)
+    if (firstExit !== -1 && callAt > firstExit) return 'the guard runs after an early exit 0'
+    return null
+  }
+
+  /** Why the guard would fail to guard a real PR, or `null` when it would. */
+  function whyNotGuarding(source: string): string | null {
+    // Both guarded events, each with the payload keys GitHub actually sends.
+    if (!/pull_request \| pull_request_target\)/.test(source)) return 'pull_request is not a guarded event'
+    if (!/merge_group\)/.test(source)) return 'the merge queue is not a guarded event'
+    if (!source.includes('pull_request.base.sha') || !source.includes('pull_request.head.sha')) {
+      return 'the pull_request payload mapping is incomplete'
+    }
+    if (!source.includes('merge_group.base_sha') || !source.includes('merge_group.head_sha')) {
+      return 'the merge_group payload mapping is incomplete'
+    }
+
+    // Inside Actions, a guarded event that yielded no sha must be exit 2. Without
+    // this, relocating the event filter into the script turns every unreadable
+    // payload into a silent pass — the one genuinely new risk the move creates.
+    // The window is the strict `if` block itself, up to its own `fi`: the
+    // GUARD_*_SHA checks that follow carry the same "REFUSES to skip" text and
+    // `exit 2`, so a looser bound reads a gutted strict branch as intact.
+    const strictAt = source.search(/if \[ "\$\{GITHUB_ACTIONS:-\}" = "true"/)
+    if (strictAt === -1) return 'the guard is never strict inside Actions'
+    const strictEnd = source.indexOf('\nfi\n', strictAt)
+    if (strictEnd === -1) return 'the strict branch is unterminated'
+    if (!/REFUSES to skip/.test(source.slice(strictAt, strictEnd))) return 'the strict branch does not refuse'
+    if (!/exit 2/.test(source.slice(strictAt, strictEnd))) return 'the strict branch does not exit 2'
+
+    // THE RULE IS PER-DIRECTORY, and that is the whole finding. A top-level-only
+    // check passes the tree this repo actually produces — records live under
+    // `.trident/as-built/fix/` and friends, because branch names carry a slash —
+    // so the conflict survives a guard that only watches the top. Proved with real
+    // merges in `trident/as-built-staging-floor-realgit.test.ts`.
+    if (!source.includes('RECORD_DIRS')) return 'the guard no longer tracks which directories hold records'
+    if (!/for dir in "\$\{!RECORD_DIRS\[@\]\}"/.test(source)) {
+      return 'the guard no longer checks every record-holding directory for a floor'
+    }
+    if (!/unfloored\+=\("\$dir"\)/.test(source)) return 'an unfloored directory is not collected'
+    if (!/\$\{#unfloored\[@\]\}" -gt 0/.test(source)) return 'an unfloored directory is not a failure'
+
+    // A FLOOR IS A NON-`.md` FILE, read off the promoter's own glob
+    // (trident/as-built-appender.ts:101). Counting a `.md` file as a floor would
+    // pass a directory whose only "floor" the promoter carries away on the next
+    // run — the defect wearing a placeholder's clothes.
+    if (!/\*\.md\) RECORD_DIRS\["\$dir"\]=1/.test(source)) return 'a .md file is no longer counted as a record'
+
+    // "Not there" and "could not look" must stay different answers. `ls-tree`
+    // succeeds with empty output for an absent path, so the exit code is the only
+    // thing that can carry the unknown.
+    if (!/return 2/.test(source)) return 'the guard has no indeterminate answer'
+    if (!/could not read tree/.test(source)) return 'an unreadable tree is not a refusal'
+
+    // An explicit pair must stay strict — the contract the guard's unit tests drive.
+    if (!/if \[ -z "\$\{GUARD_BASE_SHA:-\}" \] && \[ -z "\$\{GUARD_HEAD_SHA:-\}" \]/.test(source)) {
+      return 'an explicit GUARD_BASE_SHA/GUARD_HEAD_SHA pair no longer wins'
+    }
+    return null
+  }
+
+  test('the gate enforces the floor guard today', () => {
+    // POSITIVE CONTROLS FIRST — every regex above reports "no problem" over an
+    // empty string, which reads exactly like a pass.
+    expect(floorGate.length).toBeGreaterThan(1000)
+    expect(floorGuard.length).toBeGreaterThan(1000)
+    expect(whyNotEnforcing(floorGate)).toBeNull()
+    expect(whyNotGuarding(floorGuard)).toBeNull()
+  })
+
+  test('the gate that carries the guard is the one ci.yml runs unconditionally', () => {
+    expect(yml).toContain('- run: bun scripts/ci/check-governed-repo-attributes.ts .')
+  })
+
+  test('the guard script it names exists on disk', () => {
+    expect(existsSync(join(REPO_ROOT, FLOOR_GUARD_PATH))).toBe(true)
+  })
+
+  const floorGateMutations: Array<[string, (source: string) => string]> = [
+    [
+      'the invocation is deleted',
+      (source) => source.split('\n').filter((line) => !/^guardStagingFloorDeletion\(\)$/.test(line)).join('\n'),
+    ],
+    [
+      'the guard is declared but never called',
+      (source) => source.replace(/^guardStagingFloorDeletion\(\)$/m, '// guardStagingFloorDeletion()'),
+    ],
+    [
+      'the exit code is collapsed to 1',
+      (source) => {
+        const at = source.indexOf('function guardStagingFloorDeletion')
+        return (
+          source.slice(0, at) +
+          source
+            .slice(at)
+            .replace('if (guard.exitCode !== 0) process.exit(guard.exitCode)', 'if (guard.exitCode !== 0) process.exit(1)')
+        )
+      },
+    ],
+    [
+      'the exit code is discarded',
+      (source) => {
+        const at = source.indexOf('function guardStagingFloorDeletion')
+        return (
+          source.slice(0, at) + source.slice(at).replace('if (guard.exitCode !== 0) process.exit(guard.exitCode)', '')
+        )
+      },
+    ],
+    ['the guard is no longer named', (source) => source.replace(/as-built-staging-floor-guard\.sh/g, 'nothing.sh')],
+  ]
+
+  for (const [name, mutate] of floorGateMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(floorGate)
+      expect(mutated).not.toBe(floorGate)
+      expect(whyNotEnforcing(mutated)).not.toBeNull()
+    })
+  }
+
+  const floorGuardMutations: Array<[string, (source: string) => string]> = [
+    ['the merge queue is dropped', (source) => source.replace('    merge_group)', '    never_group)')],
+    [
+      'the strict branch is removed',
+      (source) => source.replace(/if \[ "\$\{GITHUB_ACTIONS:-\}" = "true" \][\s\S]*?\nfi\n/, ''),
+    ],
+    ['the pull_request head mapping is dropped', (source) => source.replace('pull_request.head.sha', '')],
+    [
+      'the explicit override stops winning',
+      (source) =>
+        source.replace('if [ -z "${GUARD_BASE_SHA:-}" ] && [ -z "${GUARD_HEAD_SHA:-}" ]', 'if true'),
+    ],
+    [
+      'the per-directory rule is reduced to the top-level sentinel — the weaker fix, restored',
+      (source) => source.replace(/for dir in "\$\{!RECORD_DIRS\[@\]\}"/, 'for dir in ""'),
+    ],
+    [
+      'an unfloored directory stops being a failure',
+      (source) => source.replace(/if \[ "\$\{#unfloored\[@\]\}" -gt 0 \]; then/, 'if false; then'),
+    ],
+    [
+      'a .md file starts counting as a floor',
+      (source) => source.replace(/\*\.md\) RECORD_DIRS\["\$dir"\]=1 ;;/, '*.md) FLOOR_DIRS["$dir"]=1 ;;'),
+    ],
+    [
+      'an unreadable tree becomes a pass',
+      (source) => source.replace(/could not read tree/g, 'nothing to see here'),
+    ],
+  ]
+
+  for (const [name, mutate] of floorGuardMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(floorGuard)
+      expect(mutated).not.toBe(floorGuard)
+      expect(whyNotGuarding(mutated)).not.toBeNull()
     })
   }
 })
