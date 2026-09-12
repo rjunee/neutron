@@ -48,10 +48,16 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - [x] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
       as a bare "child crashed" / "pooled child exited" — assert the stored reason names
       the deploy.** The dying gateway records the kill before it makes it
-      (`gateway-shutdown-kill.ts` → `reportGatewayShutdownKill`, called from
-      `pool.ts:shutdownAllPersistentRepls` and `spawn.ts:shutdownQuarantinedChildren`), the
-      sink carries a `cause` discriminant, and both detectors read a generation-scoped
-      registry marker on the next boot. Checks: `open/wiring/__tests__/trident-child-crash-sink.test.ts`
+      (`gateway-shutdown-kill.ts` → `recordGatewayShutdownKill`, called synchronously from
+      `pool.ts:shutdownAllPersistentRepls` and `spawn.ts:shutdownQuarantinedChildren`), and
+      the live report it returns is delivered afterwards in a bounded phase
+      (`deliverShutdownKillReports`) so no child's record or kill queues behind another
+      child's sink. ~~`reportGatewayShutdownKill`, called from~~ SUPERSEDED (round 4): that
+      function survives only as a single-child convenience for callers outside the shutdown
+      walk; the walk itself must use the two-phase pair. The sink carries a `cause`
+      discriminant, and both detectors read the generation-keyed kill record on the next
+      boot — the record explaining a death the reader has independently confirmed (round 6),
+      and the report's delivery, not its verdict, closing the crash edge (round 7). Checks: `open/wiring/__tests__/trident-child-crash-sink.test.ts`
       ("the stored failure_reason says deploy, and never says the child crashed" — asserts
       the real `code_trident_runs` row), `trident/tick-liveness.test.ts` T6,
       `__tests__/poison-eviction-live-work-guard.test.ts` ("a gateway shutdown reports its
@@ -113,6 +119,19 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE CRASH EDGE WAS KEYED ON THE VERDICT INSTEAD OF ON THE DELIVERY, so an honest answer
+  got overwritten by a confident one. The edge records that a death's report happened; an
+  earlier revision closed it only when the report was an ATTRIBUTION, so a successfully
+  delivered `cause: 'unknown'` left it open and the next watchdog tick reported the same
+  death again as `cause: 'child-died'` — which `crashRunningByLauncher` writes over the
+  tombstone unconditionally (`trident/store.ts:1102-1105`). `delivered` and `attributed` are
+  different facts: telling the owner something is not telling the owner it was a deploy, and
+  only the first closes the edge. The generalisation, because this is round 4's conflation
+  arriving in a third state: `unknown` was not a possible value when that condition was
+  written, so nothing about it was wrong until it was — **every new state must be checked
+  against every field whose meaning was defined before that state existed.** The related
+  last-writer-wins on the tombstone itself is filed separately (#648), with its reachability
+  measured rather than asserted.
 - TWO CORRECT FIXES LEFT A HOLE BETWEEN THEM, and it swallowed exactly the child that
   matters most. The row-scoping refusal (round 2) and the best-effort delivery phase (round 4)
   were each right, and together they meant a QUARANTINED generation — not the row's current

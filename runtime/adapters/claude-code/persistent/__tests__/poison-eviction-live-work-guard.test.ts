@@ -705,7 +705,7 @@ describe('a fresh spawn does not inherit the previous generation\'s excuse (#518
 })
 
 describe('a child that was ALREADY DEAD when teardown arrived is not a deploy kill (#518)', () => {
-  it('reports cause unknown, writes no marker, and leaves the crash edge open', async () => {
+  it('reports cause unknown and writes no marker — the death is not ours to claim', async () => {
     // THE MISATTRIBUTION THIS PR ALMOST SHIPPED. `kill()` is idempotent after exit, so
     // teardown "kills" a child that died of a genuine fault moments earlier exactly as
     // readily as a live one. Reporting that as a deploy is the PR's own thesis running
@@ -747,10 +747,14 @@ describe('a child that was ALREADY DEAD when teardown arrived is not a deploy ki
     // NO EXCUSE ON DISK for a death we did not cause...
     expect(killedGenerations(row)).toEqual([])
     expect(wasKilledByGatewayShutdown(row)).toBe(false)
-    // ...and the edge is LEFT OPEN so the next boot's watchdog still reports the fault
-    // honestly. Closing it here would silence the very death we refused to claim.
-    // RED-mutation: stamp `child_crash_notified_at` on the unattributed path.
-    expect(row?.child_crash_notified_at).toBeUndefined()
+    // ...and the edge IS closed, because the report was DELIVERED. This assertion was
+    // inverted, and that was a defect rather than a detail: the edge records that a
+    // report happened, not what it said. Left open, the next tick reported the same
+    // death as a confident `child-died` and overwrote this honest one — pinned as a
+    // SEQUENCE in "a delivered undetermined report is not reported again". What must
+    // stay absent is the MARKER, asserted above: no excuse on disk for a death we did
+    // not cause.
+    expect(row?.child_crash_notified_at).toBeGreaterThan(0)
     expect(deadGeneration).toBeDefined()
   })
 })
@@ -1168,5 +1172,105 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
     const lostLine = lines.find((l) => l.includes('gen-lost')) ?? ''
     expect(lostLine).toContain('NOTHING durable records this death')
     expect(lostLine).not.toContain('the next boot reports it from the durable record')
+  })
+})
+
+/**
+ * #518 — A DELIVERED "I COULD NOT TELL" MUST NOT BE OVERWRITTEN BY A CONFIDENT GUESS.
+ *
+ * The crash edge records that a death's report HAPPENED. An earlier revision closed it
+ * only for the ATTRIBUTED case, so a successfully delivered `cause: 'unknown'` left it
+ * open — the next watchdog tick then passed the reporting gate and reported the same
+ * death as `cause: 'child-died'`, and `crashRunningByLauncher` writes over the
+ * tombstone's reason unconditionally. The honest answer was replaced by a confident
+ * one, which is the misattribution this whole change exists to prevent, reached by a
+ * new route.
+ *
+ * These cases assert the SEQUENCE rather than the field, because asserting the field is
+ * what codified the defect: both undetermined cases explicitly expected the edge to
+ * stay open.
+ */
+describe('a delivered undetermined report is not reported again (#518)', () => {
+  it('successful unknown → the next watchdog tick says NOTHING further', async () => {
+    // RED-mutation: restore `report.attributed &&` on the close condition in
+    // `deliverShutdownKillReports`. The shutdown half still passes — the report is
+    // delivered and says "undetermined" — and the tick then emits a SECOND report with
+    // `cause: 'child-died'`, which is what this asserts against.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-unknown-once-')), 'repl-registry.json')
+    const delivered: Array<{ cause: string; detail: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        delivered.push({ cause: info.cause, detail: info.detail })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+
+    // The child dies of a fault BEFORE teardown, so the shutdown refuses to claim it
+    // and reports `unknown` — the honest answer this must not let anything overwrite.
+    childByKey.get(key)?.kill()
+    await waitUntil(() => !childAlive(1))
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]?.cause).toBe('unknown')
+    // The edge is CLOSED — the report happened, whatever it said.
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeGreaterThan(0)
+
+    // The next boot's watchdog finds the dead pid and must add nothing.
+    await runReplWatchdogTick(options, {
+      healthProbe: async () => false,
+      isPidAlive: () => false,
+      now: () => Date.now() + 120_000,
+      postAlert: () => {},
+    })
+
+    // STILL ONE REPORT, and it still says undetermined. A second one would have said
+    // `child-died` and replaced the honest reason in the store's tombstone.
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]?.cause).toBe('unknown')
+    expect(delivered.some((d) => d.cause === 'child-died')).toBe(false)
+  })
+
+  it('THE COMPLEMENT — an UNDELIVERED unknown still leaves the edge open for retry', async () => {
+    // The fix must not degrade into "always close". A report that never landed has to
+    // stay reportable, or the round-4 backstop is gone for the undetermined case too.
+    // RED-mutation: close the edge before the sink call, or unconditionally.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-unknown-retry-')), 'repl-registry.json')
+    let sinkWorks = false
+    const delivered: string[] = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        if (!sinkWorks) throw new Error('sqlite busy')
+        delivered.push(info.cause)
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    childByKey.get(key)?.kill()
+    await waitUntil(() => !childAlive(1))
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+    expect(delivered).toEqual([])
+    // NOT closed: nothing was reported.
+    expect(loadRegistry(registryPath)[key]?.child_crash_notified_at).toBeUndefined()
+
+    // So the next boot is free to report it — and does.
+    sinkWorks = true
+    await runReplWatchdogTick(options, {
+      healthProbe: async () => false,
+      isPidAlive: () => false,
+      now: () => Date.now() + 120_000,
+      postAlert: () => {},
+    })
+    expect(delivered).toHaveLength(1)
   })
 })

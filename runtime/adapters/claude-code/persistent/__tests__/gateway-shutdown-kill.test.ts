@@ -376,10 +376,13 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
       // explains this death.
       expect(wasKilledByGatewayShutdown(record)).toBe(false)
       expect(killedGenerations(record)).toEqual([])
-      // AND THE EDGE STAYS OPEN, which is the load-bearing half: closing it would
-      // silence the next boot's honest report of the very fault we just refused to
-      // claim. RED-mutation: stamp `child_crash_notified_at` on the unattributed path.
-      expect(record?.child_crash_notified_at).toBeUndefined()
+      // AND THE EDGE IS CLOSED, because the report was DELIVERED. This case used to
+      // assert the opposite, and that was the defect: the edge records that a report
+      // happened, not what it said, so a delivered "undetermined" closes it exactly as
+      // a delivered deploy attribution does. Leaving it open let the next tick report
+      // the same death again as a confident `child-died`, overwriting the honest
+      // answer. RED-mutation: restore `report.attributed &&` on the close condition.
+      expect(record?.child_crash_notified_at).toBe(700)
     })
   }
 

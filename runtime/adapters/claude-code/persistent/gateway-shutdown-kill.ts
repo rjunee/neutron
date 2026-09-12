@@ -528,8 +528,23 @@ export async function deliverShutdownKillReports(
     tally.delivered += 1
     // COMMITTED — and only now is the edge closed, so the next boot does not report
     // this death a second time. A timed-out or thrown report deliberately leaves it
-    // OPEN, exactly as the unattributed path does, so the backstop still fires.
-    if (report.attributed && report.options.replRegistryPath !== undefined) {
+    // OPEN so the backstop still fires.
+    //
+    // KEYED ON `delivered`, NOT ON `attributed`, AND THE DIFFERENCE IS A DEFECT THIS
+    // ALREADY HAD. The edge means "this death's report is closed". A delivered
+    // `cause: 'unknown'` closes it — the report happened and it said what was true.
+    // Keying it on attribution instead conflated "we told the owner something" with
+    // "we told the owner it was a deploy", and left the edge open after an honest
+    // undetermined report: the next watchdog tick then passed the reporting gate and
+    // reported the SAME death as `cause: 'child-died'`, which
+    // `crashRunningByLauncher` writes over the tombstone unconditionally. An honest
+    // "I could not tell" was replaced by a confident "the child died" — the very
+    // misattribution this module exists to prevent, by a new route.
+    //
+    // `unknown` was not a possible value when this condition was written, which is
+    // why nothing about it was wrong until it was. THE RULE: every new state has to be
+    // checked against every field whose meaning was defined before that state existed.
+    if (report.options.replRegistryPath !== undefined) {
       closeCrashReportEdge(report.options.replRegistryPath, report.sessionKey, report.childGeneration, report.at)
     }
   }

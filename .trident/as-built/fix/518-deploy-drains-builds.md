@@ -66,9 +66,13 @@ The one process that knows a kill was deliberate is the one pulling the trigger,
 only moment it knows is just before. So it writes it down.
 
 - **`runtime/adapters/claude-code/persistent/gateway-shutdown-kill.ts`** (new) owns the
-  edge: `reportGatewayShutdownKill` stamps a generation-scoped marker on the durable REPL
+  edge: ~~`reportGatewayShutdownKill` stamps a generation-scoped marker on the durable REPL
   registry row and tells the crash sink with `cause: 'gateway-shutdown'`, awaited, before
-  the kill. `markKilledByGatewayShutdown` returns whether the marker IS ON DISK, read back
+  the kill.~~ SUPERSEDED (round 4): the two halves are split by phase —
+  `recordGatewayShutdownKill` writes the generation-keyed record synchronously before the
+  kill, and `deliverShutdownKillReports` delivers the live report afterwards under a bound.
+  `reportGatewayShutdownKill` survives only as a single-child convenience for callers
+  outside the shutdown walk. `markKilledByGatewayShutdown` returns whether the marker IS ON DISK, read back
   through the same predicate the consumers use — `patchRecord` is a silent no-op for a
   session key with no row, so "the call did not throw" is not evidence anything was
   recorded.
@@ -116,8 +120,11 @@ a deploy for a real fault stops him looking at a bug that is. Liveness is now sa
 (`sampleLivenessBeforeShutdownKill`) and `'gateway-shutdown'` is claimed only for a child
 observed alive. Anything else — already gone, or liveness unreadable — is `cause: 'unknown'`,
 a third member added precisely so `deploy` and `cannot tell` never share a branch. It writes
-no marker (an excuse on disk for a death we did not cause) and leaves `child_crash_notified_at`
-OPEN, so the next boot still reports the fault honestly.
+no marker (an excuse on disk for a death we did not cause). ~~and leaves
+`child_crash_notified_at` OPEN, so the next boot still reports the fault honestly.~~
+CORRECTED (round 7): it leaves the edge open only until the report is DELIVERED. A delivered
+undetermined report closes the edge like any other, because the edge records that a report
+happened, not what it said — see "The edge is keyed on delivery, never on the verdict" below.
 
 The residue is stated rather than papered over: `hasExited()` is a sample, so a child exiting
 between the sample and the `kill()` still lands in the deploy bucket. That window is a
@@ -350,9 +357,51 @@ side: round 3 refused to claim a deploy for a child that might already have been
 per-generation scan then claimed a death for a child that might still be alive. Same missing
 question — *what does this record actually establish?*
 
+### The edge is keyed on delivery, never on the verdict
+
+The crash edge records that a death's report HAPPENED. An earlier revision closed it only for
+the ATTRIBUTED case, so a successfully delivered `cause: 'unknown'` left it open — the next
+watchdog tick then passed the reporting gate and reported the same death as a confident
+`cause: 'child-died'`, which `crashRunningByLauncher` writes over the tombstone
+unconditionally. The honest "I could not tell" was replaced by a confident "the child died":
+this change's own defect, by a new route.
+
+`delivered` and `attributed` are different facts. Telling the owner something and telling the
+owner it was a deploy are not the same claim, and only the first closes this edge.
+
+**The generalisation, because this is the same conflation round 4 split apart.** Round 4
+separated the attribution from the report because *the attribution is knowable before the kill
+and the delivery is not*. Round 6 then added a third state, `unknown`, and left the close
+condition asking round 3's question. Nothing about that condition was wrong when it was
+written — `unknown` was not a possible value then. **So: every new state has to be checked
+against every field whose meaning was defined before that state existed.**
+
+Three tests asserted the old state (`child_crash_notified_at` undefined) rather than the
+property. They are corrected, and the property is pinned as a SEQUENCE: deliver an
+undetermined report, run a watchdog tick, assert no second notification — with the complement
+that an UNDELIVERED report still leaves the edge open and the next tick does report it.
+
+### Deferred deliberately: the tombstone's last-writer-wins
+
+`crashRunningByLauncher` overwrites `failure_reason` unconditionally on conflict
+(`trident/store.ts:1102-1105`), so when two detectors disagree the last to arrive wins — and it
+is frequently the least informed. Filed as its own item rather than fixed here: neither
+"last writer wins" nor "first writer wins" is correct (a better later report must still be
+able to replace a worse earlier one), so the field needs an argued precedence over reason
+kinds, and `crashRunningByLauncher` is the shared tombstone for every launcher-death detector
+rather than anything specific to deploy attribution.
+
+Measured reachability, so the deferral is informed rather than convenient: the run row's own
+reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1118`) and the
+pull half skips terminal runs (`trident/tick.ts:637`) — but `saveIfActive`'s veto path re-reads
+the tombstone and stamps it onto the row (`trident/store.ts:1719-1730`), guarded only by the
+CALLER'S SNAPSHOT of `subagent_status`, not by the row's current value, so an
+overwrite can reach a row given that race. This change closes the duplicate-report routes into
+it, which makes it a sharp edge behind a race rather than an everyday path.
+
 ### Measured
 
-43 mutations applied one at a time, each reverted after: **43 red, 0 survivors.** Every
+45 mutations applied one at a time, each reverted after: **45 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

@@ -125,6 +125,16 @@ export interface ReplRegistryRecord {
    *  boot is free to report the death. That is what makes the shutdown marker a
    *  backstop rather than a decoration.
    *
+   *  IT IS KEYED ON WHETHER A REPORT WAS DELIVERED, NEVER ON WHAT THE REPORT SAID.
+   *  A delivered `cause: 'unknown'` ("the launcher is gone and nobody established
+   *  why") closes this edge exactly as a delivered deploy attribution does — the
+   *  report happened and it said what was true. An earlier revision closed it only
+   *  for the attributed case, so an honest undetermined report left the edge open and
+   *  the next tick reported the same death again as a confident `child-died`, which
+   *  `crashRunningByLauncher` writes over the tombstone unconditionally. Telling the
+   *  owner something and telling the owner it was a deploy are different facts, and
+   *  only the first one closes this.
+   *
    *  The name is for the EDGE, not for the sink, because the watchdog reads it to
    *  answer "is there anything left to say about this death" — but the two are no
    *  longer in tension. An earlier revision of the shutdown path did close this
