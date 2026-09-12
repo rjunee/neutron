@@ -677,11 +677,13 @@ describe('#542 a 429 refusal skips the immediate lane retry', () => {
     // limiter the extra call can extend the window. The remedy that works is the
     // run-level backoff this block already routes to, so the lane keeps its refusal.
     const calls: string[] = []
+    const logs: string[] = []
     const refused = [{ verdict: 'REQUEST_CHANGES', findings: [], kimiStatus: 'deferred', kimiRateLimited: true }]
     const out = await retryDeferredPeers({
       verdicts: refused,
       slots: [{ name: 'argus:kimi', slot: 0, statusKey: 'kimiStatus', rateLimitKey: 'kimiRateLimited' }],
       attempts: 1,
+      log: (m: string) => logs.push(m),
       invoke: async (n: string) => {
         calls.push(n)
         return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
@@ -691,6 +693,16 @@ describe('#542 a 429 refusal skips the immediate lane retry', () => {
     // ...and the original refusal is KEPT, so the gate still blocks and the row still
     // names the 429. Skipping the retry must not soften the outcome.
     expect(out[0]).toEqual(refused[0])
+    // AND THE SKIP SAYS SO IN THE LOG. A lane that silently does not retry is
+    // indistinguishable from a lane that retried and failed when someone reads the run
+    // back — and this was the second surviving mutation: the whole log call could be
+    // deleted with every test still green. It names the seat, the status code, and why an
+    // immediate re-call cannot help, because that last part is the non-obvious bit.
+    const skip = logs.find((l) => l.includes('SKIPPED'))
+    expect(skip).toBeDefined()
+    expect(skip).toContain('argus:kimi')
+    expect(skip).toContain('HTTP 429')
+    expect(skip).toContain('immediate re-call cannot clear a rate limit')
   })
 
   test('...but an ORDINARY deferral is still retried immediately, exactly as before', async () => {

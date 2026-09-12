@@ -529,8 +529,40 @@ describe('#542 the CLI — RUN as a subprocess: the marker means 429 and nothing
     expect(prompt).toContain('KIMI_RATE_LIMITED=1')
     expect(prompt).toContain('KIMI_RATE_LIMITED=0')
     expect(prompt).toContain('kimiRateLimited: copy the KIMI_RATE_LIMITED line VERBATIM')
+    // AND THE BRIDGE IS TOLD TO TITLE ITS FINDING BY THE MEASURED LINE. The prompt used
+    // to hard-code `title:'Kimi review deferred'` for every exit 2/3 — one of the three
+    // sentences this card removed from the operator's row for being false over a 429,
+    // left standing at the surface the run's own reviewer reads.
+    expect(prompt).toContain('Kimi review NOT PERFORMED — provider refused with HTTP 429')
+    expect(prompt).toContain("do NOT write 'deferred' or 'failed'")
+    expect(prompt).toContain('do NOT claim the account is out of credit')
+    // THE DIRECTIVE ITSELF, not just the words it governs. Asserting only that the
+    // honest title appears somewhere left a live mutation: re-adding an unconditional
+    // "Title it 'Kimi review deferred'" ahead of it kept every one of the assertions
+    // above true while restoring exactly the sentence this removed.
+    expect(prompt).toContain('TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS')
+    expect(prompt).not.toContain("Title it 'Kimi review deferred'")
+    expect(prompt).not.toContain("title:'Kimi review deferred'")
     // ...and the schema must be able to carry it, or the bridge has nowhere to put it.
     expect(SRC).toContain('kimiRateLimited: {')
+  })
+
+  test('HEADLINE: the SYNTHESIS is told the truth too, not just the operator', () => {
+    // The flag was read on the operator surface only, so over a 429 the synthesis model
+    // was still handed "DEFERRED — configured but the review failed or returned no usable
+    // verdict". The direction was safe — `enforceCrossModelGate` blocks deterministically,
+    // never on this prose — but the run's own reviewer composing findings from a transport
+    // fault that did not happen is how a wrong remedy gets written down.
+    const body = SRC.slice(SRC.indexOf('const peerPanelLine ='), SRC.indexOf('const codexPanel ='))
+    expect(body).toContain('rateLimited === true')
+    expect(body).toContain('RATE LIMITED — the provider REFUSED the call with HTTP 429')
+    expect(body).toContain('Nothing failed and nothing timed out')
+    // It must still refuse an APPROVE, and still not assert a cause.
+    expect(body).toContain('Do NOT return APPROVE')
+    expect(body).toContain('do NOT assert either')
+    // ...and both seats must actually pass the flag in, derived from their own route.
+    expect(SRC).toContain('crossModelRateLimited(codexSlot, verdicts, seatRateLimitKey(slotOneRoute.group)))')
+    expect(SRC).toContain('crossModelRateLimited(kimiSlot, verdicts, seatRateLimitKey(slotTwoRoute.group)))')
   })
 
   test('the CODEX schema still CANNOT carry the flag — the follow-up is three steps, not zero', () => {
@@ -577,7 +609,13 @@ describe('#542 the honest row — a 429 refusal is reportable as itself', () => 
     expect(peer!.name).toBe('Kimi K3')
   })
 
-  test('HEADLINE: the title never stutters "review", on ANY of the four live routes', () => {
+  test('HEADLINE: the title never stutters "review", on any of the SIX composable routes', () => {
+    // SIX routes are walked and only TWO are reachable in production today — a codex-family
+    // slot one and a kimi-family slot two. The other four need a cross-model slot to hold
+    // the other family, or a producer that sets the flag, which the three-step note on
+    // `deferredCrossModelPeers` says does not exist yet for codex. Walking all six is
+    // deliberate (the composition is what is under test, and the unreachable arms are
+    // exactly where a stutter would sit unnoticed) but the count is stated honestly.
     // MEASURED REGRESSION. The row first composed its title as `${name} cross-model
     // review …`, which is right for a bare vendor name and wrong for the off-family
     // seats whose names ALREADY end in "review": slot one holding a kimi tier — the
@@ -655,6 +693,38 @@ describe('#542 the honest row — a 429 refusal is reportable as itself', () => 
     expect(
       deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' }, {}, { codex: true, kimi: true }),
     ).toHaveLength(2)
+  })
+
+  test('HEADLINE: the generic row and the 429 row share ONE label expression', () => {
+    // THE COMMENT CLAIMED THIS AND THE CODE DID NOT DO IT. `offFamily` was hoisted and
+    // described as anti-drift protection while the generic rows went on recomposing the
+    // same expression inline — a comment asserting a guarantee that did not exist, which
+    // is the third time this card has had to retract one. It is real now, and this is the
+    // assertion that keeps it real: both rows for the same seat must carry the identical
+    // label, so recomposing either inline (and drifting a space, a word, a family name)
+    // reds here instead of reaching an operator.
+    const { deferredCrossModelPeers } = loadReal()
+    for (const route of [
+      { codex: { group: 'kimi' } },
+      { codex: { group: 'claude' } },
+    ]) {
+      const generic = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' }, route, {})[0]
+      const limited = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' }, route, { codex: true })[0]
+      expect(generic).toBeDefined()
+      expect(limited).toBeDefined()
+      expect(generic!.name).toBe(limited!.name)
+      expect(generic!.title.startsWith(`${generic!.name} `)).toBe(true)
+      expect(limited!.title.startsWith(`${generic!.name} `)).toBe(true)
+    }
+    for (const route of [
+      { kimi: { group: 'codex' } },
+      { kimi: { group: 'claude' } },
+    ]) {
+      const generic = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' }, route, {})[0]
+      const limited = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' }, route, { kimi: true })[0]
+      expect(generic!.name).toBe(limited!.name)
+      expect(limited!.title.startsWith(`${generic!.name} `)).toBe(true)
+    }
   })
 
   test('a CONNECTED or NOT_CONNECTED seat writes no row at all, flag or no flag', () => {
@@ -872,9 +942,9 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
   })
 
   test('and the ADVICE names both possibilities instead of "retry once healthy"', () => {
-    // BOTH HALVES MOVE TOGETHER: the token delivery.ts keys on is authored by
-    // `rateLimitedPeer` and nowhere else, and it is the STATUS CODE rather than any
-    // English, because the code is the part that cannot be reworded.
+    // BOTH HALVES MOVE TOGETHER: the shape delivery.ts matches is `rateLimitedPeer`'s
+    // whole authored title, anchored at both ends — see the negative cases below for why
+    // it is not the bare status code.
     const interp = interpretFailure(infraRun(title()))
     expect(interp.input_needed).toContain('HTTP 429')
     expect(interp.input_needed).toContain('rate limits')
@@ -885,6 +955,93 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
     expect(interpretFailure(infraRun('the readiness probe could not be read')).input_needed).toContain(
       'once the infrastructure is healthy',
     )
+  })
+
+  /**
+   * HEADLINE — THE ADVICE MAY NOT BE REACHED BY A CAUSE NO MODEL PROVIDER PRODUCED.
+   *
+   * This is the defect this whole card exists to remove, and an earlier revision
+   * reintroduced it. The branch keyed on `c.includes('http 429')` under an absence claim
+   * — "the token is authored by `rateLimitedPeer` and nowhere else" — that was FALSE.
+   *
+   * `infraTerminalCause` takes the first LANE finding's TITLE, and
+   * `reviewPreconditionDeferred` composes its title as `REVIEW DEFERRED — PR readiness
+   * could not be read: <probeCause(raw)>`, where `probeCause` quotes the first two lines
+   * of `gh pr view` stdout+stderr VERBATIM and `raw` is agent-transcribed. GitHub's
+   * secondary rate limit answers 403 OR 429 — which this repo already knows, since
+   * `trident/git-mode.ts` matches `/\bhttp 429\b/` on `gh` output for exactly that
+   * reason. So a GitHub refusal sent the operator to check a Kimi or Codex account's
+   * balance, and `main` handled that same cause BETTER with its generic line.
+   *
+   * Three vectors, all three measured, all three must keep the generic advice.
+   */
+  test('HEADLINE: a GITHUB secondary rate limit keeps the generic line — no provider was involved', () => {
+    // The exact shape `reviewPreconditionDeferred` composes from a `gh` refusal.
+    const ghCause =
+      'REVIEW DEFERRED — PR readiness could not be read: HTTP 429: You have exceeded a secondary ' +
+      'rate limit and have been temporarily blocked from content creation. (https://api.github.com/graphql)'
+    const interp = interpretFailure(infraRun(ghCause))
+    // Still infrastructure — that part was always right, and comes from the columns.
+    expect(interp.klass).toBe('infra-blocked')
+    // ...but NOT the cross-model-provider advice.
+    expect(interp.input_needed).toContain('once the infrastructure is healthy')
+    expect(interp.input_needed).not.toContain('balance')
+    expect(interp.input_needed).not.toContain('rate limits')
+  })
+
+  test('HEADLINE: a probe that ECHOES a prior run\'s title keeps the generic line', () => {
+    // The anchor is what buys this one, and a bare `includes` of the authored PHRASE
+    // would still fail it: `gh pr view` output can contain a previous run's terminal
+    // cause verbatim, and `probeCause` quotes it into a new title. The quoting always
+    // introduces a colon and an em dash before the phrase, neither of which the seat
+    // label may contain — so the both-ends anchor rejects it.
+    const echoed =
+      'REVIEW DEFERRED — PR readiness could not be read: Kimi K3 cross-model review RATE LIMITED ' +
+      '(HTTP 429) — no review was performed'
+    expect(interpretFailure(infraRun(echoed)).input_needed).toContain('once the infrastructure is healthy')
+  })
+
+  test('HEADLINE: a THROWN workflow message quoting 429 keeps the generic line', () => {
+    // `terminalCause: infraCause(thrownMessage)` is the third vector — arbitrary
+    // workflow error text, quoted.
+    for (const cause of [
+      'forge:build failed: upstream said HTTP 429',
+      'PR readiness could not be read: http 429',
+      'rate limited (http 429) — no review was performed by something else entirely',
+      'HTTP 429',
+      // THE TAIL ANCHOR IS WHAT REJECTS THIS ONE, and it is not hypothetical:
+      // `probeCause` joins the first TWO lines of `gh pr view` output with a SPACE, so a
+      // quoted title on line 1 followed by anything at all on line 2 produces exactly
+      // this shape. Without the `$` the authored sentence would match as a prefix of
+      // arbitrary probe prose.
+      'Kimi K3 cross-model review RATE LIMITED (HTTP 429) — no review was performed and then the probe said something else',
+    ]) {
+      expect(interpretFailure(infraRun(cause)).input_needed).toContain('once the infrastructure is healthy')
+    }
+  })
+
+  test('...and the REAL title from every live seat label still reaches the specific advice', () => {
+    // The anchor must not be so tight that it stops matching what it is for. Walked over
+    // the labels `deferredCrossModelPeers` actually composes, so a label the anchor's
+    // charset cannot express shows up here rather than as a silent fallback in production.
+    const { deferredCrossModelPeers } = loadReal()
+    const routes: Array<[Record<string, unknown>, Record<string, boolean>]> = [
+      [{}, { codex: true }],
+      [{}, { kimi: true }],
+      [{ codex: { group: 'kimi' } }, { codex: true }],
+      [{ kimi: { group: 'codex' } }, { kimi: true }],
+      [{ codex: { group: 'claude' } }, { codex: true }],
+      [{ kimi: { group: 'claude' } }, { kimi: true }],
+    ]
+    for (const [route, flags] of routes) {
+      for (const peer of deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' }, route, flags)) {
+        if (!peer.title.includes('RATE LIMITED')) continue
+        expect({ title: peer.title, advice: interpretFailure(infraRun(peer.title)).input_needed }).toEqual({
+          title: peer.title,
+          advice: interpretFailure(infraRun(title())).input_needed,
+        })
+      }
+    }
   })
 })
 

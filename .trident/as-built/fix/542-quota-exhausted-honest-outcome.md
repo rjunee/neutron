@@ -79,8 +79,8 @@ re-deciding it. The bounded retry is kept, because the transient half is real.
 
 ### It routes through the machinery that already exists
 
-Quota exhaustion is an infrastructure cause, not a review opinion, so nothing
-parallel was added beside `classifyInnerFailure`. The row is still a LANE
+A provider refusing the call is an infrastructure cause, not a review opinion, so
+nothing parallel was added beside `classifyInnerFailure`. The row is still a LANE
 finding, still forces REQUEST_CHANGES through `enforceCrossModelGate`, still
 comes out of `classifyBlock` as `infra-only`, and `infra-only` plus a non-empty
 cause is what `classifyInnerFailure` already reads as `infrastructure` — a
@@ -177,6 +177,66 @@ generic deferral row, which blocks identically and claims less.
 test green, because JS indexing already answers both cases — so they were removed
 rather than kept as reassurance.
 
+### The advice branch reintroduced the exact defect, and it was a regression against main
+
+Worth the most space of anything here, because the fix for a false sentence was
+itself a false sentence, and CI was green for it.
+
+The advice arm matched `c.includes('http 429')` under an absence claim — *"the
+matched token is authored by `rateLimitedPeer` and nowhere else"* — written into a
+source comment, a test, and this record. **It was false.** `infraTerminalCause`
+takes the first LANE finding's TITLE, and `reviewPreconditionDeferred` composes its
+title as `REVIEW DEFERRED — PR readiness could not be read: <probeCause(raw)>`,
+where `probeCause` quotes the first two lines of `gh pr view` stdout+stderr
+verbatim and `raw` is **agent-transcribed** ("Put the FULL stdout+stderr in `raw`
+VERBATIM"). GitHub's secondary rate limit answers 403 **or** 429 — which this repo
+already knew, since `trident/git-mode.ts` matches `/\bhttp 429\b/` on `gh` output
+for exactly that reason.
+
+Measured end to end:
+
+```
+cause:  REVIEW DEFERRED — PR readiness could not be read: HTTP 429: You have
+        exceeded a secondary rate limit … (https://api.github.com/graphql)
+advice: … check the provider account's rate limits AND its balance …
+```
+
+No model provider was involved at any point, and the operator was sent to look at a
+Kimi or Codex balance. `main` handled that same cause **better**, with the generic
+"retry once the infrastructure is healthy". Two more vectors reach it the same way:
+the readiness probe's `mode === 'unknown'` arm, and a thrown workflow message quoted
+through `infraCause`.
+
+It also contradicted the docblock directly above it, which says in words that *a
+keyword classifier cannot safely be handed the MEASURED cause: that text is model/CI
+prose*. The branch was a keyword classifier handed the measured cause.
+
+**The shape is now anchored at both ends** — `CROSS_MODEL_RATE_LIMIT_CAUSE` — the way
+`PRE_LAUNCH_PREFIX` and `isPublishedUnreviewedReason` already are in that file. Only
+the seat label varies, and the label vocabulary is letters, digits, spaces, hyphens
+and parens: no colon, no em dash. Every probe-quoted shape introduces one of those
+before the phrase, so a quotation cannot satisfy the anchor **even when it embeds the
+authored sentence verbatim** — the echo case, where `gh pr view` output contains a
+prior run's title. A label that ever grows a colon stops matching and falls back to
+the generic line, which is the safe direction by construction.
+
+Structural would be better and is not available to this lane: `deriveInfraBlock`
+carries only `{ cause }`, and adding a field to the harvested result means editing
+`parseInnerResult` in `trident/inner-loop.ts`. Carrying the flag as a column is the
+follow-up; the anchor is what makes the string channel safe meanwhile.
+
+### The false sentence also survived where the MODEL reads it
+
+The flag was read on the operator surface only. Over a 429 the synthesis was still
+handed `DEFERRED — configured but the review failed or returned no usable verdict`,
+and the bridge prompt still hard-coded `title:'Kimi review deferred'` — both of them
+sentences this change had already removed from the operator's row for being false in
+every clause. The direction was safe (`enforceCrossModelGate` blocks
+deterministically, never on this prose), so this bought accuracy rather than safety —
+but a reviewer told a transport fault happened is how a wrong remedy gets composed
+into the findings. `peerPanelLine` now takes the flag and the bridge is told to title
+its finding from the measured `KIMI_RATE_LIMITED` line, asserting no cause either way.
+
 ### `bunx tsc --noEmit` DOES NOT TYPECHECK `trident/`, and this branch proved it
 
 Worth recording because it cost a red CI run here and hit a sibling lane the same
@@ -236,7 +296,7 @@ where the code is right and the world where it is not.
 
 ### Tests
 
-`trident/__tests__/cross-model-rate-limited.test.ts` (34) plus two in
+`trident/__tests__/cross-model-rate-limited.test.ts` (40) plus two in
 `trident/lane-retry.test.ts`, against the REAL functions extracted from the `.mjs`.
 Both directions, because the second is what stops this becoming a merge-anything
 hole: a genuine findings-carrying REQUEST_CHANGES is still `code`, still

@@ -2995,7 +2995,12 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
     if (slot === null || slot === undefined) continue
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const current = out[slot]
-      if (rateLimitKey && crossModelRateLimited(slot, out, rateLimitKey)) {
+      // NO `rateLimitKey &&` SHORT-CIRCUIT. It read as a guard and was not one: deleting it
+      // left every test green, because `crossModelRateLimited` with an absent key already
+      // answers false (`verdict[undefined]` is `undefined`, which `!== true`). This file's
+      // rule — a guard a reverting mutation cannot fail is not a guard — is the same rule
+      // used two functions down to justify deleting two others, and it applies here too.
+      if (crossModelRateLimited(slot, out, rateLimitKey)) {
         if (logFn) logFn(`trident.lane-retry ${name} SKIPPED (provider answered HTTP 429 — an immediate re-call cannot clear a rate limit; the run-level backoff handles it)`)
         break
       }
@@ -5995,7 +6000,13 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
     const family = routes.codex?.group || 'codex'
     // The off-family seat's name IS its title prefix; the codex-family seat's prefix adds
     // "cross-model review" to a bare vendor name. Hoisted so the rate-limited row and the
-    // generic row below read the SAME label instead of composing it twice.
+    // generic row below read the SAME label.
+    //
+    // AND THE GENERIC ROW REALLY DOES READ IT NOW. An earlier revision hoisted this and
+    // claimed the sharing as anti-drift protection while the generic rows went on
+    // recomposing the expression inline — a comment asserting a guarantee that did not
+    // exist, which is the same shape as the two false claims this card already had to
+    // retract. One expression, three readers.
     const offFamily = `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`
     out.push(rateLimited.codex === true
       ? (family === 'codex'
@@ -6005,8 +6016,8 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
       name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
       evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong), or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     } : {
-      name: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
-      title: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'}) DEFERRED — refusing to silently APPROVE`,
+      name: offFamily,
+      title: `${offFamily} DEFERRED — refusing to silently APPROVE`,
       evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
@@ -6023,8 +6034,8 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
       evidence:
         'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
     } : {
-      name: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'})`,
-      title: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'}) DEFERRED — refusing to silently APPROVE`,
+      name: offFamily,
+      title: `${offFamily} DEFERRED — refusing to silently APPROVE`,
       evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
@@ -6152,7 +6163,7 @@ Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT bac
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
-- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Kimi review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
+- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major'. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
 - kimiRateLimited: copy the KIMI_RATE_LIMITED line VERBATIM — 1 → true, 0 → false. It is a grep result, NOT your judgement call and NOT something to infer from the error text: it says whether the provider REFUSED the call with HTTP 429 rather than the call failing. It says nothing about WHY it was refused and you must not guess. The status still blocks either way; this only decides whether the run reports a refusal or a transport fault, so reporting it wrongly sends the operator to the wrong place.
 Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
 }
@@ -6417,19 +6428,30 @@ TASK: ${task}`
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
   const peerRouteLabel = (route) => route.group === 'claude' ? `${route.group}/${route.model}` : route.group
-  const peerPanelLine = (letter, slot, status, review, route, off) =>
+  // THE SEAT'S OWN REASON REACHES THE SYNTHESIS, not just the operator. The deferred line
+  // says "the review failed or returned no usable verdict" — one of the three claims this
+  // card removed from the operator-facing row for being false over a 429, and it was left
+  // standing at the surface where the run's own reviewer reads it. Nothing failed; the
+  // provider refused. The direction was always safe (the seat blocks either way, and the
+  // block is deterministic in `enforceCrossModelGate` rather than left to this prose), so
+  // this buys accuracy rather than safety — but the fact is measured and sitting right
+  // there in the verdict, and telling the synthesis model a transport fault happened is
+  // how a wrong remedy gets written into the findings it composes.
+  const peerPanelLine = (letter, slot, status, review, route, off, rateLimited) =>
     off
       ? `Verdict ${letter} (Cross-model review ${slot}): OFF — deliberately set to NONE; no reviewer was dispatched.`
       : status === 'connected'
         ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): ${JSON.stringify(review)} — treat as a full panelist; an evidence-backed blocker VETOES APPROVE.`
         : status === 'deferred'
-          ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
+          ? rateLimited === true
+            ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): RATE LIMITED — the provider REFUSED the call with HTTP 429, so NO REVIEW WAS PERFORMED. Nothing failed and nothing timed out. That code does not say whether it was a per-minute rate limit or an exhausted allowance, so do NOT assert either. Do NOT return APPROVE, and do NOT describe this as a review that found nothing.`
+            : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
           : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
-  const codexPanel = peerPanelLine('C', 1, codexStatus, codexReview, slotOneRoute, slotOneRoute.disabled)
+  const codexPanel = peerPanelLine('C', 1, codexStatus, codexReview, slotOneRoute, slotOneRoute.disabled, crossModelRateLimited(codexSlot, verdicts, seatRateLimitKey(slotOneRoute.group)))
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
-  const kimiPanelLine = peerPanelLine('D', 2, kimiStatus, kimiReview, slotTwoRoute, slotTwoRoute.disabled)
+  const kimiPanelLine = peerPanelLine('D', 2, kimiStatus, kimiReview, slotTwoRoute, slotTwoRoute.disabled, crossModelRateLimited(kimiSlot, verdicts, seatRateLimitKey(slotTwoRoute.group)))
   // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null` — see `corePanelLine`,
   // which is top-level (and behaviourally tested) rather than inlined here.
   // DERIVED FROM THE SAME `coreSeats` THE GATE READS, so a seat inserted at the head

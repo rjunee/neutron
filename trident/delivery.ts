@@ -190,6 +190,51 @@ function wrongBaseGuardEvidence(reason: string): string | null {
  * stderr, and an unanchored match over attacker-shaped text lets a quotation of one refusal
  * reclassify an unrelated failure.
  */
+/**
+ * THE CROSS-MODEL RATE-LIMIT CAUSE, matched as an AUTHORED WHOLE rather than by keyword.
+ *
+ * WHY A BARE `includes('http 429')` WAS WRONG, measured end to end. `interpretFailure`'s
+ * own docblock says it: a keyword classifier cannot safely be handed the MEASURED cause,
+ * because that text is model/CI prose. `infraTerminalCause` (`inner-workflow.mjs`) takes
+ * the first LANE finding's TITLE, and `reviewPreconditionDeferred` builds its title as
+ * `REVIEW DEFERRED — PR readiness could not be read: <probeCause(raw)>`, where
+ * `probeCause` quotes the first two lines of `gh pr view` stdout+stderr VERBATIM — and
+ * `raw` is agent-transcribed. GitHub's secondary rate limit answers 403 OR 429, which
+ * this repo already knows (`trident/git-mode.ts` matches `/\bhttp 429\b/` on `gh`
+ * output for exactly that reason). So a GitHub refusal produced:
+ *
+ *   cause: REVIEW DEFERRED — PR readiness could not be read: HTTP 429: You have
+ *          exceeded a secondary rate limit …
+ *   advice: "check the provider account's rate limits AND its balance"
+ *
+ * No model provider was involved at any point, and the operator was sent to look at a
+ * Kimi or Codex balance. That is the same defect the row this matches exists to remove —
+ * a confident sentence about an unmeasured cause — and it was STRICTLY WORSE than the
+ * generic line it replaced. Two more vectors reach the same place: the readiness probe's
+ * `mode === 'unknown'` arm, and a thrown workflow message quoted as `infraCause`.
+ *
+ * SO THE SHAPE IS ANCHORED AT BOTH ENDS, the way `PRE_LAUNCH_PREFIX` and
+ * `isPublishedUnreviewedReason` already are here: only the SEAT LABEL varies, and the
+ * label vocabulary (`Codex cross-model review`, `Kimi K3 cross-model review`,
+ * `Cross-model review 1 (Claude)`, …) is letters, digits, spaces, hyphens and parens —
+ * no colon and no em dash. Every probe-quoted shape introduces at least one of those
+ * before the phrase, so a quotation cannot satisfy the anchor even when it embeds the
+ * authored sentence verbatim (the echo case: `gh pr view` output containing a PRIOR
+ * run's title). A label that ever grows a colon stops matching and falls back to the
+ * generic advice — the safe direction, by construction.
+ *
+ * WHY NOT STRUCTURALLY, which would be better: `deriveInfraBlock` carries only
+ * `{ cause }`, and adding a field to the harvested result means editing
+ * `parseInnerResult` in `trident/inner-loop.ts`, which this lane does not own. The
+ * string is the only channel available here; the anchor is what makes it safe. Carrying
+ * the flag as a column is the follow-up.
+ *
+ * BOTH HALVES MUST MOVE TOGETHER: this pattern is `rateLimitedPeer`'s title in
+ * `trident/inner-workflow.mjs` and nothing else. Tests assert the real title matches AND
+ * that all three probe-derived shapes above do not.
+ */
+const CROSS_MODEL_RATE_LIMIT_CAUSE = /^[a-z0-9 ()-]+ rate limited \(http 429\) — no review was performed$/
+
 const PRE_LAUNCH_PREFIX = /^trident infra: /
 const BUILD_NOT_STARTED = 'the build was NOT started'
 
@@ -547,14 +592,13 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
         // confident sentence about an unmeasured cause — so this says the bounded retry
         // runs first and names both things to check if the refusal survives it.
         //
-        // BOTH HALVES MUST MOVE TOGETHER: the matched token is authored by
-        // `rateLimitedPeer` in `trident/inner-workflow.mjs`, whose TITLE becomes this
-        // `cause` (`infraTerminalCause` → `terminal_cause` → `deriveInfraBlock`), and
-        // nowhere else. It is matched on the STATUS CODE rather than on English, because
-        // the code is the part that cannot be reworded. A test asserts the real title
-        // matches this predicate, because a drifted title silently restores the
-        // retry-forever line.
-        : c.includes('http 429')
+        // MATCHED AS AN AUTHORED WHOLE, NOT BY THE STATUS CODE. An earlier revision used
+        // `c.includes('http 429')` and claimed the token was authored "nowhere else";
+        // that absence claim was false and this branch then misrouted a GitHub secondary
+        // rate limit into cross-model-provider advice. See
+        // `CROSS_MODEL_RATE_LIMIT_CAUSE` for the measured chain and why the anchor is
+        // what makes a string channel safe here.
+        : CROSS_MODEL_RATE_LIMIT_CAUSE.test(c)
           ? `The bounded retry runs first — HTTP 429 does not say whether this is a rate limit that clears on its own or an account with no allowance left. If it is still refusing after that, check the provider account's rate limits AND its balance rather than assuming either. ${notRejected} ${saved}`
           : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
     return {
