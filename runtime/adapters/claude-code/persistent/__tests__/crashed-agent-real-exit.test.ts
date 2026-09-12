@@ -17,6 +17,7 @@ import type { PtyChild, PtyHost } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
@@ -46,7 +47,7 @@ function makeHost(): {
     spawn(argv: string[]): PtyChild {
       const i = argv.indexOf('--session-id')
       const sid = (i >= 0 ? argv[i + 1] : argv[argv.indexOf('--resume') + 1]) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       lastKilledByUs = false
       lastHasExited = false
       const exited = new Promise<number | null>((res) => (lastExitResolve = res))

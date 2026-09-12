@@ -18,7 +18,7 @@
  */
 
 import { createLogger } from '@neutronai/logger'
-import { closeSync, mkdirSync, openSync } from 'node:fs'
+import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const log = createLogger('registry-lock')
@@ -48,6 +48,23 @@ function getFlockLib(): typeof _lib {
   }
 }
 
+/**
+ * Did the `flock(2)` FFI LIBRARY LOAD in this process?
+ *
+ * NOT "is the lock held" and NOT "will locking work" — the library can load and the
+ * `flock` call can still return nonzero, in which case `withFlockSync` runs the body
+ * unguarded and this predicate still answers true. A caller whose correctness
+ * argument rests on the lock must therefore use `withFlockSync`'s `onOutcome`
+ * report, not this: see the sink token's `loadOrCreateSinkToken`, whose
+ * concurrent-replacement convergence is exactly such a guarantee. This is for
+ * diagnostics and for deciding whether locking is configured at all.
+ *
+ * Cheap after the first call — `getFlockLib` memoises the handle.
+ */
+export function flockAvailable(): boolean {
+  return getFlockLib() !== null
+}
+
 /** Derive the lockfile path from a registry path (`<dir>/.registry.lock`). */
 export function registryLockPath(registryPath: string): string {
   return join(dirname(registryPath), '.registry.lock')
@@ -58,11 +75,28 @@ export function registryLockPath(registryPath: string): string {
  *
  * If FFI is unavailable (non-Bun runtime), `fn` runs without locking. This is
  * safe for tests (single-process) but logs a warning if the syscall errors.
+ *
+ * `onOutcome` REPORTS WHETHER THE LOCK WAS ACTUALLY HELD while `fn` ran, and it is
+ * the only honest way for a caller to know. There are THREE states here and
+ * `flockAvailable()` distinguishes only two of them: the library failed to load, the
+ * library loaded and `flock` SUCCEEDED, and the library loaded and `flock` returned
+ * NONZERO — in which case this function deliberately runs `fn` unguarded anyway
+ * ("better to run unguarded than to skip the operation"), which is right for a
+ * generic helper and indistinguishable from success to anyone asking
+ * `flockAvailable()`. A caller whose correctness argument rests on the lock must be
+ * able to tell those apart, so this reports the fact and lets the caller rule; it
+ * does not change what this helper DOES, so the existing callers are untouched.
+ * Called exactly once per invocation, before `fn`.
  */
-export function withFlockSync<T>(lockPath: string, fn: () => T): T {
+export function withFlockSync<T>(
+  lockPath: string,
+  fn: () => T,
+  onOutcome?: (acquired: boolean) => void,
+): T {
   const lib = getFlockLib()
   if (!lib) {
     // No FFI — run unguarded (single-process test environments).
+    onOutcome?.(false)
     return fn()
   }
 
@@ -78,13 +112,26 @@ export function withFlockSync<T>(lockPath: string, fn: () => T): T {
   } catch {
     /* already exists / unwritable — openSync below surfaces a real failure */
   }
-  const fd = openSync(lockPath, 'w')
+  // O_NONBLOCK for the same reason the sink token's reader carries it: `'w'` on a
+  // FIFO blocks until a READER appears, so a lockfile path that is a FIFO would hang
+  // this call — and therefore the gateway boot that goes through it — instead of
+  // failing. With the flag, such a path answers ENXIO and the error propagates.
+  // Nothing changes for a regular file, which is every real lockfile: O_NONBLOCK
+  // affects neither the create nor the write semantics there, and it does not touch
+  // `flock` itself, which blocks on the LOCK, not on the fd.
+  const fd = openSync(
+    lockPath,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NONBLOCK,
+  )
   try {
     const rc = lib.symbols.flock(fd, LOCK_EX)
     if (rc !== 0) {
       log.error('flock_lock_ex_nonzero', { rc })
-      // Fall through — better to run unguarded than to skip the operation.
+      // Fall through — better to run unguarded than to skip the operation. The
+      // caller is TOLD, though: this is the state that looks fully capable and is
+      // not, and a caller that only asked `flockAvailable()` would never learn it.
     }
+    onOutcome?.(rc === 0)
     return fn()
   } finally {
     try {

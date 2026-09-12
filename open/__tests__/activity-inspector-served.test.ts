@@ -30,6 +30,8 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { getReplSinkInfo } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { sink } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
 
@@ -155,13 +157,31 @@ async function withComposition(
   }
 }
 
-/** POST to the loopback sink exactly as the Pre/PostToolUse hook does. */
+/**
+ * POST to the loopback sink exactly as the Pre/PostToolUse hook does — INCLUDING the
+ * part where the hook belongs to a session the gateway is driving.
+ *
+ * The `session_id` these cases send used to be `'unregistered'`, and the sink
+ * recorded the row anyway under the General scope. ISSUES #537 made the sink token
+ * durable, so an unregistered session id stopped meaning "a row we might as well
+ * keep" and started meaning "an orphaned child from a previous incarnation, holding
+ * a credential nothing rotates" — the sink refuses those now. A real hook always has
+ * a live session (`spawnSession` registers it BEFORE spawning the child), so
+ * registering one here is what makes this test post what the hook posts.
+ */
+const TAP_SESSION_ID = 'activity-served-live-session'
+
+function registerTapSession(): void {
+  sink.register(TAP_SESSION_ID, new ReplSession('k', 'gen', TAP_SESSION_ID, 'chan', '/tmp'))
+}
+
 async function tapPost(payload: Record<string, unknown>): Promise<Response> {
-  const info = getReplSinkInfo()
+  const info = await getReplSinkInfo()
+  registerTapSession()
   return fetch(`http://127.0.0.1:${info.port}/activity`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'X-Sink-Token': info.token },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ session_id: TAP_SESSION_ID, ...payload }),
   })
 }
 
@@ -193,16 +213,15 @@ describe('Activity Inspector — served end-to-end through the real Open compose
     await withComposition(async ({ get }) => {
       // This is what the CC subprocess hook does on a real `Bash` call.
       const pre = await tapPost({
-        session_id: 'unregistered',
         phase: 'pre',
         tool_name: 'Bash',
         detail: 'bun test open/',
       })
       expect(pre.status).toBe(200)
 
-      // An unregistered session degrades to the General scope (see the sink route's
-      // comment) — assert the row landed THERE, so the test pins real behaviour
-      // rather than a hoped-for scope.
+      // A session carrying no project scope records against the General scope —
+      // assert the row landed THERE, so the test pins real behaviour rather than a
+      // hoped-for scope.
       const res = await get('/api/app/activity')
       const body = (await res!.json()) as ActivityBody
       expect(body.events).toHaveLength(1)
@@ -215,7 +234,7 @@ describe('Activity Inspector — served end-to-end through the real Open compose
 
       // The finish half arrives as its own row: a `pre` with no `post` is the hang
       // signal, so they must be distinct rows, not a mutation of one.
-      await tapPost({ session_id: 'unregistered', phase: 'post', tool_name: 'Bash', detail: '' })
+      await tapPost({ phase: 'post', tool_name: 'Bash', detail: '' })
       const res2 = await get('/api/app/activity')
       const body2 = (await res2!.json()) as ActivityBody
       expect(body2.events.map((e) => e.kind)).toEqual(['tool_start', 'tool_end'])
@@ -228,7 +247,6 @@ describe('Activity Inspector — served end-to-end through the real Open compose
     // nothing about what came back. Fixtures synthesised — public repo.
     await withComposition(async ({ get }) => {
       await tapPost({
-        session_id: 'unregistered',
         phase: 'post',
         tool_name: 'Bash',
         detail: 'a-command',
@@ -251,7 +269,6 @@ describe('Activity Inspector — served end-to-end through the real Open compose
     // raw form is both unreadable and unstable. It must not survive to the wire.
     await withComposition(async ({ get }) => {
       await tapPost({
-        session_id: 'unregistered',
         phase: 'pre',
         tool_name: `mcp__neutron-${'ab'.repeat(16)}__memory_search`,
         detail: 'a-query',
@@ -271,13 +288,12 @@ describe('Activity Inspector — served end-to-end through the real Open compose
       const words = 'a synthesised assistant sentence'
       const server = `mcp__neutron-${'cd'.repeat(16)}__reply`
       await tapPost({
-        session_id: 'unregistered',
         phase: 'pre',
         tool_name: server,
         detail: words,
         args: words,
       })
-      await tapPost({ session_id: 'unregistered', phase: 'post', tool_name: server, detail: '' })
+      await tapPost({ phase: 'post', tool_name: server, detail: '' })
       const body = (await (await get('/api/app/activity'))!.json()) as ActivityBody
       // Exactly ONE row: the message. The post-ack is noise and never lands.
       expect(body.events).toHaveLength(1)

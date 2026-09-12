@@ -35,6 +35,7 @@ import { createClaudeCodeSubstrateAuto } from '../../index.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
@@ -60,7 +61,7 @@ function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {

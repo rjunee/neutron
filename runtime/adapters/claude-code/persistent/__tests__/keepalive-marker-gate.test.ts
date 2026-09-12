@@ -43,7 +43,10 @@ describe('pool.ts liveness keepalive', () => {
     // The push right after `injectMessage` means "the turn actually went in", which is
     // genuine progress and must advance the real-activity clock. Marking it synthetic
     // would make a just-injected turn look like it had done nothing.
-    const idx = src.indexOf('const initialDelivery = injectMessage(session.channelPort, spec.prompt, turn.turnId)')
+    // Located by the CALL, not by its argument list: `injectMessage` now takes the
+    // session itself (it derives that child's credential from it), and a pin on the old
+    // argument spelling would have failed for a reason unrelated to what it asserts.
+    const idx = src.indexOf('const initialDelivery = injectMessage(session,')
     expect(idx).toBeGreaterThan(-1)
     const push = /channel\.push\(\{\s*kind:\s*'status',[^}]*\}\)/.exec(src.slice(idx, idx + 1600))
     expect(push).not.toBeNull()

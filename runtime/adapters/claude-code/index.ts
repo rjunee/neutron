@@ -41,6 +41,14 @@ import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
 import type { ModelFloorNotice } from './persistent/model-floor.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 import type { SettingsPermissions } from './persistent/build-settings.ts'
+import { SINK_TOKEN_FILENAME } from './persistent/sink-coordinates.ts'
+// ISSUES #537 — the reply sink's port override, wired from the resolved BootConfig
+// by the composer. Re-exported at THIS boundary (never a deep `persistent/*` path)
+// for the same reason the notice-family types are.
+export {
+  parseSinkPortOverride,
+  setReplSinkPortOverride,
+} from './persistent/sink-coordinates.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
@@ -262,6 +270,16 @@ export interface ReplSupervisionPaths {
   restartMarkersPath: string
   heartbeatFile: string
   modelUpdateStatePath: string
+  /**
+   * The reply sink's persisted auth token (ISSUES #537). It belongs to this family
+   * because it is durable REPL supervision state for exactly the same reason the
+   * registry is: a spawned REPL is baked with the token at spawn time and can
+   * never be re-pointed, so a gateway that restarts has to present the SAME token
+   * the surviving children hold. Derived here so every durable REPL path comes
+   * from one function — and so the token lands in the state dir (outside every
+   * working tree, 0600), never in a repo.
+   */
+  sinkTokenPath: string
 }
 
 export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
@@ -273,6 +291,7 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
     restartMarkersPath: join(stateDir, '.restart-markers.json'),
     heartbeatFile: join(stateDir, '.heartbeat'),
     modelUpdateStatePath: join(stateDir, '.model-update-state.json'),
+    sinkTokenPath: join(stateDir, SINK_TOKEN_FILENAME),
   }
 }
 
@@ -499,6 +518,11 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     p.pendingRespawnsPath = paths.pendingRespawnsPath
     p.restartMarkersPath = paths.restartMarkersPath
     p.modelUpdateStatePath = paths.modelUpdateStatePath
+    // ISSUES #537 — the reply sink's persisted token, in the same state dir as the
+    // rest of the durable REPL state. Wiring it is what makes a restarted gateway
+    // present the SAME token the surviving REPLs were baked with; unwired (no
+    // supervision home), the sink falls back to `defaultSinkTokenPath()`.
+    p.sinkTokenPath = paths.sinkTokenPath
     // Register the live options so the watchdog tick + the operator admin-respawn
     // endpoint actuate each session with its OWNING substrate's options (keyed by
     // pool key).

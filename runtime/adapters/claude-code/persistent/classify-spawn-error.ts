@@ -8,8 +8,9 @@
  * that codes are stamped AT the producer, not re-derived downstream from prose.
  *
  * The two classes surfaced here (a subprocess spawn ENOENT and a REPL
- * spawn/channel-bind failure) mirror the composer's `detectBinaryNotFound` /
- * `detectChannelWedged` — but the adapter cannot import UP into the gateway, so
+ * spawn/channel-bind failure — the latter covering both a wedged dev-channel and a
+ * reply sink that cannot bind its port) mirror the composer's
+ * `detectBinaryNotFound` / `detectChannelWedged` — but the adapter cannot import UP into the gateway, so
  * the shape-matching lives here alongside the producer.
  */
 
@@ -39,6 +40,15 @@ export function classifySpawnError(message: string): SubstrateErrorClass | undef
     return 'channel_wedged'
   }
   if (/\bchannel-wedged\b/i.test(message)) return 'channel_wedged'
+  // ISSUES #537 — the reply sink could not bind its loopback port. Same CLASS as a
+  // wedged dev-channel (the substrate cannot establish the control channel its
+  // children talk over) and, crucially, the same FATAL disposition: the port is held
+  // by another process, so the ladder retrying the same turn changes nothing and an
+  // operator has to stop that process or set an override. Without this branch
+  // `pool.ts` stamps the default `retryable: true` with no code, and a hard
+  // configuration failure launders into an ordinary retryable turn error that the
+  // ladder re-attempts forever — ~1 bind budget per attempt, indefinitely.
+  if (/^repl-sink: could not bind/i.test(message)) return 'channel_wedged'
   if (/persistent-repl:\s*channel not ready/i.test(message)) return 'channel_wedged'
   return undefined
 }

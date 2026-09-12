@@ -76,7 +76,7 @@ export async function injectPersistentReplActiveTurn(
     if (active.turn.settled || active.session.activeTurn !== active.turn) {
       throw new Error('persistent-repl: active turn settled before injection')
     }
-    await injectMessage(active.session.channelPort!, input.text, active.turn.turnId, true)
+    await injectMessage(active.session, input.text, active.turn.turnId, true)
   })
   active.turn.injectionTail = delivery.catch(() => undefined)
   try {
@@ -570,7 +570,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // from a timed-out/cancelled prior turn (different seq) or a prior
           // incarnation of this resumed session (different nonce), in both the
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
-          const initialDelivery = injectMessage(session.channelPort, spec.prompt, turn.turnId)
+          const initialDelivery = injectMessage(session, spec.prompt, turn.turnId)
           // Publish immediately, but serialize follow-ups behind the initial
           // POST. This removes the wire-observed/route-not-yet-visible race
           // without allowing a follow-up to overtake the prompt.
