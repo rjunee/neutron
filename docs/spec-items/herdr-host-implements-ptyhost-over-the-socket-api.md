@@ -314,6 +314,24 @@ not-new. That is accepted and recorded here rather than hidden.
       the expected and the received number. A client with no check at all passes
       the matching case, so assert the **mismatch** case separately: a stub server
       reporting protocol 21 must make `spawn` reject, and 20 must not.
+      ASSERTED THROUGH `spawn`, WHICH IS WHERE THE GUARANTEE LIVES — and for several
+      rounds that was unwritable. The gate ran only when no `connect` dependency was
+      injected: a runtime `if` keyed on whether a TEST SEAM was present, so the seam's
+      presence changed the safety property. The consequence that matters is not that an
+      injected client skipped the check; it is that the injected path is THE ONLY PATH A
+      TEST CAN DRIVE, so this criterion could not be written against the code at all, and
+      `herdrPing()` called directly exercises the function in isolation rather than the
+      guarantee. **A gate the instrument cannot reach is the same class as an instrument
+      that cannot fail.** The verification now goes through the `HerdrRpc` handle, so the
+      injected and real paths run the same check — and asking through the handle also
+      removes, rather than argues about, the smaller point that a separate ping
+      establishes the version of the server-in-general rather than of the handle in use.
+      A BYPASS, IF ONE IS EVER WANTED, MUST BE CARRIED BY THE TYPE — a verified-RPC type
+      only a verifying constructor can produce — never by a runtime `if` on a seam.
+      AND NO PANE IS CREATED ON THE REFUSAL: the gate runs before `layout.apply`, so the
+      cleanup obligation is honoured by ORDERING, and that is asserted (a gate that ran
+      after would leave a real `claude` running behind a rejected spawn) rather than
+      assumed. The CONTROL also pins that the ping happens ONCE per spawn, not per call.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] `PtyChild.exited` resolves `null` and **never a number**, and crash-vs-recycle
       is decided by `wasKilledByUs` alone. Assert both halves against the *same*

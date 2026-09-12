@@ -19,6 +19,8 @@ import { describe, expect, it } from 'bun:test'
 import { herdrCall, herdrPing, HerdrError } from '../herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION } from '../herdr-protocol.ts'
 import { newFrameReader } from '../herdr-client.ts'
+import { HerdrHost } from '../herdr-host.ts'
+import { FakeHerdrServer } from './herdr-fake-server.ts'
 
 interface FakeSocket {
   write(data: string): number
@@ -483,5 +485,66 @@ describe('the frame bound is enforced BEFORE the allocation it exists to prevent
     // Per FRAME, not per delivery — and the surplus is dropped unread rather than
     // buffered for a next frame this connection will never carry.
     expect(reader.copiedBytes()).toBe(body.length)
+  })
+})
+
+/**
+ * THE GATE THROUGH `spawn`, which is where the guarantee lives — and which no test could
+ * reach until now.
+ *
+ * The check ran only when no `connect` dependency was injected: a runtime `if` keyed on
+ * whether a TEST SEAM was present, so the seam's presence changed the safety property.
+ * The consequence that matters is not that an injected client skipped the gate; it is
+ * that the injected path is THE ONLY PATH A TEST CAN DRIVE, so the acceptance criterion
+ * — a stub reporting protocol 21 makes `spawn` reject — was unwritable against the code.
+ * `herdrPing()` called directly exercises the function in isolation, not the guarantee.
+ *
+ * A gate the instrument cannot reach is the same class as an instrument that cannot
+ * fail, which this branch found in its own harness the same day.
+ */
+describe('the version gate holds SPAWN, not just the ping function', () => {
+  const hostWith = (server: FakeHerdrServer): HerdrHost =>
+    new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 60_000,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+
+  it('a stub reporting protocol 21 makes spawn REJECT, naming both numbers', async () => {
+    const server = new FakeHerdrServer()
+    // A SUCCESSFUL ping that answers with a different protocol — the drift shape, not a
+    // broken server. `malformMethod` returns its payload as a success.
+    server.malformMethod('ping', { type: 'pong', version: '0.9.0', protocol: 21 })
+    const e = await hostWith(server)
+      .spawn(['claude'], { cwd: '/tmp', env: {} })
+      .catch((x: unknown) => x as Error)
+    expect((e as Error).message).toContain('protocol 21')
+    expect((e as Error).message).toContain(String(HERDR_PROTOCOL_VERSION))
+  })
+
+  it('...and NO PANE IS CREATED, so there is nothing left to clean up', async () => {
+    // The cleanup obligation on this path is honoured by ORDERING — the gate runs before
+    // `layout.apply` — and that is asserted rather than assumed. A gate that ran after
+    // would leave a real `claude` running behind a rejected spawn, which is the orphan
+    // class this host was fixed for twice.
+    const server = new FakeHerdrServer()
+    server.malformMethod('ping', { type: 'pong', version: '0.9.0', protocol: 21 })
+    await hostWith(server)
+      .spawn(['claude'], { cwd: '/tmp', env: {} })
+      .catch(() => undefined)
+    expect(server.callsTo('layout.apply')).toEqual([])
+    expect(server.paneClosed).toBe(false)
+  })
+
+  it('CONTROL — a stub reporting the SUPPORTED protocol spawns normally', async () => {
+    // Without this, "spawn rejects on a mismatch" is satisfied by a spawn that always
+    // rejects, and the gate would be indistinguishable from a broken host.
+    const server = new FakeHerdrServer() // answers the measured protocol
+    const child = await hostWith(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    expect(child.pid).toBeGreaterThan(0)
+    expect(server.callsTo('ping').length).toBe(1) // ONCE, not per call
+    expect(server.callsTo('layout.apply').length).toBe(1)
+    child.kill()
   })
 })

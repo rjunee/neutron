@@ -495,8 +495,37 @@ export function createHerdrRpc(opts: HerdrCallOpts = {}): HerdrRpc {
  * throws on any mismatch: not a warning, not a degraded mode.
  */
 export async function herdrPing(opts: HerdrCallOpts = {}): Promise<HerdrPong> {
-  const expected = opts.expectProtocol ?? HERDR_PROTOCOL_VERSION
-  const result = await herdrCall('ping', {}, opts)
+  // Delegates, so there is ONE implementation of the check. The two entry points differ
+  // only in which handle they ask.
+  return await verifyHerdrProtocol(
+    { call: async (method, params) => await herdrCall(method, params, opts) },
+    opts.expectProtocol ?? HERDR_PROTOCOL_VERSION,
+  )
+}
+
+/**
+ * Verify the protocol THROUGH THE HANDLE THE CALLER WILL USE.
+ *
+ * TAKES THE RPC, and that is the whole point rather than a convenience. `HerdrHost.spawn`
+ * used to run its gate only when no `connect` dependency was injected — a runtime `if`
+ * keyed on whether a TEST SEAM was present, which made the seam's presence change the
+ * safety property. Two things were wrong with that and the second is the worse one:
+ * `spawn` did not have the property its own comment claimed ("a spawn that cannot verify
+ * the protocol does not happen" was true only on the production path), and the injected
+ * path is THE ONLY PATH A TEST CAN DRIVE — so the gate could not be reached by the
+ * instrument that was supposed to hold it. A gate a test cannot fail is the same class as
+ * a test that cannot fail.
+ *
+ * Asking through the handle also removes a smaller distinction rather than reasoning
+ * about it: pinging a connection OTHER than the one in use establishes the version of
+ * the server-in-general. Under one-request-per-connection the two are the same server,
+ * but saying "this handle" costs nothing and needs no argument.
+ */
+export async function verifyHerdrProtocol(
+  rpc: HerdrRpc,
+  expected: number = HERDR_PROTOCOL_VERSION,
+): Promise<HerdrPong> {
+  const result = await rpc.call('ping', {})
   const protocol = result['protocol']
   const version = result['version']
   if (typeof protocol !== 'number' || typeof version !== 'string') {

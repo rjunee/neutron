@@ -67,7 +67,7 @@ import {
   type HerdrPaneRead,
   type HerdrProcessInfo,
 } from './herdr-protocol.ts'
-import { createHerdrRpc, herdrPing, HerdrError, type HerdrRpc } from './herdr-client.ts'
+import { createHerdrRpc, verifyHerdrProtocol, HerdrError, type HerdrRpc } from './herdr-client.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** How long to wait for herdr to report the spawned pane's pid before refusing
@@ -143,14 +143,27 @@ export class HerdrHost implements PtyHost {
     // implements (it answers one request per connection and then closes it).
     const client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
 
-    // THE VERSION GATE, ONCE. It used to live in `connectHerdr`, which pinged as part
-    // of connecting; with a connection per call that would double the cost of every
-    // operation. Pinging here instead is not a weakening: the server's protocol cannot
-    // change under a running host without restarting herdr, and herdr's panes are its
-    // children — a restart takes the REPLs with it, so there is no drift to detect
-    // mid-session that would leave a REPL to supervise. It still THROWS on a mismatch,
-    // so a spawn that cannot verify the protocol does not happen.
-    if (this.deps.connect === undefined) await herdrPing()
+    // THE VERSION GATE, ONCE, AND THROUGH THE SAME HANDLE. It used to live in
+    // `connectHerdr`, which pinged as part of connecting; with a connection per call
+    // that would double the cost of every operation. Pinging here instead is not a
+    // weakening: the server's protocol cannot change under a running host without
+    // restarting herdr, and herdr's panes are its children — a restart takes the REPLs
+    // with it, so there is no drift to detect mid-session that would leave a REPL to
+    // supervise.
+    //
+    // UNCONDITIONAL. This was `if (this.deps.connect === undefined)` — a runtime check
+    // keyed on whether a TEST SEAM was present, so the seam's presence changed the
+    // safety property. Two consequences, and the second is the worse: `spawn` did not
+    // have the property the comment above claimed, because the claim held only on the
+    // production path; and the injected path is THE ONLY PATH A TEST CAN DRIVE, so no
+    // test could exercise this gate through `spawn` at all. Pinging `herdrPing()`
+    // directly tests the function in isolation, not the guarantee. A gate the
+    // instrument cannot reach is the same class as an instrument that cannot fail.
+    //
+    // It runs BEFORE `layout.apply`, so a refused protocol creates no pane — the
+    // cleanup obligation below is honoured by ordering rather than by a handler, and
+    // the test asserts that rather than assuming it.
+    await verifyHerdrProtocol(client)
 
     // THE CLEANUP OBLIGATION STARTS HERE, NOT AT THE END OF A SUCCESSFUL SPAWN.
     // The pane — and the `claude` process in it — exists the moment `layout.apply`

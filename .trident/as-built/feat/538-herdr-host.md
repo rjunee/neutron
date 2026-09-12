@@ -1527,6 +1527,42 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### A gate the instrument cannot reach
+
+`HerdrHost.spawn` verified the protocol only when no `connect` dependency was injected:
+
+```ts
+if (this.deps.connect === undefined) await herdrPing()
+```
+
+A runtime `if` keyed on whether a TEST SEAM is present, so the seam's presence changed
+the safety property. The comment directly above claimed "a spawn that cannot verify the
+protocol does not happen" — true of the production path, and not of `spawn`.
+
+**The consequence that matters is not the bypass.** The injected path is the only path a
+test can drive, so the acceptance criterion — a stub reporting protocol 21 makes `spawn`
+reject — was UNWRITABLE against this code. `herdr-protocol-gate.test.ts` pinged
+`herdrPing()` directly, which exercises the function in isolation rather than the
+guarantee, and the file's own criterion said `spawn`. **A gate the instrument cannot
+reach is the same class as an instrument that cannot fail** — which this branch found in
+its own harness the same day, in the `tail` bug below.
+
+The check moved behind the `HerdrRpc` seam and runs unconditionally, so the injected and
+real paths run the same code. That also removes a smaller distinction rather than
+reasoning about it: a separate `herdrPing()` establishes the version of the
+server-in-general rather than of the handle in use. Under one request per connection they
+are the same server, but asking through the handle costs nothing and needs no argument.
+
+The alternative if the ping were ever too expensive would be a type — a verified-RPC that
+only a verifying constructor can produce — never a runtime `if` on a seam, because that
+is precisely what made the seam's presence load-bearing for safety.
+
+M220 is worth its own line: moving the gate AFTER `layout.apply` reddens exactly one case,
+the one asserting no pane is created. The cleanup obligation on this path is honoured by
+ORDERING rather than by a handler, so it is asserted rather than assumed — a gate that ran
+later would leave a real `claude` running behind a rejected spawn, which is the orphan
+class this host has been fixed for twice.
+
 ### My own gate was measuring `tail`
 
 Every local `TYPECHECK rc=0` I reported this whole branch was a lie, and the shape is the
@@ -2670,6 +2706,10 @@ Run against the named suites.
 | M214 | the Bun release dispatch is unguarded again (a throwing consumer escapes) | RED 1 (the SHARED suite) |
 | M215 | a `PtyHost` fake returns a child SYNCHRONOUSLY (the #642 fixtures) | RED 3 by TIMEOUT + 7 typecheck errors — and the timeout is the tell |
 | M216 | a hand-rolled stderr patch arrives from another branch | RED 1 (the widened guard, on a file neither branch's author re-read) |
+| M217 | the version gate is bypassed when a `connect` is injected (the defect) | RED 3 |
+| M218 | the version gate is removed entirely | RED 3 |
+| M219 | PAIR: the gate becomes a floor (`<`) instead of equality | RED 3 |
+| M220 | the gate runs AFTER `layout.apply` — a pane behind a rejected spawn | RED 1, and only the no-pane case |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
