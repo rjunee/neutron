@@ -496,15 +496,27 @@ the stub arbiter actually received. A range assertion — which is what round 12
 improvement at the time — passes for any number of roughly the right magnitude, including one
 computed over a subset.
 
-**What the deletion cost, measured rather than estimated:**
+**What the deletion cost — and the first figure I published for it was wrong in the same way
+the code was.** I reported production `+90/−189` and tests `+173/−271` after round 13. Those
+numbers were measured over `merge.ts` alone, for one round, and round 14 then found a second
+cap in `arbiter.ts` plus extracted a new module — neither of which the original count could
+see, because I counted the files I had edited rather than the change I had made. A measurement
+is only about what it measured, in the accounting as well as in the code.
 
-- production, comments excluded: **+90 / −189 lines** (net **−99**)
-- tests, comments excluded: **+173 / −271 lines** (net **−98**)
-- whole change: 550 insertions / 777 deletions across 5 files
+The true cumulative figure for rounds 13-14, comments excluded, against `facf4a08`:
 
-So the machinery to show a judge *part* of a conflict was ~189 lines of production code and
-~271 lines of tests — **460 lines to do a thing that should not be done** — and declining to
-send it costs 263. That number is the honest measure of what this path was carrying.
+| | added | removed | net |
+|---|---|---|---|
+| production code (`merge.ts`, `arbiter.ts`, `arbiter-prompt.ts`) | 137 | 204 | **−67** |
+| test code | 243 | 250 | **−7** |
+| whole change, all lines | 1,081 | 752 | +329 |
+
+So **the machinery was ~204 lines of production code and ~250 of tests, and what replaced it
+is 137 and 243.** The insertion surplus in the all-lines row is documentation — this record and
+the docblocks that explain why the code is now shaped the way it is — which is the trade I
+would make again: the executable surface shrank, and the reasoning that stops it being rebuilt
+got written down. The test row is nearly flat because round 14 added three tests to the two
+deletions' nine, and those three are the ones that make the guarantee checkable at all.
 
 **Nine tests were deleted with the behaviour, and that is the correct outcome, not a
 regression in coverage.** They tested truncation: the omission marker, the per-file notices,
@@ -572,6 +584,94 @@ cap" — a cap that no longer exists. And `rebaseBranchOntoBase` justified its w
 with "the real per-run cap of 3 arbitrations … 7 model turns, ~56 minutes", the *pre-ceiling*
 figure that `MAX_ARBITRATIONS_PER_REBASE`'s own docblock records as rejected — two numbers for
 one thing in one file, with nothing to tell a reader which was current.
+
+### ROUND 14 — the deletion was incomplete, because it was enumerated from one file
+
+**The deletion above was ordered and enumerated item by item: the per-file budget, the
+notices, the omission accounting, `makeWithholding`, `headBytes`, the metrics. Every item was
+in `merge.ts`. A second, independent cap lived one module downstream and was never on the
+list.** `arbiter.ts` folded every evidence line to **4,096 characters** while building the
+prompt, against a caller budget of **8,192 bytes**. A 5,000-character unified-diff line
+therefore cleared the all-or-nothing check and lost ~904 leading characters on the way to the
+model — **the judge handed a fragment beneath a sentence saying nothing had been shortened**,
+which is verbatim the failure the deletion existed to make unreachable.
+
+**REMOVING A FEATURE LEAVES MECHANISMS BEHIND EXACTLY AS ADDING ONE LEAVES CLAIMS.** Another
+lane established the claims half of that today; this is the mechanism half, and it is worse,
+because a stale claim misleads a reader while a stale mechanism still runs. An enumeration
+written from inside one file can only ever find that file's machinery.
+
+**The root is one sentence, and it is this lane's own recurring defect crossing a module
+boundary:** the measurement and the enforcement were in `merge.ts`; the prompt was assembled in
+`arbiter.ts`. So every claim of the form *"we measured what the judge got"* was about a string
+that was not the one the judge got — *a measurement is only about what it measured*, at a seam
+where it is much harder to see, because **each file was locally consistent and neither was
+wrong on its own terms.** `merge.ts` correctly measured what `merge.ts` built; `arbiter.ts`
+correctly defanged what it was given. The defect existed only in the join, which is exactly the
+place no single file's reviewer is looking.
+
+**The second half was the metric, and the test that was supposed to catch it reproduced the
+error.** `SPEC.md` described the field as "the byte length of the exact prompt string the
+arbiter received"; the code measured only `ArbitrationInput.evidence`, a substring of a prompt
+that also carries the instruction template, the question, the options block and the run's task.
+And round 13's *identity* assertion — which I wrote specifically because a range assertion was
+too weak — compared the logged number to **the stub arbiter's input evidence**. Those two
+values are equal by construction. The assertion was named for an identity and was silent about
+the only gap it needed to see. **A stronger assertion aimed at the wrong pair of values is
+still silent**, and that is the third time in this lane a control has been improved in the
+dimension already correct.
+
+**THE RULE, NOW STRUCTURAL RATHER THAN CONVENTIONAL: there is exactly one place the prompt
+exists in final form, and that is the only place it may be measured or bounded. Anything
+upstream is an estimate, and an estimate must not be reported as the thing.**
+
+`trident/arbiter-prompt.ts` is that place. It is a module both `merge.ts` and `arbiter.ts`
+depend on and which depends on neither — deliberately not a value import from one into the
+other, because the prompt's final form is something they SHARE rather than something one owns
+and the other reaches into. `arbiter.ts` sends `arbiterPrompt(input)`; `merge.ts` measures
+`arbiterPrompt(input)` **on the same input object it is about to hand over**, not on a copy of
+its fields, because a re-mapped shape is a shape that can be mapped differently.
+
+Three things follow, and each is pinned:
+
+1. **The per-line cap is gone.** The fold that remains is bounded BY the prompt budget, so the
+   arithmetic makes it unable to cut silently: `foldEvidenceTo` marks a cut with a leading `…`
+   and keeps the last `max` characters, so a cut line is alone at least `max + 3` bytes —
+   already over a budget of `max` bytes before the template is counted. Any line long enough
+   to be shortened forces an escalation instead. The same argument covers `defang`'s own
+   64,000-character tail-slice, which is more than seven times the budget.
+2. **The budget covers the WHOLE prompt**, template included, because a budget that excluded
+   the instruction block would be framing riding free one level up — the same defect, at the
+   only layer that had not yet produced it. It is 12 KiB rather than 8 so the evidence
+   allowance survives the template being counted, and **a test asserts the budget minus the
+   real measured template is still at least `ARBITER_EVIDENCE_ALLOWANCE_MIN`**, so words added
+   to the instructions cannot quietly narrow the tier. Without that test the trade would be
+   invisible: the arbiter would simply be asked less often, with nothing to say why.
+3. **The metric is `prompt_bytes`, and the test asserts it against the substrate's actual
+   `AgentSpec.prompt`** — produced by the REAL `buildFableArbiter` over a capturing substrate,
+   not by a stub. That is the only comparison that can detect a cap or a wrapper living between
+   the budget check and the model, and it is what makes "the same pure function, called twice"
+   a verified property rather than a hope.
+
+**The boundary case is now driven, and it is the one both the check and the test stepped
+over**: a 5,000-character diff line — inside the window between the old 4,096-character cap and
+the old 8,192-byte budget. The assertion is that the line survives **verbatim** in the prompt
+the substrate was started with, plus that no `…` appears anywhere in it. A byte-total assertion
+could not catch this: a truncated prompt is *smaller*, and smaller still passes "within
+budget". The test also asserts the judge WAS asked, so it cannot pass by escalating.
+
+**Four mutations, all red:**
+
+| # | mutation | result |
+|---|---|---|
+| M67 | restore the 4,096-character per-line cap in the assembler | **red** — the 5,000-character line is shortened |
+| M68 | measure the caller's `evidence` instead of the final prompt | **red** — the `AgentSpec.prompt` identity |
+| M69 | shrink the budget until the template eats the evidence allowance | **red, 3 tests** |
+| M70 | transform the prompt in `arbiter.ts` AFTER the caller measured it (`.slice(0, 6_000)`) | **red** — this is the round-14 defect class itself, and it is now caught |
+
+M70 is the one that matters most: it proves the guarantee is about the *seam*, not about the
+particular cap that was removed. Any future mechanism inserted between the measurement and the
+model fails a test rather than shipping quietly.
 
 ### THE PATTERN, named because it recurred four times
 
@@ -813,7 +913,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Twenty-six mutations reverted one at a time, each proved a test red. Eight survived a
+Seventy mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

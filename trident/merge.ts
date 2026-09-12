@@ -70,6 +70,11 @@ import type { TridentRun } from './store.ts'
 // `conflict-resolver.ts`, which imports `MergeConflictResolver` back out of THIS
 // file — a value import here would close that into a real require cycle.
 import type { ArbitrationOutcome, TridentArbiter } from './arbiter.ts'
+// A VALUE import, and it closes no cycle: `arbiter-prompt.ts` is the module BOTH this file
+// and `arbiter.ts` depend on, and it depends on neither. It exists because the prompt has to
+// be measured where it exists in final form — see its header for the defect that forced it
+// (#541 round 14).
+import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 // The repo's defang + size-cap standard for any text that reaches a prompt, a log
 // or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
@@ -1783,15 +1788,14 @@ export async function worktreeFingerprint(run_host: RunHostCommand, wt: string):
 }
 
 /**
- * THE ARBITER'S EVIDENCE BUDGET (#541 round 13) — A THRESHOLD FOR ASKING, NOT A
- * TRUNCATION POINT.
+ * THE ARBITER IS ASKED ONLY ABOUT A CONFLICT IT CAN SEE WHOLE (#541 rounds 13-14).
  *
  * WHAT THIS REPLACES, AND WHY IT IS A DELETION RATHER THAN A SIXTH FIX. Rounds 7-12 built
  * machinery to show a judge PART of an oversized conflict and tell it so: a per-file byte
  * budget, per-file truncation notices, an omitted-files marker, a whole-evidence backstop
- * notice, and `makeWithholding` — a single owner whose stated purpose was to make the
- * judge's notices and the telemetry structurally incapable of disagreeing. That machinery
- * produced FIVE defects across five rounds, the last two AFTER that structural refactor:
+ * notice, and `makeWithholding` — a single owner whose stated purpose was to make the judge's
+ * notices and the telemetry structurally incapable of disagreeing. That machinery produced
+ * FIVE defects across five rounds, the last two AFTER that structural refactor:
  *
  *   1. round 7  — the history marker was appended AFTER the budget was spent, so every
  *                 history that dropped a record overshot the cap by the marker's length;
@@ -1801,44 +1805,42 @@ export async function worktreeFingerprint(run_host: RunHostCommand, wt: string):
  *   4. round 12 — `raw_bytes` claimed a pre-bounding total while counting only the diffs
  *                 fetched before the loop broke;
  *   5. round 13 — `newestRecordsWithinBudget` budgeted record bytes but not the `| `
- *                 prefixes and joining newlines its own caller adds, so the final cap
- *                 could cut through a retained record or eat the marker; and `shownBytes`
+ *                 prefixes and joining newlines its own caller adds; and `shownBytes`
  *                 counted quoted diff BODIES only — not labels, not notices — while both
  *                 its field comment and `SPEC.md` called it what the judge was sent.
  *
  * ONE SHAPE, FIVE TIMES: THE BYTES ACCOUNTED FOR WERE NEVER THE BYTES EMITTED. Framing —
- * labels, quote prefixes, separators, the notices themselves — rode free every time,
- * because the accounting happened where content was CHOSEN and the emission happened
- * somewhere else. `makeWithholding` unified the two AUDIENCES for a withholding event and
- * did not save this, because it did not unify the MEASUREMENT with the EMISSION. That is
- * not a bug that comes good on the sixth attempt; it is a property of any design that
- * shows part of a thing and separately describes the part.
+ * labels, quote prefixes, separators, the notices themselves — rode free every time, because
+ * the accounting happened where content was CHOSEN and the emission happened somewhere else.
+ * `makeWithholding` unified the two AUDIENCES for a withholding event and did not save this,
+ * because it did not unify the MEASUREMENT with the EMISSION. That is not a bug that comes
+ * good on the sixth attempt; it is a property of any design that shows part of a thing and
+ * separately describes the part.
  *
- * So the judge either sees the whole conflict or is never asked. `SPEC.md` pre-committed
- * to precisely this response and named production data as the trigger; the trigger fired
- * on evidence instead. Five defects is a stronger signal than a resolution ratio, and a
- * pre-commitment honoured early, on better evidence than the one it named, is the
- * pre-commitment working rather than being bent.
+ * AND ROUND 14 IS THE SAME SENTENCE ACROSS A MODULE BOUNDARY, which is the instance worth
+ * remembering. The deletion above enumerated the machinery by name and every name was in
+ * THIS file, while `arbiter.ts` went on applying a 4,096-CHARACTER per-line cap of its own
+ * when it built the prompt. A 5,000-character diff line passed the 8,192-BYTE all-or-nothing
+ * check here and lost ~904 characters there. Each file was locally consistent; the claim
+ * "we measured what the judge got" was false anyway, because the string measured here was
+ * not the string sent. REMOVING A FEATURE LEAVES MECHANISMS BEHIND EXACTLY AS ADDING ONE
+ * LEAVES CLAIMS — and an enumeration written from one file can only ever find that file's.
  *
- * THE MEASUREMENT IS NOW THE EMITTED STRING ITSELF — taken in `arbitrateConflict` on the
- * exact value handed to `arbitrate`, after every label, prefix and separator is already in
- * it. There is no second number to keep in step and nothing left that can ride free,
- * because the thing measured IS the thing sent. That identity is the whole fix.
- *
- * A BYTE budget, because the bound that matters is what leaves the process; a character
- * cap on multi-byte text bounds neither prompt size nor cost. 8 KiB is the SUM of the two
- * budgets it replaces (4 KiB of hunks, 2 KiB of history per side), so the largest payload
- * a judge can receive is unchanged — what changed is that a conflict exceeding it now
- * escalates to the owner instead of arriving as a fragment.
+ * SO THE BUDGET AND THE MEASUREMENT BOTH MOVED TO WHERE THE PROMPT IS FINAL.
+ * `ARBITER_PROMPT_BYTES_MAX` lives in `arbiter-prompt.ts` and covers the WHOLE prompt —
+ * instruction template, question, options and task included, because those are bytes that
+ * reach the model too, and a budget that excluded them would be framing riding free one level
+ * up. This file measures `arbiterPrompt(input)` on the very object it is about to hand to the
+ * arbiter, and declines to ask when it does not fit. There is nothing left between the check
+ * and the model.
  *
  * THE CAP IS ALSO THE SECURITY BOUNDARY, not a tidiness rule. This text is GIT-AUTHORED:
  * commit messages and diff bodies written by whoever wrote the branches. Dropping `Bash`
  * removed a write vector; quoting unbounded git output into the prompt would trade it for
  * an injection surface, which is the worse end of that deal. Every byte still goes through
- * `foldEvidenceTo` — the same `defang` and `EVIDENCE_SCAN_MAX` path as every other
- * untrusted string in this repo — and the prompt frames the whole block as data.
+ * `foldEvidenceTo` — the same `defang` and `EVIDENCE_SCAN_MAX` path as every other untrusted
+ * string in this repo — and the prompt frames the whole block as data.
  */
-export const ARBITER_EVIDENCE_BYTES_MAX = 8_192
 
 /**
  * THE ONE BOUND LEFT THAT DROPS ANYTHING (#541 round 13), and it is stated to the judge.
@@ -1895,7 +1897,7 @@ const QUOTE = '| '
 function quoteAll(text: string): string {
   return text
     .split('\n')
-    .map((line) => `${QUOTE}${foldEvidenceTo(line, ARBITER_EVIDENCE_BYTES_MAX).trim()}`)
+    .map((line) => `${QUOTE}${foldEvidenceTo(line, ARBITER_PROMPT_BYTES_MAX).trim()}`)
     .join('\n')
 }
 
@@ -1903,7 +1905,7 @@ function quoteAll(text: string): string {
  * The conflict as the judge will see it, or the fact that it will not be shown at all.
  *
  * TWO ARMS, AND THERE IS DELIBERATELY NO THIRD. A "showed N of M" arm is the entire class
- * of defect recorded at `ARBITER_EVIDENCE_BYTES_MAX`: it requires a count, a notice, and an
+ * of defect recorded at `ARBITER_PROMPT_BYTES_MAX`: it requires a count, a notice, and an
  * agreement between them that five rounds could not hold. `over-budget` carries NO byte
  * figure for the same reason — the loop stops fetching once it knows the answer, so any
  * number here would mean "at least this much" while being read as a total, which is
@@ -1965,7 +1967,7 @@ export async function conflictEvidence(
     const section = `${label}\n${body}`
     sections.push(section)
     used += Buffer.byteLength(`${section}\n`, 'utf8')
-    if (used > ARBITER_EVIDENCE_BYTES_MAX) return { kind: 'over-budget' }
+    if (used > ARBITER_PROMPT_BYTES_MAX) return { kind: 'over-budget' }
   }
   return { kind: 'complete', body: sections.join('\n') }
 }
@@ -2033,7 +2035,7 @@ async function sideHistory(
   // than arriving shortened.
   const folded = res.stdout
     .split('\u0000')
-    .map((record) => foldEvidenceTo(record, ARBITER_EVIDENCE_BYTES_MAX).trim())
+    .map((record) => foldEvidenceTo(record, ARBITER_PROMPT_BYTES_MAX).trim())
     .filter((record) => record.length > 0)
     // QUOTE-PREFIXED for the same reason the hunks are: folding removes newlines from a
     // record, but a record whose whole text IS `OPTIONS:` would still land at column 0.
@@ -2070,7 +2072,7 @@ async function sideHistory(
  * as it does without an arbiter at all (#541 round 13).
  */
 type ArbitrationAttempt =
-  | { kind: 'decided'; outcome: ArbitrationOutcome; evidence_bytes: number }
+  | { kind: 'decided'; outcome: ArbitrationOutcome; prompt_bytes: number }
   | { kind: 'over-budget' }
 
 async function arbitrateConflict(
@@ -2142,36 +2144,47 @@ async function arbitrateConflict(
     `\`${safeBase}\`:\n${branchHistory}\n\n` +
     `UP TO ${MAX_HISTORY_COMMITS_PER_SIDE} MOST RECENT COMMITS ON \`${safeBase}\` NOT ON ` +
     `\`${safeBranch}\`:\n${baseHistory}`
-  // THE ONE MEASUREMENT, AND IT IS TAKEN ON THE STRING THAT LEAVES (#541 round 13). Five
-  // rounds of defects all had one shape: the bytes accounted for were not the bytes
-  // emitted, because counting happened where content was chosen and framing was added
-  // afterwards. Every label, quote prefix, heading and separator this function adds is
-  // already inside `evidence` here, so there is nothing left that can ride free. An
-  // over-budget conflict is not shown in part and not judged — it escalates.
-  const evidence_bytes = Buffer.byteLength(evidence, 'utf8')
-  if (evidence_bytes > ARBITER_EVIDENCE_BYTES_MAX) return { kind: 'over-budget' }
+  // THE INPUT IS BUILT ONCE AND MEASURED AS THE PROMPT IT BECOMES (#541 round 14).
+  //
+  // Round 13 measured `evidence` — this file's own assembly — and called that "the string
+  // that leaves". It was not. `arbiter.ts` wrapped it in an instruction template, a question,
+  // an options block and the run's task, and applied a per-line cap of its own that was
+  // SMALLER than this budget, so a 5,000-character diff line cleared the check here and was
+  // shortened there. The bytes accounted for still were not the bytes emitted; the only thing
+  // that had changed was which module the gap lived across.
+  //
+  // So `arbiterPrompt` is the single place the prompt exists in final form, and it is called
+  // on THIS OBJECT — the same `input` that is handed to `arbitrate` on the next line, not a
+  // copy of its fields. A re-mapped shape is a shape that can be mapped differently, which is
+  // how two sides come to disagree about what was sent. `prompt_bytes` is therefore the length
+  // of the string the model receives, and the seam test asserts it against the substrate's
+  // actual `AgentSpec.prompt` rather than against this file's inputs — because "the same pure
+  // function" is a guarantee only while the function stays pure.
+  const input = {
+    run: ctx.run,
+    repo_path: ctx.repo,
+    question:
+      `Rebasing \`${safeBranch}\` onto \`${safeBase}\` hit a conflict and the bounded ` +
+      `resolver gave up rather than resolve it. Does a correct resolution exist that one ` +
+      `more, better-directed resolver round could reach, or do the two sides change the ` +
+      `same behaviour incompatibly?`,
+    evidence,
+    options: [...CONFLICT_ARBITRATION_OPTIONS],
+  }
+  const prompt_bytes = Buffer.byteLength(arbiterPrompt(input), 'utf8')
+  if (prompt_bytes > ARBITER_PROMPT_BYTES_MAX) return { kind: 'over-budget' }
   try {
-    const outcome: unknown = await arbitrate({
-      run: ctx.run,
-      repo_path: ctx.repo,
-      question:
-        `Rebasing \`${safeBranch}\` onto \`${safeBase}\` hit a conflict and the bounded ` +
-        `resolver gave up rather than resolve it. Does a correct resolution exist that one ` +
-        `more, better-directed resolver round could reach, or do the two sides change the ` +
-        `same behaviour incompatibly?`,
-      evidence,
-      options: [...CONFLICT_ARBITRATION_OPTIONS],
-    })
+    const outcome: unknown = await arbitrate(input)
     // A MALFORMED OUTCOME IS AN UNAVAILABLE ARBITER, decided here where the catch
     // still covers us rather than by a field access three lines into the caller.
     if (!isArbitrationOutcome(outcome)) {
       return {
         kind: 'decided',
         outcome: { kind: 'unavailable', reason: 'the arbiter returned a malformed outcome' },
-        evidence_bytes,
+        prompt_bytes,
       }
     }
-    return { kind: 'decided', outcome, evidence_bytes }
+    return { kind: 'decided', outcome, prompt_bytes }
   } catch (error) {
     // A THROWING arbiter is an unavailable arbiter. `buildFableArbiter` already
     // degrades internally, but this seam must hold for any injected arbiter too:
@@ -2183,7 +2196,7 @@ async function arbitrateConflict(
         kind: 'unavailable',
         reason: error instanceof Error ? error.message : 'the arbiter threw',
       },
-      evidence_bytes,
+      prompt_bytes,
     }
   }
 }
@@ -2428,7 +2441,7 @@ async function rebaseBranchOntoBase(
           branch,
           base,
           conflict_files: conflicted.length,
-          budget_bytes: ARBITER_EVIDENCE_BYTES_MAX,
+          budget_bytes: ARBITER_PROMPT_BYTES_MAX,
           action: 'the conflict could not be shown completely; escalated to the owner without arbitrating',
         })
       }
@@ -2446,7 +2459,7 @@ async function rebaseBranchOntoBase(
           : attempt.kind === 'over-budget'
             ? {
                 kind: 'unavailable',
-                reason: `the conflict is larger than the ${ARBITER_EVIDENCE_BYTES_MAX}-byte evidence budget, so it could not be shown completely`,
+                reason: `the arbiter's prompt would exceed its ${ARBITER_PROMPT_BYTES_MAX}-byte budget, so the conflict could not be shown completely`,
               }
             : attempt.outcome
       // THE SIZE DIMENSION OF THE KILL CRITERION (#541 rounds 10 and 13). This tier's
@@ -2454,16 +2467,21 @@ async function rebaseBranchOntoBase(
       // already handled — so a resolved/escalated ratio without the size would measure the
       // mechanism's value while hiding the variable most likely to explain it.
       //
-      // `evidence_bytes` IS NOW EXACT, IN EVERY LINE THAT CARRIES IT, and that is a
-      // consequence of the deletion rather than a separate fix. It is the byte length of
-      // the finished prompt string, measured on the value handed to the arbiter, and it is
-      // only ever emitted on a `decided` attempt — where the payload is complete by
-      // construction. There is no truncation flag to qualify it because there is no
-      // truncation: the two states are "the judge saw all of this" and "the judge was not
-      // asked", and the second is counted by `merge_conflict_arbiter_oversize` above.
+      // `prompt_bytes` IS THE LENGTH OF WHAT THE MODEL RECEIVED, and the name says which
+      // string that is (#541 round 14). It was `evidence_bytes`, measured over this file's
+      // own assembly, while `SPEC.md` described it as "the byte length of the exact prompt
+      // string the arbiter received" — a field whose documentation named the prompt and
+      // whose value measured a substring of it. It now comes from `arbiterPrompt`, the one
+      // place the prompt exists in final form, called on the same object that is sent.
+      //
+      // Exact, not approximate, and only ever emitted on a `decided` attempt — where the
+      // payload is complete by construction. There is no truncation flag to qualify it
+      // because there is no truncation: the two states are "the judge saw all of this" and
+      // "the judge was not asked", and the second is counted by
+      // `merge_conflict_arbiter_oversize` above.
       const sizeFields = {
         conflict_files: conflicted.length,
-        evidence_bytes: attempt?.kind === 'decided' ? attempt.evidence_bytes : 0,
+        prompt_bytes: attempt?.kind === 'decided' ? attempt.prompt_bytes : 0,
       }
       if (attempt?.kind === 'decided') {
         arbitrationsThisRebase++

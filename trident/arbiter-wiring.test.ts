@@ -30,7 +30,6 @@ import { join } from 'node:path'
 import { cleanupAfterMerge } from './git-mode.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import {
-  ARBITER_EVIDENCE_BYTES_MAX,
   MAX_HISTORY_COMMITS_PER_SIDE,
   buildMergeCleanupDeps,
   CONFLICT_ARBITER_RETRY_OPTION,
@@ -39,6 +38,11 @@ import {
   MAX_CONFLICT_ROUNDS,
   type RunHostCommand,
 } from './merge.ts'
+import {
+  ARBITER_EVIDENCE_ALLOWANCE_MIN,
+  ARBITER_PROMPT_BYTES_MAX,
+  arbiterPrompt,
+} from './arbiter-prompt.ts'
 import {
   assertArbitrableOptions,
   buildFableArbiter,
@@ -101,6 +105,32 @@ function conflictingHost(
 }
 
 /** A recording arbiter that answers with a fixed outcome. */
+/**
+ * A REAL `buildFableArbiter` over a substrate that records the `AgentSpec` it is started
+ * with (#541 round 14). Round 13's "identity" assertion compared the logged byte count to
+ * the STUB ARBITER'S INPUT EVIDENCE — two values equal by construction, so the assertion
+ * named identity and was silent about the only gap that mattered: everything `arbiter.ts`
+ * adds to, or does to, that evidence on the way to the model. Asserting against the prompt
+ * the substrate actually receives is what closes it.
+ */
+function capturingArbiter(decision: string): { arbitrate: TridentArbiter; specs: AgentSpec[] } {
+  const specs: AgentSpec[] = []
+  const arbitrate = buildFableArbiter({
+    build_substrate: () =>
+      ({
+        start(spec: AgentSpec) {
+          specs.push(spec)
+          async function* gen() {
+            yield { kind: 'token', text: `DECISION: ${decision}\nREASONING: because the two edits are additive.` }
+            yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'mock' }
+          }
+          return { events: gen(), cancel: async () => {} }
+        },
+      }) as never,
+  })
+  return { arbitrate, specs }
+}
+
 function stubArbiter(outcome: ArbitrationOutcome): {
   arbitrate: TridentArbiter
   seen: ArbitrationInput[]
@@ -969,7 +999,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       // rode free for five rounds — the budget governs what the arbiter was handed, so the
       // test weighs precisely that.
       expect(Buffer.byteLength(evidence, 'utf8'), `${name}: evidence over budget`).toBeLessThanOrEqual(
-        ARBITER_EVIDENCE_BYTES_MAX,
+        ARBITER_PROMPT_BYTES_MAX,
       )
       // And no quoted line is ever left without its prefix — the property that keeps
       // untrusted text off column 0.
@@ -1097,7 +1127,7 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
     // joined folding and kept by per-name folding, which is the actual difference.
     const huge = `${'D'.repeat(60_000)}.ts`
     const evidence = await evidenceFor('feat-bigname', ['sibling.ts', huge].join('\u0000'))
-    expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_EVIDENCE_BYTES_MAX)
+    expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
     // The sibling survived the oversized neighbour that follows it.
     expect(evidence).toContain('sibling.ts')
     // And the huge name is present but bounded — not silently dropped either.
@@ -1112,7 +1142,7 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
     // limit of five, which keeps the assertion about the thing it names.
     const many = Array.from({ length: 40 }, (_, k) => `file-${k}.ts`).join('\u0000')
     const evidence = await evidenceFor('feat-manyfiles', many)
-    expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_EVIDENCE_BYTES_MAX)
+    expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
     // `renderPaths` names the first few and counts the rest.
     expect(evidence).toContain('more')
   })
@@ -1361,22 +1391,15 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       }
       return ok()
     }
-    let sent = ''
     let attempts = 0
+    const { arbitrate, specs } = capturingArbiter(CONFLICT_ARBITER_RETRY_OPTION)
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
       resolve_conflict: async () => {
         attempts++
         return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
       },
-      arbitrate: async (input) => {
-        sent = input.evidence
-        return {
-          kind: 'decision',
-          option_id: CONFLICT_ARBITER_RETRY_OPTION,
-          reasoning: 'additive',
-        }
-      },
+      arbitrate,
     })
     const lines = await captureLogs(async () => {
       await cleanupAfterMerge(run, deps)
@@ -1395,17 +1418,26 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       // arbiter actually received, so no accounting path that omits labels, quote prefixes
       // or headings can satisfy it. That identity is the whole of the round-13 fix,
       // expressed as the one assertion that can detect its absence.
-      const bytes = Number(/evidence_bytes=(\d+)/.exec(line)?.[1] ?? '-1')
-      expect(bytes, `${name}: evidence_bytes is the emitted length`).toBe(
-        Buffer.byteLength(sent, 'utf8'),
+      const bytes = Number(/prompt_bytes=(\d+)/.exec(line)?.[1] ?? '-1')
+      // THE ASSERTION IS AGAINST THE PROMPT THE SUBSTRATE WAS STARTED WITH — the actual
+      // `AgentSpec.prompt`, produced by the REAL arbiter, not this test's idea of the
+      // evidence. Round 13 compared the metric to the stub's input evidence, which is equal
+      // to itself by construction and says nothing about the instruction template, the
+      // question, the options, the task, or any transform applied on the way. This is the
+      // one comparison that can detect a cap or a wrapper living between the budget check
+      // and the model.
+      expect(specs.length, `${name}: the substrate was started`).toBe(1)
+      expect(bytes, `${name}: prompt_bytes is the length of AgentSpec.prompt`).toBe(
+        Buffer.byteLength(specs[0]?.prompt ?? '', 'utf8'),
       )
       // Not vacuous: the evidence is a real payload, not an empty string.
-      expect(bytes, `${name}: evidence_bytes magnitude`).toBeGreaterThan(500)
-      expect(bytes, `${name}: within budget`).toBeLessThanOrEqual(ARBITER_EVIDENCE_BYTES_MAX)
+      expect(bytes, `${name}: prompt_bytes magnitude`).toBeGreaterThan(500)
+      expect(bytes, `${name}: within budget`).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
     }
     // The outcome is still recorded alongside it — size is an addition, not a replacement.
     expect(outcome).toContain('outcome=resolved')
-    // Still no model-authored text on either line.
+    // Still no model-authored text on either line — the reasoning the model emitted
+    // ('additive') must not reach a durable log.
     expect(arbitration).not.toContain('additive')
     expect(outcome).not.toContain('additive')
   })
@@ -1524,6 +1556,70 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
 
+  test('A DIFF LINE BETWEEN THE OLD PER-LINE CAP AND THE BUDGET ARRIVES INTACT', async () => {
+    // THE CASE BOTH THE CHECK AND THE TEST STEPPED OVER, round 13. `merge.ts` declared the
+    // conflict complete against an 8,192-BYTE budget while `arbiter.ts` folded every line to
+    // 4,096 CHARACTERS building the prompt, so any diff line in between cleared the gate and
+    // was silently shortened on the way to the model — a fragment delivered under a sentence
+    // saying nothing had been left out. 5,000 characters sits squarely in that window.
+    //
+    // The assertion is that the line SURVIVES VERBATIM in the prompt the substrate was
+    // started with. Asserting a byte total would not catch it: a truncated prompt is smaller,
+    // and smaller still passes "within budget".
+    const line = 'X'.repeat(5_000)
+    const run = localRun('feat-longline')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('long.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${line}\n+short\n`)
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const { arbitrate, specs } = capturingArbiter('stop')
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    await cleanupAfterMerge(run, deps).catch(() => {})
+
+    // The judge WAS asked — this line is inside the budget, so escalating here would be the
+    // opposite failure and would make the assertion below vacuous.
+    expect(specs.length, 'a 5,000-character line is inside the budget and must be judged').toBe(1)
+    const prompt = specs[0]?.prompt ?? ''
+    expect(prompt).toContain(line)
+    // And nothing anywhere in the prompt was elided: `foldEvidenceTo` marks a cut with a
+    // leading horizontal ellipsis, so its absence is the direct evidence of no truncation.
+    expect(prompt.includes('…'), 'no line was shortened on the way to the model').toBe(false)
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
+  })
+
+  test('THE FIXED TEMPLATE CANNOT QUIETLY EAT THE EVIDENCE ALLOWANCE', async () => {
+    // THE BUDGET NOW COVERS THE WHOLE PROMPT, which is correct — the instruction block, the
+    // question, the options and the task are bytes that reach the model, and a budget that
+    // excluded them would be framing riding free one level up. But it means every word added
+    // to the instruction text takes room away from the conflict, and that trade would
+    // otherwise be invisible: the tier would simply arbitrate less often, with nothing to say
+    // why. This pins the relationship instead of leaving it to arithmetic in a comment.
+    const empty = arbiterPrompt({
+      question: '',
+      evidence: '',
+      options: [...CONFLICT_ARBITRATION_OPTIONS],
+      run: { task: '' },
+    })
+    const overhead = Buffer.byteLength(empty, 'utf8')
+    expect(
+      ARBITER_PROMPT_BYTES_MAX - overhead,
+      `the template is ${overhead} bytes, leaving too little for evidence`,
+    ).toBeGreaterThanOrEqual(ARBITER_EVIDENCE_ALLOWANCE_MIN)
+  })
+
   test('AN OVER-BUDGET CONFLICT ESCALATES TO THE OWNER AND IS NEVER ARBITRATED', async () => {
     // THE LOAD-BEARING TEST OF ROUND 13, and it asserts the ESCALATION PATH WAS REACHED
     // rather than that nothing crashed. Four separate things have to be true, and each one
@@ -1581,7 +1677,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const oversize = lines.find((l) => l.includes('merge_conflict_arbiter_oversize')) ?? ''
     expect(oversize, 'the oversize skip must be recorded').not.toBe('')
     expect(oversize).toContain('conflict_files=1')
-    expect(oversize).toContain(`budget_bytes=${ARBITER_EVIDENCE_BYTES_MAX}`)
+    expect(oversize).toContain(`budget_bytes=${ARBITER_PROMPT_BYTES_MAX}`)
     // 4. And it is NOT counted as an arbitration.
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })

@@ -28,13 +28,13 @@ import { cleanupAfterMerge } from './git-mode.ts'
 import {
   buildMergeCleanupDeps,
   conflictEvidence,
-  ARBITER_EVIDENCE_BYTES_MAX,
   runWorktreePath,
   worktreeFingerprint,
   TridentBaseDriftHold,
   TridentMergeConflictEscalation,
   TridentMergeError,
 } from './merge.ts'
+import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
@@ -1040,7 +1040,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
-    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(ARBITER_EVIDENCE_BYTES_MAX)
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
     expect(body).toContain('feat line 19')
     expect(body).toContain('main line 19')
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
