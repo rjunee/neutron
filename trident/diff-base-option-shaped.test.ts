@@ -33,7 +33,12 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { spawnCapture } from './git-mode.ts'
-import { diffBaseRef, originBaseResolves, TridentOptionShapedBaseError } from './merge.ts'
+import {
+  diffBaseRef,
+  originBaseResolves,
+  TridentEmptyBaseError,
+  TridentOptionShapedBaseError,
+} from './merge.ts'
 
 const WORKFLOW_SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -162,6 +167,43 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     }
   })
 
+  test('AN EMPTY BASE IS REFUSED — `..<head>` is a plausible wrong answer, not an error', async () => {
+    // MEASURED, which the previous mitigation was not: it returned the empty value and
+    // asserted "the caller's own diff will fail loudly". On git 2.43
+    //   `git diff --name-only --no-renames --end-of-options '..HEAD'` → exit 0, NO OUTPUT
+    //   `git rev-list --count --end-of-options '..HEAD'`              → exit 0, prints "0"
+    // so nothing fails and every consumer gets a well-formed wrong answer. Asserted below
+    // against real git, because a test that only checked the throw would be resting on the
+    // same unmeasured belief the fix is replacing.
+    const w = await seedWorld('empty-base')
+    const diff = await spawnCapture(
+      ['git', '-C', w.repo, 'diff', '--name-only', '--no-renames', '--end-of-options', `..${w.head}`],
+      w.repo,
+    )
+    expect({ ok: diff.ok, out: diff.stdout.trim() }).toEqual({ ok: true, out: '' })
+    const count = await spawnCapture(
+      ['git', '-C', w.repo, 'rev-list', '--count', '--end-of-options', `..${w.head}`],
+      w.repo,
+    )
+    expect({ ok: count.ok, out: count.stdout.trim() }).toEqual({ ok: true, out: '0' })
+
+    // So it is refused at the binding — in BOTH implementations, and for whitespace too.
+    for (const empty of ['', '   ', '\t']) {
+      for (const resolves of [true, false]) {
+        expect(() => diffBaseRef(empty, null, resolves)).toThrow(TridentEmptyBaseError)
+      }
+    }
+    await expect(workflowDiffBase({ baseBranch: '', repoPath: w.repo })).rejects.toThrow(
+      /refusing an empty base branch/,
+    )
+
+    // …and a PIN still wins, because the pin is read before the name. Same ordering the
+    // option-shaped case needed.
+    const sha = 'e'.repeat(40)
+    expect(diffBaseRef('', sha, false)).toBe(sha)
+    expect(await workflowDiffBase({ baseBranch: '', baseSha: sha, repoPath: w.repo })).toBe(`'${sha}'`)
+  })
+
   test('ORDER: a valid PIN wins before the name is examined — in BOTH implementations', async () => {
     // THE REGRESSION THIS PINS. The first version of the `.mjs` guard threw at module
     // scope, BEFORE `pinnedBase` was consulted — so a run with a valid 40-hex pin and an
@@ -267,6 +309,18 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
       const got = await bothAgree(w, { baseBranch: 'main', originResolves: false, mergeMode })
       expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'main', mjs: 'main' })
     }
+  })
+
+  test('unpinned, EMPTY: both REFUSE — the axis the option-shaped rows stepped over', async () => {
+    // The option-shaped rows vary HOSTILE vs ORDINARY and hold EMPTY constant, which is
+    // exactly the blind spot the axes lesson names: a matrix proves nothing about an axis
+    // it holds constant, and the axis you hold constant is usually the one you did not
+    // notice you were choosing.
+    const w = await seedWorld('parity-empty')
+    expect(() => diffBaseRef('', null, false)).toThrow(TridentEmptyBaseError)
+    await expect(workflowDiffBase({ baseBranch: '', repoPath: w.repo })).rejects.toThrow(
+      /refusing an empty base branch/,
+    )
   })
 
   test('unpinned, option-shaped: both REFUSE rather than answering', async () => {

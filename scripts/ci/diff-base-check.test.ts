@@ -455,6 +455,14 @@ describe('the gate as CI runs it', () => {
   })
 
   test('and with nothing planted, the gate is clean — so the cases above are not vacuous', () => {
+    // WHY THIS IS SAFE NEXT TO THE PLANTING TESTS ABOVE, measured rather than assumed:
+    // `bun test` runs test FILES SEQUENTIALLY. Verified with two files, one holding a
+    // marker on disk for 1200 ms and the other reporting whether it could see it — it
+    // could not. Within a file, tests are serial too, and each plant cleans up in a
+    // `finally`. So the only way this assertion can see a planted offender is TWO
+    // CONCURRENT `bun test` invocations against the same worktree, which is not how CI
+    // runs it (one invocation per shard, per checkout) and which is exactly what made this
+    // test red once during development.
     const res = spawnSync('bun', [GATE], { cwd: ROOT, encoding: 'utf8' })
     expect({ status: res.status, stderr: res.stderr }).toEqual({ status: 0, stderr: '' })
   })

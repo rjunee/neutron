@@ -116,7 +116,7 @@ runs before the tree is touched; an empty scan exits 1.
 ### The gate's own verification had the gate's own bug
 
 CodeQL `js/useless-regexp-character-escape`, HIGH, two alerts, both at
-`scripts/ci/diff-base-check.test.ts:176` — *"The escape sequence `\$` is equivalent to
+`scripts/ci/diff-base-check.test.ts:176` (that line is `:260` as merged) — *"The escape sequence `\$` is equivalent to
 just `$`, so the sequence may still represent a meta-character when it is used in a
 regular expression."*
 
@@ -167,6 +167,46 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round ten: a mitigation asserted instead of measured, and a lag that moved
+
+**An empty base produced a silent empty review.** `diffBaseRef` returned an empty
+`base_branch` untouched, above a comment asserting the caller's diff would "fail loudly".
+That sentence was never measured. On git 2.43:
+
+    git diff --name-only --no-renames --end-of-options '..HEAD'   → exit 0, NO OUTPUT
+    git rev-list --count --end-of-options '..HEAD'                → exit 0, prints "0"
+
+Nothing fails. Per consumer, read from the code rather than assumed: the review-diff
+listing is already guarded (an empty listing throws "refused to dispatch reviewers for an
+empty diff"), so a zero-file review cannot be dispatched from there — but the stranded-run
+ahead count reads `0` as "nothing worth salvaging", the mutation gate reports "this branch
+changes no file", and the stage-1 test set comes back empty. One guard contains the worst
+case; three consumers get a plausible wrong answer.
+
+**"THE CALLER WILL FAIL" IS A CLAIM ABOUT THE CALLER, and it needs measuring like any
+other.** That is now the second mitigation on this branch that was asserted rather than
+tested, and the pair is instructive because the mistakes are different: round seven put a
+*correct check in the wrong place* (`originBaseResolves` declining to probe an
+option-shaped name, which routed it to the unguarded branch); this one made a *correct
+check unnecessary* by believing something about git. Both were found in a falsification
+pass, recorded as known, and shipped wrong — so finding a case is not the same as handling
+it, and the handling deserves the same measurement the finding got.
+
+Refused at the binding now, in both implementations, with the pin still winning first; and
+the parity table gained an EMPTY axis, which the option-shaped rows had held constant while
+varying hostile-vs-ordinary. That is the axes lesson landing on this very file.
+
+**And the count lag MOVED rather than closed.** Round nine re-measured the mutation figures
+in the as-built and wrote a standing note about why that file kept lagging. The spec item
+still said "4 of 7" — so the *normative acceptance* described verification that no longer
+existed, one round after the rule was stated. The artefact being looked at got fixed and
+the one that was not inherited the staleness, which is the standing note's own sentence
+applied to the correction rather than the original. Every numeric claim across all four
+documents that make them — spec item, as-built, gate header, `lint.sh` — has now been
+measured against the final tree in one pass: the mutation counts, the positive control's
+size (3 → 5 as shapes were found), the consumer tallies, and the line numbers, which are
+given as-cut AND as-merged because this record outlives the branch.
 
 ### Round eight: the same rule, twice, disagreeing about ORDER
 
@@ -416,7 +456,9 @@ and needs no gate at all.
 
 ### Dispositions for the rest of the class
 
-Fixed: `inner-workflow.mjs` `:1426`, `:2160`, `:5078`, the two wrapper argvs;
+Fixed (line numbers as of the tree this branch was cut from — the file has grown by ~200
+lines since, so treat them as provenance rather than as a map): `inner-workflow.mjs`
+`:1426`, `:2160`, `:5078`, the two wrapper argvs;
 `orchestrator.ts` review diff + `--output` group diffs, the stranded-run ahead count, the
 stage-1 test-strategy base, the mutation gate's blast-radius base;
 `computeDiffLineCount`'s parameter and `changedFilesWithStatus`/`changedFilesOnBranch`'s

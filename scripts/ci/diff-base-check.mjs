@@ -152,7 +152,8 @@
 // ── WHY THE CONTROLS AND THE TRIPWIRE ─────────────────────────────────
 // This repo has been bitten by a check that matched nothing and reported success.
 // So before it looks at the tree at all, every invocation runs a POSITIVE control
-// (a fixture whose 3 offenses the matcher must reproduce exactly) and a NEGATIVE
+// (a fixture whose 5 offenses the matcher must reproduce exactly — it grew from 3 as new
+// shapes were found) and a NEGATIVE
 // control (a fixture of near-misses in which exactly the un-argued exemption must
 // be the only hit). A scan that reaches ZERO files also exits 1: an absence
 // proves nothing until the same matcher has been shown finding something.

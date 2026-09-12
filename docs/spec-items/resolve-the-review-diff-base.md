@@ -160,6 +160,16 @@ The resolution order is evidence-first, and is the same at every site:
       refusal belongs on the arm that reads the name; a module-scope check failed runs whose
       pin meant the name was never used. Verified by "ORDER: a valid PIN wins before the name
       is examined — in BOTH implementations", which asserts the two together in one test.
+- [ ] **An empty base is refused at the binding.** `..<head>` is not an error — measured,
+      `git diff --name-only` exits 0 with no output and `git rev-list --count` exits 0
+      printing `0` — so an empty base yields a plausible wrong answer, not a failure. The
+      previous mitigation was a comment asserting the caller would "fail loudly", never
+      measured; **a claim about the caller needs measuring like any other.** Verified by
+      "AN EMPTY BASE IS REFUSED", which measures both git commands in the fixture BEFORE
+      asserting the throw, covers whitespace, asserts a pin still wins, and drives both
+      implementations; plus an EMPTY row in the parity table — an axis the option-shaped
+      rows held constant. Mutations: restoring the untouched return, or removing the `.mjs`
+      check, each reds two tests.
 - [ ] **An option-shaped base is refused at the binding, and every consumer is shielded.**
       A name beginning with `-` is read by git as a FLAG, not a revision: `--output=<path>..<head>`
       writes that file, and two of the four consumers exit 0 while doing it. `diffBaseRef` throws
@@ -191,7 +201,11 @@ The resolution order is evidence-first, and is the same at every site:
       go on claiming a condition wider than the probe establishes.
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
-      4 of 7 tests fail, and the two agreement/complement tests stay green.
+      **5 of 9** tests fail, and the agreement/complement tests stay green. (Written as
+      "4 of 7" and corrected here: the as-built's re-measurement last round did not reach
+      this document, so the normative acceptance described verification that no longer
+      existed. A count is a claim about the code, and correcting it in one artefact moves
+      the lag rather than closing it.)
 - [ ] **No base branch NAME is in scope where a rev-range is built, at the boundaries
       where that is achievable — and the criterion says where it is not.** This is what
       carries the invariant, and it is structural: `diffBase` and `diffBaseRef()` are the

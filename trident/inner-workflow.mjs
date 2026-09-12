@@ -1439,6 +1439,15 @@ const diffBaseSubstitution = `"$(git rev-parse --verify -q ${shSingleQuote(`refs
  * had already been superseded. Validate on the path where the value is actually used.
  */
 function unpinnedDiffBase() {
+  // AN EMPTY BASE IS REFUSED TOO, matching `diffBaseRef` — `..<head>` is a well-formed
+  // range git answers with exit 0 and no output, so it yields a plausible wrong answer
+  // rather than a failure. Measured; the comment that used to claim the caller would fail
+  // loudly was never tested.
+  if (typeof baseBranch !== 'string' || baseBranch.trim().length === 0) {
+    throw new Error(
+      `trident infra: refusing an empty base branch: ${JSON.stringify(baseBranch)}. The range '..<head>' is not an error — git diff exits 0 with no output — so an empty base produces a plausible wrong answer rather than a failure.`,
+    )
+  }
   if (typeof baseBranch === 'string' && baseBranch.trim().startsWith('-')) {
     throw new Error(
       `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,

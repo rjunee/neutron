@@ -253,10 +253,35 @@ export function diffBaseRef(
     return base_sha.trim().toLowerCase()
   }
   const name = base_branch.trim()
-  // An empty name would make the range `..<head>`, which git reads as HEAD..<head> —
-  // a different question with a plausible-looking answer. Hand it back untouched and
-  // let the caller's own diff fail loudly instead.
-  if (name.length === 0) return base_branch
+  // AN EMPTY NAME IS REFUSED HERE, and the sentence this replaces is why.
+  //
+  // It used to return the value untouched and assert "let the caller's own diff fail
+  // loudly instead". THAT WAS NEVER MEASURED, AND IT IS FALSE. Measured on git 2.43:
+  //   git diff --name-only --no-renames --end-of-options '..HEAD'  → exit 0, NO OUTPUT
+  //   git rev-list --count --end-of-options '..HEAD'               → exit 0, prints "0"
+  // Nothing fails; every consumer gets a well-formed answer that is wrong.
+  //
+  // WHAT THAT COSTS, per consumer, stated from the code rather than assumed:
+  //   * the review-diff listing is the one place already guarded — an empty listing
+  //     throws "outer publisher refused to dispatch reviewers for an empty diff", so a
+  //     zero-file review cannot actually be dispatched from there;
+  //   * the stranded-run ahead count reads `0` as "this branch is not ahead of the base",
+  //     i.e. nothing worth salvaging — silently, with no exception;
+  //   * the mutation gate's blast radius comes back empty and reports "this branch changes
+  //     no file", which is fail-closed but for the wrong stated reason;
+  //   * the stage-1 test-strategy set comes back empty.
+  // So the worst case is contained by one guard at one site, and three consumers get a
+  // plausible wrong answer. That is still a range nobody asked for.
+  //
+  // "THE CALLER WILL FAIL" IS A CLAIM ABOUT THE CALLER, and it needs measuring like any
+  // other. This is the second mitigation on this branch that was asserted rather than
+  // tested — the first put a correct check in the wrong place (`originBaseResolves`
+  // declining to probe an option-shaped name, which routed it to the unguarded branch).
+  // An empty base has no legitimate meaning, so it is refused where the option-shaped one
+  // is, and for the same reason: it cannot be a rev-range operand at all.
+  if (name.length === 0) {
+    throw new TridentEmptyBaseError(base_branch)
+  }
   // AN OPTION-SHAPED NAME IS REFUSED HERE, NOT ROUTED PAST HERE.
   //
   // `originBaseResolves` already declined to PROBE such a name, and for one round that
@@ -283,6 +308,21 @@ export function diffBaseRef(
     throw new TridentOptionShapedBaseError(name)
   }
   return origin_base_resolves ? `origin/${name}` : name
+}
+
+/**
+ * An EMPTY base name. Thrown by `diffBaseRef` rather than returned, because `..<head>`
+ * is a well-formed range git answers successfully and wrongly — see the measurement there.
+ */
+export class TridentEmptyBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing an empty base ref: ${JSON.stringify(base)}. The range \`..<head>\` is not an error — ` +
+        '`git diff --name-only` exits 0 with no output and `git rev-list --count` exits 0 printing 0 — ' +
+        'so an empty base yields a plausible wrong answer rather than a failure.',
+    )
+    this.name = 'TridentEmptyBaseError'
+  }
 }
 
 /**
