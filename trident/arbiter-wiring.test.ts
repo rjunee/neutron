@@ -32,7 +32,9 @@ import type { HostCommandResult } from './git-mode.ts'
 import {
   MAX_HISTORY_COMMITS_PER_SIDE,
   buildMergeCleanupDeps,
+  assembleEvidence,
   conflictEvidence,
+  truncationLog,
   CONFLICT_ARBITER_RETRY_OPTION,
   CONFLICT_ARBITRATION_OPTIONS,
   MAX_ARBITRATIONS_PER_REBASE,
@@ -1100,6 +1102,26 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
 
+  test('THE TRUNCATION CHANNEL: a shortened field cannot reach a completeness claim', async () => {
+    // DRIVEN DIRECTLY, because production cannot reach it today: every cap in `merge.ts` is the
+    // prompt budget itself, so anything long enough to be shortened is also over budget and the
+    // size bound fires first. That makes this a guard for the NEXT cap — which is the whole
+    // point, since six of the seven instances of this defect arrived as a new cap nobody
+    // re-audited. Leaving it untested would make it a comment.
+    const clean = truncationLog()
+    const ok0 = assembleEvidence('lead-in', [{ heading: 'H:', part: { kind: 'present', text: 'x' } }], clean)
+    expect('text' in ok0).toBe(true)
+    expect('text' in ok0 ? ok0.text : '').toContain('EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE')
+
+    // Now fold something past the budget through the SAME log the assembler consults.
+    const dirty = truncationLog()
+    const folded = dirty.fold('q'.repeat(ARBITER_PROMPT_BYTES_MAX + 10))
+    expect(folded.length, 'the fold really did shorten it').toBeLessThan(ARBITER_PROMPT_BYTES_MAX + 10)
+    const refused = assembleEvidence('lead-in', [{ heading: 'H:', part: { kind: 'present', text: 'x' } }], dirty)
+    expect('missing' in refused).toBe(true)
+    expect('missing' in refused ? refused.missing : '').toBe('evidence-truncated')
+  })
+
   test('THE SEAM PROPERTY: no arbiter call is reachable without COMPLETE evidence', async () => {
     // THE GENERALISATION OF THIS ROUND, and the reason it is a property rather than a case.
     // Round 14 removed a per-line cap on the grounds that the guarantee is about the SEAM and
@@ -1122,6 +1144,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       onBlob?: () => HostCommandResult | never
       onNumstat?: () => HostCommandResult | never
       onLog?: () => HostCommandResult | never
+      listingOk?: boolean
       stages?: readonly number[]
     }
     const shapes: Shape[] = [
@@ -1227,6 +1250,11 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         onDiff: () => ok('Binary files a/x and b/y differ\n'),
       },
       { name: 'numstat exits non-zero', conflicted: 'a.ts', onNumstat: () => fail('fatal: bad object') },
+      // THE UPSTREAM LISTING ITSELF. git reported a conflict and then refused to name the
+      // files; `[]` made that indistinguishable from a clean index.
+      { name: 'the conflicted-file listing fails', conflicted: 'a.ts', listingOk: false },
+      // A CALLER-CONTROLLED FIELD THAT GETS SHORTENED. Present, but not all of it.
+      { name: 'a filename past the fold cap', conflicted: `${'D'.repeat(60_000)}.ts` },
       { name: 'git log exits non-zero', conflicted: 'a.ts', onLog: () => fail('fatal: bad revision') },
       {
         name: 'git log throws',
@@ -1251,7 +1279,12 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         if (isUnmergedQuery(cmd)) {
           return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
         }
-        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(shape.conflicted)
+        // A HOST THAT CANNOT FAIL CANNOT TEST A FAILURE PATH. This one always answered the
+        // unresolved-file listing successfully, which is why the property could not see a
+        // failed listing being handed to the judge as "no conflicted paths reported".
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) {
+          return shape.listingOk === false ? fail('fatal: not a git repository') : ok(shape.conflicted)
+        }
         if (cmd.includes('--numstat')) {
           return shape.onNumstat === undefined ? ok('3\t1\ta.ts\n') : shape.onNumstat()
         }
@@ -1269,7 +1302,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         return ok()
       }
       // What the evidence layer concluded, read directly from the same host.
-      const evidence = await conflictEvidence(host, wt, shape.conflicted.split('\u0000'))
+      const evidence = await conflictEvidence(host, wt, { readable: shape.listingOk !== false, paths: shape.conflicted.split('\u0000') }, truncationLog())
       kinds[shape.name] = evidence.kind
       // And whether the judge was reached through the real seam.
       const { arbitrate, seen } = stubArbiter({
@@ -1322,6 +1355,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'numstat exits non-zero',
       'git log exits non-zero',
       'git log throws',
+      'the conflicted-file listing fails',
+      'a filename past the fold cap',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
     }
@@ -1331,6 +1366,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     // Established-but-unshowable is its OWN kind, never blurred into "could not read".
     expect(kinds['binary pair']).toBe('binary')
     expect(kinds['numstat exits non-zero']).toBe('unreadable')
+    expect(kinds['the conflicted-file listing fails']).toBe('unreadable')
     expect(kinds['enormous diff']).toBe('over-budget')
   })
 
@@ -1462,34 +1498,52 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
     expect(evidence).not.toContain('\u0007')
   })
 
-  test('an OVERSIZED filename is bounded, and one huge name cannot erase the others', async () => {
-    // Per-NAME folding is what buys the second half of that: folding the joined string
-    // would let one 60 KB path consume the budget and silently drop every sibling.
-    // THE SIBLING GOES FIRST, and that ordering is the whole detector. With the huge
-    // name last, folding the JOINED string still leaves the sibling visible — the cap
-    // keeps the TAIL, so the last entry survives by luck and the test passes for the
-    // wrong reason (verified by mutation). A sibling BEFORE the huge name is erased by
-    // joined folding and kept by per-name folding, which is the actual difference.
+  test('an OVERSIZED filename means the judge is NOT ASKED, not shown a shortened one', async () => {
+    // THIS TEST CODIFIED THE DEFECT. It asserted a 60,000-character path was BOUNDED and that
+    // arbiter evidence was still produced — i.e. that a caller-controlled field could be
+    // silently shortened and the result still handed over under a sentence saying nothing had
+    // been left out. The name was right about per-name folding; the expectation was wrong about
+    // what should follow from it.
+    //
+    // Shortening is now reported by the fold itself and reaches the same exit as a missing
+    // part: the evidence is refused and the owner gets the conflict.
+    const run = localRun('feat-bigname')
     const huge = `${'D'.repeat(60_000)}.ts`
-    const evidence = await evidenceFor('feat-bigname', ['sibling.ts', huge].join('\u0000'))
-    expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
-    // The sibling survived the oversized neighbour that follows it.
-    expect(evidence).toContain('sibling.ts')
-    // And the huge name is present but bounded — not silently dropped either.
-    expect(evidence).toContain('DDD')
+    const { host } = namedConflictHost(wtOf('/shared', run), ['sibling.ts', huge].join('\u0000'))
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    expect(seen.length, 'a shortened field must not be handed over as complete').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain('why=')
   })
 
-  test('MANY conflicted files are bounded by count, not just by name length', async () => {
-    // FORTY, NOT FOUR HUNDRED (#541 round 13). Four hundred conflicted files no longer
-    // reach the judge at all — the evidence goes over budget and the merge escalates — so
-    // the old fixture proved `renderPaths` bounded the summary by testing an input that
-    // never gets rendered. Forty is inside the budget and still far past `renderPaths`'
-    // limit of five, which keeps the assertion about the thing it names.
+  test('MANY conflicted files are COUNTED in the lead-in and each shown in full below', async () => {
+    // `renderPaths` used to bound this summary to five names plus "and N more" — a silent
+    // omission under a completeness claim. It bought nothing: every conflicted path already
+    // appears below as its own labelled section, in full, or the evidence is refused. The
+    // lead-in now states the number and points at the sections, which omits nothing because it
+    // never claims to be the list.
     const many = Array.from({ length: 40 }, (_, k) => `file-${k}.ts`).join('\u0000')
     const evidence = await evidenceFor('feat-manyfiles', many)
+    expect(evidence).toContain('40 file(s), each shown in full below')
+    expect(evidence).not.toContain('more')
+    // NOT VACUOUS: the names really are all there, including ones `renderPaths` would have cut.
+    expect(evidence).toContain('file-0.ts')
+    expect(evidence).toContain('file-39.ts')
     expect(Buffer.byteLength(evidence, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
-    // `renderPaths` names the first few and counts the rest.
-    expect(evidence).toContain('more')
   })
 
   test('an ORDINARY filename with a space is still readable — the fold is not a mangle', async () => {
@@ -2094,7 +2148,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\u0007\u0007\u0007y\n')
       return ok()
     }
-    const evidence = await conflictEvidence(host, '/shared', ['a.ts'])
+    const evidence = await conflictEvidence(host, '/shared', { readable: true, paths: ['a.ts'] }, truncationLog())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     // Three BELs → three spaces, not one.

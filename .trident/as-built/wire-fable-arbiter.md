@@ -1132,6 +1132,73 @@ M97 is the honest one: the docblock claimed column positions survive and nothing
 collapsing a run kept the boundary intact and silently shifted every column after it. A claim
 without a detector is a comment.
 
+### ROUND 21 — stop auditing call sites; make truncation observable
+
+**Instance six.** `listConflictedFiles` turned a non-zero `git diff --diff-filter=U` into `[]`,
+and `conflictEvidence` turned `paths.length === 0` into `{kind:'complete'}` with the body
+`(no conflicted paths reported)`. So git reported a conflict, refused to name the files, and the
+judge was handed that refusal as complete evidence. **An empty list and an unreadable list are
+different facts** — the `?? {}` defect, the same one this lane has now met as a failed diff, a
+described one-sided conflict, a contentless binary diff and a placeholder history.
+
+The seam-property test could not see it because **its host always made the listing succeed**. A
+host that cannot fail cannot test a failure path; the listing now has a failure shape and so
+does the stub.
+
+**Instance seven.** The completeness sentence was unconditional while three caller-controlled
+fields were being shortened under it: filenames through `foldEvidence`'s 300-character cap, the
+path summary through `renderPaths` (five names plus "and N more"), and the resolver's escalation
+question through the same 300-character cap. **And a test codified it** — a 60,000-character
+filename was expected to be bounded *and* still yield arbiter evidence. That is the third test I
+wrote which pinned the defect it was describing.
+
+**THE FIX IS THE ONE THAT ENDS THE SERIES, because auditing call sites is what produced
+instances two through seven.** The caller list is never finished, and a cap added later is
+invisible to every audit already done. So:
+
+1. **The fold primitive reports.** `foldEvidenceReporting` returns `{text, truncated}` — and it
+   reports **both** ways it can shorten. The `max` cut is the one an audit finds; the
+   `EVIDENCE_SCAN_MAX` window, which keeps only the last 64,000 characters before `defang` ever
+   runs, is the one it misses, and it carries **no marker of its own**, so the flag is the only
+   evidence it happened.
+2. **A per-arbitration collector carries the flags.** `TruncationLog.fold` is how a
+   caller-controlled value becomes text, so the flag travels with it and cannot be forgotten.
+3. **`assembleEvidence` derives the claim from the disjunction** and takes the same exit as a
+   missing part. The only thing that can produce the completeness sentence is the thing that
+   knows — so a future cap anywhere feeds the same channel and the claim stops being reachable
+   without anyone re-auditing.
+
+**Two truncating fields were deleted rather than flagged**, which is better than reporting them:
+the path summary now states a COUNT and points at the sections — every conflicted path already
+appears below in full, or the evidence is refused, so the lead-in omits nothing *because it
+never claims to be the list* — and every remaining fold uses the prompt budget.
+
+**And that leaves the truncation exit unreachable from production today**, which is worth saying
+rather than hiding: no cap is smaller than the budget, so anything long enough to be shortened
+is also over budget and the size bound fires first. **Found by mutation** — M100/M101/M102 all
+survived, because no fixture could truncate without also being over budget. The exit is a guard
+for the NEXT cap, which is exactly the point, and it is now unit-tested directly. A guard with
+no detector is a comment.
+
+**Mutations:**
+
+| # | mutation | result |
+|---|---|---|
+| M99 | a failed listing collapses back to `[]` | **red** |
+| M100 | the truncation disjunction is ignored | survived → **red** |
+| M101 | the fold stops reporting the `max` cut | survived → **red**, 2 tests |
+| M102 | the fold stops reporting the scan-window cut | survived → **red** |
+| M103 | the path label bypasses the truncation channel | **red**, 2 tests |
+
+### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
+
+Worth stating as its own finding rather than as an apology. The tests were written from the same
+understanding as the code, so they encoded the same mistake — a test cannot catch an error in
+the premise it shares. **The structural fixes are the only thing that broke the symmetry**,
+because they make the wrong behaviour *unrepresentable* rather than merely unasserted:
+`EvidencePart` for presence, the single `assembleEvidence` constructor for the claim, and the
+reporting fold for loss. Each one turns "I remembered to check" into "there is no way to say it".
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -1372,7 +1439,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Ninety-eight mutations reverted one at a time, each proved a test red. Eight survived a
+One hundred and three mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

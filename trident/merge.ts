@@ -79,7 +79,7 @@ import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 // or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
 // The back edge from that module is a TYPE import, so this closes no runtime cycle.
-import { foldEvidence, foldEvidenceTo, foldRefName } from './wrong-base-remedy.ts'
+import { foldEvidence, foldEvidenceReporting, foldEvidenceTo, foldRefName } from './wrong-base-remedy.ts'
 
 export type RunHostCommand = EnvCapableHostRunner
 
@@ -1683,13 +1683,22 @@ function isRebaseConflict(res: HostCommandResult): boolean {
  * `CONFLICTED FILES`. Git's default C-quoting renders `ünicode file.txt` as
  * `"\303\274nicode file.txt"`, naming a file the resolver cannot open.
  */
-async function listConflictedFiles(run_host: RunHostCommand, repo: string): Promise<string[]> {
+async function listConflictedFiles(
+  run_host: RunHostCommand,
+  repo: string,
+): Promise<{ readable: boolean; paths: string[] }> {
+  // READABLE IS CARRIED, NOT COLLAPSED INTO `[]` (#541 round 21). A failed listing and a clean
+  // index are different facts, and returning the empty array for both is the `?? {}` defect:
+  // downstream, `paths.length === 0` became "no conflicted paths reported" and was handed to
+  // the judge as COMPLETE evidence about a conflict git had just refused to describe. The
+  // resolver path keeps the old behaviour — it is handed `paths` either way — because an empty
+  // list there means "nothing to name", which is what it already did with it.
   const res = await run_host(
     ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
     repo,
   )
-  if (!res.ok) return []
-  return res.stdout.split('\0').filter((s) => s.length > 0)
+  if (!res.ok) return { readable: false, paths: [] }
+  return { readable: true, paths: res.stdout.split('\0').filter((s) => s.length > 0) }
 }
 
 /**
@@ -1973,12 +1982,12 @@ function quoteAll(text: string): string {
  * NO PAYLOAD ON THE TWO REFUSAL ARMS beyond a fixed reason literal. `over-budget` carries no
  * byte figure — the loop stops fetching once it knows the answer, so any number would mean "at
  * least this much" while reading as a total, which is verbatim the round-12 defect — and
- * `unreadable`'s `why` is one of four repo-authored words, never a path or a git message.
+ * `unreadable`'s `why` is one of five repo-authored words, never a path or a git message.
  */
 export type ConflictEvidence =
   | { kind: 'complete'; body: string }
   | { kind: 'over-budget' }
-  | { kind: 'unreadable'; why: 'index' | 'not-in-index' | 'diff' | 'blob' }
+  | { kind: 'unreadable'; why: 'listing' | 'index' | 'not-in-index' | 'diff' | 'blob' }
   /**
    * BINARY: established, and unshowable. Its own arm rather than `unreadable`, because the two
    * are different facts and the kill criterion has to tell them apart — a repo whose conflicts
@@ -2079,15 +2088,24 @@ async function unmergedStages(
 export async function conflictEvidence(
   run_host: RunHostCommand,
   repo: string,
-  paths: string[],
+  listing: { readable: boolean; paths: string[] },
+  // THE SAME COLLECTOR the caller hands to `assembleEvidence`. Passed in rather than created
+  // here so that one arbitration has ONE truncation channel: a path shortened in a section
+  // label and a resolver question shortened in the preamble are the same fact about the same
+  // evidence, and they must reach the completeness claim together.
+  shortened: TruncationLog,
 ): Promise<ConflictEvidence> {
+  // A LISTING WE COULD NOT READ IS UNKNOWN, never "no conflicted paths". git had just reported
+  // a conflict; being unable to name the files is a failure to establish it.
+  if (!listing.readable) return { kind: 'unreadable', why: 'listing' }
+  const paths = listing.paths
   if (paths.length === 0) return { kind: 'complete', body: '(no conflicted paths reported)' }
   const stages = await unmergedStages(run_host, repo)
   if (stages === null) return { kind: 'unreadable', why: 'index' }
   const sections: string[] = []
   let used = 0
   for (const path of paths) {
-    const label = `${QUOTE.trim()} --- ${foldEvidence(path)} (\`-\` = base, \`+\` = branch)`
+    const label = `${QUOTE.trim()} --- ${shortened.fold(path)} (\`-\` = base, \`+\` = branch)`
     // A path the caller called conflicted that the INDEX does not list as unmerged. Two
     // views of the same tree disagreeing is not a fact about the conflict, it is a fact
     // about our own reading of it — so it is unknown, not one-sided.
@@ -2290,6 +2308,31 @@ async function sideHistory(
 type EvidencePart = { kind: 'present'; text: string } | { kind: 'missing'; why: ArbiterNotAskedWhy }
 
 /**
+ * WHERE EVERY TRANSFORMATION THAT CAN DROP SOMETHING REPORTS IT.
+ *
+ * One collector per arbitration, handed to `assembleEvidence`, which is the only thing that can
+ * write the completeness claim. Folding a value goes through `fold` below, so a caller CANNOT
+ * obtain the text without the flag travelling with it — the audit-proof version of "check each
+ * call site", which is what produced six further instances of this defect.
+ */
+export interface TruncationLog {
+  fold: (value: string) => string
+  any: () => boolean
+}
+
+export function truncationLog(): TruncationLog {
+  let truncated = false
+  return {
+    fold: (value) => {
+      const folded = foldEvidenceReporting(value, ARBITER_PROMPT_BYTES_MAX)
+      if (folded.truncated) truncated = true
+      return folded.text
+    },
+    any: () => truncated,
+  }
+}
+
+/**
  * THE ONE PLACE THAT DECIDES WHETHER THE EVIDENCE IS COMPLETE, AND THE ONE PLACE THAT SAYS SO.
  *
  * The completeness sentence used to be a CONSTANT — written in the prompt template and again
@@ -2303,13 +2346,27 @@ type EvidencePart = { kind: 'present'; text: string } | { kind: 'missing'; why: 
  * completeness instead of to withholding: the fifth evidence component cannot arrive with a
  * fifth placeholder, because a `missing` part has no rendering at all.
  */
-function assembleEvidence(
+export function assembleEvidence(
   preamble: string,
   sections: readonly { heading: string; part: EvidencePart }[],
+  shortened: TruncationLog,
 ): { text: string } | { missing: ArbiterNotAskedWhy } {
   for (const section of sections) {
     if (section.part.kind === 'missing') return { missing: section.part.why }
   }
+  // FIDELITY, ON THE SAME CHANNEL AS PRESENCE (#541 round 21). A part that is HERE but SHORTER
+  // than it was cannot be described by a sentence saying nothing was left out, so it takes the
+  // identical exit. Every transformation that can drop anything reports through `shortened`,
+  // and this is the only thing that can produce the claim — so a cap added anywhere later feeds
+  // the same disjunction and the claim simply stops being reachable, without anyone auditing
+  // call sites again.
+  // REACHABILITY, STATED HONESTLY: no cap in this file is currently SMALLER than the prompt
+  // budget, so anything long enough to be shortened is also long enough to be over budget, and
+  // the size bound fires first. This exit is therefore a guard for the NEXT cap rather than a
+  // path production takes today — which is exactly the point, since six of the seven instances
+  // of this defect arrived as a new cap nobody re-audited. It is unit-tested directly for that
+  // reason; a guard with no detector is a comment.
+  if (shortened.any()) return { missing: 'evidence-truncated' }
   const body = sections
     .map((section) => `${section.heading}\n${section.part.kind === 'present' ? section.part.text : ''}`)
     .join('\n\n')
@@ -2358,7 +2415,11 @@ function assembleEvidence(
  * the first says the arbiter's useful range is narrow, the second says something is broken.
  * One event with a discriminator, not two events and not one blurred count.
  */
-export type ArbiterNotAskedWhy = 'over-budget' | 'evidence-unreadable' | 'evidence-binary'
+export type ArbiterNotAskedWhy =
+  | 'over-budget'
+  | 'evidence-unreadable'
+  | 'evidence-binary'
+  | 'evidence-truncated'
 type ArbitrationAttempt =
   | {
       kind: 'decided'
@@ -2390,7 +2451,7 @@ async function arbitrateConflict(
     repo: string
     base: string
     branch: string
-    conflicted: string[]
+    listing: { readable: boolean; paths: string[] }
     resolver_question: string
   },
 ): Promise<ArbitrationAttempt> {
@@ -2404,14 +2465,15 @@ async function arbitrateConflict(
   //
   // `foldEvidence` PER NAME, not over the joined string: folding the join would let
   // one enormous path consume the whole budget and silently erase the others, and a
-  // per-name cap is what makes each entry independently bounded. It folds every
-  // forgery codepoint and newline to an ASCII space, which keeps an ordinary path
-  // with a space in it readable (the arbiter has to be able to Read these) while
-  // removing any ability to start a new line. `renderPaths` then bounds the COUNT,
-  // so a thousand-file conflict cannot flood the prompt either.
+  // A COUNT, NOT A TRUNCATED LIST (#541 round 21). This summary used to fold each name at
+  // `foldEvidence`'s 300-character cap and then hand the result to `renderPaths`, which names
+  // five and counts the rest — two silent omissions under a sentence promising nothing was left
+  // out. Neither was buying anything: EVERY conflicted path already appears below as its own
+  // labelled section, in full, or the evidence is refused. So the lead-in states the number and
+  // points at the sections, which omits nothing because it never claimed to be the list.
   const files =
-    ctx.conflicted.length > 0
-      ? renderPaths(ctx.conflicted.map((path) => foldEvidence(path)))
+    ctx.listing.paths.length > 0
+      ? `${ctx.listing.paths.length} file(s), each shown in full below`
       : '(unnamed)'
   // THE REF NAMES, FOLDED ONCE (#541 review round 7). `branch` and `base` were the
   // fourth and fifth untrusted inputs into this prompt and the two that went in raw:
@@ -2433,7 +2495,8 @@ async function arbitrateConflict(
   // one bounded read-only pass over material it cannot extend.
   // THE CONFLICT ITSELF — the one thing a toolless judge cannot obtain and must have
   // (round 9). Without it the turn was choosing on filenames alone.
-  const hunks = await conflictEvidence(ctx.run_host, ctx.repo, ctx.conflicted)
+  const shortened = truncationLog()
+  const hunks = await conflictEvidence(ctx.run_host, ctx.repo, ctx.listing, shortened)
   // NOT ASKED ON EVIDENCE WE DID NOT ESTABLISH (#541 round 15). `unreadable` used to be
   // reported as `complete` with a sentence that hedged between "one side only" and "git could
   // not read it", so a failed read reached the judge under an assurance that nothing had been
@@ -2455,7 +2518,7 @@ async function arbitrateConflict(
     `Rebasing \`${safeBranch}\` onto \`${safeBase}\`. ` +
       `Conflicted files (markers still present in your cwd): ${files}. The resolver was ` +
       `asked to keep both intents and stage the result; it reported instead: ` +
-      `"${foldEvidence(ctx.resolver_question)}".`,
+      `"${shortened.fold(ctx.resolver_question)}".`,
     [
       {
         heading: 'THE CONFLICT (`-` is the base\'s version, `+` is the branch\'s):',
@@ -2470,6 +2533,7 @@ async function arbitrateConflict(
         part: baseHistory,
       },
     ],
+    shortened,
   )
   if ('missing' in assembled) return { kind: 'not-asked', why: assembled.missing }
   const evidence = assembled.text
@@ -2692,7 +2756,8 @@ async function rebaseBranchOntoBase(
       )
     }
     rounds++
-    const conflicted = await listConflictedFiles(run_host, repo)
+    const listing = await listConflictedFiles(run_host, repo)
+    const conflicted = listing.paths
     // The ORIGINAL branch commit git is replaying right now. A round we cannot
     // attribute to a commit is attributed to NONE — it simply does not count
     // toward coverage, so the path stays held rather than being exempted on the
@@ -2780,7 +2845,7 @@ async function rebaseBranchOntoBase(
               repo,
               base,
               branch,
-              conflicted,
+              listing,
               resolver_question: outcome.question,
             })
           : null

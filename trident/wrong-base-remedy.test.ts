@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   composeWrongBaseRefusal,
   foldEvidence,
+  foldEvidenceReporting,
   probePidLiveness,
   probeTreeOccupancy,
   TOTAL_BUDGET_MS,
@@ -2775,5 +2776,24 @@ describe('composeWrongBaseRefusal: the invisible characters, the equals spelling
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('#541 round 21 — the fold reports what it dropped', () => {
+  test('BOTH ways it can shorten are reported, not just the obvious one', () => {
+    // The `max` cut is the one an audit finds. `EVIDENCE_SCAN_MAX` is the one it misses: an
+    // enormous input keeps only its last 64,000 characters before `defang` ever runs, and a
+    // caller promising completeness has to know that happened too.
+    expect(foldEvidenceReporting('short', 1000)).toEqual({ text: 'short', truncated: false })
+
+    const overMax = foldEvidenceReporting('a'.repeat(500), 100)
+    expect(overMax.truncated, 'the max cut is reported').toBe(true)
+    expect(overMax.text.startsWith('…')).toBe(true)
+
+    // Longer than the scan window but folded under a generous max: the ONLY signal that
+    // anything was lost is the flag.
+    const scanned = foldEvidenceReporting('b'.repeat(70_000), 1_000_000)
+    expect(scanned.truncated, 'the scan-window cut is reported').toBe(true)
+    expect(scanned.text.startsWith('…'), 'and it carries no marker of its own').toBe(false)
   })
 })

@@ -663,8 +663,32 @@ export function foldEvidence(s: string): string {
  * stderr are the ones that explain a failure.
  */
 export function foldEvidenceTo(s: string, max: number): string {
-  const folded = defang(s.length > EVIDENCE_SCAN_MAX ? s.slice(-EVIDENCE_SCAN_MAX) : s)
-  return folded.length > max ? `…${folded.slice(-max)}` : folded
+  return foldEvidenceReporting(s, max).text
+}
+
+/**
+ * The same fold, but it SAYS WHETHER IT DROPPED ANYTHING (#541 round 21).
+ *
+ * WHY THE PRIMITIVE REPORTS RATHER THAN THE CALLERS AUDITING. Seven times on one branch, some
+ * function quietly returned less than it was given while a CONSTANT sentence elsewhere said
+ * nothing was lost. Fixing that by checking call sites is what produced instances two through
+ * seven: the caller list is never finished, and a cap added later is invisible to every audit
+ * already done.
+ *
+ * So the transformation itself carries the fact. A caller that needs to promise completeness
+ * takes `truncated` from here and cannot construct the promise without it — the same move as
+ * `EvidencePart`, one layer down: for PRESENCE a missing part has no rendering, and for FIDELITY
+ * a shortened one arrives already flagged.
+ *
+ * BOTH ways this can shorten are reported, which is the part an audit would have missed: the
+ * `max` cut is the obvious one, and `EVIDENCE_SCAN_MAX` silently keeps only the last 64,000
+ * characters of an enormous input before `defang` ever runs.
+ */
+export function foldEvidenceReporting(s: string, max: number): { text: string; truncated: boolean } {
+  const scanned = s.length > EVIDENCE_SCAN_MAX
+  const folded = defang(scanned ? s.slice(-EVIDENCE_SCAN_MAX) : s)
+  if (folded.length > max) return { text: `…${folded.slice(-max)}`, truncated: true }
+  return { text: folded, truncated: scanned }
 }
 
 /**
