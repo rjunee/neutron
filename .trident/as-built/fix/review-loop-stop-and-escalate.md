@@ -54,7 +54,19 @@ subtraction can collide, a construction cannot.
 The instruction became load-bearing in the process, because nothing in the code removes a
 line number any more, so it is pinned in all four places it is said (the schema and the
 three prompts) — the legitimate kind of source assertion, since a schema is data handed to
-the model and has no behaviour to execute. Six mutations, each applied individually, all
+the model and has no behaviour to execute.
+
+THE STRONGER VERSION WAS CONSIDERED AND DEFERRED, deliberately rather than silently:
+building identity from NAMED fields (`file`, `symbol`, `rule`, with `line` in its own slot)
+would make it structurally impossible for a line number to reach identity, instead of
+instructing against it. It is filed as #657 with the reasoning. It was not done here
+because it changes the model-facing schema, all three prompts, the decoder and every
+fixture across ~six suites, and what it buys is converting a failure that is ALREADY the
+safe direction into no failure at all. It also does not fix the remaining over-fire case —
+a model that gives two different defects the same key still collides, and no schema shape
+prevents that; the `undecidable` third answer and the no-progress backstop are what cover
+it. The one thing #657 must not do is "named fields when present, else parse the key":
+that is two rules that must agree, which is the shape that produced this defect. Six mutations, each applied individually, all
 RED: restoring the strip, a narrower positional strip, an identity that never matches, one
 that stops normalising case, one that makes a moved line escalate, and one that drops the
 instruction.
