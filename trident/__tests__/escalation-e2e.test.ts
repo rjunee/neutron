@@ -39,6 +39,18 @@ interface ScriptedRound {
 interface RunOpts {
   rounds: ScriptedRound[]
   maxRounds?: number
+  /** What the bounded re-plan reports as its `complexity` tag. 'mechanical' is the case
+   *  the guard exists for: `modelForTag` routes it to Sonnet, so adopting it wholesale
+   *  would DOWNGRADE the executor on a run that just proved hard enough to need
+   *  re-planning. */
+  rePlanComplexity?: 'mechanical' | 'reasoning'
+  /** Seats that return NOTHING — dispatched, and the agent died. The only way to make a
+   *  real panel come back `infra-only` is to kill one of its seats. */
+  deadSeats?: readonly string[]
+  /** The first round the seats above die on (default 1). A round that JUDGED the code
+   *  followed by one that did not is the only sequence in which the ledger's
+   *  "record 'code' rounds only" guard has an observable consequence. */
+  deadSeatsFromRound?: number
   /** What the bounded re-plan's `plan:fable` seat does. `throws` is the case a
    *  source read cannot distinguish from the others: `agent()` REJECTS on a transport
    *  error, a schema refusal or an exhausted retry, and an uncaught rejection leaves
@@ -49,6 +61,11 @@ interface RunOpts {
 interface Captured {
   label: string
   prompt: string
+  /** The MODEL the seat was actually routed to. Captured because "the re-plan may raise
+   *  the executor tag but never lower it" is a claim about routing, and routing is a
+   *  behaviour — asserting the source line that sets `complexityTag` proves only that a
+   *  string exists. */
+  model: unknown
 }
 
 /** The marker the re-plan puts in its execution spec, so "did it reach Forge?" is a
@@ -81,9 +98,10 @@ async function runWorkflow(
   const roundFor = (n: number): ScriptedRound =>
     opts.rounds[Math.min(n, opts.rounds.length) - 1] ?? { findings: [] }
 
-  const agent = async (prompt: string, o?: { label?: string }): Promise<unknown> => {
+  const agent = async (prompt: string, o?: { label?: string; model?: unknown }): Promise<unknown> => {
     const label = String(o?.label ?? '')
-    captured.push({ label, prompt })
+    captured.push({ label, prompt, model: o?.model })
+    if ((opts.deadSeats ?? []).includes(label) && synthCount + 1 >= (opts.deadSeatsFromRound ?? 1)) return null
     // Each round's commit is DIFFERENT, so the branch visibly moves and the round lands.
     const shaFor = (n: number): string => String(n).padStart(2, '0').repeat(20)
     const built = /^head-probe-round-built-r(\d+)$/.exec(label)
@@ -116,13 +134,14 @@ async function runWorkflow(
         implementationPlan: '- [ ] the revised task',
         topTask: 'the revised task',
         executionSpec: `TARGET FILES: x.ts — ${REPLAN_SPEC_MARKER}`,
-        complexity: 'reasoning',
+        complexity: opts.rePlanComplexity ?? 'reasoning',
         remainingTasks: 0,
       }
     }
     if (label === 'argus:synthesis') {
       synthCount += 1
       const r = roundFor(synthCount)
+      if (r.findings.length === 0) return { verdict: 'REQUEST_CHANGES', findings: [] }
       return {
         verdict: 'REQUEST_CHANGES',
         findings: r.findings,
@@ -428,6 +447,100 @@ describe('a design gap with NO ROUND LEFT to re-plan in', () => {
     })
     expect(labels(captured, 'plan:fable')).toEqual(['plan:fable'])
     expect(result.escalation).toBeUndefined()
+  })
+})
+
+describe('the routing the re-plan performs, executed rather than grepped', () => {
+  test('HEADLINE: a re-plan tagged `mechanical` does NOT downgrade the fix round’s model', () => {
+    // `modelForTag` routes 'mechanical' to Sonnet and everything else to Opus, so
+    // adopting the re-plan's tag wholesale silently downgraded the executor on a run
+    // that had just proved hard enough to need re-planning — and on the rounds whose
+    // APPROVE ships the change. Asserted on the model the fix round was ACTUALLY routed
+    // to: the source line that sets `complexityTag` proves only that a string exists.
+    return runWorkflow({
+      maxRounds: 4,
+      rePlanComplexity: 'mechanical',
+      rounds: [
+        {
+          findings: [finding('a:b:c'), finding('d:e:f'), finding('g:h:i')],
+          escalate: { kind: 'design-gap', whatIsMissing: 'the plan asked for it' },
+        },
+        { findings: [finding('j:k:l'), finding('m:n:o')] },
+        { findings: [finding('p:q:r')] },
+        { findings: [finding('s:t:u')] },
+      ],
+    }).then(({ captured }) => {
+      const fix = captured.find((c) => c.label === 'forge:fix-round-2')
+      expect(fix).toBeDefined()
+      // `models.opus` from the args below; `models.sonnet` is what a downgrade produces.
+      expect(fix?.model).toBe('opus')
+      expect(fix?.model).not.toBe('sonnet')
+      // …and the re-plan DID run, so this is the guard holding and not the re-plan
+      // having been skipped.
+      expect(labels(captured, 'plan:fable')).toEqual(['plan:fable'])
+      expect(fix?.prompt).toContain(REPLAN_SPEC_MARKER)
+    })
+  })
+
+  // THERE IS NO USEFUL CONTROL FOR THE `reasoning` CASE, and saying so is better than
+  // shipping one that looks like a control. `modelForTag` maps BOTH `null` (no tag) and
+  // `'reasoning'` to the same model, so "the re-plan adopted reasoning" has no observable
+  // consequence at all: a version that adopted nothing routes identically. The only
+  // behaviour the tag can change is the `mechanical` downgrade, and that is exactly what
+  // the test above asserts. (Mutation-checked: a production change that never adopts the
+  // tag leaves every assertion here green, because there is nothing to see.)
+})
+
+describe('a round that did NOT judge the code is kept out of the ledger', () => {
+  test('HEADLINE: a CODE round followed by a DEAD SEAT is reported as infra-only, not as a plan defect', async () => {
+    // THE SEQUENCE IS THE TEST. A run that exits on its FIRST non-code round cannot tell
+    // you whether the ledger recorded it — the loop leaves either way. The guard only
+    // becomes observable when a round that JUDGED the code is followed by one that did
+    // not: without it the dead seat's lane finding lands in the ledger, the arithmetic
+    // reads it as a round that failed to converge, and the run reports `not-converging`
+    // — a kind that asserts a DESIGN DEFECT — about a review that never happened.
+    // Measured with the guard removed: `blockKind` becomes 'not-converging' and an
+    // escalation appears, on a run whose second panel simply died.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 6,
+      deadSeats: ['argus:claude'],
+      deadSeatsFromRound: 2,
+      rounds: [
+        // A severity outside the four the schema names: `isCodeWorkFinding` counts it as
+        // code work (unknown severity is fail-closed) so round 1 is a genuine 'code'
+        // round, while `blockingFindingCount` does not count it — which is what lets the
+        // dead seat's own lane blocker raise the count on round 2.
+        { findings: [{ severity: 'weird', title: 't', evidence: 'e', key: 'a:b:c' } as never] },
+        { findings: [] },
+      ],
+    })
+    expect(result.blockKind).toBe('infra-only')
+    expect(result.blockKind).not.toBe('not-converging')
+    expect(result.escalation).toBeUndefined()
+    expect(result.round).toBe(2)
+    expect(labels(captured, 'forge:fix-round-')).toEqual(['forge:fix-round-2'])
+  })
+
+  test('a dead review seat on round ONE exits infra-only and escalates NOTHING', async () => {
+    // An infra-only round says nothing about whether the PLAN is wrong. Folding one into
+    // the ledger would let a dead review seat look like a finding that failed to
+    // converge, and report a lane outage under a kind that asserts a design defect.
+    //
+    // Reached the only way a real panel can reach it: kill a core seat and give the
+    // synthesis no findings of its own, so the run exits with `infra-only` on round 1.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 6,
+      deadSeats: ['argus:claude'],
+      rounds: [{ findings: [] }, { findings: [] }],
+    })
+    expect(result.blockKind).toBe('infra-only')
+    // NOT an escalation kind — the run must not claim a design defect it did not measure.
+    expect(result.escalation).toBeUndefined()
+    expect(result.blockKind).not.toBe('not-converging')
+    // …and it stopped at round 1 without spending a fix round, which is the pre-existing
+    // infra-only exit doing its job unchanged.
+    expect(labels(captured, 'forge:fix-round-')).toEqual([])
+    expect(result.round).toBe(1)
   })
 })
 

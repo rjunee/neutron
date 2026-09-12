@@ -316,6 +316,45 @@ type guard, so widening the set is one edit that necessarily moves both, and
 against the CHECK constraint in the committed schema snapshot — the one statement of the
 set a database will actually enforce.
 
+### A SOURCE-TEXT ASSERTION BREAKS WHEN THE BEHAVIOUR IS CORRECTLY IMPROVED
+
+This one arrived on its own and is worth more than the code it cost. A wiring test
+required the literal `if (!rePlan || typeof rePlan.executionSpec !== 'string' …)`.
+Production then replaced that string comparison with a computed failure classification —
+an unambiguous improvement, made to close a real gap — and the ONLY thing that noticed was
+the test asserting the old string. CI went red on a correct change.
+
+So the argument against source-text assertions is stronger than "they do not prove
+behaviour": they actively BREAK when behaviour improves, and the version of that defect
+which does NOT cost a round is the one where the string happens to survive a change that
+broke the behaviour. Both directions are wrong; only one of them is loud.
+
+The wiring suite was therefore DELETED rather than repaired — eight source-text and
+call-count assertions across six tests, every one of them standing in for something the
+executed suite now asserts directly (the gate consulted after each re-review, the findings
+reaching the planner, exactly one re-plan per run, a planner that produced nothing
+escalating, the terminal result carrying the escalation, the executor tag never lowered).
+Keeping both would leave the weaker one to fail again the next time the stronger one is
+satisfied by better code.
+
+TWO SURVIVE, and the rule for what may: an assertion about SOURCE is legitimate only where
+there is no behaviour to execute. The review SCHEMA is data handed to the model and is
+never validated in-process, so its literal IS the deliverable. And the claim being read
+off `synthesisRaw` rather than `gated` is not reachable by execution — `gated` SPREADS the
+seat's reply, so both readings behave identically on every input a test can build without
+also driving the CI seam — while remaining the guard that stops this file's own advisories
+being laundered into a reviewer's judgement.
+
+TWO WERE CONVERTED rather than deleted, and converting them found things. "The re-plan
+may raise the executor tag but never lower it" is now asserted on the MODEL the fix round
+was actually routed to — and writing it showed there is no useful control for the
+`reasoning` case at all, because `modelForTag` maps both `null` and `'reasoning'` to the
+same model, so adopting it has no observable consequence; the suite says that instead of
+shipping a control that looks like one. "The ledger records only rounds that judged the
+code" needed a SEQUENCE to be observable — a code round followed by a dead seat — and with
+the guard removed that run reports `not-converging`, a kind asserting a DESIGN DEFECT,
+about a review that never happened.
+
 ### The wiring is executed, not grepped
 
 `trident/__tests__/escalation-e2e.test.ts` runs the shipped `inner-workflow.mjs` body

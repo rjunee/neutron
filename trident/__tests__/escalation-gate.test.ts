@@ -424,70 +424,31 @@ describe('what the gate is allowed to look at — the findings the FIX ROUND was
   })
 })
 
-describe('the WIRING — the shipped loop actually consults the gate', () => {
-  // The behavioural tests above prove the gate decides correctly. These prove the loop
-  // ASKS it — the half that a unit test of a pure function can never cover, and the half
-  // that would leave a perfectly-tested gate switched off in production.
+describe('what is asserted from the SOURCE, and why only these two things are', () => {
+  // THE REST OF THIS SUITE'S WIRING TESTS ARE GONE, deleted rather than repaired, and
+  // the reason arrived on its own: one of them required the literal
+  // `if (!rePlan || typeof rePlan.executionSpec !== 'string' …)`. Production replaced
+  // that string comparison with a computed failure classification — an unambiguous
+  // improvement, and the only thing that noticed was a test asserting the old string.
+  //
+  // So a source-text assertion does not merely fail to prove behaviour: it BREAKS when
+  // the behaviour is correctly improved, and the version of that defect which does not
+  // cost a round is the one where the string happens to survive a change that broke the
+  // behaviour. Everything those tests stood in for — the gate being consulted after each
+  // re-review, the findings reaching the planner, exactly one re-plan per run, a planner
+  // that produced nothing escalating, the terminal result carrying the escalation, and
+  // the executor tag never being lowered — is asserted BY EXECUTION in
+  // `escalation-e2e.test.ts`, which is strictly stronger. Keeping both would leave the
+  // weaker one to fail again the next time the stronger one is satisfied by better code.
+  //
+  // TWO THINGS SURVIVE, because neither has any behaviour to execute:
 
-  test('the fix loop records EVERY completed review round and decides after the re-review', () => {
-    // Two call sites: round 1 (before the loop) and the end of each fix round (after the
-    // re-review, which is the only moment two rounds of findings both exist).
-    const calls = WORKFLOW_SRC.match(/recordRoundForEscalation\(round, synthesis\)/g) ?? []
-    expect(calls.length).toBe(2)
-    // …and the fix-round one comes AFTER the assignment it reads, not before it.
-    const decideAt = WORKFLOW_SRC.lastIndexOf('recordRoundForEscalation(round, synthesis)')
-    const reviewAt = WORKFLOW_SRC.lastIndexOf('synthesis = withSuiteBlocker(await runReviewRound(diffFile, round, pr, null, fixSuiteFindings)')
-    expect(reviewAt).toBeGreaterThan(-1)
-    expect(decideAt).toBeGreaterThan(reviewAt)
-  })
-
-  test('the ledger only records a round that JUDGED THE CODE', () => {
-    // An infra-only or advisory-only round says nothing about whether the PLAN is wrong.
-    // Folding one in would let a dead review seat look like a finding that failed to
-    // converge, and report a lane outage under a kind that asserts a design defect.
-    expect(WORKFLOW_SRC).toContain("if (s === null || typeof s !== 'object' || s.blockKind !== 'code') return")
-  })
-
-  test('the RE-PLAN is handed the reviewers’ findings — the input the planner never had', () => {
-    // "A `design-gap` buys exactly ONE bounded re-plan per run, WITH THE FINDINGS
-    // ATTACHED." A re-plan that cannot see what the reviewers said is the same deaf
-    // planner that produced the bad plan, run a second time at full price.
-    const at = WORKFLOW_SRC.indexOf('function rePlanPrompt(')
-    expect(at).toBeGreaterThan(-1)
-    const body = WORKFLOW_SRC.slice(at, at + 4000)
-    expect(body).toContain('JSON.stringify(findings)')
-    expect(body).toContain('${whatIsMissing}')
-    // It runs INSIDE the loop, which is the whole correction to constraint (iii).
-    expect(WORKFLOW_SRC).toContain('rePlanPrompt(')
-    expect(WORKFLOW_SRC).toContain("withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA })")
-  })
-
-  test('the re-plan may RAISE the executor model but never LOWER it', () => {
-    // `modelForTag` routes 'mechanical' to Sonnet/medium and everything else to
-    // Opus/high. Adopting the re-plan's tag wholesale let a re-plan DOWNGRADE the model
-    // on a run that had just proved hard enough to need re-planning — silently, and on
-    // the rounds whose APPROVE ships the change.
-    expect(WORKFLOW_SRC).toContain("if (rePlan.complexity === 'reasoning') complexityTag = rePlan.complexity")
-    // The bare assignment must be gone: it is the shape that could lower the tag.
-    expect(WORKFLOW_SRC).not.toContain('\n      complexityTag = rePlan.complexity')
-  })
-
-  test('the re-plan is counted when AUTHORISED, so a second cannot be granted mid-flight', () => {
-    expect(WORKFLOW_SRC).toContain('replansUsed += 1')
-    expect(WORKFLOW_SRC).toContain('rePlanPending = true')
-  })
-
-  test('a re-plan that produced nothing ESCALATES — it is not a successful re-plan', () => {
-    // `false`, `threw` and `succeeded-with-impossible-output` are all unknown. A planner
-    // seat that returned null, or a plan with no execution spec, has not re-planned; going
-    // on would send Forge in with the ORIGINAL plan while the run's one re-plan is
-    // recorded as spent.
-    expect(WORKFLOW_SRC).toContain("if (!rePlan || typeof rePlan.executionSpec !== 'string' || rePlan.executionSpec.trim() === '')")
-  })
-
-  test('the review schema REQUIRES a key on every finding, and offers the escalate channel', () => {
-    // The prerequisite: without a reviewer-emitted identity the repeat gate is a matcher
-    // over free text, which the item rules out.
+  test('the review SCHEMA requires a finding key and offers the escalate channel', () => {
+    // A schema is DATA handed to the model, not code this process runs: nothing in a
+    // test can execute it, and the run under test never validates against it (the
+    // harness supplies replies directly). The literal IS the deliverable here — without
+    // a reviewer-emitted identity the repeat gate is a matcher over free text, which the
+    // spec item rules out — so a literal is the honest thing to assert.
     expect(WORKFLOW_SRC).toContain("required: ['severity', 'title', 'evidence', 'key'],")
     expect(WORKFLOW_SRC).toContain("required: ['kind', 'whatIsMissing'],")
     expect(WORKFLOW_SRC).toContain("enum: ['design-gap', 'missing-dependency'],")
@@ -495,15 +456,14 @@ describe('the WIRING — the shipped loop actually consults the gate', () => {
 
   test('the claim is read off the SEAT’s own reply, not off the merged findings', () => {
     // `gated` has this file's own CI advisories, suite blockers and lane findings merged
-    // into it. A declaration that the plan is wrong is a REVIEWER's judgement or it is
-    // nothing, so it is taken from `synthesisRaw` — the panel's answer before any of that.
+    // into it, and it SPREADS the seat's reply — so a run that read the claim from
+    // `gated` behaves identically on every input a test can construct without also
+    // driving the CI seam into injecting findings. The distinction is therefore not
+    // reachable by execution here, and it is worth keeping because it is the laundering
+    // guard: a declaration that the plan is wrong is a REVIEWER's judgement or it is
+    // nothing. Stated as two short identifiers rather than a whole expression, so an
+    // ordinary refactor of the surrounding code does not break it.
     expect(WORKFLOW_SRC).toContain('synthesisRaw.escalate')
     expect(WORKFLOW_SRC).not.toContain('gated.escalate')
-  })
-
-  test('the terminal result reports the escalation as its OWN block kind', () => {
-    expect(WORKFLOW_SRC).toContain('escalation !== null\n            ? escalation.kind')
-    expect(WORKFLOW_SRC).toContain('whatIsMissing: escalation.whatIsMissing,')
-    expect(WORKFLOW_SRC).toContain('triggers: escalation.triggers,')
   })
 })
