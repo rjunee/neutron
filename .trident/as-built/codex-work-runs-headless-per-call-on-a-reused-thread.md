@@ -324,6 +324,44 @@ which needs no parentage to be sound. Two of the ten criteria named an instrumen
 than their claim, which suggests this question earns a standing place rather than a
 one-off.
 
+**Widen, then scope BOTH sides — the instrument and the violation.** Every over-strict
+criterion on this PR arrived immediately after a widening, and the fourth instance showed
+why the procedure as first written was incomplete. Having fixed the state check's
+*exclusion* to be lexical, its *inclusion* widened past the property: clause (c) rejected
+any symlink resolving anywhere into the selected home, so a harmless
+`/tmp/codex-sessions -> <home>/sessions` violated it though no credential had escaped.
+Same check, same round, opposite side. The inclusion clauses are now scoped to
+**credential-bearing** files and inodes, because the property is about credentials
+escaping and not about anything referring to the directory.
+
+The scan was also unbounded — *"walk the filesystem"* is not implementable, and a negative
+over an undefined set asserts nothing. It now walks a **controlled root the test creates
+and owns**: the selected home, the worktree, the adapter's state dir, and the temp dir the
+adapter is given.
+
+So the procedure is: **widen the instrument, then scope what it looks at *and* what it
+counts as a violation.** Scoping only the first is what produced four over-strict criteria
+from four correct widenings.
+
+**And a route that works, that nothing needs, was deleted rather than certified.** The
+acceptance had required escalation-capable work to drive a real escalation to completion
+through codex's `auto_review` — the same reviewer this record states was **never observed
+denying**. That would have certified codex authorizing its own privileged actions, and a
+certified route gets used. Nothing in scope needs one: review reads a diff and the build
+runs `--sandbox danger-full-access` so it never requests an escalation. The measurement
+stays — test (c) is satisfiable on both call shapes, and that is the answer to the owner's
+criterion — but the adapter ships no approval routing at all, and every argv is asserted to
+carry none. The negative half survives and is the point of the criterion now: a call built
+with `approval_policy=on-request` and no reviewer must be refused **before dispatch**,
+because codex answers that combination with exit 0 and no event.
+
+Deleting it had a consequence worth recording, because it is the fourth question in action:
+the startup probe validated `sandbox_mode`, `approval_policy` and `approvals_reviewer` as
+*"every config key the adapter passes"* — and two of the three were no longer passed. A
+probe over a key nothing depends on fails the build for a capability we do not use. The
+list is now `sandbox_mode` alone. **Removing a feature leaves claims about it behind**, and
+they have to be chased in the same change.
+
 **Raising an instrument has a cost, and it is question 2.** Both over-strict criteria on
 this PR arrived *immediately after* a widening, and that is not coincidence. A grep sees
 only what you named; a write-observer sees **every** write in the process tree, including
@@ -480,7 +518,7 @@ pass; six were not:
 | credential scrub | `bash -lc "codex …"`, whose login shell re-sources the profile and can re-export a scrubbed key |
 | symlink sharing | a rotation performed *through the secondary path*, replacing the link with a regular file |
 | overlapping calls | a single global lock — "B waited" passes while every unrelated call serializes too |
-| approvals (found) | never escalating at all, satisfying the "not requested" branch |
+| approvals (found) | never escalating at all, satisfying the "not requested" branch — *fix later reversed: the escalation requirement was deleted outright, see below* |
 | startup probe (found) | a stub that accepts `resume` but rejects `sandbox_mode`, failing mid-turn |
 | startup probe, again | **no negative case for a missing `resume` subcommand** — the one capability with a measured in-tree breakage was the one the negatives skipped |
 

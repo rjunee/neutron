@@ -122,12 +122,10 @@ the adapter's.
    approval_policy=on-request` alone makes codex refuse an escalation outright, with
    **exit 0** and no event, so a caller that sets it without a reviewer gets a task
    silently not done. The only headless mechanism is codex's own automatic-review
-   subagent, and there is **one form for every call**: `-c approval_policy=on-request`
-   with `-c approvals_reviewer=auto_review`, measured working on a first call and on a
-   resumed one alike. `--approve-for-me` is the same thing spelled as a flag and is
-   **not used**, because it does not exist on `codex exec resume` — one form that works
-   everywhere beats two that must be selected by call shape. **It is not a safety
-   control**
+   subagent — measured working on a first call and a resumed one alike, as
+   `-c approval_policy=on-request` with `-c approvals_reviewer=auto_review`. **The adapter
+   does not use it.** That measurement answers the owner's test (c) and belongs in the
+   record; it is not a route this item ships, because **it is not a safety control**
    — the spike did not establish that it ever denies. Therefore: work that needs an
    approval *decision* does not run on headless codex, and an approval that must
    reach the **owner** never does — owner questions flow from the orchestrator
@@ -136,7 +134,8 @@ the adapter's.
    never escalates, and review reads a diff.
 7. **The CLI's contract is probed at startup, not assumed.** Before the first turn,
    the adapter verifies the surface it depends on — the `resume` **subcommand**, and
-   the config keys it passes — and refuses with a distinct unsupported-version
+   the config keys it actually passes (`sandbox_mode`; the list narrows whenever the
+   adapter stops depending on a key) — and refuses with a distinct unsupported-version
    outcome if it is absent, recording `codex --version` either way. A probe rather
    than a pinned version string, because the wrappers do not install codex (they
    check `command -v codex` and degrade to NOT_CONNECTED,
@@ -287,11 +286,19 @@ form; the "kills:" note names what the earlier form let through.
 
 - [ ] **An account's credentials are never materialised anywhere outside the selected
       existing home.** verify by **checking the resulting state, not the act that produced
-      it**: after a full call cycle, walk the filesystem and assert that **no path outside
+      it**. The scan must be **finite and owned by the test**: give the test a controlled
+      root it creates — containing the selected `CODEX_HOME`, the worktree, the adapter's
+      state dir and a writable temp dir the adapter is given — and walk **that root**, not
+      the filesystem. An unbounded walk is not implementable, and a negative over an
+      undefined set means nothing.
+      After a full call cycle, assert that **no path inside the controlled root but outside
       the selected `CODEX_HOME`**
       (a) contains the credential's contents — match on a token value seeded for the test;
-      (b) is a **hard link to the canonical `auth.json`'s inode**; or
-      (c) is a **symlink resolving into that home**.
+      (b) is a **hard link to the inode of a credential-bearing file** in that home; or
+      (c) is a **symlink resolving to a credential-bearing file** in that home.
+      **(b) and (c) are scoped to credential-bearing files, not to the home.** A symlink to
+      `<home>/sessions` exposes no credential and must not fail this — the property is
+      about credentials escaping, not about anything referring to the directory.
       This is instrument-independent: it does not care whether the path arrived by
       `copyFile`, `link`, `symlink`, `rename`, a shell redirect, or a syscall from a
       grandchild — and the filesystem is the only observer that sees **every** process,
@@ -302,7 +309,8 @@ form; the "kills:" note names what the earlier form let through.
       catches 3 of 4 routes. With lexical exclusion it catches 4 of 4. The escape lives in
       the exclusion rule, not the detection rule.
       Permitted and required not to fail: everything **inside** the selected home,
-      including replacement of its own `auth.json` — codex rotates the refresh token there
+      including replacement of its own `auth.json`; and any reference from outside to a
+      **non-credential** path within it — codex rotates the refresh token there
       (`trident/codex-credential.ts:396-399`). Positive control that the scope is real:
       force a rotation inside the home and the test still passes; have a stub materialise
       the token outside it by **each** of copy, hard link, symlink and rename, and the
@@ -356,29 +364,36 @@ form; the "kills:" note names what the earlier form let through.
       cross-process arm that waits almost as long as A**, which the earlier
       relative-to-A comparison could not fail.
 
-- [ ] **An escalation is either not requested or completed explicitly — never silently
-      refused mid-task.** verify: for build-shaped work the argv matches what ships
-      today (`trident/codex-build.sh:1402` runs `--sandbox danger-full-access`, so
-      nothing escalates) and carries no approval routing. For escalation-capable work,
-      **drive a real escalation to completion** — it is not enough that the mode
-      exists — with argv carrying `-c approval_policy=on-request` **and**
-      `-c approvals_reviewer=auto_review`, on **both** a first call and a resumed one:
-      measured, that single form works on both, so there is one form and one assertion.
-      Negative half: a call built with `approval_policy=on-request` and **no** reviewer
-      must be refused by the adapter before dispatch — measured, that combination makes
-      codex refuse the escalation with **exit 0** and no approval event, so the work is
-      silently not done.
-      *kills:* satisfying the criterion by never escalating at all (the "not requested"
-      branch alone); `--dangerously-bypass-approvals-and-sandbox`, excluded above; and
-      **the earlier split form**, which required `--approve-for-me` on first calls in
-      the contract while the assertion demanded the config pair — so the documented
-      design necessarily failed its own criterion.
+- [ ] **No call in scope requests an escalation, and a call that could would be refused
+      before dispatch rather than silently failing.** verify: every argv the adapter builds
+      carries **no approval routing at all** — no `approval_policy`, no
+      `approvals_reviewer`, no `--approve-for-me` — matching what ships today, where the
+      build runs `--sandbox danger-full-access` (`trident/codex-build.sh:1402`) so nothing
+      escalates and review reads a diff.
+      Negative half, which is the reason this criterion exists: a call built with
+      `approval_policy=on-request` and **no** reviewer must be **refused by the adapter
+      before dispatch**. Measured, that combination makes codex refuse the escalation with
+      **exit 0** and no approval event, so the work is silently not done and the wrapper
+      sees success — the failure this forecloses.
+      Also assert `--dangerously-bypass-approvals-and-sandbox` appears in no argv.
+      **Deliberately absent: any requirement that work complete an escalation.** The
+      capability exists and was measured on both call shapes — that is the answer to the
+      owner's test (c) and it is recorded in the as-built — but the only headless approver
+      is codex's own `auto_review`, which this item states was **never observed denying**
+      and is therefore not a safety control. Requiring work to exercise it would certify
+      a route letting codex authorize its own privileged actions, and a certified route
+      gets used. Nothing in scope needs one. A future consumer that does is a new item
+      with a real authorization design, not a clause inherited from a spike's
+      completeness check.
+      *kills:* an adapter that silently drops an escalating task (the negative half);
+      `--dangerously-bypass-approvals-and-sandbox`; and — by deletion rather than by
+      assertion — **an implementation certified to let codex approve its own escalations.**
 
 - [ ] **The CLI's contract is verified at startup and refused loudly, before any turn
       is spawned — and the probe fails only on the contract it gates.** verify: the
       probe checks (a) `codex exec resume --help` exposes the `resume` **subcommand**,
-      and (b) **every config key the adapter passes** — `sandbox_mode`,
-      `approval_policy`, `approvals_reviewer` — is recognised, by a single
+      and (b) **every config key the adapter passes** — which, now that no approval
+      routing ships, is `sandbox_mode` alone — is recognised, by a single
       `codex exec --strict-config --ignore-user-config` invocation carrying all of them
       plus a deliberately bogus **sentinel** key. Measured: codex reports
       `unknown configuration field <sentinel> in -c/--config override` and exits
@@ -393,8 +408,10 @@ form; the "kills:" note names what the earlier form let through.
       `runtime/adapters/codex-cli/exec.ts:67` emits the obsolete `codex exec --resume
       <id>` form, which 0.149.1 rejects at **exit 2**. The capability that actually
       broke must not be the one the negatives skip.
-      (ii) **one per relied-upon config key** — `sandbox_mode`, `approval_policy`,
-      `approvals_reviewer` — a stub rejecting that key.
+      (ii) **one per relied-upon config key** — currently `sandbox_mode` — a stub
+      rejecting that key. The list is exactly the keys the adapter passes, and it shrank
+      when the escalation route was removed: probing a key nothing depends on would fail
+      the build for a capability we do not use.
       (iii) **the sentinel is not named** though the probe ran, standing in for a CLI
       that stopped validating unknown keys.
       **Day-one case, and it is a real machine's state (#647):** with a user
