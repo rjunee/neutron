@@ -38,8 +38,8 @@ import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import {
   githubSpawnEnvRef,
   setGithubSpawnEnvResolver,
-} from '../../gateway/wiring/substrate-profiles.ts'
-import { githubProcessEnv } from '../../github/credential.ts'
+} from '@neutronai/gateway/wiring/substrate-profiles.ts'
+import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
