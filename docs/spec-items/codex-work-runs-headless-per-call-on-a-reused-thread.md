@@ -42,7 +42,9 @@ that is a reasoned position, not an omission:
   path the tree forbids; two implementations of the **same** path would be.
 - **It could not host this work as it stands.** Its resume is built as
   `codex exec --resume <id>` (`runtime/adapters/codex-cli/exec.ts:67`), and that
-  option **does not exist** on the pinned CLI: `codex exec --resume <id>` returns
+  option **does not exist** on the CLI measured here, 0.149.1 — and nothing pins that
+  version, which is why the probe below is a capability check: `codex exec --resume <id>`
+  returns
   `error: unexpected argument '--resume' found`, **exit 2**. `resume` is a
   subcommand, not a flag. So its resume path is dead against 0.149.1 regardless of
   this item.
@@ -286,10 +288,19 @@ form; the "kills:" note names what the earlier form let through.
 - [ ] **An account's credentials are never materialised anywhere outside the selected
       existing home.** verify **behaviourally, not by grep**: run a full call cycle with
       filesystem writes observed or intercepted — a spy over the fs module, or an
-      `strace`/audit trace of the process tree — and assert **no write anywhere on the
-      filesystem contains the credential's contents** (match on the token value seeded
-      for the test), and that the adapter's only credential interaction is a **read** of
-      the resolved home.
+      `strace`/audit trace of the process tree — and assert **no write whose path lies
+      outside the selected `CODEX_HOME` carries the credential's contents** (match on the
+      token value seeded for the test).
+      **Writes *inside* that home are expressly permitted and must not fail the test**,
+      including replacement of its own `auth.json`: codex rotates the refresh token when
+      it refreshes (`trident/codex-credential.ts:396-399`), so a correct implementation
+      produces exactly that write. Scoping the observation to *outside the home* is the
+      whole point — the instrument sees the entire process tree, and the property is
+      about location, not about writing.
+      Positive control that the scope is real, not just asserted: force a rotation inside
+      the selected home and assert the test still **passes**; then have a stub write the
+      same token to a path outside it and assert the test **fails**. A check that cannot
+      demonstrate both is not measuring location.
       Grepping source for `copyFile`/`link`/`symlink` is **not** acceptable as the
       primary check: it enumerates the mechanisms someone thought of, and a mutant that
       reads the credential and `writeFile`s it to `/tmp/auth.json` violates the property

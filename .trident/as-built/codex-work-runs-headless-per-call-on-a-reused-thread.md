@@ -282,6 +282,21 @@ basename comparison): **narrowing a claim to fit a textual instrument encodes th
 permanently; raising the instrument deletes it** — and raising it is available whenever the
 property is observable at runtime, which here it was.
 
+**Raising an instrument has a cost, and it is question 2.** Both over-strict criteria on
+this PR arrived *immediately after* a widening, and that is not coincidence. A grep sees
+only what you named; a write-observer sees **every** write in the process tree, including
+the ones the contract expressly allows. So the first version of the raised check forbade
+codex rotating the refresh token inside its own home — a write a correct implementation
+necessarily produces (`trident/codex-credential.ts:396-399`) — exactly as the nonce-absence control
+had forbidden codex persisting the rollout it must resume from. **A more powerful
+instrument observes things the property permits**, so widening the instrument makes
+scoping mandatory rather than optional: the new observation surface has to be narrowed to
+the property deliberately, and *"everything"* is not a scope. Both checks are now scoped
+by **location** rather than by act — no credential material outside the selected home; the
+nonce absent everywhere but the thread store — each with a positive control proving the
+exclusion is real and not merely asserted. The widening is still right, and still cheaper
+than the gap it closes, **provided question 2 runs straight afterwards.**
+
 **Where the tree already validates something, match that validator's coverage.** The
 metered-key criterion tested an `auth.json` with a key and no tokens, and missed the
 configuration that actually bills: a key present **alongside** valid OAuth tokens, which
@@ -324,7 +339,7 @@ There is one: `runtime/adapters/codex-cli/`, registered as the
 `gateway/wiring/build-llm-call-substrate.ts:1353`. Two measurements settled what to
 do about it rather than a judgement call:
 
-- **Its resume is dead on the pinned CLI.** It builds `codex exec --resume <id>`
+- **Its resume is dead on the CLI measured here (0.149.1; nothing pins it — see below).** It builds `codex exec --resume <id>`
   (`exec.ts:67`); on 0.149.1 that is `error: unexpected argument '--resume' found`,
   **exit 2** — `resume` is a subcommand, not a flag. Same dead end this spike hit
   with `-s` on `codex exec resume`, from the other direction. So it could not host
