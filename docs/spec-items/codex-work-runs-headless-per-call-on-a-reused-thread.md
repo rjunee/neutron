@@ -41,8 +41,14 @@ conversation when that process wedges, and a daemon mode this install cannot run
 3. **Usage is read from the turn, not estimated.** `codex exec --json` ends a
    turn with `{"type":"turn.completed","usage":{input_tokens,
    cached_input_tokens,…}}`. The adapter records it per call.
-4. **Subscription credentials only.** Unchanged from `trident/codex-review.sh`:
-   ChatGPT subscription `auth.json`, never a metered `OPENAI_API_KEY`.
+4. **Subscription credentials only, and the environment is the hard part.**
+   Unchanged from `trident/codex-review.sh`: ChatGPT subscription `auth.json`,
+   never a metered `OPENAI_API_KEY`. Validating the file is **not sufficient** —
+   the codex CLI prefers an inherited `OPENAI_API_KEY` over persisted OAuth, so the
+   adapter scrubs `OPENAI_API_KEY` **and** `OPENAI_KEY` from every child's
+   environment, exactly as `trident/codex-review.sh:145-152` does under its HARD
+   BILLING CONTRACT header. A correct `auth.json` beside a leaked inherited key
+   bills the metered key.
 5. **One `auth.json` file per account, shared by reference.** codex rotates the
    refresh token when it refreshes, so two independent copies of one account's
    `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A
@@ -93,21 +99,49 @@ conversation when that process wedges, and a daemon mode this install cannot run
       event. This is the whole cost case for thread reuse; an adapter that
       re-establishes context by re-sending a prompt instead of resuming the
       thread fails this while still passing the recall assertion above.
-- [ ] `resume` calls carry an explicit sandbox mode and cwd. verify: a test
-      asserts the argv the adapter builds for a resume call contains
-      `-c sandbox_mode=` and that the child's cwd is the value the caller asked
-      for — not the parent's. Negative half: a call built with a caller cwd
-      different from the test process's cwd must not run in the test process's
-      cwd.
+- [ ] Every `resume` call applies the **caller's** sandbox mode and cwd, exactly.
+      verify: a test builds resume argv for **two different** caller-requested
+      modes (e.g. `read-only` and `workspace-write`) and asserts, for each, that
+      argv contains `-c sandbox_mode=<that exact value>` — string equality against
+      the requested mode, not a prefix or substring match on `sandbox_mode=`. Two
+      modes is the load-bearing part: one mode is satisfied by a hard-coded
+      constant. The test asserts explicitly that no argv it builds carries an empty
+      value or `danger-full-access` unless that is what the caller asked for, and
+      that the child's cwd equals the caller's value — exercised with a caller cwd
+      **different from the test process's own**, so inheriting the parent's cwd
+      fails rather than coincidentally passing.
 - [ ] `--last` appears nowhere in the adapter. verify: `grep -rn -- '--last'` over
       the adapter's sources returns nothing, with the positive control that the
       same grep over `docs/spec-items/codex-work-runs-headless-per-call-on-a-reused-thread.md`
       finds it.
-- [ ] A metered `OPENAI_API_KEY` in the resolved `CODEX_HOME`'s `auth.json`
-      refuses the call rather than spending it. verify: a test builds an
-      `auth.json` with `auth_mode` absent and `OPENAI_API_KEY` set and asserts the
-      adapter returns the not-connected outcome without spawning codex; the
-      positive half asserts a subscription `auth.json` does spawn it.
+- [ ] A metered API key cannot be spent, **including one inherited from the
+      parent environment**. verify: two tests, and the second is the one that
+      matters.
+      (i) File path: an `auth.json` with `auth_mode` absent and `OPENAI_API_KEY`
+      set returns the not-connected outcome without spawning codex; a subscription
+      `auth.json` does spawn it.
+      (ii) **Environment path:** the test seeds **both** `OPENAI_API_KEY` and
+      `OPENAI_KEY` in the parent environment alongside a valid subscription
+      `auth.json`, then asserts **neither variable is present in the spawned
+      child's environment**. The assertion must read the child's env (the env
+      object handed to the spawn, or `/proc/<pid>/environ`), **never** the config or
+      the `auth.json` — the file being correct is exactly what the broken
+      implementation gets right. This is not hypothetical: the codex CLI **prefers**
+      an inherited `OPENAI_API_KEY` over persisted OAuth, which is why
+      `trident/codex-review.sh:145-152` unsets both variants under a header calling
+      it a HARD BILLING CONTRACT. An adapter that validates the file and then leaks
+      an inherited key into the child silently bills a metered key while passing
+      every other criterion here.
+- [ ] A second `CODEX_HOME` for one account **shares** its `auth.json` rather than
+      copying it. verify: a test creates a secondary `CODEX_HOME` through the
+      adapter and asserts the two homes' `auth.json` resolve to the **same
+      credential file** — same inode/`realpath`, not merely equal contents, because
+      equal contents is what a fresh copy has. Then it writes a changed token
+      through one home (standing in for a refresh) and asserts the other home reads
+      the new value back. The mutant this exists to kill is one line —
+      `copyFile(auth.json, …)` — which passes every other criterion in this
+      section until a real refresh rotates the token and silently revokes the other
+      home (`trident/codex-credential.ts:396-399`).
 - [ ] Two overlapping calls on one thread id produce the specified behaviour, not a
       collision. verify: a test starts call A on a thread and, while A is still in
       flight, starts call B on the same thread id; it asserts B **waited** (B's

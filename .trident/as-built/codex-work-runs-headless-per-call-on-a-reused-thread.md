@@ -109,6 +109,16 @@ the meter's resolution too.
   carries the positive contract (one owner per thread id, per-lane fan-out, the
   second caller waits on a bounded per-thread queue, and a conflict that arrives
   anyway is a distinct typed outcome per #542/#576) and a test with both halves.
+
+  **And the correction then contradicted itself inside the same change.** The spec
+  item was fixed to say the lock survives while this record's own Decisions Log
+  entry still read "the headless shape has no such state" — an overstatement sitting
+  in the document an implementer reads *before* deciding whether the queue and the
+  typed-conflict outcome are needed. Caught by the gate, not by the author. That is
+  the #574 rule turned inward: a change that corrects a claim must grep for every
+  place asserting the old one, **including the places it edited an hour earlier**.
+  The entry now says what is true — headless removes the wedged long-lived owner,
+  not the lock.
 - **The supervised form is unavailable.** `codex app-server daemon start` refuses
   without a managed standalone install at
   `$CODEX_HOME/packages/standalone/current/codex`; codex here is the npm
