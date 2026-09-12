@@ -100,6 +100,13 @@ describe('as-built outer-loop wiring with real git', () => {
       '## 2026-08-18 — folded after approve\n\nshipped body',
     )
     expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
+    // Empty because THIS FIXTURE seeds no staging floor, not because the repo's
+    // staging directory empties — it cannot; it keeps a tracked `.gitkeep` in every
+    // directory that holds a record, so a promotion cannot leave one with no files
+    // and make git read the promotion as a directory rename (docs/as-built/README.md).
+    // This assertion is about the ORCHESTRATOR: the staged file the run created is
+    // gone from the base. The repo's own shape is covered where it belongs, in
+    // as-built-appender-realgit.test.ts and as-built-staging-floor-realgit.test.ts.
     expect(await git(repo, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')).toBe('')
     expect(
       (await git(repo, 'diff-tree', '--no-commit-id', '--name-status', '-r', 'main')).split('\n').sort(),
@@ -213,6 +220,13 @@ describe('as-built outer-loop wiring with real git', () => {
       '## 2026-08-18 — caught up later\n\nnew body',
     )
     expect(await git(repo, 'show', 'main:docs/AS_BUILT.md')).toBe(FROZEN_LOG.trimEnd())
+    // Empty because THIS FIXTURE seeds no staging floor, not because the repo's
+    // staging directory empties — it cannot; it keeps a tracked `.gitkeep` in every
+    // directory that holds a record, so a promotion cannot leave one with no files
+    // and make git read the promotion as a directory rename (docs/as-built/README.md).
+    // This assertion is about the ORCHESTRATOR: the staged file the run created is
+    // gone from the base. The repo's own shape is covered where it belongs, in
+    // as-built-appender-realgit.test.ts and as-built-staging-floor-realgit.test.ts.
     expect(await git(repo, 'ls-tree', '-r', '--name-only', 'main', '--', '.trident/as-built/')).toBe('')
     expect((await git(repo, 'diff-tree', '--no-commit-id', '--name-status', '-r', foldedTip)).split('\n').sort()).toEqual([
       'A\tdocs/as-built/missed-after-merge.md',

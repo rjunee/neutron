@@ -1,0 +1,654 @@
+/**
+ * The real staging-floor guard against throwaway git repositories.
+ *
+ * The guard's boundary is the TREE a branch proposes, not a diff: a directory
+ * under `.trident/as-built/` that holds a record and no floor is refused however
+ * it got that way, and "I could not look" stays a different failure from "I
+ * looked and it is wrong".
+ *
+ * The property the floor buys is proved separately and with real merges, in
+ * `trident/as-built-staging-floor-realgit.test.ts` — that file drains a directory
+ * with the real promoter and shows the directory-rename conflict appearing when
+ * the floor is absent and not appearing when it is present. This file pins the
+ * guard that keeps the tree in the state that test proves is safe.
+ *
+ * The last test is the one that guards MAIN. The guard itself only ever sees
+ * branch proposals (pull requests and merge-queue commits, its own header says
+ * why), so this suite also asserts that THIS repo's tracked tree satisfies the
+ * rule. That assertion runs in every shard on every event, which is the cheapest
+ * place a regression on main can be caught.
+ */
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const GUARD_SH = fileURLToPath(new URL('./as-built-staging-floor-guard.sh', import.meta.url))
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+const UNRESOLVABLE_SHA = '0123456789abcdef0123456789abcdef01234567'
+const RECORD = '## 2026-09-12 — a staged record\n\nbody\n'
+const FLOOR_NAME = '.gitkeep'
+
+function git(repo: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
+}
+
+function commit(repo: string, message: string): void {
+  git(repo, '-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message)
+}
+
+function write(repo: string, relative: string, body: string): void {
+  const absolute = join(repo, relative)
+  mkdirSync(dirname(absolute), { recursive: true })
+  writeFileSync(absolute, body)
+}
+
+type GuardResult = { status: number; stdout: string; stderr: string }
+
+/**
+ * The guard is run with EVERY input it reads stripped unless this call supplies
+ * it. Inside Actions the ambient `GITHUB_ACTIONS`/`GITHUB_EVENT_NAME`/
+ * `GITHUB_EVENT_PATH` describe the REAL pull request, and a harness that let them
+ * through would be asking the guard about this repo while claiming to ask about a
+ * fixture — the event-filter tests below would then pass for the wrong reason.
+ */
+function runGuard(
+  repo: string,
+  base?: string,
+  head?: string,
+  event: { name?: string; actions?: boolean; payload?: string } = {},
+): GuardResult {
+  const env: Record<string, string | undefined> = { ...process.env }
+  delete env.GUARD_BASE_SHA
+  delete env.GUARD_HEAD_SHA
+  delete env.GITHUB_ACTIONS
+  delete env.GITHUB_EVENT_NAME
+  delete env.GITHUB_EVENT_PATH
+  env.AS_BUILT_STAGING_FLOOR_ROOT = repo
+  if (base !== undefined) env.GUARD_BASE_SHA = base
+  if (head !== undefined) env.GUARD_HEAD_SHA = head
+  if (event.name !== undefined) env.GITHUB_EVENT_NAME = event.name
+  if (event.actions === true) env.GITHUB_ACTIONS = 'true'
+  if (event.payload !== undefined) env.GITHUB_EVENT_PATH = event.payload
+
+  const result = spawnSync('bash', [GUARD_SH], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+describe('as-built staging floor guard (real git)', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'staging-floor-guard-'))
+  const worlds: string[] = []
+  let baseSha = ''
+  let cleanSha = ''
+  let deletesTopFloorSha = ''
+  let unflooredSubdirSha = ''
+  let flooredSubdirSha = ''
+  let renamesFloorAwaySha = ''
+  let mdFloorSha = ''
+
+  beforeAll(() => {
+    git(repo, 'init', '-q', '--initial-branch=main')
+    // The base is the world AFTER this fix: a floor at the top and a floor in the
+    // one directory that holds a record.
+    write(repo, '.trident/as-built/.gitkeep', '')
+    write(repo, '.trident/as-built/fix/.gitkeep', '')
+    write(repo, '.trident/as-built/fix/an-earlier-change.md', RECORD)
+    write(repo, 'code.ts', 'export const value = 1\n')
+    git(repo, 'add', '-A')
+    commit(repo, 'base')
+    baseSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'clean', baseSha)
+    write(repo, '.trident/as-built/fix/this-change.md', RECORD)
+    git(repo, 'add', '-A')
+    commit(repo, 'stage a record in a floored directory')
+    cleanSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'deletes-top-floor', baseSha)
+    git(repo, 'rm', '-q', '.trident/as-built/.gitkeep')
+    commit(repo, 'delete the top-level floor')
+    deletesTopFloorSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'unfloored-subdir', baseSha)
+    write(repo, '.trident/as-built/feat/a-new-prefix.md', RECORD)
+    git(repo, 'add', '-A')
+    commit(repo, 'stage a record in a directory with no floor')
+    unflooredSubdirSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'floored-subdir', baseSha)
+    write(repo, '.trident/as-built/feat/a-new-prefix.md', RECORD)
+    write(repo, '.trident/as-built/feat/.gitkeep', '')
+    git(repo, 'add', '-A')
+    commit(repo, 'stage a record in a directory it floors itself')
+    flooredSubdirSha = git(repo, 'rev-parse', 'HEAD')
+
+    // A RENAME is not a deletion to git, and it is one to this rule. The floor's
+    // job is to be a file the promoter cannot carry away; moved out of the
+    // directory it does not do that job, whatever the diff calls it.
+    git(repo, 'switch', '-q', '-c', 'renames-floor-away', baseSha)
+    git(repo, 'mv', '.trident/as-built/fix/.gitkeep', '.trident/as-built/fix-keep')
+    commit(repo, 'move the subdirectory floor out of the subdirectory')
+    renamesFloorAwaySha = git(repo, 'rev-parse', 'HEAD')
+
+    // The floor may not be a `.md` file: the promoter globs `*.md`
+    // (trident/as-built-appender.ts:101), so a README.md here is promoted as
+    // though it were a record — and then the directory is empty again.
+    git(repo, 'switch', '-q', '-c', 'md-floor', baseSha)
+    write(repo, '.trident/as-built/feat/a-new-prefix.md', RECORD)
+    write(repo, '.trident/as-built/feat/README.md', '# staged records live here\n')
+    git(repo, 'add', '-A')
+    commit(repo, 'try to floor a directory with a markdown file')
+    mdFloorSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', 'main')
+  }, 60_000)
+
+  afterAll(() => {
+    rmSync(repo, { recursive: true, force: true })
+    for (const world of worlds) rmSync(world, { recursive: true, force: true })
+  })
+
+  test('a branch staging a record into a floored directory passes', () => {
+    const result = runGuard(repo, baseSha, cleanSha)
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+  }, 30_000)
+
+  test('deleting the top-level floor FAILS and says what it breaks', () => {
+    const result = runGuard(repo, baseSha, deletesTopFloorSha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('FAILED')
+    expect(result.stderr).toContain('removes the floor')
+    expect(result.stderr).toContain('CONFLICT (file location)')
+    expect(result.stdout).not.toContain('OK')
+  }, 30_000)
+
+  test('staging a record in a directory with no floor FAILS and names the file to add', () => {
+    const result = runGuard(repo, baseSha, unflooredSubdirSha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('FAILED')
+    expect(result.stderr).toContain('.trident/as-built/feat/ — add .trident/as-built/feat/.gitkeep')
+  }, 30_000)
+
+  test('a branch that floors the directory it stages into passes', () => {
+    const result = runGuard(repo, baseSha, flooredSubdirSha)
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+  }, 30_000)
+
+  test('moving a floor OUT of its directory is refused, not just deleting it', () => {
+    // Reported as a REMOVAL rather than as a missing floor, and that is the more
+    // accurate of the two: the base had a floor here and the proposed tree does
+    // not, whatever the diff calls the operation. The directory happens to still
+    // hold a record, so the per-directory rule would also catch it — but the
+    // removal check is the one that catches it when the record is already gone.
+    const result = runGuard(repo, baseSha, renamesFloorAwaySha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+    expect(result.stdout).not.toContain('OK')
+  }, 30_000)
+
+  test('a .md file is not a floor, because the promoter promotes it', () => {
+    const result = runGuard(repo, baseSha, mdFloorSha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('.trident/as-built/feat/ — add .trident/as-built/feat/.gitkeep')
+    expect(result.stderr).toContain('NOT a README.md')
+  }, 30_000)
+
+  test('a base with no floor at all is the bootstrap: the installing diff passes, and says so', () => {
+    // The change that INSTALLS the floor is judged against a base without one. A
+    // blind refusal would red the only PR that can make the guard's claim true.
+    const unfloored = mkdtempSync(join(tmpdir(), 'staging-floor-guard-unfloored-'))
+    try {
+      git(unfloored, 'init', '-q', '--initial-branch=main')
+      write(unfloored, 'code.ts', 'export const value = 1\n')
+      git(unfloored, 'add', '-A')
+      commit(unfloored, 'base with no staging directory')
+      const base = git(unfloored, 'rev-parse', 'HEAD')
+
+      git(unfloored, 'switch', '-q', '-c', 'install', base)
+      write(unfloored, '.trident/as-built/.gitkeep', '')
+      git(unfloored, 'add', '-A')
+      commit(unfloored, 'install the staging floor')
+      const head = git(unfloored, 'rev-parse', 'HEAD')
+
+      const result = runGuard(unfloored, base, head)
+      expect(result.status).toBe(0)
+      expect(result.stderr).toContain('installs the staging floor')
+      expect(result.stderr).not.toContain('FAILED')
+    } finally {
+      rmSync(unfloored, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('the bootstrap is not a general amnesty: it never reaches the PER-DIRECTORY rule', () => {
+    // Exempting the top-level check on an unfloored base must not exempt the
+    // per-directory rule, or the state this repo was actually in on 2026-09-12 —
+    // a record under a directory with no floor — would pass.
+    //
+    // The fixture floors the TOP on both sides deliberately, so the only thing
+    // that can fail it is the per-directory rule. Letting the top-level check fire
+    // here instead would make this test pass for a reason it is not about, which
+    // is how it read before the exemption was rescoped.
+    const amnesty = mkdtempSync(join(tmpdir(), 'staging-floor-guard-amnesty-'))
+    try {
+      git(amnesty, 'init', '-q', '--initial-branch=main')
+      write(amnesty, '.trident/as-built/.gitkeep', '')
+      write(amnesty, '.trident/as-built/fix/an-earlier-change.md', RECORD)
+      git(amnesty, 'add', '-A')
+      commit(amnesty, 'base: top level floored, the record\'s own directory NOT')
+      const base = git(amnesty, 'rev-parse', 'HEAD')
+
+      git(amnesty, 'switch', '-q', '-c', 'unrelated', base)
+      write(amnesty, 'code.ts', 'export const value = 2\n')
+      git(amnesty, 'add', '-A')
+      commit(amnesty, 'an unrelated change')
+      const head = git(amnesty, 'rev-parse', 'HEAD')
+
+      const result = runGuard(amnesty, base, head)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/fix/ — add .trident/as-built/fix/.gitkeep')
+      // Not the top-level failure: that one is floored on both sides here.
+      expect(result.stderr).not.toContain('has no floor under .trident/as-built/')
+    } finally {
+      rmSync(amnesty, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('neither side floored at the TOP still FAILS, even when every record directory is floored', () => {
+    // THE BOUNDARY THE FIRST VERSION OF THIS GUARD GOT WRONG, and the reason it
+    // earns its own test rather than a line in another one. The top-level check was
+    // written as "the base HAS a floor and the head does not", which reads like the
+    // rule and is not it: with NEITHER side floored that condition is false, and a
+    // tree whose every record-holding subdirectory carries its own floor then walked
+    // the per-directory loop clean as well. The guard exited 0 over a tree that never
+    // installs the top-level floor at all — exempting, on its very first run, the one
+    // state it exists to refuse. An exemption written to let a guard install itself
+    // must be scoped to the side that is allowed to be wrong, which is the BASE.
+    //
+    // The subdirectory floor is present here on purpose: without it the per-directory
+    // rule would fail this fixture for an unrelated reason and the test would pass
+    // while proving nothing about the top-level check.
+    const neither = mkdtempSync(join(tmpdir(), 'staging-floor-guard-neither-'))
+    try {
+      git(neither, 'init', '-q', '--initial-branch=main')
+      write(neither, '.trident/as-built/fix/.gitkeep', '')
+      write(neither, '.trident/as-built/fix/an-earlier-change.md', RECORD)
+      git(neither, 'add', '-A')
+      commit(neither, 'base: every record directory floored, the top level NOT')
+      const base = git(neither, 'rev-parse', 'HEAD')
+
+      git(neither, 'switch', '-q', '-c', 'unrelated', base)
+      write(neither, 'code.ts', 'export const value = 2\n')
+      git(neither, 'add', '-A')
+      commit(neither, 'an unrelated change that installs nothing')
+      const head = git(neither, 'rev-parse', 'HEAD')
+
+      const result = runGuard(neither, base, head)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('the proposed tree has no floor under .trident/as-built/')
+      expect(result.stderr).toContain('Add it: an empty, tracked .trident/as-built/.gitkeep')
+      // And not mistaken for the other failure: nothing was removed here.
+      expect(result.stderr).not.toContain('removes the floor')
+      expect(result.stdout).not.toContain('OK')
+    } finally {
+      rmSync(neither, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  /**
+   * THE DOMAIN SWEEP.
+   *
+   * The cases above drive the guard's PREDICATE — given a directory, is it
+   * floored. They said nothing about its DOMAIN — which directories it looks at
+   * at all — and that is where the second scope error lived: the record-directory
+   * loop only enumerates directories holding a `.md` at the head, so deleting the
+   * floor from a record-LESS directory was invisible to it. A guard's coverage is
+   * the product of its predicate and its domain; these drive the domain.
+   *
+   * Every shape a staged-prefix directory can take across the two trees:
+   *   floored at base, floor deleted at head, no records      → REFUSED (the hole)
+   *   present only at base (whole directory deleted)          → REFUSED
+   *   present only at head, floored, no records               → allowed
+   *   present only at head, floored, with a record            → allowed
+   *   present only at head, UNfloored, with a record          → REFUSED (predicate)
+   */
+  describe('the domain: every shape a staged-prefix directory can take', () => {
+    /** base tree → head tree, as path/content maps; returns the guard's verdict. */
+    function verdict(label: string, base: Record<string, string>, head: Record<string, string>): GuardResult {
+      const world = mkdtempSync(join(tmpdir(), `staging-floor-domain-${label}-`))
+      worlds.push(world)
+      git(world, 'init', '-q', '--initial-branch=main')
+      for (const [path, body] of Object.entries(base)) write(world, path, body)
+      git(world, 'add', '-A')
+      commit(world, 'base')
+      const baseSha = git(world, 'rev-parse', 'HEAD')
+
+      git(world, 'switch', '-q', '-c', 'proposal', baseSha)
+      // Rebuild the staging tree from scratch so a path absent from `head` is a
+      // real deletion rather than something the fixture forgot to remove.
+      git(world, 'rm', '-r', '-q', '--ignore-unmatch', '.trident')
+      for (const [path, body] of Object.entries(head)) write(world, path, body)
+      write(world, 'code.ts', 'export const value = 2\n')
+      git(world, 'add', '-A')
+      commit(world, 'proposal')
+      return runGuard(world, baseSha, git(world, 'rev-parse', 'HEAD'))
+    }
+
+    const TOP = '.trident/as-built/.gitkeep'
+
+    test('a floor deleted from a RECORD-LESS directory is REFUSED — the hole', () => {
+      // Not a tidiness rule. The rename source is the MERGE BASE: `feat/` held a
+      // record, the promotion moved it to docs/as-built/, and every branch cut
+      // before that promotion still sees the record there. Delete the floor too
+      // and git reads the whole directory as renamed — measured, in full, with
+      // the same `CONFLICT (file location)` the fix exists to remove.
+      const result = verdict(
+        'recordless',
+        { [TOP]: '', '.trident/as-built/feat/.gitkeep': '' },
+        { [TOP]: '' },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/feat/ — restore .trident/as-built/feat/.gitkeep')
+      expect(result.stderr).toContain('rename source is the MERGE')
+      expect(result.stdout).not.toContain('OK')
+    }, 30_000)
+
+    test('a whole prefix directory present only at the BASE is REFUSED', () => {
+      const result = verdict(
+        'base-only',
+        { [TOP]: '', '.trident/as-built/docs/.gitkeep': '', '.trident/as-built/docs/a-record.md': RECORD },
+        { [TOP]: '' },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/docs/ — restore .trident/as-built/docs/.gitkeep')
+    }, 30_000)
+
+    test('a prefix directory present only at the HEAD, floored, is allowed — with or without a record', () => {
+      const floorOnly = verdict('head-only-empty', { [TOP]: '' }, { [TOP]: '', '.trident/as-built/spike/.gitkeep': '' })
+      expect(floorOnly.status).toBe(0)
+      expect(floorOnly.stdout).toContain('as-built-staging-floor-guard: OK')
+
+      const withRecord = verdict(
+        'head-only-record',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/.gitkeep': '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(withRecord.status).toBe(0)
+      expect(withRecord.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 60_000)
+
+    test('a prefix directory present only at the HEAD, UNfloored, with a record is REFUSED', () => {
+      const result = verdict(
+        'head-only-unfloored',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/spike/ — add .trident/as-built/spike/.gitkeep')
+    }, 30_000)
+
+    test('a floor RENAMED WITHIN its directory is REFUSED — the name is the rule', () => {
+      // THIS TEST USED TO ASSERT THE OPPOSITE, and it was wrong in the way only a
+      // reading of the docs against the code can catch: it encoded "the rule is a
+      // property of the directory, not of the filename", which is what the guard
+      // then did and is NOT what docs/as-built/README.md promised. A test written
+      // from the same understanding as the guard cannot disagree with it.
+      //
+      // The mechanism really is satisfied by any tracked file — that is why the
+      // looser rule was defensible. The name is enforced because the floor's other
+      // job is to be legible: a directory kept alive by a file nobody can explain
+      // is a directory somebody tidies.
+      const result = verdict(
+        'renamed-within',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/.keep': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+    }, 30_000)
+
+    test('replacing the floor with another non-record file is REFUSED — the reported bypass', () => {
+      // `junk.txt` holds the directory open exactly as well as `.gitkeep` does, so
+      // the guard passed this and so did the by-name permanent-floor pin, which
+      // only ever compared parent directories. The documented rule and the enforced
+      // rule were different rules.
+      const result = verdict(
+        'junk-floor',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/junk.txt': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+      expect(result.stdout).not.toContain('OK')
+    }, 30_000)
+
+    test('a non-record file that is NOT the floor does not floor a new directory either', () => {
+      // The same rule on the other side: a branch staging into a fresh prefix must
+      // bring a `.gitkeep`, not merely something that is not a record.
+      const result = verdict(
+        'junk-only-new',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/notes.txt': '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/spike/ — add .trident/as-built/spike/.gitkeep')
+    }, 30_000)
+
+    test('a directory may hold other files alongside its floor', () => {
+      // "Must hold this one", not "must hold only this one" — the positive control
+      // that the two tests above are refusing the MISSING name rather than the
+      // presence of anything else.
+      const result = verdict(
+        'floor-plus-extras',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '' },
+        {
+          [TOP]: '',
+          '.trident/as-built/fix/.gitkeep': '',
+          '.trident/as-built/fix/notes.txt': 'context someone parked here\n',
+          '.trident/as-built/fix/a-record.md': RECORD,
+        },
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 30_000)
+
+    test('an untouched tree passes — the positive control for this whole harness', () => {
+      // Without this, every REFUSED case above could be the fixture builder
+      // failing rather than the guard judging.
+      const result = verdict(
+        'untouched',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 30_000)
+  })
+
+  test('missing either required SHA exits 2 rather than skipping', () => {
+    const missingBase = runGuard(repo, undefined, cleanSha)
+    expect(missingBase.status).toBe(2)
+    expect(missingBase.stderr).toContain('GUARD_BASE_SHA')
+
+    const missingHead = runGuard(repo, baseSha, undefined)
+    expect(missingHead.status).toBe(2)
+    expect(missingHead.stderr).toContain('GUARD_HEAD_SHA')
+  }, 30_000)
+
+  test('an unresolvable SHA exits 2 and names the bad value', () => {
+    const result = runGuard(repo, UNRESOLVABLE_SHA, cleanSha)
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain(UNRESOLVABLE_SHA)
+  }, 30_000)
+
+  test('a genuinely non-branch event with no shas is skipped OUTSIDE Actions', () => {
+    // `push` is NOT one of these any more — it is guarded, and this test named it
+    // while that was untrue. A schedule or a manual dispatch carries no base/head
+    // pair and cannot change a tree; those are the events with nothing to judge.
+    const result = runGuard(repo, undefined, undefined, { name: 'schedule' })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('not a branch proposal')
+  }, 30_000)
+
+  test('a PUSH is guarded: deleting a RECORD-LESS floor on a push is REFUSED', () => {
+    // THE THIRD SCOPE ERROR ON THIS GUARD, and the one the other two could not
+    // have caught: the predicate was right and the domain was right, and neither
+    // ran, because every non-branch event exited 0. `ci.yml` triggers on
+    // `push: branches: [main]` and `layering` runs there with full history, so
+    // this was reachable the whole time. The push payload's `before`/`after` are
+    // exactly the base and head the guard already judges.
+    const pushed = mkdtempSync(join(tmpdir(), 'staging-floor-guard-push-'))
+    worlds.push(pushed)
+    git(pushed, 'init', '-q', '--initial-branch=main')
+    write(pushed, '.trident/as-built/.gitkeep', '')
+    write(pushed, '.trident/as-built/docs/.gitkeep', '')
+    git(pushed, 'add', '-A')
+    commit(pushed, 'main, with a record-less prefix floor')
+    const before = git(pushed, 'rev-parse', 'HEAD')
+
+    git(pushed, 'rm', '-q', '.trident/as-built/docs/.gitkeep')
+    commit(pushed, 'tidy away a floor nothing is using')
+    const after = git(pushed, 'rev-parse', 'HEAD')
+
+    const payload = join(pushed, 'push-event.json')
+    writeFileSync(payload, JSON.stringify({ before, after }))
+    const result = runGuard(pushed, undefined, undefined, { name: 'push', actions: true, payload })
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('.trident/as-built/docs/ — restore .trident/as-built/docs/.gitkeep')
+    expect(result.stdout).not.toContain('OK')
+  }, 30_000)
+
+  test('a clean push passes, and a FORCE PUSH is judged against the tip it overwrites', () => {
+    const pushed = mkdtempSync(join(tmpdir(), 'staging-floor-guard-forcepush-'))
+    worlds.push(pushed)
+    git(pushed, 'init', '-q', '--initial-branch=main')
+    write(pushed, '.trident/as-built/.gitkeep', '')
+    write(pushed, '.trident/as-built/fix/.gitkeep', '')
+    write(pushed, '.trident/as-built/fix/a-record.md', RECORD)
+    git(pushed, 'add', '-A')
+    commit(pushed, 'main')
+    const before = git(pushed, 'rev-parse', 'HEAD')
+
+    write(pushed, 'code.ts', 'export const value = 1\n')
+    git(pushed, 'add', '-A')
+    commit(pushed, 'an ordinary push')
+    const clean = git(pushed, 'rev-parse', 'HEAD')
+    const cleanPayload = join(pushed, 'clean-push.json')
+    writeFileSync(cleanPayload, JSON.stringify({ before, after: clean }))
+    const ok = runGuard(pushed, undefined, undefined, { name: 'push', actions: true, payload: cleanPayload })
+    expect(ok.status).toBe(0)
+    expect(ok.stdout).toContain('as-built-staging-floor-guard: OK')
+
+    // A force push that rewinds to a tree with no staging directory at all.
+    // `switch --orphan` empties the index and the working tree, so the commit
+    // below carries none of it.
+    git(pushed, 'switch', '-q', '--orphan', 'rewritten')
+    write(pushed, 'code.ts', 'export const value = 3\n')
+    git(pushed, 'add', '-A')
+    commit(pushed, 'a rewritten history with no staging directory')
+    const forced = git(pushed, 'rev-parse', 'HEAD')
+    const forcedPayload = join(pushed, 'forced-push.json')
+    writeFileSync(forcedPayload, JSON.stringify({ before: clean, after: forced }))
+    const refused = runGuard(pushed, undefined, undefined, { name: 'push', actions: true, payload: forcedPayload })
+    expect(refused.status).toBe(1)
+    // The rewrite takes the whole staging directory, so the top-level question
+    // answers first — the right verdict and the right message. What matters here
+    // is that a force push is JUDGED at all: no commit in the pushed history
+    // deletes anything, and only `before` makes the loss visible.
+    expect(refused.stderr).toContain('removes the floor under .trident/as-built/')
+    expect(refused.stdout).not.toContain('OK')
+  }, 60_000)
+
+  test('a push that DELETES a ref proposes no tree, and a branch creation has no base', () => {
+    const zeros = '0000000000000000000000000000000000000000'
+    const deletion = join(repo, 'push-deletion.json')
+    writeFileSync(deletion, JSON.stringify({ before: baseSha, after: zeros }))
+    const deleted = runGuard(repo, undefined, undefined, { name: 'push', actions: true, payload: deletion })
+    expect(deleted.status).toBe(0)
+    expect(deleted.stdout).toContain('deletes a ref')
+
+    // A creation carries an all-zero `before`. There is no base to compare, so the
+    // removal check has nothing to say — but the HEAD-side questions still run,
+    // which is where the floor is actually required.
+    const creation = join(repo, 'push-creation.json')
+    writeFileSync(creation, JSON.stringify({ before: zeros, after: cleanSha }))
+    const created = runGuard(repo, undefined, undefined, { name: 'push', actions: true, payload: creation })
+    expect(created.status).toBe(0)
+    expect(created.stdout).toContain('as-built-staging-floor-guard: OK')
+  }, 30_000)
+
+  test('INSIDE Actions a guarded event whose payload yields no sha exits 2', () => {
+    // The one risk the relocated event filter creates is the opposite of a
+    // bypass: a guard that decides its own applicability can decide "not
+    // applicable" over a guarded event and report clean. It must refuse instead.
+    const result = runGuard(repo, undefined, undefined, { name: 'pull_request', actions: true })
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('REFUSES to skip')
+  }, 30_000)
+
+  test('it reads the base and head shas out of a real pull_request payload', () => {
+    const payload = join(repo, 'event.json')
+    writeFileSync(payload, JSON.stringify({ pull_request: { base: { sha: baseSha }, head: { sha: deletesTopFloorSha } } }))
+    const result = runGuard(repo, undefined, undefined, { name: 'pull_request', actions: true, payload })
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('removes the floor')
+  }, 30_000)
+
+  test('it reads the base and head shas out of a real merge_group payload', () => {
+    const payload = join(repo, 'merge-group-event.json')
+    writeFileSync(payload, JSON.stringify({ merge_group: { base_sha: baseSha, head_sha: cleanSha } }))
+    const result = runGuard(repo, undefined, undefined, { name: 'merge_group', actions: true, payload })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+  }, 30_000)
+
+  /**
+   * THE PIN ON MAIN — the second control, and it had to be rebuilt to be one.
+   *
+   * It read "the guard only ever judges branch proposals, so nothing it does can
+   * catch main arriving in the bad state by another route — a manual promotion, a
+   * force-push, a revert", and then asserted only that the top-level floor exists
+   * and that every directory CURRENTLY holding a record has one. Deleting a
+   * record-less prefix floor satisfied both clauses, so the compensating control
+   * did not compensate for the event it named. The guard now runs on `push` as
+   * well, and this pin asserts the PERMANENT floors by name rather than inferring
+   * them from what happens to be occupied today.
+   *
+   * The list is a RATCHET, and it has to be a list: a record-less directory leaves
+   * no trace in the tree once its floor is gone, so nothing in HEAD can say that
+   * `.trident/as-built/docs/` ever existed. Adding a prefix means adding its floor
+   * here too — the guard will already have refused the PR that stages there
+   * without one.
+   */
+  const PERMANENT_FLOOR_DIRS = [
+    '.trident/as-built',
+    '.trident/as-built/docs',
+    '.trident/as-built/feat',
+    '.trident/as-built/fix',
+    '.trident/as-built/trident',
+  ]
+
+  test("this repo's own tracked tree keeps every permanent floor, and floors every record", () => {
+    const listed = git(REPO_ROOT, 'ls-tree', '-r', '--name-only', 'HEAD', '--', '.trident/as-built/')
+    const paths = listed === '' ? [] : listed.split('\n')
+    // Positive control: if this ever reads zero paths the assertions below are
+    // vacuous, and a vacuous pin on main is exactly the failure being prevented.
+    expect(paths.length).toBeGreaterThan(0)
+
+    // BY NAME, not by parent directory. This reduced every non-`.md` path to its
+    // directory and asked only whether the directory appeared — so replacing
+    // `.gitkeep` with `junk.txt` satisfied a test whose own comment said "by name".
+    const floors = new Set(paths.filter((path) => basename(path) === FLOOR_NAME).map((path) => dirname(path)))
+    expect(PERMANENT_FLOOR_DIRS.filter((dir) => !floors.has(dir))).toEqual([])
+    // Said twice, deliberately: the exact paths, so the assertion above cannot be
+    // read as satisfied by some other file in the same directory.
+    expect(PERMANENT_FLOOR_DIRS.map((dir) => `${dir}/${FLOOR_NAME}`).filter((path) => !paths.includes(path))).toEqual([])
+
+    // And the occupied-directory rule, which catches a record staged somewhere new.
+    const records = paths.filter((path) => path.endsWith('.md'))
+    expect(records.filter((record) => !floors.has(dirname(record)))).toEqual([])
+  }, 30_000)
+})

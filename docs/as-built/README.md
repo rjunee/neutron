@@ -42,3 +42,82 @@ free `-2`, `-3`, … suffix rather than overwriting or merging into what is ther
 Splitting the 405 existing entries would have rewritten text that other
 documents cite by content. The frozen file keeps every one of those entries
 byte-for-byte; only new records take the new shape.
+
+## The staging floor: every record directory keeps a `.gitkeep`
+
+`.trident/as-built/` — and every subdirectory of it that holds a staged record —
+carries an empty tracked `.gitkeep`. **Do not delete one, and add one alongside a
+record staged into a directory that has none.** A CI guard refuses both mistakes
+(`scripts/ci/as-built-staging-floor-guard.sh`, run by the `layering` job through
+`scripts/ci/check-governed-repo-attributes.ts`), so this section explains a rule
+the build already enforces rather than asking you to remember it.
+
+"Do not delete one" is unconditional, and the guard now enforces it that way: a
+floor may not be removed **even from a directory that holds no record today**.
+That looks like tidying an empty directory and is not, because the rename source
+is the **merge base**, not the tip — a directory whose record was promoted out
+still reads as a rename to every branch cut before the promotion, and deleting its
+floor completes the picture git needs. Measured: with the floor kept, such a
+branch merges clean; with the floor tidied away afterwards, it takes the
+`CONFLICT (file location)` in full. The guard cannot know that no unmerged branch
+stages into a directory, so it refuses; an empty `.gitkeep` costs nothing to
+keep.
+
+The guard runs on pull requests, on merge-queue commits **and on pushes to `main`** — a
+floor deleted by a force-push, a revert or a manual promotion is refused the same way. A
+second control in `scripts/ci/as-built-staging-floor-guard.test.ts` asserts the permanent
+floors by name against the tracked tree, because a directory whose floor is gone leaves
+nothing behind to notice it by.
+
+**What the floor prevents.** A promotion moves the last staged record out of a
+directory, that directory has no tracked file left, and git stops seeing it at
+all. The promotion commit is, file for file, a move out of that directory into
+`docs/as-built/` — so git reads the pair as a **directory rename**, and every
+open PR that stages a record there acquires:
+
+```
+CONFLICT (file location): .trident/as-built/<path>.md added in <sha> inside a
+directory that was renamed in origin/main, suggesting it should perhaps be moved
+to docs/as-built/<name>.md
+```
+
+Accepting that suggestion writes a shard **from a branch**, which is precisely
+what the one-writer rule above forbids — promotion happens on the base, after the
+merge, or not at all. A conflict that arrives carrying instructions to violate an
+invariant is worse than a plain conflict.
+
+Measured 2026-09-12, not predicted: one promotion emptied the directory and two of
+the seven then-open PRs immediately acquired that conflict.
+
+**Why it is per-directory and not one file at the top.** Git decides
+directory-rename detection one directory at a time, and skips it only for a
+directory that still exists. Branch names here carry a slash, so a record is
+staged at `.trident/as-built/fix/<name>.md` far more often than at the top — and a
+lone `.trident/as-built/.gitkeep` leaves `.trident/as-built/fix/` free to vanish
+with the conflict entirely intact. `trident/as-built-staging-floor-realgit.test.ts`
+proves this with real merges: the conflict appears with no floor, appears again
+with a top-level floor only, and is gone with a floor in the record's own
+directory.
+
+Floors ship for the branch-name prefixes in use (`docs/`, `feat/`, `fix/`,
+`trident/`). A record staged under a new prefix brings its own `.gitkeep`, and the
+guard fails with the exact path to add.
+
+**Why it is not a `.md` file, and why it is `.gitkeep` exactly.** Both promoters
+glob the staging directory for `*.md` (`trident/as-built-appender.ts:101`), so a
+`README.md` there would be consumed and promoted as though it were a record — and
+the directory would be empty again.
+
+The floor must be named `.gitkeep`, and the guard checks the name. The *mechanism*
+needs less than that: any tracked file survives the promoter's glob and keeps git
+from inferring a directory rename, so `junk.txt` would work. The name is required
+because the floor's other job is to be legible — a directory kept alive by a file
+nobody can explain is a directory somebody tidies, which is the deletion this rule
+exists to refuse. The guard accepted any non-Markdown file for a while, under this
+paragraph promising otherwise; that gap is now closed in both directions, and if
+the rule is ever loosened this paragraph must be loosened in the same commit.
+
+There is a fitting detail in this fix's own history: the first commit on the
+branch failed to create the placeholder with "No such file or directory", because
+the directory does not exist in a fresh worktree. The defect demonstrated itself
+during its own repair.

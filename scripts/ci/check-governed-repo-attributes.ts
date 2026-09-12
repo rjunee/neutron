@@ -161,6 +161,61 @@ function guardMigrationOrdinalCollisions(): void {
 
 guardMigrationOrdinalCollisions()
 
+/**
+ * THE AS-BUILT STAGING FLOOR — the third repo-owned rule hosted here, for the
+ * same reason as the two above: `.github/workflows/` is unreachable to every
+ * agent in this system, and `layering` already runs this gate unconditionally at
+ * `fetch-depth: 0`.
+ *
+ * WHAT IT PREVENTS, MEASURED. A branch stages one record at
+ * `.trident/as-built/<branch>.md` and the promoter moves it to
+ * `docs/as-built/<slug>.md` on the base after the merge. When a promotion
+ * consumes the LAST staged record the directory loses every tracked file, so it
+ * stops existing in the tree — and the promotion commit is, file for file, a move
+ * out of it into `docs/as-built/`. Git reads the pair as a directory rename, and
+ * every open PR carrying a staged record acquires `CONFLICT (file location) …
+ * suggesting it should perhaps be moved to docs/as-built/<name>.md`. On
+ * 2026-09-12 that happened: one promotion emptied the directory and two of the
+ * seven then-open PRs acquired that conflict. Its suggested resolution writes a
+ * shard FROM A BRANCH, which is exactly what the one-writer rule forbids.
+ *
+ * One tracked non-record file in the directory removes the class, because git
+ * skips directory-rename detection for a directory that still exists. THE RULE IS
+ * PER-DIRECTORY, and that was measured rather than assumed: git decides rename
+ * detection one directory at a time, and branch names in this repo carry a slash,
+ * so records land under `.trident/as-built/fix/` far more often than at the top.
+ * A lone `.trident/as-built/.gitkeep` leaves that subdirectory free to vanish and
+ * the conflict fully intact — proved with real merges in
+ * `trident/as-built-staging-floor-realgit.test.ts`, whose control arms show the
+ * conflict appearing with no floor AND with a top-level floor only.
+ *
+ * So the guard refuses two things: a branch that removes the floor under
+ * `.trident/as-built/` itself, and a proposed tree in which ANY directory holding
+ * a staged record has no floor. The rule was prose in `docs/as-built/README.md`
+ * first, and prose is advice to an agent that never read it (root
+ * `AGENTS.md:65-67`) — so it is a machine-checked refusal now.
+ *
+ * Same propagation contract as the guards above (1 = removes the floor, 2 = could
+ * not tell) and the same scoping to this repo, for the same reason: pointed at a
+ * fixture repo inside Actions it would inherit the real PR's shas and answer
+ * about the wrong tree.
+ */
+function guardStagingFloorDeletion(): void {
+  const here = import.meta.dir
+  const ownRepoRoot = resolve(here, '../..')
+  if (resolve(root) !== ownRepoRoot) return
+
+  const guard = Bun.spawnSync(['bash', join(here, 'as-built-staging-floor-guard.sh')], {
+    cwd: ownRepoRoot,
+    env: { ...process.env, AS_BUILT_STAGING_FLOOR_ROOT: ownRepoRoot },
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  if (guard.exitCode !== 0) process.exit(guard.exitCode)
+}
+
+guardStagingFloorDeletion()
+
 /** Is `SPEC.md` in the tree a fresh clone would get, even if not checked out? */
 function specIsCommitted(dir: string): boolean {
   return clonedTreeContains(dir, ['SPEC.md']).length > 0
