@@ -454,6 +454,125 @@ ordering bug. The replacement uses identifiable records and asserts the newest i
 present, the oldest is gone, kept records are whole, and the newest survives even when
 it alone exceeds the budget.
 
+### ROUND 13 — the truncation machinery is DELETED, on evidence rather than taste
+
+**Five defects, five rounds, one concept — and the last two arrived AFTER the refactor built
+specifically to make them impossible.** That is the whole argument, and it is worth stating
+as a sequence because no single instance would have justified the deletion:
+
+| round | the defect | what it proves in hindsight |
+|---|---|---|
+| 7 | the history omission marker was appended AFTER the budget was spent, so any history that dropped a record overshot the cap by the marker's length | a bound that does not include its own notice is not a bound |
+| 9 | the per-file budget counted the diff body but not the section LABEL | framing is not free |
+| 11 | the backstop cut bytes the loop believed it had placed, silently removing the notice that said the judge held a fragment | the notice a truncation needs can be destroyed by the truncation |
+| 12 | `raw_bytes` claimed a pre-bounding total while counting only the diffs fetched before the loop broke; its test asserted only that the field EXISTED | a field can be present, named for a total, and wrong |
+| 13 | `newestRecordsWithinBudget` budgeted record bytes but not the `\| ` prefixes and joining newlines its own caller adds, so the final cap could cut a retained record or eat the marker; and `shownBytes` counted quoted diff BODIES only — not labels, not notices — while its field comment AND the SPEC entry both called it what the judge was sent | the refactor did not reach the defect |
+
+**The shape, stated once: THE BYTES ACCOUNTED FOR WERE NEVER THE BYTES EMITTED.** Accounting
+happened where content was *chosen*; framing — labels, quote prefixes, separators, the notices
+themselves — was added *afterwards*, somewhere else. Round 12's `makeWithholding` was a good
+design and did not save this. It unified the two **audiences** for a withholding event (the
+judge and the telemetry) so they could not disagree, and the invariant it enforced —
+*recording is emitting* — held perfectly. It simply was not the invariant that was broken. The
+broken one is *measuring is emitting*, and no amount of unifying who gets told will fix a
+number computed over the wrong bytes.
+
+That is why the sixth attempt was not attempted. **Any design that shows part of a thing and
+separately describes the part has to keep a description in step with a payload, and five
+rounds is enough evidence that this particular pair does not stay in step.**
+
+**What replaced it is smaller than anything in twelve rounds: the judge either sees the whole
+conflict or is never asked.** `conflictEvidence` returns `{kind:'complete', body}` or
+`{kind:'over-budget'}` and has no third arm. `arbitrateConflict` assembles the finished prompt,
+measures **that exact string**, and returns `over-budget` without a model turn if it does not
+fit. An over-budget conflict escalates down the path that already existed for every other
+merge hold — the one the owner has had all along.
+
+**The measurement is now the emitted string, and that identity is the entire fix.** Every
+label, prefix, heading and separator this file adds is inside the value being weighed, by
+construction, so there is nothing left that can ride free. The test that pins it asserts
+IDENTITY rather than a range: `evidence_bytes` must equal `Buffer.byteLength` of the evidence
+the stub arbiter actually received. A range assertion — which is what round 12 shipped, and an
+improvement at the time — passes for any number of roughly the right magnitude, including one
+computed over a subset.
+
+**What the deletion cost, measured rather than estimated:**
+
+- production, comments excluded: **+90 / −189 lines** (net **−99**)
+- tests, comments excluded: **+173 / −271 lines** (net **−98**)
+- whole change: 550 insertions / 777 deletions across 5 files
+
+So the machinery to show a judge *part* of a conflict was ~189 lines of production code and
+~271 lines of tests — **460 lines to do a thing that should not be done** — and declining to
+send it costs 263. That number is the honest measure of what this path was carrying.
+
+**Nine tests were deleted with the behaviour, and that is the correct outcome, not a
+regression in coverage.** They tested truncation: the omission marker, the per-file notices,
+the backstop's reporting, the `headBytes` code-point primitive, the per-side byte cap, which
+end of the history the cap kept, the newest record surviving its own budget, record
+wholeness, and the one-owner telemetry agreement. All nine were tests of machinery that no
+longer exists. **The migration constraint was the same as round 12's and it held again:** the
+tests proving *the judge sees the conflict* pass unchanged — both sides present, labelled,
+quote-prefixed, hostile filenames defanged, one-sided paths stated, forgery codepoints
+folded, the closed guidance channel, the fingerprint refusal. Two survivors needed the
+*function's new name* in their call line, which is the sanctioned rename and not an
+accommodation; one — `MANY conflicted files are bounded by count` — needed its **fixture**
+changed from 400 files to 40, and that is worth recording honestly: with 400 files the
+evidence is now over budget and never rendered, so the old fixture would have "passed" while
+asserting a property of a string the judge never receives. A test whose input stops reaching
+the code under test is not a test.
+
+**THE HISTORY BOUND SURVIVED, DELIBERATELY, AND IT IS THE ONE REMAINING THING THAT DROPS
+ANYTHING.** `--max-count=MAX_HISTORY_COMMITS_PER_SIDE` still bounds each side. Three reasons it
+is a different animal from what was deleted, and one guard that makes it safe:
+
+1. it drops **whole commit records** at a granularity git itself enforces, so no fragment of a
+   record is ever produced — and a fragment presented as whole is the failure being killed;
+2. the limit is **interpolated into the prompt heading from the same constant that sets the
+   argv**, so the judge is always told the granularity of what it holds and the sentence
+   cannot drift from the flag. A hand-written "20 most recent" in the heading would have been
+   the identical defect one layer up, slowed to the speed of someone editing one and not the
+   other;
+3. it bounds **corroboration, not substance** — the conflicting hunks are the evidence for
+   "do these two intents clash", and those are complete or absent.
+
+The byte budget on history is gone, so an enormous commit message now makes the whole evidence
+over-budget and escalates, exactly like an enormous diff. **If measurement shows the count
+bound also produces bad judgements, the rule applied to the hunks applies here next.**
+
+And the anti-drift test for that heading is itself worth recording, because **my first version
+of it survived mutation.** It asserted `evidence` *contains* `UP TO ${N} MOST RECENT COMMITS
+ON`; hardcoding the BRANCH heading's number to 19 left the suite green, because the BASE
+heading still supplied a matching substring. The eleventh instance in this lane of a control
+correct in the dimension measured and silent in the dimension claimed — and in a test I wrote
+*to detect exactly that class*, in the same session I wrote the section naming it. It now
+extracts **every** occurrence and requires all of them to equal the value git was given, and
+is red whichever side drifts.
+
+**The kill criterion changed shape, and is recorded that way rather than quietly retuned.** It
+was "did resolutions cluster on complete payloads". It is now "how often is a conflict small
+enough to arbitrate at all" — the ratio of `merge_conflict_arbiter_oversize` to
+`merge_conflict_arbitration`. **If oversize dominates, the tier is nearly inert, and that is
+the next decision.** The oversize skip is deliberately a SEPARATE event and deliberately does
+not increment `arbitrationsThisRebase`: folding it into the arbitration line would pad the
+denominator of a tier that never ran, which is the same mistake the unwired-arbiter clause
+already exists to prevent, one branch over.
+
+**The pre-commitment fired by the route it named.** The round-12 SPEC entry committed, before
+any data existed, to precisely this deletion if resolutions clustered on `truncated: false`,
+and added that a further disclosure defect arriving first "reaches the same conclusion by a
+different route, and is to be taken the same way". Two arrived. So it was honoured on the
+stronger evidence rather than held for the weaker — **five defects in five rounds is a better
+argument than a resolution ratio** — and the point of writing the response down in advance is
+that the inconvenient moment had no room to re-litigate it.
+
+**Two stale docblocks were fixed in the same pass, because they are the same defect in prose.**
+`arbiter.ts` said the real size limit "stays where it belongs, at the caller's per-side history
+cap" — a cap that no longer exists. And `rebaseBranchOntoBase` justified its wall-clock trade
+with "the real per-run cap of 3 arbitrations … 7 model turns, ~56 minutes", the *pre-ceiling*
+figure that `MAX_ARBITRATIONS_PER_REBASE`'s own docblock records as rejected — two numbers for
+one thing in one file, with nothing to tell a reader which was current.
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -700,3 +819,28 @@ the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profi
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
 tripwire that fails by name at round 13 rather than letting an unbounded loop hang the
 suite — a timeout is a worse signal than a named error.
+
+**Round 13 adds seven, each proved red, one after a second attempt:**
+
+| # | mutation | result |
+|---|---|---|
+| M60 | remove the per-file running-total bound in `conflictEvidence` | **red** — the real-git oversized-conflict test calls `conflictEvidence` directly, so nothing downstream can cover for it |
+| M61 | remove the FINAL whole-prompt measurement in `arbitrateConflict` | **red** — killed only by the fixture whose hunks fit and whose history does not, which is the one case no other bound can see |
+| M62 | compute `evidence_bytes` over the hunk body instead of the emitted prompt | **red** — the identity assertion against the stub's received evidence |
+| M63 | drift the stated commit limit from the argv (hardcode one heading) | **red in both directions** — after the fix below |
+| M64 | never record the oversize skip | **red** |
+| M65 | count the oversize skip as an arbitration (`mayArbitrate` for `kind === 'decided'`) | **red** — the denominator assertion |
+| M66 | always return `over-budget` (never ask) | **red, 28 tests** — the non-vacuity direction |
+
+**M63 survived its first attempt**, and the reason is the lane's own named pattern landing in
+a test written to detect it: `toContain` on one heading is satisfied by the *other* heading, so
+hardcoding the branch side left the suite green. Fixed by extracting every
+`UP TO (\d+) MOST RECENT COMMITS ON` occurrence and requiring all of them to equal the value
+git was given — red now whichever side drifts.
+
+**M60 is worth one further note.** I expected it to SURVIVE, because the final whole-prompt
+measurement reaches the same decision and the two bounds are documented as defence in depth.
+It did not, because a test exercises `conflictEvidence` against real git directly, below the
+seam. That is the difference between a redundant guard and an untested one: redundancy at the
+seam does not excuse the primitive, and the direct test is what keeps the cost bound honest on
+its own terms.

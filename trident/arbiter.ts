@@ -196,7 +196,10 @@ const ARBITER_TOOLS: AgentSpec['tools'] = ARBITER_TOOL_NAMES.map((name) => ({
  * this file's caller meant survive, because they are the split boundary; every OTHER
  * separator — U+2028, U+2029, the bidi controls, C0/C1 — is inside a line and is folded
  * away. The fold is about codepoints, not length, so the per-line bound is generous and
- * the real size limit stays where it belongs, at the caller's per-side history cap.
+ * the real size limit stays where it belongs, with the caller: `merge.ts` measures the
+ * finished evidence string against `ARBITER_EVIDENCE_BYTES_MAX` and declines to ask at all
+ * when it does not fit, rather than shortening it (#541 round 13). This bound is therefore
+ * a defence-in-depth scan limit for any OTHER caller, never the one the seam relies on.
  */
 const ARBITER_EVIDENCE_LINE_MAX = 4_096
 function arbiterPrompt(input: ArbitrationInput): string {

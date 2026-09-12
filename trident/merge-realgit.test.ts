@@ -27,7 +27,8 @@ import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
 import {
   buildMergeCleanupDeps,
-  conflictHunks,
+  conflictEvidence,
+  ARBITER_EVIDENCE_BYTES_MAX,
   runWorktreePath,
   worktreeFingerprint,
   TridentBaseDriftHold,
@@ -959,17 +960,11 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     expect(reb.ok).toBe(false)
     expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
 
-    const { body: hunks, shown_bytes, truncated, files_shown } = await conflictHunks(
-      spawnCapture,
-      repo,
-      ['README.md'],
-    )
-
-    // THE SIZE DIMENSION the kill criterion is measured along: a small conflict is shown
-    // in full, and the instrumentation can say so.
-    expect(shown_bytes).toBeGreaterThan(0)
-    expect(truncated).toBe(false)
-    expect(files_shown).toBe(1)
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    // A SMALL CONFLICT IS SHOWN WHOLE. There is no longer a `truncated` field to assert
+    // against: the two states are "complete" and "not asked" (#541 round 13).
+    expect(evidence.kind).toBe('complete')
+    const hunks = evidence.kind === 'complete' ? evidence.body : ''
 
     // BOTH SIDES ARE PRESENT — this is the assertion round 8 shipped without.
     expect(hunks).toContain('BLOCK-UNTIL-SPACE') // the base's version (`-`)
@@ -986,15 +981,17 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
 
   test('a path that exists on only ONE side says so instead of pretending to a diff', async () => {
     const repo = await makeBaseRepo()
-    const { body: hunks, shown_bytes } = await conflictHunks(spawnCapture, repo, ['never-existed.ts'])
+    const evidence = await conflictEvidence(spawnCapture, repo, ['never-existed.ts'])
+    // A COMPLETE STATEMENT OF A FACT, not a partial view of one — so it is `complete`,
+    // and the judge is asked.
+    expect(evidence.kind).toBe('complete')
+    const hunks = evidence.kind === 'complete' ? evidence.body : ''
     expect(hunks).toContain('no two-sided diff')
-    // Nothing was readable, so the recorded conflict size is zero rather than absent.
-    expect(shown_bytes).toBe(0)
     // Still quoted, still not a crash, still not silence.
     expect(hunks.split('\n').every((l) => l.startsWith('| '))).toBe(true)
   }, 20_000)
 
-  test('an ENORMOUS conflict is bounded and the truncation is VISIBLE to the judge', async () => {
+  test('an ENORMOUS conflict is NOT shown in part — it is over-budget, so the judge is never asked', async () => {
     const repo = await makeBaseRepo()
     await git(repo, 'branch', 'feat', 'main')
     const fwt = join(repo, '.hunk-big')
@@ -1010,25 +1007,42 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
 
-    const { body: hunks, shown_bytes, truncated } = await conflictHunks(spawnCapture, repo, [
-      'README.md',
-    ])
-    // BOUNDED — the cap is enforced on the returned value, code-point safe.
-    expect(Buffer.byteLength(hunks, 'utf8')).toBeLessThanOrEqual(4_096)
-    // AND THE JUDGE IS TOLD. A silent truncation would invite a judgement on a fragment,
-    // which is worse than the escalation the prompt asks for in that case.
-    expect(hunks).toContain('truncated')
-    // AND THE INSTRUMENTATION IS TOLD — this is the case where the tier's useful range
-    // ends, so `truncated` is the field that will show whether resolutions cluster on
-    // conflicts the judge could actually see in full.
-    expect(truncated).toBe(true)
-    // `shown_bytes` IS WHAT THE JUDGE RECEIVED, not a pre-bounding total — so on a
-    // truncated conflict it is at most the display budget, never above it. The field that
-    // used to live here claimed a total while counting only the diffs fetched before the
-    // loop broke, which is a name promising more than it computes. `truncated` above is
-    // what says the conflict was bigger than this.
-    expect(shown_bytes).toBeLessThanOrEqual(4_096)
-    expect(shown_bytes).toBeGreaterThan(0)
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    // THE WHOLE POINT OF ROUND 13. This case used to return a 4 KiB fragment plus a notice
+    // saying it was a fragment — the shape that produced five defects in five rounds, twice
+    // AFTER the refactor built to make them impossible. There is now no partial value to
+    // get wrong: the only thing this returns is the decision not to ask.
+    expect(evidence.kind).toBe('over-budget')
+    // And there is NO body and NO byte count on that arm — a number here would mean "at
+    // least this much" while reading as a total, which is verbatim the round-12 defect.
+    expect(Object.keys(evidence)).toEqual(['kind'])
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a conflict that JUST fits is still shown, so the budget is a threshold and not a wall', async () => {
+    // THE OTHER DIRECTION, and it is the one that stops "escalate always" passing as a fix.
+    // A test suite that only proves big conflicts escalate is satisfied by a `conflictEvidence`
+    // that never returns `complete`; this pins that the budget admits real conflicts.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-fits')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), Array.from({ length: 20 }, (_, k) => `feat line ${k}`).join('\n'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat modest')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), Array.from({ length: 20 }, (_, k) => `main line ${k}`).join('\n'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main modest')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(ARBITER_EVIDENCE_BYTES_MAX)
+    expect(body).toContain('feat line 19')
+    expect(body).toContain('main line 19')
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 })
