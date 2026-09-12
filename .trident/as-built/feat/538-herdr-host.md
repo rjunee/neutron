@@ -1513,6 +1513,66 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### One connection per request threw away ordering, and nothing in the tree noticed
+
+A single multiplexed socket ordered our writes for free — frames left in the order we
+wrote them, on one stream. One connection per request does not: two fire-and-forget
+actuations started in the same tick are two independent connects racing, and the loser
+can be the one that had to go first. The sequence that breaks was already in the tree
+before this PR: `session-size-watchdog.ts` actuates `escape`, then the `/compact` text,
+then `enter`, in three consecutive statements. An Enter that overtakes its text submits
+whatever was on the line and leaves `/compact` typed and unsent — a compaction that
+silently did not happen, and possibly a stray prompt that did.
+
+Every actuation now goes through one chain and does not start until the previous one is
+answered; `submitLine` is queued as one unit. `pane.read` and `pane.close` stay outside
+it, and the code says why: the poll is a sampler and must not be blinded by a stalled
+keystroke, and a teardown preempts rather than queues because `repl-session.ts`'s
+escalation ladder depends on the close being prompt.
+
+**Why the existing ordering test could not see this.** It compared indices in the fake's
+`calls` array — which is pushed the moment the host hands the request over, before any
+hold, before either connection is answered. That records the CALL SITE, not the
+delivery, and it passes for an implementation with no ordering at all (M137 reddens the
+three new held-RPC cases and none of the old one). The fake now records `delivered`
+separately, pushed past the hold and the failure injection, and every ordering assertion
+reads that. M140 mutates the fake itself — recording delivery at invocation time — and
+reddens three cases, which is how I know the new array is load-bearing rather than a
+second name for the old one.
+
+**Two survivors taught me something and one did not.** M138 survived because my
+atomicity test compared METHOD names, and `submitLine`'s Enter and the competing
+`writeKey('enter')` are both `pane.send_keys` — the same sequence under either order. A
+distinguishable competitor (`escape`) makes it red. M139 survived because the two-handler
+`.then(run, run)` was dead code: the chain tail is already re-pointed at a neutralised
+promise, so it can never reject, so the rejection handler never runs. That is a case
+where the survivor meant the CODE was redundant rather than the test weak, and the fix
+was to delete the handler and mutate the line that actually holds the property (M139b,
+red). M142 — dropping the door-side exit check — survives and stays survived: the
+post-queue check is strictly stronger, and the door check only avoids queueing work for
+a dead pane.
+
+**A fixture that had been passing by accident.** Making actuations one microtask slower
+broke two tests that waited for an exit with the poll loop parked at 10 s. They had been
+passing because `exitPane()` happened to land while the first poll iteration was still
+in flight — the arrangement doing the step under test by coincidence. The poll interval
+is now a parameter of the local `spawn` helper, and any test that waits for an exit
+passes a short one.
+
+### The implementation and the record disagreed about a deletion, for the third time
+
+The as-built said PID signalling and the `/proc` parsing were deleted. The host still
+imported `readFileSync`, still exported `HERDR_PID_KILL_GRACE_MS`, and still carried the
+`/proc/<pid>/stat` field-22 parser with a doc comment pointing at a `terminateLostChild`
+that no longer existed. All of it dead, none of it noticed, because nothing fails when an
+export goes unused.
+
+A claim of deletion is a claim about the TREE, and it has to be re-derived after the
+deletion actually happens — the same rule as running the citation sweep last. The
+machinery is gone; a short comment records what was removed and why, and the acceptance
+criterion now carries an anchored grep (no declaration, no import) with a positive
+control so the empty result is an absence rather than a mistyped path.
+
 ### Rewriting the transport left twelve criteria describing code that no longer exists
 
 I replaced ONE acceptance criterion when the transport was rewritten — the one that
@@ -1716,6 +1776,13 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M134 | COMBINED: BOTH settlement guards removed | RED 1 |
 | M135 | the socket is closed only on SUCCESS, never on a failure route | RED 1 |
 | M136 | PAIR: the socket is closed TWICE on the healthy route | RED 3 |
+| M137 | no serialisation — actuations fire concurrently again | RED 3 |
+| M138 | `submitLine` enqueues its text and its Enter SEPARATELY | SURVIVED (test compared METHOD, and both keys are `pane.send_keys`) → test fixed → RED 1 |
+| M139 | the chain continues only on success (`.then(run)` not `.then(run, run)`) | SURVIVED — the tail is neutralised anyway, so the second handler was dead code; removed |
+| M139b | the chain TAIL is not neutralised (`actuations = started`) | RED 1 |
+| M140 | the fake records delivery at INVOCATION time, before the hold | RED 3 |
+| M141 | the queued call skips the post-queue exit check | SURVIVED (no case) → RED 1 |
+| M142 | PAIR: the door-side exit check is dropped | SURVIVED — unobservable; the post-queue check is strictly stronger |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

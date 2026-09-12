@@ -32,6 +32,20 @@ export interface RecordedCall {
 /** A scripted herdr server plus the levers a test needs over it. */
 export class FakeHerdrServer implements HerdrRpc {
   readonly calls: RecordedCall[] = []
+
+  /**
+   * Every call that actually REACHED the pane, in the order it reached it.
+   *
+   * `calls` records the INVOCATION — it is pushed the moment the host hands us the
+   * request, before any hold or injected failure. That is the right record for "was
+   * this ever asked for", and the WRONG one for any ordering question: with one
+   * connection per request, two actuations started in the same tick are two races,
+   * and an ordering assertion taken over `calls` compares when the host called us,
+   * not when we answered. It passes for an implementation with no ordering at all.
+   * `delivered` is pushed AFTER the hold and the failure check, so it is the order
+   * the pane would really have seen.
+   */
+  readonly delivered: RecordedCall[] = []
   readonly paneId: string
   private closed = false
   /** MUTABLE: a pane can be resized at any time, and the bridge must notice. */
@@ -125,11 +139,12 @@ export class FakeHerdrServer implements HerdrRpc {
         rej(e)
       }
     })
-    // The rejection path must exist because THE REAL TRANSPORT HAS IT: `close()` on
-    // the real client runs `failAll`, so every in-flight RPC rejects. A fake whose
-    // held call quietly succeeds after the connection closed cannot reproduce the
-    // most interesting ordering there is — a request outliving the socket it was
-    // sent on — and the code that mishandles it looks correct under test.
+    // The rejection path must exist because THE REAL TRANSPORT HAS IT: a call whose
+    // connection dies before the reply rejects, and so does one that outruns its own
+    // deadline. A fake whose held call can only ever succeed cannot reproduce the most
+    // interesting ordering there is — a request still unanswered when the thing it was
+    // about has already happened — and the code that mishandles it looks correct under
+    // test.
     promise.catch(() => {})
     this.holds.set(method, { promise, fail })
     return release
@@ -141,9 +156,15 @@ export class FakeHerdrServer implements HerdrRpc {
     this.shellPid = opts.shellPid === undefined ? 31337 : opts.shellPid
   }
 
-  /** Every recorded call to `method`. */
+  /** Every recorded call to `method` — INVOCATIONS, see {@link calls}. */
   callsTo(method: string): RecordedCall[] {
     return this.calls.filter((c) => c.method === method)
+  }
+
+  /** Every call to `method` that reached the pane — DELIVERIES, see
+   *  {@link delivered}. Use this for anything about order. */
+  deliveredTo(method: string): RecordedCall[] {
+    return this.delivered.filter((c) => c.method === method)
   }
 
   /** The pane's process ends. NOTHING IS ANNOUNCED — the server has no way to tell a
@@ -165,6 +186,9 @@ export class FakeHerdrServer implements HerdrRpc {
     // made to fail without this fake growing a flag per method.
     const injected = this.failures.get(method)
     if (injected !== undefined) throw injected
+    // PAST EVERY INJECTED OBSTACLE — this is the point at which the real server would
+    // have acted on the request, so it is the point at which delivery is recorded.
+    this.delivered.push({ method, params })
     // A malformed reply is a SUCCESS, so it is returned rather than thrown.
     const bad = this.malformed.get(method)
     if (bad !== undefined) return bad

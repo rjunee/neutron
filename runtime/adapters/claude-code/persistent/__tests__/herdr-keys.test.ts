@@ -24,10 +24,18 @@ import { FakeHerdrServer, until } from './herdr-fake-server.ts'
 import { encodeKeys, type Key, type NamedKey } from '../keystrokes.ts'
 import type { PtyChild } from '../pty-host.ts'
 
-async function spawn(server: FakeHerdrServer): Promise<PtyChild> {
+/**
+ * `pollIntervalMs` is a PARAMETER, not a constant, and the default parks the loop
+ * because these tests are about writes. Any test that waits for an EXIT must pass a
+ * short one: exit is discovered BY POLLING now, so with the loop parked the only reason
+ * such a test ever passed was that `exitPane()` happened to land while the first
+ * iteration was still in flight. That is the fixture doing the step under test by
+ * accident, and it broke the moment actuations became one microtask slower.
+ */
+async function spawn(server: FakeHerdrServer, pollIntervalMs = 10_000): Promise<PtyChild> {
   const host = new HerdrHost({
     connect: async () => server,
-    pollIntervalMs: 10_000, // park the poll loop; these tests are about writes
+    pollIntervalMs,
     sleep: (ms) => Bun.sleep(ms),
     workspaceId: 'w9',
   })
@@ -185,10 +193,131 @@ describe('write() and the fact that send_text never submits', () => {
     )
     expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('/clear')
     expect(server.callsTo('pane.send_keys')[0]!.params['keys']).toEqual(['enter'])
-    // Order matters: the submit must follow the text.
-    const iText = server.calls.findIndex((c) => c.method === 'pane.send_text')
-    const iKeys = server.calls.findIndex((c) => c.method === 'pane.send_keys')
+    // Order matters: the submit must follow the text. Taken over DELIVERIES, not
+    // invocations — `calls` is pushed when the host hands the request over, which is
+    // before either connection has been answered, so an ordering assertion there
+    // passes for an implementation with no ordering at all.
+    const iText = server.delivered.findIndex((c) => c.method === 'pane.send_text')
+    const iKeys = server.delivered.findIndex((c) => c.method === 'pane.send_keys')
     expect(iText).toBeLessThan(iKeys)
+    child.kill()
+  })
+
+  // THE WHOLE POINT OF THE QUEUE, and it is invisible without a HELD call. One
+  // connection per request means two fire-and-forget actuations started in the same
+  // tick are two independent connects racing. Hold the FIRST one open while the second
+  // would otherwise sail past it: with the queue, the second has not even been asked
+  // for; without it, the second reaches the pane first and submits an empty prompt.
+  it('a HELD text keeps the Enter behind it — the submit cannot overtake what it submits', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    const release = server.holdMethod('pane.send_text')
+    child.write('/clear')
+    child.writeKey?.('enter')
+    // Give the unserialised implementation every chance: many turns of the loop, which
+    // is far more than a second connect would need.
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    await Bun.sleep(30)
+    expect(server.deliveredTo('pane.send_text')).toEqual([])
+    expect(server.deliveredTo('pane.send_keys')).toEqual([])
+    release()
+    await until(
+      () => server.deliveredTo('pane.send_keys').length >= 1,
+      'the enter, once the text is answered',
+    )
+    expect(server.delivered.map((c) => c.method).filter((m) => m.startsWith('pane.send'))).toEqual([
+      'pane.send_text',
+      'pane.send_keys',
+    ])
+    child.kill()
+  })
+
+  // The sequence that made this a defect rather than a theory: the session-size
+  // watchdog actuates escape, then the `/compact` text, then enter — three
+  // fire-and-forget calls in three consecutive statements (`session-size-watchdog.ts`).
+  // Holding the MIDDLE one is the discriminating arrangement: if Enter can overtake the
+  // text, it submits whatever was on the line and leaves `/compact` typed and unsent.
+  it("the watchdog's escape → /compact → enter reaches the pane in that order, with the text held", async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    const release = server.holdMethod('pane.send_text')
+    child.writeKey?.('escape')
+    child.write('/compact')
+    child.writeKey?.('enter')
+    await until(() => server.deliveredTo('pane.send_keys').length >= 1, 'the escape')
+    // The escape is through; the text is held; the Enter must NOT be through.
+    await Bun.sleep(30)
+    expect(server.deliveredTo('pane.send_keys').length).toBe(1)
+    expect(server.deliveredTo('pane.send_keys')[0]!.params['keys']).toEqual(['esc'])
+    expect(server.deliveredTo('pane.send_text')).toEqual([])
+    release()
+    await until(() => server.deliveredTo('pane.send_keys').length >= 2, 'the enter')
+    expect(
+      server.delivered
+        .filter((c) => c.method === 'pane.send_text' || c.method === 'pane.send_keys')
+        .map((c) => (c.method === 'pane.send_text' ? c.params['text'] : c.params['keys'])),
+    ).toEqual([['esc'], '/compact', ['enter']])
+    child.kill()
+  })
+
+  // A FAILED ACTUATION MUST NOT WEDGE THE QUEUE. Serialising creates a new way to
+  // break: if the chain only continues on success, one rejected keystroke stops every
+  // later one forever and the REPL is dead with nothing said. The cost of dropping one
+  // actuation is one lost key; the cost of a wedged queue is the session.
+  it('a FAILED actuation does not wedge the ones behind it', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    server.failMethod('pane.send_text', new Error('server said no'))
+    child.write('/clear')
+    child.writeKey?.('enter')
+    await until(() => server.deliveredTo('pane.send_keys').length >= 1, 'the enter behind the failure')
+    // The text never reached the pane; the Enter did, and it did so AFTER.
+    expect(server.deliveredTo('pane.send_text')).toEqual([])
+    expect(server.callsTo('pane.send_text').length).toBe(1)
+    child.kill()
+  })
+
+  // A QUEUE ADDS A NEW WINDOW: an actuation can be waiting when the pane goes. The
+  // no-op-safe-after-exit contract is checked at the door AND again when the call
+  // actually starts, because between those two moments the pane can vanish — and
+  // sending a key into a dead pane is exactly the "reporting work that did not happen"
+  // failure the rest of this host is built against.
+  it('an actuation queued BEFORE the exit is dropped, not delivered to a dead pane', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server, 10)
+    const release = server.holdMethod('pane.send_text')
+    child.write('/clear')
+    child.writeKey?.('enter')
+    server.exitPane()
+    await until(() => child.hasExited(), 'the exit, discovered by polling')
+    release()
+    await Bun.sleep(30)
+    expect(server.deliveredTo('pane.send_keys')).toEqual([])
+    expect(server.callsTo('pane.send_keys')).toEqual([])
+  })
+
+  // `submitLine` is queued as ONE UNIT, not as two queued calls. If its text and its
+  // Enter were enqueued separately, a fire-and-forget actuation from another caller
+  // could land between them — submitting the caller's line with somebody else's key.
+  it('submitLine is ATOMIC in the queue — nothing lands between its text and its Enter', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    const release = server.holdMethod('pane.send_text')
+    const submitted = child.submitLine!('/compact')
+    // A DISTINGUISHABLE competing actuation. `enter` would be wrong here: both keys
+    // would then arrive as `pane.send_keys` and an assertion on METHOD alone reads the
+    // same for both orders — which is how the first version of this test passed against
+    // an implementation that enqueued the text and the Enter separately.
+    child.writeKey?.('escape')
+    await Bun.sleep(20)
+    release()
+    await submitted
+    await until(() => server.deliveredTo('pane.send_keys').length >= 2, 'both keys')
+    expect(
+      server.delivered
+        .filter((c) => c.method === 'pane.send_text' || c.method === 'pane.send_keys')
+        .map((c) => (c.method === 'pane.send_text' ? c.params['text'] : c.params['keys'])),
+    ).toEqual(['/compact', ['enter'], ['esc']])
     child.kill()
   })
 
@@ -307,7 +436,7 @@ describe('submitting a slash command REFUSES rather than silently skipping the s
 
   it('submitLine after exit rejects rather than no-opping', async () => {
     const server = new FakeHerdrServer()
-    const child = await spawn(server)
+    const child = await spawn(server, 10)
     server.exitPane()
     await until(() => child.hasExited(), 'exit')
     const before = server.callsTo('pane.send_text').length
@@ -353,9 +482,9 @@ describe('kill maps onto the only signal herdr has', () => {
     // `wasKilledByUs()` child as a clean recycle — so a genuine crash following an
     // interrupt was silently unregistered instead of being reported.
     const server = new FakeHerdrServer()
-    const child = await spawn(server)
+    const child = await spawn(server, 10)
     child.kill('SIGINT')
-    await until(() => server.callsTo('pane.send_keys').length >= 1, 'the interrupt')
+    await until(() => server.deliveredTo('pane.send_keys').length >= 1, 'the interrupt')
 
     // Now the child dies on its own — no `pane.close`, nothing we asked for.
     server.exitPane()

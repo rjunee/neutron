@@ -302,6 +302,33 @@ not-new. That is accepted and recorded here rather than hidden.
       call would double every operation, and the server's protocol cannot change under a
       running host without restarting herdr, whose panes are its children.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **Actuations on a pane are ORDERED, and one connection per request is exactly why
+      that now takes code.** A single multiplexed socket ordered writes for free: frames
+      left in the order they were written, on one stream. Per-connection does not — two
+      fire-and-forget calls started in the same tick are two independent connects racing,
+      and the loser can be the one that had to go first. The sequence that breaks is in
+      the tree: the session-size watchdog actuates `escape`, then the `/compact` text,
+      then `enter` (`session-size-watchdog.ts`), and an Enter that overtakes its text
+      submits whatever was on the line and leaves `/compact` typed and unsent. So every
+      actuation goes through one chain — a call does not start until the previous one is
+      ANSWERED — and `submitLine` is queued as ONE UNIT so nothing lands between its text
+      and its Enter.
+      THE TEST MUST HOLD THE FIRST RPC. An ordering assertion taken over INVOCATIONS
+      compares when the host called the transport, before either connection has been
+      answered, and passes for an implementation with no ordering at all; the fake
+      therefore records DELIVERIES separately (pushed past the hold and the failure
+      injection) and every ordering assertion reads that. The competing actuation must
+      also be DISTINGUISHABLE — two `enter`s both arrive as `pane.send_keys`, and an
+      assertion on method alone reads the same for both orders.
+      Three directions, because each is satisfied by an implementation that fails the
+      others: a held text keeps the Enter behind it; a FAILED actuation does not wedge
+      the ones behind it (the chain tail is neutralised, or one rejected keystroke stops
+      the session AND leaves an unobserved rejection); and an actuation queued before the
+      pane exits is DROPPED rather than delivered to a dead pane. NOT queued, deliberately:
+      `pane.read` (the poll is a sampler; ordering it behind a stalled keystroke blinds us
+      exactly when something is wrong) and `pane.close` (a teardown preempts — the
+      escalation ladder in `repl-session.ts` depends on it being prompt).
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
 - [ ] **There is no "transport loss" to handle, and the criterion that described one is
       DELETED rather than left standing.** It required the host to terminate the pid it
       learned at spawn when the socket died. Both halves are gone: a connection ending is
@@ -319,6 +346,18 @@ not-new. That is accepted and recorded here rather than hidden.
       pass against a tree where the reasoning had been deleted. Paired with
       `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
       for what replaced it.
+      AND THE IMPLEMENTATION HAS TO AGREE WITH THE RECORD. Deleting the path is not done
+      while its machinery is still exported: the `/proc/<pid>/stat` start-time parser,
+      the kill-grace constant and the `node:fs` import that fed them were still in
+      `herdr-host.ts` after the as-built said they were gone. An unused export is
+      indistinguishable from a supported one. A claim of deletion is a claim about the
+      TREE, and it has to be re-derived after the deletion actually happens.
+      verify: `rg -n "^(export|import).*(parseProcStatStartTime|HERDR_PID_KILL_GRACE_MS|node:fs)"
+      runtime/adapters/claude-code/persistent/herdr-host.ts` returns nothing — no
+      declaration and no import — against the positive control `rg -c "^export" <same
+      file>` which finds the 5 exports that remain. The unanchored grep still finds the
+      two lines of the deletion comment, which is the "one hit, and it is prose" shape
+      again: the reasoning stays, the machinery does not.
 - [ ] **Every live caller performs the readiness handshake.** Each converted E2E proof
       must call `beginOutput()` after wiring its consumers, and at least one live
       boundary test must assert NO fail-open warning across the whole run. Without it

@@ -47,7 +47,6 @@
  * collapses ENTIRELY onto `wasKilledByUs` — see `pty-host.ts`.
  */
 
-import { readFileSync } from 'node:fs'
 import type { Key } from './keystrokes.ts'
 import type { PtyChild, PtyExitCause, PtyHost, PtySpawnOpts } from './pty-host.ts'
 import {
@@ -74,50 +73,15 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
  *  bound on a hung server, not a normal wait. */
 export const HERDR_PID_WAIT_MS = 5000
 
-/**
- * How long a transport-loss termination waits for each signal to be honoured.
- *
- * Two of these back to back (SIGTERM, then SIGKILL) bound the whole confirmation, and
- * the confirmation is what licenses reporting the child dead — see
- * {@link HerdrHost.terminateLostChild}. Matches `CHILD_KILL_GRACE_MS` in
- * `signatures.ts`, which is the same ladder run over a live transport.
- */
-export const HERDR_PID_KILL_GRACE_MS = 2_000
-
-/**
- * The kernel's start time for `pid` (`/proc/<pid>/stat` field 22), or `undefined` when
- * no such process exists.
- *
- * A PID IS AN IDENTIFIER, NOT A HANDLE. It is reused, so "is pid N alive?" is the wrong
- * question — the right one is "is pid N still the process I started?". Between a pane
- * dying without a `pane_exited` and the transport closing, the kernel can hand that
- * number to something else with the same uid, and a liveness probe answers YES about a
- * process we have never heard of. Signalling on that answer kills a stranger.
- *
- * This supersedes the `signal 0` probe that stood here. That probe's EPERM reading was
- * right — "exists and is not ours to signal" is ALIVE — and the reason it is not enough
- * is the same insight one turn further: a reused PID is also a process that exists and
- * is not ours, in a sense a permission check cannot see. Start time answers both, so
- * one question replaces two.
- *
- * Field 22 is read AFTER the last `)` because field 2 (`comm`) is the executable name
- * and may itself contain spaces and parentheses; everything after that delimiter is
- * space-separated, and field 3 lands at index 0. The value is kernel-maintained, so the
- * subject cannot rewrite it to impersonate its predecessor — the same external-handle
- * rule the codex spike landed on.
- */
-export function parseProcStatStartTime(stat: string): string | undefined {
-  // Everything up to the LAST `)` is `pid (comm)`, and `comm` is the executable name:
-  // it can contain spaces and parentheses, so splitting the whole line on spaces and
-  // taking index 21 reads a different field for any process whose name has one. The
-  // last `)` is the only reliable delimiter; after it, field 3 lands at index 0, so
-  // field 22 is index 19.
-  const close = stat.lastIndexOf(')')
-  if (close < 0) return undefined
-  const afterComm = stat.slice(close + 2).split(' ')
-  const startTime = afterComm[19]
-  return startTime === undefined || startTime === '' ? undefined : startTime
-}
+// DELETED WITH THE PATH THAT USED THEM: `HERDR_PID_KILL_GRACE_MS` (the signal-ladder
+// grace for a transport-loss termination) and `parseProcStatStartTime` (the
+// `/proc/<pid>/stat` field-22 reader that answered "is pid N still the process I
+// started?"). There is no transport-loss termination and no PID signalling: a pid is an
+// identifier, not a handle, and the pane id is the identity herdr maintains atomically.
+// They are removed rather than left exported-and-unused, because an unused export is
+// indistinguishable from a supported one and the repo rule is that the old path is
+// deleted, not parked beside the new one. The reasoning that produced them is kept in
+// the as-built record, which is where dead reasoning belongs.
 
 /** The `label` put on the REPL's pane, so the owner can see what it is when they
  *  attach. */
@@ -315,11 +279,58 @@ export class HerdrHost implements PtyHost {
       ),
     )
 
-    /** Issue a pane call, best-effort. No-op after exit (the interface's
-     *  "no-op-safe after exit" contract). */
+    // ACTUATIONS ARE SERIALISED, AND THIS IS A COST OF ONE CONNECTION PER REQUEST.
+    //
+    // A single multiplexed socket ordered our writes for free: frames left in the
+    // order we wrote them, on one stream, so `pane.send_text` was on the wire before
+    // the `pane.send_keys` that submits it. One connection per request — which is the
+    // only shape this server supports — throws that away. Two fire-and-forget calls
+    // started in the same tick are two independent connects racing each other, and
+    // the loser can be the one that had to go first.
+    //
+    // The sequence that breaks is real and already in the tree: the session-size
+    // watchdog actuates `escape`, then `/compact`, then `enter`
+    // (`session-size-watchdog.ts`). If Enter overtakes the text, it submits whatever
+    // was already on the line and leaves `/compact` typed and unsent — a compaction
+    // that silently did not happen, and possibly a stray prompt that did.
+    //
+    // So every actuation goes through ONE chain: a call does not start until the
+    // previous one has been ANSWERED.
+    //
+    // THE TAIL IS NEUTRALISED, AND THAT IS THE LOAD-BEARING LINE. `actuations` is
+    // re-pointed at a promise that settles FULFILLED however `started` ended, for two
+    // reasons that are easy to conflate: a rejected keystroke must not wedge every
+    // later one (the cost of a dropped actuation is one lost key; the cost of a wedged
+    // queue is the session), and the tail is a promise nobody awaits, so a rejection
+    // left on it is an unobserved rejection — fatal under Bun's process net. The
+    // caller's own view of the failure is `started`, which is returned and IS observed
+    // (`fireAndForget` for the fire-and-forget callers, the caller's `await` for
+    // `submitLine`). Mutating the neutralisation away breaks the queue; a mutation of
+    // the `.then(run)` shape does not, because the tail can no longer be rejected.
+    //
+    // NOT queued: `pane.read` (the poll is a sampler, and ordering it behind a stalled
+    // keystroke would blind us exactly when something is wrong) and `pane.close` (a
+    // teardown preempts, it does not wait — the escalation ladder in `repl-session.ts`
+    // depends on the close being prompt).
+    let actuations: Promise<unknown> = Promise.resolve()
+    const enqueue = (run: () => Promise<unknown>): Promise<unknown> => {
+      const started = actuations.then(run)
+      actuations = started.then(
+        () => undefined,
+        () => undefined,
+      )
+      return started
+    }
+
+    /** Issue a pane ACTUATION, best-effort and in order. No-op after exit (the
+     *  interface's "no-op-safe after exit" contract) — checked again when the call
+     *  actually starts, because the pane can go while it is queued. */
     const send = (label: string, method: string, params: Record<string, unknown>): void => {
       if (exited) return
-      fireAndForget(label, client.call(method, params))
+      fireAndForget(
+        label,
+        enqueue(async () => (exited ? undefined : await client.call(method, params))),
+      )
     }
 
     const child: PtyChild = {
@@ -369,11 +380,15 @@ export class HerdrHost implements PtyHost {
           )
         }
         // Text first, then Enter, each awaited: an unacknowledged text followed by a
-        // blind Enter submits whatever was already at the prompt.
-        if (command !== '') {
-          await client.call('pane.send_text', { pane_id: paneId, text: command })
-        }
-        await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
+        // blind Enter submits whatever was already at the prompt. The PAIR is queued
+        // as one unit, so a fire-and-forget actuation from another caller cannot land
+        // between the text and the Enter that submits it.
+        await enqueue(async () => {
+          if (command !== '') {
+            await client.call('pane.send_text', { pane_id: paneId, text: command })
+          }
+          await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
+        })
       },
       kill(signal) {
         if (exited) return
@@ -430,16 +445,15 @@ export class HerdrHost implements PtyHost {
             // attempt. Escalation is the retry.
             // ONCE A TERMINAL STATE IS SETTLED, NO LATER PATH MAY REWRITE IT.
             //
-            // THE DEFECT THIS REPLACES: this reset was unconditional. `settleExit`
-            // CLOSES THE CLIENT (see it above), which rejects every still-pending
-            // RPC — including the `pane.close` we ourselves issued. So the sequence
-            // `kill()` → `pane_exited` arrives → exit settles → client closes →
-            // our close rejects → this handler runs flipped `wasKilledByUs()` from
-            // true to FALSE, *after* the child had already settled. With no exit
-            // codes anywhere in herdr that flag is the entire crash-vs-recycle
-            // discriminator, so a deliberate recycle was rewritten into an apparent
-            // crash by a cleanup path that never asked whether the question was
-            // still open.
+            // THE DEFECT THIS REPLACES: this reset was unconditional. Our own
+            // `pane.close` can reject AFTER the exit has already settled — the poll
+            // sees `pane_not_found` and settles while the close is still unanswered,
+            // and then the close comes back as an error. Running this handler then
+            // flipped `wasKilledByUs()` from true to FALSE after the child had
+            // settled. With no exit codes anywhere in herdr that flag is the entire
+            // crash-vs-recycle discriminator, so a deliberate recycle was rewritten
+            // into an apparent crash by a cleanup path that never asked whether the
+            // question was still open.
             //
             // And the rejection is not even evidence: once `exited` is true the pane
             // IS gone, so "the pane was NOT closed" would be a false statement about
