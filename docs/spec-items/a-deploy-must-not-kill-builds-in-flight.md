@@ -117,8 +117,24 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:989`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- A KILL THAT FAILED WAS STILL REPORTED AS A DEPLOY KILL — the purest form of the shape, and
+  the only finding here that crashed a build that was still running. `attributed` was computed
+  from the PRE-KILL liveness sample and consumed at delivery as though it described the
+  OUTCOME; the shutdown queues the report, swallows a thrown `kill()`, and delivered the
+  queued claim anyway. A pre-kill sample answers "was it alive"; the report asserts "we killed
+  it". The fix is not to sample again but to make the claim UNDERIVABLE before the act:
+  `attributed` is gone, the report carries the observation, and `alive-and-killed` is reachable
+  only through `confirmShutdownKill` after `kill()` returns. Queued BEFORE the kill and
+  confirmed after — stated deliberately, because queuing after would lose the record entirely
+  if the process died mid-shutdown, and queuing before is only dangerous if the queued thing is
+  a claim, so it is not one: the pre-kill value `alive-when-reached` is true when written and
+  attributes nothing. The swallowed throw now records an undetermined disposition rather than
+  letting the optimistic report stand. A second defect fell out of the same split:
+  `recordGatewayShutdownKill` returned `null` with no sink wired, conflating "nothing to
+  deliver" with "nothing to confirm", so a successful kill was never promoted for a
+  sink-less substrate.
 - THE PARSER PROMOTED WHAT IT DID NOT RECOGNISE. The entry validator checked `generation` and
   `at` only, and `observationOf` mapped every missing OR UNRECOGNISED `observed` value to
   `alive-and-killed` — the most definite answer available — so a forward-version entry, written
@@ -149,7 +165,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   never overrides an observation; `dead` + `killed` is a real conflict, reported as disputed and
   logged rather than resolved by preferring an arm). That last row was decided only after
   establishing that plain `dead` is positive in both provenances and never arises from a failed
-  look (`pool.ts:931` precedes `pool.ts:961`, so the pool branch answers for a session that has
+  look (`pool.ts:932` precedes `pool.ts:964`, so the pool branch answers for a session that has
   not been through a shutdown; the registry branch answers only when a look found no entry). A
   merge function is not a reader of one entry but of two verdicts, which is why it sat outside
   the call-site audit — so each function now records WHICH QUESTION IT ASKS, and the matrix is
@@ -204,7 +220,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   running workflows, so that was the death likeliest to matter and the one with no record at
   all. Measured before choosing: marking at quarantine time is UNSOUND, not merely awkward —
   `sweepQuarantinedChildren` terminates a quarantined child on the ROUTINE drain
-  (`spawn.ts:926-931`), which that marker would then attribute to a deploy. So the row now
+  (`spawn.ts:927-932`), which that marker would then attribute to a deploy. So the row now
   keeps a bounded LIST keyed by generation, and both readers look their own generation up.
   This is cheaper than it sounds and is not a database migration: the registry is a JSON file
   and its parser checks four fields and tolerates extras, so old and new builds interoperate
@@ -213,7 +229,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:733`), so a
+  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:734`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control
@@ -248,7 +264,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:961`, then `pool.ts:989`).
+  spawn took it over — and they share one registry row (`pool.ts:964`, then `pool.ts:1004`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink
@@ -263,5 +279,5 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:906`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:907`). Every
   deploy killed those silently.

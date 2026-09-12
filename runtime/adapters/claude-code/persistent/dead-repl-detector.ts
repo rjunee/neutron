@@ -70,7 +70,7 @@ export interface ReplWedgeProbe {
    *  explains a death, it never creates one, so a stale or forged record on a LIVE
    *  child changes nothing. Absent ⇒ the shutdown never reached this generation ⇒ the
    *  pre-#518 verdict exactly, an ordinary crash. */
-  shutdownObserved?: 'alive-and-killed' | 'already-gone' | 'could-not-sample'
+  shutdownObserved?: 'alive-and-killed' | 'alive-when-reached' | 'already-gone' | 'could-not-sample'
 }
 
 /**
@@ -107,7 +107,11 @@ export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
           detail: 'pooled child terminated by its own gateway shutting down (a service restart or a deploy)',
         }
       }
-      if (probe.shutdownObserved === 'already-gone' || probe.shutdownObserved === 'could-not-sample') {
+      if (
+        probe.shutdownObserved === 'already-gone' ||
+        probe.shutdownObserved === 'could-not-sample' ||
+        probe.shutdownObserved === 'alive-when-reached'
+      ) {
         // The shutdown REACHED this child and did not kill it. The death is real; its
         // cause was never established, and saying so is the whole point of the third
         // value — an earlier revision had no way to record this, so the retry reported
@@ -118,7 +122,9 @@ export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
           detail:
             probe.shutdownObserved === 'already-gone'
               ? 'pooled child was ALREADY gone when its gateway shut down, so the shutdown did not end it; what did is UNDETERMINED'
-              : "pooled child's liveness could not be read when its gateway shut down, so whether the shutdown ended it is UNDETERMINED",
+              : probe.shutdownObserved === 'alive-when-reached'
+                ? 'pooled child was alive when its gateway shut down and the shutdown COULD NOT TERMINATE it; whether the shutdown ended it is UNDETERMINED'
+                : "pooled child's liveness could not be read when its gateway shut down, so whether the shutdown ended it is UNDETERMINED",
         }
       }
       return { wedged: true, reason: 'pid-dead', detail: 'pooled child exited' }

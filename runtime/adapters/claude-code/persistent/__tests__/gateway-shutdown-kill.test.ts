@@ -229,7 +229,7 @@ describe('reportGatewayShutdownKill — one call, both records', () => {
     const path = registryPath()
     seed(path)
     const seen: ChildCrashInfo[] = []
-    await reportGatewayShutdownKill(optionsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 900, 'alive')
+    await reportGatewayShutdownKill(optionsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 900, 'alive', { killed: true })
 
     expect(seen).toHaveLength(1)
     expect(seen[0]?.cause).toBe('gateway-shutdown')
@@ -250,6 +250,7 @@ describe('reportGatewayShutdownKill — one call, both records', () => {
       'gen-live',
       901,
       'alive',
+      { killed: true },
     )
     expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(true)
   })
@@ -267,6 +268,7 @@ describe('reportGatewayShutdownKill — one call, both records', () => {
       'gen-live',
       902,
       'alive',
+      { killed: true },
     )
     const row = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(wasKilledByGatewayShutdown(row)).toBe(true)
@@ -296,6 +298,7 @@ describe('reportGatewayShutdownKill — one call, both records', () => {
       'gen-live',
       903,
       'alive',
+      { killed: true },
     )
     expect(committed).toBe(true)
   })
@@ -345,7 +348,7 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
     const path = registryPath()
     seed(path)
     const seen: ChildCrashInfo[] = []
-    return reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive').then(
+    return reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, 'alive', { killed: true }).then(
       () => {
         expect(seen[0]?.cause).toBe('gateway-shutdown')
         expect(seen[0]?.detail).toContain('deploy')
@@ -366,7 +369,7 @@ describe('only a child observed ALIVE is attributed to the shutdown', () => {
       const path = registryPath()
       seed(path)
       const seen: ChildCrashInfo[] = []
-      await reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, liveness)
+      await reportGatewayShutdownKill(optsFor(path, seen), 'cc-trident-fire-o-abc /repo', 'gen-live', 700, liveness, { killed: false })
 
       expect(seen).toHaveLength(1)
       expect(seen[0]?.cause).toBe('unknown')

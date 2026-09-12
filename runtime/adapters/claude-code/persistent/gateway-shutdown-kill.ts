@@ -212,7 +212,12 @@ export function observationOf(
 /** Is this one of the three observations? Rows survive upgrades and are not a trusted
  *  type boundary, so the check is a whitelist, never a cast. */
 function isObservation(value: unknown): value is GatewayShutdownObservation {
-  return value === 'alive-and-killed' || value === 'already-gone' || value === 'could-not-sample'
+  return (
+    value === 'alive-and-killed' ||
+    value === 'alive-when-reached' ||
+    value === 'already-gone' ||
+    value === 'could-not-sample'
+  )
 }
 
 /**
@@ -281,13 +286,29 @@ export function gatewayShutdownKillDetail(at: number): string {
  * states what was observed and refuses the two confident readings either side of
  * it: this is not claimed as a deploy, and it is not claimed as a fault.
  */
-export function undeterminedShutdownDetail(liveness: ShutdownLivenessSample, at: number): string {
+export function undeterminedShutdownDetail(observed: GatewayShutdownObservation, at: number): string {
   const when = new Date(at).toISOString()
-  return liveness === 'could-not-sample'
-    ? `its launcher's liveness could not be read when the gateway shut down at ${when}, ` +
+  switch (observed) {
+    case 'alive-when-reached':
+      return (
+        `it was alive when the gateway shut down at ${when} and the shutdown COULD NOT TERMINATE it, ` +
         `so whether the shutdown ended it is UNDETERMINED — not established as a deploy, not established as a fault`
-    : `its launcher was ALREADY gone when the gateway shut down at ${when}, so the shutdown did not end it; ` +
+      )
+    case 'could-not-sample':
+      return (
+        `its launcher's liveness could not be read when the gateway shut down at ${when}, ` +
+        `so whether the shutdown ended it is UNDETERMINED — not established as a deploy, not established as a fault`
+      )
+    case 'already-gone':
+      return (
+        `its launcher was ALREADY gone when the gateway shut down at ${when}, so the shutdown did not end it; ` +
         `what did is UNDETERMINED — not established as a deploy, not established as a fault`
+      )
+    case 'alive-and-killed':
+      // Not reachable from the undetermined arm; kept total rather than defaulted, so a
+      // later member cannot fall silently into someone else's sentence.
+      return gatewayShutdownKillDetail(at)
+  }
 }
 
 /**
@@ -368,6 +389,69 @@ export function pruneGatewayShutdownKills(
   )
   // Original order preserved, so "newest last" stays true for every later reader.
   return keep.filter((e) => survivors.has(e))
+}
+
+/**
+ * THE ONLY ROUTE TO A DEPLOY ATTRIBUTION, and it runs AFTER `kill()` returns.
+ *
+ * A report of a kill must not be DERIVABLE before the kill — not merely unwritten. So
+ * the pre-kill record says `alive-when-reached`, which is true when written and
+ * attributes nothing, and this promotes it to `alive-and-killed` only once the act has
+ * actually happened. A kill that threw establishes nothing and leaves the record where
+ * it was, which is the honest "cause not established" rather than a claim nothing
+ * performed.
+ *
+ * Mutates the report in place because the delivery phase reads it later, and patches the
+ * durable row so the next boot sees the same conclusion as the live sink. Both writes
+ * are cheap and local, which is what the shutdown's deadline allows.
+ */
+export function confirmShutdownKill(
+  report: PendingShutdownKillReport | null,
+  outcome: { killed: boolean },
+): void {
+  if (report === null) return
+  if (report.observed !== 'alive-when-reached') return
+  if (!outcome.killed) {
+    // Shutdown continues — that part was always right — but the disposition of THIS
+    // child is now explicitly unknown rather than left to an earlier optimistic claim.
+    process.stderr.write(
+      `[repl] gateway shutdown could not terminate generation=${report.childGeneration.slice(0, 8)} ` +
+        `— its disposition is UNDETERMINED and it is NOT reported as a deploy kill\n`,
+    )
+    return
+  }
+  report.observed = 'alive-and-killed'
+  if (report.options.replRegistryPath !== undefined) {
+    promoteGatewayShutdownObservation(
+      report.options.replRegistryPath,
+      report.sessionKey,
+      report.childGeneration,
+      'alive-and-killed',
+    )
+  }
+}
+
+/** Move an existing entry's observation forward. Only ever called with the post-kill
+ *  conclusion; a missing entry is not invented. */
+function promoteGatewayShutdownObservation(
+  registryPath: string,
+  sessionKey: string,
+  childGeneration: string,
+  observed: GatewayShutdownObservation,
+): void {
+  try {
+    const record = getRecord(registryPath, sessionKey)
+    const entries = record?.killed_by_gateway_shutdown
+    if (!Array.isArray(entries)) return
+    if (!entries.some((e) => e?.generation === childGeneration)) return
+    patchRecord(registryPath, sessionKey, {
+      killed_by_gateway_shutdown: entries.map((e) =>
+        e?.generation === childGeneration ? { ...e, observed } : e,
+      ),
+    })
+  } catch {
+    /* a registry write must never brick a shutdown */
+  }
 }
 
 export function recordGatewayShutdownOutcome(
@@ -470,8 +554,19 @@ export interface PendingShutdownKillReport {
   at: number
   /** The dead child's OS pid, recorded so the death can be confirmed later. */
   pid?: number
-  /** True when the shutdown demonstrably killed a live child. */
-  attributed: boolean
+  /**
+   * What the shutdown has established SO FAR. Starts at the pre-kill observation and is
+   * promoted to `'alive-and-killed'` by {@link confirmShutdownKill} once `kill()` has
+   * returned — never before.
+   *
+   * THERE IS NO `attributed` BOOLEAN, deliberately. One used to be computed from the
+   * PRE-KILL liveness sample and consumed at delivery as though it described the
+   * OUTCOME, so a kill that threw still published `cause: 'gateway-shutdown'` and the
+   * sink crashed a build that was still running. A pre-kill sample answers "was it
+   * alive"; the report asserts "we killed it". Deriving the cause from this field at
+   * delivery makes the claim underivable before the act, rather than merely unwritten.
+   */
+  observed: GatewayShutdownObservation
   liveness: ShutdownLivenessSample
   /** Whether a DURABLE record of this kill is on disk. The delivery phase says the
    *  next boot will recover an undelivered report, and that promise is only true when
@@ -489,8 +584,9 @@ export interface PendingShutdownKillReport {
  * before any of them is killed, and it must not be able to consume the shutdown's
  * deadline on behalf of a child that has not been reached yet.
  *
- * Returns `null` when there is nothing to deliver (no sink wired) — the marker, if
- * this death was ours, has still been written.
+ * Always returns the report, even with no sink wired: the return value is what the kill's
+ * outcome is attached to, and that is needed whether or not anyone is listening. The
+ * delivery phase skips a report with no sink.
  */
 export function recordGatewayShutdownKill(
   options: PersistentReplSubstrateOptions,
@@ -499,12 +595,13 @@ export function recordGatewayShutdownKill(
   at: number,
   liveness: ShutdownLivenessSample,
   pid?: number,
-): PendingShutdownKillReport | null {
+): PendingShutdownKillReport {
   // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
   // ALIVE was killed by this shutdown; anything else is reported as undetermined.
-  const attributed = liveness === 'alive'
+  // THE PRE-KILL OBSERVATION, and it does not assert the kill. `'alive-and-killed'` is
+  // reachable only from `confirmShutdownKill`, after `kill()` returns.
   const observed: GatewayShutdownObservation =
-    liveness === 'alive' ? 'alive-and-killed' : liveness === 'already-gone' ? 'already-gone' : 'could-not-sample'
+    liveness === 'alive' ? 'alive-when-reached' : liveness === 'already-gone' ? 'already-gone' : 'could-not-sample'
   let durablyRecorded = false
   if (options.replRegistryPath !== undefined) {
     // AN ENTRY IS WRITTEN FOR EVERY OUTCOME, not only for a kill — and that is the
@@ -549,13 +646,17 @@ export function recordGatewayShutdownKill(
       )
     }
   }
-  if (options.onChildCrash === undefined) return null
+  // RETURNED EVEN WITH NO SINK WIRED. It used to return `null` here, which conflated
+  // "nothing to DELIVER" with "nothing to CONFIRM" — so a substrate without a sink never
+  // had its record promoted to `alive-and-killed`, and a death the shutdown genuinely
+  // caused was reported on the next boot as cause-not-established. The delivery phase
+  // already skips a report whose sink is absent; confirmation must still happen.
   return {
     options,
     sessionKey,
     childGeneration,
     at,
-    attributed,
+    observed,
     liveness,
     durablyRecorded,
     ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
@@ -641,10 +742,13 @@ export async function deliverShutdownKillReports(
         sink({
           sessionKey: report.sessionKey,
           generationKey: report.childGeneration,
-          cause: report.attributed ? 'gateway-shutdown' : 'unknown',
-          detail: report.attributed
-            ? gatewayShutdownKillDetail(report.at)
-            : undeterminedShutdownDetail(report.liveness, report.at),
+          // DERIVED FROM WHAT WAS ESTABLISHED, not from a boolean sampled before the
+          // act. `'alive-and-killed'` is reachable only through `confirmShutdownKill`.
+          cause: report.observed === 'alive-and-killed' ? 'gateway-shutdown' : 'unknown',
+          detail:
+            report.observed === 'alive-and-killed'
+              ? gatewayShutdownKillDetail(report.at)
+              : undeterminedShutdownDetail(report.observed, report.at),
         }),
       )
       // A sink we abandon must not become an unhandled rejection later. Attaching the
@@ -706,8 +810,14 @@ export async function reportGatewayShutdownKill(
   childGeneration: string,
   at: number,
   liveness: ShutdownLivenessSample,
+  /** WHAT THE KILL DID. Required, and deliberately not defaulted: this wrapper does not
+   *  perform the kill, so it cannot know — and a convenience that quietly assumed
+   *  success would be the same over-claim the split exists to remove, reintroduced at
+   *  the one seam that looks harmless. */
+  outcome: { killed: boolean },
   pid?: number,
 ): Promise<void> {
   const owed = recordGatewayShutdownKill(options, sessionKey, childGeneration, at, liveness, pid)
+  confirmShutdownKill(owed, outcome)
   if (owed !== null) await deliverShutdownKillReports([owed])
 }

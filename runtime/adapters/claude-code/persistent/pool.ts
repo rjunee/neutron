@@ -12,6 +12,7 @@ import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respa
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
 import {
+  confirmShutdownKill,
   deliverShutdownKillReports,
   recordGatewayShutdownKill,
   sampleLivenessBeforeShutdownKill,
@@ -929,6 +930,8 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   const owedReports: PendingShutdownKillReport[] = []
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
+    // The report owed for THIS child, so the kill's outcome can be attached to it.
+    let owedForThisChild: PendingShutdownKillReport | null = null
     try {
       const session = await p
       session.sizeWatchdog?.stop()
@@ -970,12 +973,24 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
           session.child.pid,
         )
         if (owed !== null) owedReports.push(owed)
+        owedForThisChild = owed
       } else {
         process.stderr.write(
           `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,
         )
       }
-      session.child.kill()
+      // THE KILL'S OUTCOME IS WHAT ATTRIBUTES IT, not the sample taken before it. A
+      // throw here used to be swallowed while the queued report still published
+      // `gateway-shutdown`, so the sink crashed a build that was still running. The
+      // shutdown still continues past a failed kill — that part was always right — but
+      // this child's disposition is now recorded as UNDETERMINED rather than leaving an
+      // earlier optimistic claim standing.
+      try {
+        session.child.kill()
+        confirmShutdownKill(owedForThisChild, { killed: true })
+      } catch {
+        confirmShutdownKill(owedForThisChild, { killed: false })
+      }
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
     } catch {

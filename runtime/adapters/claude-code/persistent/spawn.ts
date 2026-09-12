@@ -27,6 +27,7 @@ import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './r
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
 import {
+  confirmShutdownKill,
   recordGatewayShutdownKill,
   sampleLivenessBeforeShutdownKill,
   type PendingShutdownKillReport,
@@ -971,10 +972,12 @@ export function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): Pe
       entry.session.child.pid,
     )
     if (report !== null) owed.push(report)
+    // Same rule as the pooled path: only a kill that RETURNED attributes the death.
     try {
       entry.session.child.kill()
+      confirmShutdownKill(report, { killed: true })
     } catch {
-      /* already gone */
+      confirmShutdownKill(report, { killed: false })
     }
   }
   return owed

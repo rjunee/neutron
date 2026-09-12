@@ -95,8 +95,21 @@ export const GATEWAY_SHUTDOWN_KILL_HISTORY = 256
  * looks like, and here that was the worst one.
  */
 export type GatewayShutdownObservation =
-  /** Observed ALIVE and then terminated by the shutdown. A deploy killed it. */
+  /** Observed ALIVE when the shutdown reached it, and the kill then RETURNED. A deploy
+   *  killed it. The only value that attributes a death to the shutdown. */
   | 'alive-and-killed'
+  /**
+   * Observed ALIVE when the shutdown reached it, and what the kill did is NOT
+   * ESTABLISHED — it threw, or this process stopped before it could record the outcome.
+   *
+   * THE PRE-KILL STATE, and it exists so that no record written before the act can
+   * assert the act. `alive-and-killed` is only ever reached by
+   * {@link confirmShutdownKill} AFTER `kill()` returns; until then the row says this,
+   * which is true at the moment it is written and attributes nothing. A process that
+   * dies mid-shutdown therefore leaves an honest "cause not established" rather than
+   * either silence or a deploy claim nothing performed.
+   */
+  | 'alive-when-reached'
   /** Already gone when the shutdown reached it — so the shutdown did NOT kill it, and
    *  nothing here establishes what did. */
   | 'already-gone'

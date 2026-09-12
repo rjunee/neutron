@@ -1006,7 +1006,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
     sessionKey: `key-${id}`,
     childGeneration: `gen-${id}`,
     at: 1_000,
-    attributed: true,
+    observed: 'alive-and-killed',
     liveness: 'alive',
     durablyRecorded: true,
   })
@@ -1188,7 +1188,7 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
     const base = {
       options: { substrate_instance_id: 'x', cwd: '/x', onChildCrash: hung } as PersistentReplSubstrateOptions,
       at: 1_000,
-      attributed: true,
+      observed: 'alive-and-killed' as const,
       liveness: 'alive' as const,
     }
     const clock = fakeClock()
@@ -1326,5 +1326,106 @@ describe('a delivered undetermined report is not reported again (#518)', () => {
     expect(delivered[0]?.detail).toContain('ALREADY gone')
     expect(delivered[0]?.cause).not.toBe('child-died')
     expect(delivered[0]?.detail).not.toBe('pooled child exited')
+  })
+})
+
+/**
+ * #518 — A KILL THAT FAILED IS NOT A KILL. Tested at the LIVE PUSH PATH, because that is
+ * where the harm lands: the production sink crashing a build that is still running.
+ *
+ * `attributed` used to be computed from the PRE-KILL liveness sample and consumed at
+ * delivery as though it described the OUTCOME. The shutdown queues the report before
+ * calling `kill()`, swallows a throw, and delivered the queued claim anyway — so an alive
+ * child whose kill failed was reported `cause: 'gateway-shutdown'` while it was still
+ * serving. A pre-kill sample answers "was it alive"; the report asserts "we killed it".
+ *
+ * The fix is not to sample again: it is that the claim is no longer DERIVABLE before the
+ * act. The pre-kill record says `alive-when-reached`, which attributes nothing, and only
+ * `confirmShutdownKill` — after `kill()` returns — promotes it.
+ */
+describe('a kill that throws never attributes a deploy (#518)', () => {
+  /**
+   * The working host, with ONE behaviour changed: its child refuses to die. Wrapping
+   * rather than re-implementing, because a hand-rolled host has to reproduce the whole
+   * channel handshake to get as far as the kill — and a fake that never finishes spawning
+   * would pass this test for the wrong reason.
+   */
+  function makeUnkillableHost(): { host: PtyHost; messagesSeen: () => number } {
+    const base = makeWedgeOnceHost()
+    let killAttempted = false
+    const host: PtyHost = {
+      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
+        const child = base.host.spawn(argv, spawnOpts)
+        return {
+          ...child,
+          kill() {
+            killAttempted = true
+            throw new Error('EPERM: cannot signal this child')
+          },
+          // It is still running: the kill never landed.
+          hasExited: () => false,
+        }
+      },
+    }
+    void killAttempted
+    return { host, messagesSeen: base.messagesSeen }
+  }
+
+  it('an ALIVE child whose kill() throws is NOT reported as a deploy kill', async () => {
+    // RED-mutation: derive the delivered cause from the pre-kill liveness sample again
+    // (`report.liveness === 'alive' ? 'gateway-shutdown' : 'unknown'`). The sink then
+    // receives `gateway-shutdown` for a child that is still running, which is the
+    // production sink crashing a live build.
+    const { host, messagesSeen } = makeUnkillableHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-unkillable-')), 'repl-registry.json')
+    const seen: Array<{ cause: string; detail: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push({ cause: info.cause, detail: info.detail })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    // The child is still running, so nothing may claim we ended it.
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.cause).not.toBe('gateway-shutdown')
+    expect(seen[0]?.cause).toBe('unknown')
+    expect(seen[0]?.detail).toContain('COULD NOT TERMINATE')
+    expect(seen[0]?.detail).toContain('UNDETERMINED')
+
+    // And no excuse on disk either: the durable record stops at what was established.
+    const row = loadRegistry(registryPath)[key]
+    expect(wasKilledByGatewayShutdown(row)).toBe(false)
+    expect(observationOf(gatewayShutdownKillEntryFor(row, row?.child_generation as string))).toBe('alive-when-reached')
+  }, 20_000)
+
+  it('THE COMPLEMENT — a kill that SUCCEEDS still attributes the deploy', async () => {
+    // Without this, "never attribute" would pass the case above and delete the feature.
+    // RED-mutation: make `confirmShutdownKill` never promote.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-killable-')), 'repl-registry.json')
+    const seen: string[] = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push(info.cause)
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    expect(childAlive(1)).toBe(false)
+    expect(seen).toEqual(['gateway-shutdown'])
+    expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(true)
   })
 })
