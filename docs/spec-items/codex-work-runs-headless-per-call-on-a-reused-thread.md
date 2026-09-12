@@ -49,11 +49,14 @@ conversation when that process wedges, and a daemon mode this install cannot run
    environment, exactly as `trident/codex-review.sh:145-152` does under its HARD
    BILLING CONTRACT header. A correct `auth.json` beside a leaked inherited key
    bills the metered key.
-5. **One `auth.json` file per account, shared by reference.** codex rotates the
+5. **One `auth.json` file per account, shared by SYMLINK.** codex rotates the
    refresh token when it refreshes, so two independent copies of one account's
-   `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A
-   second `CODEX_HOME` for the same account points at the same `auth.json`; it
-   never holds a copy of it.
+   `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A second
+   `CODEX_HOME` for the same account carries a **symlink** to the canonical file —
+   never a copy, and never a hard link. The link type is load-bearing, not
+   incidental: a credential file is rewritten by atomic replacement, which gives the
+   canonical path a new inode, and a hard link stays behind on the old one serving a
+   stale token.
 6. **Approvals, and who is allowed to be the approver.** Headless codex cannot ask
    *Neutron* for an approval — there is no channel for it. `-c
    approval_policy=on-request` alone makes codex refuse an escalation outright, with
@@ -152,16 +155,27 @@ conversation when that process wedges, and a daemon mode this install cannot run
       it a HARD BILLING CONTRACT. An adapter that validates the file and then leaks
       an inherited key into the child silently bills a metered key while passing
       every other criterion here.
-- [ ] A second `CODEX_HOME` for one account **shares** its `auth.json` rather than
-      copying it. verify: a test creates a secondary `CODEX_HOME` through the
-      adapter and asserts the two homes' `auth.json` resolve to the **same
-      credential file** — same inode/`realpath`, not merely equal contents, because
-      equal contents is what a fresh copy has. Then it writes a changed token
-      through one home (standing in for a refresh) and asserts the other home reads
-      the new value back. The mutant this exists to kill is one line —
-      `copyFile(auth.json, …)` — which passes every other criterion in this
-      section until a real refresh rotates the token and silently revokes the other
-      home (`trident/codex-credential.ts:396-399`).
+- [ ] A second `CODEX_HOME` for one account reaches the canonical `auth.json`
+      **through a symlink**, and keeps reaching it across a rotation. verify: two
+      assertions, and the second is the one with teeth.
+      (i) **Structural:** `lstat` on the secondary `auth.json` reports a **symbolic
+      link** (`islink` true), and the link resolves to the canonical file — assert
+      `realpath` equality, **never inode equality**, which a hard link also
+      satisfies.
+      (ii) **Behavioural, and it must use atomic replacement:** rewrite the
+      canonical file the way a client actually rotates a credential — write a temp
+      file, then `rename`/`replace` it over the canonical path — and assert the
+      secondary home reads the **new** token back. An in-place mutation is not an
+      acceptable substitute here: measured, a hard link and a symlink are
+      indistinguishable under in-place write (both read the new value) and diverge
+      only under replacement, where the hard link keeps the old inode and serves a
+      **stale token**.
+      Two mutants this kills, both of which passed the earlier wording: `copyFile`,
+      and `link()`. The second is the dangerous one, because atomic replace is the
+      *correct* way to rewrite a credential file — so a hard-linked implementation
+      would pass every test here and fail in production at the exact moment this
+      criterion exists to protect, a refresh, silently revoking the other home
+      (`trident/codex-credential.ts:396-399`).
 - [ ] Two overlapping calls on one thread id produce the specified behaviour, not a
       collision. verify: a test starts call A on a thread and, while A is still in
       flight, starts call B on the same thread id; it asserts B **waited** (B's

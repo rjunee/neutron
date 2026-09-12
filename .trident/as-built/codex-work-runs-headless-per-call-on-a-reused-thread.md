@@ -152,6 +152,37 @@ the meter's resolution too.
   place asserting the old one, **including the places it edited an hour earlier**.
   The entry now says what is true — headless removes the wedged long-lived owner,
   not the lock.
+
+### The sibling question: what OPERATION would a wrong implementation get right?
+
+Every other criterion corrected in this change was satisfied by the wrong **value** —
+a guessable nonce, a hard-coded sandbox mode, a key in the wrong place. One was
+satisfied by the wrong **write pattern**, and it is the more transferable miss.
+
+The `auth.json` sharing criterion asked for "the same credential file — same
+inode/`realpath`" and tested it by mutating the file in place. **A hard link passes
+both halves.** Measured here rather than argued:
+
+| | inode == canonical | `realpath` == canonical | after in-place write | after atomic replace |
+|---|---|---|---|---|
+| hard link | **true** | false | reads new value | **stale token** |
+| symlink | true | true | reads new value | reads new value |
+
+So inode equality does not discriminate at all, `realpath` does, and the *behaviour*
+only diverges under **replacement** — which is precisely how a credential file is
+rewritten, because atomic replace is the correct way to do it. A hard-linked
+implementation would therefore have passed every test as written and failed in
+production at the one moment the criterion existed to protect: a token rotation.
+
+The generalisation, which is not specific to credentials: **"what input would a wrong
+implementation get right?" has a sibling — "what *operation* would it get right?"**
+Anywhere a test asserts two paths are the same file, the discriminator is what
+happens when one is **replaced**, not when one is written through. The criterion now
+requires `islink` plus `realpath` equality, and exercises an atomic replace.
+
+The implementation was already correct — the spike used a symlink, for this reason.
+The criterion permitted something weaker than what was actually done, which is its
+own kind of failure: a record that would have let the next person do it wrong.
 - **The supervised form is unavailable.** `codex app-server daemon start` refuses
   without a managed standalone install at
   `$CODEX_HOME/packages/standalone/current/codex`; codex here is the npm
