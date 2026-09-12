@@ -202,6 +202,35 @@ database, and the three sqlite cannot store are covered through the real dispatc
 chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
 
+**THE QUESTION AFTER ANY CORRECTION IS NOT "IS THIS SITE RIGHT NOW" BUT "WHO ELSE SAYS
+THIS".** Five times on this change a rule was applied to the site in front of the author
+and not to its siblings: the cap got a careful three-way classification while the counter
+beside it silently normalised; `!= null` was fixed at the `isRalphCap` validation while
+the pair guard one layer down still read `=== undefined`; `ralph-budget.ts`'s header went
+on asserting the card-level bound this very record had disproved; a comment credited
+`delivery.ts` with a dependency it does not have; and the three-arm reason landed in
+`enterRalphPlan` while `refireNextRalphTask` — the OTHER production enforcement path, and
+the one a resumed run reaches — kept emitting "without converging" unconditionally.
+
+Every one was found by someone else, and each is cheap to find first: after changing a
+rule, grep for every other producer of it WITH A POSITIVE CONTROL, so the count means
+something. Here that grep returned exactly two producers of the cap sentence, and the
+control was that both known sites appeared in the output — a grep that finds one of two
+looks identical to a grep that finds one of one. The sentence is now written once, by
+`ralphCapFailureReason` in `ralph-budget.ts`, and fixing the string twice was refused for
+the reason that module's own header gives for existing: two copies of a rule drift, and
+the drift is invisible because both compile.
+
+THE EXTRACTION'S OWN FAILURE MODE WAS ALSO CAUGHT BY A MUTATION, not by reading. The
+first orchestrator test asserted whichever arm the row happened to take, so pointing that
+call site back at the old hard-coded string left the suite green — the helper existed and
+one call site did not use it, which is what every extraction risks. Measured while fixing
+it: a run only reaches `refireNextRalphTask` after the workflow wrote a terminal result,
+and the workflow writes a checkpoint first, so in the ORDINARY flow that row has a
+checkpoint and arm 1 is genuinely accurate there. The discriminating case is real but
+narrower — `checkpoint.sh` is an out-of-process writer, so a terminal result can land with
+no checkpoint behind it — and the test now drives both arms at that call site.
+
 **THE PATTERN, AND THE LINE THAT MATTERS MOST IN THIS RECORD.** Four boundary defects
 landed in this lane and all four were one mistake: the at-cap round reset to a fresh row,
 the cap not carried at all, an explicit `0` cap read as `20`, and an unreadable counter

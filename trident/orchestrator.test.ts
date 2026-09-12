@@ -4309,6 +4309,81 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     expect(final.ralph_round).toBe(3)
   })
 
+  test('a RESUMED run at its CARRIED cap: the reason comes from the shared author, both arms (#519)', async () => {
+    // THE SECOND ENFORCEMENT PATH, and the one the three-arm wording missed.
+    // `enterRalphPlan` (state-machine.ts) got the corrected reason while THIS path —
+    // `refireNextRalphTask`, reached when a harvested result still has work left — kept
+    // emitting "without converging" unconditionally. Both now call
+    // `ralphCapFailureReason` (ralph-budget.ts).
+    //
+    // WHICH ARM IS NATURALLY REACHABLE HERE, measured rather than assumed: a run only
+    // reaches this branch after the workflow wrote a terminal result, and the workflow
+    // writes an `inner_checkpoint` first — so in the ordinary flow the row HAS a
+    // checkpoint and arm 1 ("without converging") is genuinely accurate. That is why the
+    // first version of this test could not tell the helper from the old hard-coded
+    // string, and why the E1 mutation below survived it: both produce the same sentence
+    // for the only case the harness produced. Asserting the arm that is always right is
+    // the same mistake as a test that reacts to its subject.
+    //
+    // So the second half drives the case where they DIFFER, and it is a real one: the
+    // checkpoint is written out-of-process by `checkpoint.sh`, so a terminal result can
+    // land with no checkpoint behind it. Then arm 3 applies and the old string would be
+    // a lie about a row that recorded no build of its own.
+    function plan(): SimPlan {
+      return {
+        result: { verdict: 'REQUEST_CHANGES', prNumber: 9, branch: 'trident/carried', remainingTasks: 4 },
+      }
+    }
+
+    // ── ARM 1, the ordinary flow: a checkpoint exists, so "without converging" is true.
+    {
+      const h = buildHarness({ plan })
+      const run = await createRun({
+        ralph: true, branch: 'trident/carried', merge_mode: 'pr' as MergeMode,
+        ralph_round: 3, max_ralph_rounds: 3,
+      })
+      expect({ round: run.ralph_round, cap: run.max_ralph_rounds, cp: run.inner_checkpoint }).toEqual({
+        round: 3, cap: 3, cp: null,
+      })
+      const final = await runToTerminal(h, run.id, 40)
+      expect(final.phase).toBe('failed')
+      expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+      expect(final.inner_checkpoint).not.toBeNull() // the precondition for arm 1, asserted
+      expect(final.failure_reason ?? '').toContain('without converging')
+      // This path's OWN fact — how much work is left — survives the extraction. The state
+      // machine has no such number, so it is the half a shared helper could quietly drop.
+      expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
+      expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
+    }
+
+    // ── ARM 3, the discriminating case: the terminal result landed but no checkpoint did.
+    {
+      const h = buildHarness({ plan })
+      const run = await createRun({
+        slug: 'carried-no-checkpoint', ralph: true, branch: 'trident/carried-2',
+        merge_mode: 'pr' as MergeMode, ralph_round: 3, max_ralph_rounds: 3,
+      })
+      await h.loop.runOnce() // fire
+      await h.complete() // the workflow's terminal write (result + checkpoint)
+      // `checkpoint.sh` is a separate out-of-process writer; model its write not landing.
+      await store.update(run.id, { inner_checkpoint: null })
+      await h.loop.runOnce() // harvest → refireNextRalphTask → cap branch
+
+      const final = store.get(run.id)!
+      expect(final.phase).toBe('failed')
+      expect(final.inner_checkpoint).toBeNull() // the precondition for arm 3, asserted
+      // RED-mutation E1: point this call site back at the old unconditional string and
+      // THIS assertion fails while the arm-1 block above still passes — which is exactly
+      // how the divergence survived, and the failure mode of every extraction (the helper
+      // exists; one call site does not use it).
+      expect(final.failure_reason ?? '').toContain('no build of its own on this run')
+      expect(final.failure_reason ?? '').not.toContain('without converging')
+      // The classification token is unchanged on both arms, so nothing downstream shifts.
+      expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
+      expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
+    }
+  })
+
   test('the intermediate re-fire never leaves a harvestable inner_result behind (no re-harvest loop)', async () => {
     // Regression guard for the wiring trap: saveIfActive never writes inner_result,
     // so a re-fire that failed to null it out-of-band would re-harvest the SAME

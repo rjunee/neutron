@@ -41,6 +41,7 @@
  * ─────────────────────────────────────────────────────────────────────
  */
 
+import { ralphCapFailureReason } from './ralph-budget.ts'
 import type { TridentPhase, TridentRun, WorkflowColumnsSeen } from './store.ts'
 
 /** The phases the loop never advances out of. */
@@ -253,6 +254,13 @@ function enterRalphPlan(
     // The `max_ralph_rounds` token is present in both spellings — `delivery.ts` and
     // several tests key on it — so only the explanation changes, never the
     // classification.
+    // THE SENTENCE IS OWNED BY `ralphCapFailureReason` (ralph-budget.ts), NOT WRITTEN
+    // HERE (final gate). It used to be written here, and `refireNextRalphTask`
+    // (orchestrator.ts) went on emitting "without converging" unconditionally — the same
+    // rule applied to the site in front of me and not to its sibling, for the fourth time
+    // on this change. The derivation of the three arms, and of why there are three rather
+    // than four, lives with the function. What remains here is the call.
+    //
     // THREE BRANCHES, BECAUSE THE ROW DISTINGUISHES THREE THINGS — and the previous
     // revision collapsed two of them (final gate, round three). Having correctly removed
     // a claim that was NOT determinable (inheritance), it retreated to the most general
@@ -293,13 +301,7 @@ function enterRalphPlan(
     // assert the token out of `failure_reason`. No PRODUCTION reader parses it today;
     // `phase: 'failed'` is what production routes on, and that is identical on all three
     // arms.
-    const builtSomethingItself = run.inner_checkpoint !== null
-    const nothingWasEverAllocated = !builtSomethingItself && run.ralph_round === 0
-    const failure_reason = builtSomethingItself
-      ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`
-      : nothingWasEverAllocated
-        ? `Ralph loop cannot start: max_ralph_rounds is ${run.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build`
-        : `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) with ralph_round already at ${run.ralph_round} and no build of its own on this run (inner_checkpoint is null): the budget is consumed, so there was no iteration left to start and nothing was attempted. This row does not record WHO consumed it — it may have spent the rounds itself through the phase graph, or carried the count forward from an earlier run of this card — so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge`
+    const failure_reason = ralphCapFailureReason(run)
     return {
       phase: 'failed',
       round: run.round,

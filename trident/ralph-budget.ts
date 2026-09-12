@@ -176,3 +176,60 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
   if (!isRalphCap(dispatch_cap)) return null
   return Math.min(prior_cap as number, dispatch_cap as number)
 }
+
+/**
+ * THE ONE AUTHOR OF THE CAP-REFUSAL DIAGNOSIS, shared by both production sites that
+ * enforce the Ralph bound.
+ *
+ * WHY IT IS HERE AND NOT INLINE (final gate). The three-arm wording was written into
+ * `enterRalphPlan` (state-machine.ts) and `refireNextRalphTask` (orchestrator.ts) kept
+ * emitting "without converging" unconditionally — so the sentence this lane spent three
+ * rounds correcting was still live on the path a RESUMED seeded run takes after review
+ * when `remaining_tasks > 0`, which is precisely the shape most likely to arrive at the
+ * cap having run no iteration of its own. Fixing the string twice would have re-created
+ * the defect this module's own header names: two copies of a rule drift, and the drift is
+ * invisible because both compile. This file is the leaf both call sites can reach, so it
+ * owns the sentence the way it already owns the predicates.
+ *
+ * THE THREE ARMS, and why there are three rather than four. The refusal fires iff
+ * `ralph_round >= max_ralph_rounds`; `max_ralph_rounds` is written only by
+ * `TridentRunStore.create` (absent from `TridentRunUpdate`) and `create` refuses any cap
+ * that is not a non-negative safe integer, so `ralph_round === 0` here IMPLIES
+ * `max_ralph_rounds === 0`, and round 0 under a positive cap cannot reach this code at
+ * all.
+ *
+ *   1. A CHECKPOINT EXISTS — this run built something and then ran out. "Without
+ *      converging" is accurate for it and is the original wording, unchanged.
+ *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0: no iteration was ever
+ *      authorised, so nothing was spent by anyone. Determinable from the row.
+ *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget IS consumed, whoever consumed
+ *      it; only WHO is open, since this row may have advanced the counter itself through
+ *      the phase graph or carried the count in from an earlier run of the card.
+ *
+ * TAKES PRIMITIVES, NOT A RUN, so this module stays a true leaf that imports nothing —
+ * the property its header rests on. `remaining_tasks` is the orchestrator's extra fact
+ * (it knows how much work is left; the state machine does not), appended when present so
+ * neither caller loses information the other never had.
+ *
+ * The `max_ralph_rounds` token appears in all three arms, so the classification is
+ * unchanged and only the explanation differs.
+ */
+export function ralphCapFailureReason(row: {
+  inner_checkpoint: string | null
+  ralph_round: number
+  max_ralph_rounds: number
+  remaining_tasks?: number | null
+}): string {
+  const tail =
+    typeof row.remaining_tasks === 'number' && Number.isFinite(row.remaining_tasks)
+      ? ` (${row.remaining_tasks} task(s) still unbuilt)`
+      : ''
+  const builtSomethingItself = row.inner_checkpoint !== null
+  if (builtSomethingItself) {
+    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) without converging${tail}`
+  }
+  if (row.ralph_round === 0) {
+    return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`
+  }
+  return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round already at ${row.ralph_round} and no build of its own on this run (inner_checkpoint is null): the budget is consumed, so there was no iteration left to start and nothing was attempted. This row does not record WHO consumed it — it may have spent the rounds itself through the phase graph, or carried the count forward from an earlier run of this card — so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge${tail}`
+}
