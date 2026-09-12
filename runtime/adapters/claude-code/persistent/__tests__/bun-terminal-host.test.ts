@@ -15,7 +15,12 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { bunTerminalHost, newScreenAccumulator } from '../bun-terminal-host.ts'
+import {
+  BunTerminalHost,
+  bunTerminalHost,
+  newScreenAccumulator,
+  writeAllOrThrow,
+} from '../bun-terminal-host.ts'
 import type { PtyChild } from '../pty-host.ts'
 
 /** Wait until `cond()` holds, or throw. */
@@ -263,5 +268,132 @@ describe('the screen accumulator is bounded in BYTES', () => {
     // invisible to the count above (verified: that mutation survived until this line).
     expect(maxWhenSaturated).toBeGreaterThan(CAP - 2048)
     expect(maxWhenSaturated).toBeLessThanOrEqual(CAP)
+  })
+})
+
+/**
+ * THE SHORT-WRITE GUARD, TESTED THROUGH THE SEAM — because it cannot be tested through
+ * a pty. A real pty does not short-write the small payloads `submitLine` sends, so a
+ * mutation deleting the check survived every end-to-end case here. That was recorded as
+ * an uncovered boundary rather than papered over, and this is the fix: the write
+ * function is an argument, so zero and partial acceptance are ordinary inputs.
+ */
+describe('a short pty write is a failed submit, not a silent partial one', () => {
+  it('a write the kernel REFUSES ENTIRELY is reported', () => {
+    expect(() => writeAllOrThrow(() => 0, '/compact', "'/compact'")).toThrow(
+      /short write of '\/compact' — the pty accepted 0 of 8 bytes/,
+    )
+  })
+
+  it('a PARTIAL write is reported — a half-delivered command is not a delivered one', () => {
+    expect(() => writeAllOrThrow(() => 3, '/compact', "'/compact'")).toThrow(
+      /accepted 3 of 8 bytes/,
+    )
+  })
+
+  it('CONTROL — a write the kernel takes in full raises nothing', () => {
+    let sent: string | Uint8Array | undefined
+    expect(() =>
+      writeAllOrThrow((d) => {
+        sent = d
+        return Buffer.byteLength(d as string, 'utf8')
+      }, '/compact', "'/compact'"),
+    ).not.toThrow()
+    expect(sent).toBe('/compact')
+  })
+
+  // BYTES, NOT UTF-16 UNITS, and only a multibyte payload can tell them apart. `é` is
+  // one code unit and two bytes, so a write that accepted exactly the code-unit count
+  // delivered HALF the payload — and a `.length` comparison calls that complete. The
+  // same confusion was fixed three times on the herdr side of this branch.
+  it('measures BYTES — a write accepting the UTF-16 unit count is still short', () => {
+    const text = 'éé' // 2 code units, 4 bytes
+    expect(() => writeAllOrThrow(() => text.length, text, 'the text')).toThrow(
+      /accepted 2 of 4 bytes/,
+    )
+  })
+
+  it('CONTROL — a multibyte write accepting all its BYTES is accepted', () => {
+    const text = 'éé'
+    expect(() =>
+      writeAllOrThrow(() => Buffer.byteLength(text, 'utf8'), text, 'the text'),
+    ).not.toThrow()
+  })
+
+  it('a Uint8Array payload is measured by its own length, not re-encoded', () => {
+    const bytes = new Uint8Array([0x0d])
+    expect(() => writeAllOrThrow(() => 0, bytes, "the 'enter' key")).toThrow(
+      /accepted 0 of 1 bytes/,
+    )
+    expect(() => writeAllOrThrow(() => 1, bytes, "the 'enter' key")).not.toThrow()
+  })
+})
+
+/**
+ * THE GUARD'S WIRING, which a pure helper could not reach.
+ *
+ * Extracting `writeAllOrThrow` made the CHECK assertable; it did not make it assertable
+ * that `submitLine` still calls it. The mutation that replaces both calls with bare
+ * `terminal.write` survived every test above, because no real pty will short-write an
+ * eight-byte payload. So the terminal is injectable — the same seam `HerdrHost` has for
+ * its socket, for the same reason.
+ */
+describe('submitLine is WIRED to the short-write guard, not merely accompanied by it', () => {
+  /** A host whose pty accepts `accept(data)` bytes of each write. */
+  function hostWithPty(accept: (data: string | Uint8Array) => number): {
+    host: BunTerminalHost
+    writes: (string | Uint8Array)[]
+  } {
+    const writes: (string | Uint8Array)[] = []
+    const host = new BunTerminalHost({
+      createTerminal: () => ({
+        // `Bun.Terminal.write` is typed `string | ArrayBufferView`; this host only ever
+        // hands it the narrower `string | Uint8Array`, which is what the guard measures.
+        write: (d: string | ArrayBufferView) => {
+          const payload = typeof d === 'string' ? d : new Uint8Array(d.buffer, d.byteOffset, d.byteLength)
+          writes.push(payload)
+          return accept(payload)
+        },
+        resize: () => undefined,
+        close: () => undefined,
+      }),
+      spawn: () => ({
+        pid: 4242,
+        exited: new Promise<number | null>(() => {}), // never exits during the test
+        exitCode: null,
+        kill: () => undefined,
+      }),
+    })
+    return { host, writes }
+  }
+
+  const full = (d: string | Uint8Array): number =>
+    typeof d === 'string' ? Buffer.byteLength(d, 'utf8') : d.length
+
+  it('a pty that REFUSES the text makes submitLine reject — and the Enter is not sent', async () => {
+    const { host, writes } = hostWithPty(() => 0)
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    await expect(child.submitLine!('/compact')).rejects.toThrow(/short write of "\/compact"/)
+    // A REFUSED TEXT MUST LEAVE THE ENTER UNSENT. A blind Enter after a text that did
+    // not land submits whatever was already on the line — the exact failure the
+    // acknowledged seam exists to prevent, and it is only visible here because the
+    // refusal can be arranged at all.
+    expect(writes).toEqual(['/compact'])
+  })
+
+  it('a pty that takes the text but REFUSES the Enter also rejects', async () => {
+    let n = 0
+    const { host } = hostWithPty((d) => (n++ === 0 ? full(d) : 0))
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    await expect(child.submitLine!('/compact')).rejects.toThrow(/short write of the 'enter' key/)
+  })
+
+  it('CONTROL — a pty that takes everything resolves, and sends text THEN enter', async () => {
+    const { host, writes } = hostWithPty(full)
+    const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
+    await child.submitLine!('/compact')
+    expect(writes.length).toBe(2)
+    expect(writes[0]).toBe('/compact')
+    expect(String(writes[1])).toBe('\r')
   })
 })

@@ -1513,6 +1513,55 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### A shared interface that encodes one backend's behaviour is the dual-path outcome
+
+`PtyChild.write` said "DOES NOT SUBMIT, AND REFUSES TO PRETEND IT DOES" and described
+herdr's CR/LF refusal as though it were the interface's rule. That was harmless while
+herdr was the only implementation and became false the moment a second supported backend
+had the opposite behaviour: under an in-process pty a `\r` genuinely submits. A caller
+reading the shared type could no longer reason about its own bytes — which is the single
+thing the type exists to tell it. Keeping two backends and letting the contract describe
+one of them is precisely the "two diverging code paths" outcome the owner said he did not
+want; the contract has to stay honest about both, and that is the ongoing cost of the
+option.
+
+`write` is now a byte-delivery operation that says nothing about submission in either
+direction. herdr's CR/LF refusal moved to `HerdrHost` as its own documented precondition,
+where it is enforced and where the reasoning belongs. The submission-bearing operation is
+`submitLine`, which both backends implement honestly and differently — herdr awaits two
+acknowledged round trips, the pty checks that every byte was accepted — and neither
+fabricates the other's claim.
+
+Swept the rest of the interface for the same shape rather than fixing the one clause
+named. Eight more places stated a herdr fact as a universal: `writeKey` ("under herdr it
+is also the ONLY way to submit"), `kill`, `wasKilledByUs`, `beginOutput`, `resize`,
+`onScreen`, `onExit`, and `cols`/`rows`. Each now says what is true of BOTH, and where
+they differ it says which is which. Two collaborators carried the same leak and were
+corrected with it: `submitCommand`'s refusal message, which explained the refusal in
+terms of herdr's `pane.send_text`, and `spawn.ts`'s `onScreen` comment.
+
+### The guard was tested; its WIRING was not
+
+M160 — deleting the Bun host's short-write check — survived every end-to-end test,
+because a real pty does not short-write an eight-byte payload. It had been recorded as an
+uncovered boundary, honestly, but the as-built simultaneously claimed "every mutation
+reddened" and the acceptance criterion called that backend "contract-complete and
+TESTED". Two false statements over one real gap.
+
+Extracting `writeAllOrThrow` as a seam-taking function makes the CHECK assertable: zero
+acceptance, partial acceptance, a UTF-16-unit count for a multibyte payload (which is the
+lax direction — `é` is one unit and two bytes, so a half-delivered write looks complete),
+and a `Uint8Array` measured by its own length, each with its control.
+
+That was not enough, and the next mutation said so: replacing both calls in `submitLine`
+with bare `terminal.write` still survived. **A pure helper can prove the check works and
+cannot prove anything still calls it.** So the terminal is injectable — the same seam
+`HerdrHost` has for its socket, added for the same reason. With it, a pty that refuses
+the text makes `submitLine` reject AND leaves the Enter unsent (a blind Enter after a
+text that did not land submits whatever was on the line), a pty that refuses only the
+Enter rejects too, and the control shows text-then-`\r` on a healthy one. M172, M173 and
+M174 all redden.
+
 ### A line count is not a bound, because a line is unbounded
 
 Keeping the Bun host brought a pre-existing defect into scope, which is exactly the cost
@@ -1921,7 +1970,16 @@ The count went 50 → 49, which is the least interesting fact about the sweep.
 
 ### Mutation table
 
-Every guard was mutated and every mutation reddened. Run against the named suites.
+Every guard was mutated. **Not every mutation reddened**, and the survivors are in the
+table with what absorbed each one — this sentence said otherwise for several rounds while
+the table below it recorded the opposite, which is the plainest kind of false claim: one
+contradicted by its own page. The rows that matter are the ones marked SURVIVED, because
+each names either a redundancy in the code (two guards absorbing each other), a property
+with no runtime observable, or a fixture that could not reach the state under test — and
+in every case the correction went into the record or into the fixture rather than into a
+looser claim.
+
+Run against the named suites.
 
 | # | Mutation | Result |
 |---|---|---|
@@ -2119,6 +2177,13 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M167 | the clamp trims to the CAP, not the low-water mark | RED 1 |
 | M168 | the clamp uses `bottomNLines` (drops the trailing newline) | RED 5 |
 | M169 | a test hand-rolls the stderr patch outside the helper | RED 1 (the widened guard) |
+| M160b | the Bun short-write check is deleted | RED 4 (through the extracted seam) |
+| M170 | the payload is measured in UTF-16 units, not bytes | RED 1 |
+| M171 | PAIR: the check is over-strict (`<=`), rejecting a complete write | RED 6 |
+| M172 | `submitLine` stops calling the guard (bare `terminal.write`) | SURVIVED (no pty short-writes 8 bytes) → terminal injected → RED 2 |
+| M173 | a REFUSED text still sends the Enter — a blind submit | RED 1 |
+| M174 | the injected terminal is ignored | RED 3 |
+| M175 | the shared `write()` contract keeps herdr's "DOES NOT SUBMIT" clause | prose — no test; the defect is a FALSE STATEMENT to callers, and the check is that the interface names no backend-specific rule |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

@@ -114,6 +114,36 @@ export function newScreenAccumulator(
   }
 }
 
+/**
+ * Hand `data` to a pty write function and REPORT whether the kernel took all of it.
+ *
+ * EXPORTED AND SEAM-TAKING, for the same reason the accumulator is: the defect this
+ * guards cannot be produced from outside. A real pty does not short-write for the small
+ * payloads `submitLine` sends, so a mutation that deletes the check survives every
+ * end-to-end test — it did, and the as-built recorded it as an uncovered boundary
+ * rather than a covered one. Taking the write function as an argument makes zero and
+ * partial acceptance ordinary inputs instead of conditions nobody can arrange.
+ *
+ * BYTES, NOT `String.length`. `terminal.write` returns bytes ACCEPTED, so comparing
+ * against UTF-16 code units is too LAX for anything non-ASCII: a 2-byte character
+ * counts as one unit, so a write that delivered half the payload can still look
+ * complete. The same confusion was fixed three times on the herdr side of this branch.
+ */
+export function writeAllOrThrow(
+  write: (data: string | Uint8Array) => number,
+  data: string | Uint8Array,
+  what: string,
+): void {
+  const expected = typeof data === 'string' ? Buffer.byteLength(data, 'utf8') : data.length
+  const written = write(data)
+  if (written < expected) {
+    throw new Error(
+      `bun-terminal-host: short write of ${what} — the pty accepted ${written} of ` +
+        `${expected} bytes, so the command was not fully delivered.`,
+    )
+  }
+}
+
 /** Minimal shape of `Bun.Terminal` we consume (kept narrow so the file type-
  *  checks even where the ambient Bun types lag the runtime). */
 interface BunTerminalLike {
@@ -152,7 +182,33 @@ function compactEnv(env: Record<string, string | undefined>): Record<string, str
   return out
 }
 
+/**
+ * Injection points, so the whole backend is drivable WITHOUT A REAL PTY.
+ *
+ * The same seam `HerdrHost` has for its socket, added for the same reason and after the
+ * same evidence: the failure modes that matter here cannot be arranged on a real pty. A
+ * kernel does not short-write the small payloads `submitLine` sends, so the mutation
+ * that unwires the short-write guard from `submitLine` survived every end-to-end case —
+ * the guard was tested and its WIRING was not. Extracting the check made the check
+ * assertable; injecting the terminal makes the wiring assertable, which is the half a
+ * pure helper could not reach.
+ *
+ * Production uses the defaults and never passes these.
+ */
+export interface BunTerminalHostDeps {
+  /** Create the pty. Defaults to `new Bun.Terminal(...)`. */
+  createTerminal?: (opts: {
+    cols?: number
+    rows?: number
+    data?: (term: BunTerminalLike, bytes: Uint8Array) => void
+  }) => BunTerminalLike
+  /** Spawn the child attached to that pty. Defaults to `Bun.spawn`. */
+  spawn?: (opts: Record<string, unknown>) => BunSpawnedLike
+}
+
 export class BunTerminalHost implements PtyHost {
+  constructor(private readonly deps: BunTerminalHostDeps = {}) {}
+
   /**
    * `async` ONLY to satisfy the interface, and that is worth saying rather than
    * hiding: `PtyHost.spawn` became `Promise<PtyChild>` because creating a herdr pane
@@ -195,7 +251,9 @@ export class BunTerminalHost implements PtyHost {
     // turns that into U+FFFD pairs while everything downstream still looks like text.
     const decoder = new TextDecoder('utf-8')
 
-    const terminal = new BunTerminal({
+    const createTerminal =
+      this.deps.createTerminal ?? ((o) => new BunTerminal(o))
+    const terminal = createTerminal({
       cols: opts.cols ?? 120,
       rows: opts.rows ?? 40,
       data: (_t, bytes) => {
@@ -208,7 +266,7 @@ export class BunTerminalHost implements PtyHost {
       },
     })
 
-    const proc = bunSpawn({
+    const proc = (this.deps.spawn ?? bunSpawn)({
       cmd: argv,
       cwd: opts.cwd,
       env: compactEnv(opts.env),
@@ -230,18 +288,6 @@ export class BunTerminalHost implements PtyHost {
         exitResolve(code)
       }),
     )
-
-    /** Hand `data` to the PTY, and REPORT whether the kernel took all of it. */
-    const writeAll = (data: string | Uint8Array, what: string): void => {
-      const expected = typeof data === 'string' ? Buffer.byteLength(data, 'utf8') : data.length
-      const written = terminal.write(data)
-      if (written < expected) {
-        throw new Error(
-          `bun-terminal-host: short write of ${what} — the pty accepted ${written} of ` +
-            `${expected} bytes, so the command was not fully delivered.`,
-        )
-      }
-    }
 
     const child: PtyChild = {
       pid: proc.pid,
@@ -287,8 +333,9 @@ export class BunTerminalHost implements PtyHost {
         }
         // TEXT FIRST, THEN THE SUBMIT, each checked: an unacknowledged text followed
         // by a blind Enter submits whatever was already at the prompt.
-        if (command !== '') writeAll(command, JSON.stringify(command))
-        writeAll(encodeKey('enter'), "the 'enter' key")
+        const write = (d: string | Uint8Array): number => terminal.write(d)
+        if (command !== '') writeAllOrThrow(write, command, JSON.stringify(command))
+        writeAllOrThrow(write, encodeKey('enter'), "the 'enter' key")
       },
       resize(cols, rows) {
         if (exited) return

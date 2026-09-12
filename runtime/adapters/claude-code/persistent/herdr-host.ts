@@ -335,11 +335,16 @@ export class HerdrHost implements PtyHost {
       pid,
       write(data) {
         const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
-        // `pane.send_text` NEVER SUBMITS — measured: a literal `\r` in the text
-        // does not fire at a prompt. Refusing the submit characters turns a silent
-        // no-op (the text typed and left sitting at the prompt, the turn hanging
-        // forever with no error anywhere) into a loud one, and names the sibling
-        // that does work. `writeKey('enter')` / `writeKeys` submit.
+        // THIS BACKEND'S OWN PRECONDITION, NOT THE INTERFACE'S. `PtyChild.write`
+        // promises byte delivery and says nothing about submission, because whether a
+        // `\r` submits is a property of the substrate — under an in-process pty it
+        // does. Under herdr it does not: `pane.send_text` NEVER SUBMITS (measured — a
+        // literal `\r` in the text does not fire at a prompt). Refusing the submit
+        // characters here turns a silent no-op (the text typed and left sitting at the
+        // prompt, the turn hanging forever with no error anywhere) into a loud one, and
+        // names the sibling that does work. `writeKey('enter')` / `writeKeys` submit.
+        // Stated as a precondition of HerdrHost so a caller reading the shared
+        // interface is not told one backend's rule as if it were everyone's.
         if (text.includes('\r') || text.includes('\n')) {
           throw new Error(
             'herdr-host: write() refuses a submit character (\\r or \\n) — herdr\'s pane.send_text ' +

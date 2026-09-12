@@ -499,10 +499,12 @@ async function spawnSession(
     child = await ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
-    // SNAPSHOT-REPLACE, not append. herdr has no raw output stream, so this fires
-    // with the pane's whole rendered screen each time it CHANGES (see
-    // `pty-host.ts` / `pty-ring.ts`). `replace` is what keeps the detector falling
-    // edge working: a cleared pane arrives as a screen with nothing on it.
+    // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
+    // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
+    // keeps the detector falling edge working: a cleared screen arrives with nothing
+    // on it. Where the screen comes from differs (herdr polls a rendered pane; the
+    // in-process host accumulates the byte stream), and `pty-host.ts` records the one
+    // consequence — a repaint collapses under herdr and does not under a pty.
     onScreen: (screen) => {
       session.ring.replace(screen)
       const now = Date.now()

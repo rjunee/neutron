@@ -154,7 +154,8 @@ not-new. That is accepted and recorded here rather than hidden.
 ## Acceptance
 
 - [ ] **`HerdrHost` is the only WIRED backend, and `bun-terminal-host.ts` is kept as an
-      injectable option — compiling, contract-complete and TESTED.** Not deleted (the
+      injectable option — compiling, contract-complete and TESTED, with no surviving
+      mutation left standing under that claim.** Not deleted (the
       scope change above), and not put behind a chooser either. What makes the option
       live rather than a supported-looking dead export — the failure this branch has now
       removed twice — is that the contract it claims is asserted: a real pty, a real pid,
@@ -169,6 +170,15 @@ not-new. That is accepted and recorded here rather than hidden.
       a short write is refusable and a delivered line is assertable — whereas herdr's
       `pane.send_text` types without firing, which is the entire reason the acknowledged
       seam exists. Neither backend claims the REPL acted on the line.
+      AND THE SHORT-WRITE PATH IS EXERCISED, not merely present. A real pty does not
+      short-write an eight-byte payload, so this needs two seams and one is not enough:
+      `writeAllOrThrow` takes the write function, which makes the CHECK assertable (zero
+      acceptance, partial acceptance, a UTF-16-unit count for a multibyte payload — the
+      LAX direction, since `é` is one unit and two bytes — and a `Uint8Array` measured by
+      its own length, each with its control); and the TERMINAL is injectable, which makes
+      the WIRING assertable, because a pure helper can prove the check works and cannot
+      prove anything still calls it. With both: a pty refusing the text makes `submitLine`
+      reject AND leaves the Enter unsent, a pty refusing only the Enter rejects too.
       (c) `onScreen` ACCUMULATES. `PtyRing.replace` overwrites with each delivery, so
       forwarding one byte chunk per call would erase all previous output every time —
       silently, with the ring looking alive and holding the last few bytes. Decoded with
@@ -201,6 +211,25 @@ not-new. That is accepted and recorded here rather than hidden.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
       and `rg -n "ptyHost \?\?" runtime/adapters/claude-code/persistent/spawn.ts` shows
       `herdrHost` as the sole default.
+- [ ] **The shared interface describes BOTH backends, or it describes neither.** A
+      contract that encodes one implementation's behaviour is the "two diverging code
+      paths" outcome that keeping a second backend was supposed to avoid — and it is
+      worse than a divergence, because a caller reading the type is told something false
+      about its own code. The instance: `PtyChild.write` said "DOES NOT SUBMIT" and gave
+      herdr's CR/LF refusal as the interface's rule, while an in-process pty submits on
+      `\r`. `write` now delivers bytes and promises nothing about submission in either
+      direction; the refusal is a documented PRECONDITION of `HerdrHost`; and
+      `submitLine` is the submission-bearing operation both backends implement honestly
+      and differently.
+      SWEPT AS A CLASS, not fixed at the clause that was reported — eight further places
+      stated a herdr fact as a universal (`writeKey`, `kill`, `wasKilledByUs`,
+      `beginOutput`, `resize`, `onScreen`, `onExit`, `cols`/`rows`), plus two
+      collaborators that leaked the same way (`submitCommand`'s refusal message and
+      `spawn.ts`'s `onScreen` comment). Each now says what is true of both and names
+      which is which where they differ.
+      verify: `rg -n "herdr" runtime/adapters/claude-code/persistent/pty-host.ts` — every
+      hit either names BunTerminalHost in the same clause or is explicitly scoped ("under
+      herdr", "the herdr backend"); no sentence states a herdr-only rule unqualified.
 - [ ] **The divergence that is a DEFECT is named, not papered over.** Keeping two
       backends means a caller can work on one and not the other, and one case is real:
       `PtyRing.textSince` is an order-preserving multiset difference against a baseline

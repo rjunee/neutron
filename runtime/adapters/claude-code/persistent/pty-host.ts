@@ -39,11 +39,12 @@
  *    probes it with `process.kill(pid, 0)`; the crashed-agent registry keys
  *    entries on `(name, pid)`). Awaiting the spawn fixes that at the construction
  *    site instead of asking every reader to know about the window.
- *  • `onData` became `onScreen`, and delivers a RENDERED SCREEN, not a byte chunk.
- *    herdr has no raw output stream, so recent output is synthesized by polling
- *    `pane.read`; each delivery is the pane's whole current screen. A callback
- *    still named `onData` and typed as bytes would have been false at every call
- *    site, and the ring below it would have kept appending screens to itself.
+ *  • `onData` became `onScreen`, and delivers a WHOLE CURRENT SCREEN, not a byte
+ *    chunk. herdr has no raw output stream, so it synthesizes one by polling
+ *    `pane.read`; the in-process host has the byte stream and accumulates it into the
+ *    same shape. A callback still named `onData` and typed as bytes would have been
+ *    false at every call site, and the ring below it would have kept appending screens
+ *    to itself.
  *
  * KEY REALISATION (§ 2): tmux was never part of Nova's substrate — it was a
  * PID-keepalive + human-attach convenience. The actual turn I/O (dev-channel
@@ -86,24 +87,34 @@ export interface PtyChild {
    *  confidently about the wrong process. */
   readonly pid: number
   /**
-   * Write text to the child's stdin. The fundamental write seam.
+   * Deliver `data` to the child's stdin. The fundamental write seam.
    *
-   * DOES NOT SUBMIT, AND REFUSES TO PRETEND IT DOES. herdr's `pane.send_text`
-   * types text at the prompt without submitting it — a literal `\r` in the text
-   * does not fire (measured). So the herdr backend REFUSES data containing `\r`
-   * or `\n` rather than accepting it and silently leaving the REPL sitting on an
-   * unsubmitted line with no error anywhere. Submit with
-   * {@link PtyChild.writeKey}`('enter')` — or, if the caller is going to REPORT
-   * whether the command took effect, with {@link PtyChild.submitLine}, which is the
-   * only form that can tell a delivered frame from a refused one.
+   * SAYS NOTHING ABOUT SUBMISSION, IN EITHER DIRECTION. This is a byte-delivery
+   * operation: it is `void`, it is fire-and-forget, and whether the bytes end a line
+   * is a property of the SUBSTRATE, not of this method. Under an in-process pty a
+   * `\r` genuinely submits; under herdr `pane.send_text` types the text at the prompt
+   * and a literal `\r` does not fire (measured). A caller that needs to know which
+   * happened is asking the wrong method.
+   *
+   * WHY THIS WORDING IS DELIBERATE. The contract previously said "DOES NOT SUBMIT"
+   * and described herdr's CR/LF refusal as if it were the interface's rule. That was
+   * herdr's semantics written into a shared type — harmless while herdr was the only
+   * implementation, and wrong the moment a second backend with the opposite behaviour
+   * became supported, because a caller reading this interface could no longer reason
+   * about its own bytes. A backend-specific PRECONDITION belongs on the backend:
+   * `HerdrHost` documents and enforces its CR/LF refusal itself.
+   *
+   * THE SUBMISSION-BEARING OPERATION IS {@link PtyChild.submitLine}, and it is the one
+   * any caller that reports an outcome must use. Both backends implement it honestly
+   * and differently — that is the contract to reason about, not this one.
    */
   write(data: string | Uint8Array): void
   /** Send one structured key (F2): encodes the correct key for
    *  enter/escape/ctrl-c/up/down/left/right/digit. Lets recovery detectors
-   *  navigate Ink arrow-pickers + send Escape/Ctrl-C, which `write` cannot — and
-   *  under herdr it is also the ONLY way to submit. No-op-safe after exit.
-   *  OPTIONAL: a backward-compatible extension — the real backend provides it;
-   *  lightweight test fakes that never receive keystrokes may omit it. */
+   *  navigate Ink arrow-pickers + send Escape/Ctrl-C, which `write` cannot.
+   *  Fire-and-forget like `write`; no-op-safe after exit. OPTIONAL: a
+   *  backward-compatible extension — both real backends provide it; lightweight test
+   *  fakes that never receive keystrokes may omit it. */
   writeKey?(key: Key): void
   /** Send a multi-key sequence (e.g. `['down','enter']` to pick the second option
    *  of an arrow-driven picker). No-op-safe after exit. OPTIONAL (see
@@ -114,10 +125,11 @@ export interface PtyChild {
    * Submit `command` as a line, and RESOLVE ONLY WHEN THE BACKEND HAS ACKNOWLEDGED
    * BOTH HALVES — the text and the Enter that submits it.
    *
-   * SETTLEMENT IS NOT CONFIRMATION. {@link write} and {@link writeKey} are `void`:
-   * over a socket backend they hand a frame to the transport and return, so a caller
-   * cannot distinguish "the REPL received `/clear`" from "the socket refused the
-   * frame". Every caller of the old pair nonetheless REPORTED SUCCESS on return —
+   * SETTLEMENT IS NOT CONFIRMATION. {@link write} and {@link writeKey} are `void`, on
+   * every backend: over a socket they hand a frame to the transport and return, so a
+   * caller cannot distinguish "the REPL received `/clear`" from "the socket refused the
+   * frame"; over a local pty they hand bytes to a fd whose acceptance count is
+   * discarded. Every caller of the old pair nonetheless REPORTED SUCCESS on return —
    * `context-reset.ts` returned `{status:'reset'}`, `pool.ts` logged a completed
    * reset — so a context reset that never happened was indistinguishable from one
    * that did, and the session kept a full context while the pool believed it empty.
@@ -128,6 +140,14 @@ export interface PtyChild {
    * it may have been partially applied (text delivered, Enter refused), so the text
    * may be sitting at the prompt.
    *
+   * WHAT EACH BACKEND CAN HONESTLY ASSERT DIFFERS, and neither fakes the other's
+   * claim. `HerdrHost` awaits the server's acknowledgement of the text and of the
+   * Enter, as two ordered round trips — the only evidence available when
+   * `pane.send_text` types without firing. `BunTerminalHost` checks that the pty
+   * accepted every byte of each half, which on a local fd IS delivery, and where `\r`
+   * genuinely submits. Neither asserts that the REPL ACTED on the line; no backend
+   * can, and this contract does not ask.
+   *
    * Optional only because a host may predate it; `submitCommand` refuses to guess
    * with `write` + `writeKey` when it is absent rather than fabricate an ack.
    */
@@ -135,17 +155,23 @@ export interface PtyChild {
   /**
    * Resize the terminal (cols × rows). No-op-safe after exit.
    *
-   * OPTIONAL, AND THE HERDR BACKEND DOES NOT PROVIDE IT. herdr's `pane.resize`
+   * OPTIONAL. `BunTerminalHost` provides it (a pty has a cols × rows setter); the
+   * HERDR BACKEND DOES NOT. herdr's `pane.resize`
    * takes `{direction, amount}` — it nudges a split ratio; herdr's layout engine
    * owns pane geometry and there is no cols × rows setter anywhere in its API.
    * Declared optional rather than implemented as a silent no-op that reports
    * success. It has zero production callers, so nothing is narrowed by its
-   * absence; a future backend on a substrate that can resize may supply it.
+   * absence.
    */
   resize?(cols: number, rows: number): void
-  /** Send a signal to the child (default SIGTERM). Idempotent after exit. Under
-   *  herdr only SIGINT is a real signal (`ctrl+c` on the pane raises one);
-   *  anything else means "end this process" and closes the pane. */
+  /** Send a signal to the child (default SIGTERM). Idempotent after exit.
+   *
+   *  WHAT "SIGNAL" MEANS DIFFERS BY BACKEND, and only the CLASSIFICATION is shared: a
+   *  SIGINT is an interrupt (abandon the turn, keep the child) and anything else is
+   *  terminal, which is what {@link wasKilledByUs} and {@link wasInterruptedByUs}
+   *  record. `BunTerminalHost` delivers the real signal to the process. Under herdr
+   *  only SIGINT is a real signal (`ctrl+c` on the pane raises one); anything else
+   *  has no primitive but closing the pane, which destroys it. */
   kill(signal?: NodeJS.Signals | number): void
   /**
    * Resolves when the child exits.
@@ -174,19 +200,26 @@ export interface PtyChild {
    * crashed-agent watchdog fires only on real crashes and never on routine
    * recycles.
    *
-   * UNDER HERDR THIS IS THE WHOLE SIGNAL, not an optimisation over exit codes:
-   * see {@link PtyChild.exited}. OPTIONAL only so a lightweight test fake may
-   * omit it; the real backend always provides it.
+   * UNDER HERDR THIS IS THE WHOLE SIGNAL, not an optimisation over exit codes: see
+   * {@link PtyChild.exited}. Under `BunTerminalHost` it is one of two inputs, since a
+   * real exit code is also available — but `spawn.ts` evaluates
+   * `!killedByUs && exitCode !== 0`, so a wrongly-latched flag short-circuits the code
+   * on BOTH backends and the rule that only a terminal operation may latch it is not a
+   * herdr-only rule. OPTIONAL only so a lightweight test fake may omit it; both real
+   * backends provide it.
    */
   readonly wasKilledByUs?: () => boolean
   /**
    * WHY this child became terminal, once it has. `undefined` while it is alive.
    *
-   * Exists because `exited` cannot carry it: herdr reports no exit status, so every
-   * death resolves `null` and the routes to it are otherwise indistinguishable — a
-   * pane we closed deliberately looks exactly like one whose process ended on its own.
-   * OPTIONAL, so a lightweight test fake may omit it; a caller that needs to
-   * tell the routes apart must treat `undefined` as "not known", never as a default.
+   * A HERDR-SHAPED FIELD, and `BunTerminalHost` does not provide it. It exists because
+   * under herdr `exited` cannot carry the reason: no exit status exists anywhere in that
+   * API, so every death resolves `null` and the routes to it are otherwise
+   * indistinguishable — a pane we closed deliberately looks exactly like one whose
+   * process ended on its own. An in-process pty has a real exit code and no concept of a
+   * pane that stopped existing, so `undefined` there is the truth rather than a gap.
+   * OPTIONAL for both reasons; a caller that needs to tell the routes apart must treat
+   * `undefined` as "not known", never as a default.
    */
   readonly exitCause?: () => PtyExitCause | undefined
   /**
@@ -196,9 +229,11 @@ export interface PtyChild {
    * It exists so that a transient intent has its own representation instead of
    * borrowing {@link PtyChild.wasKilledByUs}. An earlier version latched
    * `wasKilledByUs` on SIGINT, which left the child ALIVE and flagged as
-   * intentionally-terminated — and since herdr has no exit codes, that flag is the
-   * ENTIRE crash-vs-recycle discriminator, so one interrupt silently reclassified
-   * every later crash as a clean recycle for the rest of the child's life.
+   * intentionally-terminated. That is fatal under herdr, where the flag is the ENTIRE
+   * crash-vs-recycle discriminator, and still wrong under a backend WITH exit codes,
+   * because `spawn.ts` evaluates `!killedByUs && exitCode !== 0` — a true flag
+   * short-circuits the code before it is read. One interrupt silently reclassified every
+   * later crash as a clean recycle for the rest of the child's life, on either backend.
    *
    * **MUST NEVER BE USED FOR EXIT CLASSIFICATION.** An interrupted child that later
    * dies unexpectedly has crashed. Only a terminal operation may say otherwise, and
@@ -208,7 +243,12 @@ export interface PtyChild {
   /**
    * Tell the host its consumer is wired, and screens may start flowing.
    *
-   * WHY THIS EXISTS: `spawn` is async, and the caller cannot wire anything that
+   * ALWAYS CALLABLE, AND WHAT IT GATES DIFFERS. `HerdrHost` holds its poll loop
+   * behind it; `BunTerminalHost` has the byte stream from the moment the child is
+   * spawned and implements it as a no-op. A caller calls it unconditionally either way,
+   * which is why it is part of the shared contract rather than a herdr detail.
+   *
+   * WHY IT EXISTS: `spawn` is async, and the caller cannot wire anything that
    * needs the child — the output scanner's keystroke target, the live-process handle
    * — until the `await` resolves. A host that begins polling before returning
    * therefore has a window in which it can deliver the FIRST screen to a consumer
@@ -243,11 +283,17 @@ export interface PtySpawnOpts {
   /**
    * Callback for the child's RENDERED SCREEN, each time it CHANGES.
    *
-   * NOT A BYTE STREAM. herdr exposes no raw output, so this is synthesized by
-   * polling `pane.read`: every delivery is the pane's whole current screen, and
-   * the consumer REPLACES its ring with it (`PtyRing.replace`) rather than
-   * appending. `pty-ring.ts` carries the reasoning for why snapshot-replace was
-   * taken over diff-append and how a turn is scoped under it.
+   * NOT A BYTE STREAM, ON EITHER BACKEND. Every delivery is the child's WHOLE current
+   * screen and the consumer REPLACES its ring with it (`PtyRing.replace`) rather than
+   * appending. `pty-ring.ts` carries the reasoning for why snapshot-replace was taken
+   * over diff-append and how a turn is scoped under it.
+   *
+   * WHERE THE SCREEN COMES FROM DIFFERS, and it has a consequence worth knowing before
+   * choosing a backend. herdr exposes no raw output, so `HerdrHost` synthesizes this by
+   * polling `pane.read` — a RENDERED pane, in which an Ink repaint redraws the same
+   * content and `PtyRing.textSince` sees nothing new. `BunTerminalHost` has the byte
+   * stream and accumulates it, so a repaint really is new bytes and the same content
+   * reads as new output. Anything relying on repaint collapsing works on herdr only.
    *
    * Two guarantees the consumer depends on, both of which a naive poll loop
    * breaks while still looking right on a steady screen:
@@ -262,14 +308,14 @@ export interface PtySpawnOpts {
    * dev-channel `reply` tool.
    */
   onScreen?: (screen: string) => void
-  /** Callback when the child exits. The code is always `null` under herdr — there
-   *  are no exit codes; see {@link PtyChild.exited}. */
+  /** Callback when the child exits. `null` ALWAYS under herdr, which has no exit codes
+   *  anywhere in its API; a real kernel status under `BunTerminalHost`. See
+   *  {@link PtyChild.exited}. */
   onExit?: (code: number | null) => void
   /**
-   * Preferred terminal size. ADVISORY ONLY under the herdr backend, which ignores
-   * it: herdr's layout engine owns pane geometry and exposes no cols × rows
-   * setter (see {@link PtyChild.resize}). Retained because the interface is meant
-   * to admit a backend on a substrate that can honour it.
+   * Preferred terminal size. HONOURED by `BunTerminalHost`, which allocates the pty
+   * with it. ADVISORY ONLY under herdr, which ignores it: herdr's layout engine owns
+   * pane geometry and exposes no cols × rows setter (see {@link PtyChild.resize}).
    */
   cols?: number
   rows?: number

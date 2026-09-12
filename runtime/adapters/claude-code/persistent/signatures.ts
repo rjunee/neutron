@@ -231,10 +231,11 @@ export async function submitCommand(child: PtyChild, command: string): Promise<v
   if (child.submitLine === undefined) {
     throw new Error(
       `persistent-repl: cannot submit '${command}' — this PtyChild provides no submitLine(), and ` +
-        `write()/writeKey() are fire-and-forget: they cannot tell us the command was delivered, ` +
-        `and write() does not submit on this backend (herdr's pane.send_text types without ` +
-        `firing). Submitting a slash command whose success is reported REQUIRES the acknowledged ` +
-        `seam; refusing rather than typing '${command}' at the prompt and reporting success.`,
+        `write()/writeKey() are fire-and-forget on every backend: they deliver bytes and cannot ` +
+        `tell us the command reached the REPL, and write() carries no promise about submission ` +
+        `either way (under herdr, pane.send_text types without firing). Submitting a slash ` +
+        `command whose success is reported REQUIRES the acknowledged seam; refusing rather than ` +
+        `typing '${command}' at the prompt and reporting success.`,
     )
   }
   await child.submitLine(command)
