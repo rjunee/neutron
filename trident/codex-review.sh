@@ -57,7 +57,11 @@ BASE_REF="${1:-main}"
 # us. With a tag `release` at commit A and a remote branch `origin/release` at commit B,
 # `codex-review.sh release` reviewed from B — a different commit, silently. This wrapper
 # takes a general `[base-ref]`, so that is a real input, and the trident path could not
-# see it because it always passes an already-resolved ref.
+# see it because it never passes a TAG: it passes whatever `diffBase` resolved — a sha,
+# `origin/<base>`, or a bare base name when no remote-tracking ref resolves. (This said
+# "it always passes an already-resolved ref", which the bare-name fallback contradicts;
+# what makes trident blind to the tag case is the KIND of value it passes, not that the
+# value is always resolved.)
 #
 # SO THE PROMOTION NOW REQUIRES PROOF THAT THE ARGUMENT IS A LOCAL BRANCH NAME:
 #   * `refs/heads/<x>` must resolve — the only evidence available here that `<x>` NAMES

@@ -202,6 +202,53 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round thirteen: the fourth sweep — absolutes, checked against the code they introduce
+
+`merge.ts` said a bare local branch name is the wrong answer **"ALWAYS"** twenty lines above
+the step that returns it, and above a spec item that *requires* that fallback. **Twenty
+lines is the informative distance.** A comment is read as context FOR the code beneath it,
+not as a claim to be checked AGAINST it, so proximity hid the contradiction rather than
+exposing it — the fourth audit question with the roles swapped: not prose contradicted by
+neighbouring prose, but prose contradicted by the code it introduces. Six manual passes over
+this same claim (the title, the spec's rule, this record's invariant, `codex-build.sh`'s argv
+comment, the gate header, the spec's argv bullet) had not exhausted it, which is why it was
+closed with a sweep instead of an edit.
+
+**The sweep, and its result.** Mechanical scope: every line this branch ADDS across its 22
+touched files, grepped for `always|never|every|all|only|cannot|impossible|unconstructab|no
+code path`. **467 lines carry one.** Discarding retractions that quote a superseded claim,
+general principles that are not about this code, and test-design prose leaves **38 claims
+about what this code does.** Each was read against the code it sits above:
+
+- **20 corrected.** `merge.ts`'s "ALWAYS"; four "the refused value cannot become a rev-range
+  operand **at all**" (`merge.ts` ×2, this record, the option-shaped test) — true only
+  *through that binding*, which is why every consumer also carries `--end-of-options`; two
+  gate-reach claims ("the next site cannot re-introduce the class by forgetting", "fails CI
+  on a rev-range whose base bypasses this") narrowed to the spellings the gate enumerates;
+  six "A RESOLVED REF, never the bare local branch name" (three in `orchestrator.ts`, one in
+  `codex-review.sh`, one in `lint.sh`, one in `inner-workflow.test.ts`) — the legitimate fallback IS a bare name, so what
+  must never happen is a call site naming a base of its own; `inner-workflow.mjs`'s "the ONLY
+  place the base branch NAME is read" (`probeCiBase`, `branchLogBase` and the prompts read it
+  too); two in `orchestrator.test.ts` and one in `cross-model-dispatch.test.ts`; this record's
+  "a change to either alone cannot land" — **falsified by the very round that added the
+  whitespace axis**, so it now reads "along an axis the table varies"; and a test NAME,
+  `'NO REMOTE: … it is the only case left'`, contradicted by the test twenty lines below it
+  that reaches the same fallback with `origin` configured.
+- **18 held**, and they are what make the sweep worth trusting: a sha cannot go stale;
+  `refs/heads/<base>` is the best available base in every no-resolving-ref state; the only
+  source of a padded name is configuration (`detectBaseBranch` trims its own output at
+  `merge.ts:191-195`); only trimmed values reach the return; `diffBase` is the only name this
+  file gives a *merge-base* diff — and that heading names its own exception two lines later;
+  `--end-of-options` really does stop every measured family; a `0` from the gate means
+  "none of the enumerated spellings", never "no bare-base range exists"; `bindingCount`
+  cannot cut the fixpoint short; the two implementations cannot share a module.
+
+**So the class is now four sweeps deep**: rules (round eleven), numbers (round nine), claim
+shapes (round nine's completeness words), and now absolutes **against the code they
+introduce**. Each sweep found what the previous ones were not looking for. The generalisable
+part is the scope, not the tokens: *sweep the lines this change adds, not the sentences you
+remember writing.*
+
 ### Round twelve: the parity table held an axis constant, and an absolute survived in three more places
 
 **THE TWO IMPLEMENTATIONS DISAGREED ON WHITESPACE.** `diffBaseRef` opened with
@@ -339,7 +386,9 @@ and failed after it, over a value the pin had already superseded.
 EXAMINE a value and let it through; here it refused the whole call over a value that was
 never going to be used. Both are the same error about *where* a guard belongs: validate on
 the path where the value is actually read. Fixed by moving the check into
-`unpinnedDiffBase()`, the only arm that reads the name.
+`unpinnedDiffBase()`, the only arm of `diffBase` that reads the name — the file reads it
+elsewhere (`probeCiBase`'s unpinned fallback, `branchLogBase`, the prompts), each argued
+where it sits.
 
 #### Can the two implementations be made one? No — but they can be held to one answer.
 
@@ -370,7 +419,10 @@ the axes it varies, and the axis it holds constant is usually the one nobody not
 choosing.
 
 That is weaker than one implementation and stronger than two tested separately: the code
-is still duplicated, but a change to either alone cannot land.
+is still duplicated, but a change to either alone cannot land **along an axis the table
+varies**. That qualifier is not decoration — round twelve's trim divergence landed and sat
+green for eleven rounds precisely because the table did not vary whitespace, so the
+unqualified sentence this replaces was falsified by the very round that added the axis.
 
 #### Two stale assertions, one inside a guard
 
@@ -426,8 +478,10 @@ signal was fine and the guard's **placement** inverted the outcome. A check that
 safety measure and functions as a fast path into the unsafe branch.
 
 **Fixed at the binding, once:** `diffBaseRef` now throws `TridentOptionShapedBaseError`
-rather than returning such a name, so it cannot become a rev-range operand at all — the
-same principle as narrowing the scope in which a base branch name exists. Nothing
+rather than returning such a name, so it cannot become a rev-range operand **through that
+binding** — not "at all", which is what this said: a value that never passed through it
+still can, which is exactly why the consumers carry `--end-of-options` too. The principle
+is narrowing the scope in which a base branch name exists, not abolishing it. Nothing
 legitimate is lost: `git check-ref-format --branch` rejects a leading `-`. The `.mjs`
 binding refuses identically. **Defence in depth:** `--end-of-options` at every consumer —
 four in `orchestrator.ts`, three in `inner-workflow.mjs` (the executed resume diff and both

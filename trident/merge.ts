@@ -204,7 +204,13 @@ export async function detectBaseBranch(
  * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
  * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
  *
- * WHY A BARE LOCAL BRANCH NAME IS THE WRONG ANSWER, ALWAYS. `refs/heads/main` in a
+ * WHY A BARE LOCAL BRANCH NAME IS THE WRONG ANSWER WHEREVER A BETTER ONE EXISTS — and
+ * the right one, exactly once, where none does. **This heading said "ALWAYS" for twelve
+ * rounds, twenty lines above step 3 below, which returns the bare name when
+ * `refs/remotes/origin/<base>` does not resolve, and above the spec item that REQUIRES
+ * that fallback.** Twenty lines is the informative distance: a comment is read as context
+ * FOR the code beneath it, not as a claim to be checked AGAINST it, so proximity hid the
+ * contradiction instead of exposing it. `refs/heads/main` in a
  * shared build checkout is only as fresh as the last time something on this box
  * pulled it, and a range against a stale base silently presents every commit merged
  * in between as this branch's own work. MEASURED twice: Argus r4 / run 25b2327d —
@@ -264,7 +270,9 @@ export async function detectBaseBranch(
  * behaviour. A claim that something cannot be built has to name what prevents it; here the
  * compiler prevents one spelling, not the class.
  *
- * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base bypasses this.
+ * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base bypasses this AND
+ * whose spelling the gate enumerates — its own header lists what it cannot see. A gate is
+ * a regression alarm, not a proof of absence.
  */
 export async function diffBaseRef(
   base_branch: string,
@@ -299,7 +307,10 @@ export async function diffBaseRef(
   // tested — the first put a correct check in the wrong place (`originBaseResolves`
   // declining to probe an option-shaped name, which routed it to the unguarded branch).
   // An empty base has no legitimate meaning, so it is refused where the option-shaped one
-  // is, and for the same reason: it cannot be a rev-range operand at all.
+  // is, and for the same reason: it cannot be a rev-range operand THROUGH THIS BINDING.
+  // Not "at all" — which is what this said: a value that never passed through here can
+  // still reach a range, which is precisely why every consumer also carries
+  // `--end-of-options`. A refusal is a check on one path, never an impossibility.
   if (base_branch.trim().length === 0) {
     throw new TridentEmptyBaseError(base_branch)
   }
@@ -407,7 +418,9 @@ export class TridentPaddedBaseError extends Error {
 
 /**
  * A base name git would read as an OPTION rather than a revision. Thrown by
- * `diffBaseRef` so the value cannot reach a rev-range operand; see the argument there.
+ * `diffBaseRef`, so such a value cannot reach a rev-range operand THROUGH THAT BINDING —
+ * not "cannot reach one", which is why the consumers carry `--end-of-options` too. See the
+ * argument there.
  */
 export class TridentOptionShapedBaseError extends Error {
   constructor(readonly base: string) {

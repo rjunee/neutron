@@ -15,7 +15,9 @@
  *
  * ── WHAT IS ASSERTED, AND WHY IN TWO LAYERS ───────────────────────────
  *  1. THE BINDING REFUSES. `diffBaseRef` throws, so the value cannot become a rev-range
- *     operand at all. This is the fix; everything below is defence in depth.
+ *     operand THROUGH THAT BINDING. Not "at all" — a value that never passed through it
+ *     still can, which is the whole reason layer 2 exists. This is the fix; everything
+ *     below is defence in depth.
  *  2. EVERY CONSUMER CARRIES `--end-of-options`. Asserted against the SHIPPED source of
  *     `orchestrator.ts`, `inner-workflow.mjs` and the two wrappers — extracted by text,
  *     with a positive control that the extraction found the call sites, so a consumer

@@ -361,8 +361,12 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect((await filesInRange(w.consumer, `main..${w.head}`)).length).toBe(STALE_COMMITS + 1)
   })
 
-  test('NO REMOTE: the bare name is the fallback, and it is the only case left', async () => {
-    // The genuine no-remote world, which is now the ONLY case the bare name is used in.
+  test('NO REMOTE: the bare name is the fallback — one of the two worlds that reach it', async () => {
+    // The genuine no-remote world. This name said "the only case left" and the comment
+    // said "the ONLY case the bare name is used in" — contradicted by the test TWENTY LINES
+    // BELOW, which reaches the same fallback with `origin` configured and only the base ref
+    // missing. The condition is the REF, so there are two worlds, and a test title is a
+    // claim like any other.
     // Without this the fix would be "always prefer origin/", which breaks every repo
     // that has none — and nothing in the with-remote tests above could detect that.
     const w = await seedWorld('no-remote')

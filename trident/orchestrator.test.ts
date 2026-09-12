@@ -3364,8 +3364,11 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     // the same defect this file already fixes for the wrong-base refusals, which
     // fold every name they quote.
     //
-    // SINCE #546 THE NAME DOES NOT GET THAT FAR AT ALL, and that is the stronger
-    // property this now asserts: `diffBaseRef` replaces it with the LAUNCH-PINNED
+    // SINCE #546 THE NAME DOES NOT GET THAT FAR ON A PINNED RUN — which is this run, and
+    // is the stronger property asserted here. Not "at all": an unpinned run with no
+    // resolving `origin/<base>` still carries the name, which is why the fold below is
+    // still needed and still covered at its source.
+    // `diffBaseRef` replaces it with the LAUNCH-PINNED
     // SHA — which is 40 hex characters and can carry no forgery codepoint by
     // construction. The fold itself is unchanged and still covers the unpinned
     // legacy path, at its source: `mutation-claim-artifact.test.ts`, "A HOSTILE BASE
@@ -6725,7 +6728,8 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // A very high active-run count fixes jobs at 1, so the expected rendered bytes
     // remain stable even if MemAvailable moves between these two budget reads.
     const budget = readHostBudget()
-    // THE RESOLVED REF, NOT THE BASE BRANCH NAME (#546). The block this renders tells
+    // THE BASE THE BINDING CHOSE, NOT ONE THIS CALL SITE NAMED (#546) — the pin here,
+    // and `origin/<base>` or the bare name when there is none. The block this renders tells
     // the build to run `git diff --name-only <base>` against its working tree to pick
     // the stage-1 test set, so a stale `refs/heads/<base>` adds every file the base has
     // moved past to that set. `NO_DRIFT_SHA` is what this harness answers the launch

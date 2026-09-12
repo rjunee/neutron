@@ -1409,10 +1409,16 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
- * here, so the next site cannot re-introduce the class by forgetting.
+ * here — in any spelling the gate ENUMERATES. It used to say "so the next site cannot
+ * re-introduce the class by forgetting": a textual matcher cannot enforce that, its own
+ * header lists the shapes it misses, and it has twice been green against a real bare-base
+ * range. It makes a regression loud; it does not make one impossible.
  */
 /**
- * The unpinned arm of `diffBase`, and the ONLY place the base branch NAME is read.
+ * The unpinned arm of `diffBase`, and the only place `diffBase` reads the base branch
+ * NAME. NOT the only place in this file: `probeCiBase` reads it as the unpinned fallback
+ * for its check-runs API path, `branchLogBase` qualifies it as `origin/<base>`, and the
+ * prompts print it. Each is argued where it sits. The narrow claim is the one that holds.
  *
  * AN OPTION-SHAPED NAME IS REFUSED HERE — the same refusal `diffBaseRef` makes on the TS
  * side, for the same measured reason: a rev-range operand beginning with `-` is parsed by

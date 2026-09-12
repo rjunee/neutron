@@ -3279,7 +3279,11 @@ export function buildTridentOrchestrator(
       const localHead = local.stdout.trim()
       if (!local.ok || !/^[0-9a-f]{40}$/.test(localHead)) return null
 
-      // A RESOLVED REF, never the bare local branch name (#546): a stale `refs/heads/main`
+      // THE BASE `resolvedDiffBase` CHOSE (#546) — the launch pin, else `origin/<base>`
+      // when that ref resolves, else the bare name, which is legitimate and is the only
+      // answer there is without a fetch. This comment said "never the bare local branch
+      // name", which the fallback contradicts; what must never happen is this call site
+      // naming a base of its own. A stale `refs/heads/main`
       // makes `rev-list --count <base>..<localHead>` count the base's own unmerged history
       // as this lane's commits, and this count is what decides whether a stranded run built
       // anything worth salvaging.
@@ -4407,7 +4411,8 @@ export function buildTridentOrchestrator(
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
-        // A RESOLVED REF (#546). The block this renders tells the build to run
+        // THE BASE `diffBaseRef` CHOSE (#546) — the pin, `origin/<base>` when it resolves,
+        // else the bare name — never a base named here. The block this renders tells the build to run
         // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
         // test set; a stale `refs/heads/main` adds every file the base moved past to
         // that set, which is the wasteful direction of the same defect.
@@ -5037,7 +5042,8 @@ export function buildTridentOrchestrator(
       // as null — which the gate already refuses — so the fallback can never
       // turn a missing nomination into a pass.
       const expectedHead = reviewedHeadOid(run)
-      // A RESOLVED REF (#546). `changedFilesOnBranch` takes it as `git diff --name-only
+      // THE BASE `resolvedDiffBase` CHOSE (#546), never one named here.
+      // `changedFilesOnBranch` takes it as `git diff --name-only
       // <base>...<ref>`, and the three-dot form resolves the merge-base — so a stale
       // `refs/heads/main` (which IS an ancestor of the branch) puts every file the base
       // moved past into the blast radius the mutation nomination is scored against.

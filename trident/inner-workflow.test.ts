@@ -842,8 +842,11 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'codexHome',
       'codexReviewSh',
       'baseBranch',
-      // The RESOLVED diff base (#546) — the ref the wrapper's standalone
-      // `git diff <base>..HEAD` fallback is given, never the bare local branch name.
+      // The base `diffBase` CHOSE (#546) — what the wrapper's standalone
+      // `git diff <base>..HEAD` fallback is given: the pin, else `origin/<base>` when that
+      // ref resolves, else the bare name, which is legitimate. (Read "never the bare local
+      // branch name" until the round-thirteen absolutes sweep; what never happens is the
+      // wrapper choosing a base of its own.)
       'diffBase',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',

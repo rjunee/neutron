@@ -1263,7 +1263,10 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
     // …and the identical substitution in pr mode, which is the half #546 was about: the
     // wrapper's last-resort `git diff <base>..HEAD` ran against whatever `refs/heads/main`
-    // held. The bare name is never a literal operand in either mode.
+    // held. The bare name is never a FIXED operand chosen at compose time in either mode —
+    // it appears only as the substitution's fallback, taken when
+    // `refs/remotes/origin/main` does not resolve in the repository the diff runs in.
+    // (Not "never a literal operand": the fallback is exactly that, legitimately.)
     expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 && printf %s 'origin/main' || printf %s 'main')" 'pr'`)
     expect(pr).not.toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
