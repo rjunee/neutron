@@ -128,6 +128,7 @@ function conflictPrompt(input: {
   conflicted_files: string[]
   task: string
   mode: 'rebase' | 'replay'
+  guidance?: string
 }): string {
   const files = input.conflicted_files.length > 0 ? input.conflicted_files.join(', ') : '(run `git status` to find them)'
   const replay = input.mode === 'replay'
@@ -143,12 +144,21 @@ function conflictPrompt(input: {
   const done = replay
     ? `   (only after every conflict is resolved and staged).`
     : `   (only after every conflict is staged and tests pass).`
+  // ARBITER GUIDANCE (#541) — present only on a SECOND round the arbiter tier
+  // asked for after a first attempt escalated. It is advice from a read-only
+  // reviewer that has just inspected THIS tree, not an instruction to resolve at
+  // any cost: the ESCALATE rule below still outranks it, or a retried round would
+  // be pressure to guess.
+  const guide =
+    input.guidance !== undefined && input.guidance.trim().length > 0
+      ? `\n\nA READ-ONLY ARBITER ALREADY LOOKED AT THIS TREE after an earlier resolution attempt escalated, and judged that a correct resolution exists. Its reasoning: ${input.guidance.trim()}\nTreat that as a lead to check, not as permission to guess. If you read the two sides and they still change the same behaviour incompatibly, ESCALATE anyway — a second opinion does not make an undecidable conflict decidable.`
+      : ''
   const confine = replay
     ? `\n\nSTAY INSIDE YOUR CWD. Every path you Read, Edit, Write or touch from Bash must be under ${input.repo_path}. Other builds are running against other checkouts of this same repository on this machine; a stack trace, an import error, or a tool suggestion that points somewhere else is pointing at someone else's working tree — do not follow it, and never edit it.`
     : ''
   return `You are FORGE — Neutron's autonomous build sub-agent — resolving a git ${replay ? 'REPLAY' : 'REBASE'} CONFLICT. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 
-${where}${confine}
+${where}${confine}${guide}
 
 CONFLICTED FILES: ${files}
 
@@ -199,6 +209,7 @@ export function buildForgeConflictResolver(
         conflicted_files: input.conflicted_files,
         task: input.run.task,
         mode: input.mode ?? 'rebase',
+        ...(input.guidance !== undefined ? { guidance: input.guidance } : {}),
       }),
       tools: RESOLVER_TOOLS,
       model_preference: modelPreference,

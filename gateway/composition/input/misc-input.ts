@@ -190,6 +190,18 @@ export interface MiscCompositionInput {
      */
     resolve_conflict?: import('@neutronai/trident/merge.ts').MergeConflictResolver
     /**
+     * THE ARBITER TIER (#541). `buildFableArbiter` was built, unit-tested, exported
+     * and never constructed; this key is what gives it a production call site. The
+     * orchestrator threads it into the merge deps, where a LOCAL-mode rebase
+     * conflict the bounded resolver ESCALATED gets ONE read-only Fable turn that
+     * either asks for a better-directed retry or lets the escalation stand.
+     * DECLARED HERE because a wiring key this type does not carry is silently
+     * dropped and the seam ships inert (the `resolve_phase_models` lesson). The
+     * composer wires this to `buildFableArbiter` over the ephemeral substrate
+     * factory. Absent → a resolver escalation goes straight to the owner, as today.
+     */
+    arbitrate?: import('@neutronai/trident/arbiter.ts').TridentArbiter
+    /**
      * Bounded reword turn behind the purity preflight (2026-08-31). The publisher
      * runs the repository's public leak gate on the branch tree BEFORE opening a
      * PR; a finding is handed to this seam, which rewords the flagged prose in

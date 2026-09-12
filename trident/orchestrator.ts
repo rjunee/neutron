@@ -83,6 +83,7 @@ import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
+import type { TridentArbiter } from './arbiter.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import { readCommittedMutationClaim } from './mutation-claim-artifact.ts'
 import {
@@ -323,6 +324,24 @@ export interface BuildTridentOrchestratorOptions {
    * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
+  /**
+   * THE ARBITER TIER (#541) — `buildFableArbiter` (`arbiter.ts`), threaded into the
+   * default `buildMergeCleanupDeps` so a LOCAL-mode rebase conflict the bounded
+   * resolver ESCALATED gets one read-only second opinion before the run terminates
+   * in chat. Ignored when `merge_deps` is supplied (the override owns its own deps),
+   * exactly like `resolve_conflict`.
+   *
+   * WIRED AT ONE HOLD, DELIBERATELY. Not the base-drift holds and not the dirty-
+   * worktree refusal: the only alternative to stopping at those is waiving a review
+   * gate or force-removing uncommitted work, and `arbiter.ts` forbids the first
+   * structurally (`FORBIDDEN_OPTION_IDS`) and the second by being read-only. An
+   * arbiter asked to adjudicate something it cannot see, or cannot legally choose,
+   * is worse than one that is not asked.
+   *
+   * ABSENT → byte-identical to today: a resolver escalation aborts the rebase and
+   * posts its specific question. So does `{kind:'unavailable'}`.
+   */
+  arbitrate?: TridentArbiter
   /**
    * PURITY PREFLIGHT SEAM — run the public leak gate on the branch's own tree
    * between the rebase replay and the lease push. DEFAULTS TO THE REAL RUNNER,
@@ -2300,10 +2319,10 @@ export function buildTridentOrchestrator(
   const db_path = opts.db_path
   const merge_deps =
     opts.merge_deps ??
-    buildMergeCleanupDeps(
-      opts.run_host,
-      opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
-    )
+    buildMergeCleanupDeps(opts.run_host, {
+      ...(opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {}),
+      ...(opts.arbitrate !== undefined ? { arbitrate: opts.arbitrate } : {}),
+    })
   const foldAsBuilt =
     opts.fold_as_built ??
     ((run: TridentRun, base: string) =>

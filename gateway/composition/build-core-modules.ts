@@ -733,6 +733,14 @@ export function buildCoreModules(
         if (tridentWiring.resolve_conflict !== undefined) {
           orchestratorOpts.resolve_conflict = tridentWiring.resolve_conflict
         }
+        // #541 — THE ARBITER TIER, above the resolver. A rebase conflict the bounded
+        // resolver escalated gets one read-only Fable turn before the run terminates
+        // in chat; it can only ask for one better-directed retry, never approve,
+        // merge, waive review or block. Absent, or `unavailable`, → the escalation
+        // reaches the owner exactly as it did before this line existed.
+        if (tridentWiring.arbitrate !== undefined) {
+          orchestratorOpts.arbitrate = tridentWiring.arbitrate
+        }
         // The purity preflight's bounded reword turn. The preflight itself always
         // runs (its runner is the orchestrator's DEFAULT); this line is what gives
         // it something to do about a finding instead of only naming it on the PR.

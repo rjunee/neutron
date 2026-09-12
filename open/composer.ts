@@ -526,6 +526,7 @@ import {
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
+import { buildFableArbiter } from '@neutronai/trident/arbiter.ts'
 import { buildLeakPreflightFixer } from '@neutronai/trident/leak-fixer.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { buildTridentTerminalObserver } from './wiring/trident-nexus-observer.ts'
@@ -6070,6 +6071,23 @@ export function buildOpenGraphComposer(
           })
         : undefined
 
+    // #541 — THE ARBITER TIER, above the resolver. `buildFableArbiter` had been
+    // built, unit-tested and exported with ZERO production call sites since
+    // 2026-08-15; this is the construction that gives it one. A fresh ephemeral
+    // READ-ONLY REPL (Read/Glob/Grep/read-only Bash) rooted in the conflicted
+    // worktree gets ONE bounded turn when the resolver escalates, and may only
+    // choose between "retry with this guidance" and "stop" — `approve`, `merge` and
+    // `skip-review` cannot even enter the option set (`FORBIDDEN_OPTION_IDS`).
+    // Instance prefix per `arbiter.ts`. Gated on the SAME live-credential predicate
+    // as the resolver: an arbiter can only run where builds run. Absent → a
+    // resolver escalation posts its question to chat, exactly as before.
+    const tridentArbiter =
+      tridentFireInnerWorkflow !== null
+        ? buildFableArbiter({
+            build_substrate: makeEphemeralSubstrate('cc-trident-arbiter'),
+          })
+        : undefined
+
     // Purity-preflight fixer (2026-08-31): a fresh ephemeral REPL rooted in the
     // preflight's scratch worktree rewords gate-flagged prose so a finding is a
     // fixable defect in THIS round instead of a guaranteed-red PR. Same gating
@@ -6988,6 +7006,9 @@ export function buildOpenGraphComposer(
               ...(tridentConflictResolver !== undefined
                 ? { resolve_conflict: tridentConflictResolver }
                 : {}),
+              // #541 — the arbiter tier above that resolver: an escalated conflict
+              // gets one read-only second opinion before the run ends in chat.
+              ...(tridentArbiter !== undefined ? { arbitrate: tridentArbiter } : {}),
               // Purity preflight (2026-08-31) — the bounded reword turn behind
               // the orchestrator's fix_leak_findings seam.
               ...(tridentLeakFixer !== undefined ? { fix_leak_findings: tridentLeakFixer } : {}),

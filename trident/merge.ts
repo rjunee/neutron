@@ -65,6 +65,10 @@ import { createLogger } from '@neutronai/logger'
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
+// TYPE-ONLY, deliberately. `arbiter.ts` imports the shared prompt rules from
+// `conflict-resolver.ts`, which imports `MergeConflictResolver` back out of THIS
+// file — a value import here would close that into a real require cycle.
+import type { ArbitrationOutcome, TridentArbiter } from './arbiter.ts'
 
 export type RunHostCommand = EnvCapableHostRunner
 
@@ -168,11 +172,47 @@ export interface MergeConflictResolver {
      *     other lanes are building in.
      */
     mode?: 'rebase' | 'replay'
+    /**
+     * ARBITER GUIDANCE — present ONLY on a round the arbiter tier asked for
+     * (`rebaseBranchOntoBase`, after a first attempt escalated and the arbiter
+     * selected `retry-resolution`). It is the arbiter's own reasoning: what it
+     * read in this tree and why it believes a correct resolution exists. Absent
+     * on every first attempt, which is why a resolver that ignores it behaves
+     * exactly as it does today.
+     */
+    guidance?: string
   }): Promise<{ resolved: true } | { resolved: false; question: string }>
 }
 
 /** Bound the rebase-continue loop so a pathological history can't spin forever. */
 export const MAX_CONFLICT_ROUNDS = 12
+
+/**
+ * THE ARBITER TIER'S OPTION SET for a resolver escalation (#541). Exactly the
+ * two things the caller can actually DO at this point in `rebaseBranchOntoBase`,
+ * and nothing else: there is no "land it anyway" here, which is why this set
+ * passes `assertArbitrableOptions` (see `arbiter.ts` `FORBIDDEN_OPTION_IDS` — the
+ * structural boundary that keeps `approve`/`merge`/`skip-review` out of any set
+ * an arbiter selects from).
+ *
+ * DECLARED AS A CONSTANT, not built inline, so the "non-empty option set" rule
+ * is a testable property of the module rather than a promise about a literal.
+ */
+export const CONFLICT_ARBITRATION_OPTIONS = [
+  {
+    id: 'retry-resolution',
+    description:
+      'A correct resolution exists and the first turn simply missed it. Hand the SAME conflicted tree back to the bounded resolver for ONE more round, carrying your reasoning as guidance.',
+  },
+  {
+    id: 'stop',
+    description:
+      'The two sides changed the same behaviour incompatibly (or the tree does not show enough to decide). Stop, and post the question the resolver asked to the owner.',
+  },
+] as const
+
+/** The only arbiter verdict at the conflict seam that changes what happens. */
+export const CONFLICT_ARBITER_RETRY_OPTION = CONFLICT_ARBITRATION_OPTIONS[0].id
 
 /**
  * Resolve the base branch to merge into. Tries `origin/HEAD`'s symbolic
@@ -1208,7 +1248,18 @@ async function freeBranchFromWorktrees(
  */
 export function buildMergeCleanupDeps(
   run_host: RunHostCommand,
-  opts: { base_branch?: string; resolve_conflict?: MergeConflictResolver } = {},
+  opts: {
+    base_branch?: string
+    resolve_conflict?: MergeConflictResolver
+    /**
+     * THE ARBITER TIER (#541). Consulted ONLY when the bounded resolver above
+     * escalated a rebase conflict — the one hold in this file whose evidence is
+     * entirely inside the tree the arbiter can read. Absent, or `unavailable`,
+     * or any verdict other than `retry-resolution`: the escalation reaches the
+     * owner exactly as it does today.
+     */
+    arbitrate?: TridentArbiter
+  } = {},
 ): MergeCleanupDeps {
   return {
     async mergePr(run: TridentRun): Promise<void> {
@@ -1488,7 +1539,15 @@ export function buildMergeCleanupDeps(
           //     replays on top of any sibling build that merged before it. On a real
           //     content conflict, dispatch the bounded Forge resolver; on a genuinely
           //     ambiguous one, escalate to chat (TridentMergeConflictEscalation).
-          const conflicted = await rebaseBranchOntoBase(run_host, wt, base, branch, run, opts.resolve_conflict)
+          const conflicted = await rebaseBranchOntoBase(
+            run_host,
+            wt,
+            base,
+            branch,
+            run,
+            opts.resolve_conflict,
+            opts.arbitrate,
+          )
           // (2a) BASE-DRIFT HOLD (#542) — the rebase just replayed the reviewed
           //     diff on top of a base the review never saw. Files the resolver
           //     was handed with BOTH sides in context are subtracted (see
@@ -1605,6 +1664,63 @@ async function listConflictedFiles(run_host: RunHostCommand, repo: string): Prom
   return res.stdout.split('\0').filter((s) => s.length > 0)
 }
 
+/**
+ * Ask the arbiter tier (#541) whether an escalated rebase conflict deserves one
+ * more resolver round. NEVER THROWS and never returns anything but an
+ * `ArbitrationOutcome`: an unwired arbiter is `unavailable`, and so is one that
+ * rejects. The caller's only special case is a `retry-resolution` decision;
+ * everything else is today's escalation, which is why this function cannot make
+ * the merge worse than it is without it.
+ *
+ * The question is ONE technical question and the evidence is what the arbiter can
+ * go and check for itself — the conflicted paths in the tree it is rooted at, the
+ * two refs, and what the resolver said when it gave up. Deliberately NOT the
+ * conflict hunks themselves: the arbiter has Read/Grep inside `repo`, and a
+ * pasted excerpt would be a second, staler copy of a file it is standing in.
+ */
+async function arbitrateConflict(
+  arbitrate: TridentArbiter | undefined,
+  ctx: {
+    run: TridentRun
+    repo: string
+    base: string
+    branch: string
+    conflicted: string[]
+    resolver_question: string
+  },
+): Promise<ArbitrationOutcome> {
+  if (arbitrate === undefined) {
+    return { kind: 'unavailable', reason: 'no arbiter is wired' }
+  }
+  const files = ctx.conflicted.length > 0 ? ctx.conflicted.join(', ') : '(unnamed)'
+  try {
+    return await arbitrate({
+      run: ctx.run,
+      repo_path: ctx.repo,
+      question:
+        `Rebasing \`${ctx.branch}\` onto \`${ctx.base}\` hit a conflict and the bounded ` +
+        `resolver gave up rather than resolve it. Does a correct resolution exist that one ` +
+        `more, better-directed resolver round could reach, or do the two sides change the ` +
+        `same behaviour incompatibly?`,
+      evidence:
+        `Conflicted files (markers still present in your cwd): ${files}. The resolver was ` +
+        `asked to keep both intents and stage the result; it reported instead: ` +
+        `"${ctx.resolver_question}". Read the conflicted files and the history of each side ` +
+        `(\`git log\`/\`git show\` on \`${ctx.branch}\` and \`${ctx.base}\`) before deciding.`,
+      options: [...CONFLICT_ARBITRATION_OPTIONS],
+    })
+  } catch (error) {
+    // A THROWING arbiter is an unavailable arbiter. `buildFableArbiter` already
+    // degrades internally, but this seam must hold for any injected arbiter too:
+    // a rejection here would otherwise replace a specific, owner-readable
+    // conflict question with a raw stack trace, and skip the `rebase --abort`.
+    return {
+      kind: 'unavailable',
+      reason: error instanceof Error ? error.message : 'the arbiter threw',
+    }
+  }
+}
+
 /** Abort an in-progress rebase and return the working tree to `base`. Best-effort. */
 async function abortRebase(run_host: RunHostCommand, repo: string, base: string): Promise<void> {
   await run_host(['git', '-C', repo, 'rebase', '--abort'], repo)
@@ -1626,6 +1742,15 @@ async function abortRebase(run_host: RunHostCommand, repo: string, base: string)
  *     OR no resolver is configured on a conflict — the OUTER loop turns this into
  *     a chat-delivered specific question.
  *   - `TridentMergeError` for any other (non-conflict) rebase failure.
+ *
+ * THE ARBITER TIER SITS BETWEEN THOSE TWO SENTENCES (#541). `arbiter.ts` was
+ * built, tested and never constructed; this is its one call site in this file.
+ * A resolver escalation is the ONLY hold here whose whole evidence — the
+ * conflict markers, both sides, the history on each — is inside the tree the
+ * arbiter is allowed to read, and the only one whose alternative to stopping is
+ * not a review waiver. Every other hold in this file goes straight to the owner
+ * and keeps doing so; see the exclusions recorded at `CONFLICT_ARBITRATION_OPTIONS`
+ * and in the change record.
  */
 async function rebaseBranchOntoBase(
   run_host: RunHostCommand,
@@ -1634,6 +1759,7 @@ async function rebaseBranchOntoBase(
   branch: string,
   run: TridentRun,
   resolver: MergeConflictResolver | undefined,
+  arbitrate?: TridentArbiter,
 ): Promise<Map<string, Set<string>>> {
   // Per path, the SET OF BRANCH COMMITS the resolver was handed a conflict for,
   // accumulated across rounds (a later round's `--diff-filter=U` no longer lists
@@ -1648,6 +1774,9 @@ async function rebaseBranchOntoBase(
   // commits' worth of coverage, which is how one resolved commit came to vouch
   // for a second commit nobody had ever looked at.
   const conflictedAll = new Map<string, Set<string>>()
+  // Set ONLY by an arbiter that asked for another round (#541); cleared as soon
+  // as a round resolves. Undefined on every first attempt at every commit.
+  let guidance: string | undefined
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
@@ -1684,11 +1813,51 @@ async function rebaseBranchOntoBase(
       base_branch: base,
       run,
       conflicted_files: conflicted,
+      ...(guidance !== undefined ? { guidance } : {}),
     })
     if (!outcome.resolved) {
+      // ARBITER TIER (#541). The resolver gave up; ask the arbiter whether a
+      // second, better-directed round can finish it. ONE bounded read-only turn,
+      // capped per run by the arbiter itself.
+      //
+      // EVERY WAY THIS CAN GO WRONG LANDS ON THE LINE BELOW. `unavailable` (no
+      // arbiter wired, cap spent, timed out, crashed, no marker, an option it was
+      // not offered), `owner-only`, a `stop` decision, or an arbiter that throws
+      // — all of them fall through to the identical abort + escalate the owner
+      // has had all along. That is the property that makes wiring this safe: the
+      // arbiter can only ever ADD one retry, never block a run and never guess.
+      const verdict = await arbitrateConflict(arbitrate, {
+        run,
+        repo,
+        base,
+        branch,
+        conflicted,
+        resolver_question: outcome.question,
+      })
+      if (verdict.kind === 'decision' && verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION) {
+        // Re-enter the loop WITHOUT advancing the rebase: `res` still holds the
+        // same conflicted result, so the next iteration re-reads the unresolved
+        // set and re-dispatches the resolver against the same commit — carrying
+        // the arbiter's reasoning. `rounds` was already spent on this pass and
+        // the next one spends another, so MAX_CONFLICT_ROUNDS keeps bounding the
+        // loop exactly as before.
+        log.info('merge_conflict_arbiter_retry', {
+          run: run.id,
+          branch,
+          base,
+          conflicted_files: conflicted.join(', '),
+          reasoning: verdict.reasoning,
+        })
+        guidance = verdict.reasoning
+        continue
+      }
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(outcome.question)
     }
+    // A resolved round advances onto a DIFFERENT commit, whose conflict the
+    // arbiter has said nothing about. Stale guidance there would describe the
+    // wrong two sides.
+    guidance = undefined
     // The resolver staged its resolutions; advance the rebase (which may surface
     // the NEXT conflicting commit → loop). `core.editor=true` so the replayed
     // commit never blocks on an interactive editor in this headless path.
