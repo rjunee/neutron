@@ -161,6 +161,23 @@ export interface WorktreeReaperOptions {
    * 'unknown' refusal is testable without corrupting a real rebase state directory.
    */
   rebase_head?: (worktree: string) => RebaseHead
+  /**
+   * MAY THE REF PASS RUN YET? (#547, found by CI against
+   * `build-core-modules-trident-stranded-sweep.test.ts`.)
+   *
+   * The boot rescue for stranded failed PR runs (`sweepStrandedFailures`) publishes such
+   * a run's commits by PUSHING ITS BRANCH — so on the very boot where both fire, this
+   * sweep's startup pass would delete the ref the rescue was about to push, and the
+   * rescue would then find nothing to publish. The composition therefore hands in a
+   * predicate that goes true once that rescue has settled.
+   *
+   * A PREDICATE, not a promise to await: a tick must never block on a rescue that is
+   * talking to a remote, and the WORKTREE pass has no reason to wait for it. Answering
+   * false leaves every ref alone and records why, so a rescue that never settles costs a
+   * nuisance rather than a deletion. Defaults to ready for a composition with no rescue
+   * wired — there is then nothing whose turn this could be taking.
+   */
+  refs_ready?: () => boolean
 }
 
 export interface WorktreeReapReport {
@@ -343,6 +360,8 @@ export async function sweepTridentWorktrees(
   let removalAttempts = 0
   // Shared across repos so one sweep's total destructive work stays bounded.
   const refDeletions = { attempts: 0 }
+  // Read ONCE per sweep, so every repo in one sweep answers the same question.
+  const refsReady = (opts.refs_ready ?? (() => true))()
 
   for (const repo of new Set(opts.store.listRepoPaths())) {
     if (!existsSync(repo)) continue
@@ -440,6 +459,13 @@ export async function sweepTridentWorktrees(
     // pass and the prune just left: a tree that was removed is no longer a holder, and
     // a tree that was PRESERVED still is. One try/catch for the same reason the prune
     // has one — a ref sweep that throws in one repo must not abandon the next.
+    if (!refsReady) {
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: 'awaiting-boot-rescue: the stranded-failure sweep has not settled yet',
+      })
+      continue
+    }
     try {
       await reapBranchRefs(opts, repo, processCwds, report, refDeletions, detachedThisSweep)
     } catch (error) {
@@ -458,7 +484,6 @@ export async function sweepTridentWorktrees(
 interface ZHolder {
   path: string
   branch: string | null
-  detached: boolean
 }
 
 /**
@@ -482,10 +507,13 @@ function parseHoldersZ(stdout: string): ZHolder[] {
       close()
       continue
     }
-    holder ??= { path: '', branch: null, detached: false }
+    holder ??= { path: '', branch: null }
     if (field.startsWith('worktree ')) holder.path = field.slice('worktree '.length)
     else if (field.startsWith('branch ')) holder.branch = field.slice('branch '.length)
-    else if (field === 'detached') holder.detached = true
+    // `detached` is deliberately NOT read. An entry with no `branch` attribute is asked
+    // about its rebase/bisect state whatever else it says, because the SUPERSET is the
+    // safe side: a git that stopped printing `detached` for a rebasing worktree would
+    // otherwise make that tree's ref read as unheld.
   }
   close()
   return holders

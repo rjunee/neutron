@@ -21,6 +21,7 @@ import {
   DEFAULT_WORKTREE_RETENTION_MS,
   MAX_REF_DELETIONS_PER_SWEEP,
   SALVAGE_REF_PREFIX,
+  TRIDENT_REF_PREFIX,
   sweepTridentWorktrees,
   type WorktreeReaperStore,
 } from './worktree-reaper.ts'
@@ -892,6 +893,54 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(existsSync(dirty)).toBe(true)
     expect(readFileSync(join(dirty, 'rescue-me.txt'), 'utf8')).toBe('the only copy\n')
     expect(await refExists(repo, 'refs/heads/trident/dirty-ref')).toBe(true)
+  }, 30_000)
+
+  test('the ref pass stands down while the boot rescue has not settled', async () => {
+    // Found by CI, not by reasoning (`build-core-modules-trident-stranded-sweep.test.ts`):
+    // the boot rescue for a stranded failed PR run publishes its commits by PUSHING ITS
+    // BRANCH, and on the boot where both fire the reaper deleted the ref first, leaving
+    // the rescue nothing to push. The WORKTREE half still runs — only refs wait.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/rescue-pending'
+    const sha = await seedRef(repo, branch, 'rescue')
+    const removable = await addWorktree(repo, 'wf_removable-too')
+    const now = Date.now()
+    backdate(removable, now)
+
+    const waiting = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+      now: () => now,
+      refs_ready: () => false,
+    })
+
+    expect(waiting.refs_examined).toBe(0)
+    expect(waiting.refs_deleted).toEqual([])
+    expect(waiting.refs_kept).toEqual(
+      expect.arrayContaining([
+        {
+          ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+          reason: 'awaiting-boot-rescue: the stranded-failure sweep has not settled yet',
+        },
+      ]),
+    )
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    // The worktree half is NOT deferred with it.
+    expect(waiting.removed).toContain(removable)
+
+    const secondRoot = join(root, 'second')
+    mkdirSync(secondRoot)
+    const after = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(secondRoot),
+      now: () => now,
+      refs_ready: () => true,
+    })
+
+    expect(after.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
+    expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
   }, 30_000)
 
   test('a branch outside refs/heads/trident/ is never even looked at', async () => {

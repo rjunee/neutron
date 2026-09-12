@@ -67,6 +67,17 @@ terminal", which is the answer that authorises the delete.
     `update-ref -d` deletes it without a word. Gate 4 should already have refused; this is the gate
     that does not depend on gate 4 being right.
 
+**THE BOOT RESCUE GETS FIRST CRACK, and CI is what found that it wasn't.** The stranded-failure
+sweep (`trident/orchestrator.ts:722` `sweepStrandedFailures`, wired at module init) publishes a
+stranded failed PR run's commits by PUSHING ITS BRANCH — and the reaper's startup pass
+(`immediate: true`) won that race on the one boot where both fire, so the rescue found nothing to
+push (`gateway/composition/build-core-modules-trident-stranded-sweep.test.ts` went red on shard
+6/8). The reaper now takes a `refs_ready` PREDICATE, lifted by the composition once that sweep has
+settled however it went. A predicate rather than an awaited promise because a tick must never block
+on a rescue talking to a remote: the WORKTREE half of the sweep runs from tick one either way, and
+the ref half records that it is waiting. The no-rescue branch of the composition sets the latch
+explicitly, so a latch only ever lifted on the other branch cannot disable half the reaper here.
+
 **The 79 are swept by this change rather than left to age out**, because the same guard answers
 them: measured against the live rows, 73 pass gates 5-7 and 6 are refused for unknown ownership.
 Ref retention is deliberately ZERO where a worktree gets 24 h — a worktree can hold work no probe
@@ -86,4 +97,6 @@ Every terminal and non-terminal phase is enumerated by parsing the shipped
 `migrations/expected-schema.txt` phase CHECK and splitting it with the module's own
 `TERMINAL_PHASES`, so the table cannot drift from the schema or be guessed. Each of the three
 terminal phases deletes; each of the five active phases keeps. Every refusal above has its own
-test, and each gate was mutation-checked by reverting it and proving the suite reds.
+test, and each gate was mutation-checked by reverting it and proving the suite reds — including the
+boot-rescue latch, in both halves: dropping it inside the reaper reds the reaper suite, and dropping
+its wiring in the composition reds the stranded-sweep test.
