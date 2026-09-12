@@ -60,23 +60,28 @@ remote-tracking ref for it exists**, and it is carried by the STRUCTURE, not by 
 
 Stated in the order of how much it proves:
 
-0. **The bare name is reached whenever `refs/remotes/origin/<base>` does not resolve to a
-   commit** — NOT "only with no remote", which is the round-six framing and is wider than
-   the probe. `origin` can be configured while that ref is missing, deleted or never
-   fetched, and the probe also answers no when it cannot run at all. `diffBase`'s unpinned
-   arm asks git, in either merge mode; where the answer is no, `refs/heads/<base>` is the
-   best available base and there is no better one without a fetch, which is deliberately
-   not attempted. That case is legitimate, tested by two fixtures (no remote at all, and a
-   configured origin with the base ref deleted), and the only one left.
-1. **`codex-build.sh` cannot CHOOSE a base — which is not the same as no bare name
-   reaching its range, and this item claimed the second.** It takes the base as argv `$2`
+0. **`refs/heads/<base>` is reached whenever `refs/remotes/origin/<base>` does not resolve to
+   a commit, and a base that resolves to NEITHER is refused.** `diffBase`'s unpinned arm asks
+   git, in either merge mode; where the answer is no, the LOCAL BRANCH NAMED IN FULL is the
+   best available base and there is no better one without a fetch, which is deliberately not
+   attempted. That case is legitimate, tested by two fixtures (no remote at all, and a
+   configured origin with the base ref deleted). Where neither ref resolves, `diffBaseRef`
+   throws and the workflow composes `refs/heads/<base>` anyway for git to reject.
+
+   > **This item read "the bare name is reached whenever …" through round eighteen**, and the
+   > condition it argued about — "not only with no remote", the round-six framing — was the
+   > right correction to the wrong half. The NAME was the problem: a bare word is not inert,
+   > and a same-named tag answers to it (round nineteen). Kept here because the narrowing of
+   > the CONDITION is still the load-bearing part; the ANSWER it names is superseded.
+1. **`codex-build.sh` cannot CHOOSE a base — which is not the same as nothing bad reaching
+   its range, and this item once claimed the second.** It takes the base as argv `$2`
    (`BASE_DIFF_REF="${2:-}"`), its default is EMPTY, and an empty value skips the
-   last-resort diff entirely, so the wrapper never invents or improves a base. But item 0
-   above *requires* the bare name when `refs/remotes/origin/<base>` does not resolve, that
-   name is passed as this argv, and it reaches
-   `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:819`). Measured
-   through the shipped line in `trident/codex-wrapper-bare-base.test.ts`: with no remote it
-   yields the branch's own single file, and handed a stale `main` where `origin/main` is 4
+   last-resort diff entirely, so the wrapper never invents or improves a base. **As of round
+   nineteen the trident path hands it only a sha or a fully qualified ref** — `diffBase` has
+   no arm that composes a bare name. What the wrapper does with whatever it IS handed is
+   still measured through the shipped line in `trident/codex-wrapper-bare-base.test.ts`,
+   because the wrapper takes argv from anyone: with no remote a bare `main` yields the
+   branch's own single file, and handed a stale `main` where `origin/main` is 4
    commits ahead it yields five files — the wrapper is incapable of repairing a bad base,
    which is exactly why the composing side must not hand it one. **If a claim says something
    cannot be built, name the mechanism that prevents it**; the mechanism here prevents a
@@ -106,25 +111,32 @@ Stated in the order of how much it proves:
 - `trident/inner-workflow.mjs` — `diffBase`, declared once beside `pinnedBase`, read by
   the forge contract's reviewer diff, the planner's resume inspection hint, the resume
   diff, and the base argv of both codex wrappers. Order: the launch-pinned sha, else
-  `origin/<base>` whenever `refs/remotes/origin/<base>` resolves to a commit — in EITHER
-  merge mode — else the bare name. (This bullet said "in pr mode, else the bare name in
-  local mode" until round twelve: the merge-mode fallback round six removed, surviving in
-  the record's own inventory of the thing that replaced it.) It also refuses an empty,
-  whitespace-padded or option-shaped name.
-- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, origin_base_resolves)` where the
-  third argument is a **thunk** `() => Promise<boolean>` invoked only on the arm that needs
-  it, next to `detectBaseBranch` which produces the name it refuses to let through. It was
+  `refs/remotes/origin/<base>` whenever that ref resolves to a commit — in EITHER merge mode —
+  else `refs/heads/<base>`, which it composes whether or not THAT resolves so git rejects it
+  out loud. No arm composes a bare name. (Two corrections live here: it said "in pr mode, else
+  the bare name in local mode" until round twelve — the merge-mode fallback round six removed,
+  surviving in the record's own inventory of the thing that replaced it — and it said "else the
+  bare name" until round nineteen.) It also refuses an empty, whitespace-padded or
+  option-shaped name.
+- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, ref_resolves)` where the third
+  argument is a **thunk** `(ref: string) => Promise<boolean>`, invoked only on the arms that
+  need it — once for `refs/remotes/origin/<base>`, then for `refs/heads/<base>` — next to
+  `detectBaseBranch` which produces the name it refuses to let through. (It took no argument
+  and asked only about origin until round eighteen; the signature is in the round-eighteen
+  section.) Every exit is the pin, a qualified ref, or a throw. It was
   a plain `boolean` and "pure" for most of this branch; round eleven found that every caller
   then wrote `await originBaseResolves(…)` in the argument position, which JavaScript
   evaluates *before* the pin can be returned — so the ordering had to become a property of
   the signature. See the round-eleven section.
   Used at every `resolveBase()`-fed range in `trident/orchestrator.ts`.
 - the shell wrappers compose **no** base at all: `trident/codex-build.sh` and
-  `trident/codex-review.sh` receive whatever the composing side resolved as argv — a sha,
-  `origin/<base>`, or the legitimate bare name; `trident/codex-wrapper-bare-base.test.ts`
-  runs both shipped range lines to show which. `BASE_BRANCH` became
-  `BASE_DIFF_REF` so the name stops claiming a branch; `codex-review.sh` also demotes a
-  bare name to `origin/<name>` when one resolves, for standalone use.
+  `trident/codex-review.sh` receive whatever the composing side resolved as argv — from
+  trident, a sha or a fully qualified ref, never a bare name (round nineteen);
+  `trident/codex-wrapper-bare-base.test.ts` runs both shipped range lines to measure what they
+  do with whatever they are handed, because argv comes from anyone. `BASE_BRANCH` became
+  `BASE_DIFF_REF` so the name stops claiming a branch; `codex-review.sh` independently
+  qualifies a bare argument for standalone use — `refs/remotes/origin/<x>` when that resolves,
+  else `refs/heads/<x>` — and REFUSES an ambiguous or tag-only one.
 
 ### And a gate, so the next site cannot forget
 
@@ -262,9 +274,26 @@ wrapper keep a tag-only name reds 1; and hiding a bare `return name` inside a si
 **That last mutation exists because the structural test had the code's own blind spot.** Its
 first version anchored the pattern at the start of a line, so it never saw the two returns
 written as `if (await ref_resolves(…)) return \`refs/…\`` — it examined five statements and
-declared seven correct. Widened to match a `return` anywhere on the line and to pin the COUNT
-at 7, so a new arm cannot slip in unexamined. **An instrument written to check a rule keeps
-inheriting the assumption the rule was broken by** — the fourth time on this branch.
+declared seven correct, and would have walked past `if (x) return name`. Widened to match a
+`return` anywhere on the line and to pin the COUNT at 7, so a new arm cannot slip in unexamined.
+
+**AN INSTRUMENT THAT ENUMERATES BY SYNTAX INHERITS THE BLIND SPOTS OF ITS PATTERN**, and this
+is the third instrument on this PR to fail that way — the coverage scanner keyed to one
+identifier spelling, the same scanner examining one range per physical line, and now a
+structural check anchored at line start. Each was written to enforce a rule the code had just
+broken, and each encoded the same assumption the code had broken it with. The durable answers
+are the two this branch reached by other means: **prevent the shape instead of enumerating it**
+(`gitRangeArgv`, and a binding with no bare-name exit), and **pin a COUNT alongside the
+predicate**, so a pattern that stops matching fails instead of going quiet.
+
+**And one more fixture that could not fail for its stated reason.** The ambiguous branch/tag
+case seeded `refs/heads/release` and `refs/tags/release` at the SAME commit and then asserted
+both equalled it — so the comment claiming "the two refs disagree about the commit" was false,
+and the fixture could not show that git's choice changes the reviewed commit, which is the only
+reason the refusal exists. Now seeded at different commits, with the bare name measured
+resolving to the TAG while the branch the operator named sits elsewhere. **A test whose two arms
+are the same value cannot fail for the reason it exists** — the same shape as a matrix holding
+an axis constant, one level down.
 
 ### Round eighteen: the degraded path is the one that runs when things are already wrong
 
@@ -310,10 +339,13 @@ return now resolves to a different commit. Mutations: dropping the TS fallback a
 dropping the `.mjs` arm reds 4, letting the wrapper pass an ambiguous name through reds 1.
 
 **Unexplained, and noted rather than buried:** `trident/publish-rebase-realgit.test.ts`'s
-blank-line-context case failed ONCE during round seventeen's full-suite run and passed in
-isolation and on the immediate re-run. This branch does not touch that file, so it is not
-chased here — but "it passed on re-run" is a weaker claim than it sounds, and the next person
-who sees it deserves to know it happened here once.
+blank-line-context case failed ONCE during round seventeen's full-suite run, and five cases in
+`trident/mutation-prover-realgit.test.ts` failed ONCE during round twenty's — each passing in
+isolation and on the immediate re-run (4888/0). Both are REAL-GIT suites this branch does not
+touch, and both flaked only under a full-suite run on a shared box, which points at contention
+rather than at either file. Not chased here, and not dressed up: **"it passed on re-run" is a
+weaker claim than it sounds**, and two independent instances in one session is the kind of
+thing the next person deserves to find written down rather than rediscover.
 
 ### Round seventeen: the resolution was correct and then discarded at the return statement
 
@@ -1059,13 +1091,15 @@ The complements, because a fix that always preferred something else would pass t
 case: the fresh case (both answers agree, stated without reference to the composed
 command so it stays green under the mutation); a pin that IS the stale sha (still
 honoured — the order is over real inputs, not a preference for `origin/<base>`); and the
-fallback (the bare name is kept when `origin/<base>` does not resolve — prefixing
+fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve — prefixing
 `origin/` unconditionally would break every repository that has no such ref).
 
-> **As first written that last clause said "local mode (the bare name is kept)".** The
-> fallback was keyed on merge mode for the first five rounds; round six replaced it with a
-> per-repository probe. Corrected here in the round-nine reconciliation pass rather than
-> left as a third superseded framing in the permanent record.
+> **That last clause has now been corrected twice.** As first written it said "local mode (the
+> bare name is kept)": the fallback was keyed on merge mode for the first five rounds, and
+> round six replaced it with a per-repository probe — corrected in the round-nine
+> reconciliation pass. It then said "the bare name is kept" until round nineteen replaced that
+> answer with `refs/heads/<base>`, because a bare word is not inert and a same-named tag
+> answers to it. The CONDITION was right both times; the ANSWER was wrong both times.
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at

@@ -181,11 +181,19 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // `refs/heads/`, so the review would have run against the TAG with only a
     // `warning: refname … is ambiguous` on a stderr this wrapper sends to /dev/null.
     const w = await seedWorld()
-    await git(w.repo, 'update-ref', 'refs/heads/release', w.local)
-    // The ambiguity is real in this repo, and the two refs disagree about the commit —
-    // otherwise the refusal would be protecting nothing.
+    // THE BRANCH AND THE TAG AT DIFFERENT COMMITS. Both were seeded at `w.local` until this
+    // round, so the two assertions below compared a value with itself: the fixture could not
+    // show that git's choice CHANGES the reviewed commit, which is the only reason the
+    // refusal exists. A test whose two arms are the same value cannot fail for the reason it
+    // exists.
+    await git(w.repo, 'update-ref', 'refs/heads/release', w.remote)
     expect(await git(w.repo, 'rev-parse', 'refs/tags/release')).toBe(w.local)
-    expect(await git(w.repo, 'rev-parse', 'refs/heads/release')).toBe(w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/heads/release')).toBe(w.remote)
+    expect(w.local).not.toBe(w.remote)
+    // AND THE STAKES, measured: the bare word resolves to the TAG, so a review that accepted
+    // it would have run against `w.local` while the branch the operator named is at
+    // `w.remote`. That is the commit the refusal is protecting.
+    expect(await git(w.repo, 'rev-parse', 'release')).toBe(w.local)
     const res = await runBlock(w.repo, 'release')
     expect({ ok: res.ok, stdout: res.stdout }).toEqual({ ok: false, stdout: '' })
     // The message has to name BOTH refs and the way out, or the operator is left with an

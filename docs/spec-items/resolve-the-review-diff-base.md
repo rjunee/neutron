@@ -106,16 +106,17 @@ things:
 - **an argv boundary that carries whatever the composing side resolved** —
   `trident/codex-build.sh` takes the base as argv `$2` and holds no base-branch-name binding at
   all (its default is empty, and empty skips the diff), so the wrapper cannot *invent* a base.
-  An earlier draft called a bare-base range there *unconstructable*: **that was false.** The
-  legitimate fallback above — no resolving `refs/remotes/origin/<base>` — is a bare NAME, it is
-  passed as that argv, and it reaches `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`
-  (`codex-build.sh:819`), which `trident/codex-wrapper-bare-base.test.ts` now exercises through
-  the shipped line. **If a claim says something cannot be built, it has to name the mechanism
-  that prevents it**; the mechanism here prevents the wrapper *choosing* a base, not a bare name
-  arriving at one. `trident/codex-review.sh` is weaker still: its argv default is the literal
-  `main`, which it promotes to `origin/main` when that ref resolves and leaves bare when it does
-  not — a resolved ref on the trident path, which always passes one, merely demoted in a
-  standalone run against a repo with no `origin/<base>`.
+  **From trident it now receives only a sha or a fully qualified ref**, because `diffBase` has
+  no arm that composes a bare name. That is a property of the CALLER, not of the wrapper: argv
+  comes from anyone, so `trident/codex-wrapper-bare-base.test.ts` still measures what the
+  shipped line `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:819`) does
+  with a bare name, a stale one and a padded one. **If a claim says something cannot be built,
+  it has to name the mechanism that prevents it** — an earlier draft called a bare-base range
+  there *unconstructable*, and the mechanism it named prevents the wrapper CHOOSING a base, not
+  a bare name arriving at one. `trident/codex-review.sh` defends itself independently, because
+  its argv default is the literal `main`: it qualifies a bare argument to
+  `refs/remotes/origin/<x>` when that resolves and to `refs/heads/<x>` otherwise, and REFUSES
+  an ambiguous (branch + tag) or tag-only one.
 
 `scripts/ci/diff-base-check.mjs` is **defence in depth on top of that** — it exists to
 make a regression loud, not to prove absence. A textual matcher over source cannot
@@ -197,10 +198,11 @@ The resolution order is evidence-first, and is the same at every site:
       not a hard-wired preference for `origin/<base>`. Verified by "A PINNED BASE THAT IS THE
       STALE SHA IS STILL HONOURED" — which a fix that unconditionally reached for
       `origin/<base>` would fail while passing every other stale-case test.
-- [ ] **Local mode gets the SAME resolution as pr mode, and the bare name is reached only when
-      `refs/remotes/origin/<base>` does not resolve** — not "only with no remote", which this
-      criterion carried after the condition it names had already been narrowed, and which its
-      own sibling criterion two entries down contradicts. The fallback was `merge_mode`-keyed,
+- [ ] **Local mode gets the SAME resolution as pr mode, and `refs/heads/<base>` is reached only
+      when `refs/remotes/origin/<base>` does not resolve** — not "only with no remote", which
+      this criterion carried after the condition it names had already been narrowed, and not
+      "the bare name", which it said until round nineteen replaced that answer with a qualified
+      ref. The fallback was `merge_mode`-keyed,
       which is the last place this defect
       lived: local mode against a stale `main` produced five files where the branch changed one.
       Verified by "LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file", which
@@ -315,11 +317,14 @@ The resolution order is evidence-first, and is the same at every site:
       string-shaped form reddens two tests.
 - [ ] **The fallback is reached whenever the REF does not resolve — not only when the repository
       has no remote.** Two fixtures, because they are different states and an earlier draft of
-      this criterion named only the first: "NO REMOTE: the bare name is the fallback" removes the
-      remote and every `refs/remotes/` ref; "CONFIGURED ORIGIN, MISSING BASE REF" keeps `origin`
-      configured and deletes only `refs/remotes/origin/main`, which is the ordinary state of a
-      fresh worktree that has not fetched. Both assert the substitution resolves to `main` and
-      that a real diff is still produced. Without the first the fix would be "always prefer
+      this criterion named only the first: "NO REMOTE: the fallback is refs/heads/<base>" removes
+      the remote and every `refs/remotes/` ref; "CONFIGURED ORIGIN, MISSING BASE REF" keeps
+      `origin` configured and deletes only `refs/remotes/origin/main`, which is the ordinary
+      state of a fresh worktree that has not fetched. Both assert the substitution resolves to
+      **`refs/heads/main`** — it was `main` until round nineteen — and that a real diff is still
+      produced. A third fixture covers the world where the local branch is gone too and only a
+      TAG answers to the name: there the composed word is still `refs/heads/main`, git refuses
+      it, and no diff is produced at all. Without the first the fix would be "always prefer
       `origin/`", which breaks every repository that has none; without the second the spec would
       go on claiming a condition wider than the probe establishes.
 - [ ] **The two implementations do not NORMALISE differently — asserted on the whitespace axis.**
@@ -335,17 +340,21 @@ The resolution order is evidence-first, and is the same at every site:
       reds it; deleting the `.mjs` guard reds it — 2 tests each, measured. **The table that
       exists to catch divergence held this axis constant for eleven rounds**, which is the same
       blind spot as the code it audits.
-- [ ] **The bare name actually reaching a wrapper's range is exercised, not just argued.** The
-      fallback is legitimate, so the bare name does reach `codex-build.sh`'s
-      `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` and `codex-review.sh`'s
-      `FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD")`. Verified by
+- [ ] **What each wrapper's range line does with the value it is handed is exercised, not just
+      argued.** Trident no longer hands either wrapper a bare name — every `diffBase` arm is a
+      sha or a qualified ref — but argv comes from anyone, and the wrapper's own behaviour is
+      what makes the composing side's choice load-bearing. Verified by
       `trident/codex-wrapper-bare-base.test.ts`, which extracts both shipped lines by text and
-      RUNS them: in a no-remote repository the bare name yields the branch's own work (pinned
-      file list and count), and in a repository whose local base is stale the same line handed the
-      bare name yields the inflated answer while the resolved ref yields the correct one — so the
-      argv is shown to be load-bearing at the wrapper, which is the reason the wrapper must never
-      improve or guess it. It also measures what a padded name does there (an empty diff, because
-      `2>/dev/null || true` swallows git's fatal), which is why the binding refuses one.
+      RUNS them: in a no-remote repository a bare `main` yields the branch's own work (pinned
+      file list and count); in a repository whose local base is stale the same line handed that
+      bare name yields the inflated answer while the resolved ref yields the correct one — so
+      the wrapper is shown to be incapable of repairing a bad base, which is why the composing
+      side must never guess one. It also measures what a padded name does there (an empty diff,
+      because `2>/dev/null || true` swallows git's fatal), which is why the binding refuses one.
+      **This criterion read "the fallback is legitimate, so the bare name does reach …" until
+      round nineteen removed that fallback** — an acceptance criterion demanding behaviour the
+      code had deliberately deleted, which is the citation-sweep lesson one level up: the code
+      moved three times and the account moved once.
       The previous wrapper criteria inspected argv and source text only.
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
