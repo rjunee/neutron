@@ -148,6 +148,35 @@ export interface RecoveredReply {
   instance_slug?: string
 }
 
+/**
+ * WHY the pooled child that hosted detached work is gone (#518). The consumer
+ * composes the durable failure reason from this, so the discriminant is a FIELD
+ * rather than a phrase to be pattern-matched out of `detail`.
+ *
+ *   - `'child-died'` — the child's process ended and we did not ask it to: the
+ *     supervision watchdog found the pid dead, or the pool evicted an
+ *     abandon-poisoned child. A fault.
+ *   - `'gateway-shutdown'` — THE GATEWAY KILLED IT, on its way down
+ *     (`shutdownAllPersistentRepls` from the SIGTERM handler: a service restart
+ *     or a deploy). Nothing was wrong with the child or the build.
+ *
+ * The two must never collapse: a deploy reported as a crash was the whole of
+ * spec item `a-deploy-must-not-kill-builds-in-flight`, and a crash reported as a
+ * deploy would be the same defect pointing the other way.
+ */
+export type ChildCrashCause = 'child-died' | 'gateway-shutdown'
+
+/** The durable child-death edge handed to `onChildCrash`. */
+export interface ChildCrashInfo {
+  sessionKey: string
+  /** The dead child's `child_generation` — what owns the detached work. */
+  generationKey: string
+  /** Why it is gone. See {@link ChildCrashCause}. */
+  cause: ChildCrashCause
+  /** Human-readable evidence for the cause, composed at the observation site. */
+  detail: string
+}
+
 /** Options to construct a persistent-REPL substrate. Superset of the retired
  *  `ClaudeCodeSubstrateOptions` so the flip-sites pass the same opts bag. */
 export interface PersistentReplSubstrateOptions {
@@ -198,7 +227,7 @@ export interface PersistentReplSubstrateOptions {
   /** Called when the crash watchdog observes that this substrate's pooled child
    *  exited. Runtime consumers use this durable failure edge to reap detached
    *  work owned by the dead child. */
-  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** THE EVICTION GUARD. Consulted by `getOrSpawnSession` BEFORE it evicts an
    *  abandon-poisoned warm child: how many live, in-process workloads (trident
    *  inner workflows — the Argus panel, the arbiter, the terminal/cleanup steps

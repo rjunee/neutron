@@ -20,7 +20,63 @@ const base: ReplWedgeProbe = { hasChild: true, childAlive: true, healthOk: true,
 describe('detectReplWedged — detection table', () => {
   it('pooled child exited → pid-dead (strongest signal, checked first)', () => {
     const v = detectReplWedged({ ...base, childAlive: false, healthOk: false })
-    expect(v).toMatchObject({ wedged: true, reason: 'pid-dead' })
+    expect(v).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
+  })
+
+  // ─── #518: a deploy is not a crash, and the pair below is what says so ───────
+
+  it('child exited AND the registry says a gateway shutdown killed it → pid-dead-gateway-shutdown', () => {
+    // RED-mutation: delete the `killedByGatewayShutdown` branch. The verdict falls
+    // back to `pid-dead` / "pooled child exited" and the deploy is reported as a
+    // crash — the defect the spec item names.
+    const v = detectReplWedged({ ...base, childAlive: false, healthOk: false, killedByGatewayShutdown: true })
+    expect(v).toMatchObject({ wedged: true, reason: 'pid-dead-gateway-shutdown' })
+    expect(v).toMatchObject({ wedged: true })
+    if (v.wedged) {
+      expect(v.detail).toContain('deploy')
+      expect(v.detail).not.toContain('pooled child exited')
+    }
+  })
+
+  it('THE COMPLEMENT — child exited with NO shutdown marker stays pid-dead / "pooled child exited"', () => {
+    // A change that reported EVERY death as a deploy would satisfy the case above and
+    // be worthless. This is the case that makes it mean something, and it is the
+    // acceptance criterion stated negatively: the 08-10 23:30 and 08-11 06:04 crashes
+    // have no checkout near them and must NOT be attributed to a deploy.
+    //
+    // RED-mutation: make the branch unconditional (`if (true)`) — this reddens while
+    // the deploy case above still passes.
+    const explicitlyFalse = detectReplWedged({
+      ...base,
+      childAlive: false,
+      healthOk: false,
+      killedByGatewayShutdown: false,
+    })
+    expect(explicitlyFalse).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
+    // ABSENT, not merely false: a probe built before #518 (or one whose registry read
+    // could not answer) must land on the crash arm, never the deploy arm.
+    const fieldAbsent = detectReplWedged({ ...base, childAlive: false, healthOk: false })
+    expect(fieldAbsent).toMatchObject({ wedged: true, reason: 'pid-dead', detail: 'pooled child exited' })
+  })
+
+  it('a shutdown marker on a LIVE child manufactures nothing', () => {
+    // The marker EXPLAINS a death; it may never create one. RED-mutation: hoist the
+    // `killedByGatewayShutdown` check above the `childAlive` test.
+    expect(detectReplWedged({ ...base, killedByGatewayShutdown: true })).toEqual({ wedged: false })
+    // ...and a marked, alive-but-silent child is still the dev-channel verdict.
+    expect(
+      detectReplWedged({ ...base, healthOk: false, killedByGatewayShutdown: true }),
+    ).toMatchObject({ wedged: true, reason: 'no-port-listener' })
+  })
+
+  it('the operator alert names the restart rather than a silent spawn failure', () => {
+    const text = buildWedgeAlertText({ sessionKey: 'k', reason: 'pid-dead-gateway-shutdown' })
+    expect(text).toContain('process terminated by a gateway restart/deploy')
+    // The plain crash symptom is unchanged — the two sentences must stay distinct.
+    expect(buildWedgeAlertText({ sessionKey: 'k', reason: 'pid-dead' })).toContain('process dead')
+    expect(buildWedgeCapHitAlertText({ sessionKey: 'k', reason: 'pid-dead-gateway-shutdown' })).toContain(
+      'process terminated by a gateway restart/deploy',
+    )
   })
 
   it('child alive but /health silent → no-port-listener', () => {

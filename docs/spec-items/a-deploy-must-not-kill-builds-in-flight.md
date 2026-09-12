@@ -26,12 +26,68 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 
 ## Acceptance
 
-- [ ] A deploy either drains/defers while a run is in flight, OR the workflow survives its
-      launcher's restart. One of the two, chosen deliberately and pinned by a test.
-- [ ] Either way the owner is TOLD which happened. A deploy-caused death is never reported
+- [ ] **A deploy either drains/defers while a run is in flight, OR the workflow survives its
+      launcher's restart. One of the two, chosen deliberately and pinned by a test.**
+      CHOSEN: *the workflow survives its launcher's restart* — and it is NOT deliverable
+      here, so this box stays open rather than being ticked against a check that does not
+      exist. Why the choice is forced, established 2026-09-12:
+      - **Drain/defer cannot work while the REPL is in the gateway's cgroup.** A deploy ends
+        in `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is
+        SIGKILLed at `TimeoutStopSec` regardless of what our polite layer decides
+        (`gateway/index.ts:1035-1043` says so in as many words). A `hostsLiveWork` gate on
+        `shutdownAllPersistentRepls` would therefore *report* a deferral it cannot deliver.
+      - **Nothing here can make a survivor useful either.** `orphan-adoption.ts` is
+        adopt-or-kill and only kills — verdicts `killed|not-ours|dead|no-pid`
+        (`orphan-adoption.ts:49-53`), no adopt arm, and `spawnResume` terminates the
+        recorded pid before resuming (`orphan-adoption.ts:229`). A pane that survived a
+        restart would be killed by the next boot.
+      - **Both halves are milestone-1 work that lands first.** #538 moves the REPL into a
+        herdr pane outside this process tree; #539 is explicitly "gating the shutdown kill"
+        plus the adopt arm and the boot reconciliation pass. Building a drain here would be
+        a mechanism #539 obsoletes, in a tree that forbids dual code paths.
+- [x] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
       as a bare "child crashed" / "pooled child exited" — assert the stored reason names
-      the deploy.
-- [ ] The two unexplained crashes (08-10 23:30, 08-11 06:04) have no checkout near them and
-      are NOT closed by this fix. A change that claims them fails review.
-- [ ] This does not subsume #514 (a CRASHED run is never reaped), which asks what the row
-      does AFTER a child dies. Fixing one must not be credited with the other.
+      the deploy.** The dying gateway records the kill before it makes it
+      (`gateway-shutdown-kill.ts` → `reportGatewayShutdownKill`, called from
+      `pool.ts:shutdownAllPersistentRepls` and `spawn.ts:shutdownQuarantinedChildren`), the
+      sink carries a `cause` discriminant, and both detectors read a generation-scoped
+      registry marker on the next boot. Checks: `open/wiring/__tests__/trident-child-crash-sink.test.ts`
+      ("the stored failure_reason says deploy, and never says the child crashed" — asserts
+      the real `code_trident_runs` row), `trident/tick-liveness.test.ts` T6,
+      `__tests__/poison-eviction-live-work-guard.test.ts` ("a gateway shutdown reports its
+      own kills as a deploy"), `__tests__/repl-supervision.test.ts` (#518, the next-boot
+      watchdog path), `__tests__/gateway-shutdown-kill.test.ts`,
+      `__tests__/launcher-liveness-attribution.test.ts`.
+- [x] **The two unexplained crashes (08-10 23:30, 08-11 06:04) have no checkout near them and
+      are NOT closed by this fix. A change that claims them fails review.** Nothing in this
+      change correlates a death with a deploy: attribution exists ONLY where the gateway
+      wrote the marker itself, generation-scoped. Every deploy case is paired with its
+      complement, and the mutation run confirms the pair is real — making the deploy arm
+      unconditional reddens
+      `trident-child-crash-sink.test.ts` ("THE COMPLEMENT — a genuine crash with no deploy
+      near it still reads as a crash", the 08-10/08-11 shape),
+      `dead-repl-detector.test.ts`, `tick-liveness.test.ts` T6 and
+      `launcher-liveness-attribution.test.ts`. A stale marker naming a superseded
+      generation is refused (`wasKilledByGatewayShutdown`), and `spawn.ts` clears both
+      fields on a new spawn.
+- [x] **This does not subsume #514 (a CRASHED run is never reaped), which asks what the row
+      does AFTER a child dies. Fixing one must not be credited with the other.** #514's
+      mechanism — the `onChildCrash` sink latching the runs a dead generation owned — is
+      untouched: the same call, the same `crashRunningByLauncher`, the same reaping. This
+      change adds only WHICH death it was (the `cause` field and the reason it composes).
+      `trident-child-crash-sink.test.ts`'s `child-died` cases are #514's behaviour, still
+      green and unmodified, and `repl-supervision.test.ts`'s "#514" case still asserts the
+      bare `pooled child exited` detail.
+
+## What was found not to be true
+
+- The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
+  understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
+  handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
+  pool and calls `session.child.kill()` (`pool.ts:898`) on every warm child. We kill it
+  deliberately, which is precisely why the cause is knowable and can be recorded.
+- The site most certain to be hosting a live build reported NOTHING at all. A quarantined
+  child is out of the pool *because* it still hosts running workflows, and
+  `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:838`). Every
+  deploy killed those silently.

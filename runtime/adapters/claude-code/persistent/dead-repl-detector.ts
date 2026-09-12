@@ -31,6 +31,13 @@ export type WedgeVerdict =
 export type WedgeReason =
   /** A pooled session exists but its child has exited — strongest signal. */
   | 'pid-dead'
+  /** The child has exited AND the registry records that a gateway shutdown
+   *  deliberately terminated THIS generation (#518): a service restart or a
+   *  deploy, not a fault. Same recovery as `pid-dead` (respawn), a different
+   *  SENTENCE — the detail this verdict carries is what the durable crash sink
+   *  reports, and "pooled child exited" for a death we caused is the true-but-
+   *  wrong sentence the spec item exists to delete. */
+  | 'pid-dead-gateway-shutdown'
   /** Child looks alive but the dev-channel `/health` is dead. */
   | 'no-port-listener'
   /** No pooled child AND never reached ready AND `/health` dead — a stale
@@ -52,6 +59,12 @@ export interface ReplWedgeProbe {
   /** The registry believes this session reached `/health` at some point
    *  (`first_ready_at` set) — disambiguates "never came up" from "went silent". */
   ccReady: boolean
+  /** #518 — a gateway shutdown deliberately terminated THIS generation
+   *  (`wasKilledByGatewayShutdown` over the registry row). Only consulted on the
+   *  dead-child branch: it explains a death, it never creates one, so a stale or
+   *  forged marker on a LIVE child changes nothing. Absent ⇒ false ⇒ the
+   *  pre-#518 verdict exactly. */
+  killedByGatewayShutdown?: boolean
 }
 
 /**
@@ -62,6 +75,8 @@ export interface ReplWedgeProbe {
  *   hasChild  childAlive  healthOk  ccReady  verdict
  *   --------  ----------  --------  -------  --------------------------------
  *   yes       no          -         -        wedged: 'pid-dead'
+ *                                             ...or 'pid-dead-gateway-shutdown'
+ *                                             when `killedByGatewayShutdown`
  *   yes       yes         no        -        wedged: 'no-port-listener'
  *   yes       yes         yes       -        not wedged
  *   no        -           yes       -        not wedged (health is positive)
@@ -74,6 +89,17 @@ export interface ReplWedgeProbe {
 export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
   if (probe.hasChild) {
     if (!probe.childAlive) {
+      // #518 — WE killed it, and the registry says so. The recovery is identical
+      // (`decideWedgeAction` branches on `wedged`, never on which dead-child
+      // reason); what changes is the sentence the durable crash sink stores, so a
+      // deploy stops being reported to the owner as a crashed build.
+      if (probe.killedByGatewayShutdown === true) {
+        return {
+          wedged: true,
+          reason: 'pid-dead-gateway-shutdown',
+          detail: 'pooled child terminated by its own gateway shutting down (a service restart or a deploy)',
+        }
+      }
       return { wedged: true, reason: 'pid-dead', detail: 'pooled child exited' }
     }
     if (!probe.healthOk) {
@@ -95,15 +121,26 @@ export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
   }
 }
 
+/** The operator-facing symptom for each wedge reason, authored once so the two
+ *  alert bodies below cannot drift. A gateway-shutdown kill reads as what it is:
+ *  the process is dead AND we are the ones who killed it. */
+function wedgeSymptom(reason: WedgeReason): string {
+  switch (reason) {
+    case 'pid-dead':
+      return 'process dead'
+    case 'pid-dead-gateway-shutdown':
+      return 'process terminated by a gateway restart/deploy'
+    case 'no-port-listener':
+      return 'dev-channel silent'
+    case 'no-pid-no-listener':
+      return 'no live signals'
+  }
+}
+
 /** Canonical alert body for a detected wedge. Lifted from Nova; the operator
  *  endpoint is `POST /admin/respawn-session?session=<key>`. */
 export function buildWedgeAlertText(args: { sessionKey: string; reason: WedgeReason }): string {
-  const symptom =
-    args.reason === 'pid-dead'
-      ? 'process dead'
-      : args.reason === 'no-port-listener'
-        ? 'dev-channel silent'
-        : 'no live signals'
+  const symptom = wedgeSymptom(args.reason)
   return (
     `\u{26A0}\u{FE0F} REPL \`${args.sessionKey}\` appears wedged (${symptom} — ` +
     `spawn failed silently). Auto-recovery in progress... or send ` +
@@ -113,12 +150,7 @@ export function buildWedgeAlertText(args: { sessionKey: string; reason: WedgeRea
 
 /** Cap-hit variant: wedged AND the respawn cap tripped → auto-recovery OFF. */
 export function buildWedgeCapHitAlertText(args: { sessionKey: string; reason: WedgeReason }): string {
-  const symptom =
-    args.reason === 'pid-dead'
-      ? 'process dead'
-      : args.reason === 'no-port-listener'
-        ? 'dev-channel silent'
-        : 'no live signals'
+  const symptom = wedgeSymptom(args.reason)
   return (
     `\u{1F6A8} REPL \`${args.sessionKey}\` wedged (${symptom}) AND respawn cap-hit ` +
     `— auto-recovery DISABLED. Force-recover via ` +

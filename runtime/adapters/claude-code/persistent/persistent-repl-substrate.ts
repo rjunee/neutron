@@ -41,7 +41,13 @@ export type { RespawnTrigger, RespawnOutcome } from './session-respawn.ts'
 export type { ReplToolBridge } from './pool-state.ts'
 
 // Public surface, re-exported from the split modules.
-export type { RateLimitBannerNotice, RecoveredReply, PersistentReplSubstrateOptions } from './types.ts'
+export type {
+  RateLimitBannerNotice,
+  RecoveredReply,
+  PersistentReplSubstrateOptions,
+  ChildCrashCause,
+  ChildCrashInfo,
+} from './types.ts'
 export {
   setReplToolBridge,
   clearReplToolBridgeIf,

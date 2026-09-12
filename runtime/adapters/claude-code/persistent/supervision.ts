@@ -18,6 +18,7 @@ import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnR
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
+import { gatewayShutdownKillAt, wasKilledByGatewayShutdown } from './gateway-shutdown-kill.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
@@ -420,7 +421,15 @@ async function probeReplLiveness(
   // Pass the recorded session id so the default probe can reject a recycled port
   // serving a DIFFERENT session (port-recycle guard).
   const healthOk = port !== undefined ? await healthProbe(port, record?.sessionId) : false
-  return { hasChild, childAlive, healthOk, ccReady: record?.first_ready_at !== undefined }
+  return {
+    hasChild,
+    childAlive,
+    healthOk,
+    ccReady: record?.first_ready_at !== undefined,
+    // #518 — generation-scoped: a marker naming a SUPERSEDED generation answers
+    // false, so the next child's genuine crash is never excused as a deploy.
+    killedByGatewayShutdown: wasKilledByGatewayShutdown(record),
+  }
 }
 
 /**
@@ -481,7 +490,14 @@ export async function runReplWatchdogTick(
       crashSink !== undefined
     ) {
       try {
-        await crashSink({ sessionKey, generationKey: record.child_generation, detail: verdict.detail })
+        await crashSink({
+          sessionKey,
+          generationKey: record.child_generation,
+          // #518 — WHY it is gone travels as a field, not as a phrase the consumer
+          // has to pattern-match back out of `detail`.
+          cause: verdict.reason === 'pid-dead-gateway-shutdown' ? 'gateway-shutdown' : 'child-died',
+          detail: verdict.detail,
+        })
         patchRecord(registryPath, sessionKey, { child_crash_notified_at: now })
       } catch (err) {
         log.error('child_crash_sink_error', { sessionKey, error: String(err) })
@@ -504,7 +520,9 @@ export async function runReplWatchdogTick(
         continue
       }
       const trigger: RespawnTrigger =
-        action.verdict.reason === 'pid-dead' ? 'crash-watchdog' : 'wedge-watchdog'
+        action.verdict.reason === 'pid-dead' || action.verdict.reason === 'pid-dead-gateway-shutdown'
+          ? 'crash-watchdog'
+          : 'wedge-watchdog'
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
       respawned = outcome.ok
       if (action.alert.send) {
@@ -939,6 +957,13 @@ export async function peekSizeWatchdogForTest(
 // External launcher liveness — the PULL half of crash detection.
 // ---------------------------------------------------------------------------
 
+/** What {@link probeLauncherGenerationAlive} can answer. Mirrored by trident's
+ *  `LauncherLiveness` (`trident/tick.ts`), which is the same union — the
+ *  runtime layer may not import trident, so the two are kept identical by name
+ *  and a compile-time check at the wiring seam
+ *  (`open/wiring/trident-launcher-liveness.ts`). */
+export type LauncherGenerationLiveness = 'alive' | 'dead' | 'unknown' | 'killed-by-gateway-shutdown'
+
 /**
  * Is the launcher child identified by `generationKey` still a LIVE process?
  *
@@ -965,11 +990,19 @@ export async function peekSizeWatchdogForTest(
  *
  * 'dead' therefore requires POSITIVE evidence, and the answer is BINARY process
  * liveness: no amount of thinking can make a live agent probe 'dead'.
+ *
+ * #518 — 'killed-by-gateway-shutdown' IS 'dead', WITH THE CAUSE ATTACHED. The
+ * registry row carries a generation-scoped marker written by the gateway that
+ * terminated this child on its own way down (a service restart or a deploy). It
+ * is reported separately so the caller's durable failure reason can name the
+ * deploy instead of saying the launcher crashed: same reaping, honest sentence.
+ * The marker is NEVER allowed to manufacture a death — the pid check runs first
+ * and must independently say dead.
  */
 export function probeLauncherGenerationAlive(
   generationKey: string,
   replRegistryPath: string,
-): 'alive' | 'dead' | 'unknown' {
+): LauncherGenerationLiveness {
   try {
     // The pool stores `Promise<ReplSession>`, so read the SETTLED value rather than
     // awaiting a spawn that may still be in flight — the same synchronous-mirror
@@ -1003,7 +1036,12 @@ export function probeLauncherGenerationAlive(
         process.kill(record.pid, 0)
         return 'alive'
       } catch (err) {
-        return (err as NodeJS.ErrnoException)?.code === 'EPERM' ? 'alive' : 'dead'
+        if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'alive'
+        // Dead, positively. Now — and only now — ask WHOSE doing it was. A
+        // generation-scoped marker for THIS child means the owning gateway killed
+        // it while shutting down; a stale marker for a superseded generation is
+        // refused by `wasKilledByGatewayShutdown` and the answer stays 'dead'.
+        return gatewayShutdownKillAt(record) !== undefined ? 'killed-by-gateway-shutdown' : 'dead'
       }
     }
     return 'unknown'

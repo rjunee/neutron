@@ -48,7 +48,9 @@ import {
   enqueuePendingRespawn,
   loadPendingRespawns,
 } from '../pending-respawns-queue.ts'
-import { getRecord, patchRecord, saveRegistry } from '../repl-registry.ts'
+import { getRecord, patchRecord, saveRegistry, type ReplRegistryRecord } from '../repl-registry.ts'
+import { markKilledByGatewayShutdown } from '../gateway-shutdown-kill.ts'
+import type { ChildCrashInfo } from '../types.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
@@ -343,7 +345,7 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
   it('pid-dead detection calls the durable child-crash sink before respawn (#514)', async () => {
     const { host } = makeFakeReplHost()
     const registryPath = tmpRegistry()
-    const crashes: Array<{ sessionKey: string; generationKey: string; detail: string }> = []
+    const crashes: ChildCrashInfo[] = []
     const opts: PersistentReplSubstrateOptions = {
       ...baseOptions(host, registryPath),
       onChildCrash: (info) => { crashes.push(info) },
@@ -364,7 +366,65 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     // though the existing detector still logs and respawns the dead child.
     const generationKey = getReplRegistrySnapshot(registryPath)[key]?.child_generation
     expect(generationKey).toBeDefined()
-    expect(crashes).toEqual([{ sessionKey: key, generationKey: generationKey as string, detail: 'pooled child exited' }])
+    // #518 — `cause: 'child-died'` is the COMPLEMENT half of the deploy attribution
+    // below: a child that died with no gateway-shutdown marker on its row has no
+    // deploy to blame, and the detail stays the bare crash sentence.
+    expect(crashes).toEqual([
+      {
+        sessionKey: key,
+        generationKey: generationKey as string,
+        cause: 'child-died',
+        detail: 'pooled child exited',
+      },
+    ])
+  })
+
+  it('#518 — a pid-dead child the GATEWAY SHUTDOWN killed reaches the sink as a deploy, not a crash', async () => {
+    // THE EXACT PATH THE INCIDENT TOOK. A deploy restarts the service; the dying
+    // gateway kills the pooled child and stamps the registry row; the NEXT boot's
+    // watchdog finds the recorded pid dead. Before #518 that boot reported
+    // `pid-dead → "pooled child exited"` and the owner was handed a crashed build.
+    //
+    // RED-mutation: in `supervision.ts`, hard-code `cause: 'child-died'` on the
+    // crashSink call (or drop `killedByGatewayShutdown` from `probeReplLiveness`) —
+    // this reddens while the plain pid-dead case above stays green.
+    const { host } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const crashes: ChildCrashInfo[] = []
+    const opts: PersistentReplSubstrateOptions = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: (info) => { crashes.push(info) },
+    }
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    await waitForHasSession(registryPath, key)
+    await drain(sub.start(spec('please __DIE__')))
+
+    // What the dying gateway wrote down, generation-scoped, just before the kill.
+    const generationKey = getReplRegistrySnapshot(registryPath)[key]?.child_generation as string
+    expect(generationKey).toBeDefined()
+    expect(markKilledByGatewayShutdown(registryPath, key, generationKey, 1_755_000_000_000)).toBe(true)
+    // The marker also stamps `child_crash_notified_at`, which is what stops this very
+    // tick from firing a SECOND, bare notification that would overwrite the deploy
+    // attribution in the store. Clear it so this case can observe the sink at all —
+    // the suppression itself is pinned in `gateway-shutdown-kill.test.ts`.
+    const registryNow = getReplRegistrySnapshot(registryPath)
+    const row = { ...(registryNow[key] as ReplRegistryRecord) }
+    delete row.child_crash_notified_at
+    saveRegistry(registryPath, { ...registryNow, [key]: row })
+
+    await runReplWatchdogTick(opts, {
+      healthProbe: async () => false,
+      now: () => Date.now() + 120_000,
+    })
+
+    expect(crashes).toHaveLength(1)
+    expect(crashes[0]?.cause).toBe('gateway-shutdown')
+    expect(crashes[0]?.generationKey).toBe(generationKey)
+    expect(crashes[0]?.detail).toContain('deploy')
+    expect(crashes[0]?.detail).not.toBe('pooled child exited')
   })
 
   it('a rejected crash sink is retried before the dead registry PID is replaced (#514)', async () => {

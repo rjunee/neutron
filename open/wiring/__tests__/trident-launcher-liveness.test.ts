@@ -61,6 +61,41 @@ describe('buildTridentLauncherLivenessProbe', () => {
     expect(await probe(run())).toBe('unknown')
   })
 
+  // ─── #518: the attributed death ──────────────────────────────────────────────
+
+  test('carries killed-by-gateway-shutdown through unanimously', async () => {
+    const probe = buildTridentLauncherLivenessProbe({
+      derive_registry_path: (home) => home,
+      probe: () => 'killed-by-gateway-shutdown',
+    })
+    expect(await probe(run())).toBe('killed-by-gateway-shutdown')
+  })
+
+  test('dead in one home + killed-by-gateway-shutdown in the other is NOT a disagreement', async () => {
+    // Both answers positively say the process is gone; only ONE registry carries the
+    // marker, which is evidence the other simply lacks. Folding that into 'unknown'
+    // would strand a build the probe had confirmed dead in both homes until the
+    // 90-minute reaper — a REGRESSION against main, where both answered 'dead'.
+    //
+    // RED-mutation: drop the dead-flavour arm and return 'unknown' on any
+    // disagreement. This reddens; the genuine disagreement case above stays green.
+    const probe = buildTridentLauncherLivenessProbe({
+      derive_registry_path: (home) => home,
+      probe: (_key, path) => (path === '/worktree' ? 'dead' : 'killed-by-gateway-shutdown'),
+    })
+    expect(await probe(run())).toBe('killed-by-gateway-shutdown')
+  })
+
+  test('alive in one home still beats an attributed death in the other', async () => {
+    // The attribution arm must not smuggle a reap past the ambiguity rule. A live
+    // process anywhere is still ambiguity, never permission to kill.
+    const probe = buildTridentLauncherLivenessProbe({
+      derive_registry_path: (home) => home,
+      probe: (_key, path) => (path === '/worktree' ? 'alive' : 'killed-by-gateway-shutdown'),
+    })
+    expect(await probe(run())).toBe('unknown')
+  })
+
   test('does not probe a missing generation key', async () => {
     let calls = 0
     const probe = buildTridentLauncherLivenessProbe({ probe: () => (++calls, 'dead') })

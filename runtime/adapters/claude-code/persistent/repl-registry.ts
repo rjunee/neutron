@@ -89,6 +89,15 @@ export interface ReplRegistryRecord {
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
+  /** #518 — the `child_generation` a GATEWAY SHUTDOWN deliberately terminated
+   *  (`shutdownAllPersistentRepls`, reached from the SIGTERM handler: a service
+   *  restart or a deploy). Written just before the kill, read on the next boot so
+   *  the death is reported as the deploy it was instead of a bare crash. Names the
+   *  generation because this row outlives the child: see
+   *  `gateway-shutdown-kill.ts` → `wasKilledByGatewayShutdown`. */
+  killed_by_gateway_shutdown_generation?: string
+  /** #518 — epoch ms the shutdown kill above was recorded. */
+  killed_by_gateway_shutdown_at?: number
 }
 
 /** All records keyed by `sessionKey`. */

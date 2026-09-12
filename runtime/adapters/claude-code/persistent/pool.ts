@@ -11,6 +11,7 @@ import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
+import { reportGatewayShutdownKill } from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
@@ -883,18 +884,65 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
 // D1: `activeWatchdogs` / `activeModelWatchdogs` live in `pool-state.ts`,
 // imported above.
 
-/** Test/operator helper: SIGTERM every warm REPL and clear the pool. */
+/**
+ * Test/operator helper: SIGTERM every warm REPL and clear the pool.
+ *
+ * IN PRODUCTION THIS IS THE DEPLOY (#518). The gateway's SIGTERM handler calls it
+ * (`gateway/index.ts`), so `systemctl restart` — which is what a deploy does after
+ * it checks out the new vendor tree — reaches `session.child.kill()` below and
+ * takes every detached trident workflow inside those children with it. Three of
+ * five recorded `trident_launcher_crashes` landed 18-28 s after a vendor checkout,
+ * and the 08-13 deploy rolled trident's own merge: a build that lands killed the
+ * builds still running, at the rate the pipeline succeeded.
+ *
+ * So before each kill we say so, durably — `reportGatewayShutdownKill` writes the
+ * generation-scoped marker to the REPL registry AND tells the durable crash sink
+ * with `cause: 'gateway-shutdown'`. Without it the owner learned about his lost
+ * build from the next boot's watchdog as `pid-dead → pooled child exited`, or from
+ * the liveness probe as `inner workflow launcher crashed`: true sentences about a
+ * fault that never happened.
+ *
+ * Reporting is NOT gated on how much live work the child hosts. `hostsLiveWork` is
+ * optional and its absence means zero, so gating on it would turn an unwired
+ * callback into silence — and a run the sink cannot match is a cheap no-op the
+ * store's own 7-day prune clears. Surviving the restart instead of reporting it is
+ * the herdr-host half (#538 moves the REPL out of this process tree; #539 gates
+ * this kill and adds the adopt arm); this is the half that is true either way.
+ */
 export async function shutdownAllPersistentRepls(): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
   for (const w of activeWatchdogs.values()) w.stop()
   activeWatchdogs.clear()
   for (const w of activeModelWatchdogs.values()) w.stop()
   activeModelWatchdogs.clear()
+  // ONE timestamp for the whole teardown: every child in this pool dies of the
+  // same event, and a per-child `Date.now()` would invite a reader to treat the
+  // spread as evidence of separate causes.
+  const shutdownAt = Date.now()
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
     try {
       const session = await p
       session.sizeWatchdog?.stop()
+      // BEFORE the kill. After it this process may not get another turn, and the
+      // gateway closes its database a few statements after we return.
+      //
+      // The owning options come from `supervisedBySessionKey` — the SAME map the
+      // supervision watchdog resolves a crash sink through. The production adapter
+      // populates it for every REPL whose instance home resolves
+      // (`adapters/claude-code/index.ts`, beside `replRegistryPath`), which is every
+      // supervised REPL including the trident fire launcher. An UNREGISTERED key can
+      // only be a directly-constructed substrate (tests); say so rather than killing
+      // a child that hosted work and recording nothing, which is the silence this
+      // whole change exists to remove.
+      const owner = supervisedBySessionKey.get(key)
+      if (owner !== undefined) {
+        await reportGatewayShutdownKill(owner, key, session.childGeneration, shutdownAt)
+      } else {
+        process.stderr.write(
+          `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,
+        )
+      }
       session.child.kill()
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
@@ -906,7 +954,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // them quarantined), so the loop above cannot see them. At teardown the hosted
   // work they were being kept alive for is going away anyway — kill them, or the
   // process is orphaned.
-  await shutdownQuarantinedChildren()
+  await shutdownQuarantinedChildren(shutdownAt)
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs.
