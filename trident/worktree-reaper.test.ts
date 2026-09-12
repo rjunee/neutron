@@ -828,8 +828,11 @@ describe('branch-ref reap — the refusals (#547)', () => {
       proc_root: makeProc(root),
     })
 
-    expect(raced).not.toBeNull()
-    expect(raced).not.toBe(before)
+    // Narrowed rather than asserted-and-reused: `raced` is `string | null` because the
+    // trigger may not have fired, and "it fired" is itself part of what this test claims.
+    const arrived = raced
+    if (arrived === null) throw new Error('the delete was never reached, so nothing was raced')
+    expect(arrived).not.toBe(before)
     expect(report.refs_deleted).toEqual([])
     expect(
       report.refs_kept.some(
@@ -838,7 +841,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       JSON.stringify(report.refs_kept),
     ).toBe(true)
     // THE ARRIVING COMMIT IS STILL THERE, on the branch, not merely in the object store.
-    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(raced)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(arrived)
     expect(await git(repo, 'log', '-1', '--format=%s', `refs/heads/${branch}`)).toBe('raced in')
   }, 30_000)
 
