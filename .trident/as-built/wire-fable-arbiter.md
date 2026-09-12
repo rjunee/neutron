@@ -262,8 +262,19 @@ of the only measurement that matters. That defect was in the first cut of the
 instrumentation and was caught by the control test asserting nothing is logged when no
 arbiter is consulted.
 
+**THE RESIDUAL THAT NARROWS IT FURTHER, AND IS NOW MEASURED.** The hunk payload is bounded
+at 4 KiB total, so for a large conflict the arbiter sees a fraction and the prompt tells it
+to escalate. That is the right failure direction, but it means the mechanism's useful range
+is SMALL conflicts — which is plausibly where the bounded resolver was already succeeding.
+That is the third reduction in this tier's expected value, after the guidance channel's
+removal and the one-invocation cap, and it is a measurable rather than an argument:
+`conflict_files`, `hunk_raw_bytes` and `hunk_truncated` ride both instrumentation lines, so
+the resolved/escalated ratio can be sliced by whether the judge actually saw the whole
+conflict. If resolutions cluster entirely on conflicts shown in full, the honest claim is
+"rescues the easy end of escalations" rather than "rescues escalations".
+
 If it proves worth little, the answer is to stop offering the retry rather than re-open
-the channel.
+the channel — and not to raise the bound and hope.
 
 ### The third channel IN: conflict filenames
 

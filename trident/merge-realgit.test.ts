@@ -959,7 +959,17 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     expect(reb.ok).toBe(false)
     expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
 
-    const hunks = await conflictHunks(spawnCapture, repo, ['README.md'])
+    const { body: hunks, raw_bytes, truncated, files_shown } = await conflictHunks(
+      spawnCapture,
+      repo,
+      ['README.md'],
+    )
+
+    // THE SIZE DIMENSION the kill criterion is measured along: a small conflict is shown
+    // in full, and the instrumentation can say so.
+    expect(raw_bytes).toBeGreaterThan(0)
+    expect(truncated).toBe(false)
+    expect(files_shown).toBe(1)
 
     // BOTH SIDES ARE PRESENT — this is the assertion round 8 shipped without.
     expect(hunks).toContain('BLOCK-UNTIL-SPACE') // the base's version (`-`)
@@ -976,8 +986,10 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
 
   test('a path that exists on only ONE side says so instead of pretending to a diff', async () => {
     const repo = await makeBaseRepo()
-    const hunks = await conflictHunks(spawnCapture, repo, ['never-existed.ts'])
+    const { body: hunks, raw_bytes } = await conflictHunks(spawnCapture, repo, ['never-existed.ts'])
     expect(hunks).toContain('no two-sided diff')
+    // Nothing was readable, so the recorded conflict size is zero rather than absent.
+    expect(raw_bytes).toBe(0)
     // Still quoted, still not a crash, still not silence.
     expect(hunks.split('\n').every((l) => l.startsWith('| '))).toBe(true)
   }, 20_000)
@@ -998,12 +1010,19 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
 
-    const hunks = await conflictHunks(spawnCapture, repo, ['README.md'])
+    const { body: hunks, raw_bytes, truncated } = await conflictHunks(spawnCapture, repo, [
+      'README.md',
+    ])
     // BOUNDED — the cap is enforced on the returned value, code-point safe.
     expect(Buffer.byteLength(hunks, 'utf8')).toBeLessThanOrEqual(4_096)
     // AND THE JUDGE IS TOLD. A silent truncation would invite a judgement on a fragment,
     // which is worse than the escalation the prompt asks for in that case.
     expect(hunks).toContain('truncated')
+    // AND THE INSTRUMENTATION IS TOLD — this is the case where the tier's useful range
+    // ends, so `truncated` is the field that will show whether resolutions cluster on
+    // conflicts the judge could actually see in full.
+    expect(truncated).toBe(true)
+    expect(raw_bytes).toBeGreaterThan(4_096)
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 })

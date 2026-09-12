@@ -1454,6 +1454,59 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     expect(outcome).not.toContain('both sides are additive')
   })
 
+  test('BOTH log lines carry the CONFLICT SIZE, so the ratio can be sliced by it', async () => {
+    // THE THIRD REDUCTION IN THIS TIER'S EXPECTED VALUE, made measurable instead of
+    // argued. The hunk payload is bounded at 4 KiB, so a large conflict reaches the judge
+    // as a fragment and the prompt tells it to escalate — which means the useful range is
+    // SMALL conflicts, plausibly the range the bounded resolver already handled. A
+    // resolved/escalated ratio without the size measures the mechanism while hiding the
+    // variable most likely to explain it, so size rides BOTH lines: the arbitration line
+    // and the outcome line, the latter so the ratio needs no join.
+    const run = localRun('feat-size')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('a.ts\u0000b.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n`)
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'additive',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps)
+    })
+    const arbitration = lines.find((l) => l.includes('merge_conflict_arbitration')) ?? ''
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome')) ?? ''
+    for (const [name, line] of [['arbitration', arbitration], ['outcome', outcome]] as const) {
+      expect(line, `${name} line missing`).not.toBe('')
+      expect(line, `${name}: conflict_files`).toContain('conflict_files=2')
+      expect(line, `${name}: hunk_raw_bytes`).toContain('hunk_raw_bytes=')
+      expect(line, `${name}: hunk_truncated`).toContain('hunk_truncated=false')
+    }
+    // The outcome is still recorded alongside it — size is an addition, not a replacement.
+    expect(outcome).toContain('outcome=resolved')
+    // Still no model-authored text on either line.
+    expect(arbitration).not.toContain('additive')
+    expect(outcome).not.toContain('additive')
+  })
+
   test('a granted retry that ESCALATES ANYWAY is recorded as escalated — the denominator of the bet', async () => {
     // The case that decides whether this tier earns its cost. If most granted retries
     // land here, the honest response is to stop offering the retry.
