@@ -23,6 +23,7 @@ import { HerdrHost } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import { terminateChild } from '../repl-session.ts'
 import type { PtyChild } from '../pty-host.ts'
 
 /** Spawn against a fake server with a fast poll, collecting delivered screens. */
@@ -285,6 +286,99 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
 
     // All four distinct — a constant would collapse them.
     expect(new Set([ca.exitCause?.(), cb.exitCause?.(), cc.exitCause?.()]).size).toBe(3)
+  })
+
+  it('a FAILED pane.close settles NOTHING and latches NOTHING — the pane is still there', async () => {
+    // THE DEFECT. `kill` settled from `.finally()`, so a REJECTED `pane.close` still
+    // resolved `exited`, flipped `hasExited()` and reported `exitCause`
+    // 'closed-by-us'. A live REPL, recorded as cleanly terminated.
+    //
+    // What would a wrong implementation get right? One that settles unconditionally
+    // passes every existing kill test, because they all use a fake that cannot
+    // refuse. That is why the fake grew `failMethod`.
+    const server = new FakeHerdrServer({ paneId: 'w9:pFail' })
+    const { child } = await spawnWithFake(server)
+    server.failMethod('pane.close', new Error('pane.close refused'))
+    child.kill()
+    await until(() => server.callsTo('pane.close').length >= 1, 'close attempted')
+    // Give the rejection every chance to settle something.
+    await Bun.sleep(30)
+
+    const sentinel = Symbol('unsettled')
+    const raced = await Promise.race([child.exited, Bun.sleep(30).then(() => sentinel)])
+    expect(raced).toBe(sentinel) // `exited` did NOT resolve
+    expect(child.hasExited()).toBe(false)
+    expect(child.exitCause?.()).toBeUndefined()
+    // AND THE FLAG DID NOT LATCH. With no exit codes anywhere in herdr,
+    // `wasKilledByUs` is the whole crash-vs-recycle discriminator (`spawn.ts`): a
+    // latch here would make every LATER real crash on this still-living child read
+    // as an intentional recycle, for the rest of its life.
+    expect(child.wasKilledByUs?.()).toBe(false)
+  })
+
+  it('the failed close RE-ARMS the escalation — terminateChild retries and the pane really closes', async () => {
+    // The consequence the case above only implies. `terminateChild` returns early at
+    // BOTH of its `child.hasExited()` guards (`repl-session.ts`), so a false
+    // settlement does not merely misreport — it DISARMS the SIGKILL retry and leaks
+    // the process. Not settling is what makes the ladder run its second rung, which
+    // is the bounded retry.
+    const server = new FakeHerdrServer({ paneId: 'w9:pRetry' })
+    const { child } = await spawnWithFake(server)
+    server.failMethod('pane.close', new Error('pane.close refused'))
+    const done = terminateChild(child)
+    await until(() => server.callsTo('pane.close').length >= 1, 'first attempt')
+    // The transient clears, as a retry presupposes.
+    server.clearFailure('pane.close')
+    await done
+    // TWO attempts, and the pane is gone. Pinning the count is the point: settling on
+    // the first (failed) one yields exactly one call and a child that claims to have
+    // exited — which is the bug.
+    expect(server.callsTo('pane.close').length).toBe(2)
+    expect(server.paneClosed).toBe(true)
+    expect(child.hasExited()).toBe(true)
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(child.exitCause?.()).toBe('closed-by-us')
+  }, 10_000)
+
+  it('CONTROL — a close that SUCCEEDS settles and latches, so the pair is discriminating', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:pOk' })
+    const { child } = await spawnWithFake(server)
+    child.kill()
+    await child.exited
+    expect(child.hasExited()).toBe(true)
+    expect(child.exitCause?.()).toBe('closed-by-us')
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(server.paneClosed).toBe(true)
+  })
+
+  it('a pane_exited RACING a close we asked for still reads as intentional, not as a crash', async () => {
+    // The window the `terminating` flag exists for. Between asking for the close and
+    // its acknowledgement the pane may die of the close itself, arriving as a
+    // `pane_exited` event; classifying that as a crash would respawn-and-report a
+    // session we deliberately ended.
+    const server = new FakeHerdrServer({ paneId: 'w9:pRace' })
+    const { child } = await spawnWithFake(server)
+    const releaseClose = server.holdMethod('pane.close') // close genuinely IN FLIGHT
+    child.kill()
+    await until(() => server.callsTo('pane.close').length >= 1, 'close in flight')
+    expect(child.hasExited()).toBe(false) // still unacknowledged
+    server.exitPane()
+    await child.exited
+    // Attributed to us: we asked for this. Classifying it as a crash would respawn
+    // and report a session we deliberately ended.
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(child.exitCause?.()).toBe('pane-exited')
+    releaseClose()
+  })
+
+  it('CONTROL for the race — a pane_exited with NO kill in flight is a crash', async () => {
+    // Without this, `terminating` could simply be `true` and the case above passes.
+    const server = new FakeHerdrServer({ paneId: 'w9:pCrash' })
+    const { child } = await spawnWithFake(server)
+    server.exitPane()
+    await child.exited
+    expect(child.wasKilledByUs?.()).toBe(false)
+    expect(child.exitCause?.()).toBe('pane-exited')
   })
 
   it('exitCause is undefined while the child is alive — it never guesses', async () => {

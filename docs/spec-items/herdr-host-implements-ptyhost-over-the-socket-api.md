@@ -208,12 +208,55 @@ not-new. That is accepted and recorded here rather than hidden.
       would satisfy it.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **Submitting a slash command is mandatory, and its absence is a refusal.** A
-      `PtyChild` with `write` but no `writeKey` must make the reset report
-      `{status:'failed'}`, never `{status:'reset'}` — and must write nothing rather
-      than leave the command typed at the prompt. Assert the CONTROL too (the same
-      session with `writeKey` resets and submits), or "failed" could be coming from
-      the harness.
+      `PtyChild` with no `submitLine` must make the reset report `{status:'failed'}`,
+      never `{status:'reset'}` — and must write nothing rather than leave the command
+      typed at the prompt. The refusing child must still provide `write` AND
+      `writeKey`: what is refused is the UNACKNOWLEDGED seam, not the keyless one, and
+      a child that cannot press enter makes the criterion satisfiable by any
+      implementation that merely needs a key. Assert the CONTROL too (the same session
+      WITH `submitLine` resets and submits), or "failed" could be coming from the
+      harness.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/context-reset-sweep.test.ts runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
+- [ ] **An actuation whose success is REPORTED is awaited and acknowledged.**
+      `submitCommand` must resolve only after the backend has acknowledged BOTH the
+      text and the Enter, and reject if either is refused — including the partial case
+      (text accepted, Enter refused), which is precisely the state a fire-and-forget
+      pair reports as a completed reset while the command sits unsubmitted at the
+      prompt. A refused text must not be followed by an Enter, or the submit lands on
+      whatever the prompt already held. Three cases or none: text-refused,
+      Enter-refused, and the control where both succeed — any two of the three are
+      satisfied by an implementation that rejects unconditionally or awaits only one
+      half. The control must NOT poll for the calls: `await`ing and then asserting the
+      call log is the only form that can tell "resolved after acknowledgement" from
+      "resolved immediately".
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
+- [ ] **A reset that did not happen is never recorded as one, on EITHER caller path.**
+      `context-reset.ts` reports `{status:'failed'}` with the backend's reason;
+      `pool.ts`, whose policy is log-and-proceed, emits the operator-visible
+      `context-reset /clear failed` line carrying that reason and still completes the
+      import. The pool case needs the paired control (an accepted submit reports
+      nothing), because a path that reports every reset as failed is exactly as blind
+      as one that reports none — and because "the import still completed" is satisfied
+      by the defect itself.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/import-warm-session-reset.test.ts runtime/adapters/claude-code/persistent/__tests__/context-reset-sweep.test.ts`
+- [ ] **Exit settles only on CONFIRMED closure, and a failed close latches nothing.**
+      A rejected `pane.close` must leave `exited` unresolved, `hasExited()` false,
+      `exitCause()` undefined and `wasKilledByUs()` false — the pane is still there, so
+      every one of those is the truth. Asserting the flags alone is not a criterion: an
+      implementation that settles early gets the eventual state right and still leaks
+      the process, because `terminateChild` returns at both of its `hasExited()` guards
+      (`repl-session.ts:361,370`). So pin the CONSEQUENCE — drive `terminateChild`
+      against a close that fails once and then succeeds, and require TWO `pane.close`
+      calls and a pane that is actually closed. Control: a successful close settles,
+      latches, and closes.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **A `pane_exited` arriving while OUR close is in flight is ours.** With the close
+      genuinely held mid-flight, an exit event must classify as intentional
+      (`wasKilledByUs()` true); with no kill in flight the same event must classify as
+      a crash. The held-call form is load-bearing — a fake that answers instantly
+      collapses the in-flight window to nothing and makes the property vacuous — and
+      the crash control is what stops a flag that is simply always true.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **The read cap is enforced AT its boundary, in both directions.** The request
       must clamp to `HERDR_READ_LINE_CAP` at a viewport of
       `HERDR_READ_LINE_CAP - HERDR_READ_WINDOW_LINES + 1` (= 800) and must NOT clamp

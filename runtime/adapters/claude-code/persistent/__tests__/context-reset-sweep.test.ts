@@ -69,9 +69,12 @@ function makeFakeSession(opts: {
   turnsServed: number
   exited?: boolean
   onClear?: () => void
-  /** Omit `writeKey` entirely — a legal `PtyChild` (the method is optional) that
-   *  can type but cannot submit. */
-  noWriteKey?: boolean
+  /** Omit `submitLine` — a legal `PtyChild` (the method is optional) that can type
+   *  and can press keys, but cannot ACKNOWLEDGE either. `writeKey` is deliberately
+   *  still present: a regression that fell back to `write` + `writeKey` would look
+   *  like a working reset in this fake, so requiring the acknowledged seam is what
+   *  the refusal test actually pins. */
+  noSubmitLine?: boolean
 }): {
   session: ReplSession
   writes: string[]
@@ -93,12 +96,20 @@ function makeFakeSession(opts: {
     // `KEY:<name>` in the same stream so ordering stays assertable, and `onClear`
     // fires on the submit rather than on the text — otherwise a regression that
     // dropped the `enter` would still look like a successful reset here.
-    ...(opts.noWriteKey === true
+    writeKey(key: Key): void {
+      writes.push(`KEY:${key}`)
+      if (key === 'enter' && writes.at(-2) === CONTEXT_RESET_COMMAND) opts.onClear?.()
+    },
+    // The ACKNOWLEDGED submit, which is the only seam the actuation is allowed to
+    // use: it records the same text-then-`enter` pair (so ordering assertions are
+    // unchanged) but its promise is what "the reset happened" now rests on.
+    ...(opts.noSubmitLine === true
       ? {}
       : {
-          writeKey(key: Key): void {
-            writes.push(`KEY:${key}`)
-            if (key === 'enter' && writes.at(-2) === CONTEXT_RESET_COMMAND) opts.onClear?.()
+          async submitLine(command: string): Promise<void> {
+            writes.push(command)
+            writes.push('KEY:enter')
+            if (command === CONTEXT_RESET_COMMAND) opts.onClear?.()
           },
         }),
     kill(): void {
@@ -433,7 +444,7 @@ describe('createPooledContextResetSweep — Layer B periodic sweep', () => {
 })
 
 describe('a reset that cannot submit reports FAILED, never a hollow reset', () => {
-  it('a child with no writeKey yields {status:"failed"}, not {status:"reset"}', async () => {
+  it('a child with no submitLine yields {status:"failed"}, not {status:"reset"}', async () => {
     // THE DEFECT. `writeKey` is OPTIONAL on `PtyChild`, and the actuation used
     // `session.child.writeKey?.('enter')`. For a child that implements `write` but
     // not `writeKey` that typed `/clear` at the prompt, skipped Enter, and returned
@@ -443,7 +454,7 @@ describe('a reset that cannot submit reports FAILED, never a hollow reset', () =
       sessionId: 'no-writekey',
       project: 'proj-A',
       turnsServed: 1,
-      noWriteKey: true,
+      noSubmitLine: true,
     })
     const out = await actuateSessionContextReset(session, {
       acquire_wait_ms: 50,
@@ -451,12 +462,12 @@ describe('a reset that cannot submit reports FAILED, never a hollow reset', () =
       idle_max_ms: 10,
     })
     expect(out.status).toBe('failed')
-    if (out.status === 'failed') expect(out.detail ?? '').toContain('writeKey')
+    if (out.status === 'failed') expect(out.detail ?? '').toContain('submitLine')
     // And it refused rather than half-actuating: nothing was typed at the prompt.
     expect(writes).toEqual([])
   })
 
-  it('CONTROL — the same session WITH writeKey resets and submits', async () => {
+  it('CONTROL — the same session WITH submitLine resets and submits', async () => {
     // Without this, "failed" could be coming from anything about the harness.
     const { session, writes } = makeFakeSession({
       sessionId: 'with-writekey',

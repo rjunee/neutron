@@ -203,62 +203,124 @@ describe('write() and the fact that send_text never submits', () => {
 })
 
 describe('submitting a slash command REFUSES rather than silently skipping the submit', () => {
-  /** A child that implements `write` but NOT `writeKey` — a legal `PtyChild`, since
-   *  `writeKey` is optional on the interface. */
-  function childWithoutWriteKey(): { child: PtyChild; writes: string[] } {
-    const writes: string[] = []
-    const child: PtyChild = {
-      pid: 1,
-      write: (d) => void writes.push(typeof d === 'string' ? d : Buffer.from(d).toString('utf8')),
-      kill: () => {},
-      exited: Promise.resolve(null),
-      hasExited: () => false,
-    }
-    return { child, writes }
-  }
-
-  it('THROWS for a child with no writeKey, instead of typing the command and moving on', () => {
-    // THE DEFECT THIS REPLACES. `child.writeKey?.('enter')` skipped the submit for
-    // exactly this child, and the caller then returned `{status:'reset'}` — a reset
-    // that never happened, reported as one. `?.` on a method whose ABSENCE CHANGES
-    // THE OUTCOME is a silent skip wearing the clothes of a safe default.
-    const { child, writes } = childWithoutWriteKey()
-    let err: Error | undefined
-    try {
-      submitCommand(child, '/clear')
-    } catch (e) {
-      err = e as Error
-    }
-    expect(err).toBeDefined()
-    expect(err!.message).toContain('writeKey')
-    expect(err!.message).toContain('/clear')
-    // Nothing was typed either: a refusal, not a half-done actuation that leaves
-    // '/clear' sitting at the prompt for the next keystroke to submit by accident.
-    expect(writes).toEqual([])
-  })
-
-  it('sends text THEN enter for a child that does provide writeKey', () => {
+  /** A child with `write` AND `writeKey` but NO `submitLine` — a legal `PtyChild`,
+   *  since all three are optional. Keeping `writeKey` is the point: a regression
+   *  that fell back to `write` + `writeKey` would produce a perfectly ordered
+   *  text-then-enter here and still be wrong, because neither call can report a
+   *  refusal. What must be refused is the UNACKNOWLEDGED seam, not the keyless one. */
+  function childWithoutSubmitLine(): { child: PtyChild; order: string[] } {
     const order: string[] = []
     const child: PtyChild = {
       pid: 1,
-      write: (d) => void order.push(`TEXT:${String(d)}`),
+      write: (d) => void order.push(`TEXT:${typeof d === 'string' ? d : Buffer.from(d).toString('utf8')}`),
       writeKey: (k) => void order.push(`KEY:${k}`),
       kill: () => {},
       exited: Promise.resolve(null),
       hasExited: () => false,
     }
-    submitCommand(child, '/compact')
-    expect(order).toEqual(['TEXT:/compact', 'KEY:enter'])
+    return { child, order }
+  }
+
+  it('REJECTS for a child with no submitLine, even though it could type and press enter', async () => {
+    // THE DEFECT THIS REPLACES, IN ITS SECOND FORM. Round one: `writeKey?.('enter')`
+    // skipped the submit outright. Round two: the submit happened, but `write` and
+    // `writeKey` are `void` — they hand a frame to the socket and return — so a
+    // REFUSED frame and a delivered one were the same observable event, and the
+    // caller returned `{status:'reset'}` for both. This child is fully capable of
+    // the old path; the refusal is about the claim, not the capability.
+    const { child, order } = childWithoutSubmitLine()
+    let err: Error | undefined
+    await submitCommand(child, '/clear').catch((e: unknown) => {
+      err = e as Error
+    })
+    expect(err).toBeDefined()
+    expect(err!.message).toContain('submitLine')
+    expect(err!.message).toContain('/clear')
+    // Nothing was typed either: a refusal, not a half-done actuation that leaves
+    // '/clear' sitting at the prompt for the next keystroke to submit by accident.
+    expect(order).toEqual([])
   })
 
-  it('the real herdr child satisfies it — the refusal is unreachable in production', async () => {
+  it('uses submitLine — and ONLY submitLine — for a child that provides it', async () => {
+    const order: string[] = []
+    const child: PtyChild = {
+      pid: 1,
+      write: (d) => void order.push(`TEXT:${String(d)}`),
+      writeKey: (k) => void order.push(`KEY:${k}`),
+      submitLine: async (c) => void order.push(`SUBMIT:${c}`),
+      kill: () => {},
+      exited: Promise.resolve(null),
+      hasExited: () => false,
+    }
+    await submitCommand(child, '/compact')
+    // Exactly one entry, and it is the acknowledged one: pinning the absence of
+    // `TEXT:`/`KEY:` is what stops a future version from "helpfully" doing both.
+    expect(order).toEqual(['SUBMIT:/compact'])
+  })
+
+  it('CONTROL — the real herdr child submits, and RESOLVES only after both halves are acknowledged', async () => {
     const server = new FakeHerdrServer()
     const child = await spawn(server)
-    expect(() => submitCommand(child, '/clear')).not.toThrow()
-    await until(() => server.callsTo('pane.send_keys').length >= 1, 'submit')
+    // Awaiting is the assertion: if `submitLine` resolved before the calls landed,
+    // the two `toEqual`s below would read an empty call log. No polling here for
+    // exactly that reason — `until()` would hide the difference.
+    await submitCommand(child, '/clear')
     expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('/clear')
     expect(server.callsTo('pane.send_keys')[0]!.params['keys']).toEqual(['enter'])
     child.kill()
+  })
+
+  it('a REFUSED text rejects, and never presses enter on whatever was at the prompt', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    server.failMethod('pane.send_text', new Error('send_text refused'))
+    let err: Error | undefined
+    await submitCommand(child, '/clear').catch((e: unknown) => {
+      err = e as Error
+    })
+    expect(err).toBeDefined()
+    expect(err!.message).toContain('send_text refused')
+    // AND THE ENTER MUST NOT HAVE HAPPENED. A blind Enter after an unacknowledged
+    // text submits whatever the prompt already held — the previous turn's half-typed
+    // line, or nothing at all — so the ordering is a correctness property, not a
+    // tidiness one.
+    expect(server.callsTo('pane.send_keys')).toEqual([])
+    child.kill()
+  })
+
+  it('a REFUSED enter rejects even though the text landed — partial actuation is not success', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    server.failMethod('pane.send_keys', new Error('send_keys refused'))
+    let err: Error | undefined
+    await submitCommand(child, '/clear').catch((e: unknown) => {
+      err = e as Error
+    })
+    expect(err).toBeDefined()
+    expect(err!.message).toContain('send_keys refused')
+    // The text DID land — this is the case the old fire-and-forget pair reported as
+    // a completed reset: '/clear' typed at the prompt, never submitted, the context
+    // fully intact, and `{status:'reset'}` returned.
+    expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('/clear')
+    child.kill()
+  })
+
+  it('submitLine after exit rejects rather than no-opping', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    server.exitPane()
+    await until(() => child.hasExited(), 'exit')
+    const before = server.callsTo('pane.send_text').length
+    let err: Error | undefined
+    await child.submitLine!('/clear').catch((e: unknown) => {
+      err = e as Error
+    })
+    // `write`/`writeKey` are no-op-safe after exit by contract. An ACKNOWLEDGED
+    // operation may not be: silently resolving would tell the caller a dead REPL
+    // had accepted the command.
+    expect(err).toBeDefined()
+    expect(err!.message).toContain('after exit')
+    expect(server.callsTo('pane.send_text').length).toBe(before)
   })
 })
 

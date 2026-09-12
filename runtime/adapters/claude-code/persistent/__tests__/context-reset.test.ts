@@ -126,6 +126,12 @@ function makeRecordingHost(): {
         writeKey(key) {
           timeline.push({ kind: 'key', key })
         },
+        // The acknowledged pair. `submitCommand` uses ONLY this, so a reset reported
+        // as done is a reset this fake was told about and confirmed.
+        async submitLine(command: string) {
+          timeline.push({ kind: 'write', data: command })
+          timeline.push({ kind: 'key', key: 'enter' })
+        },
         kill() {
           if (hasExited) return
           hasExited = true

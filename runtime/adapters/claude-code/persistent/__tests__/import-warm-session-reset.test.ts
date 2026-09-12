@@ -46,7 +46,7 @@ type Timeline = Array<
  *  (b) records every raw PTY `write()` into a shared timeline, so a test can assert
  *  a `/clear` was written before a reused turn's inject. `seen` increments per turn
  *  within one REPL (the warm-reuse signal). */
-function makeRecordingHost(): {
+function makeRecordingHost(failSubmit?: string): {
   host: PtyHost
   spawnCount: () => number
   timeline: Timeline
@@ -104,6 +104,15 @@ function makeRecordingHost(): {
         // submits. Recorded so `CLEARS` can require the pair.
         writeKey(key) {
           timeline.push({ kind: 'key', key })
+        },
+        // The acknowledged pair — see `submitCommand`.
+        async submitLine(command: string) {
+          // A backend that REFUSES. The point of an acknowledged submit is that this
+          // is distinguishable from a delivered one; the fire-and-forget pair it
+          // replaces recorded both identically.
+          if (failSubmit !== undefined) throw new Error(failSubmit)
+          timeline.push({ kind: 'write', data: command })
+          timeline.push({ kind: 'key', key: 'enter' })
         },
         kill() {
           if (hasExited) return
@@ -210,6 +219,61 @@ describe('PersistentReplSubstrate — reset_context_per_turn (import warm-sessio
       expect(e.data).toBe(CONTEXT_RESET_COMMAND)
       expect(e.data).not.toContain('\r')
     }
+  })
+
+  it('a REFUSED /clear is reported and the import proceeds — never silently skipped', async () => {
+    // THE POOL PATH'S HALF OF IT. `context-reset.ts` returns `{status:'failed'}`, so
+    // a dropped `await` there is caught by the status. HERE the policy is log +
+    // proceed (a stranded import is worse than a stale context), so the ONLY thing
+    // that distinguishes "cleared" from "failed to clear" is the operator-visible
+    // line — which means an unawaited `submitCommand` makes a reset that never
+    // happened completely invisible. What a wrong implementation gets right: the
+    // import still completes, and the turns still return. So the run succeeding is
+    // not the assertion; the diagnostic is.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown): boolean => {
+      errs.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+    let out1 = ''
+    try {
+      const { host, timeline } = makeRecordingHost('send_keys refused')
+      const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
+      await drain(sub.start(spec('chunk-0')))
+      out1 = await drain(sub.start(spec('chunk-1')))
+      // Nothing was submitted — the refusal means the REPL never saw the command.
+      expect(CLEARS(timeline)).toBe(0)
+    } finally {
+      process.stderr.write = realWrite
+    }
+    // The import was NOT stranded...
+    expect(out1).toBe('seen=1 got=chunk-1')
+    // ...and the failure was reported, with the backend's reason.
+    const reported = errs.filter((e) => e.includes('context-reset /clear failed'))
+    expect(reported.length).toBe(1)
+    expect(reported[0]).toContain('send_keys refused')
+  })
+
+  it('CONTROL — when the submit is accepted, nothing is reported as failed', async () => {
+    // Without this the case above is satisfied by a pool that reports EVERY reset as
+    // failed, which is just as blind as reporting none.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: unknown): boolean => {
+      errs.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const { host, timeline } = makeRecordingHost()
+      const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
+      await drain(sub.start(spec('chunk-0')))
+      await drain(sub.start(spec('chunk-1')))
+      expect(CLEARS(timeline)).toBe(1)
+    } finally {
+      process.stderr.write = realWrite
+    }
+    expect(errs.filter((e) => e.includes('context-reset /clear failed'))).toEqual([])
   })
 
   it('the default warm substrate (no flag) writes NO /clear — opt-in only', async () => {

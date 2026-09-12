@@ -68,7 +68,9 @@ export interface PtyChild {
    * does not fire (measured). So the herdr backend REFUSES data containing `\r`
    * or `\n` rather than accepting it and silently leaving the REPL sitting on an
    * unsubmitted line with no error anywhere. Submit with
-   * {@link PtyChild.writeKey}`('enter')`.
+   * {@link PtyChild.writeKey}`('enter')` — or, if the caller is going to REPORT
+   * whether the command took effect, with {@link PtyChild.submitLine}, which is the
+   * only form that can tell a delivered frame from a refused one.
    */
   write(data: string | Uint8Array): void
   /** Send one structured key (F2): encodes the correct key for
@@ -82,6 +84,29 @@ export interface PtyChild {
    *  of an arrow-driven picker). No-op-safe after exit. OPTIONAL (see
    *  `writeKey`). */
   writeKeys?(keys: readonly Key[]): void
+
+  /**
+   * Submit `command` as a line, and RESOLVE ONLY WHEN THE BACKEND HAS ACKNOWLEDGED
+   * BOTH HALVES — the text and the Enter that submits it.
+   *
+   * SETTLEMENT IS NOT CONFIRMATION. {@link write} and {@link writeKey} are `void`:
+   * over a socket backend they hand a frame to the transport and return, so a caller
+   * cannot distinguish "the REPL received `/clear`" from "the socket refused the
+   * frame". Every caller of the old pair nonetheless REPORTED SUCCESS on return —
+   * `context-reset.ts` returned `{status:'reset'}`, `pool.ts` logged a completed
+   * reset — so a context reset that never happened was indistinguishable from one
+   * that did, and the session kept a full context while the pool believed it empty.
+   *
+   * A DETACHED WRITE CANNOT SUPPORT ANY CLAIM ABOUT ITS EFFECT. Anything whose
+   * caller asserts an outcome must therefore be awaitable and acknowledged, which is
+   * this method. Rejection means the command is NOT known to have been submitted;
+   * it may have been partially applied (text delivered, Enter refused), so the text
+   * may be sitting at the prompt.
+   *
+   * Optional only because a host may predate it; `submitCommand` refuses to guess
+   * with `write` + `writeKey` when it is absent rather than fabricate an ack.
+   */
+  submitLine?(command: string): Promise<void>
   /**
    * Resize the terminal (cols × rows). No-op-safe after exit.
    *

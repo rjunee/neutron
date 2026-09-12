@@ -641,6 +641,99 @@ entirely still passed it. Widening the window with a deliberate `await` before w
 made it real: the requirement is what must be pinned, not the narrowness of one caller's
 window. Fifth instance this build of the same shape.
 
+### Settlement is not confirmation, and a detached write cannot support any claim about its effect
+
+Review r9, and the deepest of the seven, because the code was not wrong about anything
+it *did* — it was wrong about what it was entitled to *say*.
+
+**A failed `pane.close` reported a clean termination.** `kill()` settled from
+`.finally()`:
+
+```ts
+client.call('pane.close', { pane_id: paneId }).finally(() => settleExit('closed-by-us'))
+```
+
+`.finally()` runs on rejection too. So a `pane.close` the server REFUSED still resolved
+`exited`, flipped `hasExited()` to true and reported `exitCause()` as `'closed-by-us'` —
+a live REPL recorded as cleanly ended, with the pane still sitting there. Two separate
+things broke on that one word. `terminateChild` (`repl-session.ts:357-377`) returns early
+at **both** of its `child.hasExited()` guards — 361 and 370 — so the SIGKILL rung of the
+escalation ladder never ran and the process leaked; and `killedByUs` latched on an
+attempt that closed nothing, which, with no exit codes anywhere in herdr, is the
+*entire* crash-vs-recycle discriminator, so every later real crash on that still-living
+child read as an intentional recycle for the rest of its life. Exactly the failure mode
+r6 wrote up for SIGINT, reached by a different road: **only a CONFIRMED terminal
+operation may latch it.**
+
+The fix is not to settle later, it is to settle on a fact: `.then(onOk, onFail)`, with
+`settleExit` only on the success arm, and the kill flag CLEARED on the failure arm. Not
+settling is also what re-arms the ladder — `hasExited()` stays false, the grace race
+times out, and `kill('SIGKILL')` makes a second bounded attempt. **Escalation is the
+retry**; nothing else had to be built for it.
+
+One simplification fell out of trying to mutate it. I first kept two flags — an
+`attempting` and a confirmed `killedByUs` — and could not construct a mutation that
+reddened for dropping the second, because after a confirmed close the two are true in
+exactly the same states. **Unobservable state cannot be tested, only believed**, so it
+collapsed to one flag: set when a terminal kill is REQUESTED (which is what makes a
+`pane_exited` racing our own close read as intentional), cleared if that request fails.
+
+**And `write`/`writeKey` could not support what their callers claimed.** The same defect
+one layer up, and a repeat offender: r4 fixed `writeKey?.('enter')` silently skipping the
+submit, and `context-reset.ts` still returned `{status:'reset'}` for a reset that never
+happened — now because `write` and `writeKey` are `void`. Over a socket they hand a frame
+to the transport and return; a REFUSED frame and a delivered one are the same observable
+event. The worst case is the partial one: text accepted, Enter refused, so `/clear` sits
+typed at the prompt with the full context intact, and the pool records an empty one.
+
+So `PtyChild` grew `submitLine(command): Promise<void>` — the acknowledged operation —
+and `submitCommand` uses only that, refusing a child that lacks it **even when that child
+has both `write` and `writeKey`**. What is refused is the unacknowledged seam, not the
+keyless one. Both callers now `await`: `context-reset.ts` turns a rejection into
+`{status:'failed'}` with the backend's reason, and `pool.ts`, whose policy is
+log-and-proceed, emits its `context-reset /clear failed` line — which, on that path, is
+the only thing in the world that distinguishes a reset from a non-reset.
+
+That last point is worth its own note, because I nearly recorded it as untestable.
+M26b (r6) survived against the `pool.ts` path and I reported it inapplicable, reasoning
+that a path which logs and proceeds has no discriminating outcome. That was wrong, and
+M70 was the same mutation arriving again: the log **is** the outcome. The requirement is
+not "the import fails" (it must not — a stranded import is worse than a stale context);
+it is "the operator can tell". A test capturing stderr, plus the control that an accepted
+submit reports nothing, kills it. *Inapplicable* was a conclusion about my test harness
+that I had dressed up as a conclusion about the requirement.
+
+**And one thing the tree caught that I did not.** My first fix was
+`.then(onOk, onRej)`, which is correct JavaScript and wrong here: a two-arg `.then`
+handles the rejection BEFORE `fireAndForget`'s own `.catch`, so the failed close would
+never have been counted or logged as a background rejection — a second, quieter version of
+the same mistake, losing the evidence instead of the escalation. `scripts/ci/lint.sh`'s
+PRE-SWALLOW GATE named it with the file and line and told me the shape to use
+(`logger/fire-and-forget.ts:119-137` takes an `onError` third argument). It is now a
+one-arg `.then` with the failure handling in `onError`, so the rejection is counted, logged
+and *then* acted on. Worth recording because the gate found a defect class I had just
+written two thousand words about.
+
+**The third submit site is left alone, deliberately.** `session-size-watchdog.ts:326-345`
+also does escape + text + `enter`, still fire-and-forget. I checked whether it belongs in
+this fix and it does not: it never claims the compaction HAPPENED. It returns "we pressed
+it", and it stamps the mid-compact lock BEFORE the writes precisely so a transport failure
+cannot double-send `/compact` — with `compactLockMaxMs` releasing the lock so a failed
+compaction is retried (`:326-328`). That is already the shape the P0 asked for on the
+other path: retain state that permits bounded retry rather than assert an outcome.
+Converting it would mean making a synchronous policy function async for no change in what
+anyone is entitled to believe. Scoped and named, not silently narrowed.
+
+**And the fake had to stop being agreeable — for the third time.** `pane.close` returned
+`{type:'ok'}` unconditionally, so no test could have caught any of this. That is the
+third requirement class this one fake has hidden: a no-op `end` hid a teardown that never
+closed the socket (r5), a `write` that always returned `d.length` hid the short-write
+class (r6), and now an unfailable `pane.close`. Each was fixed one method at a time,
+which is precisely why there was a third. Failure is now injectable for **any** method
+(`failMethod`/`clearFailure`), and so is latency (`holdMethod`) — the in-flight window is
+where the `pane_exited` race lives, and a fake that answers instantly collapses that
+window to nothing and makes every in-flight property vacuously true.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -709,6 +802,32 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M59 | the gate never fails open | RED 1 |
 | M60 | `beginOutput()` does not release | RED 17 |
 | M61 | frame bound `>=` — rejects a maximal COMPLETE frame | RED 2 |
+| M62 | settle from `.finally()` — settle whether or not the close succeeded | RED 2 |
+| M62b | PAIR: settle ONLY on a failed close, never on a successful one | RED 3 |
+| M63 | do not clear the kill flag when the close fails (latch on the attempt) | RED 1 |
+| M63b | PAIR: clear the kill flag on a SUCCESSFUL close too | RED 2 |
+| M64 | `wasKilledByUs` always false | RED 6 |
+| M65 | `submitLine` sends the text fire-and-forget instead of awaiting it | RED 1 |
+| M65b | PAIR: `submitLine` sends Enter BEFORE the text | RED 2 |
+| M66 | `submitLine` swallows a refused Enter | RED 1 |
+| M67 | `submitCommand` falls back to `write`+`writeKey` when `submitLine` is absent | RED 1 |
+| M68 | `submitLine` no-ops after exit instead of rejecting | RED 1 |
+| M69 | `context-reset.ts` drops the `await` on `submitCommand` | RED 2 |
+| M70 | `pool.ts` drops the `await` on `submitCommand` | RED 1 |
+| M70b | PAIR: `pool.ts` reports a failure even when the submit SUCCEEDS | RED 1 |
+| M71 | the fake ignores injected per-method failures | RED 4 |
+| M72 | a successful `pane.close` does not record the closure in the fake | RED 2 |
+| M73 | the fake's `holdMethod` does not actually hold | RED 1 |
+
+M62/M62b bracket settlement from both sides — settling on failure and failing to settle
+on success — and M63/M63b do the same for the kill flag; without the pair, "never latch"
+is satisfied by a flag that is never set at all. M64 is the collapse case. M65b is the
+one that needed thinking about: sending Enter first still sends both frames, so the call
+log alone cannot tell the orders apart — what separates them is that a refused text must
+leave the Enter UNSENT, because a blind Enter submits whatever the prompt already held.
+M71–M73 mutate the FAKE rather than the code, which is the only way to show that the new
+levers are load-bearing: if disabling `failMethod` or `holdMethod` changes nothing, the
+tests that depend on them were passing for some other reason.
 
 M58/M60 bracket the gate from both sides (ignored entirely, and never opened), M59 pins
 the fail-open, and M61 is M56's terminated-frame twin: the at-limit case must hold on

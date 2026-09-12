@@ -466,7 +466,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             // (measured), so the old `write('/clear\r')` would have silently done
             // nothing. `write` now REFUSES a `\r` rather than no-op, and `writeKey`
             // is the submit.
-            submitCommand(session.child, CONTEXT_RESET_COMMAND)
+            // Awaited: the catch below is the only thing that keeps a failed reset
+            // from being logged as a completed one.
+            await submitCommand(session.child, CONTEXT_RESET_COMMAND)
             // Force a beat so `waitForReplIdle` can't short-circuit before the
             // TUI starts reacting to the `/clear`, then wait for it to settle so
             // the subsequent inject lands on a cleared, idle REPL.

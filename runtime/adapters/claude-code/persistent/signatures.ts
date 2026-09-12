@@ -217,18 +217,27 @@ export function sendKey(child: PtyChild, key: Key): void {
  * and the precondition — `actuateSessionContextReset` turns that into
  * `{status:'failed', detail}`, which is the honest sibling of the success it would
  * otherwise have reported.
+ *
+ * AND THE SUBMIT IS AWAITED. Refusing when the seam is missing fixed only half of
+ * it: `write` + `writeKey` are `void`, so over a socket backend they hand two frames
+ * to the transport and return, and a REFUSED frame was indistinguishable from a
+ * delivered one. The caller still reported `{status:'reset'}` — for the same reset
+ * that never happened, now for a different reason. A detached write cannot support
+ * any claim about its effect, so this returns a promise that resolves only once the
+ * backend has acknowledged BOTH the text and the Enter ({@link PtyChild.submitLine}),
+ * and every caller that reports an outcome must await it.
  */
-export function submitCommand(child: PtyChild, command: string): void {
-  if (child.writeKey === undefined) {
+export async function submitCommand(child: PtyChild, command: string): Promise<void> {
+  if (child.submitLine === undefined) {
     throw new Error(
-      `persistent-repl: cannot submit '${command}' — this PtyChild provides no writeKey(), and ` +
-        `write() does not submit on this backend (herdr's pane.send_text types without firing). ` +
-        `Submitting a slash command REQUIRES the structured-key seam; refusing rather than ` +
-        `typing '${command}' at the prompt and reporting success.`,
+      `persistent-repl: cannot submit '${command}' — this PtyChild provides no submitLine(), and ` +
+        `write()/writeKey() are fire-and-forget: they cannot tell us the command was delivered, ` +
+        `and write() does not submit on this backend (herdr's pane.send_text types without ` +
+        `firing). Submitting a slash command whose success is reported REQUIRES the acknowledged ` +
+        `seam; refusing rather than typing '${command}' at the prompt and reporting success.`,
     )
   }
-  child.write(command)
-  child.writeKey('enter')
+  await child.submitLine(command)
 }
 
 /** Resolve the Claude Code transcript root the SAME way the JSONL ghost gate and

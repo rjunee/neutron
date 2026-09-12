@@ -163,12 +163,19 @@ export class HerdrHost implements PtyHost {
     }
 
     let exited = false
-    // Set the instant WE signal the child (any intentional termination), so the
-    // exit handler can distinguish a crash from an expected recycle. With herdr
-    // this is the ONLY thing that can make that distinction — there are no exit
-    // codes — so it is load-bearing rather than an optimisation.
-    let killedByUs = false
-    // A transient intent, tracked separately from `killedByUs` so an interrupt can
+    /**
+     * "WE ENDED THIS CHILD" — the entire crash-vs-recycle discriminator, since herdr
+     * reports no exit codes anywhere (`spawn.ts`), so it is load-bearing rather than
+     * an optimisation.
+     *
+     * ONE flag, not two. Set synchronously when a terminal `kill` is REQUESTED, so a
+     * `pane_exited` arriving while the close is in flight still reads as intentional;
+     * CLEARED if that close fails, so an attempt that closed nothing leaves no trace.
+     * A separate "confirmed" flag would be indistinguishable from this one in every
+     * reachable state — and unobservable state cannot be tested, only believed.
+     */
+    let terminating = false
+    // A transient intent, tracked separately from `terminating` so an interrupt can
     // never be mistaken for a termination. See `pty-host.ts`.
     let interruptedByUs = false
     let exitResolve: (code: number | null) => void = () => {}
@@ -274,6 +281,33 @@ export class HerdrHost implements PtyHost {
         if (keys.length === 0) return
         send('herdr-host.writeKeys', 'pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(keys) })
       },
+      async submitLine(command) {
+        // ACKNOWLEDGED, IN ORDER, AND NOT NO-OP-SAFE. `write`/`writeKey` are
+        // fire-and-forget by interface; this is the variant a caller may build a
+        // claim on, so every way it can fail has to reach the caller — including
+        // "the child is already gone", which a silent no-op would report as a
+        // completed reset.
+        if (exited) {
+          throw new Error(
+            `herdr-host: submitLine(${JSON.stringify(command)}) after exit — the pane is gone, so ` +
+              'the command was not submitted. Reporting success here would let a caller record a ' +
+              'context reset that never happened.',
+          )
+        }
+        if (command.includes('\r') || command.includes('\n')) {
+          throw new Error(
+            'herdr-host: submitLine() refuses an embedded submit character (\\r or \\n) — ' +
+              'pane.send_text does not submit, so it would be typed literally. Pass the bare ' +
+              'command; submitLine sends the Enter key itself.',
+          )
+        }
+        // Text first, then Enter, each awaited: an unacknowledged text followed by a
+        // blind Enter submits whatever was already at the prompt.
+        if (command !== '') {
+          await client.call('pane.send_text', { pane_id: paneId, text: command })
+        }
+        await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
+      },
       kill(signal) {
         if (exited) return
         // CLASSIFY BEFORE LATCHING. SIGINT is the one real signal herdr can deliver
@@ -283,7 +317,7 @@ export class HerdrHost implements PtyHost {
         // which destroys it, so no `pane_exited` follows and we settle locally.
         const asInt = signal === 'SIGINT' || signal === 2
         if (asInt) {
-          // ONLY A TERMINAL OPERATION MAY LATCH `killedByUs`. An earlier version set
+          // ONLY A TERMINAL OPERATION MAY SET `terminating`. An earlier version set
           // it here, before distinguishing the signal, and then returned without
           // terminating anything — leaving the child ALIVE and flagged as
           // intentionally-terminated. Because herdr has no exit codes,
@@ -295,19 +329,51 @@ export class HerdrHost implements PtyHost {
           send('herdr-host.kill.sigint', 'pane.send_keys', { pane_id: paneId, keys: ['ctrl+c'] })
           return
         }
-        // Terminal from here: record the intent BEFORE signalling, so even a child
-        // that is already gone reads as an expected termination rather than a crash.
-        killedByUs = true
+        // Terminal from here. Record the intent for the IN-FLIGHT WINDOW only, so a
+        // `pane_exited` racing a close we did ask for still classifies as intentional.
+        terminating = true
         fireAndForget(
           'herdr-host.kill.close',
-          client.call('pane.close', { pane_id: paneId }).finally(() => {
+          // ONE-ARG `.then` on purpose: the rejection must reach `fireAndForget`'s
+          // own handler so it is counted and logged like every other background
+          // failure, and only THEN reach the `onError` below. A two-arg
+          // `.then(onOk, onRej)` would swallow it before the wrapper ever saw it —
+          // which is the whole point of the pre-swallow lint gate.
+          client.call('pane.close', { pane_id: paneId }).then(() => {
+            // CONFIRMED CLOSURE. Only now is the pane known to be gone, and only
+            // now may the exit settle.
             settleExit('closed-by-us')
           }),
+          (e: unknown) => {
+            // A FAILED CLOSE CLOSED NOTHING. An earlier version settled from
+            // `.finally()`, so a rejected `pane.close` still resolved `exited`,
+            // flipped `hasExited()` and reported `exitCause` 'closed-by-us' — a
+            // live REPL recorded as cleanly terminated. Two things then broke at
+            // once. The escalation ladder in `repl-session.ts` (`terminateChild`)
+            // returns early at BOTH of its `child.hasExited()` guards, so the
+            // SIGKILL retry never fired and the process leaked; and the kill flag
+            // latched on an attempt that failed, which — with no exit codes
+            // anywhere in herdr — is the entire crash-vs-recycle discriminator, so
+            // every later real crash on this child read as a clean recycle.
+            //
+            // So: do not settle, and do not latch. Clearing `terminating` leaves
+            // the child exactly as it is — alive and unflagged — which is both the
+            // truth and what RE-ARMS the ladder: `hasExited()` stays false, the
+            // grace race times out, and `kill('SIGKILL')` runs a second, bounded
+            // attempt. Escalation is the retry.
+            terminating = false
+            process.stderr.write(
+              `[herdr-host] pane ${paneId}: pane.close FAILED (${e instanceof Error ? e.message : String(e)}) — the pane was ` +
+                `NOT closed. Not settling exit: reporting a close that did not happen would ` +
+                `disarm the caller's SIGKILL escalation and misreport a later crash as an ` +
+                `intentional recycle.\n`,
+            )
+          },
         )
       },
       exited: exitedPromise,
       hasExited: () => exited,
-      wasKilledByUs: () => killedByUs,
+      wasKilledByUs: () => terminating,
       wasInterruptedByUs: () => interruptedByUs,
       exitCause: () => exitCause,
       beginOutput: () => {

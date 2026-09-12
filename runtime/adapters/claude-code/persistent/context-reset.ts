@@ -228,10 +228,13 @@ export async function actuateSessionContextReset(
     // again so the REPL is clean + at rest for the next turn.
     await waitForReplIdle(session, opts.idle_quiet_ms, opts.idle_max_ms)
     // TEXT, THEN AN `enter` KEY — herdr's `pane.send_text` does not submit. The
-    // submit is MANDATORY: `submitCommand` throws when the child has no structured-
-    // key seam, and the catch below turns that into `{status:'failed'}` rather than
-    // reporting a reset that never happened.
-    submitCommand(session.child, CONTEXT_RESET_COMMAND)
+    // submit is MANDATORY, and it is AWAITED: this function's whole output is a
+    // claim about whether the reset happened, so it may not be built on a
+    // fire-and-forget write. `submitCommand` resolves only once the backend has
+    // acknowledged both the text and the Enter, and rejects otherwise — the catch
+    // below turns either failure into `{status:'failed'}` rather than reporting a
+    // reset that never happened.
+    await submitCommand(session.child, CONTEXT_RESET_COMMAND)
     // Un-mark the scope's warm topics NOW — under the mutex, adjacent to the
     // `/clear` write, before any turn blocked on `acquireTurn` can resume. Best-
     // effort: a throwing listener must not abort a reset whose `/clear` already

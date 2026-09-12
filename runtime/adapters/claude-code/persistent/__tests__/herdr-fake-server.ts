@@ -53,6 +53,60 @@ export class FakeHerdrServer implements HerdrRpc {
    *  pane already exists, which is where the leak lived. */
   subscribeFails = false
 
+  /**
+   * PER-METHOD FAILURE INJECTION, as a first-class property of this fake.
+   *
+   * A FAKE THAT CANNOT FAIL MAKES A WHOLE CLASS OF REQUIREMENT UNTESTABLE, and the
+   * tests then pass because the fake is agreeable rather than because the code is
+   * right. This has now cost three defects on this branch, each in a different
+   * method: a no-op `end` hid a teardown that never closed the socket (r5), a
+   * `write` that always returned `d.length` hid the short-write class (r6), and
+   * `pane.close` succeeding unconditionally hid a failed kill reporting success
+   * (r7). Each was fixed one method at a time, which is why there was a third.
+   *
+   * So failure is injectable for ANY method, not for the ones someone has needed so
+   * far — otherwise the fourth is simply waiting on whichever method has not yet
+   * needed to fail.
+   */
+  /** True once a `pane.close` has SUCCEEDED. A failed one must leave this false. */
+  paneClosed = false
+
+  private readonly failures = new Map<string, Error>()
+
+  /** Make `method` reject until {@link clearFailure}. Default error is untyped, i.e.
+   *  a transient failure; pass a `HerdrError` for a typed one. */
+  failMethod(method: string, err?: Error): void {
+    this.failures.set(method, err ?? new Error(`fake-herdr: ${method} refused`))
+  }
+
+  /** Stop failing `method`. */
+  clearFailure(method: string): void {
+    this.failures.delete(method)
+  }
+
+  private readonly holds = new Map<string, Promise<void>>()
+
+  /**
+   * Make `method` HANG until the returned function is called. Latency is as real as
+   * failure and needs the same first-class lever: a socket call is in flight for a
+   * round trip, and the code under test has to be correct DURING that window, not
+   * only at its two ends. A fake that always answers instantly collapses the window
+   * to nothing and makes every in-flight property vacuously true.
+   */
+  holdMethod(method: string): () => void {
+    let release: () => void = () => {}
+    this.holds.set(
+      method,
+      new Promise<void>((res) => {
+        release = () => {
+          this.holds.delete(method)
+          res()
+        }
+      }),
+    )
+    return release
+  }
+
   constructor(opts: FakeHerdrServerOpts = {}) {
     this.paneId = opts.paneId ?? 'w9:p1'
     this.viewportRows = opts.viewportRows === undefined ? 62 : opts.viewportRows
@@ -80,6 +134,14 @@ export class FakeHerdrServer implements HerdrRpc {
   async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push({ method, params })
     if (this.closed) throw new Error('fake-herdr: call on a closed connection')
+    // Held BEFORE the failure check, so a method can be made slow, slow-then-failing,
+    // or simply failing.
+    const hold = this.holds.get(method)
+    if (hold !== undefined) await hold
+    // Injected failure BEFORE any method-specific behaviour, so every method can be
+    // made to fail without this fake growing a flag per method.
+    const injected = this.failures.get(method)
+    if (injected !== undefined) throw injected
     switch (method) {
       case 'ping':
         return { type: 'pong', version: '0.8.2', protocol: 20 }
@@ -126,7 +188,16 @@ export class FakeHerdrServer implements HerdrRpc {
         return { type: 'ok' }
       case 'pane.send_text':
       case 'pane.send_keys':
+        return { type: 'ok' }
       case 'pane.close':
+        // A CLOSE THAT SUCCEEDS DESTROYS THE PANE, as the real server's does: it is
+        // gone and unreadable afterwards, and no `pane_exited` follows. Recording it
+        // separately from `paneGone` is what lets a test ask the question that
+        // matters — "was anything actually closed?" — rather than only asking what
+        // the child now claims about itself.
+        this.paneClosed = true
+        this.paneGone = true
+        this.readFails = true
         return { type: 'ok' }
       default:
         throw new Error(`fake-herdr: unscripted method '${method}' — the host asked for something new`)
@@ -140,6 +211,8 @@ export class FakeHerdrServer implements HerdrRpc {
   ): Promise<() => void> {
     this.calls.push({ method: 'events.subscribe', params: subscription })
     if (this.closed) throw new Error('fake-herdr: subscribe on a closed connection')
+    const injectedSub = this.failures.get('events.subscribe')
+    if (injectedSub !== undefined) throw injectedSub
     if (this.subscribeFails) throw new Error('fake-herdr: subscribe refused')
     let set = this.handlers.get(kind)
     if (set === undefined) {
