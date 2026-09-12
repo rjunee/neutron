@@ -230,8 +230,16 @@ so the wiring cannot latch a value for the process.
 Two values in this change look contradictory at a glance, and the next reader will
 otherwise "fix" one of them, so both the code and this record say it plainly:
 
-- the **token** and the **port** must be DETERMINISTIC. A child baked with them has
-  to still authenticate after a restart. That IS #537.
+- the **port** must be DETERMINISTIC and the **token** must be STABLE, which are not
+  the same property and the difference is the whole mechanism. The port is *derived*
+  — `deriveSinkPort(stateDir)`, a hash of the state dir, so the next gateway computes
+  the same number from the same input with nothing stored. The token is *random*:
+  `stageFreshToken` mints it with `randomBytes` and restart stability comes from
+  PERSISTING that value to a 0600 file, not from recomputing it. Calling both
+  "deterministic" reads as though the token could be re-derived, which would mean a
+  secret computable by anyone who knows the inputs — the opposite of what it is.
+  Either way a child baked with them still authenticates after a restart, and that IS
+  #537.
 - the **staging temp name** must be UNIQUE. Nothing ever reads it by name; its only
   requirement is that two writers never choose the same path.
 

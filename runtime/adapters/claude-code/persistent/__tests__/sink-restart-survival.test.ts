@@ -590,6 +590,24 @@ describe('sink port — per instance, never ephemeral (#537)', () => {
     expect(existsSync(tokenPath)).toBe(false)
   })
 
+  test('a sink given ONLY a tokenPath binds the DERIVED port — the derivation, not the fixture', async () => {
+    // The acceptance says a restart against the same state dir binds the same port. The
+    // sequential-instances case below hands BOTH sinks the same explicit `port`, so its
+    // `second.port === first.port` is satisfied by the fixture telling them the same
+    // number: delete the state-dir derivation from `startOnce` and that test stays
+    // green. A test satisfiable by a mechanism other than the one under test measures
+    // the wrong thing.
+    //
+    // This one supplies NO port and asserts against `deriveSinkPort` itself, so the
+    // derivation is what is being checked. Equality between two instances could not do
+    // that job alone — two equally wrong ports are still equal.
+    const dir = scratch()
+    const s = new ReplSink()
+    liveSinks.push(s)
+    await s.ensureStarted({ tokenPath: join(dir, SINK_TOKEN_FILENAME), bindAttempts: 4, bindRetryDelayMs: 25 })
+    expect(s.port).toBe(deriveSinkPort(dir))
+  })
+
   test('sequential sink instances agree, and the second authorizes a child the FIRST baked', async () => {
     const dir = scratch()
     const tokenPath = join(dir, SINK_TOKEN_FILENAME)
