@@ -27,14 +27,21 @@ So the unit of this change is the rule.
 The invariant is **no code path composes a rev-range from a base branch NAME**, and it is
 carried by the STRUCTURE, not by the gate. Stated in the order of how much it proves:
 
-1. **The shell wrappers: unconstructable.** `codex-build.sh` and `codex-review.sh` receive
-   an already-resolved ref as argv (`BASE_DIFF_REF="${2:-}"`, `BASE_REF="${1:-main}"`) and
-   no variable holding a base branch name exists in either file — `grep -nE
-   'BASE_BRANCH|base_branch|baseBranch'` over both returns nothing. A bare-base range there
-   is not detected; there is nothing to build one from.
+1. **`codex-build.sh`: unconstructable.** It takes the base as argv `$2`
+   (`BASE_DIFF_REF="${2:-}"`), its default is EMPTY, and an empty value skips the
+   last-resort diff entirely — so no base branch name can reach a range there at all.
+   **`codex-review.sh` is weaker, and an earlier draft of this record overstated it by
+   lumping the two together.** Its default is the literal `main`
+   (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which it promotes to
+   `origin/main` when that ref resolves and leaves bare when it does not. So:
+   unconstructable on the trident path, which always passes a resolved ref, and merely
+   *demoted* in a standalone run against a repo with no `origin/<base>`.
 2. **One binding per boundary.** `diffBase` (`inner-workflow.mjs`) and the exported
-   `diffBaseRef()` (`merge.ts`) are the only producers of a range base, so there is no
-   second spelling to drift from. The branch NAME is still in scope in both files for
+   `diffBaseRef()` (`merge.ts`) are the only things that turn a base branch NAME into a
+   range base, so there is no second spelling to drift from. They are NOT the only
+   producers of a range base — `rebased.baseSha`, `localForkPoint()`, `seenPin` and
+   `run.base_sha` all reach a range operand directly — and an earlier draft claimed they
+   were. Each of those is a **sha**, which is the property that matters. The branch NAME is still in scope in both files for
    prose, so this is a narrowed surface rather than an impossibility.
 3. **CHECK 8 is defence in depth.** It makes a regression loud. It does not prove absence,
    and the gate's own header now says so in as many words.
@@ -144,6 +151,34 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Three claims outran their instrument, and the audit is the lesson
+
+The review gate found the same habit three times on this branch: a claim stated
+universally, delivered by a bounded instrument. **"every rev-range"** from a pattern match
+over source text; **"taint follows aliases to a fixpoint"** asserted with `base`/`b`/`c`,
+so false for any `$`-containing name; and **"fixpoint"** from a loop capped at four
+rounds — invisible in dependency order, because a forward chain of any length propagates
+in one scan, which is exactly how the first alias test was written.
+
+Fixing those one at a time meant the next gate found the next one, so the fourth round was
+spent auditing every claim in the gate and the spec item against the code that delivers
+it. That turned up three more, all confirmed by measurement rather than by reading:
+
+| claim | status | what was true |
+|---|---|---|
+| "`diffBase`/`diffBaseRef()` are the **only producers of a range base**" | **false** | four sha-valued producers reach a range operand directly; the true claim is "the only things that turn a base branch NAME into one" |
+| "**no variable holding a base branch name exists in their scope**" (both wrappers) | **false for one** | `codex-review.sh`'s argv default *is* the literal `main`; only `codex-build.sh` reaches the strong property |
+| "`[^{}]*` … **every real site** is one call or one ternary deep" | **overstated** | a nested interpolation escapes the class entirely — measured at zero hits; now listed as a blind spot |
+
+A fourth, smaller one went the other way: the loop's early-exit break was described as the
+termination guarantee. Deleting it leaves the suite green and takes the file's tests from
+0.9s to 4.6s — it is a performance guard, and `bindingCount` is what terminates.
+
+**The rule this leaves behind:** a word asserting completeness or termination — *every*,
+*all*, *any*, *always*, *never*, *only*, *fixpoint* — is a universal quantifier over an
+instrument that is almost certainly bounded. Name the lines that deliver it and the input
+that would falsify it, or narrow it before writing it down.
 
 ### A branded `ResolvedRef` type was considered and rejected
 

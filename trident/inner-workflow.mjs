@@ -1362,8 +1362,8 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
   : null
 
 /**
- * THE ONLY NAME THIS FILE GIVES A DIFF BASE. Every rev-range asking "what did this
- * branch change relative to the base it will merge into" reads this — the forge
+ * THE ONLY NAME THIS FILE GIVES A BASE BRANCH TO A DIFF. Every rev-range asking "what
+ * did this branch change relative to the base it will merge into" reads this — the forge
  * contract's reviewer diff, the resume diff, the planner's inspection hint, and the
  * base argv handed to both codex wrappers. (`branchLogBase` below is the one range
  * that does NOT, and the comment there says why: it asks a different question.)

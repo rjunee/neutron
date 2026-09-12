@@ -155,6 +155,39 @@ describe('the matcher finds every shape #546 actually shipped in', () => {
     expect(taintedNames(src)).toEqual(new Set(['base', 'b', 'c']))
   })
 
+  test('the alias fixpoint is a FIXPOINT — a reverse-ordered chain past any fixed cap', () => {
+    // The loop was capped at FOUR rounds while calling itself a fixpoint. The cap is
+    // invisible in DEPENDENCY order, because a forward chain propagates end-to-end
+    // within a single scan however long it is — which is exactly how the old alias test
+    // was written, so the iteration boundary was never exercised. A REVERSE-ordered
+    // chain advances one hop per round, so it is the only shape that can see the cap.
+    const chain = (n: number): string => {
+      const links = []
+      for (let i = n; i >= 1; i--) links.push(`const v${i} = ${i === 1 ? 'base' : `v${i - 1}`}`)
+      links.push('const base = await resolveBase(run)')
+      links.push(`const cmd = \`git diff \${v${n}}..\${head}\``)
+      return links.join('\n')
+    }
+
+    // SIX hops, reverse-ordered: comfortably past the old cap of 4, and past any other
+    // fixed number a future author might reach for.
+    const six = chain(6)
+    expect(findBareBaseRanges(six).map((h) => h.line)).toEqual([8])
+    expect([...taintedNames(six)].sort()).toEqual(['base', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6'])
+
+    // AND IT SCALES, so this is not "7 happens to work". A 40-hop reverse chain needs
+    // 40 rounds; the bound is the binding count, which is a real bound rather than a
+    // number chosen for comfort.
+    const forty = chain(40)
+    expect(findBareBaseRanges(forty).map((h) => h.line)).toEqual([42])
+    expect(taintedNames(forty).size).toBe(41)
+
+    // THE COMPLEMENT: an equally long chain rooted in a RESOLVED value stays clean, so
+    // the fixpoint spreads taint along real edges rather than to everything in reach.
+    const clean = chain(40).replace('const base = await resolveBase(run)', 'const base = diffBase')
+    expect(findBareBaseRanges(clean)).toEqual([])
+  })
+
   test('an identifier containing `$` aliases like any other — no meta-character in sight', () => {
     // CodeQL `js/useless-regexp-character-escape`, HIGH, on this file's own first
     // landing. The alias hop used to build a regex per tainted name by splicing the name

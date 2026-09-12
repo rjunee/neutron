@@ -27,13 +27,24 @@
 // and what enforces it is STRUCTURAL, not textual:
 //
 //   * ONE BINDING PER BOUNDARY. `diffBase` in `trident/inner-workflow.mjs` and the
-//     exported `diffBaseRef()` in `trident/merge.ts` are the only producers of a
-//     range base. There is no second spelling to drift from.
-//   * AN ARGV BOUNDARY THAT CARRIES ONLY RESOLVED REFS. `trident/codex-build.sh`
-//     and `trident/codex-review.sh` receive an already-resolved ref as argv, so
-//     NO VARIABLE HOLDING A BASE BRANCH NAME EXISTS IN THEIR SCOPE. In those two
-//     files a bare-base range is not "detected" — it is unconstructable, which is
-//     a different and much stronger thing.
+//     exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a
+//     base BRANCH NAME into a range base. They are NOT the only producers of a range
+//     base, and this comment used to say they were: `rebased.baseSha` (the observed
+//     base tip), `localForkPoint()`, `seenPin` and `run.base_sha` all reach a range
+//     operand directly in `orchestrator.ts` and `merge.ts`. Every one of those is a
+//     SHA, which is the property that matters — a sha cannot go stale the way a branch
+//     name can — so the narrower claim is the true one and the wider one was false.
+//   * AN ARGV BOUNDARY THAT CARRIES A RESOLVED REF. `trident/codex-build.sh` takes the
+//     base as argv `$2` and holds no base-branch-name binding at all: its default is
+//     EMPTY (`"${2:-}"`), and an empty value skips the last-resort diff entirely, so
+//     there a bare-base range is genuinely unconstructable.
+//
+//     `trident/codex-review.sh` IS WEAKER, and this comment used to overstate it too.
+//     Its argv default is the literal `main` (`BASE_REF="${1:-main}"`) — a bare base
+//     branch name, in scope — which the rev-parse below promotes to `origin/main` WHEN
+//     THAT REF RESOLVES and leaves bare when it does not. So: unconstructable on the
+//     trident path, which always passes a resolved ref, and merely DEMOTED in a
+//     standalone invocation against a repo with no `origin/<base>`.
 //
 // THIS GATE IS DEFENCE IN DEPTH. It exists to make a regression LOUD, not to prove
 // absence. Read the scope note below before relying on it for the latter.
@@ -73,6 +84,11 @@
 //     inside itself. The range there is correct-by-parameter; the defect moves to
 //     whatever the caller passes, which this gate only sees if the caller's own
 //     expression happens to match.
+//   * A NESTED INTERPOLATION. `RANGE_BRACED` reads the operand with `[^{}]*`, so
+//     `` `${shSingleQuote(`${pfx}/${baseBranch}`)}..${head}` `` matches NOTHING —
+//     measured, zero hits. A balanced-brace parse would close this; a character class
+//     cannot, and this file previously asserted "every real site here is one call or
+//     one ternary deep" instead of listing the gap.
 //   * ANY SPELLING NOT ENUMERATED ABOVE. That set is open, and the next member of
 //     it will be found the same way the last two were — by mutating the fix and
 //     checking the gate reddens, never by reading this list and feeling covered.
@@ -143,7 +159,8 @@ const EXTENSIONS = ['.ts', '.mts', '.mjs', '.js', '.sh']
  * twelve of them, deliberately, because that is what makes the matcher provable — so
  * scanning itself would be a permanent self-report. The same exemption the console gate
  * gives the logger package whose sink IS `console.*`. The controls still run on every
- * invocation, so this file's correctness is checked harder than any file it scans.
+ * invocation of the gate, so excluding this file from the SCAN does not leave its own
+ * matcher unchecked.
  */
 const SELF = 'diff-base-check.mjs'
 
@@ -217,8 +234,11 @@ const RANGE_TAIL = String.raw`(?:["'\x60]\s*\+\s*["'\x60]|["'\x60])?\.{2,3}`
  * watching the gate stay green — and then caught AGAIN, one spelling later, by the
  * review gate. That is the evidence for the scope note in the header.
  *
- * `[^{}]*` rather than a balanced-brace parse: every real site here is one call or one
- * ternary deep, and the identifier extraction below is what decides the verdict.
+ * `[^{}]*` rather than a balanced-brace parse. That is a LIMIT, not a proof: it reads
+ * one call or one ternary deep, and a NESTED interpolation escapes it entirely (see the
+ * header's scope note — measured at zero hits). Every site in the tree today is within
+ * that depth, which is a fact about the tree now and not a property of the matcher. The
+ * identifier extraction below decides the verdict for what it does reach.
  */
 const RANGE_BRACED = new RegExp(String.raw`\$\{([^{}]*)\}` + RANGE_TAIL, 'g')
 
@@ -250,16 +270,37 @@ export function taintedNames(source) {
     let m
     while ((m = rx.exec(source)) !== null) names.add(m[1])
   }
-  // AND THROUGH ALIASES, to a fixpoint. `const base = await resolveBase(run)` followed
-  // by `const b = base` and then `${b}..${head}` is the same defect with one more hop,
-  // and a one-pass taint would call it clean. Bounded by the number of bindings, so it
-  // terminates; four rounds is far past anything real and stops a pathological file
-  // from making the gate the slow part of CI.
+  // AND THROUGH ALIASES, TO AN ACTUAL FIXPOINT — the word is load-bearing and the third
+  // claim on this branch to have outrun its instrument. This loop was capped at FOUR
+  // rounds, which is a fixpoint only for a chain the scan happens to traverse in one
+  // pass. `const b = base` propagates within a single scan when the bindings appear in
+  // DEPENDENCY order, so a forward chain of any length is caught in round 1 — but a
+  // REVERSE-ORDERED chain advances exactly one hop per round:
+  //
+  //     const e = d          ← round 4 reaches `d`, so `e` is never added
+  //     const d = c
+  //     const c = b
+  //     const b = a
+  //     const a = base
+  //     const base = await resolveBase(run)
+  //     const cmd = `git diff ${e}..${head}`   ← measured: ZERO hits at cap 4
+  //
+  // WHICH LINE DOES WHAT, because "it terminates" was itself a claim worth pinning:
+  //   * `bindingCount` TERMINATES IT, and is the only thing that has to. `names` only
+  //     ever grows, every name it can gain is some binding's left-hand side, and a
+  //     reverse-ordered chain of N bindings advances one hop per round — so N rounds
+  //     always suffice. That is a REAL bound derived from the input, not a number
+  //     chosen for comfort, and unlike a fixed cap it cannot cut the fixpoint short.
+  //   * the `names.size === before` break only ends it EARLY. Measured by deleting it:
+  //     the suite stays green and the file's tests go from 0.9s to 4.6s. It is a
+  //     performance guard, and calling it the termination guarantee would have been the
+  //     same kind of overclaim as the cap it replaced.
   //
   // ONE STATIC PATTERN, matched once per round, with the name comparison done as a
   // literal `Set.has`. See `BINDING_FROM_IDENTIFIER` for what the per-name spliced
   // regex this replaces got silently wrong.
-  for (let round = 0; round < 4; round++) {
+  const bindingCount = (source.match(BINDING_FROM_IDENTIFIER) ?? []).length
+  for (let round = 0; round <= bindingCount; round++) {
     const before = names.size
     BINDING_FROM_IDENTIFIER.lastIndex = 0
     let m
@@ -353,8 +394,10 @@ export function findBareBaseRanges(source) {
 // Hard-coded, checked on every invocation, BEFORE the tree is touched.
 
 /**
- * 5 offenses, at lines 4, 6, 11, 14 and 16 — EVERY shape #546 was actually composed
- * in, not the one that is easiest to match:
+ * 5 offenses, at lines 4, 6, 11, 14 and 16 — the two shapes #546 itself was composed in
+ * plus the three this gate was later caught missing, rather than the one that is easiest
+ * to match. NOT an enumeration of every possible shape; the header's scope note lists
+ * what stays invisible:
  *   * the bare name in a template (line 4);
  *   * THE NAME WRAPPED IN A CALL (line 6) — `git diff ${shSingleQuote(baseBranch)}..`
  *     is the exact text `writeResumeDiff` shipped, and the first draft of this gate

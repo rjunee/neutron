@@ -34,12 +34,19 @@ mode `docs/agent-legible-architecture.md` §1 names explicitly. So the unit of t
 composes a rev-range from a base branch NAME*, and it is carried by two things:
 
 - **one binding per boundary** — `diffBase` in `trident/inner-workflow.mjs` and the
-  exported `diffBaseRef()` in `trident/merge.ts` are the only producers of a range base,
-  so there is no second spelling to drift from;
-- **an argv boundary that carries only resolved refs** — `trident/codex-build.sh` and
-  `trident/codex-review.sh` receive an already-resolved ref as argv, so **no variable
-  holding a base branch name exists in their scope**. There a bare-base range is not
-  detected, it is *unconstructable*, which is a different and stronger thing.
+  exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a base
+  branch NAME into a range base, so there is no second spelling to drift from. They are
+  *not* the only producers of a range base and an earlier draft of this said they were:
+  `rebased.baseSha`, `localForkPoint()`, `seenPin` and `run.base_sha` all reach a range
+  operand directly. Every one of those is a **sha**, which is the property that matters;
+- **an argv boundary that carries a resolved ref** — `trident/codex-build.sh` takes the
+  base as argv `$2` and holds no base-branch-name binding at all (its default is empty,
+  and empty skips the diff), so there a bare-base range is genuinely *unconstructable*.
+  `trident/codex-review.sh` is **weaker**, and an earlier draft overstated it: its argv
+  default is the literal `main`, which it promotes to `origin/main` when that ref
+  resolves and leaves bare when it does not. Unconstructable on the trident path, which
+  always passes a resolved ref; merely demoted in a standalone run against a repo with
+  no `origin/<base>`.
 
 `scripts/ci/diff-base-check.mjs` is **defence in depth on top of that** — it exists to
 make a regression loud, not to prove absence. A textual matcher over source cannot
@@ -90,13 +97,16 @@ The resolution order is evidence-first, and is the same at every site:
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
       4 of 7 tests fail, and the two agreement/complement tests stay green.
 - [ ] **No base branch NAME is in scope where a rev-range is built, at the boundaries
-      where that is achievable.** This is the criterion that carries the invariant, and it
-      is structural: `diffBase` and `diffBaseRef()` are the only producers, and both shell
-      wrappers take a resolved ref as argv so the name is absent from their scope entirely.
-      Verified by `trident/inner-workflow.test.ts` and
+      where that is achievable — and the criterion says where it is not.** This is what
+      carries the invariant, and it is structural: `diffBase` and `diffBaseRef()` are the
+      only things that turn a base branch name into a range base, and `codex-build.sh`
+      holds no base-branch-name binding at all (default empty, and empty skips the diff).
+      `codex-review.sh` reaches only the weaker property — its argv default is the literal
+      `main`, demoted to `origin/main` when that ref resolves — and this criterion claims
+      only that. Verified by `trident/inner-workflow.test.ts` and
       `trident/__tests__/cross-model-dispatch.test.ts` (the wrapper argv carries the
-      resolved ref, per merge mode) and by `grep -n 'BASE_DIFF_REF\|BASE_REF'` over the two
-      scripts showing no base-branch-name binding. A criterion that said only "CHECK 8 is
+      resolved ref, per merge mode) and by reading both scripts' base bindings. A criterion
+      that said only "CHECK 8 is
       green" would be satisfied by a tree whose bare-base range is merely spelled in a way
       the matcher does not enumerate.
 - [ ] **CHECK 8 makes a regression LOUD, with an honest scope.**
@@ -117,6 +127,16 @@ The resolution order is evidence-first, and is the same at every site:
       by the four named tests in `scripts/ci/diff-base-check.test.ts`, and by mutation —
       reverting `RANGE_TAIL`, dropping `RANGE_CONCAT`, or disabling the `logicalLines`
       join each reddens the suite (3, 1 and 1 test respectively).
+- [ ] **The alias propagation reaches an actual fixpoint, not a fixed number of passes.**
+      The loop was capped at four rounds while calling itself a fixpoint; the cap is
+      invisible in dependency order, because a forward chain of any length propagates
+      end-to-end in one scan — which is how the first alias test was written, so the
+      iteration boundary was never exercised. Verified by "the alias fixpoint is a
+      FIXPOINT", which uses a REVERSE-ordered chain (one hop per round) at 6 and at 40
+      hops, plus the complement that an equally long chain rooted in a resolved value
+      stays clean. Mutating the bound back to 4 reddens it. The bound is now the binding
+      count — a real bound derived from the input — and the early-exit break is a
+      performance guard, measured, not the termination guarantee.
 - [ ] **No regex is BUILT from scanned source.** The alias hop spliced a captured
       identifier into a `new RegExp` unescaped, and identifiers may contain `$` — an
       end-of-line anchor — so aliasing through `$base` silently matched nothing and the
