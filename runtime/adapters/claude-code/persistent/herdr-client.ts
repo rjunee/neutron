@@ -234,6 +234,22 @@ export class HerdrClient implements HerdrRpc {
    * discipline on transcript files, for the same reason.)
    */
   onBytes(chunk: Uint8Array): void {
+    // A CLOSED TRANSPORT ACCEPTS NOTHING. This is the same rule as the three above it
+    // — once a terminal state is settled, no later path may rewrite it — enforced at
+    // the EDGE rather than in the host's bookkeeping.
+    //
+    // THE DEFECT THIS REPLACES: `onBytes` buffered and dispatched unconditionally, so
+    // bytes arriving after `close()` still parsed into a valid frame and still invoked
+    // subscription handlers. The event that matters is precisely `pane_exited`: the
+    // host's handler calls `settleExit`, so a post-close frame could re-open the exact
+    // question the close had just settled. `settleExit` closing the client is a
+    // meaningless guarantee if the socket can keep writing into the host afterwards.
+    //
+    // It also un-did teardown's other job. Teardown releases `this.bytes` because it
+    // may hold up to `maxFrameBytes`; with no guard here, chunks arriving afterwards
+    // simply started accumulating again — the buffer teardown claims to have released
+    // grew back, unbounded by anything that would ever read it.
+    if (this.closed) return
     // `Buffer.from(Uint8Array)` copies, so the socket may reuse its buffer.
     this.bytes =
       this.bytes.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.bytes, Buffer.from(chunk)])
@@ -404,6 +420,18 @@ export class HerdrClient implements HerdrRpc {
    */
   private teardown(err: Error): void {
     if (this.closed) return
+    // Set before `failAll`, deliberately — but NOT load-bearing today, and saying so
+    // is the honest version. `failAll` only calls `p.reject()`, and a promise's
+    // rejection handler runs as a MICROTASK: it cannot execute inside `failAll`, so by
+    // the time any caller re-enters this client, `teardown` has already returned and
+    // the flag is set under either ordering. A mutation that moves this line below
+    // `failAll` SURVIVES the suite, which is the proof rather than the suspicion.
+    //
+    // It stays here because it costs nothing and it is the ordering that remains
+    // correct if `failAll` ever gains a SYNCHRONOUS callback — at which point the
+    // difference becomes real and observable. What IS load-bearing and is tested: a
+    // re-entrant call from a rejection handler is refused, and `teardown`'s own early
+    // return makes it idempotent.
     this.closed = true
     try {
       this.socket?.end()
@@ -424,6 +452,18 @@ export class HerdrClient implements HerdrRpc {
   /** True once the connection is gone. */
   isClosed(): boolean {
     return this.closed
+  }
+
+  /**
+   * Bytes currently held in the inbound frame buffer.
+   *
+   * Exposed because teardown's promise to RELEASE this buffer is otherwise
+   * unobservable, and unobservable state cannot be tested, only believed — the same
+   * reason the two kill flags collapsed into one. It is the only way to assert that
+   * a closed client accumulates nothing.
+   */
+  bufferedBytes(): number {
+    return this.bytes.length
   }
 
   /**
@@ -520,13 +560,28 @@ export class HerdrClient implements HerdrRpc {
     subscription: Record<string, unknown>,
     handler: HerdrEventHandler,
   ): Promise<() => void> {
+    // REGISTER BEFORE ASKING, because an event can arrive between our request and its
+    // acknowledgement and the host subscribes to `pane_exited` precisely so that an
+    // exit DURING STARTUP is still observed. Registering after the ack would open a
+    // window in which the one event we cannot afford to miss is dropped.
     let set = this.handlers.get(kind)
     if (set === undefined) {
       set = new Set()
       this.handlers.set(kind, set)
     }
     set.add(handler)
-    await this.call('events.subscribe', { subscriptions: [subscription] })
+    try {
+      await this.call('events.subscribe', { subscriptions: [subscription] })
+    } catch (e) {
+      // ...AND UNREGISTER IF THE ASK FAILED. Registering early is a deliberate race
+      // win, not a licence to leave the handler behind: a rejected subscribe returns
+      // no unsubscribe function, so the caller has no way to remove it and believes
+      // it was never subscribed. A handler nobody can reach but the dispatcher still
+      // calls is the same class of defect as the one above — state outliving the
+      // operation that created it.
+      this.handlers.get(kind)?.delete(handler)
+      throw e
+    }
     return () => {
       this.handlers.get(kind)?.delete(handler)
     }

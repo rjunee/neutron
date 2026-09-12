@@ -992,6 +992,86 @@ a passing test. Both are the fixture deciding the outcome. I checked this test's
 arrangement against it: the fake only EMITS `pane_exited` — the host's own subscription
 handler is what settles — and nothing in the arrangement writes the flag being asserted.
 
+### The fourth row: the rule has to hold at the EDGE, not just in the bookkeeping
+
+Review r13. The first three rounds were all the host's own bookkeeping; this one is the
+transport, and it is the same sentence one layer down.
+
+**`onBytes` accepted and dispatched after teardown.** It appended every chunk with no
+`closed` check, so bytes arriving after `close()` still parsed into a valid frame and
+still invoked subscription handlers. The event that matters is exactly `pane_exited` —
+the host's handler calls `settleExit` — so a post-close frame could **re-open the
+question the close had just settled**. `settleExit` closing the client is a meaningless
+guarantee if the socket can still write into the host afterwards.
+
+It also quietly undid teardown's other job. Teardown releases `this.bytes` because it may
+hold up to `maxFrameBytes`; with no guard, chunks arriving afterwards started accumulating
+again — the buffer teardown claims to have released grew back, bounded by nothing and
+read by no one.
+
+| | what it did to the terminal state |
+|---|---|
+| r9 — `.finally()` | settled the **wrong** outcome |
+| r11 — `?? {}` | settled an **unknown** as an empty success |
+| r12 — the close/exit race | **un-settled** a correct answer |
+| r13 — `onBytes` after close | let the **transport** write after all of the above had settled |
+
+### The sweep: `closed` existing is not the same as every path consulting it
+
+**14 entry points examined, 2 changed.** The finding named one door; the rule names a
+class, so the class was walked.
+
+Changed:
+
+- **`onBytes`** — the defect above.
+- **`subscribe`** — it registers the handler BEFORE awaiting the acknowledgement, which
+  is deliberate and must stay: an event can arrive between the request and its ack, and
+  the host subscribes to `pane_exited` precisely so an exit *during startup* is still
+  seen. But a REJECTED subscribe returned no unsubscribe function, so the caller could
+  not remove the handler and believed it was never subscribed — a handler nobody can
+  reach that the dispatcher still calls. It is now removed on failure. Registering early
+  is a race win, not a licence to leave state behind.
+
+Left, with reasons: `call` and `ping` already reject on a closed connection; `close` and
+`onClose` both delegate to `teardown`, whose own `if (this.closed) return` makes it
+idempotent; `dispatch` is private and reachable only from the now-guarded `onBytes`;
+`failAll` is teardown-internal; `isClosed`, `bufferedBytes` and the constructor hold no
+state to corrupt. The RPC timeout **timer callback** calls `teardown`, so a timer that
+survives a close is a no-op — and `failAll` clears the timers as it drains. `attach` is
+the one deliberate omission: it is called once by `connectHerdr` before any use, and a
+silent no-op there would hide a wiring bug rather than prevent one.
+
+### An ordering I was asked to check, which turned out not to be load-bearing — and the mutation is why I know
+
+The question was whether `closed` is set before or after `failAll`, on the theory that
+if `failAll`'s rejection handlers can re-enter the client, the ordering decides whether
+the guard holds during teardown or only after it.
+
+It is set **before**, and I initially wrote a test claiming to pin that. The test was
+wrong, and the faithful mutation found it: **MOVING** the assignment below `failAll` —
+rather than deleting it, which is what my first sloppy attempt did and which reddened 38
+cases for the wrong reason — **SURVIVES the entire suite.**
+
+The reason is structural. `failAll` only calls `p.reject()`, and a promise's rejection
+handler runs as a **microtask**: it cannot execute inside `failAll`, so every caller
+observes the flag after `teardown` has already returned, under either ordering. **The
+ordering is unobservable through the promise API and therefore not a criterion** — an
+assertion about it passes for both implementations, which is the exact defect I have
+spent this branch removing from other people's reasoning and had now written myself.
+
+So the line stays (it costs nothing and remains the correct ordering if `failAll` ever
+gains a synchronous callback), the comment says plainly that it is not load-bearing
+today, and the test was renamed to assert what it actually discriminates: a re-entrant
+call from a rejection handler is refused rather than half-served.
+
+Two smaller notes from the same run, both about my own mutations rather than the code:
+M90 as first written was a copy of M89 and proved nothing, and M91 deleted the assignment
+instead of moving it. **A mutation that changes more than the one thing it names cannot
+tell you which thing the test caught** — M91's 38 failures looked like strong evidence
+and were evidence of a different bug entirely. Rewritten, M90 now reddens exactly the
+accumulation case and M89 exactly the dispatch case, which is what separates the two
+requirements.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1093,6 +1173,12 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M87 | reset first, then guard — ordering inverted | RED 1 |
 | M88 | the fake stops failing in-flight calls on close | SURVIVED alone — see M88b |
 | M88b | M88 **combined** with the host defect restored | GREEN with the bug present: the fake is the enabling condition |
+| M89 | remove the post-close guard on `onBytes` (the reported defect) | RED 2 |
+| M89b | PAIR: refuse bytes ALWAYS, not only after close | RED 53 |
+| M90 | guard placed AFTER buffering — refuses to dispatch but still accumulates | RED 1 (the accumulation case alone) |
+| M91 | MOVE `closed = true` below `failAll` (ordering only) | SURVIVED — the ordering is unobservable; see above |
+| M92 | a refused subscribe keeps its handler registered | RED 1 |
+| M93 | unregister on EVERY subscribe, not only the failed one | RED 3 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

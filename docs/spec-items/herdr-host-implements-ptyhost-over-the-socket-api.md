@@ -250,6 +250,27 @@ not-new. That is accepted and recorded here rather than hidden.
       calls and a pane that is actually closed. Control: a successful close settles,
       latches, and closes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **A CLOSED transport accepts nothing.** After `close()`, `onBytes` must neither
+      dispatch nor buffer: a post-close frame must not reach a subscription handler
+      (`pane_exited` is the one that would re-open a settled exit), and repeated chunks
+      must leave the buffer teardown released at zero. Both halves need their own case —
+      a guard placed after the append refuses to dispatch while still accumulating, and
+      passes the first test alone. Both need a control taken on the SAME client with the
+      SAME bytes while open, or "not delivered" is satisfied by a malformed frame or an
+      unwired handler. The buffer must be observable for the accumulation half to be
+      assertable at all.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **Every entry point consults `closed`, not just the field existing.** The surface is
+      walked as a class rather than patched at the reported door: report the count
+      examined against the count changed. A rejected `subscribe` must leave no handler
+      behind — registering before the acknowledgement is deliberate (an event can arrive
+      in that window, and the host subscribes so a startup exit is still seen), which
+      makes removal on failure the obligation rather than late registration. NOTE what is
+      NOT a criterion: the order of `closed = true` against `failAll` is unobservable,
+      because `failAll` only calls `p.reject()` and rejection handlers run as microtasks
+      — a mutation moving that line survives, so any test asserting the ordering passes
+      for both implementations.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **A settled terminal state is IMMUTABLE.** No later path may rewrite `exitCause`,
       `hasExited()` or `wasKilledByUs()` once the exit has settled — including the
       rejection of an RPC that the settlement itself caused, since `settleExit` closes

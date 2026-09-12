@@ -555,6 +555,125 @@ describe('herdr client framing', () => {
     })
   }
 
+  it('a CLOSED client accepts nothing — a post-close frame never reaches a handler', async () => {
+    // THE FOURTH VARIANT of one rule: once a terminal state is settled, no later path
+    // may rewrite it — here enforced at the TRANSPORT EDGE rather than in the host's
+    // bookkeeping. `onBytes` buffered and dispatched unconditionally, so bytes arriving
+    // after `close()` still parsed and still invoked subscription handlers. The event
+    // that matters is exactly this one: the host's `pane_exited` handler calls
+    // `settleExit`, so a post-close frame could RE-OPEN the question the close settled.
+    const client = new HerdrClient(60_000)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const seen: Record<string, unknown>[] = []
+    const sub = client.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
+      seen.push(d)
+    })
+    feed(client, '{"id":"n1","result":{"type":"ok"}}\n')
+    await sub
+
+    // CONTROL FIRST, on the same client and the same bytes: while OPEN the frame is
+    // delivered. Without this, the assertion below passes for a frame that was simply
+    // malformed, or a handler that was never wired.
+    feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:live"}}\n')
+    expect(seen).toEqual([{ pane_id: 'w1:live' }])
+
+    client.close()
+    feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:ghost"}}\n')
+    // Unchanged — the identical frame shape that WAS delivered a moment ago is now
+    // refused, so the difference is the close and nothing else.
+    expect(seen).toEqual([{ pane_id: 'w1:live' }])
+  })
+
+  it('a CLOSED client accumulates nothing — the buffer teardown released stays released', async () => {
+    // Teardown's other job. It empties `this.bytes` because that buffer may hold up to
+    // `maxFrameBytes`; with no guard, chunks arriving afterwards simply started
+    // accumulating again — the released buffer grew back, bounded by nothing and read
+    // by no one.
+    const client = new HerdrClient(60_000)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+
+    // CONTROL: while OPEN, an unterminated chunk really does accumulate — otherwise
+    // "zero after close" is satisfied by a buffer that never fills at all.
+    feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:p1"}')
+    expect(client.bufferedBytes()).toBeGreaterThan(0)
+
+    client.close()
+    expect(client.bufferedBytes()).toBe(0) // teardown released it
+    for (let i = 0; i < 50; i++) feed(client, 'x'.repeat(1000))
+    // Fifty thousand bytes offered, none retained.
+    expect(client.bufferedBytes()).toBe(0)
+  })
+
+  it('a re-entrant call from a rejection handler is refused, not half-served', async () => {
+    // WHAT THIS DOES *NOT* PIN, stated because the distinction cost a mutation to
+    // find: it does not pin the ORDER of `closed = true` against `failAll`. I wrote it
+    // believing it did, and the faithful mutation — MOVING that line below `failAll`
+    // rather than deleting it — SURVIVES. The reason is that `failAll` only calls
+    // `p.reject()`, and a rejection handler runs as a microtask, so it cannot execute
+    // inside `failAll`; every caller observes the flag after `teardown` has returned,
+    // under either ordering. The ordering is unobservable through the promise API and
+    // therefore not a criterion. Asserting it here would have been a test that passes
+    // for both implementations.
+    //
+    // What it DOES pin, which is real: caller code re-entering the client from a
+    // rejection handler is refused rather than handed a half-torn-down connection.
+    const client = new HerdrClient(60_000)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    let observedClosed: boolean | undefined
+    let reentrantRejected: string | undefined
+    const pending = client.call('pane.read', {}).catch(async () => {
+      // Inside the rejection handler `failAll` is running RIGHT NOW.
+      observedClosed = client.isClosed()
+      await client.call('pane.get', {}).catch((e: unknown) => {
+        reentrantRejected = (e as Error).message
+      })
+    })
+    client.close()
+    await pending
+    expect(observedClosed).toBe(true)
+    expect(reentrantRejected).toContain('closed connection')
+  })
+
+  it('a REFUSED subscribe leaves no handler behind', async () => {
+    // Registering before the ack is deliberate — an event can arrive between the
+    // request and its acknowledgement, and the host subscribes to `pane_exited`
+    // precisely so an exit DURING STARTUP is still seen. But a rejected subscribe
+    // returns no unsubscribe function, so the caller cannot remove the handler and
+    // believes it was never subscribed: a handler nobody can reach that the dispatcher
+    // still calls.
+    const client = new HerdrClient(60_000)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const seen: Record<string, unknown>[] = []
+    const sub = client
+      .subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
+        seen.push(d)
+      })
+      .then(
+        () => undefined,
+        (e: unknown) => e as Error,
+      )
+    // The server REFUSES the subscription.
+    feed(client, '{"id":"n1","error":{"code":"invalid_request","message":"no"}}\n')
+    expect(await sub).toBeDefined()
+    expect(client.isClosed()).toBe(false) // a refused subscribe is not a transport failure
+    feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:p1"}}\n')
+    expect(seen).toEqual([])
+  })
+
+  it('CONTROL — an ACCEPTED subscribe does receive events', async () => {
+    // Without this, "leaves no handler behind" is satisfied by never registering one.
+    const client = new HerdrClient(60_000)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const seen: Record<string, unknown>[] = []
+    const sub = client.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
+      seen.push(d)
+    })
+    feed(client, '{"id":"n1","result":{"type":"ok"}}\n')
+    await sub
+    feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:p1"}}\n')
+    expect(seen).toEqual([{ pane_id: 'w1:p1' }])
+  })
+
   it('CONTROL — both LEGITIMATE envelopes still work', async () => {
     // Otherwise a validator that rejected everything would pass all of the above.
     const client = new HerdrClient(5000)
