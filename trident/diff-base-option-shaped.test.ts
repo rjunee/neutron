@@ -30,8 +30,86 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { fileURLToPath } from 'node:url'
+
 import { spawnCapture } from './git-mode.ts'
 import { diffBaseRef, originBaseResolves, TridentOptionShapedBaseError } from './merge.ts'
+
+const WORKFLOW_SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+
+/**
+ * `inner-workflow.mjs`'s `diffBase`, evaluated for one set of launch args.
+ *
+ * THE RULE IS IMPLEMENTED TWICE — here and in `diffBaseRef` — because the workflow script
+ * takes no imports (its globals are injected by the Workflow runtime and its own header
+ * says it "is NOT runnable with plain node/bun"), so the two cannot share a module. They
+ * have now diverged twice: once on the merge-mode fallback, once on ORDER. This harness
+ * exists so the parity table below can hold them to the same answers, which is the
+ * strongest single source of truth available when the code itself cannot be one.
+ *
+ * Returns the base operand the workflow composed, or throws whatever the workflow threw.
+ */
+async function workflowDiffBase(args: {
+  baseBranch: string
+  baseSha?: string
+  mergeMode?: 'pr' | 'local'
+  repoPath?: string
+}): Promise<string> {
+  const RECORDED = 'a'.repeat(40)
+  let captured = ''
+  const agent = async (prompt: string, o?: { label?: string }): Promise<unknown> => {
+    const label = o?.label ?? ''
+    if (label.startsWith('head-probe-round-')) return { head: RECORDED }
+    if (label === 'resume-diff') {
+      captured = prompt
+      // Everything after this is irrelevant to the base; stop the run rather than mock
+      // the whole panel.
+      throw new Error('__CAPTURED__')
+    }
+    return ''
+  }
+  const body = WORKFLOW_SRC.replace('export const meta', 'const meta')
+  const AsyncFunction = Object.getPrototypeOf(async function (): Promise<void> {}).constructor as (
+    ...a: string[]
+  ) => (...a: unknown[]) => Promise<unknown>
+  const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
+  try {
+    await fn(
+      agent,
+      async (fns: Array<() => Promise<unknown>>) => Promise.all(fns.map((f) => f())),
+      () => {},
+      () => {},
+      { total: 0, spent: () => 0 },
+      {
+        repoPath: args.repoPath ?? '/repo',
+        task: 'x',
+        baseBranch: args.baseBranch,
+        slug: 'ord',
+        maxRounds: 10,
+        mergeMode: args.mergeMode ?? 'pr',
+        prNumber: args.mergeMode === 'local' ? null : 7,
+        branch: 'trident/ord',
+        dbPath: '/tmp/none.db',
+        runId: 'ord-1',
+        resumeCheckpoint: 'forge-done',
+        resumeCheckpointHead: RECORDED,
+        resumeLiveHead: RECORDED,
+        resumeFindings: null,
+        codexHome: null,
+        checkpointScript: '/repo/trident/checkpoint.sh',
+        worktreeCleanupScript: '/repo/trident/worktree-cleanup.sh',
+        models: { fable: 'f', opus: 'o', sonnet: 's', fast: 'h' },
+        reflectionGuidance: '',
+        ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+      },
+    )
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== '__CAPTURED__') throw err
+  }
+  const m = /git diff --end-of-options (.+?)\.\.'/.exec(captured)
+  if (m === null) throw new Error(`no resume-diff command captured: ${captured.slice(0, 200)}`)
+  return m[1] as string
+}
 
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
 const created: string[] = []
@@ -84,6 +162,31 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     }
   })
 
+  test('ORDER: a valid PIN wins before the name is examined — in BOTH implementations', async () => {
+    // THE REGRESSION THIS PINS. The first version of the `.mjs` guard threw at module
+    // scope, BEFORE `pinnedBase` was consulted — so a run with a valid 40-hex pin and an
+    // option-shaped base branch failed, even though the pin means the name is never read
+    // and never reaches git. `diffBaseRef` returned the pin first; the same rule,
+    // implemented twice, disagreed about ORDER.
+    //
+    // That is the mirror of the defect the guard was added for: there a `-` check refused
+    // to EXAMINE a value and let it through; here it refused the whole call over a value
+    // already superseded. Validate on the path where the value is used.
+    //
+    // Asserted in BOTH implementations in one test, because covering only `diffBaseRef`
+    // is precisely how the divergence survived.
+    const sha = 'b'.repeat(40)
+    expect(diffBaseRef('--output=/tmp/x', sha, false)).toBe(sha)
+    expect(await workflowDiffBase({ baseBranch: '--output=/tmp/x', baseSha: sha })).toBe(`'${sha}'`)
+  })
+
+  test('ORDER: with NO pin, both refuse the same name', async () => {
+    expect(() => diffBaseRef('--output=/tmp/x', null, false)).toThrow(TridentOptionShapedBaseError)
+    await expect(workflowDiffBase({ baseBranch: '--output=/tmp/x' })).rejects.toThrow(
+      /would read as an option, not a revision/,
+    )
+  })
+
   test('THE COMPLEMENT: an ordinary name is unaffected in both directions', () => {
     expect(diffBaseRef('main', null, true)).toBe('origin/main')
     expect(diffBaseRef('main', null, false)).toBe('main')
@@ -100,6 +203,78 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     }
     expect(await originBaseResolves(spy, '/repo', '--output=/tmp/x')).toBe(false)
     expect(calls).toBe(0)
+  })
+})
+
+describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
+  /**
+   * `diffBaseRef` (TS) and `diffBase` (.mjs) encode the same rule and cannot share a
+   * module: the workflow script takes no imports. They have diverged twice — the
+   * merge-mode fallback, then the pin/validate ORDER — each time caught by review rather
+   * than by a test, because each implementation was only ever tested on its own.
+   *
+   * This table is the answer to "can they be made one": not as code, but they can be held
+   * to one set of answers. Every row asserts BOTH, so a change to either alone reds here.
+   *
+   * The `.mjs` answer is a SHELL WORD, so it is evaluated in a real repository to compare
+   * with the TS answer — which is also the only way to check that the substitution resolves
+   * to what the TS branch would have picked.
+   */
+  async function bothAgree(
+    w: World,
+    row: { baseBranch: string; baseSha?: string; originResolves: boolean; mergeMode?: 'pr' | 'local' },
+  ): Promise<{ ts: string; mjs: string }> {
+    const ts = diffBaseRef(row.baseBranch, row.baseSha ?? null, row.originResolves)
+    const composed = await workflowDiffBase({
+      baseBranch: row.baseBranch,
+      repoPath: w.repo,
+      ...(row.mergeMode === undefined ? {} : { mergeMode: row.mergeMode }),
+      ...(row.baseSha === undefined ? {} : { baseSha: row.baseSha }),
+    })
+    // Evaluate the composed word in the fixture — a quoted literal for the pinned arm, a
+    // substitution for the unpinned one.
+    const res = await spawnCapture(['bash', '-c', `printf %s ${composed}`], w.repo)
+    return { ts, mjs: res.stdout.trim() }
+  }
+
+  test('pinned sha wins for every name, including one the unpinned arm would refuse', async () => {
+    const w = await seedWorld('parity-pinned')
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
+    const sha = 'c'.repeat(40)
+    for (const baseBranch of ['main', 'release/1.x', '--output=/tmp/x']) {
+      const got = await bothAgree(w, { baseBranch, baseSha: sha, originResolves: true })
+      expect({ baseBranch, ...got }).toEqual({ baseBranch, ts: sha, mjs: sha })
+    }
+  })
+
+  test('unpinned, origin/<base> RESOLVES: both pick origin/<base>, IN EITHER MERGE MODE', async () => {
+    // BOTH MODES, because the FIRST divergence between these two implementations was
+    // exactly a merge-mode-keyed fallback in the `.mjs` — and a table that only ran `pr`
+    // would not have caught it. Verified by mutation: reintroducing that fallback reds
+    // this row.
+    const w = await seedWorld('parity-origin')
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
+    for (const mergeMode of ['pr', 'local'] as const) {
+      const got = await bothAgree(w, { baseBranch: 'main', originResolves: true, mergeMode })
+      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'origin/main', mjs: 'origin/main' })
+    }
+  })
+
+  test('unpinned, origin/<base> MISSING: both fall back to the bare name, in either mode', async () => {
+    const w = await seedWorld('parity-no-origin')
+    // No `refs/remotes/origin/main` in this fixture at all.
+    for (const mergeMode of ['pr', 'local'] as const) {
+      const got = await bothAgree(w, { baseBranch: 'main', originResolves: false, mergeMode })
+      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'main', mjs: 'main' })
+    }
+  })
+
+  test('unpinned, option-shaped: both REFUSE rather than answering', async () => {
+    const w = await seedWorld('parity-refuse')
+    expect(() => diffBaseRef('--output=/tmp/x', null, false)).toThrow(TridentOptionShapedBaseError)
+    await expect(workflowDiffBase({ baseBranch: '--output=/tmp/x', repoPath: w.repo })).rejects.toThrow(
+      /would read as an option, not a revision/,
+    )
   })
 })
 

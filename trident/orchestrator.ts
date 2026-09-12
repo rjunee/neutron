@@ -2707,10 +2707,13 @@ export function buildTridentOrchestrator(
     // straight back to `resolveBase(run)` — `detectBaseBranch`'s bare `main` — on the theory
     // that "there is no remote base at all" is the one case where the name is the best
     // available answer. Two of those three fallback worlds still have a better answer:
-    // `run.base_sha` is the launch-observed tip, and in pr mode `origin/<base>` is a
-    // remote-tracking ref the launch path fetched and refused to start without. `diffBaseRef`
-    // picks whichever exists and reaches the bare name only in local mode, where there is
-    // genuinely no origin to be behind.
+    // `run.base_sha` is the launch-observed tip, and `origin/<base>` is a remote-tracking
+    // ref the launch path fetches (and, in pr mode, refuses to start without). `diffBaseRef`
+    // picks whichever exists and reaches the bare name whenever `refs/remotes/origin/<base>`
+    // does not resolve — NOT "only in local mode", which is the framing the fix that removed
+    // it left behind here. The merge mode says nothing about whether a remote exists; keying
+    // the fallback on it was the defect, and a comment still asserting it is the same claim
+    // surviving its own correction.
     const baseRef =
       rebased.baseSha !== ''
         ? rebased.baseSha

@@ -1411,17 +1411,40 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
  * here, so the next site cannot re-introduce the class by forgetting.
  */
-// AN OPTION-SHAPED BASE IS REFUSED BEFORE IT CAN BE COMPOSED, the same refusal
-// `diffBaseRef` makes on the TS side and for the same measured reason: a rev-range
-// operand beginning with `-` is parsed by git as a FLAG, and `--output=<path>..<head>`
-// writes the file (git 2.43, exit 0 for `git diff --name-only`). No branch can be named
-// this way — `git check-ref-format --branch` rejects a leading `-` — so nothing
-// legitimate is lost, and failing the run loudly beats composing a command that writes
-// somewhere nobody asked for.
-if (typeof baseBranch === 'string' && baseBranch.trim().startsWith('-')) {
-  throw new Error(
-    `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,
-  )
+/**
+ * The shell substitution the unpinned arm resolves with — declared ABOVE the function
+ * that returns it because both are evaluated at module scope, so this is a temporal-dead-
+ * zone constraint rather than a matter of layout.
+ */
+const diffBaseSubstitution = `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
+
+/**
+ * The unpinned arm of `diffBase`, and the ONLY place the base branch NAME is read.
+ *
+ * AN OPTION-SHAPED NAME IS REFUSED HERE — the same refusal `diffBaseRef` makes on the TS
+ * side, for the same measured reason: a rev-range operand beginning with `-` is parsed by
+ * git as a FLAG, and `--output=<path>..<head>` writes the file (git 2.43, exit 0 for
+ * `git diff --name-only`). No branch can be named this way — `git check-ref-format
+ * --branch` rejects a leading `-` — so nothing legitimate is lost.
+ *
+ * AND IT IS REFUSED HERE RATHER THAN AT MODULE SCOPE, which is where the first version of
+ * this guard sat. That version threw BEFORE `pinnedBase` was consulted, so a run with a
+ * valid 40-hex pin and an option-shaped base branch failed — even though the pin means
+ * the name is never read and never reaches git. `diffBaseRef` returns the pin before it
+ * validates the name; this now does the same, and the two implementations agree on
+ * ORDER as well as on value.
+ *
+ * That mistake is the mirror of the one it was fixing: there a `-` check refused to
+ * EXAMINE the value and let it through; here it refused the whole call over a value that
+ * had already been superseded. Validate on the path where the value is actually used.
+ */
+function unpinnedDiffBase() {
+  if (typeof baseBranch === 'string' && baseBranch.trim().startsWith('-')) {
+    throw new Error(
+      `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,
+    )
+  }
+  return diffBaseSubstitution
 }
 
 const diffBase =
@@ -1436,7 +1459,7 @@ const diffBase =
       // Every consumer of `diffBase` is a shell word — the two codex wrappers' argv and
       // the commands in the prompts — so the substitution is evaluated exactly where the
       // diff runs. It is pre-quoted for that reason, and consumers must NOT re-quote it.
-      `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
+      unpinnedDiffBase()
 
 function forgeStep1(reenter) {
   return reenter

@@ -137,11 +137,21 @@ fi
 # branch changed 30 (#546) and at ~100 files where it changed 20 (run 25b2327d).
 #
 # DEFENCE IN DEPTH, NOT THE GUARANTEE. What enforces the invariant is structural:
-# one binding per boundary (`diffBase`, `diffBaseRef()`) and an argv boundary that
-# hands the shell wrappers an already-resolved ref, so no variable holding a base
-# branch NAME exists in their scope at all. This check makes a regression LOUD; a
-# pass means "none of the enumerated spellings is present", never "no bare-base
-# range exists". diff-base-check.mjs lists what it cannot see, and why.
+# one binding per boundary (`diffBase`, `diffBaseRef()`), plus an argv boundary that
+# hands the wrappers an already-resolved ref.
+#
+# THAT BOUNDARY IS NOT UNIFORM, and this comment used to say it was — "no variable
+# holding a base branch NAME exists in their scope at all". `codex-build.sh` reaches
+# it (argv $2, default EMPTY, and empty skips the diff). `codex-review.sh` does NOT:
+# it defaults `BASE_REF` to the literal `main` for standalone use, promoting it to
+# `origin/main` only when that ref resolves and only for a proven local branch name.
+# The as-built for this branch records that default; a guard describing its own
+# coverage must not contradict it, because a stale sentence HERE tells the next
+# person a gap is covered when it is not.
+#
+# This check makes a regression LOUD; a pass means "none of the enumerated spellings
+# is present", never "no bare-base range exists". diff-base-check.mjs lists what it
+# cannot see, and why.
 if ! bun "$HERE/diff-base-check.mjs"; then
   fail=1
 fi

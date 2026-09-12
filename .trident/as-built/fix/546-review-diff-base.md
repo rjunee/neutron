@@ -156,6 +156,76 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round eight: the same rule, twice, disagreeing about ORDER
+
+Round seven's refusal went in at MODULE SCOPE in `inner-workflow.mjs` — before
+`pinnedBase` was consulted. `diffBaseRef` returns the pin *before* it validates the name.
+So a run with a valid 40-hex pin and an option-shaped base branch **threw**, where it
+should have used the pin and never looked at the name: a run that worked before the fix
+and failed after it, over a value the pin had already superseded.
+
+**That is the mirror of the defect round seven fixed.** There a `-` check refused to
+EXAMINE a value and let it through; here it refused the whole call over a value that was
+never going to be used. Both are the same error about *where* a guard belongs: validate on
+the path where the value is actually read. Fixed by moving the check into
+`unpinnedDiffBase()`, the only arm that reads the name.
+
+#### Can the two implementations be made one? No — but they can be held to one answer.
+
+`diffBaseRef` (TS) and `diffBase` (`.mjs`) encode the same rule. They **cannot share a
+module**: the workflow script takes no imports — its globals are injected by the Workflow
+runtime and its own header states it "is NOT runnable with plain `node`/`bun`". Extracting
+the rule would mean either giving that file an import it cannot have, or generating it,
+which trades a divergence you can read for one you cannot.
+
+They have now diverged **twice**, and neither time did a test catch it — because each
+implementation was only ever tested on its own:
+
+| round | divergence | caught by |
+|---|---|---|
+| six | `.mjs` kept a merge-mode-keyed fallback the TS side had dropped | review |
+| eight | `.mjs` validated the name *before* the pin; TS after | review |
+
+So the answer to "two copies of a rule" here is a **parity table**
+(`trident/diff-base-option-shaped.test.ts`): every row asserts BOTH implementations, over
+pinned/unpinned, origin-resolves/missing, both merge modes, and the refusal. The `.mjs`
+answer is a shell word, so it is evaluated in a real repository to be comparable. Verified
+by mutation: reintroducing *either* historical divergence reds a row — the merge-mode one
+only after the table was widened to run both modes, which is itself the lesson that a
+parity table is only as good as the axes it varies.
+
+That is weaker than one implementation and stronger than two tested separately: the code
+is still duplicated, but a change to either alone cannot land.
+
+#### Two stale assertions, one inside a guard
+
+`orchestrator.ts` still said the bare name is reached "only in local mode" — the framing
+the round-six fix removed, surviving in the comment above the call it changed. And
+`lint.sh` claimed neither wrapper holds a base-branch-name variable while
+`codex-review.sh` deliberately defaults `BASE_REF` to bare `main` — **which this very
+record documents**. The document asserting the finding and the document asserting the
+opposite were in the same PR.
+
+The second is the one that matters: a stale sentence in a comment misleads a reader; a
+stale sentence in **a guard's own self-description** tells the next person the guard covers
+something it does not, which is how a gap gets left on purpose.
+
+#### The guidance correction, which came out of round seven
+
+Through most of this branch the working rule was *narrow the claim to match the
+instrument*. Round seven's falsification pass produced a case where that was the wrong
+move: "every consumer carries `--end-of-options`" was false because two `.mjs` prompt sites
+lacked it, and the cheap fix was to narrow the sentence to "every consumer except two,
+which the binding protects". Adding the marker to those two sites instead made the simple
+sentence true.
+
+**The better rule is: match the claim and the instrument — and prefer raising the
+instrument whenever the strong claim is achievable.** Narrowing is the fallback for when it
+is not. A narrowed claim is honest but it also encodes the gap permanently, and every
+future reader has to carry the exception; a raised instrument deletes the exception. The
+test is simply which is cheaper *here* — and "add a flag to two call sites" is far cheaper
+than "teach everyone forever that there are two call sites where this does not hold".
+
 ### Round seven: the mitigation opened a file-write, and a stale signature
 
 **`originBaseResolves` declined to PROBE a name beginning with `-`, and declining to probe

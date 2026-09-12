@@ -148,6 +148,18 @@ The resolution order is evidence-first, and is the same at every site:
       the same repo — the previous version of this test asserted the command *shape* and could
       not see the bug in the fixture it ran against. Mutating the fallback back to the bare name
       reddens it.
+- [ ] **The two implementations of the rule agree, row by row.** `diffBaseRef` (TS) and
+      `diffBase` (`.mjs`) cannot share a module — the workflow script takes no imports — and
+      have diverged twice, on the merge-mode fallback and on whether the pin is read before
+      the name. Verified by the parity table in `trident/diff-base-option-shaped.test.ts`,
+      which asserts BOTH over pinned/unpinned, origin-resolves/missing, both merge modes and
+      the refusal, evaluating the `.mjs` shell word in a real repository so the two are
+      comparable. Mutation: reintroducing either historical divergence reds a row. A
+      criterion naming only one implementation is how both divergences survived.
+- [ ] **A valid pin wins before the name is examined, in both implementations.** The
+      refusal belongs on the arm that reads the name; a module-scope check failed runs whose
+      pin meant the name was never used. Verified by "ORDER: a valid PIN wins before the name
+      is examined — in BOTH implementations", which asserts the two together in one test.
 - [ ] **An option-shaped base is refused at the binding, and every consumer is shielded.**
       A name beginning with `-` is read by git as a FLAG, not a revision: `--output=<path>..<head>`
       writes that file, and two of the four consumers exit 0 while doing it. `diffBaseRef` throws
