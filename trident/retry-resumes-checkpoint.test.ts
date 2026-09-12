@@ -1,34 +1,43 @@
 /**
- * A RE-DISPATCH MUST RESUME THE DEAD RUN, NOT START ITS CARD OVER (#519).
+ * A RE-DISPATCH OF A MID-BUDGET RUN KEEPS ITS RALPH COUNT (#519).
  *
- * The defect, measured in this tree: a re-dispatch creates a NEW `code_trident_runs`
- * row, and `create` wrote `ralph_round: 0` onto it unconditionally. Two consequences
- * follow, both from code in this repo rather than from a guess:
+ * WHAT THIS CLOSES, exactly. A governed run that died at `fix-round-N` or
+ * `outer-published:*` with iterations LEFT used to be re-dispatched onto a row at
+ * `ralph_round: 0`. Two readers make that a real loss for that run:
+ * `refireNextRalphTask` (orchestrator.ts) bounds its remaining loop on
+ * `nextRalphRound > run.max_ralph_rounds`, and `buildWorkflowArgs` (inner-loop.ts)
+ * threads the counter to the inner workflow as `ralphRound`, where the plan-refresh
+ * cadence reads `ralphRound % PLAN_REFRESH_EVERY` — so the periodic full re-plan
+ * landed on the wrong iteration of the same piece of work. The count and its cap now
+ * travel together.
  *
- *   - `refireNextRalphTask` (trident/orchestrator.ts) bounds the WHOLE Ralph loop on
- *     `ralph_round + 1 > run.max_ralph_rounds`. A counter reset to 0 on every
- *     re-dispatch means the bound stopped applying to the CARD: press ▶ again and a
- *     non-converging planner gets another full 20 iterations, indefinitely.
- *   - `buildWorkflowArgs` (trident/inner-loop.ts) threads the counter to the inner
- *     workflow as `ralphRound`, where the planner-cadence gate reads
- *     `ralphRoundNum % PLAN_REFRESH_EVERY`. A reset counter restarts the periodic
- *     full re-plan on the wrong iteration, so the survey is re-paid off-cadence.
+ * WHAT THIS DOES *NOT* CLOSE, pinned as a test rather than left in prose (see
+ * "THE LIMIT" below). It does NOT make `max_ralph_rounds` a bound on the CARD. A run
+ * that EXHAUSTS the loop dies with `inner_checkpoint = 'ralph-task-built'`
+ * (`refireNextRalphTask`'s cap branch goes through `failedRun`, which does not touch
+ * the checkpoint), that name is not review-capable, so the exhausted row classifies
+ * `died-before-build` and seeds NOTHING — the next dispatch is a fresh build with a
+ * fresh budget. Pressing ▶ repeatedly still buys iterations; it now costs one
+ * exhaustion cycle per press instead of none. The row is recreated by every dispatch,
+ * so any per-row counter is one reset away by construction; holding the spend on the
+ * CARD is the durable fix and is a different change.
  *
- * The `inner_checkpoint` half of continuity already lands (the salvage-resume seed).
- * This file drives the REAL `dispatchBoardBoundBuild` against the REAL store and
- * pins both directions of the round half — it resumes on proof, it starts fresh
- * (and logs why) without it — plus the three boundaries that make resuming safe: an
- * EXHAUSTED round is carried so the cap still bites rather than being reset to a
- * fresh budget, a live run is refused at the existing claim chokepoint, and the
- * launcher-CRASH relaunch (a different path, on the SAME row) is untouched.
+ * This file drives the REAL `dispatchBoardBoundBuild` against the REAL store and pins
+ * both directions — the carry on proof, the fresh start (and its logged reason)
+ * without it — plus the boundaries that make it safe: the cap travels WITH the round
+ * so a tighter one cannot be raised, a task-text edit past the slug's 35th character
+ * does not cost the card its budget, a live run is refused at the existing claim
+ * chokepoint, and the launcher-CRASH relaunch (a different path, on the SAME row) is
+ * untouched.
  *
  * Every case names the mutation that turns it RED.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { readFileSync } from 'node:fs'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
@@ -38,7 +47,8 @@ import {
 } from './board-dispatch.ts'
 import {
   TridentRunStore,
-  TridentUnseededPinError,
+  TridentUnboundedCarriedRoundError,
+  TridentUngovernedRalphRoundError,
   type MergeMode,
   type TridentRun,
 } from './store.ts'
@@ -212,11 +222,13 @@ describe('a re-dispatch after a DEAD run resumes from its checkpoint AND its ral
     expect(seedLine).toContain(`prior_run_id=${prior.id}`)
   })
 
-  test('THE BUDGET IS NOW THE CARD\'S: a second re-dispatch does not hand back a fresh 20', async () => {
-    // The consequence the reset had: `refireNextRalphTask` refuses at
-    // `ralph_round + 1 > max_ralph_rounds`, so a card could be resurrected forever by
-    // re-pressing ▶ — each attempt believing it had spent nothing. RED-mutation: the
-    // same as A above; the chain collapses to 0 at every link.
+  test('A CHAIN of mid-budget re-dispatches keeps accumulating, never restarting', async () => {
+    // Each link in the chain inherits the spend of the one before it, so a card that
+    // dies mid-budget twice has spent both times. This is NOT the same as bounding the
+    // card — see THE LIMIT below for the case that still resets — it is the property
+    // that the counter survives a re-dispatch at all, for as long as the runs keep
+    // dying on a review-capable checkpoint.
+    // RED-mutation: the same as A above; the chain collapses to 0 at every link.
     await priorRun({ ralph_round: 4 })
 
     const first = await dispatchRecording(async () => HEAD)
@@ -242,14 +254,22 @@ describe('a re-dispatch after a DEAD run resumes from its checkpoint AND its ral
     expect(second.result.run.inner_checkpoint).toBe('fix-round-5')
   })
 
-  test('THE WORKFLOW IS TOLD THE TRUE ROUND — the planner cadence is not restarted', async () => {
-    // WHERE THE RE-SPENT PLANNING ACTUALLY LANDS. `buildWorkflowArgs` threads the
-    // row's counter to the inner workflow as `ralphRound`, and the planner-cadence
-    // gate reads `ralphRoundNum % PLAN_REFRESH_EVERY` to decide between the cheap
-    // continuation planner and the full survey (inner-workflow.mjs). A row born at 0
-    // tells the workflow this is iteration 1, so the cadence restarts and the full
-    // re-plan lands on the wrong iteration — the governed plan regenerated from
-    // scratch off-schedule, every time a card is retried.
+  test('WIRING: the launcher threads the carried round into the workflow args', async () => {
+    // WHAT THIS ASSERTS AND WHAT IT DOES NOT (adversarial review, P2). It asserts the
+    // WIRING: the counter written on the row is what `buildWorkflowArgs` hands the
+    // inner workflow as `ralphRound`, so the carry is not a column nothing reads.
+    //
+    // It does NOT show that any planner was skipped, and the "planning tokens are not
+    // re-spent" acceptance box is UNTICKED because of that. The cadence gate
+    // (`inner-workflow.mjs`, `cleanContinuation`) requires `resumeCheckpoint ===
+    // 'ralph-task-built'` AND `ralphRound >= 1` AND `% PLAN_REFRESH_EVERY !== 0` — and
+    // this change deliberately never resumes `ralph-task-built` (it is
+    // `died-before-build`). So for every shape this change DOES resume, the full
+    // `plan:fable` survey runs exactly as it did before; the carried round only
+    // matters for the resumed run's own LATER iterations, whose cadence
+    // `inner-workflow-plan-next.test.ts` already pins at rounds 1-4 versus 5 and 10.
+    // Asserting an input to a gate no test here drives would be a proxy, and this
+    // docblock exists so nobody mistakes it for more.
     // RED-mutation: mutation A or B — the args carry 0 and the assertion fails.
     await priorRun({ ralph_round: 4 })
 
@@ -327,38 +347,42 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     expect(seedLine).toBeNull()
   })
 
-  test('THE BRANCH TIP MOVED: nothing is carried, and the line names the moved tip', async () => {
+  test('THE BRANCH TIP MOVED: the COMMIT is refused, and the line names the moved tip', async () => {
     // THE EVIDENCE GATE. A 40-hex tip that is not the recorded one means the branch
-    // moved under this lane — a force-push, or another card's commit. Resuming onto
-    // it would build against a state that is gone, and would do it while carrying the
-    // prior run's base pin, which is exactly what makes the launcher's
-    // leftover-branch refusal exempt the adopted tip.
+    // moved under this lane — a force-push, or another card's commit. Resuming onto it
+    // would build against a state that is gone, and would do it while carrying the
+    // prior run's base pin, which is exactly what makes the launcher's leftover-branch
+    // refusal exempt the adopted tip.
     // RED-mutation: replace the comparison with `if (candidate !== null) seed =
-    // candidate` — it always resumes, and every assertion here fails.
+    // candidate` — it always resumes, and the checkpoint assertions here fail.
     await priorRun({ ralph_round: 4 })
 
     const { result, seedLine } = await dispatchRecording(async () => MOVED)
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.run.ralph_round).toBe(0)
     expect(result.run.inner_checkpoint).toBeNull()
     expect(result.run.inner_checkpoint_head).toBeNull()
     expect(result.run.base_sha).toBeNull()
-    expect(store.get(result.run.id)!.ralph_round).toBe(0)
     expect(seedLine).toContain('reason=branch_tip_moved')
-    expect(seedLine).toContain('ralph_round=0')
+    // …AND THE BUDGET STILL TRAVELS, because the card named this run and a rebuild
+    // does not un-spend iterations the card already paid for. The two carries have
+    // different gates on purpose: the commit needs the tip proof, the counter needs
+    // only identity, and `min` can never authorise work.
+    expect(result.run.ralph_round).toBe(4)
+    expect(store.get(result.run.id)!.ralph_round).toBe(4)
+    expect(seedLine).toContain('budget_carried=true')
   })
 
-  test('THE BRANCH IS ABSENT OR THE REF UNREADABLE: refused too, under its own reason', async () => {
+  test('THE BRANCH IS ABSENT OR THE REF UNREADABLE: the commit is refused under its own reason', async () => {
     // `unknown` AUTHORISES NOTHING. An empty read is the branch being gone, or a ref
     // that could not be read at all (an uncredentialed remote, a probe that threw) —
     // the ABSENCE of evidence, not evidence of another lane. It refuses like a moved
-    // tip, but under a different reason, because the sentence is what tells an
-    // operator whether to look at the branch or at the credential.
-    // RED-mutation: treat `''` as a match (`observed === candidate.head || observed
-    // === ''`) and both arms below resume against a branch nobody can see.
-    // PREFIX-DISTINCT TASKS. `slugifyTask` truncates at 35 characters, so two cards
+    // tip, but under a different reason, because the sentence is what tells an operator
+    // whether to look at the branch or at the credential.
+    // RED-mutation: treat `''` as a match (`observed === candidate.head || observed ===
+    // ''`) and both arms below resume against a branch nobody can see.
+    // PREFIX-DISTINCT TASKS: `slugifyTask` truncates at 35 characters, so two cards
     // whose titles differ only in a suffix share a slug — and a branch.
     for (const [name, task, tip] of [
       ['absent / unreadable', 'absent ref card — rebuild the importer', async () => ''],
@@ -375,9 +399,10 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
       const { result, seedLine } = await dispatchRecording(tip, { task })
       expect(result.ok).toBe(true)
       if (!result.ok) return
-      expect({ name, round: result.run.ralph_round }).toEqual({ name, round: 0 })
       expect({ name, cp: result.run.inner_checkpoint }).toEqual({ name, cp: null })
       expect(seedLine).toContain('reason=branch_tip_unreadable_or_absent')
+      // The spend still travels — same reasoning as the moved-tip case above.
+      expect({ name, round: result.run.ralph_round }).toEqual({ name, round: 4 })
     }
   })
 
@@ -398,14 +423,12 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     expect(new Set(tasks.map(slugifyTask)).size).toBe(tasks.length)
   })
 
-  test('A PRIOR THAT BUILT NOTHING RESUMABLE: no round travels either', async () => {
-    // `ralph-task-built` has a commit behind it but `resumeOnUnchangedHead` rebuilds
-    // it by design, and a `stopped` run is work the OWNER discarded. Neither hands
-    // anything forward — and the round must not sneak past a checkpoint that did not.
-    // RED-mutation: carry `prior.ralph_round` outside the `candidate !== null` arm
-    // and the round arrives on a row with no checkpoint, which `create` then refuses
-    // (`TridentUnseededPinError`) — so the dispatch fails outright.
-    // PREFIX-DISTINCT TASKS, for the same truncation reason as above.
+  test('A PRIOR THAT BUILT NOTHING RESUMABLE hands over no COMMIT — but its spend still counts', async () => {
+    // `ralph-task-built` has a commit behind it but `resumeOnUnchangedHead` rebuilds it
+    // by design; a `stopped` run is work the OWNER discarded; a null checkpoint built
+    // nothing. None of them hands a commit forward.
+    // RED-mutation: carry `prior.inner_checkpoint` outside the `candidate !== null` arm
+    // and a row is seeded with a checkpoint the workflow will not review.
     for (const [name, task, over] of [
       ['ralph-task-built', 'handoff card — rebuild the importer', { checkpoint: 'ralph-task-built' as const }],
       ['a STOPPED prior', 'stopped card — rebuild the importer', { phase: 'stopped' as const }],
@@ -416,9 +439,13 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
       const { result, seedLine } = await dispatchRecording(async () => HEAD, { task })
       expect(result.ok).toBe(true)
       if (!result.ok) return
-      expect({ name, round: result.run.ralph_round }).toEqual({ name, round: 0 })
       expect({ name, cp: result.run.inner_checkpoint }).toEqual({ name, cp: null })
       expect(seedLine).toContain('reason=prior_run_has_no_resumable_build')
+      // AND THE SPEND TRAVELS ANYWAY. This arm matters most: the Ralph loop's own
+      // exhaustion path parks on `ralph-task-built`, so a budget gated on the commit
+      // seed would give the one shape that can actually exhaust a card the one thing it
+      // must not get — a fresh budget. See THE LIMIT below.
+      expect({ name, round: result.run.ralph_round }).toEqual({ name, round: 4 })
     }
   })
 
@@ -455,7 +482,7 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     expect(control.result.run.inner_checkpoint).toBe('fix-round-3')
   })
 
-  test('AN EXHAUSTED PRIOR STAYS EXHAUSTED — the round is carried and the cap still bites', async () => {
+  test('a prior that spent its whole budget ON A REVIEW-CAPABLE CHECKPOINT stays exhausted', async () => {
     // THE BEHAVIOUR THIS TEST USED TO ASSERT AS CORRECT (cross-model review,
     // BLOCKER 1). It created a prior at the cap and asserted the resumed row came
     // back at `ralph_round: 0` with `max_ralph_rounds: 20` — a FULL budget. Trace it
@@ -467,6 +494,10 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     //
     // A refusal to carry has to be a refusal, not a reset. So the round travels
     // verbatim and the cap bites on the row that inherits it.
+    //
+    // THE SHAPE MATTERS AND IS NARROW: this is a run parked on `fix-round-3` that
+    // happens to have spent every iteration. A run that actually exhausted the Ralph
+    // LOOP dies on `ralph-task-built` and seeds nothing at all — see THE LIMIT.
     // RED-mutation: restore the `round < max` conjunct in `carryableRalphRound` and
     // this row comes back at 0 with a fresh budget — every assertion below fails.
     await priorRun({ ralph_round: DEFAULT_MAX_RALPH_ROUNDS, max_ralph_rounds: DEFAULT_MAX_RALPH_ROUNDS })
@@ -532,6 +563,300 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
   })
 })
 
+describe('THE CAP TRAVELS WITH THE ROUND — a re-dispatch may tighten the budget, never loosen it', () => {
+  // NO TEST ANYWHERE SET `deps.max_ralph_rounds` (adversarial review, P3: the mutant
+  // that replaced `deps.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS` with
+  // `prior.max_ralph_rounds` survived the whole suite). It is threaded in production
+  // from `code-command.ts`, so a cap lowered between two attempts is a live path. Every
+  // test below sets it explicitly, and the prior row's cap differs from BOTH the
+  // default and the dispatch's value so the three cannot be confused.
+
+  test('a TIGHTER prior cap survives a dispatch carrying the ambient default', async () => {
+    // THE MEASURED DEFECT (round 2 BLOCKER): prior 5/5 + no explicit cap → 5/20, and
+    // `5 + 1 > 20` is false, so a card someone deliberately capped at 5 got twenty.
+    // RED-mutation: drop the `...(budget !== null ? { max_ralph_rounds } : {})` half of
+    // the create call and the row is born at cap 20.
+    await priorRun({ ralph_round: 5, max_ralph_rounds: 5 })
+
+    const { result } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 5,
+      cap: 5,
+    })
+    // AND THE CAP BITES: a card at 5/5 gets no further iteration.
+    expect(computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {}).phase).toBe(
+      'failed',
+    )
+  })
+
+  test('a cap LOWERED in configuration since the prior run applies immediately', async () => {
+    // Tightening is always safe, so a config cut reaches a resumed card. Prior cap 20,
+    // dispatch cap 5, carried round 4 → 4/5.
+    // RED-mutation: pass `prior.max_ralph_rounds` instead of `deps.max_ralph_rounds` as
+    // the ceiling — the exact mutant that survived — and the cap comes back 20.
+    await priorRun({ ralph_round: 4, max_ralph_rounds: 20 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { max_ralph_rounds: 5 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 4,
+      cap: 5,
+    })
+  })
+
+  test('a cap RAISED in configuration does NOT reach a resumed card', async () => {
+    // The load-bearing half. If a raise reached it, an exhausted card could be
+    // resurrected by editing config and pressing ▶ — the unbounded-retry defect
+    // re-entering through the cap instead of the counter. Prior cap 6, dispatch cap 30
+    // → 6, because `min` only ever tightens.
+    // RED-mutation: replace `Math.min(...)` with the dispatch ceiling and the cap
+    // becomes 30, buying twenty-four iterations nobody authorised.
+    await priorRun({ ralph_round: 5, max_ralph_rounds: 6 })
+
+    const { result } = await dispatchRecording(async () => HEAD, { max_ralph_rounds: 30 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 5,
+      cap: 6,
+    })
+  })
+
+  test('an UNSEEDED dispatch still takes the configured cap, byte-identically', async () => {
+    // The negative control for the three above: with no prior to inherit from, the
+    // dispatch's own cap is written exactly as it was before any of this existed.
+    // RED-mutation: make `effectiveMaxRalphRounds` prefer the carried value
+    // unconditionally and this row loses its configured cap.
+    const { result } = await dispatchRecording(async () => HEAD, { max_ralph_rounds: 7 })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect({ round: result.run.ralph_round, cap: result.run.max_ralph_rounds }).toEqual({
+      round: 0,
+      cap: 7,
+    })
+  })
+})
+
+describe("AN EDITED SPEC DOC MUST NOT COST THE CARD ITS BUDGET", () => {
+  test('a task-text edit past the slug\'s 35th character keeps the spend, and says which fact differed', async () => {
+    // THE MEASURED DEFECT (adversarial review, P2). The ▶ task text is the card's
+    // design-doc BODY and `slugifyTask` truncates at 35 characters, so an owner
+    // clarifying that doc between two presses keeps the same slug, the same branch and
+    // the same card — while the full text differs. That used to be reported as
+    // `prior_run_is_a_different_card` and reset the budget: same lane, same card, and a
+    // diagnosis that was simply false. Clarifying a spec doc between two presses is the
+    // most likely thing an owner does.
+    // RED-mutation: move the `prior.task !== input.task` check back ABOVE the link
+    // check (so it decides identity) and the round comes back 0 under the old reason.
+    const PREFIX = 'rebuild the governed importer end to'
+    const BEFORE = `${PREFIX} end with a full regression suite`
+    const AFTER = `${PREFIX} end with a full regression suite, and note the CSV edge case`
+    // Precondition, asserted rather than assumed: the edit really does keep the slug.
+    expect(slugifyTask(AFTER)).toBe(slugifyTask(BEFORE))
+    expect(AFTER).not.toBe(BEFORE)
+
+    await priorRun({ task: BEFORE, ralph_round: 12, max_ralph_rounds: 20 })
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD, { task: AFTER })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // THE SPEND SURVIVES: the card named this run, which is identity.
+    expect(result.run.ralph_round).toBe(12)
+    expect(result.run.max_ralph_rounds).toBe(20)
+    expect(seedLine).toContain('budget_carried=true')
+    // THE COMMIT STILL DOES NOT, and that asymmetry is deliberate: adopting the wrong
+    // card's unreviewed commit sends code to review under another card's title, while a
+    // wrong budget carry can only tighten a bound. Under-authorising is the safe side.
+    expect(result.run.inner_checkpoint).toBeNull()
+    expect(result.run.base_sha).toBeNull()
+    // AND THE REASON IS TRUE. `prior_run_is_a_different_card` was a false statement
+    // about the world; this names which of the two facts disagreed.
+    expect(seedLine).toContain('reason=prior_run_task_text_differs')
+    expect(seedLine).not.toContain('different_card')
+  })
+})
+
+describe('LOCAL merge-mode over a REAL git repo, with the REAL branch-tip reader', () => {
+  /**
+   * WHY THIS IS NOT ANOTHER INJECTED PROBE (round 2 test gap). Every other test here
+   * injects `readBranchTip`, so they verify the MODE reaches the seam and nothing more —
+   * the real `rev-parse --verify` path was never executed, while the `local` acceptance
+   * criterion was being claimed on the strength of it. These two dispatch with NO
+   * injection at all, against a repo built on disk with no origin and with a `gh` that
+   * records every invocation, so "works without gh or a remote" is measured rather than
+   * assumed. That is the whole point of the criterion: a resume that leans on
+   * `detectExistingPr` silently degrades to nothing exactly here.
+   */
+  function realRepo(name: string, branch: string | null): { dir: string; head: string } {
+    const dir = join(tmp, name)
+    mkdirSync(dir)
+    const git = (...a: string[]): void => {
+      const r = Bun.spawnSync(['git', '-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a])
+      expect(r.exitCode).toBe(0)
+    }
+    expect(Bun.spawnSync(['git', 'init', dir]).exitCode).toBe(0)
+    git('commit', '--allow-empty', '-m', 'init')
+    if (branch !== null) git('branch', branch)
+    const rev = Bun.spawnSync(['git', '-C', dir, 'rev-parse', '--verify', 'HEAD'])
+    // NO ORIGIN: `git remote` must be empty, or the "no remote" claim is untested.
+    expect(Bun.spawnSync(['git', '-C', dir, 'remote']).stdout.toString().trim()).toBe('')
+    return { dir, head: rev.stdout.toString().trim() }
+  }
+
+  /** A `gh` on PATH that RECORDS every call and fails, so any reliance on it shows up. */
+  function recordingGh(): string {
+    const shimDir = join(tmp, `gh-shim-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(shimDir)
+    const log = join(shimDir, 'calls')
+    writeFileSync(join(shimDir, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nexit 1\n`)
+    chmodSync(join(shimDir, 'gh'), 0o755)
+    return shimDir
+  }
+
+  async function dispatchReal(repoDir: string, task: string) {
+    const shim = recordingGh()
+    const oldPath = process.env['PATH']
+    process.env['PATH'] = `${shim}:${oldPath ?? ''}`
+    const lines: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((a) => String(a)).join(' '))
+    }
+    try {
+      // NO `readBranchTip` — `defaultReadBranchTip` runs `git rev-parse --verify` for
+      // real, against `refs/heads/<branch>` in this repo.
+      const result = await dispatchBoardBoundBuild(
+        { task, board_item_id: 'ready' },
+        deps({ resolveBuildRepo: async () => repoDir }),
+      )
+      return {
+        result,
+        seedLine: lines.find((l) => l.includes('event=dispatch_resume_seed')) ?? null,
+        ghCalls: (() => {
+          try {
+            return readFileSync(join(shim, 'calls'), 'utf8').trim()
+          } catch {
+            return ''
+          }
+        })(),
+      }
+    } finally {
+      console.log = original
+      process.env['PATH'] = oldPath ?? ''
+    }
+  }
+
+  test('an EXISTING local ref is read by rev-parse and the commit is adopted', async () => {
+    // RED-mutation: make `defaultReadBranchTip`'s local arm return '' (or point it at a
+    // remote) and the seed is refused — the real reader is what this proves.
+    const TASK_LOCAL = 'local real git card — rebuild the importer'
+    const branch = `trident/${slugifyTask(TASK_LOCAL)}`
+    const { dir, head } = realRepo('real-local-present', branch)
+    const prior = await priorRun({ task: TASK_LOCAL, ralph_round: 4 })
+    // The prior run recorded THIS repo's actual commit, which is what makes the
+    // head-equality proof a real comparison rather than two fixtures agreeing.
+    await store.update(prior.id, { inner_checkpoint_head: head, base_sha: head })
+
+    const { result, seedLine, ghCalls } = await dispatchReal(dir, TASK_LOCAL)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.merge_mode).toBe('local')
+    expect(result.run.inner_checkpoint).toBe('fix-round-3')
+    expect(result.run.inner_checkpoint_head).toBe(head)
+    expect(result.run.ralph_round).toBe(4)
+    expect(seedLine).toContain('reason=resumed')
+    // WITHOUT gh, AND WITHOUT A REMOTE. The resume leans on neither.
+    expect(ghCalls).toBe('')
+    expect(result.run.pr).toBeNull()
+  })
+
+  test('an ABSENT local ref reads empty and refuses the commit, keeping only the spend', async () => {
+    // The other side: `rev-parse --verify --quiet` on a ref that does not exist exits
+    // non-zero, which is `''` — the absence of evidence, not evidence of another lane.
+    // RED-mutation: treat a non-zero rev-parse as a match and this dispatch adopts a
+    // commit on a branch that does not exist.
+    const TASK_GONE = 'local absent ref card — rebuild the importer'
+    const { dir } = realRepo('real-local-absent', null) // the card's branch is NOT created
+    const prior = await priorRun({ task: TASK_GONE, ralph_round: 4 })
+    await store.update(prior.id, { inner_checkpoint_head: HEAD, base_sha: BASE })
+
+    const { result, seedLine, ghCalls } = await dispatchReal(dir, TASK_GONE)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.inner_checkpoint).toBeNull()
+    expect(seedLine).toContain('reason=branch_tip_unreadable_or_absent')
+    expect(result.run.ralph_round).toBe(4) // identity is the link, not the branch
+    expect(ghCalls).toBe('')
+  })
+})
+
+describe('THE LIMIT — what this change does NOT close, pinned so it cannot be forgotten', () => {
+  test('a card with NO board link gets a fresh budget, however much it has spent', async () => {
+    // THE HONEST BOUND ON EVERY CLAIM IN THIS FILE. The spend is inherited through the
+    // card's `linked_run_id`, so anything that dispatches without one starts at zero:
+    // `onboarding/overnight/register.ts` creates governed runs with no card at all, and
+    // an owner who re-cuts a card (new title → new slug → no prior) gets a fresh budget
+    // on purpose. The row is recreated by every dispatch, so a per-row counter is one
+    // reset away by construction; holding the spend on the CARD is the durable fix and
+    // is a separate change.
+    // RED-mutation: let an absent link fall back to the task text and this row inherits
+    // a budget the board cannot show anyone.
+    await priorRun({ ralph_round: 12 })
+    cardLink = null // the card no longer names the run it produced
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.ralph_round).toBe(0)
+    expect(result.run.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(seedLine).toContain('reason=card_names_no_run')
+    expect(seedLine).toContain('budget_carried=false')
+  })
+
+  test('an EXHAUSTED ralph run does keep its spend through the board link — the P1 row, measured', async () => {
+    // The adversarial review measured this row as a fresh budget: a run that exhausts
+    // the Ralph loop takes `refireNextRalphTask`'s cap branch, which builds its terminal
+    // row through `failedRun` and so leaves `inner_checkpoint = 'ralph-task-built'` —
+    // not review-capable, therefore `died-before-build`, therefore no seed, therefore
+    // (when the budget was gated on the seed) `ralph_round: 0` and a full twenty again.
+    //
+    // Decoupling the budget from the commit seed closes that row FOR A LINKED CARD,
+    // which is what this asserts. It does NOT make the bound card-level in general —
+    // see the test above for the shapes that still reset.
+    // RED-mutation: gate `carriedRalphBudget` on `seed !== null` and this row is born
+    // at 0/20 with the whole budget back.
+    await priorRun({
+      checkpoint: 'ralph-task-built',
+      ralph_round: DEFAULT_MAX_RALPH_ROUNDS,
+      max_ralph_rounds: DEFAULT_MAX_RALPH_ROUNDS,
+    })
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.inner_checkpoint).toBeNull() // no commit is adopted, correctly
+    expect(result.run.ralph_round).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(result.run.max_ralph_rounds).toBe(DEFAULT_MAX_RALPH_ROUNDS)
+    expect(seedLine).toContain('reason=prior_run_has_no_resumable_build')
+    // And the loop refuses the next iteration rather than starting a twenty-first.
+    const next = computeTransition({ ...store.get(result.run.id)!, phase: 'ralph-task' }, {})
+    expect(next.phase).toBe('failed')
+    expect(next.failure_reason).toContain('max_ralph_rounds')
+  })
+})
+
 describe('a re-dispatch is REFUSED while the previous run is still live', () => {
   test('a NON-TERMINAL run on this branch refuses the dispatch and writes no row', async () => {
     // Never resume into a run that is still going: the point of carrying continuity
@@ -559,6 +884,63 @@ describe('a re-dispatch is REFUSED while the previous run is still live', () => 
     expect(result.message).toContain(live.id.slice(0, 8))
     // NOTHING was created — not a fresh row, and certainly not a second resumed one.
     expect(store.listNonTerminalByRepo(tmp).length).toBe(before)
+  })
+
+  test('A REFUSED dispatch emits NO seed line — a retry that never happened is not reported', async () => {
+    // THE ORDERING DEFECT (adversarial review, P3). The line used to be emitted before
+    // the plan-doc await and before three refusal returns, so a dispatch that created no
+    // row still logged `reason=resumed`: the one line an operator greps to find out what
+    // a retry inherited, describing a retry that did not occur. It is now emitted after
+    // the row exists and reads its values off that row.
+    // RED-mutation: move the `log.info('dispatch_resume_seed', …)` block back above the
+    // `createIfClaimsAvailable` call and this assertion fails — the refusal below has a
+    // perfectly seedable prior, so the early line would say `resumed`.
+    const prior = await priorRun({ ralph_round: 4 })
+    // …and something live holds the branch, so the dispatch is refused outright.
+    const live = await store.create({
+      slug: `${slugifyTask(TASK)}`, project_slug: 'proj-1', repo_path: tmp,
+      task: 'a competing lane', branch: BRANCH, ralph: true,
+      id: 'live-holder-no-log',
+    })
+    await store.update(live.id, { phase: 'ralph-task' })
+    cardLink = prior.id
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    // NO ROW, THEREFORE NO SEED LINE. Silence here is the honest answer: nothing
+    // inherited anything, because nothing was created.
+    expect(seedLine).toBeNull()
+  })
+
+  test('a PATH-CLAIM refusal — past the seed decision, still no row and still no line', async () => {
+    // THE ARM THE BRANCH-LIVENESS TEST ABOVE CANNOT REACH, and the one the ordering
+    // defect actually lived on. The old log position sat after the seed ladder but
+    // BEFORE the file-contention block and its plan-doc await, so a dispatch refused by
+    // a PATH claim — which happens inside the create transaction, after that point —
+    // logged `reason=resumed` for a row that was never written.
+    // RED-mutation: move the `log.info('dispatch_resume_seed', …)` block back to just
+    // before `let createdRunId` and this assertion fails.
+    const PATHY = 'edit trident/budget-carry.ts and keep the importer regression suite green'
+    const prior = await priorRun({ task: PATHY, ralph_round: 4 })
+    cardLink = prior.id
+    // A live run in ANOTHER lane (different slug, different branch, so neither the
+    // branch-liveness gate nor the slug index fires) that already claims this path.
+    const holder = await store.create({
+      slug: 'some-other-lane', project_slug: 'proj-1', repo_path: tmp,
+      task: 'another lane', branch: 'trident/some-other-lane',
+      claimed_paths: ['trident/budget-carry.ts'],
+    })
+    await store.update(holder.id, { phase: 'forge-init' })
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD, { task: PATHY })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('held')
+    expect(seedLine).toBeNull()
   })
 
   test('a run that goes live DURING the tip probe is still refused — by the store claim path', async () => {
@@ -662,23 +1044,63 @@ describe('THE LAUNCHER-CRASH RELAUNCH IS A DIFFERENT PATH, AND IS UNCHANGED', ()
 })
 
 describe('the write site refuses a carried round it should never have been offered', () => {
-  test('an UNSEEDED row may not carry one — the four seed columns are one seed', async () => {
-    // "Do not put the check only in the caller." A round on a row with no checkpoint
-    // is a FRESH build born partway through a budget it never spent, with its
-    // plan-refresh cadence shifted. RED-mutation: delete the `seededCheckpoint === ''`
-    // arm in `create` and this row is writable from any future path.
+  test('a NON-GOVERNED row may not carry a round', async () => {
+    // "Do not put the check only in the caller" (adversarial review, P3). `create`
+    // re-applied the unseeded and pair rules but never this one, so
+    // `create({ ralph: false, ralph_round: 4 })` wrote a Ralph counter onto a row that
+    // will never run a Ralph loop — and `buildWorkflowArgs` reads it regardless, so
+    // the workflow would be told an iteration number for a loop that does not exist.
+    // RED-mutation: delete the `input.ralph !== true` arm and this row is writable.
     await expect(
       store.create({
-        slug: 'unseeded', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true, ralph_round: 4,
+        slug: 'ungoverned', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+        ralph: false, ralph_round: 4, max_ralph_rounds: 20,
       }),
-    ).rejects.toThrow(TridentUnseededPinError)
-    // POSITIVE CONTROL: the identical row WITH the full seed is accepted, so the
-    // refusal above is the missing checkpoint talking.
-    const seeded = await store.create({
-      slug: 'seeded', project_slug: 'proj-1', repo_path: tmp, task: 'x', ralph: true, ralph_round: 4,
-      inner_checkpoint: 'fix-round-3', inner_checkpoint_head: HEAD, base_sha: BASE,
+    ).rejects.toThrow(TridentUngovernedRalphRoundError)
+    // POSITIVE CONTROL: the identical row with `ralph: true` is accepted.
+    const governed = await store.create({
+      slug: 'governed', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 4, max_ralph_rounds: 20,
     })
-    expect(seeded.ralph_round).toBe(4)
+    expect(governed.ralph_round).toBe(4)
+  })
+
+  test('a round with NO CAP NAMED is refused — the bound is a pair, not a counter', async () => {
+    // THE MEASURED DEFECT (round 2 BLOCKER). `create` supplies
+    // DEFAULT_MAX_RALPH_ROUNDS when the caller names no cap, so a row carrying a spent
+    // round but no cap silently RAISES the bound of any card that had a tighter one: a
+    // prior at 5/5 became 5/20, and `5 + 1 > 20` authorises fifteen more iterations.
+    // RED-mutation: delete the `input.max_ralph_rounds === undefined` arm and the row
+    // below is created at 5/20 — the exact shape the blocker measured.
+    await expect(
+      store.create({
+        slug: 'no-cap', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+        ralph: true, ralph_round: 5,
+      }),
+    ).rejects.toThrow(TridentUnboundedCarriedRoundError)
+    // POSITIVE CONTROL: name the cap and it is accepted, at the value named.
+    const paired = await store.create({
+      slug: 'paired', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 5, max_ralph_rounds: 8,
+    })
+    expect({ round: paired.ralph_round, cap: paired.max_ralph_rounds }).toEqual({ round: 5, cap: 8 })
+  })
+
+  test('a carried round needs NO seeded checkpoint — a rebuilt card has still spent it', async () => {
+    // THE RULE THAT WAS REMOVED, and why (adversarial review, P2). An earlier revision
+    // refused a round on a row with no `inner_checkpoint`, reasoning that a fresh build
+    // has spent no iterations. But the row produced when a card's spec doc is edited
+    // past the slug's 35th character is exactly that: the COMMIT is refused (the text
+    // no longer matches) while the CARD has still spent those iterations. A rebuild
+    // does not un-spend them, and charging them is the tightening direction.
+    // RED-mutation: reinstate the `seededCheckpoint === ''` refusal and the
+    // edited-spec-doc dispatch above fails outright instead of keeping its budget.
+    const unseeded = await store.create({
+      slug: 'unseeded-budget', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 6, max_ralph_rounds: 20,
+    })
+    expect(unseeded.inner_checkpoint).toBeNull()
+    expect(unseeded.ralph_round).toBe(6)
   })
 
   test('a round at or past the cap is stored VERBATIM — not refused, not clamped', async () => {

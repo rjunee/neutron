@@ -26,13 +26,31 @@
  * It also SALVAGES a build that already exists. When the card's latest terminal
  * run is built-but-never-reviewed (`run-disposition.ts`) and the live branch tip
  * still resolves to exactly the commit that run recorded, the new row is created
- * already carrying that run's checkpoint evidence AND its Ralph re-fire counter —
- * so `launch()` takes its existing resume path, the commit goes to REVIEW instead
- * of being rebuilt from scratch, and the card's `max_ralph_rounds` budget is not
- * silently reset to a fresh 20 by the act of re-pressing ▶ (#519). Every other
- * shape dispatches exactly as it did before, and now SAYS SO: one
- * `dispatch_resume_seed` line per dispatch that had a prior terminal run, naming
- * either what was carried or the proof that failed.
+ * already carrying that run's checkpoint evidence — so `launch()` takes its
+ * existing resume path and the commit goes to REVIEW instead of being rebuilt from
+ * scratch.
+ *
+ * AND, ON A SEPARATE GATE, IT CARRIES THE CARD'S RALPH SPEND (#519) — `ralph_round`
+ * together with the cap it is measured against, `min(prior, this dispatch)`, so a
+ * governed run that died MID-budget keeps its count and its plan-refresh cadence
+ * instead of restarting them. The gate is the board link alone
+ * (`item.linked_run_id`), not the commit proof: identity is what the link
+ * establishes, and a budget carry is monotone — `min` can only tighten a bound,
+ * never authorise work — so a task-text edit past the slug's 35th character does not
+ * cost a card its budget while it does still refuse the commit.
+ *
+ * WHAT THAT DOES NOT DO, stated here because an earlier revision of this header
+ * claimed it did: it does NOT make `max_ralph_rounds` a bound on the CARD. The spend
+ * rides the card's `linked_run_id`, so any dispatch without one — `onboarding/
+ * overnight/register.ts` creates governed runs with no card at all, and an owner who
+ * re-cuts a card gets a new slug and no prior — starts at zero. The row is recreated
+ * by every dispatch, so a per-row counter is one reset away by construction; holding
+ * the spend on the CARD is the durable fix and is a separate change.
+ *
+ * Every other shape dispatches exactly as it did before, and now SAYS SO: one
+ * `dispatch_resume_seed` line per dispatch that had a prior terminal run AND created
+ * a row, naming what was carried (commit and budget are reported separately, because
+ * one word cannot honestly cover two gates) or the proof that failed.
  *
  * Before creating the run it resolves THIS project's own git-initialized build
  * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
@@ -75,13 +93,14 @@ import {
   type PublisherCredentialSource,
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
-import { builtButNeverReviewedSeed } from './run-disposition.ts'
+import { builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 
 const log = createLogger('trident')
 
@@ -1101,18 +1120,16 @@ export async function dispatchBoardBoundBuild(
   // ('ralph-progress-unknown'), so the resolved `ralph` flag is an input to the
   // seed decision rather than something read after the row exists.
   //
-  // THE CHECKPOINT IS NOT THE WHOLE OF CONTINUITY (#519). `ralph_round` is the
-  // other durable half: `refireNextRalphTask` bounds the entire Ralph loop on it
-  // and `buildWorkflowArgs` threads it to the inner workflow's planner-cadence
-  // gate, so a retry that resets it to 0 hands the card a FRESH 20-iteration
-  // budget every time ▶ is pressed — the bound `max_ralph_rounds` exists to impose
-  // becomes unenforceable by re-dispatch — and restarts the plan-refresh cadence.
-  // It travels under the SAME proof as the checkpoint, plus the one fact a counter
-  // needs (both runs governed); `carriedRalphRound` in run-disposition.ts owns that
-  // predicate and `create` re-applies its normalisation at the write site. It is
-  // NOT bounded by the cap on the way through: an exhausted round is carried so the
-  // cap refuses the next iteration on THIS row, rather than being dropped for a
-  // fresh row that has the whole budget again.
+  // THE CHECKPOINT IS NOT THE WHOLE OF CONTINUITY (#519). The card's Ralph SPEND is
+  // the other durable half: `refireNextRalphTask` bounds the run's remaining loop on
+  // `ralph_round + 1 > max_ralph_rounds` and `buildWorkflowArgs` threads the counter
+  // to the inner workflow's plan-refresh cadence, so a re-dispatch that writes 0 hands
+  // a mid-budget run a fresh count and lands its periodic full re-plan on the wrong
+  // iteration of the same work. `carriedRalphBudget` (run-disposition.ts) owns that
+  // decision — BOTH halves or neither, and the cap is min(prior, this dispatch) so a
+  // re-dispatch may tighten the budget and never loosen it. It is deliberately NOT
+  // gated on the commit proof; see the ladder below and the file header for why the
+  // link is the identity and the task text is not.
   //
   // THE HEAD EQUALITY IS LOAD-BEARING, not a nicety. It is what makes ADOPTING the
   // prior run's commit — its checkpoint, head, findings and base pin — safe: the
@@ -1154,6 +1171,11 @@ export async function dispatchBoardBoundBuild(
   // emitted once, after the last await, so the line reports the decision that was
   // actually made rather than one it was heading for.
   let seedReason = 'no_prior_terminal_run'
+  // THE CARD'S RALPH BUDGET, carried separately from the commit and gated on the
+  // STRONG identity alone — see `carriedRalphBudget` (run-disposition.ts). Null for
+  // every dispatch that has no governed prior to inherit from, which is the
+  // pre-existing shape.
+  let budget: ReturnType<typeof carriedRalphBudget> = null
   const prior = deps.store.latestTerminalBySlug(deps.project_slug, slug)
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
   // DIFFERENT cards whose titles agree on their first 35 slugged characters share
@@ -1191,69 +1213,106 @@ export async function dispatchBoardBoundBuild(
   // intact. The saving is claimed only when the board itself says whose commit is
   // being adopted.
   const cardsPriorRun = typeof item.linked_run_id === 'string' ? item.linked_run_id.trim() : ''
+  //
+  // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
+  // MEASURED defect (adversarial review, P2). It used to compare the task text
+  // before the link, and refuse with `prior_run_is_a_different_card`. But the ▶ task
+  // text is the card's design-doc BODY (`work-board-surface.ts`), and `slugifyTask`
+  // truncates at 35 characters — so an owner clarifying that doc between two presses
+  // keeps the same slug, the same branch and the same card, while the full text
+  // differs. Measured: a prior at `ralph_round 12` on `fix-round-3`, tip unmoved,
+  // `linked_run_id` naming it, came back `prior_run_is_a_different_card` with a fresh
+  // budget — the same lane, the same card, and a diagnosis that was simply false.
+  // Clarifying a spec doc between two presses is the most likely thing an owner does.
+  //
+  // So the link decides identity and the text decides only whether the COMMIT may be
+  // adopted. The asymmetry is not a compromise, it is the hazard model: adopting the
+  // wrong card's unreviewed commit sends code to review under another card's title,
+  // whereas the budget carry is MONOTONE (`min`) and can only tighten a bound. A
+  // wrong budget carry under-authorises; a wrong commit carry authorises. This repo
+  // takes the under-authorising side.
+  //
+  // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
+  // MEASURED defect (adversarial review, P2). It used to compare the task text
+  // BEFORE the link and refuse with `prior_run_is_a_different_card`. But the ▶ task
+  // text is the card's design-doc BODY (`work-board-surface.ts`) and `slugifyTask`
+  // truncates at 35 characters — so an owner clarifying that doc between two presses
+  // keeps the same slug, the same branch and the same card while the full text
+  // differs. Measured: a prior at `ralph_round 12` on `fix-round-3`, tip unmoved,
+  // `linked_run_id` naming it, came back `prior_run_is_a_different_card` with a fresh
+  // budget. Same lane, same card, and a diagnosis that was simply false. Clarifying a
+  // spec doc between two presses is the most likely thing an owner does.
+  //
+  // So the LINK decides identity and the TEXT decides only whether the COMMIT may be
+  // adopted. The asymmetry is the hazard model, not a compromise: adopting the wrong
+  // card's unreviewed commit sends code to review under another card's title, while
+  // the budget carry is MONOTONE (`min`) and can only TIGHTEN a bound. A wrong budget
+  // carry under-authorises; a wrong commit carry authorises. This repo takes the
+  // under-authorising side, so the weak proxy does not get to veto the strong
+  // identity for a value that cannot authorise anything.
   if (prior === null) {
     seedReason = 'no_prior_terminal_run'
-  } else if (prior.task !== input.task) {
-    seedReason = 'prior_run_is_a_different_card'
   } else if (cardsPriorRun === '') {
     seedReason = 'card_names_no_run'
   } else if (cardsPriorRun !== prior.id) {
     seedReason = 'card_names_a_different_run'
   } else {
-    // NO CAP IS PASSED, deliberately (cross-model review, BLOCKER 1). The carried
-    // `ralph_round` travels verbatim so `max_ralph_rounds` bites on the row that
-    // inherits it; gating the carry on the cap looked prudent and did the opposite,
-    // because this call's refusal path is not a refusal — it is a fresh row at 0,
-    // on which the cap check then authorises the whole budget again.
-    const candidate = builtButNeverReviewedSeed(prior, { ralph })
-    if (candidate === null) {
-      seedReason = 'prior_run_has_no_resumable_build'
+    // PAST THE LINK CHECK THIS CARD *IS* THIS RUN'S CARD, so the budget travels and
+    // nothing below can veto it. `deps.max_ralph_rounds` is passed as the CEILING for
+    // the carried cap — never as a gate on the carried ROUND, which is the mistake an
+    // earlier revision of this branch made: a refused carry is a fresh row at 0, i.e.
+    // a budget RESET wearing a guard's clothes.
+    budget = carriedRalphBudget(prior, {
+      ralph,
+      ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+    })
+    if (prior.task !== input.task) {
+      // Only the COMMIT is refused, and the reason names which of the two facts
+      // disagreed rather than claiming this is a different card.
+      seedReason = 'prior_run_task_text_differs'
     } else {
-      // The call itself sits inside the try: a NON-async probe throws at the
-      // call, before any promise exists for a .catch to attach to (Argus r7).
-      let tip = ''
-      try {
-        tip = await (
-          deps.readBranchTip ??
-          ((p: string, b: string, m: MergeMode) =>
-            defaultReadBranchTip(p, b, m, credentialedRunner ?? spawnCapture))
-        )(repo_path, branch, merge_mode)
-      } catch {
-        tip = '' // a thrown probe is NO evidence — fall through to a fresh dispatch
-      }
-      const observed = tip.trim().toLowerCase()
-      if (observed === candidate.head) {
-        seed = candidate
-        seedReason = 'resumed'
+      const candidate = builtButNeverReviewedSeed(prior, { ralph })
+      if (candidate === null) {
+        seedReason = 'prior_run_has_no_resumable_build'
       } else {
-        // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
-        // tip that is not the recorded one means the branch moved — someone else's
-        // commit, or a force-push — and resuming onto it would build against state
-        // that is gone. An empty read means the branch is absent, or the ref could
-        // not be read at all (an uncredentialed remote, a thrown probe); that is
-        // not evidence of another lane's work, it is the absence of evidence. Both
-        // refuse, because `unknown` authorises nothing; only the sentence differs,
-        // and it is the sentence that tells an operator whether to look at the
-        // branch or at the credential.
-        seedReason = observed === '' ? 'branch_tip_unreadable_or_absent' : 'branch_tip_moved'
+        // The call itself sits inside the try: a NON-async probe throws at the
+        // call, before any promise exists for a .catch to attach to (Argus r7).
+        let tip = ''
+        try {
+          tip = await (
+            deps.readBranchTip ??
+            ((p: string, b: string, m: MergeMode) =>
+              defaultReadBranchTip(p, b, m, credentialedRunner ?? spawnCapture))
+          )(repo_path, branch, merge_mode)
+        } catch {
+          tip = '' // a thrown probe is NO evidence — fall through to a fresh dispatch
+        }
+        const observed = tip.trim().toLowerCase()
+        if (observed === candidate.head) {
+          seed = candidate
+          seedReason = 'resumed'
+        } else {
+          // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
+          // tip that is not the recorded one means the branch moved — someone else's
+          // commit, or a force-push — and resuming onto it would build against state
+          // that is gone. An empty read means the branch is absent, or the ref could
+          // not be read at all (an uncredentialed remote, a thrown probe); that is
+          // not evidence of another lane's work, it is the absence of evidence. Both
+          // refuse, because `unknown` authorises nothing; only the sentence differs,
+          // and it is the sentence that tells an operator whether to look at the
+          // branch or at the credential.
+          seedReason = observed === '' ? 'branch_tip_unreadable_or_absent' : 'branch_tip_moved'
+        }
       }
     }
   }
-  // ONE LINE, ALWAYS, WHENEVER THERE WAS A PRIOR TERMINAL RUN TO ASK ABOUT — a
-  // card with none has nothing to report and stays silent. `resumed` names what
-  // was carried; every other value names the proof that failed, and the row
-  // written instead is the honest fresh one.
-  if (prior !== null) {
-    log.info('dispatch_resume_seed', {
-      project: deps.project_slug,
-      item: board_item_id,
-      branch,
-      prior_run_id: prior.id,
-      reason: seedReason,
-      checkpoint: seed?.checkpoint ?? null,
-      ralph_round: seed?.ralph_round ?? 0,
-    })
-  }
+  // ONE value for the row's Ralph cap, decided HERE so nothing below can overwrite
+  // it — the deps spread used to sit inside the create call BELOW the seed and
+  // silently won, which is how a prior run's 5 became the ambient 20. `budget` has
+  // already folded the deps cap in as a ceiling, so this is not "config ignored": it
+  // is min(prior, config). Undefined for every dispatch with nothing to inherit,
+  // which is byte-identical to before.
+  const effectiveMaxRalphRounds = budget?.max_ralph_rounds ?? deps.max_ralph_rounds
 
   // (5) FILE CONTENTION — do not start a build on a file a LIVE run already owns.
   //
@@ -1312,14 +1371,23 @@ export async function dispatchBoardBoundBuild(
             inner_checkpoint_head: seed.head,
             inner_checkpoint_findings: seed.findings,
             base_sha: seed.base_sha,
-            // AND THE RE-FIRE COUNTER (#519) — 0 on every shape that could not
-            // prove a round worth carrying, which is what `create` writes anyway,
-            // so an unusable prior round is byte-identical to a fresh row.
-            ralph_round: seed.ralph_round,
           }
         : {}),
+      // THE CARD'S RALPH BUDGET (#519) — BOTH HALVES OR NEITHER, and carried
+      // independently of the commit seed above: the link is what proves this card owns
+      // the prior run, and the task text has no bearing on a value that can only
+      // tighten a bound. `create` refuses a round whose cap was not named, so the pair
+      // is written as a pair here.
+      ...(budget !== null
+        ? { ralph_round: budget.ralph_round, max_ralph_rounds: budget.max_ralph_rounds }
+        : {}),
+      // …and for every dispatch with nothing to inherit, the configured cap exactly as
+      // before. `effectiveMaxRalphRounds` already prefers the carried one, so this
+      // never overwrites it (the old deps spread sat BELOW the seed and did).
+      ...(budget === null && effectiveMaxRalphRounds !== undefined
+        ? { max_ralph_rounds: effectiveMaxRalphRounds }
+        : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
-      ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
       ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
@@ -1395,6 +1463,32 @@ export async function dispatchBoardBoundBuild(
     }
     const run = admission.run
     createdRunId = run.id
+    // ONE LINE PER DISPATCH THAT HAD A PRIOR TERMINAL RUN TO ASK ABOUT, EMITTED ONLY
+    // NOW — after the row exists (adversarial review, P3). It used to be emitted
+    // before the plan-doc await and before three refusal returns, so a dispatch that
+    // created NO row still logged `reason=resumed`: the one line an operator would
+    // grep to find out what a retry inherited, reporting a retry that never happened.
+    // Reading the values off the ROW rather than off `seed`/`budget` closes the other
+    // half of that: the line now states what was WRITTEN, not what was intended.
+    if (prior !== null) {
+      log.info('dispatch_resume_seed', {
+        project: deps.project_slug,
+        item: board_item_id,
+        branch,
+        prior_run_id: prior.id,
+        run: run.id,
+        reason: seedReason,
+        checkpoint: run.inner_checkpoint,
+        // THE BOUND IS A PAIR, so both halves are reported: a round without the cap it
+        // is measured against says nothing about whether the card is exhausted.
+        ralph_round: run.ralph_round,
+        max_ralph_rounds: run.max_ralph_rounds,
+        // AND WHETHER THE CARD'S SPEND WAS INHERITED AT ALL, as its own field. A
+        // `reason` of `resumed` describes the COMMIT; the budget is carried on a
+        // different gate, so one word cannot honestly cover both.
+        budget_carried: budget !== null,
+      })
+    }
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.
     // The durable loop fires + harvests by runId; terminal-reconcile clears it.
     await deps.board.attachRun(deps.project_slug, item.id, run.id)

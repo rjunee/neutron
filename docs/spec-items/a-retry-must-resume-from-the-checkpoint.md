@@ -18,48 +18,66 @@ not. A resume that depends on a GitHub PR probe also silently degrades to zero i
 
 ## Acceptance
 
+**None of the three is met. All three were ticked at one point in #628 and all three
+ticks were wrong**; the measurements below are why. The item stays `open`.
+
 - [ ] A retry carries the dead run's `inner_checkpoint` and `ralph_round` forward, OR states
       plainly on the card that it will not. Silence fails; a new run row with
       `inner_checkpoint = null` and `ralph_round = 0` and no card text is the defect.
-      **HALF MET — see "Not met" below.** The carrying branch is delivered; the
-      *card-text* branch, which is what a REFUSAL to carry needs, is not. It needs a
-      board surface that does not exist.
-- [x] Planning and review tokens are not re-spent on a resume that had a checkpoint to
+      **PARTIAL.** The carrying branch holds only for a MID-BUDGET run (below); the
+      *card-text* branch, which is what a refusal needs, is not delivered at all —
+      there is no board surface to write it to.
+- [ ] Planning and review tokens are not re-spent on a resume that had a checkpoint to
       resume from. Assert the governed plan is NOT regenerated from scratch.
-- [x] Resume does not depend on the fire-time `detectExistingPr` probe alone. Assert the
+      **NOT MET.** `inner-workflow.mjs`'s `cleanContinuation` needs
+      `resumeCheckpoint === 'ralph-task-built'` AND `ralphRound >= 1` AND
+      `% PLAN_REFRESH_EVERY !== 0`. This change never resumes `ralph-task-built` (it
+      classifies `died-before-build`), so for every shape it *does* resume the full
+      `plan:fable` survey runs exactly as before. #628 ticked this on a test asserting
+      `buildWorkflowArgs`' `ralphRound === 4` — an input to a gate no test drives.
+- [ ] Resume does not depend on the fire-time `detectExistingPr` probe alone. Assert the
       `local` merge-mode case, where a PR probe silently degrades to zero — a test run only
       in `pr` mode passes with the defect present.
+      **PARTIAL.** The dispatch-level half is now real: `trident/retry-resumes-checkpoint.test.ts`
+      drives the default branch-tip reader against a git repo on disk with no origin and
+      a recording `gh` shim, for a present and an absent ref. The criterion's own subject
+      — that the RESUME does not degrade — is not asserted end-to-end.
 
 ## Shipped
 
-The `inner_checkpoint` half landed with the salvage-resume seed (`builtButNeverReviewedSeed`
-→ `dispatchBoardBoundBuild` → `TridentRunStore.create`); this item's own change added the
-`ralph_round` half. The record is
+`builtButNeverReviewedSeed` → `dispatchBoardBoundBuild` → `TridentRunStore.create`
+already carried `inner_checkpoint`, its head, its findings, the base pin and the review
+`round`. #628 adds the card's Ralph SPEND on a separate gate: `ralph_round` together
+with the cap it is measured against, `min(prior, dispatch)`, so a re-dispatch may
+tighten the budget and never loosen it. Record:
 `docs/as-built/a-retry-must-resume-from-the-checkpoint.md` (staged at
-`.trident/as-built/fix/519-retry-resumes-checkpoint.md` until promoted).
+`.trident/as-built/fix/519-retry-resumes-checkpoint.md`).
 
-**Exhausted stays exhausted.** The round is carried VERBATIM, cap included, so
-`max_ralph_rounds` bites on the row that inherits it (`computeTransition`,
-`refireNextRalphTask`: fail loudly, naming the cap). An earlier revision refused to carry a
-round at or past the cap; that refusal fell back to a fresh row at `ralph_round: 0`, on which
-`0 + 1 > max_ralph_rounds` is false — so re-dispatching a card AT its cap restored all twenty
-iterations. A refusal to carry has to be a refusal, not a reset.
+**The honest scope is the MID-BUDGET case.** A governed run that died at `fix-round-N`
+or `outer-published:*` with iterations left keeps its count and its plan-refresh
+cadence. Measured improvement beyond that: because the spend is gated on the board
+link rather than on the commit seed, it also survives a moved tip, an unreadable ref,
+an unresumable prior — including the `ralph-task-built` row the Ralph loop's own
+exhaustion path parks on — and a spec-doc edit past the slug's 35th character.
 
 ## Not met
 
-**Criterion 1's card-text branch is NOT delivered, and this item stays `open` for it.**
-When the evidence gate refuses to carry — a moved tip, an unreadable ref, a prior with
-nothing resumable, a card naming another run — the dispatch writes a fresh row and emits one
-`dispatch_resume_seed` line naming the reason. **A server log is not card text.** The
-criterion names "no card text" as the defect and a log does not answer it: nobody looking at
-the card sees it.
+**1. The refusal is not stated on the card.** When the evidence gate refuses the
+commit, the dispatch emits one `dispatch_resume_seed` line. **A server log is not card
+text**; nobody looking at the card sees it. It cannot be met without a new surface:
+`work_board_items` has no free-text column (its text is `title`, sanitised, and
+`design_doc_ref`) and `TridentBoardBinder` is `get` / `attachRun` / reconcile.
+Delivering it means a column plus a migration, a render in the card UI, and wiring at
+three composition roots.
 
-It cannot be met without a new surface. `work_board_items` has no free-text field to carry a
-diagnostic — its text columns are `title` (sanitised; rewriting it would destroy the card's
-own name) and `design_doc_ref` — and `TridentBoardBinder`, the structural surface the
-dispatch chokepoint is allowed to touch, is `get` / `attachRun` / reconcile. Delivering it
-means a new column plus a migration, a render in the card UI, and wiring at three
-composition roots: a different change from this one, in packages this lane does not own.
+**2. Planning tokens are still re-spent.** See the criterion above. The carried round
+only changes the cadence of a resumed run's LATER iterations, whose behaviour
+`trident/inner-workflow-plan-next.test.ts` already pins at rounds 1-4 versus 5 and 10.
 
-Until that exists the honest state is: the retry CARRIES, and when it cannot, only the run
-row and the log say so.
+**3. `max_ralph_rounds` is still not a bound on the CARD, and this is the structural
+one.** The spend rides `linked_run_id`, so any dispatch without one starts at zero:
+`onboarding/overnight/register.ts` creates governed runs with no card, and an owner who
+re-cuts a card gets a new slug and no prior. The row is recreated by every dispatch, so
+a per-row counter is one reset away by construction. The durable fix is to hold the
+spend on the card, or to refuse/announce the dispatch when the card's budget is spent.
+Tracked as **rjunee/neutron#629**, with the measurement.

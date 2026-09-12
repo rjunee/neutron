@@ -68,3 +68,46 @@ export const DEFAULT_MAX_RALPH_ROUNDS = 20 as const
 export function carryableRalphRound(round: unknown): number {
   return Number.isSafeInteger(round) && (round as number) >= 1 ? (round as number) : 0
 }
+
+/**
+ * The re-fire cap the row that RESUMES a prior run must be born with: the TIGHTER of
+ * the cap that run actually had and the cap this dispatch would otherwise get.
+ *
+ * WHY A CAP HAS TO TRAVEL AT ALL (cross-model review round 2, BLOCKER). Carrying the
+ * round alone does not make "exhausted stays exhausted" true, because the bound is a
+ * PAIR. A prior run at `ralph_round: 5, max_ralph_rounds: 5` re-dispatched with no
+ * explicit cap produced a row at `ralph_round: 5, max_ralph_rounds: 20` — the round
+ * travelled, the cap did not, and `5 + 1 > 20` is false, so a card someone
+ * deliberately capped at 5 got 20. The earlier revision of this file claimed the cap
+ * travelled "verbatim"; it did not, and the boundary tests could not see it because
+ * they used the default cap on both sides, which makes round-vs-cap and
+ * round-vs-default indistinguishable.
+ *
+ * THE RULE IS ONE-DIRECTIONAL: a re-dispatch may TIGHTEN the budget, never loosen
+ * it. `Math.min` is the whole implementation and each direction is deliberate.
+ *
+ *   - A cap LOWER on the prior row survives the re-dispatch. That is the case the
+ *     blocker names: a deliberate 5 is the card's own bound and a dispatch that
+ *     happens to carry the ambient default must not raise it.
+ *   - A cap lowered in CONFIGURATION since the prior run applies immediately.
+ *     Tightening is always safe; there is no reason to make a card immune to a
+ *     budget cut.
+ *   - A cap RAISED in configuration does NOT reach a resumed card. This is the
+ *     load-bearing half. If it did, an exhausted card could be resurrected by
+ *     editing config and pressing ▶ — the same unbounded-retry defect the round
+ *     carry closes, re-entering through the cap instead of the counter. The escape
+ *     hatch is deliberate and explicit rather than ambient: the seed only fires when
+ *     the card NAMES the prior run, so re-cutting the card (or detaching the link)
+ *     takes the fresh dispatch, with its fresh budget, on purpose.
+ *
+ * Null means "nothing to carry — use the dispatch's own cap", which is the
+ * pre-existing behaviour for every row. FAIL-CLOSED on either value being
+ * unreadable: a non-integer or non-positive cap on either side answers null rather
+ * than inventing a bound.
+ */
+export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): number | null {
+  const usable = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 1
+  if (!usable(prior_cap)) return null
+  const ceiling = usable(dispatch_cap) ? (dispatch_cap as number) : DEFAULT_MAX_RALPH_ROUNDS
+  return Math.min(prior_cap as number, ceiling)
+}

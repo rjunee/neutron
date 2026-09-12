@@ -17,7 +17,6 @@
 
 import { describe, expect, test } from 'bun:test'
 import { makeTridentRun } from './testing/make-trident-run.ts'
-import { computeTransition } from './state-machine.ts'
 import {
   builtButNeverReviewedSeed,
   terminalRunDisposition,
@@ -179,138 +178,7 @@ describe('builtButNeverReviewedSeed — what may be handed to the next dispatch'
     // `pr` deliberately does NOT: `launch()` reads `run.pr ?? detectExistingPr(run)`,
     // so a carried number short-circuits that probe onto a PR that may since have
     // been closed — the prior run's 7 must not appear anywhere in this object.
-    //
-    // `ralph_round` IS THE FIELD ADDED FOR #519, and the argument this comment asks
-    // for: `refireNextRalphTask` bounds the whole Ralph loop on that counter and
-    // `buildWorkflowArgs` threads it to the inner workflow's plan-refresh cadence, so
-    // a retry that resets it to 0 hands the card a fresh 20-iteration budget every
-    // time ▶ is pressed and restarts the cadence. It is 0 HERE because this row is
-    // not a ralph row and no ralph mode was asked for — the fresh-dispatch value, so
-    // this shape is unchanged in behaviour for every non-ralph prior. The carrying
-    // cases are pinned in the two tests below.
-    expect(seed).toEqual({
-      checkpoint: 'forge-done',
-      head: HEAD,
-      findings,
-      base_sha: base,
-      ralph_round: 0,
-    })
-  })
-
-  /**
-   * THE RE-FIRE COUNTER (#519) — the other durable half of continuity.
-   *
-   * A re-dispatch creates a NEW row, and `create` wrote `ralph_round: 0` onto it
-   * unconditionally. Two things follow from that, both measurable in this repo's own
-   * code: `refireNextRalphTask` (orchestrator.ts) bounds the entire Ralph loop on
-   * `ralph_round + 1 > max_ralph_rounds`, so every re-press of ▶ handed the card a
-   * fresh 20-iteration budget and `max_ralph_rounds` stopped being a bound on the
-   * CARD at all; and `buildWorkflowArgs` (inner-loop.ts) threads the counter to the
-   * inner workflow as `ralphRound`, where the plan-refresh cadence reads
-   * `ralphRound % PLAN_REFRESH_EVERY`, so the periodic full re-plan restarted on the
-   * wrong iteration.
-   *
-   * It travels under the seed's existing proof — the caller has shown the live
-   * branch tip is this run's own recorded commit and that the card names this run —
-   * plus the two facts a COUNTER needs, enumerated below. Both directions are here:
-   * the carrying case and every shape that must answer 0.
-   */
-  test('RALPH ROUND: a governed prior hands its re-fire counter forward', () => {
-    const governedPrior = (over: Partial<Parameters<typeof makeTridentRun>[0]> = {}) =>
-      makeTridentRun({
-        phase: 'failed',
-        inner_verdict: 'REVIEW_NOT_RUN',
-        inner_checkpoint: 'fix-round-3',
-        inner_checkpoint_head: HEAD,
-        base_sha: BASE,
-        ralph: true,
-        ralph_round: 4,
-        max_ralph_rounds: 20,
-        ...over,
-      })
-
-    // THE CARRYING CASE: both runs governed.
-    expect(builtButNeverReviewedSeed(governedPrior(), { ralph: true })?.ralph_round).toBe(4)
-    // …and the rest of the seed is untouched by it.
-    expect(builtButNeverReviewedSeed(governedPrior(), { ralph: true })?.checkpoint).toBe('fix-round-3')
-
-    // BOTH RUNS MUST BE GOVERNED. `opts.ralph` is the mode the NEW row is born in
-    // (resolved at dispatch by `detectRalphMode`); `run.ralph` is the mode the count
-    // was produced in. A Ralph iteration count means nothing on a row that will not
-    // run a Ralph loop, and a non-Ralph prior has no iterations to count.
-    expect(builtButNeverReviewedSeed(governedPrior(), { ralph: false })?.ralph_round).toBe(0)
-    expect(builtButNeverReviewedSeed(governedPrior(), {})?.ralph_round).toBe(0)
-    expect(
-      builtButNeverReviewedSeed(governedPrior({ ralph: false }), { ralph: true })?.ralph_round,
-    ).toBe(0)
-
-    // A COUNT OF ZERO IS NOTHING TO CARRY — the fresh-row value either way.
-    expect(builtButNeverReviewedSeed(governedPrior({ ralph_round: 0 }), { ralph: true })?.ralph_round).toBe(0)
-
-    // AND EVERY SHAPE THE COUNTER CANNOT BE READ AS A ROUND IN answers 0 rather than
-    // being coerced. `Number.isSafeInteger` is the only test that rejects all of
-    // them; the column is an INTEGER, so these are legacy/garbled-row shapes and a
-    // partially-built run object in a caller's own test.
-    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, '4', null, undefined]) {
-      expect({ bad, round: builtButNeverReviewedSeed(
-        governedPrior({ ralph_round: bad as unknown as number }),
-        { ralph: true },
-      )?.ralph_round }).toEqual({ bad, round: 0 })
-    }
-  })
-
-  test('RALPH ROUND: EXHAUSTED STAYS EXHAUSTED — a round AT the cap is still carried', () => {
-    // THE BUG THIS TEST USED TO BLESS (cross-model review, BLOCKER 1). An earlier
-    // revision refused to carry a round at or past the cap, on the theory that such a
-    // row could never re-fire — and this test asserted 0 as the correct answer. But
-    // the refusal is not a refusal: it produces a FRESH row at `ralph_round: 0`, and
-    // `refireNextRalphTask` then asks `0 + 1 > max_ralph_rounds`, which is false. So
-    // re-dispatching a card AT its cap restored all twenty iterations, which is the
-    // unbounded-retry defect this whole change exists to close.
-    //
-    // The round now travels verbatim, cap and all, so `max_ralph_rounds` bites on the
-    // row that inherits it. Nothing useful is lost: a seeded row resumes to a REVIEW,
-    // and `refireNextRalphTask` is reached only from `publish_requested && ralph &&
-    // remaining_tasks > 0` — so the resumed run still reviews, fixes and merges the
-    // commit it adopted, and only a NEW planning iteration is refused.
-    const priorAt = (round: number, cap = 20) =>
-      makeTridentRun({
-        phase: 'failed',
-        inner_verdict: 'REVIEW_NOT_RUN',
-        inner_checkpoint: 'fix-round-3',
-        inner_checkpoint_head: HEAD,
-        base_sha: BASE,
-        ralph: true,
-        ralph_round: round,
-        max_ralph_rounds: cap,
-      })
-
-    // AT the cap, and PAST it: carried, not zeroed.
-    expect(builtButNeverReviewedSeed(priorAt(20), { ralph: true })?.ralph_round).toBe(20)
-    expect(builtButNeverReviewedSeed(priorAt(25), { ralph: true })?.ralph_round).toBe(25)
-    // One BELOW the cap is carried too — the case that always worked, kept as the
-    // control so this cannot pass by carrying nothing.
-    expect(builtButNeverReviewedSeed(priorAt(19), { ralph: true })?.ralph_round).toBe(19)
-    // A SMALLER cap on the prior row changes nothing: the seed does not compare the
-    // round against any cap at all, which is the property BLOCKER 1 turned on.
-    expect(builtButNeverReviewedSeed(priorAt(9, 5), { ralph: true })?.ralph_round).toBe(9)
-
-    // AND THE CAP REALLY DOES BITE on a row carrying the exhausted round.
-    // `computeTransition` is the state machine's SINGLE ralph-counter site and
-    // `refireNextRalphTask` applies the identical `+1 > max` test; both sides of the
-    // bound, so this cannot pass by failing everything.
-    const atCap = computeTransition(
-      makeTridentRun({ phase: 'ralph-task', ralph: true, ralph_round: 20, max_ralph_rounds: 20 }),
-      {},
-    )
-    expect(atCap.phase).toBe('failed')
-    expect(atCap.failure_reason).toContain('max_ralph_rounds')
-    const belowCap = computeTransition(
-      makeTridentRun({ phase: 'ralph-task', ralph: true, ralph_round: 19, max_ralph_rounds: 20 }),
-      {},
-    )
-    expect(belowCap.phase).toBe('ralph-plan')
-    expect(belowCap.ralph_round).toBe(20)
+    expect(seed).toEqual({ checkpoint: 'forge-done', head: HEAD, findings, base_sha: base })
   })
 
   test('RALPH PARITY: a bare forge-done never seeds a ralph run, but fix-round/published do', () => {
