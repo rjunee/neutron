@@ -368,13 +368,13 @@ export class HerdrHost implements PtyHost {
         // claim on, so every way it can fail has to reach the caller — including
         // "the child is already gone", which a silent no-op would report as a
         // completed reset.
-        if (exited) {
-          throw new Error(
+        const goneAfterExit = (): Error =>
+          new Error(
             `herdr-host: submitLine(${JSON.stringify(command)}) after exit — the pane is gone, so ` +
               'the command was not submitted. Reporting success here would let a caller record a ' +
               'context reset that never happened.',
           )
-        }
+        if (exited) throw goneAfterExit()
         if (command.includes('\r') || command.includes('\n')) {
           throw new Error(
             'herdr-host: submitLine() refuses an embedded submit character (\\r or \\n) — ' +
@@ -387,6 +387,21 @@ export class HerdrHost implements PtyHost {
         // as one unit, so a fire-and-forget actuation from another caller cannot land
         // between the text and the Enter that submits it.
         await enqueue(async () => {
+          // RE-CHECKED HERE, AND IT IS NOT THE SAME CHECK AS THE ONE AT THE DOOR.
+          //
+          // A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK, so
+          // every precondition tested before enqueueing is a claim about a world that
+          // may have moved by the time the work runs. The window is real: hold an
+          // earlier actuation, call this, let polling settle the child, release the
+          // hold — without this line the text and Enter go to a vanished pane.
+          //
+          // It THROWS rather than dropping, which is where it differs from the
+          // fire-and-forget path's identical-looking guard. `write`/`writeKey` are
+          // no-op-safe by contract and a queued one is simply discarded; this is the
+          // acknowledged seam a caller REPORTS an outcome from, so "the child went while
+          // you were waiting" has to reach that caller. Resolving quietly would record a
+          // context reset that never happened — the defect this whole method exists for.
+          if (exited) throw goneAfterExit()
           if (command !== '') {
             await client.call('pane.send_text', { pane_id: paneId, text: command })
           }

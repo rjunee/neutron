@@ -39,11 +39,28 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await Bun.sleep(10)
 }
 
+/** Wait until `cond()` holds, or throw. */
+async function until(cond: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`until: timed out waiting for ${label}`)
+    await Bun.sleep(5)
+  }
+}
+
+interface Spawned {
+  readonly child: PtyChild
+  /** End the child the way its own substrate does — the pane vanishing under herdr, the
+   *  process exiting under a pty. Each backend arranges it in its own terms; what the
+   *  shared case asserts is what the CONTRACT says afterwards. */
+  endChild(): void
+}
+
 interface Backend {
   readonly name: string
   /** Spawn a child whose substrate is ALREADY producing the startup screen, so the
    *  window between `spawn()` returning and `beginOutput()` is real on both. */
-  spawn(onScreen: (s: string) => void): Promise<PtyChild>
+  spawn(onScreen: (s: string) => void): Promise<Spawned>
   /** The text the startup screen contains. */
   readonly startup: string
 }
@@ -63,7 +80,9 @@ const herdrBackend: Backend = {
       workspaceId: 'w9',
       outputGateMaxMs: 60_000, // long, so the FAIL-OPEN timer cannot be what delivers
     })
-    return await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    // The pane vanishes; the host learns of it on the next poll.
+    return { child, endChild: () => server.exitPane() }
   },
 }
 
@@ -71,6 +90,10 @@ const bunBackend: Backend = {
   name: 'BunTerminalHost (in-process pty, streamed)',
   startup: STARTUP,
   async spawn(onScreen) {
+    let endProcess: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endProcess = res
+    })
     const host = new BunTerminalHost({
       // THE PRODUCER FIRES SYNCHRONOUSLY, INSIDE `spawn()`. That is the sharpest form
       // of the window: a pty can deliver bytes before the caller's `await` has even
@@ -87,13 +110,15 @@ const bunBackend: Backend = {
       },
       spawn: () => ({
         pid: 4242,
-        exited: new Promise<number | null>(() => {}), // stays alive for the test
+        exited: exitedPromise, // stays alive until the case ends it
         exitCode: null,
         kill: () => undefined,
       }),
       outputGateMaxMs: 60_000,
     })
-    return await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    // The process exits; the host is TOLD, rather than discovering it by polling.
+    return { child, endChild: () => endProcess(0) }
   },
 }
 
@@ -104,7 +129,7 @@ describe('PtyHost conformance — the readiness gate', () => {
     describe(backend.name, () => {
       it('delivers NO screen before beginOutput(), and then delivers the one it held', async () => {
         const screens: string[] = []
-        const child = await backend.spawn((s) => screens.push(s))
+        const { child } = await backend.spawn((s) => screens.push(s))
         // The window the contract is about: `spawn()` has returned and the caller has
         // not finished wiring. An ungated host has already called `onScreen` by now.
         await settle()
@@ -124,7 +149,7 @@ describe('PtyHost conformance — the readiness gate', () => {
 
       it('beginOutput() is idempotent — a second call delivers nothing extra', async () => {
         const screens: string[] = []
-        const child = await backend.spawn((s) => screens.push(s))
+        const { child } = await backend.spawn((s) => screens.push(s))
         child.beginOutput?.()
         await settle()
         const afterFirst = screens.length
@@ -135,6 +160,32 @@ describe('PtyHost conformance — the readiness gate', () => {
         // a screen the consumer has already seen.
         expect(screens.length).toBe(afterFirst)
         child.kill()
+      })
+    })
+  }
+
+  for (const backend of BACKENDS) {
+    describe(`${backend.name} — submitLine after exit`, () => {
+      it('REJECTS rather than resolving, so no caller can report a command it did not send', async () => {
+        // THE ACKNOWLEDGED SEAM'S WHOLE POINT, and it belongs to the INTERFACE rather
+        // than to either substrate: `submitCommand` refuses a child without
+        // `submitLine` precisely because a caller REPORTS an outcome from it. "The
+        // child is already gone" is a way the command was not submitted, so it has to
+        // reach that caller — resolving quietly records a context reset that never
+        // happened, which is the defect the method exists for.
+        //
+        // NON-VACUOUS ON BOTH, by different mechanisms: herdr learns of the exit by
+        // POLLING a vanished pane, the pty is TOLD by its process. The case asserts
+        // what the contract says afterwards, not how each found out.
+        const { child, endChild } = await backend.spawn(() => undefined)
+        child.beginOutput?.()
+        endChild()
+        await until(() => child.hasExited(), `${backend.name}: the exit`)
+        const outcome = await child.submitLine!('/clear').then(
+          () => 'RESOLVED — a command that was never sent, reported as sent',
+          (e: unknown) => (e as Error).message,
+        )
+        expect(outcome).toContain('after exit')
       })
     })
   }

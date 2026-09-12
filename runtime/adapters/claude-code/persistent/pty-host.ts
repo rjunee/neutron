@@ -255,10 +255,24 @@ export interface PtyChild {
   /**
    * Tell the host its consumer is wired, and screens may start flowing.
    *
-   * ALWAYS CALLABLE, AND WHAT IT GATES DIFFERS. `HerdrHost` holds its poll loop
-   * behind it; `BunTerminalHost` has the byte stream from the moment the child is
-   * spawned and implements it as a no-op. A caller calls it unconditionally either way,
-   * which is why it is part of the shared contract rather than a herdr detail.
+   * BOTH HOSTS GATE ON IT, and what they hold back differs only in mechanism.
+   * `HerdrHost` holds its poll loop behind it. `BunTerminalHost` has the byte stream
+   * from the moment the child is spawned, so it holds the CALL — output accumulates
+   * throughout and the latest screen is delivered the instant this is called.
+   *
+   * THIS PARAGRAPH SAID "`BunTerminalHost` … implements it as a no-op", WHICH WAS TRUE
+   * WHEN WRITTEN AND THEN WAS NOT. That host was restored without a gate, reintroducing
+   * the race below, and was fixed — but this prose, in the one document whose job is
+   * telling callers what BOTH backends do, still described the version that shipped
+   * broken. A claim about a backend is invalidated by changing that backend, exactly as
+   * a `file:line` is; the shared suite
+   * (`__tests__/pty-host-conformance.test.ts`) is what now holds both hosts to this
+   * sentence rather than the sentence being the record.
+   *
+   * Both fail open on the SAME window ({@link PTY_OUTPUT_GATE_MAX_MS}), so their
+   * behaviour cannot drift, and both deliver what they held rather than dropping it —
+   * a host that loses the screen it withheld is as broken as one that delivers too
+   * early, just silently.
    *
    * WHY IT EXISTS: `spawn` is async, and the caller cannot wire anything that
    * needs the child — the output scanner's keystroke target, the live-process handle

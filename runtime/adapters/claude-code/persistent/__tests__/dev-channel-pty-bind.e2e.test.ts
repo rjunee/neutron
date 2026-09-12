@@ -28,8 +28,12 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { buildReplArgv } from '../build-repl-argv.ts'
 import { buildSettings } from '../build-settings.ts'
-import { HerdrHost } from '../herdr-host.ts'
-import type { PtyChild } from '../pty-host.ts'
+import {
+  registerPaneLeakGuard,
+  withLiveHerdrChild,
+  type LiveChildRef,
+} from './live-herdr-child.ts'
+import type { PtySpawnOpts } from '../pty-host.ts'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
 import { withCapturedStderr } from './capture-stderr.ts'
 
@@ -52,6 +56,12 @@ const PROMPT_FILE = join(PERSIST, 'repl-agent-base.md')
 
 // bun's `describe.skipIf` keeps the test visible-but-skipped in CI.
 describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guard)', () => {
+  // THE MEASUREMENT, not the habit. Counts the live server's panes before and after and
+  // FAILS if this suite left one behind — which is what a `finally` full of good
+  // intentions cannot promise, and what four orphaned `claude` processes in the owner's
+  // workspace proved. Inside the opt-in describe, so it never runs without a server.
+  registerPaneLeakGuard('dev-channel-pty-bind.e2e')
+
   it('handshakes (/channel-bound) and round-trips a reply despite the benign TUI warning', async () => {
     const channelName = `neutron-${randomBytes(4).toString('hex')}`
     const sessionId = crypto.randomUUID()
@@ -135,12 +145,11 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
     // control-flow analysis does not see an assignment made in a closure — a plain
     // `let child: PtyChild | null = null` narrows to `never` by the `finally` that has
     // to kill it. The object survives the analysis and the cleanup keeps its type.
-    const spawned: { child?: PtyChild } = {}
+    const ref: LiveChildRef = {}
     try {
       await withCapturedStderr(
         async (hostErr) => {
-          const host = new HerdrHost()
-          spawned.child = await host.spawn(argv, {
+          const spawnOpts: PtySpawnOpts = {
             cwd: cfgDir,
             env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
             // A RENDERED SCREEN, not a chunk — see `pty-host.ts`. Each delivery is the
@@ -156,18 +165,17 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
                 .replace(/\s+/g, '')
               if (/forlocalchanneldevelopment|usingthisforlocaldevelopment/i.test(norm)) {
                 dismissed = true
-                setTimeout(() => spawned.child?.writeKey?.('enter'), 400)
+                setTimeout(() => ref.child?.writeKey?.('enter'), 400)
               }
             },
-          })
+          }
+          await withLiveHerdrChild(ref, argv, spawnOpts, async () => {
 
-          // RELEASE THE OUTPUT GATE — the readiness handshake the production caller performs
-          // in `spawn.ts` once its consumers are wired. Without it the host waits out
-          // `HERDR_OUTPUT_GATE_MAX_MS` (5 s), emits its "WIRING BUG" warning, and only then
-          // begins polling: every one of these live proofs was silently taking the fail-open
-          // path and NORMALISING it. The guard is well-tested and its real callers were all
-          // on the wrong side of it.
-          spawned.child.beginOutput?.()
+            // THE OUTPUT GATE IS RELEASED BY THE HELPER, once the spawn resolves — the
+            // readiness handshake the production caller performs in `spawn.ts`. Doing it
+            // there rather than here is the point: every one of these proofs forgot it
+            // once and silently took the fail-open path, which the assertion at the end
+            // of this body now refuses.
 
             // Wait for the dev-channel to report its port (transport attached).
             for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
@@ -193,12 +201,12 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
             // production takes. Asserted at the END so the whole run is covered, not just
             // the moment after spawn.
             expect(hostErr.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
+          })
         },
         // Tee: a 90 s live proof a human is watching must still print as it runs.
         { tee: true },
       )
     } finally {
-      spawned.child?.kill('SIGTERM')
       sink.stop(true)
     }
   }, 90_000)

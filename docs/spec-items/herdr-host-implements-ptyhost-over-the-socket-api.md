@@ -242,6 +242,11 @@ not-new. That is accepted and recorded here rather than hidden.
       must be modelled before they can be shared honestly. Adding cases is the cheap part;
       agreeing what "the same case" means for two substrates with different observables
       is not.
+      SECOND SHARED CASE, added because it is genuinely non-vacuous on both: `submitLine`
+      after the child has exited must REJECT, by different mechanisms on each side —
+      herdr learns of the exit by polling a vanished pane, the pty is told by its
+      process. The case asserts what the contract says afterwards, not how each found
+      out, which is the test of whether a case belongs in a shared suite at all.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
 - [ ] **The shared interface describes BOTH backends, or it describes neither.** A
       contract that encodes one implementation's behaviour is the "two diverging code
@@ -505,6 +510,43 @@ not-new. That is accepted and recorded here rather than hidden.
       nothing if either the pattern or the domain is wrong, and on this branch both have
       been.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts tests/integration/pty-e2e-registered.test.ts`
+- [ ] **A live proof leaves the owner's herdr exactly as it found it.** This item's
+      subject is making herdr the REPL container, and its own live suites leaked REPL
+      containers into the owner's session: four orphaned tabs, each a real `claude`
+      parented straight to the server, with no title and the fixture cwd, ages spanning
+      the hours these proofs had been running. He found them by looking at his own screen.
+      TWO DEFECTS, both shapes already fixed elsewhere on this branch. The close was
+      never CONFIRMED — `kill()` is `void` and issues `pane.close` as a background RPC,
+      so a test process that returns from its `finally` and exits has ASKED without
+      knowing, and a request still buffered when the process dies was never sent at all
+      (settlement is not confirmation, one layer further out). And the SPAWN SAT OUTSIDE
+      THE `try` in two suites, so a rejecting spawn skipped the cleanup while the pane
+      already existed — the obligation starts when the resource exists, not when the
+      function succeeds, which is `abandonPane`'s own correction escaping through the
+      suite.
+      FIXED AS A LIFECYCLE GUARANTEE, NOT AS CLEANUP CALLS: one scoped helper owns the
+      spawn, the readiness handshake and the `try`/`finally`, and AWAITS `child.exited`
+      — which the host settles only from the `pane.close` reply — with a bounded
+      deadline, because an unbounded wait turns a leak into a hang and an unreported one
+      turns it back into a leak.
+      THREE THINGS ENFORCE IT, and the third is the one that survives a fifth live test:
+      a guard fails any `*.e2e.test.ts` that constructs `HerdrHost` directly, with a
+      positive control that every e2e file reaches the helper (so "no offenders" is not
+      "no spawns"); the helper's confirmation, bounded-wait and already-exited paths have
+      their own cases against a fake that settles ONLY when told, because a fake that
+      settles on `kill()` cannot reproduce the defect; and each live suite records the
+      server's pane IDs before and after and FAILS on any that appeared — by id, not by
+      count, and a pane that CLOSED is not a leak.
+      WHY NOTHING AUTOMATED SAW IT, which is the finding worth more than the fix: the
+      panes are created THROUGH A SOCKET by a process the test does not own, so the
+      test's own process shows no leak — no fd, no child, no handle — and CI never runs
+      these at all because they are opt-in. That is the same property that let the
+      one-request-per-connection transport defect survive eight green rounds. **This
+      lane's live surface has no automated observer**, and twice now the instrument that
+      caught a real defect was a human or a hand-written probe. The pane-count assertion
+      exists because a standing check on that surface is worth more here than another
+      unit test.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.test.ts tests/integration/pty-e2e-registered.test.ts`
 - [ ] **No test may switch a live proof off.** The live herdr proofs are the only tests
       in this repo that can see a real server, and they are exactly the instrument that
       would have caught the transport defect this branch fixed. Three unit suites point
@@ -544,7 +586,17 @@ not-new. That is accepted and recorded here rather than hidden.
       others: a held text keeps the Enter behind it; a FAILED actuation does not wedge
       the ones behind it (the chain tail is neutralised, or one rejected keystroke stops
       the session AND leaves an unobserved rejection); and an actuation queued before the
-      pane exits is DROPPED rather than delivered to a dead pane. NOT queued, deliberately:
+      pane exits is DROPPED rather than delivered to a dead pane.
+      A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK, so EVERY
+      precondition tested before enqueueing has to be re-tested when the work runs — a
+      check at the door is a claim about a world that may have moved. The two queued
+      paths differ in what the re-check DOES, and the difference is the contract's, not
+      an inconsistency: a fire-and-forget actuation is no-op-safe and is silently
+      dropped; `submitLine` is the acknowledged seam a caller reports an outcome from, so
+      it THROWS. Resolving quietly there records a context reset that never happened —
+      the defect the method exists for. The `writeKey` case cannot see this: it needs its
+      own, with a held actuation ahead of the `submitLine` and the exit landing while it
+      waits. NOT queued, deliberately:
       `pane.read` (the poll is a sampler; ordering it behind a stalled keystroke blinds us
       exactly when something is wrong) and `pane.close` (a teardown preempts — the
       escalation ladder in `repl-session.ts` depends on it being prompt).

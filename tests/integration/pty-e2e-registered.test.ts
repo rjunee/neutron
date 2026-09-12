@@ -167,6 +167,46 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     expect(offenders).toEqual([])
   })
 
+  // NO LIVE PROOF MAY SPAWN A HERDR PANE OUTSIDE THE SCOPED HELPER — and this is the
+  // guard with a user-visible blast radius. The others protect the test run; this one
+  // protects the OWNER'S SCREEN. These suites leaked four orphaned `claude` processes
+  // into his herdr workspace, each a real REPL container parented straight to the
+  // server, ages spanning the hours this lane had been running its proofs. He found
+  // them by looking at his own session and asking whether they were us.
+  //
+  // NOTHING AUTOMATED COULD HAVE SEEN IT. The panes are created THROUGH A SOCKET by a
+  // process the test does not own, so the test's own process shows no leak — no fd, no
+  // child, no handle. And CI never runs these at all, because they are opt-in and
+  // skipped there. That is the same property that let the one-request-per-connection
+  // transport defect survive eight green rounds: this lane's live surface has no
+  // automated observer, so a rule about it has to be enforced statically, here, in a
+  // test that DOES run in CI.
+  test('no live proof spawns a herdr pane outside the scoped helper', () => {
+    const SPAWNS = /new HerdrHost\s*\(/
+    const HELPER = 'runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.ts'
+    const offenders = allTestSources(REPO_ROOT)
+      .filter((f) => f.endsWith('.e2e.test.ts'))
+      .filter((f) => {
+        try {
+          return SPAWNS.test(readFileSync(f, 'utf8'))
+        } catch {
+          return false
+        }
+      })
+      .map((f) => relative(REPO_ROOT, f))
+    expect(offenders).toEqual([])
+    // POSITIVE CONTROL, both halves: the pattern finds the construction where it
+    // legitimately lives, and the walk reaches the e2e suites it is meant to police —
+    // an empty offender list proves nothing if either is wrong, and on this branch both
+    // have been.
+    expect(SPAWNS.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
+    const e2e = allTestSources(REPO_ROOT).filter((f) => f.endsWith('.e2e.test.ts'))
+    expect(e2e.length).toBeGreaterThanOrEqual(3)
+    // ...and each of them reaches the helper, so "no offenders" is not "no spawns".
+    const usingHelper = e2e.filter((f) => readFileSync(f, 'utf8').includes('withLiveHerdrChild'))
+    expect(usingHelper.length).toBe(e2e.length)
+  })
+
   // NO TEST MAY MONKEY-PATCH PROCESS STATE BY HAND — not just the live ones. The
   // hand-rolled shape is install, do the interesting thing, restore, and it goes wrong
   // two ways that both leave the process changed for everything after it: the restore

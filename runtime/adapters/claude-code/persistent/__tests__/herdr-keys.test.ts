@@ -296,6 +296,33 @@ describe('write() and the fact that send_text never submits', () => {
     expect(server.callsTo('pane.send_keys')).toEqual([])
   })
 
+  // A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK. The
+  // fire-and-forget path re-checks `exited` when the queued call actually starts; the
+  // ACKNOWLEDGED one did not, so a `submitLine` queued behind a held actuation ran its
+  // text and Enter against a pane that had vanished while it waited — and resolved,
+  // reporting a context reset that never happened. The case above covers `writeKey`
+  // only, which is why this one is separate rather than a parameter of it.
+  it('a submitLine queued BEFORE the exit REJECTS rather than actuating a dead pane', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server, 10)
+    const release = server.holdMethod('pane.send_keys')
+    child.writeKey?.('escape') // occupies the queue
+    const submitted = child.submitLine!('/clear').then(
+      () => 'resolved',
+      (e: unknown) => (e as Error).message,
+    )
+    server.exitPane()
+    await until(() => child.hasExited(), 'the exit, discovered by polling')
+    release()
+    // IT REACHES THE CALLER. Dropping it quietly is right for `write`/`writeKey`, which
+    // are no-op-safe by contract, and WRONG here: this is the seam a caller reports an
+    // outcome from.
+    expect(await submitted).toContain('after exit')
+    // And nothing was actuated on the dead pane.
+    expect(server.deliveredTo('pane.send_text')).toEqual([])
+    expect(server.callsTo('pane.send_text')).toEqual([])
+  })
+
   // `submitLine` is queued as ONE UNIT, not as two queued calls. If its text and its
   // Enter were enqueued separately, a fire-and-forget actuation from another caller
   // could land between them — submitting the caller's line with somebody else's key.

@@ -47,8 +47,12 @@ import { randomBytes } from 'node:crypto'
 
 import { buildReplArgv } from '@neutronai/runtime/adapters/claude-code/persistent/build-repl-argv.ts'
 import { buildSettings } from '@neutronai/runtime/adapters/claude-code/persistent/build-settings.ts'
-import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
-import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
+import {
+  registerPaneLeakGuard,
+  withLiveHerdrChild,
+  type LiveChildRef,
+} from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.ts'
+import type { PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import { ensureClaudeTrust } from '@neutronai/runtime/adapters/claude-code/persistent/ensure-claude-trust.ts'
 
 import { DEFAULT_AGENT_BASE_PROMPT } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
@@ -216,10 +220,11 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     skipPermissions: true,
   })
 
-  const host = new HerdrHost()
   let dismissed = false
-  let child: PtyChild | null = null
-  child = await host.spawn(argv, {
+  // A HOLDER, read by the `onScreen` closure below — which can fire before `spawn()`
+  // resolves, so nothing here may depend on the assignment having happened yet.
+  const ref: LiveChildRef = {}
+  const spawnOpts: PtySpawnOpts = {
     cwd: fixtureHome,
     env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
     // A RENDERED SCREEN, not a chunk — see `pty-host.ts`.
@@ -231,54 +236,58 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
         .replace(/\s+/g, '')
       if (/forlocalchanneldevelopment|usingthisforlocaldevelopment/i.test(norm)) {
         dismissed = true
-        setTimeout(() => child?.writeKey?.('enter'), 400)
+        setTimeout(() => ref.child?.writeKey?.('enter'), 400)
       }
     },
-  })
+  }
 
-  // RELEASE THE OUTPUT GATE — the readiness handshake the production caller performs
-  // in `spawn.ts` once its consumers are wired. Without it the host waits out
-  // `HERDR_OUTPUT_GATE_MAX_MS` (5 s), emits its "WIRING BUG" warning, and only then
-  // begins polling: every one of these live proofs was silently taking the fail-open
-  // path and NORMALISING it. The guard is well-tested and its real callers were all
-  // on the wrong side of it.
-  child.beginOutput?.()
-
+  // EVERY LIVE SPAWN GOES THROUGH THE SCOPED HELPER — it owns the `try`/`finally` (so a
+  // rejecting spawn cleans up too), releases the output gate, and AWAITS the server's
+  // confirmation that the pane is gone. `kill()` is `void`, and a test process that
+  // exits with the close still in flight leaves a real `claude` running in the owner's
+  // herdr. Four of them did.
   try {
-    for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
-    expect(channelPort).toBeGreaterThan(0)
-    for (let i = 0; i < 40 && !bound; i++) await Bun.sleep(500)
-    expect(bound).toBe(true)
+    return await withLiveHerdrChild(ref, argv, spawnOpts, async () => {
+      for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
+      expect(channelPort).toBeGreaterThan(0)
+      for (let i = 0; i < 40 && !bound; i++) await Bun.sleep(500)
+      expect(bound).toBe(true)
 
-    // Inject the LIVE shipped template bytes as the ritual's task — exactly what
-    // the tick loop hands the substrate as `user_message`.
-    const templateBytes = readFileSync(bundledTemplatePathFor(id), 'utf8')
-    const r = await fetch(`http://127.0.0.1:${channelPort}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': 'e2e-token' },
-      body: JSON.stringify({ text: templateBytes, turn_id: '1:1' }),
+      // Inject the LIVE shipped template bytes as the ritual's task — exactly what
+      // the tick loop hands the substrate as `user_message`.
+      const templateBytes = readFileSync(bundledTemplatePathFor(id), 'utf8')
+      const r = await fetch(`http://127.0.0.1:${channelPort}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Sink-Token': 'e2e-token' },
+        body: JSON.stringify({ text: templateBytes, turn_id: '1:1' }),
+      })
+      expect(r.status).toBe(200)
+      // Rituals are multi-step (glob + read several files + compose): poll longer.
+      //
+      // THIS CEILING USED TO BE 60s AND MADE THE KAIZEN CASE UNPASSABLE. The test
+      // budget is 180s (now 300s) but the reply poll gave up after 120×500ms, so the
+      // heaviest ritual — kaizen globs the corrections log, diary, every project's
+      // ACTIONS/STATUS, the sibling ritual prompts AND the skills dir, then reasons
+      // about repeats — returned `undefined` at 62.8s on the first run this file has
+      // ever had. That reads as "the ritual produced nothing", which is a very
+      // different bug report from "our poll was shorter than the work". A wait that
+      // expires before the test it serves is a test that cannot pass for the reason
+      // it claims to check. Keep this comfortably UNDER the per-test timeout.
+      for (let i = 0; i < 480 && reply === undefined; i++) await Bun.sleep(500)
+      return reply
     })
-    expect(r.status).toBe(200)
-    // Rituals are multi-step (glob + read several files + compose): poll longer.
-    //
-    // THIS CEILING USED TO BE 60s AND MADE THE KAIZEN CASE UNPASSABLE. The test
-    // budget is 180s (now 300s) but the reply poll gave up after 120×500ms, so the
-    // heaviest ritual — kaizen globs the corrections log, diary, every project's
-    // ACTIONS/STATUS, the sibling ritual prompts AND the skills dir, then reasons
-    // about repeats — returned `undefined` at 62.8s on the first run this file has
-    // ever had. That reads as "the ritual produced nothing", which is a very
-    // different bug report from "our poll was shorter than the work". A wait that
-    // expires before the test it serves is a test that cannot pass for the reason
-    // it claims to check. Keep this comfortably UNDER the per-test timeout.
-    for (let i = 0; i < 480 && reply === undefined; i++) await Bun.sleep(500)
-    return reply
   } finally {
-    child?.kill('SIGTERM')
     sink.stop(true)
   }
 }
 
 describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 acceptance)', () => {
+  // THE MEASUREMENT, not the habit. Counts the live server's panes before and after and
+  // FAILS if this suite left one behind — which is what a `finally` full of good
+  // intentions cannot promise, and what four orphaned `claude` processes in the owner's
+  // workspace proved. Inside the opt-in describe, so it never runs without a server.
+  registerPaneLeakGuard('bundled-rituals.e2e')
+
   it(
     'morning-brief output references a real fixture item',
     async () => {

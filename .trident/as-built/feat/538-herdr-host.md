@@ -1513,6 +1513,91 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The PR about making herdr the REPL container leaked REPL containers into herdr
+
+The owner found four unexplained tabs in his own workspace and asked whether they were
+us. They were: four real `claude` processes parented straight to the herdr server, no
+title, the fixture cwd, ages spanning the hours this lane had been running its live
+proofs. The orphaned-pane class this branch has been closing INSIDE the host, escaping
+through the suite.
+
+**Two defects, and both are shapes already fixed elsewhere on this branch.** The close
+was never confirmed: `kill()` is `void` by contract and issues `pane.close` as a
+background RPC, so a test that returns from its `finally` and exits has ASKED without
+knowing — and a request still in the socket buffer when the process dies was never sent
+at all. Settlement is not confirmation, one layer further out than the first time. And
+the spawn sat OUTSIDE the `try` in two of the three suites, so a rejecting spawn skipped
+the cleanup while the pane already existed — `abandonPane`'s own lesson, that the
+obligation starts when the resource exists rather than when the function succeeds,
+escaping through the test.
+
+Fixed as a lifecycle guarantee rather than as four `pane.close` calls: one scoped helper
+owns the spawn, the readiness handshake and the `try`/`finally`, and awaits
+`child.exited` — which the host settles only from the `pane.close` REPLY — with a bounded
+deadline. Bounded because an unbounded wait turns a leak into a hang, which is a worse
+way to find out about the same problem; and reported when it expires, because an
+unreported timeout turns it straight back into a leak.
+
+**Why nothing automated saw it, and this is worth more than the fix.** The panes are
+created THROUGH A SOCKET by a process the test does not own, so the test's own process
+shows no leak at all — no fd, no child, no handle to notice. And CI never runs these,
+because the live proofs are opt-in and skipped there. That is the same property that let
+the one-request-per-connection transport defect survive eight green rounds: **this lane's
+live surface has no automated observer.** Twice now the instrument that caught a real
+defect on it was a human looking at a screen or a hand-written probe.
+
+So the durable part is the standing check, not the helper. Each live suite records the
+server's pane IDs before and after and fails on any that APPEARED — by id rather than by
+count, because a count says something escaped and an id says what, and because a pane the
+owner closed himself mid-run must not read as a leak. That turns "every suite remembers
+to clean up", which is a claim about people, into a claim about the server that survives
+a fifth live test written by someone who has not read the file.
+
+The fourth guard in this family, and the first with a blast radius outside the test run:
+no `*.e2e.test.ts` may construct `HerdrHost` directly. Its positive control has two parts
+for the reason the last three taught — the pattern must find the construction where it
+legitimately lives, AND every e2e file must be shown to reach the helper, or "no
+offenders" would also be satisfied by "no spawns".
+
+Verified afterwards: four panes on the live server, all legitimate — the owner's own two
+`claude` sessions with real titles, and two shells. Nothing of ours.
+
+### A queue moves the moment of execution away from the moment of the check
+
+Third consequence of the serialisation, and the first two name the pattern: ordering was
+lost because one connection per request removed it, the deadline had to cover connecting
+because the connect moved inside the call, and now — **every precondition tested before
+enqueueing is a claim about a world that may have moved by the time the work runs.**
+
+`submitLine` checked `exited` at the door and not again inside its queued unit, so a
+`submitLine` waiting behind a held actuation ran its text and Enter against a pane that
+had vanished while it waited, and RESOLVED. That is the exact defect the method exists
+for: a caller reporting a context reset that never happened.
+
+The two queued paths now both re-check, and they do different things with the answer —
+which is the contract's distinction, not an inconsistency. A fire-and-forget actuation is
+no-op-safe and is silently dropped. `submitLine` is the acknowledged seam, so it THROWS:
+"the child went while you were waiting" is a way the command was not submitted, and it
+has to reach the caller. M181 is the mutation that proves the difference is load-bearing
+— making the re-check drop instead of throw reddens, because a silent success here is
+worse than no check at all.
+
+Swept the queued paths for others: `send()` already re-checked (that was M141's fix), and
+nothing else is enqueued. The one other precondition-after-an-await in the file, the
+`pane.close` error handler's `if (exited) return`, is already an execution-time re-check
+and documented as one.
+
+### The prose describing a backend is invalidated by changing that backend
+
+`pty-host.ts` said `BunTerminalHost.beginOutput()` "implements it as a no-op". True when
+written; false the moment that host was given a gate, and left standing in the one
+document whose job is telling callers what BOTH backends do. Same class as the eight
+clauses swept last round, reappearing from the other direction: there the interface
+described one backend's behaviour, here the implementation moved and the interface prose
+did not. **A claim about a backend is invalidated by changing that backend, exactly as a
+`file:line` is** — and the durable answer is that the shared conformance suite now holds
+both hosts to that sentence, rather than the sentence being the record.
+
 ### The restored backend reintroduced the race `beginOutput()` exists to prevent
 
 `BunTerminalHost` had the byte stream from the instant the child was spawned, so it
@@ -2244,6 +2329,16 @@ Run against the named suites.
 | M177 | the Bun gate holds but never delivers what it held | RED 1 |
 | M178 | the Bun release is not once-only — it re-delivers on every call | RED 1 |
 | M179 | the HERDR poll loop stops awaiting its gate | RED 1 — the same shared suite, which is the proof it runs against both |
+| M180 | `submitLine` does not re-check exit at EXECUTION time | RED 1 |
+| M181 | that re-check DROPS instead of throwing (a silent success) | RED 1 |
+| M182 | PAIR: the door-side check is dropped | SURVIVED — unobservable; the execution-time check is strictly stronger, as with M142 |
+| M183 | a live proof constructs `HerdrHost` directly again | RED 1 |
+| M184 | a live proof stops using the scoped helper entirely | RED 1 |
+| M185 | the close is fired and not awaited — the leak itself | RED 1 |
+| M186 | an unconfirmed close is silent | RED 1 |
+| M187 | the confirmation wait is UNBOUNDED (a leak becomes a hang) | RED 1 |
+| M188 | an already-exited child is killed anyway | RED 1 |
+| M189 | the leak diff is a length compare (a CLOSED pane reads as a leak) | RED 2 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
