@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:989`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:992`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -136,8 +136,8 @@ somebody can find beats an unbounded one nobody knows about.
 
 **The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
 generations on one session key — the pooled child, and a quarantined child that held the key
-before a fresh spawn took it over — and they share one registry row (`pool.ts:964`, then
-`pool.ts:1004`). The later write replaced the earlier one, so the row named one generation
+before a fresh spawn took it over — and they share one registry row (`pool.ts:967`, then
+`pool.ts:1008`). The later write replaced the earlier one, so the row named one generation
 beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
 disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
 now refuses a generation the row does not currently name — free, because both consumers match
@@ -571,8 +571,8 @@ about why it died".
 
 **That last row required checking what plain `dead` asserts, before deciding.** It is positive in
 both provenances and never arises from a failed look: the pool branch answers it for a session
-that by construction has not been through a shutdown (`pool.ts:932` deletes the pool entry
-before the record is written at `pool.ts:964`), and the registry branch answers it only when a
+that by construction has not been through a shutdown (`pool.ts:935` deletes the pool entry
+before the record is written at `pool.ts:967`), and the registry branch answers it only when a
 look for an entry naming this generation found none. So it is a real conflict between two
 positive attributions, not `dead-cause-undetermined` wearing the wrong name — and it is not
 resolved by preferring an arm, which is what an earlier revision did. A disputed cause IS an
@@ -660,7 +660,7 @@ that an UNDELIVERED report still leaves the edge open and the next tick does rep
 ### Deferred deliberately: the tombstone's last-writer-wins
 
 `crashRunningByLauncher` overwrites `failure_reason` unconditionally on conflict
-(`trident/store.ts:1314-1317`), so when two detectors disagree the last to arrive wins — and it
+(`trident/store.ts:1367-1370`), so when two detectors disagree the last to arrive wins — and it
 is frequently the least informed. Filed as its own item rather than fixed here: neither
 "last writer wins" nor "first writer wins" is correct (a better later report must still be
 able to replace a worse earlier one), so the field needs an argued precedence over reason
@@ -668,9 +668,9 @@ kinds, and `crashRunningByLauncher` is the shared tombstone for every launcher-d
 rather than anything specific to deploy attribution.
 
 Measured reachability, so the deferral is informed rather than convenient: the run row's own
-reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1330`) and the
+reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1383`) and the
 pull half skips terminal runs (`trident/tick.ts:648`) — but `saveIfActive`'s veto path re-reads
-the tombstone and stamps it onto the row (`trident/store.ts:1931-1942`), guarded only by the
+the tombstone and stamps it onto the row (`trident/store.ts:1984-1995`), guarded only by the
 CALLER'S SNAPSHOT of `subagent_status`, not by the row's current value, so an
 overwrite can reach a row given that race. This change closes the duplicate-report routes into
 it, which makes it a sharp edge behind a race rather than an everyday path.

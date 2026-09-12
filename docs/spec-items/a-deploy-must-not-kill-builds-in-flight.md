@@ -117,7 +117,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:989`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:992`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
 - A KILL THAT FAILED WAS STILL REPORTED AS A DEPLOY KILL — the purest form of the shape, and
   the only finding here that crashed a build that was still running. `attributed` was computed
@@ -165,7 +165,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   never overrides an observation; `dead` + `killed` is a real conflict, reported as disputed and
   logged rather than resolved by preferring an arm). That last row was decided only after
   establishing that plain `dead` is positive in both provenances and never arises from a failed
-  look (`pool.ts:932` precedes `pool.ts:964`, so the pool branch answers for a session that has
+  look (`pool.ts:935` precedes `pool.ts:967`, so the pool branch answers for a session that has
   not been through a shutdown; the registry branch answers only when a look found no entry). A
   merge function is not a reader of one entry but of two verdicts, which is why it sat outside
   the call-site audit — so each function now records WHICH QUESTION IT ASKS, and the matrix is
@@ -203,7 +203,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   earlier revision closed it only when the report was an ATTRIBUTION, so a successfully
   delivered `cause: 'unknown'` left it open and the next watchdog tick reported the same
   death again as `cause: 'child-died'` — which `crashRunningByLauncher` writes over the
-  tombstone unconditionally (`trident/store.ts:1314-1317`). `delivered` and `attributed` are
+  tombstone unconditionally (`trident/store.ts:1367-1370`). `delivered` and `attributed` are
   different facts: telling the owner something is not telling the owner it was a deploy, and
   only the first closes the edge. The generalisation, because this is round 4's conflation
   arriving in a third state: `unknown` was not a possible value when that condition was
@@ -264,7 +264,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:964`, then `pool.ts:1004`).
+  spawn took it over — and they share one registry row (`pool.ts:967`, then `pool.ts:1008`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink
