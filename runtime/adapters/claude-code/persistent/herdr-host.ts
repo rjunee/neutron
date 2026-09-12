@@ -323,11 +323,24 @@ export class HerdrHost implements PtyHost {
     /** Issue a pane ACTUATION, best-effort and in order. No-op after exit (the
      *  interface's "no-op-safe after exit" contract) — checked again when the call
      *  actually starts, because the pane can go while it is queued. */
-    const send = (label: string, method: string, params: Record<string, unknown>): void => {
+    const send = (
+      label: string,
+      method: string,
+      params: Record<string, unknown>,
+      /**
+       * Called if the actuation FAILED. Optional, and deliberately not a change of shape
+       * for anyone else: fire-and-forget is right for keystrokes, and making every
+       * caller await a keypress would be a worse contract than the one being fixed.
+       * What is wrong is LATCHING A CLAIM on top of a fire-and-forget act — so the one
+       * caller that latches gets a way to unlatch, and the rest are untouched.
+       */
+      onFailed?: () => void,
+    ): void => {
       if (exited) return
       fireAndForget(
         label,
         enqueue(async () => (exited ? undefined : await client.call(method, params))),
+        onFailed === undefined ? undefined : () => onFailed(),
       )
     }
 
@@ -425,8 +438,33 @@ export class HerdrHost implements PtyHost {
           // (`spawn.ts`), so that one interrupt silently reclassified every later
           // crash as a clean recycle for the rest of the child's life. A transient
           // intent gets its own flag.
+          // AND THE LATCH IS ROLLED BACK IF THE ACTUATION FAILS. `send` is
+          // fire-and-forget, so this set a flag asserting "WE sent this child an
+          // INTERRUPT" (`pty-host.ts`) on top of an act that the server can refuse —
+          // the same defect, in the same direction, as the Bun host's `kill()` latching
+          // before a `proc.kill` that throws. THE RULE DOES NOT ATTACH TO A FILE THAT
+          // HAS LEARNED IT; IT ATTACHES TO EVERY OPERATION THAT LATCHES INTENT BEFORE AN
+          // ACT THAT CAN FAIL — and this one sits twenty lines above the comment stating
+          // it for the close path.
+          //
+          // Guarded on liveness for the reason the close path records: once a terminal
+          // state is settled, no later path may rewrite it.
           interruptedByUs = true
-          send('herdr-host.kill.sigint', 'pane.send_keys', { pane_id: paneId, keys: ['ctrl+c'] })
+          send(
+            'herdr-host.kill.sigint',
+            'pane.send_keys',
+            { pane_id: paneId, keys: ['ctrl+c'] },
+            () => {
+              if (exited) return
+              interruptedByUs = false
+              process.stderr.write(
+                `[herdr-host] pane ${paneId}: the SIGINT actuation was REFUSED — no interrupt ` +
+                  `was delivered. Clearing wasInterruptedByUs: claiming an interrupt that did ` +
+                  `not happen would let a caller record a turn as abandoned when the child ` +
+                  `never saw it.\n`,
+              )
+            },
+          )
           return
         }
         // Terminal from here. Record the intent for the IN-FLIGHT WINDOW only, so a
@@ -445,6 +483,26 @@ export class HerdrHost implements PtyHost {
             settleExit('closed-by-us')
           }),
           (e: unknown) => {
+            // `pane_not_found` IS CONFIRMATION, AND IT WAS LANDING IN THE BRANCH FOR
+            // "COULD NOT FIND OUT". FALSE AND UNKNOWN MUST NOT SHARE A BRANCH: a typed
+            // not-found is a FACT — the pane is gone — while a timeout, a transport
+            // error or a malformed reply are the ABSENCE of a fact. One `catch` cannot
+            // mean both, and treating the fact as an unknown broke the same two things
+            // the handler below exists to protect: `hasExited()` stayed false, so
+            // `repl-session.ts`'s ladder kept escalating against a pane that no longer
+            // existed; and `terminating` was cleared, so when polling later settled the
+            // exit, `wasKilledByUs()` was false and a deliberate recycle read as a crash
+            // — the defect the comment below was written to prevent, arriving through
+            // the other door.
+            //
+            // The poll path already knew this (`paneIsGone`, and the typed check in the
+            // read handler); the close path had no case for it at all. It settles
+            // exactly as `ok` does: we asked for the termination and the pane is gone,
+            // so the cause is ours and the flag stays latched.
+            if (e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND) {
+              settleExit('closed-by-us')
+              return
+            }
             // A FAILED CLOSE CLOSED NOTHING. An earlier version settled from
             // `.finally()`, so a rejected `pane.close` still resolved `exited`,
             // flipped `hasExited()` and reported `exitCause` 'closed-by-us' — a

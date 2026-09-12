@@ -413,6 +413,41 @@ not-new. That is accepted and recorded here rather than hidden.
       as one that reports none — and because "the import still completed" is satisfied
       by the defect itself.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/import-warm-session-reset.test.ts runtime/adapters/claude-code/persistent/__tests__/context-reset-sweep.test.ts`
+- [ ] **`pane_not_found` FROM THE CLOSE IS CONFIRMATION, not a failure to find out.**
+      FALSE AND UNKNOWN MUST NOT SHARE A BRANCH, and here they did: `pane.close` settled
+      only on its `.then` arm, so a typed not-found — positive proof the pane is gone,
+      which the real server sends and the fake models — went to the handler for "the
+      close told us nothing". It broke both things that handler exists to protect:
+      `hasExited()` stayed false, so `repl-session.ts`'s ladder kept escalating against a
+      pane that no longer existed, and `terminating` was cleared, so when polling later
+      settled the exit a deliberate recycle read as a crash. The poll path had the typed
+      check in two places; the close path had no case for it at all.
+      It settles exactly as `ok` does — we asked for the termination and the pane is
+      gone, so the cause is ours and the flag stays latched — while every other rejection
+      keeps the existing behaviour of clearing `terminating` and settling nothing. BOTH
+      DIRECTIONS, or "settle on any rejection" passes the first case.
+      THE BOUNDARY THE RACE TEST MISSES: it lets polling settle FIRST and then releases
+      the held close, so the close is never the thing that learns the pane is gone. The
+      new case parks the poll, so the close is the only observer — which is the
+      arrangement in which the close path's own handling is the whole answer.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **NO FLAG MAY OUTLIVE THE ACT IT CLAIMS — enumerated across both hosts, not fixed
+      where reported.** An operation that failed must not leave behind a latch saying it
+      succeeded. THE RULE ATTACHES TO EVERY OPERATION THAT LATCHES INTENT BEFORE AN ACT
+      THAT CAN FAIL, not to a file that has learned it: `herdr-host.ts` states the rule
+      for its `pane.close` and the SIGINT path twenty lines above it did not follow it.
+      THREE SITES EXIST across the two hosts, and the count is the criterion because
+      "fixed the one reported" is how the second and third survived: (1) `terminating`
+      before `pane.close` — rolled back from the start; (2) `interruptedByUs` before a
+      fire-and-forget `pane.send_keys`; (3) `killedByUs`/`interruptedByUs` before
+      `proc.kill`. Two of the three were found by a reviewer rather than by the author of
+      the rule. Every rollback is guarded on liveness (a settled terminal state is
+      immutable) and is as NARROW as its latch (a failing interrupt must not erase a
+      delivered termination).
+      WITHOUT MAKING THE ACT FAILABLE FOR EVERYONE: fire-and-forget is the right shape
+      for a keystroke, and the fix is a rollback hook for the one caller that latches —
+      not an `await` imposed on every caller that does not.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
 - [ ] **Exit settles only on CONFIRMED closure, and a failed close latches nothing.**
       A rejected `pane.close` must leave `exited` unresolved, `hasExited()` false,
       `exitCause()` undefined and `wasKilledByUs()` false — the pane is still there, so

@@ -276,7 +276,20 @@ export class BunTerminalHost implements PtyHost {
       outputReleased = true
       const held = heldScreen
       heldScreen = undefined
-      if (held !== undefined && opts.onScreen !== undefined) opts.onScreen(held)
+      if (held !== undefined && opts.onScreen !== undefined) {
+        // A THROWING CONSUMER MUST NOT PROPAGATE INTO THE HOST'S CALLER, and here it
+        // would: this host delivers SYNCHRONOUSLY from `beginOutput()`, so a detector
+        // that threw would come back out of the caller's own readiness handshake, while
+        // under herdr the same throw is swallowed by the poll loop. Found while
+        // enumerating the latch-before-a-fallible-act sites — a different rule, the same
+        // sweep: a caller must not be able to tell which backend it has by how its own
+        // bug reaches it.
+        try {
+          opts.onScreen(held)
+        } catch {
+          // Same policy as the poll loop's dispatch on the herdr side.
+        }
+      }
     }
     // FAIL OPEN, LOUDLY — the same policy as the herdr host, for the same reason.
     // Withholding output forever is worse than delivering it late: a REPL whose screens
@@ -334,7 +347,12 @@ export class BunTerminalHost implements PtyHost {
             heldScreen = screen
             return
           }
-          opts.onScreen(screen)
+          try {
+            opts.onScreen(screen)
+          } catch {
+            // A throwing consumer must not kill the stream, exactly as it must not kill
+            // the herdr poll loop.
+          }
         },
       })
       proc = (this.deps.spawn ?? bunSpawn)({

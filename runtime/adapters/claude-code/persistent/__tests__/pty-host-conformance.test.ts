@@ -324,6 +324,32 @@ describe('PtyHost conformance — the readiness gate', () => {
     })
   }
 
+  for (const backend of BACKENDS) {
+    describe(`${backend.name} — a throwing consumer`, () => {
+      it('does not propagate into the caller, and does not stop later delivery', async () => {
+        // A caller must not be able to tell which backend it has by how its OWN bug
+        // reaches it. herdr swallows a throwing `onScreen` in its poll loop; the pty
+        // delivers synchronously from `beginOutput()`, so the same throw came back out
+        // of the caller's readiness handshake. Found while enumerating latch-before-a-
+        // fallible-act sites — a different rule, the same sweep.
+        let calls = 0
+        const { child } = await backend.spawn(() => {
+          calls += 1
+          throw new Error('the detector threw')
+        })
+        // The handshake itself must survive it.
+        expect(() => child.beginOutput?.()).not.toThrow()
+        await settle()
+        expect(`${backend.name} sawScreen: ${String(calls > 0)}`).toBe(
+          `${backend.name} sawScreen: true`,
+        )
+        // ...and the host is still alive afterwards, not wedged by its consumer.
+        expect(child.hasExited()).toBe(false)
+        child.kill()
+      })
+    })
+  }
+
   it('CONTROL — the suite really runs against BOTH hosts, not one twice', () => {
     // Without this, a mistake in the table (the same backend listed twice, or one
     // silently dropped) would leave a "conformance" suite conforming one implementation

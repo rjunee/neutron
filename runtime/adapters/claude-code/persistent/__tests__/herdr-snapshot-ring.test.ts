@@ -349,6 +349,53 @@ describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
     expect(server.paneClosed).toBe(true)
   })
 
+  // `pane_not_found` FROM THE CLOSE IS CONFIRMATION, NOT A FAILURE TO FIND OUT.
+  //
+  // FALSE AND UNKNOWN MUST NOT SHARE A BRANCH. A typed not-found is a FACT — the pane is
+  // gone — while a timeout, a transport error or a malformed reply are the ABSENCE of a
+  // fact, and one `catch` cannot mean both. Treating the fact as an unknown broke both
+  // things the failed-close handler exists to protect: `hasExited()` stayed false, so
+  // the escalation ladder kept escalating against a pane that no longer existed, and
+  // `terminating` was cleared, so a deliberate recycle later read as a crash.
+  //
+  // THE BOUNDARY THE RACE TEST BELOW MISSES. That one lets polling settle the exit
+  // FIRST and then releases the close, so the close is never the thing that learns the
+  // pane is gone. Here polling is parked, so the close is the only observer — which is
+  // the arrangement in which the close path's own handling of `pane_not_found` is the
+  // whole answer.
+  it('a close answered pane_not_found SETTLES — the close is the first to learn it', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:pGone' })
+    // Poll parked: nothing but the close can discover the exit.
+    const { child } = await spawnWithFake(server, 60_000)
+    server.exitPane() // the pane is already gone when we ask to close it
+    child.kill()
+    expect(await child.exited).toBeNull()
+    // OURS, and latched. We asked for the termination and the pane is gone; the cause
+    // is the same one a successful close reports.
+    expect(child.exitCause?.()).toBe('closed-by-us')
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(child.wasInterruptedByUs?.()).toBe(false)
+  })
+
+  it('CONTROL — an UNTYPED close rejection still settles nothing and latches nothing', async () => {
+    // The other side of the split, and what stops "settle on any rejection" passing the
+    // case above: a close that failed for a reason that says nothing about the pane must
+    // leave the child exactly as it was — alive and unflagged — which is what re-arms
+    // the ladder.
+    const server = new FakeHerdrServer({ paneId: 'w9:pMute' })
+    const { child } = await spawnWithFake(server, 60_000)
+    server.failMethod('pane.close', new Error('transport hiccup'))
+    const errs = await withCapturedStderr(async () => {
+      child.kill()
+      await until(() => server.callsTo('pane.close').length >= 1, 'the close attempt')
+      await Bun.sleep(30)
+    })
+    expect(child.hasExited()).toBe(false)
+    expect(child.exitCause?.()).toBeUndefined()
+    expect(child.wasKilledByUs?.()).toBe(false)
+    expect(errs.filter((e) => e.includes('pane.close FAILED')).length).toBe(1)
+  })
+
   it('a pane vanishing while OUR close is in flight still reads as intentional', async () => {
     // The window the terminating flag exists for. Between asking for the close and its
     // acknowledgement the pane can disappear — of our own close, or because the process

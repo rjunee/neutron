@@ -21,6 +21,7 @@ import { HERDR_KEY_NAMES, herdrKeyName, herdrKeyNames } from '../herdr-protocol.
 import { HerdrHost } from '../herdr-host.ts'
 import { submitCommand } from '../signatures.ts'
 import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import { withCapturedStderr } from './capture-stderr.ts'
 import { encodeKeys, type Key, type NamedKey } from '../keystrokes.ts'
 import type { PtyChild } from '../pty-host.ts'
 
@@ -481,6 +482,35 @@ describe('submitting a slash command REFUSES rather than silently skipping the s
 })
 
 describe('kill maps onto the only signal herdr has', () => {
+  // A REFUSED SIGINT MUST NOT CLAIM THE INTERRUPT WAS SENT. `send` is fire-and-forget —
+  // which is the right shape for a keystroke — and the flag was latched on top of it, so
+  // a `pane.send_keys` the server refused left `wasInterruptedByUs()` true against
+  // `pty-host.ts`'s "True once WE sent this child an INTERRUPT". Same defect and same
+  // direction as the Bun host latching before a `proc.kill` that throws: an operation
+  // that failed leaving behind a latch that says it succeeded.
+  //
+  // THE FILE ALREADY KNEW HOW TO INJECT THIS — `failMethod('pane.send_keys', …)` is used
+  // for the refused-submit case — and only the SIGINT row was missing. The asymmetry in
+  // the coverage was the asymmetry in the code.
+  it('a REFUSED ctrl+c does not latch wasInterruptedByUs', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    server.failMethod('pane.send_keys', new Error('send_keys refused'))
+    const errs = await withCapturedStderr(async () => {
+      child.kill('SIGINT')
+      await until(() => server.callsTo('pane.send_keys').length >= 1, 'the attempt')
+      await Bun.sleep(30)
+    })
+    // It really was attempted, and it really did not land.
+    expect(server.deliveredTo('pane.send_keys')).toEqual([])
+    expect(child.wasInterruptedByUs?.()).toBe(false)
+    // ...and the terminal flag is untouched: the clear is as narrow as the latch.
+    expect(child.wasKilledByUs?.()).toBe(false)
+    expect(child.hasExited()).toBe(false)
+    expect(errs.filter((e) => e.includes('SIGINT actuation was REFUSED')).length).toBe(1)
+    child.kill()
+  })
+
   it('SIGINT becomes a ctrl+c keypress, and does NOT latch wasKilledByUs', async () => {
     // THIS TEST USED TO ASSERT THE CONTRADICTION. It checked `hasExited() === false`
     // AND `wasKilledByUs() === true` — alive and intentionally-terminated at the same

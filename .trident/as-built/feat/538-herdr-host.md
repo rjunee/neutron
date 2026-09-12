@@ -1527,6 +1527,65 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### False and unknown shared a branch, in the one place the rule was already written down
+
+`pane.close` settled only on its `.then` arm. Every rejection went to the handler for a
+close that told us nothing — including `pane_not_found`, which is positive proof the pane
+is gone, which the real server sends and which our own fake models because it does.
+
+So a close that came back with the FACT was treated as the ABSENCE of a fact, and it
+broke both things that handler exists to protect: `hasExited()` stayed false, so the
+escalation ladder kept escalating against a pane that no longer existed; and `terminating`
+was cleared, so when polling later settled the exit, `wasKilledByUs()` was false and a
+deliberate recycle read as a crash — the defect the handler's own comment was written to
+prevent, arriving through the other door. The poll path had the typed check in two places.
+The close path had no case for it at all, while the as-built asserted "only `ok` or
+`pane_not_found` confirms" — a sentence whose first half was implemented.
+
+The existing race test could not see it: it lets polling settle the exit FIRST and then
+releases the held close, so the close is never the thing that learns the pane is gone. The
+new case parks the poll so the close is the only observer, and its pair keeps an UNTYPED
+rejection settling nothing — or "settle on any rejection" passes the first case and loses
+the distinction entirely (M211 reddens three).
+
+### The rule does not attach to a file that has learned it
+
+`herdr-host.ts` states the no-latch-on-a-failed-act rule for its close path — and the
+SIGINT path **twenty lines above that comment** sets `interruptedByUs = true` and then
+calls a fire-and-forget `send`, so a `pane.send_keys` the server refuses left a flag
+asserting "WE sent this child an INTERRUPT" against the interface's own words. Same
+defect and same direction as the Bun host's `kill()` latching before a `proc.kill` that
+throws.
+
+That makes the useful lesson the opposite of "copy this file's discipline". **The rule
+attaches to every operation that latches intent before an act that can fail**, so I
+enumerated them rather than fixing the one reported. **There are three across the two
+hosts:**
+
+| # | site | rollback |
+| --- | --- | --- |
+| 1 | `terminating` before `pane.close` (herdr) | present from the start |
+| 2 | `interruptedByUs` before a fire-and-forget `pane.send_keys` (herdr) | added this round |
+| 3 | `killedByUs`/`interruptedByUs` before `proc.kill` (Bun) | added last round |
+
+**Two of the three were found by a reviewer rather than by the author of the rule**, which
+is the number worth keeping: writing a rule down next to one instance of it does not find
+its siblings. Every rollback is guarded on liveness (a settled terminal state is
+immutable) and is as narrow as its latch (a failing interrupt must not erase a delivered
+termination).
+
+What was NOT done: making `send` awaitable or failable for every caller. Fire-and-forget
+is the right shape for a keystroke; what was wrong is latching a claim on top of it, so
+only the caller that latches gets a rollback hook.
+
+**The enumeration found one more thing, of a different class.** Every non-intent flag
+assignment was checked too, and `outputReleased` led to a real divergence: the Bun host
+delivered `onScreen` synchronously from `beginOutput()` with no guard, so a throwing
+detector came back out of the caller's own readiness handshake — while under herdr the
+identical throw is swallowed by the poll loop. A caller must not be able to tell which
+backend it has by how its own bug reaches it. Both dispatch sites are now guarded, and the
+case went into the shared conformance suite (M214).
+
 ### The missing row is the operation that FAILS, in a table built from operations that work
 
 `BunTerminalHost.kill()` latched `killedByUs` and then swallowed a throwing
@@ -2545,6 +2604,11 @@ Run against the named suites.
 | M207 | PAIR: nothing latches at all | RED 4 |
 | M208 | the TOP liveness guard alone | SURVIVED (absorbed) → entry-guard observable added → RED 1 |
 | M209 | COMBINED: BOTH liveness guards removed | RED 1, and a DIFFERENT test from M204 |
+| M210 | `pane_not_found` from the close is an unknown again (the defect) | RED 1 |
+| M211 | PAIR: ANY close rejection settles — unknown treated as confirmation | RED 3 |
+| M212 | a refused SIGINT keeps its latch (the defect) | RED 1 |
+| M213 | PAIR: the SIGINT flag is never latched at all | RED 3 |
+| M214 | the Bun release dispatch is unguarded again (a throwing consumer escapes) | RED 1 (the SHARED suite) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
