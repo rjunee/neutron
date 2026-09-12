@@ -977,12 +977,14 @@ export function shutdownQuarantinedChildren(
     owed.push(report)
     // Same rule as the pooled path: SIGNAL here, and let the caller's shared pass
     // establish whether it actually died. Only an observed exit attributes the kill.
+    let signalDelivered = false
     try {
       entry.session.child.kill()
+      signalDelivered = true
     } catch {
-      /* the signal failed; the shared pass sees it never exited and records that */
+      /* the signal failed; a later death is then not ours to claim */
     }
-    awaitingExit.push({ report, child: entry.session.child })
+    awaitingExit.push({ report, child: entry.session.child, signalDelivered })
   }
   return { reports: owed, awaitingExit }
 }

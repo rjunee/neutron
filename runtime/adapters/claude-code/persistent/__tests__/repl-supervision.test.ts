@@ -386,7 +386,7 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     // `pid-dead → "pooled child exited"` and the owner was handed a crashed build.
     //
     // RED-mutation: in `supervision.ts`, hard-code `cause: 'child-died'` on the
-    // crashSink call (or drop `killedByGatewayShutdown` from `probeReplLiveness`) —
+    // crashSink call (or drop `shutdownObserved` from `probeReplLiveness`) —
     // this reddens while the plain pid-dead case above stays green.
     const { host } = makeFakeReplHost()
     const registryPath = tmpRegistry()

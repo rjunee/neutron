@@ -73,14 +73,23 @@ const log = createLogger('repl-registry')
 export const GATEWAY_SHUTDOWN_KILL_RETENTION_MS = 4 * 60 * 60_000
 
 /**
- * A backstop against unbounded growth, NOT the retention rule. It can only ever evict an
- * entry that is ALREADY outside the retention window or already unreferenced — see
- * `pruneGatewayShutdownKills`. Generous because the harm it prevents (a large registry
- * row) is smaller than the harm it could cause (a build with no failure reason), and it
- * is logged when it bites, because reaching it means something pathological is restarting
- * this session key.
+ * AN ALARM THRESHOLD, NOT A CAP. Nothing is evicted for crossing it.
+ *
+ * It used to slice the row down to this many entries, which contradicted the sentence
+ * directly above it: with more than this many entries all genuinely inside the retention
+ * window, the "backstop" became the PRIMARY rule and discarded the oldest still-live
+ * attribution — exactly the loss this whole mechanism exists to prevent, under exactly
+ * the load that makes it likely.
+ *
+ * It does not need to evict, because THE AGE RULE ALREADY BOUNDS GROWTH: every entry
+ * outside `GATEWAY_SHUTDOWN_KILL_RETENTION_MS` is released, so the most a row can hold is
+ * the number of shutdowns that landed on one session key inside that window. Crossing
+ * this threshold therefore means something pathological is restarting the key — roughly a
+ * restart a minute, sustained for hours — which is a thing to SAY rather than a thing to
+ * paper over by dropping evidence. The crash-loop guard (`restart-rate.ts`) is what exists
+ * to catch the cause.
  */
-export const GATEWAY_SHUTDOWN_KILL_HISTORY = 256
+export const GATEWAY_SHUTDOWN_KILL_ALARM_COUNT = 256
 
 /**
  * WHAT THE SHUTDOWN OBSERVED about one generation when it reached it.
@@ -232,7 +241,7 @@ export interface ReplRegistryRecord {
    *  respawn — it must outlive the generation it describes, which is the whole
    *  reason it exists.
    *
-   *  Bounded to {@link GATEWAY_SHUTDOWN_KILL_HISTORY} newest entries: one entry
+   *  Growth is bounded by the retention window, not by a count: one entry
    *  accrues per shutdown that killed a child on this key, and the only consumer is
    *  a still-in-flight build asking about its own launcher — bounded by trident's
    *  2-hour in-flight ceiling, so older entries are unreachable by construction. */

@@ -1461,3 +1461,57 @@ describe('a kill that throws never attributes a deploy (#518)', () => {
     expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(true)
   })
 })
+
+/**
+ * #518 — THE CAUSAL BOUNDARY AT THE LIVE PUSH PATH. The existing unkillable-host case has
+ * a child that stays alive, so forcing "the signal was delivered" is masked by
+ * `hasExited()` being false. This is the case that is not: our signal fails, and the child
+ * dies anyway — dead, and not by us.
+ */
+describe('a signal that failed does not become a deploy kill when the child dies anyway', () => {
+  it('reports UNDETERMINED for a child that exited while our signal was failing', async () => {
+    // RED-mutation: `let signalDelivered = true` in the pool loop, or confirm from
+    // `hasExited()` alone. Either attributes an independent exit to the deploy — which is
+    // this item's own defect, in its third position.
+    const base = makeWedgeOnceHost()
+    let diedOnItsOwn = false
+    const host: PtyHost = {
+      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
+        const child = base.host.spawn(argv, spawnOpts)
+        return {
+          ...child,
+          // Our signal never lands...
+          kill() {
+            throw new Error('EPERM: cannot signal this child')
+          },
+          // ...and it dies of something else while we are trying.
+          hasExited: () => diedOnItsOwn,
+        }
+      },
+    }
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-died-anyway-')), 'repl-registry.json')
+    const seen: Array<{ cause: string; detail: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push({ cause: info.cause, detail: info.detail })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, base.messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    // It is alive when the shutdown reaches it, and dies during the confirmation grace.
+    setTimeout(() => {
+      diedOnItsOwn = true
+    }, 5)
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.cause).not.toBe('gateway-shutdown')
+    expect(seen[0]?.cause).toBe('unknown')
+    // And nothing on disk claims the deploy did it.
+    expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(false)
+  }, 20_000)
+})

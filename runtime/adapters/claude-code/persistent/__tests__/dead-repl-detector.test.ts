@@ -26,7 +26,7 @@ describe('detectReplWedged — detection table', () => {
   // ─── #518: a deploy is not a crash, and the pair below is what says so ───────
 
   it('child exited AND the registry says a gateway shutdown killed it → pid-dead-gateway-shutdown', () => {
-    // RED-mutation: delete the `killedByGatewayShutdown` branch. The verdict falls
+    // RED-mutation: delete the `shutdownObserved === 'alive-and-killed'` branch. The verdict falls
     // back to `pid-dead` / "pooled child exited" and the deploy is reported as a
     // crash — the defect the spec item names.
     const v = detectReplWedged({ ...base, childAlive: false, healthOk: false, shutdownObserved: 'alive-and-killed' as const })
@@ -85,7 +85,7 @@ describe('detectReplWedged — detection table', () => {
 
   it('a shutdown marker on a LIVE child manufactures nothing', () => {
     // The marker EXPLAINS a death; it may never create one. RED-mutation: hoist the
-    // `killedByGatewayShutdown` check above the `childAlive` test.
+    // `shutdownObserved` check above the `childAlive` test.
     expect(detectReplWedged({ ...base, shutdownObserved: 'alive-and-killed' as const })).toEqual({ wedged: false })
     // ...and a marked, alive-but-silent child is still the dev-channel verdict.
     expect(

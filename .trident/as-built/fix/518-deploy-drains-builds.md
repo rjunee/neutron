@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:992`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:993`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -87,9 +87,11 @@ only moment it knows is just before. So it writes it down.
   timestamp for the whole teardown. `shutdownQuarantinedChildren` (`spawn.ts`) now reports
   too. An unregistered key writes a stderr line naming what could not be told, rather than
   dying silently.
-- **The next boot reads the marker.** `ReplWedgeProbe` gains `killedByGatewayShutdown`;
-  `detectReplWedged`'s dead-child branch returns the new reason
-  `pid-dead-gateway-shutdown` with a detail that names the deploy. The operator alert texts
+- **The next boot reads the marker.** `ReplWedgeProbe` gains `shutdownObserved`, carrying
+  the four-valued observation rather than a yes/no; `detectReplWedged`'s dead-child branch
+  returns `pid-dead-gateway-shutdown` with a detail that names the deploy when the
+  observation is `alive-and-killed`, and `pid-dead-cause-undetermined` when the shutdown
+  reached the child but did not establish the kill. The operator alert texts
   route through one `wedgeSymptom` helper so the two bodies cannot drift.
 - **The pull half too.** `probeLauncherGenerationAlive` answers
   `'killed-by-gateway-shutdown'` — but only AFTER `process.kill(pid, 0)` has independently
@@ -411,6 +413,44 @@ attributed/reported conflation in one pass instead of three rounds.
 
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
+
+### The backstop was the primary rule under load
+
+`pruneGatewayShutdownKills`'s contract said young entries are retained and the cap may only
+take what age-or-reference already released — and then capped every *unreferenced* entry,
+young ones included. With more entries than the threshold all genuinely inside the window,
+the "backstop" became the primary rule and dropped the oldest still-live attribution: the
+loss this mechanism exists to prevent, under exactly the load that makes it likeliest.
+
+**It does not need to evict at all, which is the part worth recording.** The age rule
+already bounds growth — everything outside the retention window is released, so a row holds
+at most the shutdowns that landed on one session key inside that window. The count cap was
+guarding a bound that already existed. So it is now an ALARM: crossing it keeps every entry
+and says so loudly, because the situation it describes (a restart a minute, sustained for
+hours) is a thing to report, not a reason to discard evidence — and `restart-rate.ts` is
+what exists to catch the cause. `GATEWAY_SHUTDOWN_KILL_HISTORY` is renamed
+`GATEWAY_SHUTDOWN_KILL_ALARM_COUNT`, because a constant named for a retained count that
+retains nothing is a name whose plain reading is false.
+
+### "Is it dead" is not "is it dead because of us"
+
+The third position of one sentence on this item. `attributed` was derivable before the act;
+then a `kill()` that merely RETURNED was read as a kill that worked; and then an exit that
+happened anyway was read as our kill. Each fix moved the evidence closer to the act, and
+none of them recorded whether the act SUCCEEDED.
+
+`hasExited()` answers "is it dead". Attribution needs "is it dead BECAUSE OF US", and the
+only thing that can establish the second is whether our signal was delivered. So
+`ShutdownExitWatch` carries `signalDelivered` — set by the caller for the initial signal,
+raised by the escalation when the SIGKILL lands — and promotion requires BOTH it and the
+exit. A child whose signal failed and which then died of something else is dead, and not by
+us: undetermined, never a deploy.
+
+The previous coverage had a child that stayed ALIVE, so the causal boundary was untested:
+an independent exit during the grace was indistinguishable from our kill. It is now driven
+at the live push path — our signal throws, the child dies anyway, and the report must not
+say deploy — with the complements that a delivered signal plus an exit IS a kill, and that
+the escalation landing makes a subsequent death ours.
 
 ### The ticked box was a claim the code could not falsify
 
@@ -757,6 +797,15 @@ rather than confirming them:
   now covered by M36 (single-slot marker restored → the quarantined generation disappears),
   M40 (spawn clears the history → the quarantined record is lost) and M39 (the probe matches
   any entry rather than this generation → absence read as attribution).
+- **M65 RETIRED**, not counted: it targeted the `survivors` slice in the old backstop,
+  which no longer exists now that the threshold evicts nothing. Its property — never evict
+  a referenced entry — is subsumed by **M79** (restore the eviction), which is strictly
+  stronger because it also evicts YOUNG entries. A mutation for code that is gone is not
+  coverage.
+- **M82** (have the caller always claim its signal landed) survived its first run, because
+  the live-path case had a child that never exits — so the forced claim was masked by
+  `hasExited()` being false. The case that is not masked, our signal failing while the
+  child dies anyway, was added and it reds.
 - **M31** (drop the per-phase clamp) survived its first version, and that is what established
   the paragraph above: the clamp changes no count, so only an elapsed-time assertion can kill
   it. Retargeted with a justified opt-out rather than left unfalsifiable.

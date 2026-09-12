@@ -988,12 +988,16 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
       // "the signal did not throw" is the absence of one failure mode, not evidence of
       // death. Waiting per child here would also put one child's grace period in front
       // of the next child's signal, which is the phase rule this module already obeys.
+      let signalDelivered = false
       try {
         session.child.kill()
+        signalDelivered = true
       } catch {
-        /* the signal failed; the shared pass sees it never exited and records that */
+        /* the signal failed; a later death is then not ours to claim */
       }
-      if (owedForThisChild !== null) awaitingExit.push({ report: owedForThisChild, child: session.child })
+      if (owedForThisChild !== null) {
+        awaitingExit.push({ report: owedForThisChild, child: session.child, signalDelivered })
+      }
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
     } catch {

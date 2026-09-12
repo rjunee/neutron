@@ -146,8 +146,20 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:992`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:993`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE RETENTION BACKSTOP WAS THE PRIMARY RULE UNDER LOAD, and evicted inside the window it
+  guaranteed. With more entries than the cap all genuinely young, it dropped the oldest
+  still-live attribution — the loss this item exists to prevent, at the load that makes it
+  likeliest. It does not need to evict: the age rule already bounds growth, so the count is
+  now an ALARM that keeps everything and says so, and the constant is renamed for what it
+  does.
+- "IS IT DEAD" IS NOT "IS IT DEAD BECAUSE OF US" — the third position of this item's one
+  sentence. `attributed` was derivable before the act; then a `kill()` that merely returned
+  was read as a kill that worked; then an exit that happened anyway was read as our kill.
+  Attribution now requires BOTH a delivered signal (carried on the watch, raised by the
+  escalation) and an observed exit, so a child that died of something else while our signal
+  was failing is undetermined rather than a deploy.
 - A KILL THAT FAILED WAS STILL REPORTED AS A DEPLOY KILL — the purest form of the shape, and
   the only finding here that crashed a build that was still running. `attributed` was computed
   from the PRE-KILL liveness sample and consumed at delivery as though it described the

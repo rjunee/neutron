@@ -34,6 +34,21 @@ import {
 } from '../gateway-shutdown-kill.ts'
 import { detectReplWedged } from '../dead-repl-detector.ts'
 
+/** Synchronous sibling of `captureStderr`, for pure functions. */
+function captureStderrSync<T>(fn: () => T): { result: T; lines: string[] } {
+  const lines: string[] = []
+  const original = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
+    return true
+  }) as typeof process.stderr.write
+  try {
+    return { result: fn(), lines }
+  } finally {
+    process.stderr.write = original
+  }
+}
+
 /** Capture `[repl] …` stderr for the duration of `fn`. */
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
   const lines: string[] = []
@@ -56,7 +71,7 @@ import {
   type ShutdownExitWatch,
 } from '../gateway-shutdown-kill.ts'
 import {
-  GATEWAY_SHUTDOWN_KILL_HISTORY,
+  GATEWAY_SHUTDOWN_KILL_ALARM_COUNT,
   GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
   removeRecord,
@@ -511,7 +526,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     const stillReferenced = (generation: string): boolean => generation === 'g0'
     // Far more than the backstop, and all of them far NEWER than the retention window.
     const recent = ANCIENT + GATEWAY_SHUTDOWN_KILL_RETENTION_MS * 10
-    for (let i = 0; i < GATEWAY_SHUTDOWN_KILL_HISTORY + 20; i++) {
+    for (let i = 0; i < GATEWAY_SHUTDOWN_KILL_ALARM_COUNT + 20; i++) {
       patchRecord(path, KEY, { child_generation: `later-${i}` })
       recordGatewayShutdownOutcome(path, KEY, `later-${i}`, recent + i, 'alive-and-killed', 4242, stillReferenced)
     }
@@ -723,7 +738,7 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
         }
       },
     }
-    return { watch: { report, child }, signals }
+    return { watch: { report, child, signalDelivered: false }, signals }
   }
 
   const pendingFor = (path: string, generation: string): PendingShutdownKillReport =>
@@ -783,7 +798,10 @@ describe('only a child that actually exited is recorded as killed (#518)', () =>
     seed(path)
     const report = pendingFor(path, 'gen-live')
     const { watch, signals } = watchFor(report, { exitsOnSigterm: true, exitsOnSigkill: true })
+    // The shutdown loop signals before the confirmation pass and records that it landed;
+    // this mirrors that, since the pass only escalates children still alive.
     watch.child.kill()
+    watch.signalDelivered = true
 
     await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
 
@@ -921,5 +939,147 @@ describe('what the owner gets when BOTH channels fail', () => {
       }),
     )
     expect(attempted[0]).toBe('gen-unbacked')
+  })
+})
+
+describe('the alarm threshold never evicts a young entry (#518)', () => {
+  it('MORE young entries than the threshold are ALL retained, and the row says so', () => {
+    // THE BOUNDARY THE OLD COVERAGE MISSED — it had one young entry and one old referenced
+    // one, never more than the threshold all young. There the "backstop" became the
+    // PRIMARY rule and dropped the oldest still-live attribution: the loss this mechanism
+    // exists to prevent, under exactly the load that makes it likeliest.
+    //
+    // RED-mutation: restore `return keep.slice(-GATEWAY_SHUTDOWN_KILL_ALARM_COUNT)`.
+    const n = GATEWAY_SHUTDOWN_KILL_ALARM_COUNT + 1
+    const entries = Array.from({ length: n }, (_, i) => ({
+      generation: `g${i}`,
+      at: 1_000 + i,
+      observed: 'alive-and-killed' as const,
+    }))
+    const { result: kept, lines } = captureStderrSync(() => pruneGatewayShutdownKills(entries, 1_000 + n))
+    expect(kept).toHaveLength(n)
+    // The OLDEST is the one a long-running build is likeliest to need, so name it.
+    expect(kept.some((e) => e.generation === 'g0')).toBe(true)
+    // Crossing the threshold is SAID, not silently absorbed.
+    expect(lines.join('')).toContain('KEEPING them all')
+  })
+
+  it('THE COMPLEMENT — retention still releases what ages out, so growth stays bounded', () => {
+    // Without this, "never evict" would pass the case above by leaking forever. Growth is
+    // bounded by the WINDOW, which is why the threshold does not need to evict.
+    // RED-mutation: make `young()` return true unconditionally.
+    const old = Array.from({ length: 10 }, (_, i) => ({
+      generation: `old${i}`,
+      at: 0,
+      observed: 'alive-and-killed' as const,
+    }))
+    const fresh = { generation: 'fresh', at: GATEWAY_SHUTDOWN_KILL_RETENTION_MS, observed: 'alive-and-killed' as const }
+    const kept = pruneGatewayShutdownKills([...old, fresh], GATEWAY_SHUTDOWN_KILL_RETENTION_MS + 1)
+    expect(kept.map((e) => e.generation)).toEqual(['fresh'])
+  })
+
+  it('and no alarm is emitted when the row is ordinary', () => {
+    const { lines } = captureStderrSync(() =>
+      pruneGatewayShutdownKills([{ generation: 'g', at: 10, observed: 'alive-and-killed' as const }], 20),
+    )
+    expect(lines.join('')).not.toContain('KEEPING them all')
+  })
+})
+
+describe('an exit that happened anyway is not our kill (#518)', () => {
+  it('signal FAILED but the child died on its own → UNDETERMINED, not a deploy', async () => {
+    // THE CAUSAL BOUNDARY. `hasExited()` answers "is it dead"; attribution needs "is it
+    // dead BECAUSE OF US". The previous kill-throws case covered only a child that STAYED
+    // ALIVE, so an independent exit during the grace was attributed to the deploy — the
+    // third position of this item's one defect, each fix moving the evidence closer to the
+    // act without ever recording whether the act succeeded.
+    //
+    // RED-mutation: `confirmShutdownKill(w.report, { killed: w.child.hasExited() })`.
+    const path = registryPath()
+    seed(path)
+    const report = recordGatewayShutdownKill(
+      { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path, onChildCrash: () => {} } as PersistentReplSubstrateOptions,
+      KEY,
+      'gen-live',
+      1_000,
+      'alive',
+      4242,
+    )
+    let exited = false
+    const watch: ShutdownExitWatch = {
+      report,
+      // Our signal never landed — neither the SIGTERM (the caller's `kill()` threw, so
+      // `signalDelivered` is false) nor the escalation.
+      signalDelivered: false,
+      child: {
+        exited: Promise.resolve(0),
+        hasExited: () => exited,
+        kill: () => {
+          throw new Error('EPERM')
+        },
+      },
+    }
+    // It dies during the grace, of something else entirely.
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => { exited = true } })
+
+    expect(watch.child.hasExited()).toBe(true)
+    expect(report.observed).toBe('alive-when-reached')
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(false)
+  })
+
+  it('THE COMPLEMENT — signal delivered and the child died IS our kill', async () => {
+    // Otherwise "require a delivered signal" would pass the case above by never
+    // attributing anything. RED-mutation: `killed: false` unconditionally.
+    const path = registryPath()
+    seed(path)
+    const report = recordGatewayShutdownKill(
+      { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path, onChildCrash: () => {} } as PersistentReplSubstrateOptions,
+      KEY,
+      'gen-live',
+      1_000,
+      'alive',
+      4242,
+    )
+    let exited = false
+    const watch: ShutdownExitWatch = {
+      report,
+      signalDelivered: true,
+      child: { exited: Promise.resolve(0), hasExited: () => exited, kill: () => { exited = true } },
+    }
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    expect(report.observed).toBe('alive-and-killed')
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
+  })
+
+  it('the SIGKILL escalation landing makes a subsequent death ours', async () => {
+    // The escalation is a delivered signal too, so a child that only dies to SIGKILL is a
+    // deploy kill. RED-mutation: drop `w.signalDelivered = true` after the escalation and
+    // this child becomes permanently unattributable.
+    const path = registryPath()
+    seed(path)
+    const report = recordGatewayShutdownKill(
+      { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path, onChildCrash: () => {} } as PersistentReplSubstrateOptions,
+      KEY,
+      'gen-live',
+      1_000,
+      'alive',
+      4242,
+    )
+    let exited = false
+    const watch: ShutdownExitWatch = {
+      report,
+      // The initial SIGTERM failed...
+      signalDelivered: false,
+      child: {
+        exited: Promise.resolve(0),
+        hasExited: () => exited,
+        // ...but the escalation lands.
+        kill: () => {
+          exited = true
+        },
+      },
+    }
+    await confirmShutdownExits([watch], { graceMs: 1, sleep: async () => {} })
+    expect(report.observed).toBe('alive-and-killed')
   })
 })

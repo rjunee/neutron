@@ -135,7 +135,7 @@
  */
 
 import {
-  GATEWAY_SHUTDOWN_KILL_HISTORY,
+  GATEWAY_SHUTDOWN_KILL_ALARM_COUNT,
   GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
   patchRecord,
@@ -370,25 +370,21 @@ export function pruneGatewayShutdownKills(
     typeof e.at === 'number' && Number.isFinite(e.at) && now - e.at < GATEWAY_SHUTDOWN_KILL_RETENTION_MS
 
   const keep = entries.filter((e) => young(e) || referenced(e))
-  if (keep.length <= GATEWAY_SHUTDOWN_KILL_HISTORY) return keep
-
-  // THE BACKSTOP, AND IT OBEYS THE SAME RULE. Slicing the newest N here was a bug in the
-  // first version of this fix, caught by its own test: the oldest surviving entry is
-  // exactly the one a long-running build is most likely to need, so an oldest-first
-  // eviction re-created the stranding the age rule had just removed. A referenced entry is
-  // never evicted, whatever its age and however full the row is; the cap is filled out
-  // with the NEWEST unreferenced entries.
-  const live = keep.filter(referenced)
-  const spare = Math.max(0, GATEWAY_SHUTDOWN_KILL_HISTORY - live.length)
-  const droppable = keep.filter((e) => !referenced(e))
-  const survivors = new Set([...live, ...droppable.slice(-spare)])
-  process.stderr.write(
-    `[repl] gateway-shutdown kill history for one session key exceeded ${GATEWAY_SHUTDOWN_KILL_HISTORY} retained ` +
-      `entries (${live.length} still referenced by a live run) — dropping the oldest UNREFERENCED entries; ` +
-      `if this recurs, something is restarting this session key pathologically\n`,
-  )
-  // Original order preserved, so "newest last" stays true for every later reader.
-  return keep.filter((e) => survivors.has(e))
+  // NOTHING IS EVICTED FOR CROSSING THE ALARM THRESHOLD. An earlier revision sliced the
+  // row down to it, which contradicted this function's own contract: with more entries
+  // than the threshold all genuinely YOUNG, the "backstop" became the primary rule and
+  // dropped the oldest still-live attribution — the loss this mechanism exists to prevent,
+  // under the load that makes it likeliest. The age rule already bounds growth (everything
+  // outside the window is released), so crossing the threshold is a thing to SAY, not a
+  // reason to discard evidence.
+  if (keep.length > GATEWAY_SHUTDOWN_KILL_ALARM_COUNT) {
+    process.stderr.write(
+      `[repl] gateway-shutdown kill history for one session key holds ${keep.length} entries still inside the ` +
+        `retention window (alarm threshold ${GATEWAY_SHUTDOWN_KILL_ALARM_COUNT}) — KEEPING them all, because ` +
+        `dropping one loses a build's failure reason; something is restarting this session key pathologically\n`,
+    )
+  }
+  return keep
 }
 
 /**
@@ -505,6 +501,18 @@ function promoteGatewayShutdownObservation(
 export interface ShutdownExitWatch {
   report: PendingShutdownKillReport
   child: { readonly exited: Promise<number | null>; hasExited: () => boolean; kill: (signal?: never) => void }
+  /**
+   * Whether OUR termination signal was actually delivered — set by the caller for the
+   * initial signal, and raised here if the SIGKILL escalation succeeds.
+   *
+   * ATTRIBUTION NEEDS "DEAD BECAUSE OF US", AND `hasExited()` ONLY ANSWERS "DEAD". This is
+   * the third position of one defect on this item: the attribution was first derivable
+   * before the act, then read from a `kill()` that merely returned, and then from an exit
+   * that may have happened anyway. Each fix moved the evidence closer to the act and none
+   * recorded whether the act SUCCEEDED. A child whose signal failed and which then died on
+   * its own is dead — and not by us, so it is undetermined, never a deploy kill.
+   */
+  signalDelivered: boolean
 }
 
 /** How long every signalled child together gets to exit before the escalation, and
@@ -550,12 +558,18 @@ export async function confirmShutdownExits(
     if (w.child.hasExited()) continue
     try {
       w.child.kill('SIGKILL' as never)
+      // The escalation landed, so from here a death IS ours to claim.
+      w.signalDelivered = true
     } catch {
       /* already gone, or unsignallable — the recheck below decides either way */
     }
   }
   await settle()
-  for (const w of watches) confirmShutdownKill(w.report, { killed: w.child.hasExited() })
+  for (const w of watches) {
+    // BOTH are required. Exited without a delivered signal means it died of something
+    // else while we were failing to signal it: dead, and not by us.
+    confirmShutdownKill(w.report, { killed: w.signalDelivered && w.child.hasExited() })
+  }
 }
 
 export function recordGatewayShutdownOutcome(
@@ -574,7 +588,7 @@ export function recordGatewayShutdownOutcome(
     // likeliest of all to be hosting live work, and a single-slot marker had nowhere
     // to put it. Entries are idempotent per generation (a re-mark keeps the first
     // timestamp: the kill happened once) and bounded to the newest
-    // GATEWAY_SHUTDOWN_KILL_HISTORY.
+    // GATEWAY_SHUTDOWN_KILL_ALARM_COUNT.
     const existing = getRecord(registryPath, sessionKey)
     if (existing === undefined) return false
     const prior = Array.isArray(existing.killed_by_gateway_shutdown) ? existing.killed_by_gateway_shutdown : []
