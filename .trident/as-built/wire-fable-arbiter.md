@@ -63,6 +63,61 @@ file; one seam per change. And `on_infra_retry` (`orchestrator.ts:387`), which i
 other never-passed production option — issue #535 owns it, and this change does not
 silently expand into it.
 
+### The read-only property, and the two wrong answers before it
+
+THE ENFORCEMENT IS THE TOOL SURFACE. `ARBITER_TOOL_NAMES` is `['Read','Glob','Grep']`.
+No `Bash`, no `Edit`, no `Write`. `--tools` is a real CLI-level gate and — this is the
+part all of us had wrong — **it survives `--dangerously-skip-permissions`**, which
+governs the approval prompt, not which built-ins exist. Proved against a real binary
+(`trident/__tests__/arbiter-tool-gate.e2e.test.ts`, `claude` 2.1.269) with a control arm
+showing the same prompt DOES create the file when `Bash` is granted. It is driven by
+`AgentSpec.tools`, not by the frozen `SubstrateProfile` shape, so enforced read-only
+needed no substrate migration at all.
+
+TWO EARLIER ANSWERS FAILED, FOR ONE REASON RATHER THAN TWO, and both are recorded so
+they are not retried:
+
+1. *Withhold the GitHub credential.* Necessary, not sufficient. It stops the arbiter
+   pushing; it does nothing about the CALLER pushing the arbiter's edits. My first
+   write-up excused the residual as "local mutation inside the throwaway worktree" —
+   false: that tree is the run's conflicted merge worktree, whose contents become the
+   commit.
+2. *Fingerprint the worktree before and after the turn.* A detective control against an
+   adversary with arbitrary code execution, which is a category error.
+   `nohup setsid sh -c 'sleep 1.5; … git add' &` passes the immediate re-check and lands
+   seconds later — measured against this branch's actual function: `before ==
+   immediately-after` true, `before == 3s-later` false, injected line staged. My tests
+   mutated synchronously, so they were shaped to the threat I had imagined.
+
+A prompt-injectable turn with write access to the tree that becomes the merge cannot be
+made safe by DETECTING what it did. Reaping was ruled out for the same family of reason:
+a cgroup kill does reap a `setsid` child, but `wrong-base-remedy.ts`'s
+`CONFIGURED_CODE_CAVEAT` already records that git-configured code (reference-transaction
+hooks, `ext::` helpers, `credential.helper`) may write anywhere and is executed by the
+caller's own `rebase --continue`, with no arbiter process alive to reap.
+
+WHAT BASH WAS FOR, AND WHERE IT COMES FROM NOW. The conflict markers are in the files,
+which Read/Grep reach. Bash's unique contribution was each side's HISTORY — why a change
+exists, not what it says. The CALLER now runs that `git log` itself (`sideHistory`,
+`--max-count=20`, subjects and bodies only) and quotes both directions into the evidence.
+
+THE CAP IS PART OF THE SAME CHANGE, NOT A FOLLOW-UP. That text is git-authored — commit
+messages written by whoever wrote the branches — so it is attacker-influenceable, and
+quoting it unbounded would trade a write vector for an injection surface. `foldEvidence`'s
+300-character ceiling exists for chat sentences and would truncate history to
+uselessness, so `foldEvidenceTo` takes a caller-chosen budget and the seam sets a fixed
+**2 KiB per side, tail-kept, byte-measured** (a character cap bounds neither prompt size
+nor cost on multi-byte text), routed through the same `defang` / `EVIDENCE_SCAN_MAX` path
+as every other untrusted string here. The prompt also frames the whole evidence block as
+data, never instructions.
+
+`worktreeFingerprint` is KEPT as defence in depth, with its claims downgraded in all
+three docblocks that overstated them. It still covers a resolver or harness bug leaving
+the tree different from what the arbitration saw, and it costs three read-only git calls.
+If phase D lands a real sandbox, `Bash` could return under it and this becomes the
+belt-and-braces it should always have been. `permission_mode`/`sandbox` were never
+touched: shape-only at Step 0, and irrelevant to the mechanism that works.
+
 ### The privilege boundary — the fix review forced
 
 The first version of this change passed the DEFAULT substrate profile, and that made

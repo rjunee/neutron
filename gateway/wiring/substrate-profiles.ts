@@ -334,12 +334,18 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * run's conflicted merge worktree, whose contents become the commit. Dropping the credential
  * stops this turn pushing; it does nothing about its CALLER pushing its edits.
  *
- * That half is enforced at the call site instead: `trident/merge.ts` fingerprints the worktree
- * immediately before and after every arbitration (`worktreeFingerprint`) and refuses to act on
- * the decision if anything moved, or if the check could not be made. `permission_mode` and
- * `sandbox` would make it structural here rather than downstream, and both are deliberately
- * shape-only at Step 0 (see the file header) — so this profile closes the reach that leaves the
- * machine, and the caller closes the reach that stays on it.
+ * That half is closed somewhere else entirely, and NOT by this profile: `trident/arbiter.ts`
+ * grants only Read/Glob/Grep, and `--tools` is a real CLI-level gate that survives
+ * `--dangerously-skip-permissions` (proved against a real binary in
+ * `trident/__tests__/arbiter-tool-gate.e2e.test.ts`). A turn with no `Bash` cannot write at
+ * all, so there is no local write for this profile to worry about. `merge.ts`'s
+ * `worktreeFingerprint` is kept as labelled defence in depth — it cannot see an asynchronous
+ * writer and is not the enforcement of anything.
+ *
+ * `permission_mode` and `sandbox` are NOT what fixed this and are not needed for it: they are
+ * shape-only at Step 0 (see the file header), while the tool grant works today. This profile's
+ * own job is narrower and still worth doing — it closes the reach that LEAVES THE MACHINE
+ * (`gh pr merge`, `git push`, `gh api`), which a tool grant says nothing about.
  *
  * Site: `open/composer.ts` (`cc-trident-arbiter` via `makeEphemeralSubstrate`).
  */

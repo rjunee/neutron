@@ -642,8 +642,29 @@ export const CONFIGURED_CODE_CAVEAT =
  */
 const EVIDENCE_SCAN_MAX = 64_000
 export function foldEvidence(s: string): string {
+  return foldEvidenceTo(s, EVIDENCE_PROSE_MAX)
+}
+
+/**
+ * `foldEvidence` with a CALLER-CHOSEN output budget (#541).
+ *
+ * WHY THE BUDGET IS A PARAMETER NOW. `EVIDENCE_PROSE_MAX` is 300 characters because
+ * every existing caller renders a SENTENCE the owner reads in chat. The arbiter seam
+ * (`trident/merge.ts`) has a different job for the same machinery: it quotes each
+ * side's commit history into a model prompt, which does not fit in 300 characters and
+ * is not read by a human. That text is git-authored — commit messages and diff bodies
+ * from both branches — so it is attacker-INFLUENCEABLE and must go through the same
+ * `defang` + `EVIDENCE_SCAN_MAX` path as everything else here. Making the budget an
+ * argument is what lets it, instead of the seam growing a private second fold that
+ * would drift from this one.
+ *
+ * Identical to `foldEvidence` in every other respect, including keeping the TAIL: the
+ * newest commits are the ones that explain a conflict, exactly as the last lines of
+ * stderr are the ones that explain a failure.
+ */
+export function foldEvidenceTo(s: string, max: number): string {
   const folded = defang(s.length > EVIDENCE_SCAN_MAX ? s.slice(-EVIDENCE_SCAN_MAX) : s)
-  return folded.length > EVIDENCE_PROSE_MAX ? `…${folded.slice(-EVIDENCE_PROSE_MAX)}` : folded
+  return folded.length > max ? `…${folded.slice(-max)}` : folded
 }
 
 /**
