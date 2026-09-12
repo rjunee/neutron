@@ -33,7 +33,7 @@
  * in-band terminal transition reaps within a tick; everything else reaps within the
  * 15-minute cadence or at the next boot (`immediate: true`).
  *
- * ── THE EVIDENCE GUARD, AND WHY IT IS STRICTLY SAFER THAN THE 2026-09-01 INCIDENT ─
+ * ── THE EVIDENCE GUARD — FOURTEEN CHECKS, SAFER THAN THE 2026-09-01 INCIDENT ──────
  *
  * `docs/as-built/wrong-base-guard-prints-a-destructi.md` records a guard that
  * composed an unconditional `git branch -D` from NOTHING and pointed it at a branch
@@ -57,7 +57,7 @@
  *      `rebase-apply/head-name` and `BISECT_START`). That read answering 'unknown'
  *      refuses every ref in the repo, because what it could not read may name any of
  *      them.
- *  4c. No DETACHED LINKED worktree still on disk is standing on the ref's commit. Keyed on the
+ *   5. No DETACHED LINKED worktree still on disk is standing on the ref's commit. Keyed on the
  *      COMMIT, not a name, which is what makes it survive the sweep boundary: the
  *      worktree pass's own `checkout --detach` leaves HEAD on the tip, so a tree that
  *      pass detached and then PRESERVED (dirty, or inside retention) still points at the
@@ -66,13 +66,16 @@
  *      there HEAD is the `onto` commit — and does not need to, because gate 4 does. The
  *      SHARED checkout is excluded (see the loop): it is never a disposable build tree, so
  *      it is never the tree this protects, and including it only refuses on coincidence.
- *   5. At least one run row in this repo names the branch. NO row is not evidence the
+ *   6. No worktree THIS SWEEP detached still exists — a same-sweep fast path, kept only
+ *      because it can name the detach in the refusal reason. Gate 5 is what holds that line;
+ *      this map lives for ONE sweep. See the detach site in `sweepTridentWorktrees`.
+ *   7. At least one run row in this repo names the branch. NO row is not evidence the
  *      ref is disposable — it is the absence of an owner, so it is kept. That single
  *      rule is what protects a hand-made branch and, measured against the 79, it is
  *      what keeps 6 of them.
- *   6. EVERY run row naming it is in a terminal phase. One non-terminal owner keeps
+ *   8. EVERY run row naming it is in a terminal phase. One non-terminal owner keeps
  *      the ref (`listBranchOwners` is unbounded for exactly this reason — see there).
- *   7. No owning run's recorded worktree still EXISTS on disk.
+ *   9. No owning run's recorded worktree still EXISTS on disk.
  *
  *      CREDIT THIS GATE WITH NOTHING TODAY. Measured read-only against the production
  *      store on 2026-09-12: 0 of 291 run rows carry a non-null `worktree` (the
@@ -80,28 +83,42 @@
  *      preservation of a dirty tree's ref rests on gates 4 and 4c, not on this. It is
  *      kept because it is correct and costs nothing the day that column is populated —
  *      not because it is load-bearing now. A follow-up populates it at provisioning.
- *   8. No live process is standing in an owning run's worktree path, and none is
+ *  10. No live process is standing in an owning run's worktree path, and none is
  *      standing in a path bearing its `workflow_run_id`. The race it is aimed at is
  *      real — the row goes terminal (hang watchdog, cancel, crash latch) while the
  *      detached workflow is still running.
  *
  *      IT ALSO CANNOT FIRE TODAY, for two reasons, and neither is a licence to delete
- *      anything. The worktree half is dead for the same reason as gate 7 (no row carries
+ *      anything. The worktree half is dead for the same reason as gate 9 (no row carries
  *      a `worktree`). The generation half compares a 36-character run UUID against
  *      `wf_<8hex>-<3hex>-<n>` basenames: measured 0 of 17 matches, because they are
  *      different identifiers — which also makes `claimedByNonTerminalRun` above weaker
  *      than it reads. What actually protects a LIVE workflow is not this gate: its tree
  *      is `isLive`, so the worktree pass never detaches it, so it still holds its branch
  *      by name and gate 4 keeps the ref. A follow-up re-keys or drops this witness.
- *   9. A salvage ref was CREATED first — create-only, never a blind set. 67 of the 79
+ *  11. A salvage ref was CREATED first — create-only, never a blind set. 67 of the 79
  *      measured refs carry commits origin does not have, so the delete would otherwise
  *      be the only copy's last reference. `refs/trident-reaped/<slug>/<sha>` keeps them
  *      reachable — outside `refs/heads` so it can never re-enter a launch, and outside
  *      `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push.
  *      Recovery is `git branch <name> <sha>`. Salvage failing REFUSES the delete.
- *  9a. NOTHING CLAIMS THE REF AS OF NOW — holders and live owners RE-MEASURED, not
+ *  12. NOTHING CLAIMS THE REF AS OF NOW — holders and live owners RE-MEASURED, not
  *      remembered, immediately before the delete.
- *  9b. AND NOTHING CLAIMED IT DURING THE DELETE. The same measurement again, afterwards,
+ *  13. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP: `git update-ref -d <ref>
+ *      <expected-sha>` checks the old value and unlinks the ref under one ref lock, so a
+ *      branch that has advanced since the enumeration cannot be deleted at all. There is
+ *      no read-then-delete window, because there is no separate read.
+ *
+ *      THIS IS WHERE THE FIRST CUT OF THIS MODULE WAS WRONG, and it is worth saying so
+ *      here rather than only at the call site. It used to `rev-parse` the sha and then
+ *      run `git branch -D`, and call the pair a compare-and-swap. Anything could advance
+ *      the branch between the two commands, `branch -D` has no old-value check at any
+ *      price, and the commit that had just arrived went with it — while the salvage above
+ *      preserved the OLD tip. `branch -D` was chosen for a real measurement (git 2.43: it
+ *      refuses a branch a worktree holds, where `update-ref -d` does not) that answered
+ *      the wrong question: holder safety is gates 4, 5 and 6, which do not depend on the
+ *      delete primitive, whereas atomicity can only come FROM the primitive.
+ *  14. AND NOTHING CLAIMED IT DURING THE DELETE. The same measurement again, afterwards,
  *      with a CREATE-ONLY restore at the unchanged sha if one did.
  *
  *      WHY BOTH (#547 round 3). The CAS below protects the ref's VALUE and nothing else. A
@@ -117,20 +134,6 @@
  *      lossless — the sha is unchanged by construction, so the claimant's HEAD symref
  *      resolves to the same commit, and the restore is create-only so a claimant that made
  *      its own branch wins. See the call site for the residue this leaves.
- *  10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP: `git update-ref -d <ref>
- *      <expected-sha>` checks the old value and unlinks the ref under one ref lock, so a
- *      branch that has advanced since the enumeration cannot be deleted at all. There is
- *      no read-then-delete window, because there is no separate read.
- *
- *      THIS IS WHERE THE FIRST CUT OF THIS MODULE WAS WRONG, and it is worth saying so
- *      here rather than only at the call site. It used to `rev-parse` the sha and then
- *      run `git branch -D`, and call the pair a compare-and-swap. Anything could advance
- *      the branch between the two commands, `branch -D` has no old-value check at any
- *      price, and the commit that had just arrived went with it — while the salvage above
- *      preserved the OLD tip. `branch -D` was chosen for a real measurement (git 2.43: it
- *      refuses a branch a worktree holds, where `update-ref -d` does not) that answered
- *      the wrong question: holder safety is gates 4 and 4b, which do not depend on the
- *      delete primitive, whereas atomicity can only come FROM the primitive.
  */
 
 import {
@@ -146,6 +149,7 @@ import { basename, join } from 'node:path'
 import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop'
 
+import type { HostCommandResult } from './git-mode.ts'
 import { removeWorktreePath, type RunHostCommand } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentBranchOwner, TridentRun } from './store.ts'
@@ -162,7 +166,7 @@ export const MAX_REMOVALS_PER_SWEEP = 50
  */
 export const TRIDENT_REF_PREFIX = 'refs/heads/trident/'
 
-/** Where a reaped tip is kept so its commits stay reachable (gate 10). */
+/** Where a reaped tip is kept so its commits stay reachable (gate 11). */
 export const SALVAGE_REF_PREFIX = 'refs/trident-reaped/'
 
 /**
@@ -173,9 +177,18 @@ export const SALVAGE_REF_PREFIX = 'refs/trident-reaped/'
 export const MAX_REF_DELETIONS_PER_SWEEP = 50
 
 /**
+ * Attempts at putting a raced ref back (gate 14). Small and fixed: the failure it covers is
+ * a transient ref-lock contention, and the thing it must not become is an unbounded wait
+ * inside a sweep. Exported so the bound is pinned by VALUE in the tests and not merely by
+ * the relation "more than one" — a test that only checks retrying happens cannot see this
+ * number change.
+ */
+export const MAX_RESTORE_ATTEMPTS = 3
+
+/**
  * REF RETENTION IS DELIBERATELY ZERO, unlike the 24 h a worktree gets. A worktree can
  * hold work that exists nowhere else and no probe can read intent out of it, so age is
- * a stand-in for "somebody may still want this". A ref holds commits, which gate 10
+ * a stand-in for "somebody may still want this". A ref holds commits, which gate 11
  * copies elsewhere before the delete — and the whole point of #547 is that the ref
  * refuses the card's NEXT launch, which can be seconds away. A retention window here
  * would preserve exactly the failure being fixed.
@@ -442,13 +455,40 @@ export async function sweepTridentWorktrees(
     let listed
     try {
       listed = await opts.run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain'], repo)
-    } catch {
+    } catch (error) {
+      // COUNTED, NOT JUST SKIPPED (#547 round 5). These three `continue`s predate the ref
+      // reap and are right for the WORKTREE half — there is nothing to sweep in a repo that
+      // will not answer. What was wrong was the silence: they also skip the REF half, so an
+      // unreadable `worktree list` made a repository indistinguishable from one with nothing
+      // to reap, which is precisely the mode this module claims to have fixed. A claim in a
+      // header is worth no more than the counter behind it.
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: `repo-unenumerable: ${errText(error)}`,
+      })
+      report.refs_stood_down += 1
       continue
     }
-    if (!listed.ok) continue
+    if (!listed.ok) {
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: `repo-unenumerable: ${hostText(listed)}`,
+      })
+      report.refs_stood_down += 1
+      continue
+    }
 
     const entries = parseWorktrees(listed.stdout)
-    if (entries.length === 0) continue
+    if (entries.length === 0) {
+      // An EMPTY listing is not a measurement of a repository: git always reports at least
+      // the main working tree, so zero entries means the output was not what was asked for.
+      report.refs_kept.push({
+        ref: `${TRIDENT_REF_PREFIX}* in ${repo}`,
+        reason: 'repo-unenumerable: `worktree list` named no worktrees at all, not even the main one',
+      })
+      report.refs_stood_down += 1
+      continue
+    }
     report.repos_swept += 1
     /** `refs/heads/trident/*` → the worktree this sweep detached it from. */
     const detachedThisSweep = new Map<string, string>()
@@ -497,7 +537,7 @@ export async function sweepTridentWorktrees(
         // repo inside `sweepTridentWorktrees`, so on the NEXT sweep the tree is already
         // detached, `entry.branch` is null, this block never runs, and this map is empty
         // — which is exactly how a preserved dirty tree lost its ref one sweep later.
-        // GATE 4c in `reapBranchRefs` is the durable answer: it matches the ref's COMMIT
+        // GATE 5 in `reapBranchRefs` is the durable answer: it matches the ref's COMMIT
         // against the HEAD of every listed tree still on disk, and the `--detach` above
         // leaves HEAD on the tip. All this records is the nicer refusal REASON while the
         // sweep that performed the detach is still running.
@@ -537,7 +577,7 @@ export async function sweepTridentWorktrees(
 
     // THE BRANCH-REF REAP (#547), last in the repo so it reads the world the worktree
     // pass and the prune just left: a tree that was removed is no longer a holder, and a
-    // tree that was PRESERVED still is — by its HEAD (gate 4c), which is what makes that
+    // tree that was PRESERVED still is — by its HEAD (gate 5), which is what makes that
     // true on every later sweep too and not just on the one that detached it. One
     // try/catch for the same reason the prune has one: a ref sweep that throws in one
     // repo must not abandon the next.
@@ -569,7 +609,7 @@ interface ZHolder {
   path: string
   /** The branch the entry has checked out BY NAME, absent for a detached tree. */
   branch: string | null
-  /** The commit the entry's HEAD is at — present even when `branch` is not (gate 4c). */
+  /** The commit the entry's HEAD is at — present even when `branch` is not (gate 5). */
   head: string | null
   bare: boolean
 }
@@ -630,7 +670,7 @@ function parseRefLines(stdout: string): { ref: string; sha: string }[] {
 }
 
 /**
- * Is a process standing anywhere that belongs to this run (gate 8)? Two independent
+ * Is a process standing anywhere that belongs to this run (gate 10)? Two independent
  * witnesses, because a terminal row proves only what the STORE believes: a cwd inside
  * the worktree the run recorded, and a cwd under a path bearing the run's launcher
  * generation key — the same `workflow_run_id` basename match `claimedByNonTerminalRun`
@@ -693,7 +733,7 @@ async function refClaimedNow(
   const entries = parseHoldersZ(listed.stdout)
   for (const [index, holder] of entries.entries()) {
     if (holder.branch === ref) return `checked out at ${holder.path}`
-    // The commit-keyed witness, linked trees only, for the same reasons as gate 4c.
+    // The commit-keyed witness, linked trees only, for the same reasons as gate 5.
     if (index > 0 && !holder.bare && holder.head === sha && existsSync(holder.path)) {
       return `a detached worktree stands on the tip at ${holder.path}`
     }
@@ -781,7 +821,7 @@ async function reapBranchRefs(
   const readRebase = opts.rebase_head ?? readRebaseHead
   const holders = parseHoldersZ(holderList.stdout)
   const held = new Map<string, string>()
-  // GATE 4c — DURABLE HOLDER-BY-HEAD. Keyed on the COMMIT, and it is what makes the
+  // GATE 5 — DURABLE HOLDER-BY-HEAD. Keyed on the COMMIT, and it is what makes the
   // preservation of a detached tree outlive the sweep that detached it.
   const heads = new Map<string, string>()
   for (const [index, holder] of holders.entries()) {
@@ -870,7 +910,7 @@ async function reapBranchRefs(
       continue
     }
 
-    // GATE 4c — A DETACHED WORKTREE STANDING ON THIS EXACT COMMIT HOLDS IT, and this is
+    // GATE 5 — A DETACHED WORKTREE STANDING ON THIS EXACT COMMIT HOLDS IT, and this is
     // the gate that survives the sweep boundary.
     //
     // THE DEFECT THIS FIXES (adversarial review of PR #606, escalated and confirmed).
@@ -930,7 +970,7 @@ async function reapBranchRefs(
       continue
     }
 
-    // GATE 9 — SALVAGE FIRST, CREATE-ONLY. `refs/trident-reaped/<slug>/<sha>` embeds the
+    // GATE 11 — SALVAGE FIRST, CREATE-ONLY. `refs/trident-reaped/<slug>/<sha>` embeds the
     // sha it carries, so the name is a function of its own value: two sweeps reaping the
     // same slug write the SAME ref when the tip matches and DIFFERENT refs when it does
     // not, and neither can overwrite the other's. The write is still made create-only
@@ -967,7 +1007,7 @@ async function reapBranchRefs(
       }
     }
 
-    // GATE 10 — THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP, and that is the whole reason
+    // GATE 13 — THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP, and that is the whole reason
     // `update-ref -d` is the primitive here rather than `git branch -D`.
     //
     // THE BUG THIS REPLACES (cross-model review of PR #606). This used to be a
@@ -997,7 +1037,7 @@ async function reapBranchRefs(
     // branch — the next sweep confirms that salvage and finishes. A process that dies
     // after leaves the intended end state. Nothing spans two refs, so there is no
     // partially-applied state for a crash to leave behind.
-    // GATE 11a — NOTHING CLAIMS IT AS OF NOW, re-measured rather than remembered. This
+    // GATE 12 — NOTHING CLAIMS IT AS OF NOW, re-measured rather than remembered. This
     // is the ordinary case: a dispatch that already committed its claim is seen here and
     // the destructive act is never performed at all.
     const claimedBefore = await refClaimedNow(opts, repo, ref, short, sha)
@@ -1009,21 +1049,41 @@ async function reapBranchRefs(
     deletionBudget.attempts += 1
     let deleted
     try {
-      deleted = await opts.run_host(['git', '-C', repo, 'update-ref', '-d', ref, sha], repo)
+      // `--no-deref` IS LOAD-BEARING AND ITS BLAST RADIUS IS THE DEFAULT BRANCH. Without
+      // it, `update-ref -d` follows a SYMREF and deletes what it points AT, leaving the
+      // symref itself standing. Measured on git 2.43: with `refs/heads/trident/evil` a
+      // symref to `refs/heads/main`, every gate here passes on the symref's own name — 9b
+      // included, since `holder.branch === ref` never matches — and the delete removed
+      // `refs/heads/main`. Nothing in trident creates a symref under `refs/heads/` and
+      // there are none on the repo of record, which is exactly why this is one flag rather
+      // than a guard: "unreachable in this tree" has been the wrong answer twice in this
+      // change already. The CAS is unaffected — the old-value compare still resolves
+      // through the symref, so a stale sha still refuses.
+      deleted = await opts.run_host(
+        ['git', '-C', repo, 'update-ref', '--no-deref', '-d', ref, sha],
+        repo,
+      )
     } catch (error) {
       report.refs_kept.push({ ref, reason: `delete-refused: ${errText(error)}` })
       continue
     }
-    if (!deleted.ok) {
+    // A TIMEOUT IS NOT A REFUSAL, and collapsing the two skipped the repair. `spawnCapture`
+    // kills the child on its watchdog and reports `ok:false` with `timed_out:true` — and a
+    // kill that lands AFTER the ref lock committed leaves the ref gone while the result says
+    // it failed. Read as a refusal, that `continue`d past gate 14: no restore was attempted
+    // even with a claimant standing on the branch, and the report said the ref was kept.
+    // Indeterminate means fall through to 9b and let it measure what actually happened.
+    const deleteTimedOut = deleted.timed_out === true
+    if (!deleted.ok && !deleteTimedOut) {
       // The overwhelmingly likely cause is the CAS losing — the ref moved, so something
       // is alive on it. Reported with git's own words rather than as a diagnosis.
       report.refs_kept.push({ ref, reason: `delete-refused: ${hostText(deleted)}` })
       continue
     }
-    // GATE 11b — AND NOTHING CLAIMED IT DURING THE DELETE. This is what makes the
+    // GATE 14 — AND NOTHING CLAIMED IT DURING THE DELETE. This is what makes the
     // OUTCOME correct for every interleaving instead of merely making the bad one rare.
     //
-    // Gate 11a and the CAS together still leave one ordering: a dispatch claims the slug
+    // Gate 12 and the CAS together still leave one ordering: a dispatch claims the slug
     // and checks the branch out AFTER 11a read and BEFORE `update-ref -d` ran, at the
     // unchanged tip. Nothing git offers can close that from inside one command — there is
     // no primitive that compares a HOLDER and unlinks a ref atomically, and
@@ -1043,11 +1103,40 @@ async function reapBranchRefs(
     // in a run that has just started, against silently deleting a live lane's branch.
     const claimedDuring = await refClaimedNow(opts, repo, ref, short, sha)
     if (claimedDuring !== null) {
-      let restored
-      try {
-        restored = await opts.run_host(['git', '-C', repo, 'update-ref', ref, sha, ''], repo)
-      } catch (error) {
-        restored = { ok: false, stdout: '', stderr: errText(error), exit_code: 1 }
+      // BOUNDED RETRY, CREATE-ONLY ON EVERY ATTEMPT (#547 round 5). The residue on the
+      // FAILED branch is not the sub-second, retryable thing the comment above describes:
+      // a claimant whose HEAD symref points at a deleted branch reports "No commits yet",
+      // and its next commit is PARENTLESS — its PR becomes a whole-tree diff against
+      // unrelated history, which is the silently-wrong-base class this card exists to
+      // eliminate. Nothing automated repairs it either, because a ref that does not exist
+      // does not enumerate on the next sweep. So a transient lock or a contended ref gets
+      // more than one chance here.
+      //
+      // `''` — create-only — is repeated on every attempt and is not an optimisation to be
+      // dropped later: a retry that degraded to a force-create would clobber a claimant
+      // that had made its own branch between attempts, which is worse than not retrying.
+      // The bound is a fixed count, not a deadline, because this sits inside a sweep that
+      // must stay finite.
+      //
+      // LC_ALL=C is pinned for the ONE decision in this module that reads a git MESSAGE:
+      // `refAlreadyExists` matches "reference already exists", and `spawnCapture` merges
+      // `process.env`, so a localised environment would translate the string this branch
+      // turns on. It fails safe (an unmatched message is treated as unknown and reported
+      // loudly) and there are no translations on this host — pinned anyway, because a
+      // guard that depends on the operator's locale is a guard with a hidden input.
+      let restored: HostCommandResult = { ok: false, stdout: '', stderr: 'not attempted', exit_code: 1 }
+      for (let attempt = 1; attempt <= MAX_RESTORE_ATTEMPTS; attempt++) {
+        try {
+          restored = await opts.run_host(
+            ['git', '-C', repo, 'update-ref', ref, sha, ''],
+            repo,
+            { LC_ALL: 'C' },
+          )
+        } catch (error) {
+          restored = { ok: false, stdout: '', stderr: errText(error), exit_code: 1 }
+        }
+        // Success, or a refusal that already tells us the ref is there: either way, done.
+        if (restored.ok || refAlreadyExists(restored)) break
       }
       if (restored.ok) {
         report.refs_restored.push({ ref, sha })
@@ -1067,7 +1156,7 @@ async function reapBranchRefs(
         })
         log.warn('worktree_reaper_ref_claimant_owns', { repo, ref, sha, salvage, claim: claimedDuring })
       } else {
-        // EVERY OTHER FAILURE MEANS THE REF IS ABSENT, and this is the one outcome gate 9b
+        // EVERY OTHER FAILURE MEANS THE REF IS ABSENT, and this is the one outcome gate 14
         // exists to prevent — the claimant's symbolic HEAD is dangling right now.
         //
         // THIS BRANCH IS HERE BECAUSE THE FIRST CUT DID NOT HAVE IT (#547 round 4). It read

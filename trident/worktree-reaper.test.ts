@@ -21,6 +21,7 @@ import {
   DEFAULT_REAP_INTERVAL_MS,
   DEFAULT_WORKTREE_RETENTION_MS,
   MAX_REF_DELETIONS_PER_SWEEP,
+  MAX_RESTORE_ATTEMPTS,
   SALVAGE_REF_PREFIX,
   TRIDENT_REF_PREFIX,
   sweepTridentWorktrees,
@@ -312,8 +313,12 @@ test('the reaper can never force or kill, and its ONE delete is an atomic CAS', 
   expect(source).not.toContain("'branch', '-D'")
   expect(source).not.toContain("'-D'")
   // ONE deletion, and it names the expected sha (the CAS) rather than just the ref.
-  expect(source.match(/'update-ref', '-d'/g) ?? []).toHaveLength(1)
-  expect(source).toContain("['git', '-C', repo, 'update-ref', '-d', ref, sha]")
+  expect(source.match(/'update-ref', '--no-deref', '-d'/g) ?? []).toHaveLength(1)
+  expect(source).toContain("['git', '-C', repo, 'update-ref', '--no-deref', '-d', ref, sha]")
+  // `--no-deref` IS THE FLAG, and its absence is what made the delete able to remove
+  // `refs/heads/main` through a symref. Banned in its dereferencing form outright so the
+  // flag cannot be dropped back out (proven against real git below).
+  expect(source).not.toContain("'update-ref', '-d'")
   // The salvage write is create-only: the trailing '' is `update-ref`'s "must not exist".
   expect(source).toContain("['git', '-C', repo, 'update-ref', salvage, sha, '']")
 })
@@ -433,7 +438,7 @@ async function seedRef(repo: string, branch: string, marker: string): Promise<st
 /** Every spelling of "delete this ref" a sweep could reach for. */
 function isADelete(cmd: readonly string[]): boolean {
   const joined = cmd.join(' ')
-  return joined.includes('update-ref -d') || joined.includes('branch -D')
+  return /update-ref (--no-deref )?-d/.test(joined) || joined.includes('branch -D')
 }
 
 async function refExists(repo: string, ref: string): Promise<boolean> {
@@ -1660,6 +1665,191 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
   }, 60_000)
 
+  test('REAL GIT: a symref under refs/heads/trident/ does not take refs/heads/main with it', async () => {
+    // MEASURED, NOT HYPOTHETICAL. `update-ref -d` FOLLOWS a symref and deletes what it
+    // points AT, leaving the symref standing. With `refs/heads/trident/evil` a symref to
+    // `refs/heads/main`, every gate here passes on the symref's own name — gate 14 included,
+    // since `holder.branch === ref` never matches — so without `--no-deref` the delete
+    // removed `refs/heads/main`. Nothing in trident makes a symref under `refs/heads/` and
+    // there are none on the repo of record; the flag is here anyway, because "unreachable in
+    // this tree" was the wrong answer twice in this change already, and the blast radius of
+    // being wrong a third time is the default branch.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/evil-symref'
+    const mainTip = await git(repo, 'rev-parse', 'refs/heads/main')
+    await git(repo, 'symbolic-ref', `refs/heads/${branch}`, 'refs/heads/main')
+    // THE PREMISE: it resolves to main's tip, so every sha-keyed gate and the CAS agree.
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(mainTip)
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    // MAIN SURVIVES. That is the whole test.
+    expect(await git(repo, 'rev-parse', 'refs/heads/main')).toBe(mainTip)
+    expect(await refExists(repo, 'refs/heads/main')).toBe(true)
+    // The symref itself is what got reaped, and it is gone rather than left dangling.
+    expect(report.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
+    const stillSym = await spawnCapture(
+      ['git', '-C', repo, 'symbolic-ref', '-q', `refs/heads/${branch}`],
+      repo,
+    )
+    expect(stillSym.ok).toBe(false)
+  }, 60_000)
+
+  test('the restore is RETRIED, a bounded number of times, create-only every time', async () => {
+    // A transient ref-lock contention must not be the difference between a repaired ref and
+    // a claimant committing onto no history at all. The bound is pinned by VALUE below, not
+    // merely by "more than once": a relation that tracks behaviour against a constant is
+    // blind to the constant moving.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/restore-flaky'
+    const sha = await seedRef(repo, branch, 'flaky')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_flaky-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+    let restoreCalls = 0
+    const createOnly: string[][] = []
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          return spawnCapture(cmd, cwd)
+        }
+        if (deleted && cmd.includes('update-ref') && cmd.includes(`refs/heads/${branch}`)) {
+          restoreCalls += 1
+          createOnly.push([...cmd])
+          // Fail once with a lock error, then let the real command through.
+          if (restoreCalls === 1) {
+            return { ok: false, stdout: '', stderr: 'fatal: cannot lock ref: lock failure', exit_code: 1 }
+          }
+          return spawnCapture(cmd, cwd)
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(restoreCalls).toBe(2)
+    // THE REF IS BACK, which a single-shot restore would not have managed.
+    expect(report.refs_restored).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+    expect(report.refs_restore_failed).toEqual([])
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    // EVERY attempt kept the create-only empty old-value. A retry that degraded to a
+    // force-create would clobber a claimant that made its own branch between attempts.
+    expect(createOnly.length).toBe(2)
+    for (const attempt of createOnly) expect(attempt[attempt.length - 1]).toBe('')
+  }, 60_000)
+
+  test('the restore pins LC_ALL=C, because its outcome is read off a git MESSAGE', async () => {
+    // `refAlreadyExists` is the only branch in this module that turns on a git message, and
+    // `spawnCapture` merges `process.env` — so a localised environment would translate the
+    // string it matches. No translations exist on this host, which is exactly why this is
+    // asserted on the ARGUMENT rather than on behaviour: an outcome test cannot see a hidden
+    // input that happens to be benign today.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/locale-pinned'
+    const sha = await seedRef(repo, branch, 'locale')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_locale-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+    const restoreEnvs: (Record<string, string> | undefined)[] = []
+
+    await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd, extraEnv) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          return spawnCapture(cmd, cwd)
+        }
+        if (deleted && cmd.includes('update-ref') && cmd.includes(`refs/heads/${branch}`)) {
+          restoreEnvs.push(extraEnv)
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(restoreEnvs.length).toBeGreaterThan(0)
+    for (const env of restoreEnvs) expect(env?.LC_ALL).toBe('C')
+  }, 60_000)
+
+  test('the retry bound is a fixed small number, and its VALUE is pinned', async () => {
+    // Both halves: the constant is what it is, and the code actually stops there rather than
+    // retrying forever. A test asserting only "it retried" cannot see this number change.
+    expect(MAX_RESTORE_ATTEMPTS).toBe(3)
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/restore-never-lands'
+    const sha = await seedRef(repo, branch, 'neverlands')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_never-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+    let restoreCalls = 0
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          return spawnCapture(cmd, cwd)
+        }
+        if (deleted && cmd.includes('update-ref') && cmd.includes(`refs/heads/${branch}`)) {
+          restoreCalls += 1
+          return { ok: false, stdout: '', stderr: 'fatal: cannot lock ref: lock failure', exit_code: 1 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(restoreCalls).toBe(MAX_RESTORE_ATTEMPTS)
+    expect(report.refs_restore_failed).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+    expect(report.refs_restored).toEqual([])
+  }, 60_000)
+
+  test('a DELETE THAT TIMED OUT is indeterminate, so the repair still runs', async () => {
+    // `spawnCapture` kills the child on its watchdog and reports ok:false WITH
+    // timed_out:true. A kill that lands after the ref lock committed leaves the ref gone
+    // while the result says it failed — read as a refusal, that skipped the repair entirely
+    // and reported the ref as kept, with a claimant standing on it.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/delete-timed-out'
+    const sha = await seedRef(repo, branch, 'timedout')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_timeout-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let deleted = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          deleted = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          // The ref lock COMMITS, and only then does the watchdog kill report.
+          const real = await spawnCapture(cmd, cwd)
+          expect(real.ok).toBe(true)
+          return { ok: false, stdout: '', stderr: 'killed by watchdog', exit_code: 143, timed_out: true }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(deleted).toBe(true)
+    // NOT reported as a plain refusal, and the repair DID run: the ref is back.
+    expect(report.refs_kept.some((k) => k.reason.startsWith('delete-refused:'))).toBe(false)
+    expect(report.refs_restored).toEqual([{ ref: `refs/heads/${branch}`, sha }])
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+    expect(await git(claimant, 'rev-parse', 'HEAD')).toBe(sha)
+  }, 60_000)
+
   test('a salvage that cannot be written blocks the delete', async () => {
     // Only the salvage WRITE is broken, not the delete: a stub that broke both would let
     // the ref survive for the wrong reason and prove nothing about the ordering.
@@ -1891,6 +2081,46 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     expect(report.refs_stood_down).toBe(1)
   }, 30_000)
 
+  for (const shape of [
+    { what: 'a `worktree list` that THREW', stub: 'throw' as const },
+    { what: 'a `worktree list` that exited non-zero', stub: 'fail' as const },
+    { what: 'a `worktree list` that named NO worktrees at all', stub: 'empty' as const },
+  ]) {
+    test(`${shape.what} is a counted stand-down, not silence`, async () => {
+      // These three `continue`s predate the ref reap and are right for the WORKTREE half.
+      // What was wrong was the silence: they also skip the REF half, so a repo that would
+      // not answer was indistinguishable from one with nothing to reap — the exact mode the
+      // header and the record claim is fixed. A claim is worth no more than its counter.
+      const { root, repo } = await makeRepo()
+      const sha = await seedRef(repo, 'trident/repo-went-dark', 'repodark')
+
+      const report = await sweepTridentWorktrees({
+        store: stubStore(repo, [], [owner('trident/repo-went-dark', { phase: 'failed' })]),
+        run_host: async (cmd, cwd) => {
+          const isPlainList =
+            cmd.includes('worktree') && cmd.includes('list') && !cmd.includes('-z')
+          if (isPlainList) {
+            if (shape.stub === 'throw') throw new Error('the worktree list is unreadable')
+            if (shape.stub === 'fail') {
+              return { ok: false, stdout: '', stderr: 'listing denied', exit_code: 128 }
+            }
+            return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+          }
+          return spawnCapture(cmd, cwd)
+        },
+        proc_root: makeProc(root),
+      })
+
+      expect(report.refs_stood_down).toBe(1)
+      expect(report.refs_deleted).toEqual([])
+      expect(
+        report.refs_kept.some((k) => k.reason.startsWith('repo-unenumerable:')),
+        JSON.stringify(report.refs_kept),
+      ).toBe(true)
+      expect(await git(repo, 'rev-parse', 'refs/heads/trident/repo-went-dark')).toBe(sha)
+    }, 30_000)
+  }
+
   test('ORDINARY per-ref refusals are NOT stand-downs, so they stay quiet', async () => {
     // The other half of the contract: an unowned ref is refused every fifteen minutes for
     // the life of the process, and must not log every fifteen minutes with it.
@@ -1906,6 +2136,30 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     expect(report.refs_kept.length).toBeGreaterThan(0)
     expect(report.refs_stood_down).toBe(0)
   }, 30_000)
+
+  test('the composition lifts the latch BEFORE starting the reaper, not after', () => {
+    // `SupervisedLoop.start()` fires its first tick SYNCHRONOUSLY with `immediate: true`
+    // (`loop/index.ts`: `void this.runOnce()` inside `start`), so a latch set AFTER
+    // `start()` is still unset when the boot sweep reads it. The no-rescue branch therefore
+    // stood the boot sweep's REF half down on the one branch whose entire premise is that
+    // there is no rescue to wait for — the opposite of what its comment claimed.
+    //
+    // Asserted on ORDER in the composition source, because the defect is an ordering and a
+    // behavioural test would have to reach into module init to see it.
+    const src = readFileSync(
+      new URL('../gateway/composition/build-core-modules.ts', import.meta.url),
+      'utf8',
+    )
+    const lift = src.indexOf('if (reconcileStranded === undefined) strandedSweepSettled = true')
+    const start = src.indexOf('reaper?.start()')
+    expect(lift, 'the pre-start lift must exist').toBeGreaterThan(-1)
+    expect(start).toBeGreaterThan(-1)
+    expect(lift, 'the latch must be lifted BEFORE reaper.start()').toBeLessThan(start)
+    // And `immediate: true` is what makes the ordering matter, so pin that too rather than
+    // leaving this test resting on a property of the loop that could quietly change.
+    const reaperSrc = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    expect(reaperSrc).toContain('immediate: true')
+  })
 
   test('the summary log fires for a stand-down and not for a quiet sweep', () => {
     // The condition itself, since the log call is a side effect this suite cannot observe:

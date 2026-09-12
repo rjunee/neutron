@@ -842,6 +842,14 @@ export function buildCoreModules(
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       if (reaper !== undefined) loopRegistry.register(reaper.describe())
       loop.start()
+      // THE LATCH IS DECIDED BEFORE THE REAPER STARTS, and the order is load-bearing
+      // (#547 round 5). `SupervisedLoop.start()` fires its first tick SYNCHRONOUSLY when
+      // the descriptor is `immediate: true`, so a latch set after `start()` is still unset
+      // when the boot sweep reads it — which silently stood the boot sweep's REF half down
+      // on the branch whose whole point is that there is no rescue to wait for. Lifting it
+      // here costs nothing on the rescue branch, which overwrites it to false below before
+      // anything can observe it.
+      if (reconcileStranded === undefined) strandedSweepSettled = true
       // `immediate: true` on the descriptor, so `start()` IS the startup sweep — the
       // one-time hand cleanup of 2026-08-17 becomes something the gateway does for
       // itself on every boot.
@@ -871,9 +879,10 @@ export function buildCoreModules(
           ? { store, loop, drain, stranded_sweep, ...reaperOpt }
           : { store, loop, stranded_sweep, ...reaperOpt }
       }
-      // NO RESCUE IS WIRED, so there is nothing whose turn the ref reap could be taking.
-      // Set explicitly rather than defaulted, because a latch that is only ever lifted on
-      // the other branch is a latch that disables half the reaper on this one.
+      // NO RESCUE IS WIRED, so there is nothing whose turn the ref reap could be taking —
+      // already lifted ABOVE `reaper.start()`, because the first tick is synchronous and
+      // would otherwise read it unset. Left here as a belt-and-braces idempotent set, not
+      // as the place the decision is made.
       strandedSweepSettled = true
       const reaperOpt = reaper !== undefined ? { reaper } : {}
       return drain !== undefined

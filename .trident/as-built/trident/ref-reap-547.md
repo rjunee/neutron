@@ -6,6 +6,17 @@ inert — the next launch of the same card RE-ENTERS it (`trident/inner-workflow
 branch already exists from a previous run of this card, RE-ENTER it rather than failing"), so the
 card's next build starts on the stale base its last attempt failed from.
 
+WHICH PUBLICATION MEASUREMENT, because an unqualified number in a durable record invites exactly one
+re-derivation that disagrees — and one was made. By LIVE `git ls-remote` against origin the 79 split
+3 at the exact sha / 9 already contained in `origin/main` / **67 local-only**. Recomputed against
+LOCAL TRACKING REFS (`refs/remotes/origin/*`) the same 79 split 30 / 6 / **44**. Both are right about
+different questions. `ls-remote` asks the remote what it has NOW and is the conservative reading — a
+stale or absent tracking ref makes a branch look local-only, never the reverse — so it is the figure
+the design rests on. Tracking refs answer what this clone last fetched, which is the larger
+"already published" number and the one to prefer when the remote cannot be reached. The conclusion is
+the same either way: tens of these refs hold commits that exist nowhere else, so the delete must be
+salvaged first.
+
 Why teardown never happened. `worktree-cleanup.sh` does tear the ref down, and its gating is sound
 (`delete-branch` mode, only once origin holds the exact sha) — but it is invoked from the inner
 workflow's `finally{}` (`trident/inner-loop.ts:417-426` threads its path in), so it runs only while
@@ -29,7 +40,8 @@ this loop, so an in-band terminal transition reaps within a tick; an out-of-band
 could drop the one old row that turns "a non-terminal run still owns this" into "every owner is
 terminal", which is the answer that authorises the delete.
 
-**TEN pieces of evidence, and unprovable refuses at every one.** The 2026-09-01 incident
+**FOURTEEN CHECKS, and unprovable refuses at every one.** (The count is the length of the list
+below, stated once; the module header carries the same fourteen in the same order.) The 2026-09-01 incident
 (`docs/as-built/wrong-base-guard-prints-a-destructi.md`) is a guard that composed an unconditional
 `git branch -D` from nothing and aimed it at a branch a live locked worktree was holding. So:
 
@@ -42,11 +54,11 @@ terminal", which is the answer that authorises the delete.
 4. No worktree holds the ref — including the ones git calls DETACHED, because a tree mid-rebase or
    mid-bisect prints no `branch` attribute while genuinely holding one. `readRebaseHead` answering
    'unknown' freezes every ref in the repo: what could not be read may name any of them.
-4b. No worktree THIS SWEEP detached still exists — a same-sweep fast path, kept only for the
+6. No worktree THIS SWEEP detached still exists — a same-sweep fast path, kept only for the
    refusal wording. The worktree pass detaches a process-free `trident/*` holder BEFORE it decides
    whether the tree may be removed, so a tree preserved immediately afterwards (dirty, or inside
    retention) has had its ref freed while its only-copy work sits on top of it.
-4c. No DETACHED LINKED worktree still on disk is standing on the ref's COMMIT. This is the gate that
+5. No DETACHED LINKED worktree still on disk is standing on the ref's COMMIT. This is the gate that
    actually holds that line, and 4b is not — see "GATE 4b HELD FOR EXACTLY ONE SWEEP" below. Keyed
    on the commit rather than a name, because the worktree pass's own `checkout --detach` leaves HEAD
    on the tip, so the tree still points at the ref however many sweeps later. It does not cover a
@@ -54,15 +66,15 @@ terminal", which is the answer that authorises the delete.
    the rebase's own `head-name`. The SHARED checkout is excluded: it is never a disposable build
    tree, so it is never the tree this protects, and including it refuses on coincidence — measured
    while writing it, two cases refused a ref whose worktree had genuinely been removed.
-5. At least one run row names the branch. NO row is the absence of an owner, not evidence of
+7. At least one run row names the branch. NO row is the absence of an owner, not evidence of
    disposability — it is what protects a hand-made branch, and it keeps 6 of the 79.
-6. EVERY row naming it is terminal.
-7. No owning run's recorded worktree still exists on disk — **which cannot fire today, and this
+8. EVERY row naming it is terminal.
+9. No owning run's recorded worktree still exists on disk — **which cannot fire today, and this
    record credited it as evidence when it should not have.** Measured read-only against the
    production store on 2026-09-12: 0 of 291 run rows carry a non-null `worktree`, because the
    orchestrator writes `worktree: null`. Kept because it is correct and costs nothing the day that
    column is populated, not because it is load-bearing now.
-8. No live process stands in an owning run's worktree, and none stands in a path bearing its
+10. No live process stands in an owning run's worktree, and none stands in a path bearing its
    `workflow_run_id`. The race is real — the row goes terminal while the detached workflow is still
    running — but **this gate cannot fire today either.** The worktree half is dead for the same
    reason as gate 7; the generation half compares a 36-character run UUID against
@@ -70,20 +82,33 @@ terminal", which is the answer that authorises the delete.
    identifiers. What actually protects a LIVE workflow is not this gate: its tree is `isLive`, so
    the worktree pass never detaches it, so it still holds its branch by name and gate 4 keeps the
    ref. The same mis-keying makes `claimedByNonTerminalRun` weaker than it reads.
-9. A salvage ref was CREATED first, create-only. 67 of the 79 carry commits origin does not have,
+11. A salvage ref was CREATED first, create-only. 67 of the 79 carry commits origin does not have
+   by live `ls-remote` (44 by local tracking refs — see the measurement note above),
    so the delete would otherwise drop the last reference to them. `refs/trident-reaped/<slug>/<sha>`
    keeps them reachable — outside `refs/heads` so it can never re-enter a launch, outside
    `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push. Recovery is
    `git branch <name> <sha>`. Salvage failing refuses the delete.
-9a. Nothing CLAIMS the ref as of now — holders and live owners re-measured, not remembered,
+12. Nothing CLAIMS the ref as of now — holders and live owners re-measured, not remembered,
    immediately before the delete.
-9b. And nothing claimed it DURING the delete: the same measurement again afterwards, with a
-   create-only restore at the unchanged sha if one did. See "THE CAS PROTECTS THE REF'S VALUE"
-   below for why both, and what each of the three possible restore outcomes means.
-10. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP — `git update-ref -d <ref> <expected-sha>`, which
+13. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP — `git update-ref --no-deref -d <ref>
+   <expected-sha>`, which
     checks the old value and unlinks the ref under one ref lock. A branch that advanced since the
     enumeration cannot be deleted at all, because there is no read-then-delete window: there is no
     separate read. See below for what this replaces.
+
+   `--no-deref` IS PART OF THE PRIMITIVE, not a nicety. Without it `update-ref -d` FOLLOWS a
+   symref and deletes what it points at, leaving the symref standing — measured on git 2.43:
+   with `refs/heads/trident/evil` a symref to `refs/heads/main`, every gate passes on the
+   symref's own name (gate 14 included, since the holder's `branch` never matches it) and the
+   delete removed `refs/heads/main`. There are no symrefs under `refs/heads/` on the repo of
+   record and nothing in trident makes one; the flag is here because "unreachable in this
+   tree" was the wrong answer twice in this change already, and the blast radius of being
+   wrong a third time is the default branch. The CAS is unaffected: the old-value compare
+   still resolves through the symref, so a stale sha still refuses.
+
+14. And nothing claimed it DURING the delete: the same measurement again afterwards, with a
+   create-only restore at the unchanged sha if one did. See "THE CAS PROTECTS THE REF'S VALUE"
+   below for why both, and what each of the three possible restore outcomes means.
 
 **THE CAS PROTECTS THE REF'S VALUE, NOT ITS HOLDER — so the holder and owner checks were still
 racy, and this is the inverse of the bug the card exists to fix.** The holder listing and the owner
@@ -134,10 +159,20 @@ own words) means the claimant owns its own ref and nothing was put back or neede
 OTHER failure is `refs_restore_failed` — not counted as a restore, logged at error, breaking the
 summary's silence, and carrying the one-line `git branch <name> <sha>` recovery, which works because
 the salvage ref still holds the tip. A command that failed establishes that it did not succeed and
-nothing else. The residue is a sub-second window in
-which the ref does not resolve, which can fail a `git switch` in the claiming run's first step — a
-retryable error in a run that has just started, weighed against silently deleting a live lane's
-branch. Both halves refuse on an unreadable measurement, git side and store side alike.
+nothing else.
+
+THE RESIDUE, STATED AT ITS WORST RATHER THAN AT ITS BEST. On the SUCCESS and EEXIST paths it is a
+sub-second window in which the ref does not resolve, which can fail a `git switch` in the claiming
+run's first step — retryable, in a run that has just started. On the `refs_restore_failed` path it is
+neither sub-second nor retryable, and an earlier draft of this paragraph said it was: a claimant whose
+HEAD symref points at a deleted branch reports "No commits yet", and its next commit is PARENTLESS.
+Its PR then reads as a whole-tree diff against unrelated history — the silently-wrong-base class this
+card exists to eliminate. No commit is lost and the printed recovery works, but nothing automated
+repairs it, because a ref that does not exist does not enumerate on the next sweep. That is why the
+restore is RETRIED, `MAX_RESTORE_ATTEMPTS` times, create-only on every attempt — a fixed count rather
+than a deadline because it sits inside a sweep that must stay finite, and create-only on every attempt
+because a retry that degraded to a force-create would clobber a claimant that made its own branch
+between attempts, which is worse than not retrying at all. Both halves refuse on an unreadable measurement, git side and store side alike.
 
 Pinned by the reviewer's exact interleaving — `worktree add` at the already-enumerated tip, fired on
 the delete command itself — plus a claim landing before the delete, a live run ROW appearing
@@ -247,5 +282,17 @@ SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a 
 note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable
 rebase state reading as clear, the owners read failure, the restore's create-only-ness, and the
 `!confirmed.ok` half of the salvage verify. One guard is documented as NOT reddenable and kept
-anyway with the reason stated (gate 4c's `existsSync`), rather than given a test that pretends
-otherwise.
+anyway with the reason stated, rather than given tests that pretend otherwise. FOUR of them, not one,
+and an undercount in this particular record costs more than in ordinary prose because this file is
+where the honest-accounting standard in this repo is set:
+
+  * gate 5's `existsSync(holder.path)` — a listed entry whose directory is gone is refused either
+    way, by name via gate 4 or by `readRebaseHead` answering 'unknown' and standing the repo down.
+  * the in-loop gate 2 `!ref.startsWith(TRIDENT_REF_PREFIX)` — `for-each-ref` is already scoped to
+    that prefix, so the check can never fire on real output.
+  * `holder.head !== ''` in gate 5's map build — git never prints an empty `HEAD` attribute.
+  * `holder.path !== ''` in `parseHoldersZ`'s record close — git never emits a pathless record.
+
+All four are benign defence-in-depth against a malformed or future git, all four are one comparison,
+and none of them can change an outcome in this tree. They are named because a reader counting
+mutation survivors should find the same number here that they measure.
