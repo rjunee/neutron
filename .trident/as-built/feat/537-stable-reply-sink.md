@@ -88,12 +88,19 @@ quiet fallback.
   one process lifetime but every lifetime until the file is removed — AND that this
   is a new exposure in KIND, not just duration. A per-process token was revoked by
   every restart, so a `claude` orphaned by a previous incarnation could not be
-  believed by the next gateway. A stable one is not revoked, and the sink answers
-  `/tool-call` and `/activity` before the no-session 404 by design, so an orphan
-  holding the token reaches the live tool bridge with a fabricated session id and no
-  live turn behind it (measured on a bridgeless instance: 503 "no tool bridge wired"
-  / "no-tap", i.e. past the token check). That is the strongest argument yet for the
-  per-session token `spawn.ts` defers, and it is written where the token is loaded.
+  believed by the next gateway. A stable one is not revoked, and at the time this
+  was written the sink answered `/tool-call` and `/activity` before the no-session 404,
+  so an orphan holding the token reached the live tool bridge with a fabricated session
+  id and no live turn behind it (measured then on a bridgeless instance: 503 "no tool
+  bridge wired" / "no-tap", i.e. past the token check).
+
+  **That argument was accepted and acted on in the same PR, so this paragraph is
+  history, not current state.** The per-session token it calls for is no longer
+  deferred: `spawn.ts` hands each child `HMAC(root, childGeneration)` and the sink
+  authorizes credential -> session, so a fabricated session id buys nothing and an
+  orphan's credential belongs to a dead incarnation. The residual that survives is
+  narrower and is stated separately below: same-uid read access to the child's own
+  0600 config still defeats it.
 
 - **`runtime/adapters/claude-code/persistent/pool-state.ts`.** `ReplSink` is
   exported (a second instance is how restart survival is testable), takes a
@@ -476,10 +483,18 @@ pinned too (a message that merely mentions the sink is still unclassified).
 Durable coordinates are a PRECONDITION for adopting a surviving REPL, not the
 adoption. Nothing here re-registers a surviving REPL into the sink's session map,
 and `pool.ts` needs an in-memory `session.channelPort` to inject, so a surviving
-bridge's `/reply` authenticates and then lands on 404 `no-session` rather than 401.
-That is #539's work; `sink-coordinates.ts` says so where it makes the claim, and
-the restart-survival test asserts exactly that 404 rather than pretending the
-session survives.
+bridge's `/reply` is refused with **401**. That is #539's work, and
+`sink-coordinates.ts` says so where it makes the claim.
+
+This paragraph said 404 `no-session` until round 16, and that was the pre-credential
+design: when every child carried the shared root token, a survivor authenticated and
+then failed to route. Authorization now runs CREDENTIAL -> SESSION and the lookup
+precedes any session lookup, so the survivor never reaches the routing step. Measured
+rather than reasoned: there is no `no-session` response left in the adapter (the only
+`no-session*` is `no-session-to-resume`, a 409 in `session-respawn.ts`), the sole 404
+in `pool-state.ts` is the unknown-path catch-all, and the restart-survival suite
+asserts no 404 at all. The claim that "the test asserts exactly that 404" was true when
+written and had outlived the code by one round.
 
 ### Concurrent first startup — the second P1 the review caught
 
@@ -683,8 +698,12 @@ whitespace-only, short → refused and replaced; a symlink → replaced by a rea
 The central case is written as a restart: start a sink, take its coordinates the
 way a spawn would, stop it, start a second one against the same state dir, and
 require the second to bind the SAME port, present the SAME token, and accept a
-POST carrying the FIRST instance's token (404 `no-session` = authenticated and
-routed; a foreign token still gets 401).
+POST carrying the FIRST instance's credential. Until round 16 that acceptance read
+"404 `no-session` = authenticated and routed", which belonged to the shared-token
+design: authorization now runs CREDENTIAL -> SESSION, so what the second instance must
+prove is that the SAME derived credential is still recognised once the session is
+registered on it — a foreign credential gets 401, and an unregistered survivor gets 401
+too, which is why the registration is part of the case rather than incidental to it.
 
 EADDRINUSE is asserted to fail loudly AND to bind nothing else — `sink.port`
 throws `not started`, so the test would fail against a silent ephemeral fallback,

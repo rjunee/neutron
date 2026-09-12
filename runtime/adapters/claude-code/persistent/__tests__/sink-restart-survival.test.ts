@@ -1281,6 +1281,38 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     expect((await post(s.port, secondCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
   })
 
+  test('a replacement registered with NO unregister still revokes the displaced credential', async () => {
+    // The production boundary. The respawn case above calls `unregisterIf` first, so it
+    // walks around the path that actually runs: nothing in production is obliged to
+    // unregister before a replacement registers, and `unregisterIf` is identity-guarded
+    // — once B holds the id, A's own death handler no-ops. If `register` does not revoke
+    // what it displaces, A's credential lives forever.
+    const dir = scratch()
+    const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
+    wireBridgeAndTap()
+
+    const sessionId = 'session-replaced-without-an-unregister'
+    const first = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
+    s.register(sessionId, first)
+    const firstCredential = s.credentialFor(first)
+    expect((await post(s.port, firstCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
+
+    // The replacement, with NO unregister of any kind in between.
+    const second = new ReplSession('key', 'generation-2', sessionId, 'chan', dir)
+    s.register(sessionId, second)
+    const secondCredential = s.credentialFor(second)
+    expect(secondCredential).not.toBe(firstCredential)
+
+    // The displaced incarnation is refused on EVERY privileged route, not just the one
+    // this test happened to open with.
+    for (const path of PRIVILEGED) {
+      expect((await post(s.port, firstCredential, path, bodyFor(path, sessionId))).status).toBe(401)
+    }
+    // The positive control: the replacement still works, so this cannot be satisfied by
+    // a `register` that drops both credentials.
+    expect((await post(s.port, secondCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
+  })
+
   test('the LEGITIMATE child still succeeds on every privileged route, with its scope', async () => {
     // The positive control. Without it, every refusal above is satisfied by a sink that
     // refuses everything — and the PR would have traded a security hole for an outage.

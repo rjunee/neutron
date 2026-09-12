@@ -138,10 +138,18 @@ everything, which is how a security fix becomes an outage.
 Durable coordinates are a PRECONDITION for adopting a surviving REPL, not the
 adoption. Nothing here re-registers a surviving REPL into the sink's session map,
 and `persistent/pool.ts` needs an in-memory `session.channelPort` to inject, so
-today a surviving bridge authenticates and then lands on 404 `no-session`. That is
-the next item's work (`ISSUES #539`), and after the authorization criterion above it
-is also the right answer: an unadopted child is indistinguishable from an orphan, so
-it must be refused until something adopts it.
+today a surviving bridge is refused with **401**. Authorization runs CREDENTIAL ->
+SESSION (`persistent/pool-state.ts`, `ReplSink.handle`): the lookup is `byCredential`
+and it happens BEFORE body parsing and before any session lookup, so a restarted sink
+that has registered nothing resolves the survivor's credential to no session and stops
+there. There is no authenticated-but-unrouted state on this path and no `no-session`
+404 — an earlier draft of this section claimed one, describing the shared-root-token
+design this item replaced.
+
+Adopting the survivor is the next item's work (`ISSUES #539`), and 401 is also the
+right answer until then: an unadopted child is indistinguishable from an orphan, so it
+must be refused until something adopts it. #539 must therefore RE-REGISTER a survivor,
+not merely reconnect to it — reconnection alone leaves it refused.
 
 WHAT THE CREDENTIAL DOES NOT CLOSE, so this item is not read as a clean bill:
 

@@ -25,8 +25,13 @@
  * gateway adopt a REPL that is still running — a precondition, not the adoption
  * itself. Nothing here re-registers a surviving REPL into the sink's session map,
  * and `pool.ts` still needs an in-memory `session.channelPort` to inject, so today
- * a surviving bridge's `/reply` authenticates and then lands on 404 `no-session`
- * instead of 401. Closing that is #539's work; this is the coordinate half.
+ * a surviving bridge's `/reply` is refused with 401. Authorization runs
+ * CREDENTIAL -> SESSION and the restarted sink has registered nothing, so the
+ * survivor's credential resolves to no session and the request never reaches a
+ * session lookup — there is no authenticated-but-unrouted state on this path, and
+ * no `no-session` 404 (grep: the only `no-session*` in the adapter is
+ * `no-session-to-resume`, a 409 in `session-respawn.ts`). Closing that is #539's
+ * work; this is the coordinate half.
  *
  * SECURITY POSTURE, AND WHAT PERSISTING THE TOKEN WIDENS. `spawn.ts` writes the
  * per-session config dir 0700 and its files 0600 precisely BECAUSE they carry

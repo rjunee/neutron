@@ -413,7 +413,24 @@ export class ReplSink {
     return deriveChildSinkToken(this.token, session.childGeneration)
   }
 
+  /**
+   * Bind a session to its id AND to the credential its child presents.
+   *
+   * REPLACING a session REVOKES the one it displaces. Without that, registering B
+   * under an id A still holds leaves `credentialFor(A)` in `byCredential` forever:
+   * `unregisterIf` is identity-guarded, so A's own death handler then no-ops
+   * (`sessions.get(id)` is already B) and nothing else ever evicts it. A dead
+   * incarnation would keep reaching every privileged route — the orphan this route's
+   * whole design exists to refuse, arriving through the replacement path instead of
+   * through a lifted session id.
+   *
+   * Order matters: the displaced credential is dropped BEFORE the new one is stored,
+   * so a replacement that happens to share a `childGeneration` — and therefore the
+   * same derived credential — ends up mapped to the NEW session rather than deleted.
+   */
   register(sessionId: string, session: ReplSession): void {
+    const displaced = this.sessions.get(sessionId)
+    if (displaced !== undefined) this.byCredential.delete(this.credentialFor(displaced))
     this.sessions.set(sessionId, session)
     this.byCredential.set(this.credentialFor(session), session)
   }
