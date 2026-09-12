@@ -22,7 +22,9 @@ import { join } from 'node:path'
 import {
   closeCrashReportEdge,
   gatewayShutdownKillEntryFor,
+  recordGatewayShutdownKill,
   observationOf,
+  pruneGatewayShutdownKills,
   sampleLivenessBeforeShutdownKill,
   undeterminedShutdownDetail,
   gatewayShutdownKillDetail,
@@ -32,6 +34,7 @@ import {
 } from '../gateway-shutdown-kill.ts'
 import {
   GATEWAY_SHUTDOWN_KILL_HISTORY,
+  GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
   patchRecord,
   upsertRecord,
@@ -44,6 +47,9 @@ const killedGenerations = (record: ReplRegistryRecord | undefined): string[] =>
 const killedAt = (record: ReplRegistryRecord | undefined, generation: string): number | undefined =>
   (record?.killed_by_gateway_shutdown ?? []).find((e) => e.generation === generation)?.at
 import type { ChildCrashInfo, PersistentReplSubstrateOptions } from '../types.ts'
+
+/** The session key `seed` writes. */
+const KEY = 'cc-trident-fire-o-abc /repo'
 
 function registryPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'neutron-gsk-')), 'repl-registry.json')
@@ -459,20 +465,133 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     expect(killedAt(record, 'gen-live')).toBe(500)
   })
 
-  it('the history is bounded, and keeps the NEWEST entries', () => {
-    // One entry accrues per shutdown that killed a child on this key, so unbounded
-    // growth is a slow leak in a file rewritten on every spawn. The newest are kept
-    // because the only consumer is a still-in-flight build asking about its own
-    // launcher. RED-mutation: drop the `.slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)`.
+  it('an entry a LIVE RUN still references is never evicted, however many follow it', () => {
+    // THE PROPERTY, not the mechanism. The old case asserted that eviction happens; it
+    // could not see that eviction had taken an attribution a running build still needed.
+    // Repro it named: `g0` owns a running build, its live report failed, and enough later
+    // generations are recorded on the same session key to push it out. Under a count cap
+    // `g0` was evicted and its attribution was unrecoverable — the stranding this whole
+    // change exists to prevent, caused by the cap meant to be harmless.
+    //
+    // RED-mutation: drop the `stillReferenced` arm from `pruneGatewayShutdownKills` (keep
+    // only the age test). `g0` disappears and this reddens.
     const path = registryPath()
     seed(path)
-    for (let i = 0; i < GATEWAY_SHUTDOWN_KILL_HISTORY + 5; i++) {
-      recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', `gen-${i}`, 1_000 + i, 'alive-and-killed')
+    const ANCIENT = 1_000
+    expect(recordGatewayShutdownOutcome(path, KEY, 'g0', ANCIENT, 'alive-and-killed', 4242)).toBe(true)
+
+    // `g0` still owns an in-flight run; every other generation does not.
+    const stillReferenced = (generation: string): boolean => generation === 'g0'
+    // Far more than the backstop, and all of them far NEWER than the retention window.
+    const recent = ANCIENT + GATEWAY_SHUTDOWN_KILL_RETENTION_MS * 10
+    for (let i = 0; i < GATEWAY_SHUTDOWN_KILL_HISTORY + 20; i++) {
+      patchRecord(path, KEY, { child_generation: `later-${i}` })
+      recordGatewayShutdownOutcome(path, KEY, `later-${i}`, recent + i, 'alive-and-killed', 4242, stillReferenced)
     }
-    const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
-    expect(killedGenerations(record)).toHaveLength(GATEWAY_SHUTDOWN_KILL_HISTORY)
-    expect(gatewayShutdownKillEntryFor(record, `gen-${GATEWAY_SHUTDOWN_KILL_HISTORY + 4}`)).toBeDefined()
-    expect(gatewayShutdownKillEntryFor(record, 'gen-0')).toBeUndefined()
+
+    const record = getRecord(path, KEY)
+    // `g0` SURVIVES — ancient, far past the window, and beyond the cap, because a run
+    // still refers to it. Its attribution is therefore still recoverable.
+    expect(gatewayShutdownKillEntryFor(record, 'g0')?.at).toBe(ANCIENT)
+    expect(observationOf(gatewayShutdownKillEntryFor(record, 'g0'))).toBe('alive-and-killed')
+  })
+
+  it('the PRODUCTION path threads hostsLiveWork, so a live run protects its own entry', () => {
+    // The unit cases above hand `stillReferenced` in directly, which proves the RULE and
+    // not the WIRING — measured: a mutation that stopped `reportGatewayShutdownKill`
+    // passing the probe survived every one of them. `hostsLiveWork` is the seam the pool
+    // already consults before evicting a child that hosts live work, and this asserts the
+    // record path consults the same one.
+    //
+    // RED-mutation: pass `undefined` instead of the `hostsLiveWork` adapter in
+    // `recordGatewayShutdownKill`. The ancient entry is then released on age, because
+    // nothing tells retention that a run still needs it.
+    const path = registryPath()
+    seed(path)
+    const ANCIENT = 1_000
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', ANCIENT, 'alive-and-killed', 4242)).toBe(true)
+
+    patchRecord(path, KEY, { child_generation: 'gen-next' })
+    const options = {
+      substrate_instance_id: 'cc-trident-fire-o-abc',
+      cwd: '/repo',
+      replRegistryPath: path,
+      // The old generation still hosts a live workflow; the new one does not.
+      hostsLiveWork: (generation: string) => (generation === 'gen-live' ? 3 : 0),
+    } as PersistentReplSubstrateOptions
+    recordGatewayShutdownKill(
+      options,
+      KEY,
+      'gen-next',
+      ANCIENT + GATEWAY_SHUTDOWN_KILL_RETENTION_MS * 5,
+      'alive',
+      4242,
+    )
+
+    // The ancient entry survives ONLY because the threaded probe said a run still needs it.
+    expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')?.at).toBe(ANCIENT)
+  })
+
+  it('a THROWING hostsLiveWork does not break the record path', () => {
+    const path = registryPath()
+    seed(path)
+    const options = {
+      substrate_instance_id: 'x',
+      cwd: '/repo',
+      replRegistryPath: path,
+      hostsLiveWork: () => {
+        throw new Error('store down')
+      },
+    } as PersistentReplSubstrateOptions
+    expect(() => recordGatewayShutdownKill(options, KEY, 'gen-live', 10, 'alive', 4242)).not.toThrow()
+    expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')).toBeDefined()
+  })
+
+  it('an entry outside the window that nothing references IS released', () => {
+    // The complement: retention must actually bound growth, or the fix above is just a
+    // leak. RED-mutation: `return true` from the age test — nothing is ever released.
+    const path = registryPath()
+    seed(path)
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-old', 1_000, 'alive-and-killed', 4242)).toBe(true)
+    patchRecord(path, KEY, { child_generation: 'gen-new' })
+    recordGatewayShutdownOutcome(
+      path,
+      KEY,
+      'gen-new',
+      1_000 + GATEWAY_SHUTDOWN_KILL_RETENTION_MS + 1,
+      'alive-and-killed',
+      4242,
+      () => false,
+    )
+    const record = getRecord(path, KEY)
+    expect(gatewayShutdownKillEntryFor(record, 'gen-old')).toBeUndefined()
+    expect(gatewayShutdownKillEntryFor(record, 'gen-new')).toBeDefined()
+  })
+
+  it('inside the window an entry is kept even when nothing claims to reference it', () => {
+    // Age governs on its own, so an unwired or negative reference probe can never evict a
+    // young entry. RED-mutation: make the keep condition `stillReferenced?.(...) === true`
+    // alone, dropping the age test.
+    const path = registryPath()
+    seed(path)
+    recordGatewayShutdownOutcome(path, KEY, 'gen-young', 5_000, 'alive-and-killed', 4242)
+    patchRecord(path, KEY, { child_generation: 'gen-next' })
+    recordGatewayShutdownOutcome(path, KEY, 'gen-next', 6_000, 'alive-and-killed', 4242, () => false)
+    expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-young')).toBeDefined()
+  })
+
+  it('pruneGatewayShutdownKills: a THROWING reference probe never protects, and never crashes', () => {
+    const young = { generation: 'y', at: 1_000, observed: 'alive-and-killed' as const }
+    const old = { generation: 'o', at: 0, observed: 'alive-and-killed' as const }
+    // `young` is a strict `<`, so the boundary is exclusive: pick a `now` that leaves the
+    // young entry genuinely inside the window.
+    const now = GATEWAY_SHUTDOWN_KILL_RETENTION_MS + 999
+    const kept = pruneGatewayShutdownKills([old, young], now, () => {
+      throw new Error('store down')
+    })
+    // The young one survives on age; the old one is released because the probe
+    // established nothing and age already answered.
+    expect(kept.map((e) => e.generation)).toEqual(['y'])
   })
 
   it('a row that does not exist is still refused — a no-op is not a success', () => {
@@ -480,5 +599,66 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     seed(path)
     expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBe(false)
     expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', '', 1, 'alive-and-killed')).toBe(false)
+  })
+})
+
+/**
+ * #518 — CORRUPT AND FORWARD-VERSION ENTRIES MUST NOT BECOME POSITIVE ATTRIBUTION.
+ *
+ * An earlier revision validated only `generation` and `at`, and mapped every missing OR
+ * UNRECOGNISED `observed` value to `'alive-and-killed'` — the MOST definite answer
+ * available. So an entry written by a newer build than the one reading it, with no
+ * corruption at all, made a genuine crash report as a deploy. That is the first defect in
+ * this change with the arrow reversed: two rounds went into making sure `unknown` never
+ * rides the branch carrying a definite answer, and the parser then promoted a value it
+ * did not recognise to the most definite one there is.
+ */
+describe('an entry that cannot say what was observed is evidence of nothing', () => {
+  for (const [label, observed] of [
+    ['a corrupt value', 'corrupt'],
+    ['a FORWARD-VERSION value a newer build might write', 'killed-by-some-future-mechanism'],
+    ['an empty string', ''],
+    ['a non-string', 7],
+    ['null', null],
+  ] as const) {
+    it(`${label} is refused, not promoted to alive-and-killed`, () => {
+      // RED-mutation: restore the `: 'alive-and-killed'` fallback in `observationOf`, or
+      // drop `isObservation(e.observed)` from the validator. Each of these cases reddens
+      // on its own.
+      const path = registryPath()
+      seed(path, { killed_by_gateway_shutdown: [{ generation: 'gen-live', at: 1, observed }] as never })
+      const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
+      expect(gatewayShutdownKillEntryFor(record, 'gen-live')).toBeUndefined()
+      expect(observationOf(gatewayShutdownKillEntryFor(record, 'gen-live'))).toBeUndefined()
+      // The load-bearing consequence: no deploy attribution for a death nobody recorded.
+      expect(wasKilledByGatewayShutdown(record)).toBe(false)
+    })
+  }
+
+  it('an ABSENT observed is refused too — there is no legacy shape to protect', () => {
+    // Measured, not assumed: `killed_by_gateway_shutdown` has zero occurrences on
+    // `origin/main`, so the container and `observed` ship in the SAME unmerged change and
+    // no build has ever written an entry without it. A compat arm would cover nothing
+    // while silently promoting every corrupt and forward-version entry.
+    //
+    // RED-mutation: treat `undefined` as `'alive-and-killed'`.
+    const path = registryPath()
+    seed(path, { killed_by_gateway_shutdown: [{ generation: 'gen-live', at: 1 }] as never })
+    const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
+    expect(gatewayShutdownKillEntryFor(record, 'gen-live')).toBeUndefined()
+    expect(wasKilledByGatewayShutdown(record)).toBe(false)
+  })
+
+  it('THE COMPLEMENT — all three real observations still round-trip', () => {
+    // A validator that refused everything would pass every case above and break the
+    // feature. RED-mutation: `return false` from `isObservation`.
+    for (const observed of ['alive-and-killed', 'already-gone', 'could-not-sample'] as const) {
+      const path = registryPath()
+      seed(path)
+      expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 42, observed, 4242)).toBe(true)
+      const record = getRecord(path, KEY)
+      expect(observationOf(gatewayShutdownKillEntryFor(record, 'gen-live'))).toBe(observed)
+      expect(wasKilledByGatewayShutdown(record)).toBe(observed === 'alive-and-killed')
+    }
   })
 })

@@ -119,6 +119,26 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE PARSER PROMOTED WHAT IT DID NOT RECOGNISE. The entry validator checked `generation` and
+  `at` only, and `observationOf` mapped every missing OR UNRECOGNISED `observed` value to
+  `alive-and-killed` — the most definite answer available — so a forward-version entry, written
+  by a newer build with no corruption at all, made a genuine crash report as a deploy. Round
+  one's defect with the arrow reversed: an unrecognised enum member is the canonical unknown.
+  `observed` is now required and validated where the entry is located; there is NO legacy arm,
+  measured rather than assumed — `killed_by_gateway_shutdown` has zero occurrences on
+  `origin/main`, so the container and the field ship together and no build has ever written an
+  entry without it.
+- THE RETENTION CAP ANSWERED "HOW MANY" WHEN THE QUESTION WAS "WHAT CAN STILL BE REFERENCED".
+  Keeping the newest 16 entries was justified by trident's 2 h in-flight ceiling, but a time
+  ceiling bounds DURATION while a count cap is driven by RESTART RATE and nothing ties them —
+  an unmeasured assumption about the environment. Sixteen restarts inside the window evicted a
+  generation that still owned a running build, losing its attribution: this item's own
+  stranding, caused by the cap meant to be harmless. Retention is now age
+  (`GATEWAY_SHUTDOWN_KILL_RETENTION_MS`, derived from `DEFAULT_MAX_INFLIGHT_MS` and doubled for
+  margin) OR a live reference through `hostsLiveWork`, the same per-generation seam the pool
+  consults before evicting a child that hosts live work. The count cap survives only as a
+  logged backstop that can never evict a referenced entry — a property the first version of the
+  fix broke in its own backstop and its own test caught.
 - THE COMBINER MERGED TWO QUESTIONS ON ONE LATTICE, and stranded a run through the merge rather
   than the record. `dead`, `killed-by-gateway-shutdown` and `dead-cause-undetermined` all answer
   YES to "is it dead?" and differ only on WHY; the combiner treated only the first two as

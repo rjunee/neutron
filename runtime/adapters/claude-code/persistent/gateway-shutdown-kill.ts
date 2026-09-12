@@ -136,6 +136,7 @@
 
 import {
   GATEWAY_SHUTDOWN_KILL_HISTORY,
+  GATEWAY_SHUTDOWN_KILL_RETENTION_MS,
   getRecord,
   patchRecord,
   type GatewayShutdownKillEntry,
@@ -194,9 +195,24 @@ export function wasKilledByGatewayShutdown(record: ReplRegistryRecord | undefine
 export function observationOf(
   entry: GatewayShutdownKillEntry | undefined,
 ): GatewayShutdownObservation | undefined {
-  if (entry === undefined) return undefined
-  const o = entry.observed
-  return o === 'already-gone' || o === 'could-not-sample' || o === 'alive-and-killed' ? o : 'alive-and-killed'
+  // A narrow accessor over an ALREADY-VALIDATED entry: `gatewayShutdownKillEntryFor`
+  // refuses an entry whose `observed` is absent or unrecognised, so anything that gets
+  // here carries one of the three values. It is re-checked rather than asserted, because
+  // a caller could hand in an unvalidated entry and this must not become the place that
+  // promotes a bad value.
+  //
+  // AN UNRECOGNISED MEMBER IS THE CANONICAL UNKNOWN, and an earlier revision mapped it —
+  // and a missing value — to `'alive-and-killed'`, the MOST definite answer available.
+  // A forward-version entry (written by a newer build than the one reading it) reached
+  // that without any corruption, and a genuine crash was then attributed to a deploy:
+  // the round-one defect with the arrow reversed.
+  return isObservation(entry?.observed) ? entry.observed : undefined
+}
+
+/** Is this one of the three observations? Rows survive upgrades and are not a trusted
+ *  type boundary, so the check is a whitelist, never a cast. */
+function isObservation(value: unknown): value is GatewayShutdownObservation {
+  return value === 'alive-and-killed' || value === 'already-gone' || value === 'could-not-sample'
 }
 
 /**
@@ -220,7 +236,18 @@ export function gatewayShutdownKillEntryFor(
       typeof e === 'object' &&
       e.generation === generation &&
       typeof e.at === 'number' &&
-      Number.isFinite(e.at),
+      Number.isFinite(e.at) &&
+      // `observed` IS REQUIRED, and an invalid present value is refused rather than
+      // promoted. An entry that cannot say what was observed is not evidence of
+      // anything — it is certainly not evidence that WE killed the child, which is the
+      // reading an earlier revision gave it.
+      //
+      // NO LEGACY ARM, and that is a measured decision rather than an oversight:
+      // `killed_by_gateway_shutdown` has zero occurrences on `origin/main`, so the
+      // container and this field ship in the SAME unmerged change and no build has ever
+      // written an entry without it. A compat arm here would cover nothing while
+      // silently promoting every corrupt and forward-version entry.
+      isObservation(e.observed),
   )
 }
 
@@ -287,6 +314,62 @@ export function undeterminedShutdownDetail(liveness: ShutdownLivenessSample, at:
  * evidence that anything was recorded. A no-op that reported success here would put
  * the next boot back to reporting our own kill as a crash, with nothing saying so.
  */
+/**
+ * Drop the entries that can no longer be referenced, and ONLY those.
+ *
+ * The question this function asks is "what can still be referenced" — which is why it is
+ * not answered by counting. An entry is kept when EITHER it is inside the retention
+ * window (nothing older can be asked about, bounded by trident's in-flight ceiling) OR a
+ * live run still references its generation. `stillReferenced` is the same per-generation
+ * seam the pool already consults before evicting a child that hosts live work: the
+ * identical question, one layer down.
+ *
+ * ABSENT `stillReferenced` MEANS "I CANNOT TELL", NOT "NOTHING IS REFERENCED". An unwired
+ * probe therefore protects nothing extra but is never taken as permission to evict inside
+ * the window — age alone governs, which is the conservative reading.
+ *
+ * The count cap is a backstop and can only take entries this rule has already released.
+ * If everything is still referenced or still young, the row grows and says so, because a
+ * large row is a smaller harm than a build with no failure reason.
+ */
+export function pruneGatewayShutdownKills(
+  entries: readonly GatewayShutdownKillEntry[],
+  now: number,
+  stillReferenced?: (generation: string) => boolean,
+): GatewayShutdownKillEntry[] {
+  const referenced = (e: GatewayShutdownKillEntry): boolean => {
+    try {
+      return stillReferenced?.(e.generation) === true
+    } catch {
+      // A throwing probe has established nothing, and is never taken as a reference.
+      return false
+    }
+  }
+  const young = (e: GatewayShutdownKillEntry): boolean =>
+    typeof e.at === 'number' && Number.isFinite(e.at) && now - e.at < GATEWAY_SHUTDOWN_KILL_RETENTION_MS
+
+  const keep = entries.filter((e) => young(e) || referenced(e))
+  if (keep.length <= GATEWAY_SHUTDOWN_KILL_HISTORY) return keep
+
+  // THE BACKSTOP, AND IT OBEYS THE SAME RULE. Slicing the newest N here was a bug in the
+  // first version of this fix, caught by its own test: the oldest surviving entry is
+  // exactly the one a long-running build is most likely to need, so an oldest-first
+  // eviction re-created the stranding the age rule had just removed. A referenced entry is
+  // never evicted, whatever its age and however full the row is; the cap is filled out
+  // with the NEWEST unreferenced entries.
+  const live = keep.filter(referenced)
+  const spare = Math.max(0, GATEWAY_SHUTDOWN_KILL_HISTORY - live.length)
+  const droppable = keep.filter((e) => !referenced(e))
+  const survivors = new Set([...live, ...droppable.slice(-spare)])
+  process.stderr.write(
+    `[repl] gateway-shutdown kill history for one session key exceeded ${GATEWAY_SHUTDOWN_KILL_HISTORY} retained ` +
+      `entries (${live.length} still referenced by a live run) — dropping the oldest UNREFERENCED entries; ` +
+      `if this recurs, something is restarting this session key pathologically\n`,
+  )
+  // Original order preserved, so "newest last" stays true for every later reader.
+  return keep.filter((e) => survivors.has(e))
+}
+
 export function recordGatewayShutdownOutcome(
   registryPath: string,
   sessionKey: string,
@@ -294,6 +377,7 @@ export function recordGatewayShutdownOutcome(
   at: number,
   observed: GatewayShutdownObservation,
   pid?: number,
+  stillReferenced?: (generation: string) => boolean,
 ): boolean {
   if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
   try {
@@ -309,14 +393,18 @@ export function recordGatewayShutdownOutcome(
     const entries =
       gatewayShutdownKillEntryFor(existing, childGeneration) !== undefined
         ? prior
-        : [
-            ...prior,
-            // The pid travels WITH the entry so a later reader can confirm the death
-            // against the process table rather than trusting this record. See the
-            // field's docblock: writing the entry attributes a death, it does not
-            // establish one.
-            { generation: childGeneration, at, observed, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
-          ].slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)
+        : pruneGatewayShutdownKills(
+            [
+              ...prior,
+              // The pid travels WITH the entry so a later reader can confirm the death
+              // against the process table rather than trusting this record. See the
+              // field's docblock: writing the entry attributes a death, it does not
+              // establish one.
+              { generation: childGeneration, at, observed, ...(typeof pid === 'number' && pid > 0 ? { pid } : {}) },
+            ],
+            at,
+            stillReferenced,
+          )
     patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
     return gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration) !== undefined
   } catch {
@@ -434,6 +522,20 @@ export function recordGatewayShutdownKill(
       at,
       observed,
       pid,
+      // THE SAME SEAM THE POOL USES before evicting a child that hosts live work — the
+      // identical question ("does a live run still reference this generation?"), asked one
+      // layer down about a RECORD rather than a process. Absent, retention falls back to
+      // age alone, which is the conservative reading rather than a silent "nothing is
+      // referenced".
+      options.hostsLiveWork === undefined
+        ? undefined
+        : (generation) => {
+            try {
+              return options.hostsLiveWork!(generation) > 0
+            } catch {
+              return false
+            }
+          },
     )
     if (!durablyRecorded) {
       // The row is gone, or unwritable. A best-effort write that quietly did nothing is

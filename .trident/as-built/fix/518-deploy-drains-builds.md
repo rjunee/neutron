@@ -412,6 +412,67 @@ attributed/reported conflation in one pass instead of three rounds.
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
 
+### The parser promoted what it did not recognise
+
+The validator checked `generation` and `at` while its own docblock said a malformed entry
+must not become positive evidence — and `observationOf` mapped every missing *or
+unrecognised* `observed` value to `'alive-and-killed'`, the **most** definite answer
+available. An entry written by a newer build than the one reading it reached that with no
+corruption at all, and a genuine crash was reported as a deploy.
+
+That is round one's defect with the arrow reversed. Two rounds went into making sure
+`unknown` never rides the branch carrying a definite answer; the parser then took a value it
+did not recognise and promoted it to the most definite one there is. **An unrecognised enum
+member is the canonical unknown**, and a forward version is what makes it reachable without
+corruption.
+
+`observed` is now **required**, validated in `gatewayShutdownKillEntryFor` so a malformed
+entry is not found at all, and `observationOf` is a narrow accessor that re-checks rather
+than assumes.
+
+**There is no legacy arm, and that is measured rather than assumed.**
+`killed_by_gateway_shutdown` has **zero occurrences on `origin/main`** — the container and
+`observed` ship in the same unmerged change, so no build has ever written an entry without
+it. A compat arm would have covered nothing while silently promoting every corrupt and
+forward-version entry. That is the deliberate decision the shape asked for: the legacy shape
+does not exist.
+
+### The cap answered "how many", when the question was "what can still be referenced"
+
+Retention was the newest 16 entries, justified by trident's two-hour in-flight ceiling. **A
+time ceiling bounds duration; a count cap is driven by restart rate, and nothing ties the
+two** — so the justification was an assumption about the environment that had not been
+measured. Sixteen restarts on one session key inside the window evicted a generation that
+still owned a running build, and its attribution was unrecoverable: the stranding this
+change exists to prevent, caused by the cap meant to be harmless.
+
+So the rule now bounds what actually determines reachability. An entry is kept when it is
+**inside the retention window** (`GATEWAY_SHUTDOWN_KILL_RETENTION_MS`, derived from
+`DEFAULT_MAX_INFLIGHT_MS` in `trident/liveness.ts` — 2 h — and doubled for margin, because
+the coupling is documented rather than enforced across the band boundary) **or a live run
+still references its generation**. That second test goes through `hostsLiveWork`, the same
+per-generation seam the pool already consults before evicting a child that hosts live work:
+the identical question, one layer down, asked about a record rather than a process.
+
+The count cap survives only as a backstop against a pathological restart loop, at 256, and
+it is logged when it bites.
+
+**The first version of this fix reintroduced the bug in its own backstop**, and its own test
+caught it: the backstop sliced the newest N, and the oldest surviving entry is exactly the
+one a long-running build is most likely to need. A referenced entry is now never evicted
+whatever its age or the row's size; the cap is filled out with the newest *unreferenced*
+entries.
+
+**And the boundary test tested the mechanism, not the property.** It asserted that eviction
+happens — it could not see that eviction had taken an attribution a running build still
+needed. Replaced by the repro as a property: `g0` owns a running build, its report fails,
+far more than the cap's worth of later generations are recorded, and `g0`'s attribution is
+still recoverable. With its complements: an unreferenced entry outside the window IS
+released, a young entry is kept whatever the probe says, a throwing probe never protects and
+never crashes, and the production path really threads `hostsLiveWork` — the last one added
+because a mutation that stopped threading it survived every unit case that passed
+`stillReferenced` in directly. Proving the rule is not proving the wiring.
+
 ### Which question is this function asking?
 
 That sentence is the one that would have caught the last three findings in one go, so it is
@@ -570,7 +631,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-57 mutations applied one at a time, each reverted after: **57 red, 0 survivors.** Every
+64 mutations applied one at a time, each reverted after: **64 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

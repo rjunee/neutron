@@ -51,9 +51,36 @@ import { registryLockPath, withFlockSync } from './registry-lock.ts'
 
 const log = createLogger('repl-registry')
 
-/** How many gateway-shutdown kill entries a row retains. See the field's docblock
- *  for why a small bound is sufficient rather than merely convenient. */
-export const GATEWAY_SHUTDOWN_KILL_HISTORY = 16
+/**
+ * How long a gateway-shutdown kill entry is retained.
+ *
+ * THE RETENTION RULE IS AGE, NOT COUNT, and that correction matters. An earlier revision
+ * kept the newest 16 entries and justified the number by trident's two-hour in-flight
+ * ceiling — but a time ceiling bounds DURATION while a count cap is driven by RESTART
+ * RATE, and nothing ties the two. Sixteen restarts on one session key inside the window
+ * evicted a generation that still owned a running build, whose attribution was then
+ * unrecoverable: the stranding the whole change exists to prevent, caused by the cap
+ * meant to be harmless.
+ *
+ * So the entry that can still be referenced is the entry that is kept. Reachability is
+ * bounded by trident's hard in-flight ceiling — `DEFAULT_MAX_INFLIGHT_MS`, 2 h in
+ * `trident/liveness.ts` — because no run can be in flight longer than that, so no entry
+ * older than it can be asked about. Doubled here for margin, since the coupling is
+ * documented rather than enforced (the runtime band may not import trident) and a
+ * retention window that is slightly too generous costs kilobytes while one that is too
+ * short costs a build's failure reason.
+ */
+export const GATEWAY_SHUTDOWN_KILL_RETENTION_MS = 4 * 60 * 60_000
+
+/**
+ * A backstop against unbounded growth, NOT the retention rule. It can only ever evict an
+ * entry that is ALREADY outside the retention window or already unreferenced — see
+ * `pruneGatewayShutdownKills`. Generous because the harm it prevents (a large registry
+ * row) is smaller than the harm it could cause (a build with no failure reason), and it
+ * is logged when it bites, because reaching it means something pathological is restarting
+ * this session key.
+ */
+export const GATEWAY_SHUTDOWN_KILL_HISTORY = 256
 
 /**
  * WHAT THE SHUTDOWN OBSERVED about one generation when it reached it.
@@ -82,9 +109,10 @@ export type GatewayShutdownObservation =
 export interface GatewayShutdownKillEntry {
   /** The `child_generation` this entry is about. */
   generation: string
-  /** What the shutdown established about it. ABSENT on an entry written before this
-   *  field existed, and read as `'alive-and-killed'` then — sound rather than
-   *  assumed, because the only path that wrote an entry at all was the kill path. */
+  /** What the shutdown established about it. REQUIRED: an entry whose `observed` is
+   *  absent or unrecognised is refused by `gatewayShutdownKillEntryFor` and is evidence
+   *  of nothing. Optional in the TYPE only because a row read off disk is not a trusted
+   *  type boundary — the validator, not the type, is what enforces it. */
   observed?: GatewayShutdownObservation
   /** Epoch ms the kill was recorded — before the kill, by the process making it. */
   at: number
