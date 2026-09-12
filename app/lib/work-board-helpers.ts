@@ -243,13 +243,19 @@ export function briefAlertText(rp: RunProgress | undefined): string | null {
 
 export interface RunNotice {
   text: string;
-  tone: 'failure' | 'alert';
+  tone: 'failure' | 'alert' | 'blocked';
 }
 
 /** Terminal failure is the card's outcome; a recovered brief alert is only the
  * fallback notice while no terminal failure reason exists. */
-export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+export function runNotice(item: WorkBoardItem): RunNotice | null {
+  const rp = item.run_progress;
+  // A BLOCKED card's reason is the escalation's own sentence — the most useful line on
+  // the card — but it is not a FAILURE, and painting it in the failure tone beside a
+  // "Blocked" tag would have the two halves of one row disagree. (Mirrors the web
+  // `runNotice` in landing/chat-react/WorkBoardTab.tsx.)
   const failure = failureReasonText(rp);
+  if (item.status === 'blocked') return failure === null ? null : { text: failure, tone: 'blocked' };
   if (failure !== null) return { text: failure, tone: 'failure' };
   // A failed run that recorded REVIEW_NOT_RUN and no reason: say the one thing the
   // row proves instead of a blank. A null verdict (legacy frame) claims nothing.

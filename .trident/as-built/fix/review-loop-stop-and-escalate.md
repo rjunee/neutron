@@ -101,12 +101,29 @@ it as a fourth suppressor, and `isRetry` returns false for it even though the ca
 its `linked_run_id` so the reported reason stays reachable): a control that can only
 produce a refusal, labelled "retry", is worse than no control.
 
+### THIS DID NOT CLOSE THE ITEM — the marker moves, not the item
+
+The PR shipped the stop, the escalation and the BLOCKED card. It did not ship the
+orchestrator's reorder, and the item's ROUTING requires it. So the acceptance box stays
+UNCHECKED with a pointer to #545, the issue stays open, and the PR carries no `Closes`.
+
+Worth recording as a PATTERN rather than as a fact about this branch: a PR that does most
+of an item FEELS like the item, and the tracker is the only place that difference
+survives. #536 exists because a system kept reporting progress it had not made — closing
+it on a partial delivery would be the same error one layer up, in the issue tracker
+instead of the review loop. And the next build reads this spec item to learn what it owes,
+so an honestly-unmet box is part of the deliverable. Three PRs reached this question on
+2026-09-12 (#642 for #518, this one, and #547) and the answer was the same each time.
+
 ### The reorder is reported, not automated — and the criterion says so
 
 The item's ROUTING requires the orchestrator to report in the project chat and REORDER
 the board. What ships is the REPORT and the lane. The reorder stays the orchestrator's own
-`work_board_reorder`, made when it reads the message, and the criterion was NARROWED in
-this PR with the reason rather than ticked over an unbuilt path: automating it would
+`work_board_reorder`, made when it reads the message, and the criterion is left UNCHECKED
+rather than ticked over an unbuilt path. An earlier cut of this branch edited the
+REQUIREMENT until the implementation satisfied it and then ticked the box, which is the
+same error again; `:41` and `:50` of the spec item are byte-identical to the base. The
+reason the automation stops where it does: automating it would
 require the RUN to identify which card is the dependency, and the only thing the run can
 honestly produce is `whatIsMissing` — a sentence. Deriving a card id from model prose and
 acting on it is exactly the board mutation the guardrail forbids. The delivery sentence

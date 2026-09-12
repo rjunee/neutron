@@ -21,6 +21,7 @@ import {
   reorderTarget,
   roundText,
   runNotice,
+  type RunNotice,
   splitBoard,
   statusLabel,
   stepTag,
@@ -160,6 +161,12 @@ describe('briefAlertText', () => {
     expect(briefAlertText(progress({ brief_alert: '' }))).toBeNull();
   });
 
+  // `runNotice` takes the ITEM now, because a BLOCKED card's reason is the
+  // escalation's own sentence and must not wear the failure tone. These cases are all
+  // about the run, so the item is the run wrapped in an ordinary in_progress card.
+  const noticeFor = (rp: RunProgress): RunNotice | null =>
+    runNotice(item({ status: 'in_progress', run_progress: rp }));
+
   it('never lets a sticky recovered alert mask the terminal failure outcome', () => {
     const rp = progress({
       phase_label: 'failed',
@@ -167,15 +174,15 @@ describe('briefAlertText', () => {
       failure_reason: 'publish failed: outer publisher could not open a PR',
       brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.',
     });
-    expect(runNotice(rp)).toEqual({
+    expect(noticeFor(rp)).toEqual({
       text: 'publish failed: outer publisher could not open a PR',
       tone: 'failure',
     });
-    expect(runNotice(progress({ brief_alert: 'recovered alert' }))).toEqual({
+    expect(noticeFor(progress({ brief_alert: 'recovered alert' }))).toEqual({
       text: 'recovered alert',
       tone: 'alert',
     });
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
@@ -186,7 +193,7 @@ describe('briefAlertText', () => {
   it('a failed run that recorded REVIEW_NOT_RUN says so instead of showing a blank', () => {
     // The card's measured cost, at the reading end: built work recorded as rejected.
     // A row that recorded no review and no reason can still say the one true thing.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
@@ -196,14 +203,14 @@ describe('briefAlertText', () => {
       tone: 'failure',
     });
     // A LEGACY frame (null verdict) claims nothing — the blank stays a blank.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
       verdict: null,
     }))).toBeNull();
     // A recorded reason still wins: it says more than the verdict does.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: 'merge failed: the branch could not be landed',
@@ -569,6 +576,23 @@ describe('a BLOCKED card offers neither play nor retry', () => {
     });
     expect(stepTag(blocked)).toEqual({ label: 'Blocked', colorKey: 'blocked' });
     expect(dotState(blocked)).toEqual({ colorKey: 'blocked', pulse: false });
+  });
+
+  it("the reason line keeps the escalation's sentence, in a NON-failure tone", () => {
+    // The most useful line on the card is the escalation's own sentence, so it stays —
+    // but painting it in the failure tone beside a "Blocked" tag would have the two
+    // halves of one row disagree about what happened.
+    const rp = progress({
+      step_label: 'failed',
+      phase_label: 'failed',
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency) — card X must land first',
+    });
+    expect(runNotice(item({ status: 'blocked', linked_run_id: 'run-esc', run_progress: rp }))).toEqual({
+      text: 'build BLOCKED at round 2 of 10 (missing-dependency) — card X must land first',
+      tone: 'blocked',
+    });
+    // CONTROL: the same run on a FAILED card is still the failure tone.
+    expect(runNotice(item({ status: 'failed', linked_run_id: 'run-esc', run_progress: rp }))?.tone).toBe('failure');
   });
 
   it('CONTROL: the same card in the FAILED lane still tags and paints as failed', () => {
