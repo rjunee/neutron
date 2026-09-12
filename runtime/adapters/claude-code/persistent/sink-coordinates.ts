@@ -455,7 +455,12 @@ export function sinkTokenLockPath(tokenPath: string): string {
  * THE STAGING NAME IS RANDOM, AND THAT IS NOT A CONTRADICTION OF THE TOKEN BEING
  * DERIVED. The two requirements are opposites and both are deliberate:
  *
- *   - the TOKEN and the PORT must be DETERMINISTIC, because a child baked with them
+ *   - the PORT must be DETERMINISTIC and the TOKEN must be STABLE — different
+ *     properties with the same purpose, and conflating them reads as though the token
+ *     were re-derivable, i.e. computable by anyone who knows the inputs. The port is
+ *     derived (`deriveSinkPort`, a hash of the state dir, nothing stored); the token is
+ *     minted with `randomBytes` and made stable by PERSISTING it. Either way a child
+ *     baked with them
  *     has to still authenticate after a restart — that IS #537;
  *   - this STAGING NAME must be UNIQUE, because nothing ever reads it by name and
  *     its only job is that two writers never choose the same path.

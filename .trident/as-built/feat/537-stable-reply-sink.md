@@ -774,7 +774,8 @@ boundaries — restart survival AND authorization — each bidirectional and eac
 the check that verifies it, with the index regenerated. What follows is what the
 tests do.
 
-`__tests__/sink-restart-survival.test.ts` (26 tests). The load-or-create
+`__tests__/sink-restart-survival.test.ts` (48 tests, counted on the final tree rather
+than carried forward from the round that first wrote this line). The load-or-create
 behaviour both ways, with the mode asserted by `statSync`: absent → created 0600;
 **existing valid → returned unchanged**, twice, because a token that is only
 stable on the second read is not stable; 0644 → refused and replaced; empty,

@@ -133,13 +133,17 @@ function isAddressInUse(e: unknown): boolean {
 }
 
 /** How the sink is told where to bind and where its token lives. Every field is
- *  optional: an unconfigured sink uses the fixed port + the default token path
- *  (`sink-coordinates.ts`). Production wires both from the substrate options
+ *  optional: an unconfigured sink DERIVES its port from its state dir
+ *  (`deriveSinkPort`) and uses the default token path (`sink-coordinates.ts`). It is
+ *  not a fixed port — that is the whole point of per-instance coordinates. Production wires both from the substrate options
  *  (`spawn.ts` → `PersistentReplSubstrateOptions.sinkPort`/`sinkTokenPath`). */
 export interface ReplSinkConfig {
   /** Loopback port to bind. Goes through `resolveSinkPort` like every other
-   *  source; omitted ⇒ the env override, else the port DERIVED from the token
-   *  path's state dir. A `0` is REFUSED, not honoured — see that function. */
+   *  source; omitted ⇒ the WIRED override if one is installed, else the port DERIVED
+   *  from the token path's state dir. "Wired", not environment: `resolveSinkPort`
+   *  reads `sinkPortOverrideRef`, which the boot path sets — it does not read
+   *  `process.env` itself, and that replacement was deliberate. A `0` is REFUSED,
+   *  not honoured — see that function. */
   port?: number
   /** Path of the persisted 0600 token file. Default `defaultSinkTokenPath()`. */
   tokenPath?: string
