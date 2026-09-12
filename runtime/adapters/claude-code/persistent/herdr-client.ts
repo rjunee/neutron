@@ -42,6 +42,7 @@ import {
   HERDR_RPC_TIMEOUT_MS,
   type HerdrPong,
 } from './herdr-protocol.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /** The frame delimiter, as a BYTE. 0x0A can never appear inside a multi-byte UTF-8
  *  sequence (continuation bytes are ≥ 0x80), so splitting the byte stream on it
@@ -337,13 +338,33 @@ export async function herdrCall(
     )
   }, timeoutMs)
 
-  // The connect is AWAITED, not fired and forgotten: a refused connect is a failed
-  // call, and its rejection has to reach `finish` rather than being dropped.
+  // THE DEADLINE HAS TO COVER ESTABLISHMENT, NOT JUST THE REPLY.
+  //
+  // With a persistent connection, connecting happened once at startup and every call
+  // was bounded from an already-established socket. One connection per request moves
+  // the connect INSIDE the call — and a guarantee proved against a precondition has to
+  // be re-proved when the precondition becomes part of the operation. Arming the timer
+  // is not enough: the timer settles `pending`, but if the only `await` in front of the
+  // first `pending` check is the connect, a connector that never resolves blocks here
+  // forever and the deadline is never observed. `herdrCall` hung for good despite
+  // `timeoutMs`.
+  //
+  // So the connect RACES the settlement. `pending` only ever resolves, so the race
+  // cannot turn a deadline into a rejection; `undefined` means the call ended while the
+  // connect was still in flight, and a rejecting connect still rejects the race and
+  // reaches `fail` through the catch below.
+  const connecting = (opts.connect ?? connectUnix)(socketPath, { onBytes, onClose })
   try {
-    const s = await (opts.connect ?? connectUnix)(socketPath, { onBytes, onClose })
-    if (settled) {
-      // The deadline (or a synchronous failure) already ended the call while the
-      // connect was in flight. Hand the socket straight back.
+    const s = await Promise.race([connecting, pending.then(() => undefined)])
+    if (s === undefined) {
+      // The settlement won: the call is over and the socket has not arrived. It may
+      // still be coming, and losing the race lost the reference — so the close is
+      // deferred to the connect itself. A timed-out call that leaks a descriptor per
+      // attempt is a worse failure than the hang it replaced.
+      fireAndForget('herdr-call.late-socket', endLateSocket(connecting))
+    } else if (settled) {
+      // The connect won, but the call ended while it was in flight. Hand it straight
+      // back.
       try {
         s.end()
       } catch {
@@ -371,6 +392,25 @@ export async function herdrCall(
   const outcome = await pending
   if (!outcome.ok) throw outcome.error
   return outcome.result
+}
+
+/**
+ * Close a socket that finishes connecting AFTER its call has already ended.
+ *
+ * Separated out because it is the one piece of work that OUTLIVES the call it belongs
+ * to: `herdrCall` has already returned its outcome, so there is no caller left to
+ * observe a failure here and it goes through `fireAndForget` like every other
+ * background task. A connect that ultimately FAILS needs no close — there is nothing
+ * to close — which is the only swallowed case.
+ */
+async function endLateSocket(connecting: Promise<SocketLike>): Promise<void> {
+  let late: SocketLike
+  try {
+    late = await connecting
+  } catch {
+    return // the connect failed; there is no socket to release
+  }
+  late.end()
 }
 
 /** Bind {@link herdrCall} to a set of options, giving the host one {@link HerdrRpc}

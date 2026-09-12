@@ -1513,6 +1513,43 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The third cost of one connection per request: the deadline had to cover connecting
+
+With a persistent connection, connecting happened ONCE at startup and every call was
+bounded from an already-established socket. One connection per request moves the connect
+inside every call — and that single move is why ordering was lost, why the frame bound
+had to become per-frame, and now why the deadline had to be re-proved. The pattern is
+worth naming: **a guarantee proved against a precondition has to be re-proved when the
+precondition moves into the operation.**
+
+Arming the timer was not enough. It settled the pending outcome, but the only `await` in
+front of the first check of that outcome was the connect — so a connector that never
+resolves parked there forever and `herdrCall` hung for good despite `timeoutMs`. The
+connect now RACES the settlement, and because `pending` only ever resolves, the race
+cannot turn a deadline into a rejection: `undefined` means the call ended while the
+connect was still in flight, and a rejecting connect still rejects the race.
+
+**The fixture, for the third time.** Every existing timeout case used a connector that
+RESOLVES — after 40 ms, or instantly — and a connector that always resolves cannot test
+one that does not. The unbounded path went in underneath an assertion about the ERROR
+rather than about the call ending at all. The new case asserts TERMINATION: the call
+races a sentinel, and a sentinel that wins is a hang. Same shape as the
+`HERDR_SOCKET_PATH` finding and the stderr finding — in each, the tests could not reach
+the state that mattered.
+
+**Racing loses the reference, which is a new obligation.** The socket may still be
+coming after the deadline, and nothing in the call's own lifetime can close it because
+the call is already over. So the close is deferred to the connect itself, through
+`fireAndForget` like every other piece of work that outlives its caller. M154 survived
+until that case existed; M155 is its pair, and a deferred close that also fires for a
+socket which arrived IN TIME reddens four end-count cases as a double close.
+
+**The audit, not just the one await.** The blocker asked whether anything else between
+arming the timer and the first observation of the deadline can block. `herdrCall` now has
+exactly two awaits — the raced connect and the final outcome — and everything else on
+that path (path resolution, framing, `socket.write`, every settlement) is synchronous.
+The criterion carries that count as a check rather than as a claim.
+
 ### Unknown must not confirm — and known must not be discarded
 
 Every rule on this branch so far has been the first half: an ambiguous failure settles
@@ -1925,6 +1962,9 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M150 | the capture helper restores only on the happy path (no `finally`) | RED 1 |
 | M151 | the helper restores a BOUND copy instead of the original reference | RED 2 |
 | M152 | a live proof hand-rolls the stderr patch again | RED 1 |
+| M153 | the connect is awaited again instead of raced against the deadline | RED 1 |
+| M154 | a socket arriving after the deadline is abandoned | SURVIVED (no case) → RED 1 |
+| M155 | PAIR: the deferred close fires for a socket that arrived IN TIME | RED 4 (a double close) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

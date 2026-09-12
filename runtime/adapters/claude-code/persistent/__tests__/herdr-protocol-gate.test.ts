@@ -227,6 +227,59 @@ describe('one request, one reply, one connection', () => {
     expect((e as Error).message).toContain('went unanswered')
   })
 
+  // A CONNECTOR THAT NEVER RESOLVES IS STILL BOUNDED, and the FIXTURE is the finding.
+  // Every other timeout case here uses a connector that resolves — after 40 ms, or
+  // instantly — and a connector that always resolves cannot test one that does not. The
+  // unbounded path went in underneath an assertion about the ERROR rather than about
+  // the call ending at all: the timer settled the pending outcome, but execution was
+  // parked on `await connect(...)` and never reached the check.
+  //
+  // Asserted as a RACE against a sentinel rather than by measuring elapsed time: the
+  // property is "this terminates", and a sentinel that wins is a hang.
+  it('a connector that NEVER RESOLVES is still bounded — the deadline covers establishment', async () => {
+    const SENTINEL = 'SENTINEL: herdrCall never returned'
+    const call = herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      timeoutMs: 1,
+      connect: () => new Promise<FakeSocket>(() => {}), // never resolves, never rejects
+    }).then(
+      () => 'resolved',
+      (e: unknown) => (e as Error).message,
+    )
+    const sentinel = new Promise<string>((r) => {
+      setTimeout(() => r(SENTINEL), 200)
+    })
+    expect(await Promise.race([call, sentinel])).toContain('went unanswered')
+  })
+
+  // RACING THE DEADLINE LOSES THE REFERENCE, so the close has to be deferred to the
+  // connect itself. Without it a timed-out call leaks a descriptor per attempt, which
+  // is a worse failure than the hang the race fixed — and nothing in the call's own
+  // lifetime can observe it, because the call is already over.
+  it('a socket that arrives AFTER the deadline is still released', async () => {
+    let ends = 0
+    const slowConnect = async (): Promise<FakeSocket> => {
+      await new Promise((r) => setTimeout(r, 40))
+      return {
+        write: () => 0,
+        end: () => {
+          ends += 1
+        },
+      }
+    }
+    const e = await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      timeoutMs: 1,
+      connect: slowConnect,
+    }).catch((x: unknown) => x as Error)
+    expect((e as Error).message).toContain('went unanswered')
+    // The call is already over and the socket has not arrived: nothing to close YET,
+    // which is what makes the deferred close the only thing that can do it.
+    expect(ends).toBe(0)
+    await new Promise((r) => setTimeout(r, 80))
+    expect(ends).toBe(1)
+  })
+
   // The deadline can fire while the connect is STILL IN FLIGHT — nothing is holding
   // the call's own promise yet at that moment. If the call settled by REJECTING that
   // promise, the rejection would be unobserved for the rest of the connect and Bun's

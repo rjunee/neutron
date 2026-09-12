@@ -560,14 +560,37 @@ not-new. That is accepted and recorded here rather than hidden.
       fail the call and end the connection, INCLUDING the spawn-time handshake `ping` (an
       unbounded wait there means the gateway never starts). Assert the opposite direction
       too: a reply cancels the clock, so a healthy connection is not failed — a timeout
-      that always fires would pass the first case alone. And assert the ABSENCE the shape
-      depends on: the deadline can fire while the connect is still in flight, which is a
-      window in which nothing yet holds the call's promise. The call therefore settles by
-      RESOLVING an outcome record and never by rejecting one, because an unobserved
-      rejection is fatal under Bun's process net (`logger/fire-and-forget.ts` states the
-      policy). The test registers an `unhandledRejection` listener and requires both the
-      right error and an EMPTY listener log — asserting the error alone passes with the
-      hazard present.
+      that always fires would pass the first case alone.
+      THE DEADLINE MUST COVER ESTABLISHMENT, not only the reply. With a persistent
+      connection, connecting happened once at startup and every call was bounded from an
+      already-established socket; one connection per request moves the connect INSIDE
+      the call, and a guarantee proved against a precondition has to be RE-PROVED when
+      the precondition becomes part of the operation. Arming the timer is not enough: it
+      settles the pending outcome, but if the only `await` in front of the first check is
+      the connect, a connector that never resolves parks there forever and the deadline
+      is never observed. So the connect RACES the settlement — and the case needs a
+      connector that NEVER resolves, because one that always resolves cannot test one
+      that does not. Assert TERMINATION (a race against a sentinel), not the error text:
+      the unbounded path went in underneath an assertion about the error.
+      RACING LOSES THE REFERENCE, so the close is deferred to the connect itself: a
+      socket that arrives after the deadline must still be released, or a timed-out call
+      leaks a descriptor per attempt. Both directions — the late socket IS closed, and
+      the deferred close does NOT fire for a socket that arrived in time (a double close
+      reddens the end-count cases).
+      And assert the ABSENCE the shape depends on: the deadline can fire while the
+      connect is still in flight, which is a window in which nothing yet holds the call's
+      promise. The call therefore settles by RESOLVING an outcome record and never by
+      rejecting one, because an unobserved rejection is fatal under Bun's process net
+      (`logger/fire-and-forget.ts` states the policy). The test registers an
+      `unhandledRejection` listener and requires both the right error and an EMPTY
+      listener log — asserting the error alone passes with the hazard present.
+      THE AUDIT, not just the one await: between arming the timer and the first check of
+      the pending outcome there must be NOTHING that can block unbounded. Run 2026-09-12,
+      `herdrCall` has exactly two awaits — the raced connect and the final outcome — and
+      every other step (path resolution, framing, `socket.write`, settlement) is
+      synchronous.
+      verify (audit): `awk '/^export async function herdrCall/,/^}/'
+      runtime/adapters/claude-code/persistent/herdr-client.ts | grep -c 'await '` is 2.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **Only TERMINAL operations latch `wasKilledByUs`.** `kill('SIGINT')` is an
       interrupt, not a termination: it must leave `wasKilledByUs()` false, record
