@@ -314,6 +314,44 @@ describe('parseWorkBoardItems', () => {
       null,
     ])
   })
+
+  it("carries REVIEW_NOT_RUN through verbatim, and still nulls an unknown verdict", () => {
+    // The no-review terminal is a REAL recorded verdict now. Collapsing it to null here
+    // erased the one thing a reasonless failed card could honestly say, so the board
+    // showed a blank where "review never ran" belonged.
+    const base = {
+      run_id: 'run-1',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 1,
+      started_at: '2026-08-31T00:00:00Z',
+      last_advanced_at: '2026-08-31T00:02:00Z',
+      elapsed_ms: 120000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      failure_reason: null,
+    }
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'Never reviewed',
+        status: 'failed',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, verdict: 'REVIEW_NOT_RUN' },
+      },
+      // An unrecognised string is still refused — the widening is exactly one value.
+      {
+        id: 'b',
+        title: 'Bogus verdict',
+        status: 'failed',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, verdict: 'BOGUS' },
+      },
+    ])
+    expect(out.map((i) => i.run_progress?.verdict)).toEqual(['REVIEW_NOT_RUN', null])
+  })
 })
 
 describe('doc-ref helpers (card ▸ spec-doc link)', () => {

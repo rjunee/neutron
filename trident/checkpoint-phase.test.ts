@@ -72,6 +72,15 @@ const CHECKPOINT_NAMES: readonly string[] = [
   'fix-round-2',
   'fix-round-5',
   'fix-round-10',
+  // THE FOUR-DIGIT BOUNDARY. The Bash mirror enumerated one-, two- and
+  // three-digit globs, so `fix-round-1000` left `phase` untouched there while the
+  // TypeScript table (`/^fix-round-\d+$/`) answered `argus` — a divergence in the
+  // one table whose whole claim is TOTAL equivalence, and one the corpus could not
+  // see because it stopped at round 10 (Argus r8).
+  'fix-round-999',
+  'fix-round-1000',
+  'argus-request-changes-round-999',
+  'argus-request-changes-round-1000',
   // terminal-adjacent — the OUTER loop stamps the terminal phase, not us
   'pr-merged',
   'inner-error',
@@ -101,6 +110,11 @@ describe('phaseForCheckpoint — the canonical table', () => {
     // progress snapshot asserted both at once.
     expect(phaseForCheckpoint('fix-round-1')).toBe('argus')
     expect(phaseForCheckpoint('fix-round-10')).toBe('argus')
+    // The digit run is UNBOUNDED here, and the round parser's nine-digit bound is
+    // deliberately NOT copied across: that bound exists because `checkpointRound`
+    // does arithmetic on the value, and naming a phase does not.
+    expect(phaseForCheckpoint('fix-round-1000')).toBe('argus')
+    expect(phaseForCheckpoint('fix-round-1234567890')).toBe('argus')
   })
 
   test('a change request is the fix round that follows it', () => {
@@ -159,14 +173,17 @@ describe('phaseForCheckpoint — the canonical table', () => {
 
 describe('the Bash mirror in checkpoint.sh agrees with the TypeScript table', () => {
   /** Run the script's own `phase_for_checkpoint` by sourcing it out of the file. */
-  function bashPhaseFor(checkpoint: string): string {
+  function bashPhaseFor(checkpoint: string, locale?: string): string {
     const src = readFileSync(SCRIPT, 'utf8')
     const start = src.indexOf('phase_for_checkpoint() {')
     expect(start).toBeGreaterThan(-1) // the function must still be findable
     const end = src.indexOf('\n}\n', start)
     expect(end).toBeGreaterThan(start)
     const fn = src.slice(start, end + 3)
-    const p = Bun.spawnSync(['bash', '-c', `${fn}\nphase_for_checkpoint "$1"`, '_', checkpoint])
+    const p = Bun.spawnSync(
+      ['bash', '-c', `${fn}\nphase_for_checkpoint "$1"`, '_', checkpoint],
+      locale === undefined ? {} : { env: { ...process.env, LC_ALL: locale } },
+    )
     expect(p.exitCode).toBe(0)
     return p.stdout.toString()
   }
@@ -180,6 +197,36 @@ describe('the Bash mirror in checkpoint.sh agrees with the TypeScript table', ()
   for (const name of CHECKPOINT_NAMES) {
     test(`both copies agree for ${JSON.stringify(name)}`, () => {
       expect(bashPhaseFor(name)).toBe(phaseForCheckpoint(name) ?? '')
+    })
+  }
+
+  // AND THE TWO COPIES AGREE WHATEVER LOCALE THE HOST IS IN (Argus r3, minor,
+  // measured). `[0-9]` inside `[[ =~ ]]` is COLLATED under glibc, not ASCII, so in
+  // `en_US.UTF-8` it also matches U+0663 ARABIC-INDIC DIGIT THREE: the bash mirror
+  // answered `argus` for `fix-round-٣` while `phaseForCheckpoint`'s `/^fix-round-\d+$/`
+  // answers null — the SAME defect its sibling `round_for_checkpoint` was pinned for
+  // one round earlier, and the corpus above could not see it because it holds no
+  // non-ASCII digit. The cost here is a mis-derived `phase` column rather than an
+  // aborted write, which is why it was found second; the fix is the same `LC_ALL=C`
+  // around the two tests.
+  const ARABIC_INDIC_THREE = '٣'
+  for (const locale of ['en_US.UTF-8', 'C']) {
+    test(`a non-ASCII digit implies NO phase under ${locale}, in both copies`, () => {
+      for (const name of [
+        `fix-round-${ARABIC_INDIC_THREE}`,
+        `argus-request-changes-round-${ARABIC_INDIC_THREE}`,
+      ]) {
+        expect({ name, bash: bashPhaseFor(name, locale) }).toEqual({ name, bash: '' })
+        expect({ name, ts: phaseForCheckpoint(name) }).toEqual({ name, ts: null })
+      }
+    })
+
+    test(`an ASCII round still names its phase under ${locale} — the pin is not a ban`, () => {
+      // Positive control: a mirror that answered '' for everything would satisfy
+      // the assertion above without agreeing about anything.
+      expect(bashPhaseFor('fix-round-3', locale)).toBe('argus')
+      expect(bashPhaseFor('argus-request-changes-round-3', locale)).toBe('forge-fix')
+      expect(bashPhaseFor('forge-done', locale)).toBe('argus')
     })
   }
 })
@@ -196,6 +243,10 @@ describe('checkpoint.sh writes the phase — against a real sqlite database', ()
       id TEXT PRIMARY KEY,
       phase TEXT NOT NULL DEFAULT 'forge-init'
         CHECK (phase IN (${ALL_PHASES.map((p) => `'${p}'`).join(', ')})),
+      -- Schema mirror only (migrations/expected-schema.txt:592): checkpoint.sh now
+      -- also derives \`round\` from a round-carrying name, and the fix-round-N walk
+      -- below would error 'no such column' against a table that lacks it.
+      round INTEGER NOT NULL DEFAULT 1,
       pr INTEGER,
       branch TEXT,
       brief_alert TEXT,

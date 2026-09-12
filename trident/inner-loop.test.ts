@@ -102,6 +102,57 @@ describe('parseCheckpointFindings — a resumed fix round fixes RECORDED finding
   ])('%s → [] (the workflow then RE-REVIEWS instead of fixing blind)', (_label, raw) => {
     expect(parseCheckpointFindings(raw as string | null | undefined)).toEqual([])
   })
+
+  // THE NESTING BOUND SQLITE ENFORCES AND JSON.parse DOES NOT (Argus r7). The
+  // shell write site validates with `json_valid`, which is bounded by
+  // JSON_MAX_DEPTH (1000); this decoder is the store's validator, and the two
+  // have to answer the same at the boundary or one row is a real rejection to one
+  // and a legacy one to the other.
+  test('depth 1000 — the boundary itself — still decodes (the bound is >1000, not >=1000)', () => {
+    const at = '['.repeat(1000) + '0' + ']'.repeat(1000)
+    expect(parseCheckpointFindings(at)).toHaveLength(1)
+  })
+
+  test('depth 1001 → [] — deeper than SQLite accepts, so this validator refuses it too', () => {
+    expect(parseCheckpointFindings('['.repeat(1001) + '0' + ']'.repeat(1001))).toEqual([])
+  })
+
+  test('a BOM-prefixed array → [], refused by construction rather than by version', () => {
+    // THE RATIONALE THAT STOOD HERE WAS FALSE AND IS RETRACTED (Argus r22; the same
+    // retraction already sits at the write site, `checkpoint-findings.ts`, and in
+    // `as-built-disposition-sql.test.ts`). It claimed the two engines DISAGREE about
+    // `'\uFEFF[1]'` — `json_valid = 0` on the sqlite3 CLI `checkpoint.sh` invokes
+    // (3.45.1) and 1 on the bun:sqlite the store and the counting SQL use (3.51.2).
+    // They do not: over a value whose STORED BYTES begin EF BB BF, BOTH answer 0. The
+    // reported 1 came from BINDING the marked text as a parameter, which strips the
+    // mark before SQLite sees it, so the stored value carried no mark at all.
+    // The assertion is unchanged and still the right one: the three copies of this
+    // rule agree today BY VERSION, and refusing the mark explicitly here, in
+    // `checkpoint.sh`'s `findings_case` and in the canonical counting SQL makes them
+    // agree BY CONSTRUCTION — an engine that started tolerating the mark still could
+    // not score these bytes as a real rejection.
+    expect(parseCheckpointFindings('\uFEFF[{"severity":"blocker"}]')).toEqual([])
+    // POSITIVE CONTROL: the SAME bytes without the mark are real findings, so this
+    // test cannot pass on a decoder that has stopped decoding anything.
+    expect(parseCheckpointFindings('[{"severity":"blocker"}]')).toHaveLength(1)
+    // And a mark INSIDE the text is data, not a prefix — it decodes.
+    expect(parseCheckpointFindings('[{"title":"\uFEFF"}]')).toHaveLength(1)
+  })
+
+  test('MIXED containers count toward the depth — objects nest as surely as arrays', () => {
+    // 501 × `[{` is 1002 open containers; a bracket-only counter would miss it.
+    expect(parseCheckpointFindings('[{"a":'.repeat(501) + '0' + '}]'.repeat(501))).toEqual([])
+  })
+
+  test('brackets INSIDE a string literal do not count — they nest nothing', () => {
+    expect(parseCheckpointFindings(`["${'['.repeat(3000)}"]`)).toHaveLength(1)
+  })
+
+  test('an ESCAPED quote does not end the string scan', () => {
+    // The raw column text is `["a\"[", "b"]` — one escaped quote, one stray
+    // bracket inside the string, two real entries.
+    expect(parseCheckpointFindings('["a\\"[", "b"]')).toHaveLength(2)
+  })
 })
 
 describe('parseInnerResult — decode the typed terminal column', () => {

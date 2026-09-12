@@ -395,6 +395,71 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('a failed card with no reason but a recorded REVIEW_NOT_RUN says review never ran', async () => {
+    // The measured cost read back at the board: work that was never reviewed used to
+    // render as a blank failed card, indistinguishable from a rejection.
+    const rows = [
+      item({
+        id: 'never-reviewed',
+        title: 'Unreviewed build',
+        status: 'failed',
+        linked_run_id: 'run_never_reviewed',
+        run_progress: {
+          run_id: 'run_never_reviewed',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-08-31T00:00:00Z',
+          last_advanced_at: '2026-08-31T00:02:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          pr_url: null,
+          verdict: 'REVIEW_NOT_RUN',
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(
+      'Review never ran — the work was not rejected.',
+    )
+    await act(async () => root.unmount())
+  })
+
+  it('a recorded reason still wins over the never-ran line', async () => {
+    const rows = [
+      item({
+        id: 'never-reviewed-with-reason',
+        title: 'Unreviewed build that also failed to land',
+        status: 'failed',
+        linked_run_id: 'run_never_reviewed_reason',
+        run_progress: {
+          run_id: 'run_never_reviewed_reason',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-08-31T00:00:00Z',
+          last_advanced_at: '2026-08-31T00:02:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          pr_url: null,
+          verdict: 'REVIEW_NOT_RUN',
+          failure_reason: 'merge failed: the branch could not be landed',
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(
+      'merge failed: the branch could not be landed',
+    )
+    expect(container.textContent).not.toContain('Review never ran')
+    await act(async () => root.unmount())
+  })
+
   it('renders a derived tag for a LEGACY run_progress missing step_label (no crash)', async () => {
     // A rolling-deploy / legacy gateway HTTP GET can return run_progress with only
     // phase_label (no step_label). The row must derive the tag from phase_label
