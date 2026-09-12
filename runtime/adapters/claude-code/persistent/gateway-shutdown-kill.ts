@@ -616,6 +616,55 @@ export const SHUTDOWN_EXIT_GRACE_MS = 2_000
  * is shared. A child still alive after the escalation records an UNDETERMINED
  * disposition — never a kill.
  */
+/**
+ * `hasExited()` on a child THIS MODULE DOES NOT OWN, read as three values.
+ *
+ * `sampleLivenessBeforeShutdownKill` already treats a throwing liveness probe as
+ * `could-not-sample` — the vocabulary exists precisely because "is it dead" can fail to
+ * answer. The confirmation site then called the same probe UNPROTECTED, so a throw did not
+ * produce an undetermined outcome: it rejected out of `confirmShutdownExits` and took the
+ * whole drain with it, costing every child behind that watch BOTH channels. A state that
+ * aborts its reader is not represented, only spelled.
+ *
+ * `undefined` is "could not tell", and every caller below has to say what it does with it.
+ */
+function readHasExited(w: ShutdownExitWatch): boolean | undefined {
+  try {
+    return w.child.hasExited()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The child's pid, read defensively — the same rule one field over.
+ *
+ * `pid` is a property on a child object this module does not own, and both shutdown walks
+ * read it INSIDE the marking step that precedes the kill. A getter that throws there costs
+ * the child its kill (pooled path, where the read sits in front of `kill()`) or aborts the
+ * whole quarantined loop. A read that cannot answer must cost the ENTRY its pid — which the
+ * registry already represents as "absent, so a later reader declines to attribute" — and
+ * never the shutdown.
+ */
+export function readChildPid(child: { readonly pid?: number }): number | undefined {
+  try {
+    const pid = child.pid
+    return typeof pid === 'number' ? pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The exit promise, likewise: a getter on a foreign object can throw, and one that does
+ *  must not take the shared grace down with it. */
+function exitedOf(w: ShutdownExitWatch): Promise<unknown> {
+  try {
+    return Promise.resolve(w.child.exited).catch(() => undefined)
+  } catch {
+    return Promise.resolve(undefined)
+  }
+}
+
 export async function confirmShutdownExits(
   watches: readonly ShutdownExitWatch[],
   opts: { graceMs?: number; wait?: WaitFactory } = {},
@@ -624,24 +673,27 @@ export async function confirmShutdownExits(
   const graceMs = opts.graceMs ?? SHUTDOWN_EXIT_GRACE_MS
   const wait = opts.wait ?? cancellableWait
   const settle = async (): Promise<void> => {
-    const pending = watches.filter((w) => !w.child.hasExited())
+    // NOT `!hasExited()`: a probe that could not answer is not a child known to be gone,
+    // so it is waited for with the rest. Waiting costs a shared grace we are spending
+    // anyway; skipping it would silently drop a child that may still be dying.
+    const pending = watches.filter((w) => readHasExited(w) !== true)
     if (pending.length === 0) return
     // CANCELLED WHEN THE EXITS WIN. The grace is a ceiling on how long we wait for
     // children that are slow to die, not a period the teardown must serve even when
     // every child is already gone.
     const bound = wait(graceMs)
     try {
-      await Promise.race([
-        Promise.all(pending.map((w) => w.child.exited.catch(() => undefined))),
-        bound.expired,
-      ]).catch(() => undefined)
+      await Promise.race([Promise.all(pending.map((w) => exitedOf(w))), bound.expired]).catch(() => undefined)
     } finally {
       bound.cancel()
     }
   }
   await settle()
   for (const w of watches) {
-    if (w.child.hasExited()) continue
+    // Only a child KNOWN to be gone is skipped. "Could not tell" escalates: `kill()` is
+    // idempotent after exit, so signalling a child that turns out to be dead costs
+    // nothing, while skipping one that is alive orphans it.
+    if (readHasExited(w) === true) continue
     try {
       w.child.kill('SIGKILL' as never)
       // The escalation landed, so from here a death IS ours to claim.
@@ -652,9 +704,20 @@ export async function confirmShutdownExits(
   }
   await settle()
   for (const w of watches) {
+    const exited = readHasExited(w)
+    if (exited === undefined) {
+      // THE UNDETERMINED ARM, said out loud. We signalled it and cannot read whether it
+      // died, so the disposition stays whatever the pre-kill sample established — never
+      // promoted to a kill, and never allowed to abort the phase.
+      process.stderr.write(
+        `[repl] gateway shutdown could not read whether generation=${w.report.childGeneration.slice(0, 8)} ` +
+          `exited (its liveness probe threw) — the disposition stays UNDETERMINED and the shutdown continues\n`,
+      )
+    }
     // BOTH are required. Exited without a delivered signal means it died of something
-    // else while we were failing to signal it: dead, and not by us.
-    confirmShutdownKill(w.report, { killed: w.signalDelivered && w.child.hasExited() })
+    // else while we were failing to signal it: dead, and not by us. An unreadable probe
+    // is not an exit either.
+    confirmShutdownKill(w.report, { killed: w.signalDelivered && exited === true })
   }
 }
 

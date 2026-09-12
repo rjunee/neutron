@@ -27,6 +27,7 @@ import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './r
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
 import {
+  readChildPid,
   recordGatewayShutdownKill,
   sampleLivenessBeforeShutdownKill,
   type PendingShutdownKillReport,
@@ -972,7 +973,7 @@ export function shutdownQuarantinedChildren(
       // Recorded so this generation's death can be CONFIRMED later rather than assumed
       // from the entry — and a quarantined generation needs it most, because the row's
       // own pid belongs to the replacement child that spawned over it.
-      entry.session.child.pid,
+      readChildPid(entry.session.child),
     )
     owed.push(report)
     // Same rule as the pooled path: SIGNAL here, and let the caller's shared pass

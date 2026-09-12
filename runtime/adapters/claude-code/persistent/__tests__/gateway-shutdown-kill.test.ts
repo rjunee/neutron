@@ -31,6 +31,7 @@ import {
   recordGatewayShutdownOutcome,
   reportGatewayShutdownKill,
   wasKilledByGatewayShutdown,
+  readChildPid,
   type WaitFactory,
 } from '../gateway-shutdown-kill.ts'
 import { detectReplWedged } from '../dead-repl-detector.ts'
@@ -1378,5 +1379,91 @@ describe('a sink that commits just after its bound still closes the edge', () =>
     await pendingCall.catch(() => undefined)
     await Bun.sleep(1)
     expect(getRecord(path, 'cc-trident-fire-o-abc /repo')?.child_crash_notified_at).toBeUndefined()
+  })
+})
+
+/**
+ * #518 — A STATE THAT ABORTS ITS READER IS NOT REPRESENTED, ONLY SPELLED.
+ *
+ * `sampleLivenessBeforeShutdownKill` treats a throwing liveness probe as
+ * `could-not-sample` — the whole reason the vocabulary has a third value. The CONFIRMATION
+ * site then read the same `hasExited()` unprotected, so a throw did not produce an
+ * undetermined outcome: it rejected out of `confirmShutdownExits` and took the rest of the
+ * drain with it, costing every child behind that watch BOTH channels.
+ *
+ * The standing check these cases come from: for every state in the vocabulary, which code
+ * paths read it, and does each of them SURVIVE it?
+ */
+describe('an unreadable liveness probe is undetermined, not an aborted shutdown (#518)', () => {
+  const throwingChild = (): ShutdownExitWatch['child'] => ({
+    exited: new Promise<number | null>(() => {}),
+    hasExited: () => {
+      throw new Error('EBADF: the probe cannot answer')
+    },
+    kill: () => {},
+  })
+
+  it('confirmShutdownExits RESOLVES, and records the undetermined disposition', async () => {
+    // RED-mutation: read `w.child.hasExited()` directly in any of the three places. The
+    // call rejects, every later phase (including delivery) is skipped, and this case fails
+    // with the throw rather than an assertion.
+    const path = registryPath()
+    seed(path)
+    const report = recordGatewayShutdownKill(
+      { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path } as PersistentReplSubstrateOptions,
+      KEY,
+      'gen-live',
+      700,
+      'alive',
+      4242,
+    )
+    const watch: ShutdownExitWatch = { report, child: throwingChild(), signalDelivered: true }
+
+    const { lines } = await captureStderr(() => confirmShutdownExits([watch], { graceMs: 1, wait: instantWait }))
+
+    // Not a kill — we signalled it and cannot read whether it died.
+    expect(report.observed).toBe('alive-when-reached')
+    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(false)
+    // And it says which of the two it was, rather than leaving a silent undetermined.
+    expect(lines.join('')).toContain('could not read whether')
+  })
+
+  it('a throwing probe does not cost the OTHER children their confirmation', async () => {
+    // The reason this is a P1 rather than a wrong value: the reject aborted the phase, so
+    // every watch after the throwing one lost its outcome too. RED-mutation: as above —
+    // the second report then never reaches `alive-and-killed`.
+    const path = registryPath()
+    seed(path)
+    const options = { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path } as PersistentReplSubstrateOptions
+    const bad = recordGatewayShutdownKill(options, KEY, 'gen-bad', 700, 'alive', 4242)
+    const good = recordGatewayShutdownKill(options, KEY, 'gen-live', 700, 'alive', 4243)
+    const watches: ShutdownExitWatch[] = [
+      { report: bad, child: throwingChild(), signalDelivered: true },
+      {
+        report: good,
+        child: { exited: Promise.resolve(0), hasExited: () => true, kill: () => {} },
+        signalDelivered: true,
+      },
+    ]
+
+    await captureStderr(() => confirmShutdownExits(watches, { graceMs: 1, wait: instantWait }))
+
+    expect(bad.observed).toBe('alive-when-reached')
+    expect(good.observed).toBe('alive-and-killed')
+  })
+
+  it('readChildPid answers "no pid" for a getter that throws, and the pid otherwise', () => {
+    // The same rule one field over: both shutdown walks read `pid` INSIDE the marking step
+    // that precedes the kill, so a throwing getter cost the pooled child its kill and
+    // aborted the quarantined loop outright. RED-mutation: drop the try/catch — this case
+    // throws instead of returning `undefined`, while the complement below still passes.
+    expect(
+      readChildPid({
+        get pid(): number {
+          throw new Error('EBADF')
+        },
+      }),
+    ).toBeUndefined()
+    expect(readChildPid({ pid: 4242 })).toBe(4242)
   })
 })

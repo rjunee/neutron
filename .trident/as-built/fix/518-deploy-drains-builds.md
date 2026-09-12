@@ -18,7 +18,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1052`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:1033`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:1034`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -32,7 +32,7 @@ Worse, the ONE class of child certain to be hosting a live build reported nothin
 A child is quarantined precisely because it still hosts running workflows (the eviction
 guard deferred its reaping), and `shutdownQuarantinedChildren` deleted its map entry
 before killing it — which makes the `child.exited` hook `quarantineChild` installs return
-early (`spawn.ts:907`). Every deploy killed those silently.
+early (`spawn.ts:908`). Every deploy killed those silently.
 
 ### The choice the spec item demanded, and why it is what it is
 
@@ -146,8 +146,8 @@ somebody can find beats an unbounded one nobody knows about.
 
 **The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
 generations on one session key — the pooled child, and a quarantined child that held the key
-before a fresh spawn took it over — and they share one registry row (`pool.ts:1007`, then
-`pool.ts:1093`). The later write replaced the earlier one, so the row named one generation
+before a fresh spawn took it over — and they share one registry row (`pool.ts:1008`, then
+`pool.ts:1094`). The later write replaced the earlier one, so the row named one generation
 beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
 disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
 now refuses a generation the row does not currently name — free, because both consumers match
@@ -172,7 +172,7 @@ was the death likeliest to matter and the one left with no record at all.
 
 *Marking at quarantine time is unsound, not merely awkward.* `sweepQuarantinedChildren`
 terminates a quarantined child on the ROUTINE drain once its hosted work finishes
-(`spawn.ts:927-932`). A marker written at quarantine time would attribute that ordinary reap
+(`spawn.ts:928-933`). A marker written at quarantine time would attribute that ordinary reap
 to a deploy, so the option needs the marker to mean something weaker than it says. Rejected on
 correctness, not cost.
 
@@ -196,7 +196,7 @@ must outlive the generation it describes, which is the whole reason it exists.
 
 **And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
 `record.child_generation` (`supervision.ts:1059`), which a replacement spawn overwrites
-(`spawn.ts:734`) — so a quarantined generation has never been locatable in the registry, and
+(`spawn.ts:735`) — so a quarantined generation has never been locatable in the registry, and
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
 
@@ -432,6 +432,46 @@ still terminate every pooled and quarantined child — and criterion 1's own ana
 why nothing inside this process can change that while the REPL lives in the gateway's
 cgroup. So the PR carries no `Closes`, the issue stays open against the drain/survive half
 (#538/#539), and criteria 1 and 2 stay unticked.
+
+### A state that aborts its reader is not represented, only spelled
+
+`sampleLivenessBeforeShutdownKill` catches a throwing liveness probe and records
+`could-not-sample`: the third value exists precisely because "is it dead" can fail to
+answer. `confirmShutdownExits` then read the same `hasExited()` UNPROTECTED, three times —
+the pending filter, the escalation skip, and the final promotion. A child whose probe threw
+did not produce an undetermined outcome there; it rejected out of the phase, so the
+escalation, the second grace, the confirmations of every OTHER watch, the ephemeral
+teardown and the whole delivery phase never ran. The children behind that watch lost both
+channels, which is exactly the loss the pending-spawn partition had just closed by a
+different route.
+
+Every confirmation read is now three-valued. `readHasExited` returns `true | false |
+undefined`, and each caller says what it does with the third: the pending filter WAITS for a
+child it cannot read (the grace is shared and being spent anyway), the escalation SIGNALS it
+(`kill()` is idempotent after exit, so signalling a dead child costs nothing while skipping
+a live one orphans it), and the promotion refuses — signalled but unreadable is undetermined,
+with a stderr line naming which of the two it was. `readChildPid` is the same rule one field
+over: both walks read `pid` inside the marking step that PRECEDES the kill, so a throwing
+getter cost the pooled child its kill and aborted the quarantined loop outright.
+
+### The standing check this lane earned
+
+Three rounds in a row found the same shape, so it belongs in the record as a check rather
+than as a third anecdote:
+
+> **For every state in the vocabulary: which code paths read it, and does each of them
+> SURVIVE it?**
+
+It is the sibling of the consumer sweep two sections down. That one asks whether a consumer
+treats a report as proof of something the report declines to assert; this one asks whether a
+consumer can tolerate the value at all. Both are about the same gap between a vocabulary and
+its readers, and in both the defect is invisible from the writing site — the value is
+correct, and the damage is somewhere that reads it.
+
+Also worth keeping: each time, the coverage was ADJACENT. A throwing probe was exercised in
+isolation while the delivery case used a hand-built report, so nothing drove a throwing child
+through confirmation. A never-settling SINK was covered while the unsettled POOL PROMISE was
+not. The fixture was always one seam away from the path.
 
 ### The guarantee held only until the first wedged spawn
 
@@ -844,8 +884,8 @@ about why it died".
 
 **That last row required checking what plain `dead` asserts, before deciding.** It is positive in
 both provenances and never arises from a failed look: the pool branch answers it for a session
-that by construction has not been through a shutdown (`pool.ts:961` deletes the pool entry
-before the record is written at `pool.ts:1007`), and the registry branch answers it only when a
+that by construction has not been through a shutdown (`pool.ts:962` deletes the pool entry
+before the record is written at `pool.ts:1008`), and the registry branch answers it only when a
 look for an entry naming this generation found none. So it is a real conflict between two
 positive attributions, not `dead-cause-undetermined` wearing the wrong name — and it is not
 resolved by preferring an arm, which is what an earlier revision did. A disputed cause IS an
@@ -967,7 +1007,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-97 mutations applied one at a time, each reverted after: **97 red, 0 survivors.** Every
+101 mutations applied one at a time, each reverted after: **101 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

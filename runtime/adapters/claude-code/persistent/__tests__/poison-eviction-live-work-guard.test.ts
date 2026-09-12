@@ -1686,3 +1686,74 @@ describe('an unsettled spawn does not hold the shutdown report of a live child (
     expect(childAlive(2)).toBe(false)
   }, 20_000)
 })
+
+/**
+ * #518 — AN UNREADABLE PROBE ON ONE CHILD MUST NOT COST THE OTHERS THEIR REPORT.
+ *
+ * `confirmShutdownExits` read `hasExited()` unprotected, so a probe that threw rejected out
+ * of the confirmation phase and skipped everything after it — including the delivery phase.
+ * Same outcome as the wedged-spawn traversal, by a different route: the children behind the
+ * failing one lose BOTH channels. This drives the whole sequence with a poisoned probe on
+ * the quarantined child and a healthy pooled child behind it.
+ */
+describe('a liveness probe that throws does not abort the drain (#518)', () => {
+  it('the healthy child is still confirmed and reported', async () => {
+    // RED-mutation: read `w.child.hasExited()` directly in `confirmShutdownExits` (any of
+    // the three places). The shutdown rejects, the pooled child's report is never
+    // delivered, and this case fails on the throw.
+    const base = makeWedgeOnceHost()
+    let spawns = 0
+    let poisoned = false
+    const host: PtyHost = {
+      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
+        const child = base.host.spawn(argv, spawnOpts)
+        const incarnation = (spawns += 1)
+        return {
+          ...child,
+          // Only the QUARANTINED child's probe goes bad, and only once the shutdown is
+          // under way — a probe that threw during the turn would fail this case earlier,
+          // for a different reason.
+          hasExited: () => {
+            if (poisoned && incarnation === 1) throw new Error('EBADF: the probe cannot answer')
+            return child.hasExited()
+          },
+        }
+      },
+    }
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-bad-probe-')), 'repl-registry.json')
+    const seen: Array<{ cause: string; generationKey: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      hostsLiveWork: () => 3,
+      onChildCrash: (info) => {
+        seen.push({ cause: info.cause, generationKey: info.generationKey })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, base.messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const quarantinedGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    await captureStderr(() => drain(sub.start(spec('turn-2'))))
+    const pooledGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    expect(quarantinedChildCount()).toBe(1)
+    poisoned = true
+
+    const { lines } = await captureStderr(() => shutdownAllPersistentRepls())
+    await realKillsSettled()
+
+    // THE POOLED CHILD IS REPORTED — it was behind the poisoned watch in the confirmation
+    // phase, and before this fix that phase never returned.
+    expect(seen.map((s) => s.generationKey)).toContain(pooledGeneration)
+    expect(seen.find((s) => s.generationKey === pooledGeneration)?.cause).toBe('gateway-shutdown')
+    expect(wasKilledByGatewayShutdown(loadRegistry(registryPath)[key])).toBe(true)
+
+    // And the child whose probe could not answer is UNDETERMINED — not a deploy kill, and
+    // not sent to the death sink at all, because nothing established that it died.
+    expect(seen.map((s) => s.generationKey)).not.toContain(quarantinedGeneration)
+    expect(observationOf(gatewayShutdownKillEntryFor(loadRegistry(registryPath)[key], quarantinedGeneration))).not.toBe(
+      'alive-and-killed',
+    )
+    expect(lines.join('')).toContain('could not read whether')
+  }, 20_000)
+})

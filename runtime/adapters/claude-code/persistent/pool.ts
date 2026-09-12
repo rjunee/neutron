@@ -14,6 +14,7 @@ import { getRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
   cancellableWait,
+  readChildPid,
   confirmShutdownExits,
   deliverShutdownKillReports,
   recordGatewayShutdownKill,
@@ -1013,7 +1014,7 @@ export async function shutdownAllPersistentRepls(
           // The pid goes ON the durable entry so a later reader can confirm this death
           // against the process table instead of trusting the entry. Read before the
           // kill, while the handle is certainly still valid.
-          session.child.pid,
+          readChildPid(session.child),
         )
         if (owed !== null) owedReports.push(owed)
         owedForThisChild = owed

@@ -163,8 +163,18 @@ disappears.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1052`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:1033`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:1034`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE UNDETERMINED STATE WAS HONOURED WHERE IT WAS SAMPLED AND DISCARDED WHERE IT WAS
+  CONFIRMED. `sampleLivenessBeforeShutdownKill` catches a throwing liveness probe — that is
+  why `could-not-sample` exists — and `confirmShutdownExits` then called the same
+  `hasExited()` unprotected in three places, so a probe that threw REJECTED out of the
+  confirmation phase and skipped everything after it, delivery included. Every child behind
+  that watch lost both channels: the outcome the pending-spawn fix had just closed, by
+  another route. A STATE THAT ABORTS ITS READER IS NOT REPRESENTED, ONLY SPELLED. Every
+  confirmation read is now three-valued (`readHasExited`, and `readChildPid` for the pid
+  read that precedes the kill), an unreadable probe stays undetermined and says so, and the
+  drain continues.
 - A WEDGED SPAWN COST EVERY LAUNCHER BEHIND IT ITS REPORT, which made the guarantee above
   hold only until the first pool entry that would not settle. `pool` stores the spawn
   PROMISE and inserts it before it resolves, and the shutdown walk awaited each entry in
@@ -274,7 +284,7 @@ disappears.
   never overrides an observation; `dead` + `killed` is a real conflict, reported as disputed and
   logged rather than resolved by preferring an arm). That last row was decided only after
   establishing that plain `dead` is positive in both provenances and never arises from a failed
-  look (`pool.ts:961` precedes `pool.ts:1007`, so the pool branch answers for a session that has
+  look (`pool.ts:962` precedes `pool.ts:1008`, so the pool branch answers for a session that has
   not been through a shutdown; the registry branch answers only when a look found no entry). A
   merge function is not a reader of one entry but of two verdicts, which is why it sat outside
   the call-site audit — so each function now records WHICH QUESTION IT ASKS, and the matrix is
@@ -329,7 +339,7 @@ disappears.
   running workflows, so that was the death likeliest to matter and the one with no record at
   all. Measured before choosing: marking at quarantine time is UNSOUND, not merely awkward —
   `sweepQuarantinedChildren` terminates a quarantined child on the ROUTINE drain
-  (`spawn.ts:927-932`), which that marker would then attribute to a deploy. So the row now
+  (`spawn.ts:928-933`), which that marker would then attribute to a deploy. So the row now
   keeps a bounded LIST keyed by generation, and both readers look their own generation up.
   This is cheaper than it sounds and is not a database migration: the registry is a JSON file
   and its parser checks four fields and tolerates extras, so old and new builds interoperate
@@ -338,7 +348,7 @@ disappears.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1059`), which a replacement spawn overwrites (`spawn.ts:734`), so a
+  (`supervision.ts:1059`), which a replacement spawn overwrites (`spawn.ts:735`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control
@@ -373,7 +383,7 @@ disappears.
 - The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
   this change asserted the stronger claim. One teardown reaches two generations on one
   session key — the pooled child, and a QUARANTINED child that held the key before a fresh
-  spawn took it over — and they share one registry row (`pool.ts:1007`, then `pool.ts:1093`).
+  spawn took it over — and they share one registry row (`pool.ts:1008`, then `pool.ts:1094`).
   The later write replaced the earlier one, leaving the row naming one generation and the
   marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
   disabling the next boot's backstop in exactly the case it exists for (the direct sink
@@ -388,5 +398,5 @@ disappears.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:907`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:908`). Every
   deploy killed those silently.
