@@ -140,8 +140,11 @@ the adapter's.
    than a pinned version string, because the wrappers do not install codex (they
    check `command -v codex` and degrade to NOT_CONNECTED,
    `trident/codex-review.sh:154`), so the binary is the host's and a pin here would
-   be a claim about someone else's machine. Precedent and same policy: #538's herdr
-   client must `ping` and compare protocol versions for exactly this reason.
+   be a claim about someone else's machine. The probe runs
+   `--strict-config --ignore-user-config` so the **user's** config file is out of scope
+   — a gate must fail only on what it gates, and a stale field in that file (#647) is
+   not a CLI contract violation. Precedent and same policy: #538's herdr client must
+   `ping` and compare protocol versions for exactly this reason.
 8. **A thread id has exactly one owner, and that owner's calls on it are strictly
    sequential.** Fan-out is expressed as **one thread id per lane**, never as
    several callers sharing an id. Cache warmth is unaffected — it is per-thread,
@@ -286,22 +289,34 @@ form; the "kills:" note names what the earlier form let through.
       design necessarily failed its own criterion.
 
 - [ ] **The CLI's contract is verified at startup and refused loudly, before any turn
-      is spawned.** verify: the probe checks (a) `codex exec resume --help` exposes the
-      `resume` **subcommand**, and (b) **every config key the adapter passes** —
-      `sandbox_mode`, `approval_policy`, `approvals_reviewer` — is recognised, by one
-      invocation that also carries a deliberately bogus **sentinel** key under
-      `--strict-config`. Measured: codex then reports `unknown configuration field
-      <sentinel>` and exits **before any model call** (0.06 s, zero tokens); a
-      misspelled real key is named **instead of** the sentinel, so the probe is
-      discriminating and free.
-      Positive case: the probe passes and the recorded `codex --version` appears in the
-      run's record. Negative cases, one per relied-upon key: a stub rejecting that key
-      yields a **distinct typed unsupported-version outcome**, and the test asserts
+      is spawned — and the probe fails only on the contract it gates.** verify: the
+      probe checks (a) `codex exec resume --help` exposes the `resume` **subcommand**,
+      and (b) **every config key the adapter passes** — `sandbox_mode`,
+      `approval_policy`, `approvals_reviewer` — is recognised, by a single
+      `codex exec --strict-config --ignore-user-config` invocation carrying all of them
+      plus a deliberately bogus **sentinel** key. Measured: codex reports
+      `unknown configuration field <sentinel> in -c/--config override` and exits
+      **before any model call** — 0.06 s, zero tokens — while a misspelled real key is
+      named **instead of** the sentinel.
+      Positive case: the probe passes and the recorded `codex --version` reaches the
+      run's record. Negative cases, **one per relied-upon key**: a stub rejecting that
+      key yields a **distinct typed unsupported-version outcome** and the test asserts
       **no turn was spawned** — not merely that the run failed.
+      **Day-one case, and it is a real machine's state (#647):** with a user
+      `config.toml` containing an unrecognised field, the probe must still **pass**.
+      `--ignore-user-config` is why, and it is the chosen mechanism rather than parsing
+      the error text: the two failures are distinguishable by message shape
+      (`in -c/--config override` versus a `<path>:<line>:<col>` prefix), but a probe
+      that decides whether the CLI is stable by parsing that CLI's unstable error
+      strings is circular. Taking the user's file out of scope removes the failure mode
+      instead of classifying it. Should a config-file error ever surface anyway, it is a
+      **separate, non-blocking** outcome — never the unsupported-version refusal.
       *kills:* a probe that checks only `resume` and lets a rejected `sandbox_mode`
-      surface mid-turn, which is the exact failure the probe exists to prevent; a probe
-      that detects the problem after work has started; and a sentinel-less probe that
-      would pass silently if codex ever stopped rejecting unknown keys.
+      surface mid-turn, which is the exact failure it exists to prevent; one that
+      detects the problem after work has started; a sentinel-less probe that would pass
+      silently if codex ever stopped rejecting unknown keys; and **a probe that fails
+      closed on this machine today for a reason unrelated to the CLI contract**, whose
+      first victim would disable the gate rather than fix the config.
 
 - [ ] **No long-lived codex process is created.** verify: every codex process the
       adapter starts — **including any detached or re-parented descendant**, not only

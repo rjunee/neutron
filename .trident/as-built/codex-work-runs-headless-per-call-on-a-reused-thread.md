@@ -366,20 +366,44 @@ completes an escalated write on a **first** call too, so there is one form every
 and one assertion. `--approve-for-me` is dropped; it is the same thing spelled as a flag
 and does not exist on `codex exec resume`.
 
-**The startup probe is free.** `codex exec --strict-config` rejects an unrecognised
-`-c` key with `unknown configuration field <name>` and exits **before any model call** —
-0.06 s, zero tokens. Passing every relied-upon key together with one deliberately bogus
-**sentinel** therefore validates them all in a single free invocation: codex names only
-the sentinel when every real key is recognised, and names a misspelled real key
-*instead of* the sentinel when one is not. The sentinel also makes the probe fail
-closed — if codex ever stopped rejecting unknown keys, nothing would be named and the
-probe must treat that as unsupported.
+**The startup probe is free, and the technique generalises.** `codex exec
+--strict-config` rejects an unrecognised `-c` key with `unknown configuration field
+<name>` and exits **before any model call** — 0.06 s, zero tokens. Passing every
+relied-upon key together with one deliberately bogus **sentinel** validates them all in
+a single free invocation: codex names only the sentinel when every real key is
+recognised, and names a misspelled real key *instead of* the sentinel when one is not.
 
-> Incidental, found while building that probe and not chased: the owner's live
-> `config.toml` carries a per-project `approval_policy` field that **0.149.1 no longer
-> recognises**, so any codex invocation adding `--strict-config` fails to load config
-> at all. Nothing runs `--strict-config` today. Noted because the probe above is the
-> first thing that would.
+Two properties make that a real check rather than a hopeful one, and both are reusable
+anywhere we depend on another tool's config surface:
+
+- **The sentinel converts an absence of error into a positive signal.** Without it, a
+  silent pass is ambiguous — it could mean every key was accepted, or that the tool
+  stopped validating. With it, a pass *must* produce the sentinel's name; anything else,
+  including silence, is treated as unsupported. The check fails closed.
+- **It costs nothing, so "verify the contract at startup" stops being a trade-off.**
+  The usual argument against a startup probe is latency or spend; at 0.06 s and zero
+  tokens there is nothing to weigh against catching a drift like `--resume` → `resume`
+  before a run instead of during one.
+
+**A gate must fail only on what it gates**, and this one nearly did not. The owner's
+live `config.toml` carries a per-project `approval_policy` field that 0.149.1 no longer
+recognises, so a bare `--strict-config` fails to load config on this machine — which
+would have looked identical to a genuine contract violation, the worst possible outcome
+for a gate whose entire job is telling those apart. The first person to hit it would
+have disabled the gate rather than fixed the config. Measured precedence:
+
+| invocation | reported |
+|---|---|
+| `--strict-config` alone | the config-file field, as `<path>:<line>:<col>:` |
+| `--strict-config -c <bad>=1` | the override, as `… in -c/--config override` — the file error is **masked** |
+| `--strict-config --ignore-user-config -c <bad>=1` | the override; the user's file is out of scope entirely |
+
+So the two are textually distinguishable — but the probe uses `--ignore-user-config`
+rather than the message shape, because **a probe that decides whether a CLI is stable by
+parsing that CLI's unstable error strings is circular**. Removing the failure mode beats
+classifying it. The field itself is filed as #647, with the note that it is inert today
+(every one of this spike's turns ran against it without `--strict-config` and none
+failed) and becomes load-bearing the moment anything adopts that flag.
 
 ### Not established
 
