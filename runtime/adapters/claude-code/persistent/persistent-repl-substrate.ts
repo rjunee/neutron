@@ -66,6 +66,17 @@ export { httpHealth, type HttpHealthOptions } from './repl-session.ts'
 export type { ReplSession } from './repl-session.ts'
 export { drainPendingRespawns, type DrainPendingRespawnsOptions } from './pending-respawn.ts'
 export {
+  startBootAdoption,
+  beginBootAdoption,
+  awaitBootAdoption,
+  reconcileOwnRepl,
+  resetBootAdoption,
+  resetBootAdoptionForTests,
+  BOOT_ADOPTION_BUDGET_MS,
+  type BootAdoptionDeps,
+  type RowAdoptionOutcome,
+} from './boot-adoption.ts'
+export {
   poolKeyFor,
   spawnEphemeralSession,
   createPersistentReplSubstrate,

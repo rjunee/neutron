@@ -22,6 +22,8 @@ import {
   type PendingShutdownKillReport,
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
+import { claimShutdownSurvival } from './gateway-shutdown-survival.ts'
+import { resetBootAdoption, settleBootAdoptionsForShutdown } from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
@@ -460,14 +462,19 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         // to the PTY, so each chunk analysis runs on a fresh, bounded context —
         // ONE warm process, isolated per-turn context. Skipped on the ephemeral
         // path (each ephemeral turn is already a fresh REPL) and on the first
-        // turn of a fresh/resumed spawn (`turnSeq === 0` ⇒ context already empty).
+        // turn of a fresh/resumed spawn (`turnSeq === 0` ⇒ context already empty —
+        // which is NOT true of an adopted one, see `mayHoldPriorContext`).
         // `/clear` produces no correlated reply, so it is NOT an ActiveTurn — it
         // is a fire-then-wait-for-idle interstitial. Concurrency-1 on the import
         // runner guarantees no live turn races this clear on the same REPL.
         if (
           options.reset_context_per_turn === true &&
           !ephemeral &&
-          session.turnsServedThisIncarnation() > 0 &&
+          // `mayHoldPriorContext`, NOT the turn counter: an ADOPTED session's counter
+          // starts at 0 while its child's conversation does not (#539), and skipping
+          // the reset there would run an isolated-by-contract turn on top of the
+          // previous gateway's transcript.
+          session.mayHoldPriorContext() &&
           !session.hasChildExited()
         ) {
           try {
@@ -927,6 +934,17 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * store's own 7-day prune clears. Surviving the restart instead of reporting it is
  * the herdr-host half (#538 moves the REPL out of this process tree; #539 gates
  * this kill and adds the adopt arm); this is the half that is true either way.
+ *
+ * #539 — EXCEPT THE CHILDREN THAT CAN BE FOUND AGAIN. A herdr-hosted child is a child
+ * of the herdr SERVER, so it does not die with this process and the next gateway can
+ * re-adopt it — but ONLY if a persisted row names its pane AND its generation.
+ * `claimShutdownSurvival` (`gateway-shutdown-survival.ts`) is that check — taken under
+ * the registry lock, so another incarnation cannot replace the row inside it — and it
+ * runs BEFORE the marking phase below, because a child we do not kill must never be
+ * recorded as killed. Everything it does not clear is killed and reported exactly as
+ * described above. Read that module before widening this: the kill it gates exists
+ * because of the 632-orphan / ~19 GB incident, and what replaces it is the guarantee
+ * that a surviving pane is always reachable from a row the next boot reads.
  */
 export async function shutdownAllPersistentRepls(
   opts: {
@@ -934,6 +952,8 @@ export async function shutdownAllPersistentRepls(
      *  default; a case that pins the traversal passes a small one so it does not spend
      *  the real budget proving a spawn never settles. */
     pendingSpawnGraceMs?: number
+    /** Test seam for {@link SHUTDOWN_ADOPTION_GRACE_MS}, same argument. */
+    adoptionGraceMs?: number
   } = {},
 ): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
@@ -941,6 +961,27 @@ export async function shutdownAllPersistentRepls(
   activeWatchdogs.clear()
   for (const w of activeModelWatchdogs.values()) w.stop()
   activeModelWatchdogs.clear()
+  // #539 — THE RECONCILIATION PASSES NEXT, AND STILL BEFORE THE POOL IS PARTITIONED.
+  //
+  // A pass between `host.attach` and its publish is in neither place this function
+  // looks: it is not a `pool` entry yet, so the partition below cannot see it, and
+  // nothing else waits for it. It would publish into a pool that had already been torn
+  // down, having reinstalled `childByKey`, the sink and the watchers on the way.
+  //
+  // Awaiting is strictly better than ignoring: a pass that settles inside the grace
+  // lands in `pool` and gets a REAL survival decision from `claimShutdownSurvival` —
+  // the decision that keeps its pane alive across this restart. One that does not
+  // settle is marked `shutdown`-abandoned, which means LEFT ALONE, not closed.
+  //
+  // AND IT HAPPENS BETWEEN TWO DRAINS OF `pool`, NOT BEFORE THE FIRST ONE. Draining is
+  // the only thing in this function that is synchronous with its caller, and it has to
+  // stay that way: ANY await in front of it — a bare `Promise.resolve()` is enough,
+  // measured — lets a queued child-exit handler run first and empty the entry the walk
+  // was about to report, which cost #518's already-dead-child cases their report. So
+  // the first drain keeps its synchronous position, the passes are awaited after it,
+  // and the second drain picks up exactly the sessions those passes published. The
+  // property the await exists for is unchanged: a pass that settles inside the grace
+  // still lands in `pool` and still gets a real `claimShutdownSurvival` decision.
   // ONE timestamp for the whole teardown: every child in this pool dies of the
   // same event, and a per-child `Date.now()` would invite a reader to treat the
   // spread as evidence of separate causes.
@@ -967,20 +1008,74 @@ export async function shutdownAllPersistentRepls(
   // be reported are reported first and nothing pending is in front of them.
   const settledNow: Array<[string, ReplSession]> = []
   const stillSpawning: Array<[string, Promise<ReplSession>]> = []
-  for (const [key, p] of pool.entries()) {
-    pool.delete(key)
-    const status = Bun.peek.status(p)
-    if (status === 'fulfilled') {
-      settledNow.push([key, Bun.peek(p) as ReplSession])
-      continue
+  /**
+   * THE FIRST CALL OF THIS MUST NOT BE PRECEDED BY ANY `await`. Read this before
+   * collapsing the two calls below into one.
+   *
+   * Draining `pool` is the only part of `shutdownAllPersistentRepls` that runs
+   * synchronously with its caller, and #518's guarantees depend on that. A queued
+   * child-exit handler is sitting in the microtask queue whenever a child died just
+   * before teardown; ANY yield in front of the first drain lets it run first and delete
+   * the entry this walk was about to report, and the death is then attributed to
+   * nothing at all.
+   *
+   * This is measured, not theorised: a bare `await Promise.resolve()` placed before the
+   * first drain is enough to break it, and it reds three cases in
+   * `poison-eviction-live-work-guard.test.ts` —
+   *   - "a child that was ALREADY DEAD when teardown arrived … reports cause unknown and
+   *     records it AS undetermined";
+   *   - "a delivered undetermined report is not reported again … the next watchdog tick
+   *     says NOTHING further";
+   *   - "… THE COMPLEMENT — an UNDELIVERED unknown still leaves the edge open for retry".
+   *
+   * That is why #539's wait for the reconciliation passes sits BETWEEN two drains rather
+   * than in front of the first one, which is where it was originally asked to go.
+   */
+  const drainPool = (): number => {
+    let taken = 0
+    for (const [key, p] of pool.entries()) {
+      pool.delete(key)
+      taken += 1
+      const status = Bun.peek.status(p)
+      if (status === 'fulfilled') {
+        settledNow.push([key, Bun.peek(p) as ReplSession])
+        continue
+      }
+      if (status === 'rejected') {
+        // A spawn that failed owns no child. Attach a catch so an abandoned rejection
+        // cannot surface later as an unhandled one.
+        p.catch(() => undefined)
+        continue
+      }
+      stillSpawning.push([key, p])
     }
-    if (status === 'rejected') {
-      // A spawn that failed owns no child. Attach a catch so an abandoned rejection
-      // cannot surface later as an unhandled one.
-      p.catch(() => undefined)
-      continue
-    }
-    stillSpawning.push([key, p])
+    return taken
+  }
+  drainPool()
+
+  // #539 — NOW WAIT FOR THE RECONCILIATION PASSES, AND DRAIN AGAIN. The position is
+  // load-bearing in both directions: after the first drain because that one cannot be
+  // preceded by a yield (see `drainPool`), and before the teardown walk because a pass
+  // that settles must be torn down like any other session.
+  //
+  // A pass between `host.attach` and its publish is in neither place this function
+  // looks: it was not a `pool` entry when the drain above ran, and nothing else waits
+  // for it. Left alone it would publish into a pool already torn down, having
+  // reinstalled `childByKey`, the sink and the watchers on the way.
+  //
+  // Awaiting is strictly better than ignoring: a pass that settles inside the grace
+  // publishes, the second drain takes it, and it gets a REAL survival decision from
+  // `claimShutdownSurvival` — the decision that keeps its pane alive across this
+  // restart. A pass that does NOT settle is marked `shutdown`-abandoned, which means
+  // left alone rather than closed, and it checks that at its attach AND at its publish,
+  // so nothing lands in `pool` behind this second drain.
+  await settleBootAdoptionsForShutdown(opts.adoptionGraceMs)
+  const lateArrivals = drainPool()
+  if (lateArrivals > 0) {
+    process.stderr.write(
+      `[repl] gateway shutdown: ${lateArrivals} session(s) finished reconciling during the grace and are ` +
+        'included in this teardown\n',
+    )
   }
 
   const teardown = async (key: string, session: ReplSession): Promise<void> => {
@@ -988,9 +1083,6 @@ export async function shutdownAllPersistentRepls(
     let owedForThisChild: PendingShutdownKillReport | null = null
     try {
       session.sizeWatchdog?.stop()
-      // BEFORE the kill. After it this process may not get another turn, and the
-      // gateway closes its database a few statements after we return.
-      //
       // The owning options come from `supervisedBySessionKey` — the SAME map the
       // supervision watchdog resolves a crash sink through. The production adapter
       // populates it for every REPL whose instance home resolves
@@ -1000,6 +1092,85 @@ export async function shutdownAllPersistentRepls(
       // a child that hosted work and recording nothing, which is the silence this
       // whole change exists to remove.
       const owner = supervisedBySessionKey.get(key)
+      // #539 — THE SURVIVAL GATE, AND IT RUNS BEFORE THE MARKING BELOW. A record
+      // written here attributes a death to this shutdown, so a child this gate leaves
+      // ALIVE must never reach it: "killed by the deploy" about a process that is
+      // still serving turns is exactly the false sentence #518 exists to remove,
+      // arriving from the other direction.
+      //
+      // READ AT SHUTDOWN, not remembered from spawn: the row is what the NEXT boot
+      // will read, so it is the only thing that can answer whether this child is
+      // findable. A respawn may have rewritten it since this session was created.
+      //
+      // AND READ UNDER THE REGISTRY LOCK, not with an unlocked `getRecord` snapshot.
+      // The registry is shared across processes, so an unlocked read leaves this
+      // decision unordered against a concurrent writer: another incarnation can replace
+      // the row between the snapshot and the choice, and this loop then leaves a pane
+      // alive that the only durable row no longer names. `claimShutdownSurvival` takes
+      // the same flock every writer takes — see its docblock for what that does and does
+      // not guarantee.
+      const registryPath = owner?.replRegistryPath
+      const survival = claimShutdownSurvival({
+        registryPath,
+        sessionKey: key,
+        paneHandle: session.child.paneHandle,
+        childGeneration: session.childGeneration,
+      })
+      if (survival.kind === 'survive') {
+        // LEFT RUNNING, AND HANDED OVER — which is not the same as left alone.
+        //
+        // No kill and no marker, and — load-bearing — NO `unlinkSessionConfigs`: those
+        // files are the live child's `--mcp-config` and `--settings`, and deleting them
+        // under a running REPL would leave it wired to nothing the next gateway could
+        // rebuild.
+        //
+        // BUT THIS WRAPPER MUST LET GO (Argus r25). An earlier revision of this comment
+        // said "no sink unregister that matters (this process is going away)", and the
+        // parenthetical was doing all the work — in a module whose own sibling
+        // (`gateway/index.ts`) names "tests, in-process restarts, overlapping boots" as
+        // supported. When this process does NOT go away, the retired `PtyChild` keeps its
+        // poll loop running against a pane it has given up, still wired to this session's
+        // detectors: the next adoption attaches a SECOND wrapper, and the retired one can
+        // fire a detector actuation into a screen it no longer owns. That is the
+        // stale-screen keystroke hazard, arriving from a gateway already told to stop.
+        //
+        // So: `detach` (stop reading, stop delivering, send nothing — and never close),
+        // stop the watchers, and unregister the sink, because a retired wrapper that
+        // stays registered can receive a reply meant for the incarnation that replaced
+        // it. The PANE and its process are untouched, which is the whole distinction
+        // between detach and close.
+        session.sizeWatchdog?.stop()
+        session.deadTurnWatcher?.stop()
+        session.child.detach?.()
+        sink.unregisterIf(session.sessionId, session)
+        // AND THE LIVE-PROCESS HANDLE (Argus r31). This is the fourth non-destructive
+        // release and it was the one still missing it. The three in `boot-adoption.ts` do
+        // it — and `unwind` deliberately does NOT, because that path CLOSES the pane, so
+        // the child exits and `child-exit-wiring`'s handler unregisters for it.
+        //
+        // This path is the opposite and has exactly the property that makes the leak
+        // matter: the pane is left running and the wrapper is detached, so `exited` never
+        // settles and the exit handler never fires. Costless when the process really is
+        // going away; on the in-process handover this detach exists for, the retired
+        // incarnation stays in the ambient process registry and the watchdog attributes to
+        // a wrapper that has been retired.
+        //
+        // The scope that finds this is not "the cleanup paths in one file" but EVERY PATH
+        // THAT STOPS OWNING A SESSION WITHOUT THE CHILD EXITING — four of them across two
+        // files. The audit table is drawn that way now.
+        session.liveHandle?.unregister()
+        //
+        // `return`, not `continue`: this is the per-child teardown closure, and the
+        // walk that calls it is above.
+        process.stderr.write(
+          `[repl] gateway shutdown LEAVING session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} ` +
+            `alive in pane ${survival.handle} — the registry row names it, so the next construction of this substrate re-adopts or closes it\n`,
+        )
+        return
+      }
+      process.stderr.write(
+        `[repl] gateway shutdown killing session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)}: ${survival.reason}\n`,
+      )
       if (owner !== undefined) {
         // PHASE 1 — MARK, synchronously. The owed live report is COLLECTED, not
         // awaited: a sink we do not own, awaited here, would sit between this child's
@@ -1131,6 +1302,10 @@ export async function shutdownAllPersistentRepls(
   // marker phase 1 wrote, which is what the marker is for.
   await deliverShutdownKillReports(owedReports)
   // Reset supervision state so tests don't leak per-key gates across cases.
+  // #539 — the boot-adoption gates go too: a resolved gate from the incarnation that
+  // just shut down would release a later boot's first spawn instantly while its
+  // surviving panes were still unreconciled.
+  resetBootAdoption()
   respawnGates.clear()
   childByKey.clear()
   pendingChildKills.clear()

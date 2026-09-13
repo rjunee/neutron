@@ -11,6 +11,7 @@ import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watc
 import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, cmdlineMatchesSession, defaultReadCmdline, registerOrphanKill } from './orphan-adoption.ts'
+import { awaitBootAdoption } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
@@ -712,9 +713,19 @@ export function startReplWatchdog(
   // in-process replay never fired because the gateway itself went down. Fire-and-
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
-  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options), (e) => {
-    log.error('boot_drain_error', { error: String(e) })
-  })
+  //
+  // #539 — BEHIND THE BOOT-ADOPTION GATE, because a replay is a turn and a turn
+  // spawns. A drain that ran before the surviving REPLs were reconciled would
+  // cold-`--resume` transcripts whose panes are still alive — two owners, on exactly
+  // the keys that were mid-work when the gateway went down. The gate resolves
+  // immediately when nothing is being reconciled.
+  fireAndForget(
+    'supervision.drainPendingRespawns',
+    awaitBootAdoption(registryPath).then(() => drainPendingRespawns(options)),
+    (e) => {
+      log.error('boot_drain_error', { error: String(e) })
+    },
+  )
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
   // tick for one instance's registry never serializes another instance's tick in a
@@ -725,8 +736,19 @@ export function startReplWatchdog(
     // in-flight gate: skip if a prior tick is still running (the work can take
     // longer than the cadence; double-firing would race the respawn).
     if (!tickGate.claim()) return
-    fireAndForget('supervision.runReplWatchdogTick', runReplWatchdogTick(options, wopts)
-      .finally(() => tickGate.release()), (e) => log.error('tick_error', { error: String(e) }))
+    fireAndForget(
+      'supervision.runReplWatchdogTick',
+      // #539 — THE FIRST TICK WAITS FOR BOOT ADOPTION. A tick probes liveness and
+      // RESPAWNS what looks dead, and a REPL that is mid-adoption is not yet in the
+      // pool: probing it in that window reads as a session with no child, and the
+      // respawn it triggers would spawn over a pane that is about to be re-adopted.
+      // After the pass has settled this resolves instantly, so it costs the steady
+      // state nothing.
+      awaitBootAdoption(registryPath)
+        .then(() => runReplWatchdogTick(options, wopts))
+        .finally(() => tickGate.release()),
+      (e) => log.error('tick_error', { error: String(e) }),
+    )
   }
   const handle = setIntervalFn(tick, intervalMs)
 

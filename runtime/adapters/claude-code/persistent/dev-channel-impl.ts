@@ -372,14 +372,21 @@ process.stderr.write('neutron-channel: MCP connected\n')
 
 // ISSUES #217 — exit when the MCP stdio transport closes. The transport's
 // stdin/stdout pipes go to the spawning `claude` REPL; when that parent
-// dies (wedge-respawn kill, PTY hangup on gateway exit, crash) the stdio
-// stream ends — but the loopback HTTP server above would keep this bun
+// dies (wedge-respawn kill, PTY hangup when an IN-PROCESS host's gateway
+// exits, crash) the stdio stream ends — but the loopback HTTP server above would keep this bun
 // process alive FOREVER. That was the dominant prod leak class: 132
 // ppid=1 dev-channel orphans accumulated in ~100 min of respawn churn
 // alone (632 total / ~19 GB across releases on 2026-06-11). A bridge
 // whose claude is gone can never serve a turn again — the substrate
 // always spawns a FRESH dev-channel per REPL incarnation — so exit is
-// unconditionally correct. Both hooks fire-once via the exit() inside:
+// unconditionally correct.
+//
+// THE CONDITION IS CLAUDE'S STDIO, NOT THE GATEWAY'S LIFETIME, and under the
+// herdr host those stopped being the same event (#539): the REPL is a pane of
+// the herdr server, so a gateway restart does not touch this bridge and it
+// keeps serving the same child. That is what makes re-adoption possible — the
+// next gateway finds a live dev-channel on the port the registry recorded and
+// probes it before trusting it. Both hooks fire-once via the exit() inside:
 // `onclose` is the SDK-level signal; the stdin 'end'/'close' listeners
 // are belt-and-suspenders for transports torn down without onclose.
 mcp.onclose = () => shutdownChannel('mcp transport closed')

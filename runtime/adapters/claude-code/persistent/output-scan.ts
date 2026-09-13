@@ -196,6 +196,48 @@ export class OutputScanner {
   }
 
   /**
+   * LATCH EVERY SIGNATURE THAT IS ALREADY ON SCREEN, WITHOUT FIRING ANY OF THEM (#539).
+   *
+   * THE DEFECT THIS EXISTS FOR IS A DESTRUCTIVE ONE. Every latch in this class is
+   * in-memory, so a gateway that restarts and RE-ADOPTS a still-running REPL starts
+   * with all of them clear while the pane's screen still holds whatever was on it —
+   * possibly a tool-approval prompt the owner was reading. The first scan of that pane
+   * would see the prompt as an absent->present transition, and the auto-approver's
+   * rising edge would answer it: `1` + Enter, on a question nobody asked us. The
+   * detector is not wrong; it is being shown a screen it has no history for, and
+   * "present now" is not "just appeared" for a pane that existed before we did.
+   *
+   * The fix is the edge semantics this class already has, applied at the right moment:
+   * raise the latch for everything present on the adopted screen so those signatures
+   * can only fire again AFTER falling and rising — i.e. after the prompt goes away and
+   * a NEW one appears, which is genuinely new output and genuinely ours to answer.
+   *
+   * TWO THINGS IT DELIBERATELY DOES NOT DO.
+   *  - It does not stamp `lastFireAt`: nothing fired, and a debounce floor set by a
+   *    fire that never happened would delay the first REAL detection.
+   *  - It does not CLEAR the latch of an absent detector. It raises latches only, so
+   *    it is safe to call on a scanner with history (it can only ever make the next
+   *    scan more conservative, never less). An adopted session's scanner is fresh
+   *    anyway — this is a statement about what the method guarantees, not about the
+   *    one call site.
+   *
+   * Returns the ids it latched, so the adoption path can say in one line what it
+   * silenced and a test can assert it silenced the right thing.
+   */
+  primeLatches(rawRing: string, now: number): string[] {
+    const primed: string[] = []
+    for (const det of this.detectors) {
+      const st = this.state.get(det.id)
+      if (st === undefined) continue // unreachable (register seeds it)
+      const ctx = buildDetectorContext(rawRing, det.bottomN ?? DEFAULT_BOTTOM_N, now)
+      if (!det.present(ctx)) continue
+      st.latched = true
+      primed.push(det.id)
+    }
+    return primed
+  }
+
+  /**
    * Run every detector against the current raw ring text and return those that
    * fired on this tick's rising edge. Side-effect-free w.r.t. the PTY: the
    * caller performs each fired detection's `keys` write.

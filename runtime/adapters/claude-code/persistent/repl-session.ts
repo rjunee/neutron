@@ -3,7 +3,9 @@
 // helpers (D2 split).
 
 import { createHash, randomBytes } from 'node:crypto'
-import { unlinkSync } from 'node:fs'
+import { realpathSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import type { Api5xxWatcherHandle } from './api5xx-dead-turn-watcher.ts'
 import { OutputScanner } from './output-scan.ts'
@@ -201,6 +203,34 @@ export class ReplSession {
    *  reset is needed before the next one to isolate per-turn context. */
   turnsServedThisIncarnation(): number {
     return this.turnSeq
+  }
+
+  /**
+   * Was this session RE-ADOPTED from a still-running REPL a previous gateway
+   * spawned (#539), rather than spawned by this process?
+   *
+   * The child is the same process it always was; what is new is the object watching
+   * it. Everything in-memory therefore starts empty — the ring, the detector latches,
+   * the turn counter — while the REPL itself carries a full conversation and a screen
+   * full of whatever it was doing. Anything that infers the CHILD's history from this
+   * object's counters is wrong for exactly this session, which is what the flag is
+   * for; {@link mayHoldPriorContext} is the one such inference in the tree.
+   */
+  adopted = false
+
+  /**
+   * Might this REPL's context already contain a previous turn?
+   *
+   * `turnSeq > 0` answers it for a session this process spawned: a fresh child's
+   * conversation is empty until we inject into it. It answers it WRONGLY for an
+   * adopted one, whose child has been serving turns since before this object
+   * existed — and the consumer is the per-turn context reset
+   * (`reset_context_per_turn`, the import profile), where a wrong `false` skips the
+   * `/clear` and runs an isolated-by-contract turn on top of the previous one's
+   * transcript. The counter is not the fact; "could there be anything in there" is.
+   */
+  mayHoldPriorContext(): boolean {
+    return this.turnSeq > 0 || this.adopted
   }
 
   constructor(
@@ -433,12 +463,72 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
   return !defaultIsPidAlive(pid)
 }
 
-/** Unlink a session's temp config files (`neutron-repl-*-mcp.json` +
- *  `*-settings.json`). Best-effort + idempotent (ENOENT ignored), so it is safe to
- *  call from both the dispose path and the child-exit handler. Without this, every
- *  ephemeral one-shot leaves two permanent files in `tmpdir()` (Argus r5). */
+/**
+ * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`).
+ * Best-effort + idempotent (ENOENT ignored), so it is safe to call from both the dispose
+ * path and the child-exit handler. Without this, every ephemeral one-shot leaves two
+ * permanent files in `tmpdir()` (Argus r5).
+ *
+ * THE FILESYSTEM CHECK LIVES HERE, NOT IN THE PATH BUILDER (#539, Argus r28).
+ * `replSessionConfigPaths` resolves its path textually — it is a pure builder called at
+ * SPAWN time, before the directory exists, so a `realpath` there would throw on a
+ * legitimate first spawn. Its lexical check answers a real question ("could this string
+ * ever name something outside the temp dir") and only that one. It cannot answer the
+ * other: `/tmp/neutron-repl-<32hex>` passes every lexical test while BEING A SYMLINK to
+ * somewhere else, and this is the site that follows it.
+ *
+ * WHICH PRIMITIVE, AND WHY. `realpathSync` on the DIRECTORY, then the same
+ * beneath-`tmpdir()` test. That resolves every symlinked component — the check is about
+ * where the directory really is, not what its name looks like. It is the same shape as
+ * `registry-lock.ts`'s `O_NOFOLLOW` + `fstat`: ask where the thing LANDED, not what the
+ * name pointed at when you looked.
+ *
+ * THE TOCTOU WINDOW IS NOT CLOSED, and saying so is the point. Between `realpathSync` and
+ * `unlinkSync` the directory could be replaced by a symlink. Closing that needs an
+ * `openat`-style handle-relative unlink that Node does not expose; what this removes is
+ * the durable case — a symlink already in place when cleanup runs — and it leaves the
+ * racing case, which requires an attacker timing a swap into a window of microseconds in a
+ * directory they must already be able to write.
+ *
+ * REFUSING IS NOT FREE, AND IT IS LOGGED AS THE LEAK IT IS. A path that fails this check
+ * is a credential file we meant to delete and did not, so the residual is a RETAINED
+ * plaintext credential file rather than a deleted stranger's file. That is the right
+ * direction to fail in and it still has a cost, which is why it is said out loud rather
+ * than swallowed by the existing best-effort catch.
+ */
 export function unlinkSessionConfigs(session: ReplSession): void {
+  const root = resolve(tmpdir())
   for (const p of session.configPaths) {
+    let real: string
+    try {
+      // The DIRECTORY, not the file: the file may legitimately not exist yet, and it is
+      // the directory component that a symlink would redirect.
+      real = realpathSync(dirname(p))
+    } catch {
+      // The directory is gone — so is anything we would have deleted in it.
+      continue
+    }
+    // `=== root` IS REJECTED HERE TOO (Argus r34). This read `real !== root && !…` — so a
+    // directory that resolved to the temp ROOT satisfied neither disjunct and the unlink
+    // ran, while `replSessionConfigPaths` explicitly refuses that same equality. The
+    // stricter check was the one that only BUILDS paths and the looser one the one that
+    // DELETES, which is backwards: a backstop must be at least as strict as the thing it
+    // backs up. The whole reason the filesystem check lives here is to hold when the
+    // builder is bypassed — so it has to hold for the case the builder already refuses.
+    //
+    // No caller needs the root accepted: every path this function receives is nested under
+    // `neutron-repl-<channel>/`, so a directory resolving to `tmpdir()` itself means
+    // something has gone wrong upstream, and deleting a `session-*.json` sitting loose in
+    // the temp root would be deleting a file that is not ours.
+    if (real === root || !real.startsWith(root + sep)) {
+      process.stderr.write(
+        `[repl] REFUSING to unlink ${p}: its directory resolves to ${real}, outside the temp ` +
+          'directory — a symlinked component would make this delete a file we do not own. The ' +
+          'config file is LEFT IN PLACE, which means a plaintext credential file is retained ' +
+          'rather than removed. That is the safer direction and it is not free.\n',
+      )
+      continue
+    }
     try {
       unlinkSync(p)
     } catch {

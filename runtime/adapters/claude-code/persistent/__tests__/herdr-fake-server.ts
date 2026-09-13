@@ -56,6 +56,18 @@ export class FakeHerdrServer implements HerdrRpc {
   shellPid: number | null
   /** The pane's current screen, as `pane.read` will report it. */
   screen = ''
+  /**
+   * The FOREGROUND PROCESS ARGV `pane.process_info` reports (#539).
+   *
+   * Mutable and defaulted to EMPTY, because that is the shape the adoption
+   * classifier must treat as "no identity evidence" rather than as "not ours": a
+   * pane herdr has not sampled a process for reports no argv, and a fixture that
+   * always supplied one would make that branch unreachable. Measured on 0.8.2: a
+   * `layout.apply` pane reports the exact argv vector it was given.
+   */
+  foregroundArgv: readonly string[] = []
+  /** The pane's `label`, as `pane.get` reports it. NULLABLE, like the real one. */
+  label: string | null = 'neutron-repl'
   /** When true, every `pane.read` REJECTS (a pane mid-teardown). */
   readFails = false
   /** When true, `pane.get` and `pane.read` reject with a TYPED `pane_not_found` —
@@ -199,13 +211,29 @@ export class FakeHerdrServer implements HerdrRpc {
         // The real server REPLACES the tab and mints new ids, so the host must read
         // the pane id out of the reply. Hand back an id it could not have guessed.
         return { layout: { workspace_id: 'w9', tab_id: 'w9:t7', root: { pane_id: this.paneId } } }
-      case 'pane.process_info':
+      case 'pane.process_info': {
+        if (this.paneGone) throw new HerdrError(HERDR_PANE_NOT_FOUND, 'pane not found')
+        const foreground =
+          this.foregroundArgv.length > 0
+            ? [
+                {
+                  pid: this.shellPid ?? 0,
+                  name: this.foregroundArgv[0],
+                  argv: [...this.foregroundArgv],
+                },
+              ]
+            : []
         return {
           process_info:
             this.shellPid === null
-              ? { pane_id: this.paneId }
-              : { pane_id: this.paneId, shell_pid: this.shellPid, foreground_processes: [] },
+              ? { pane_id: this.paneId, foreground_processes: foreground }
+              : {
+                  pane_id: this.paneId,
+                  shell_pid: this.shellPid,
+                  foreground_processes: foreground,
+                },
         }
+      }
       case 'pane.get':
         if (this.transientFailure) throw new Error('fake-herdr: temporarily unavailable')
         if (this.paneGone) throw new HerdrError(HERDR_PANE_NOT_FOUND, 'pane not found')
@@ -213,6 +241,7 @@ export class FakeHerdrServer implements HerdrRpc {
           pane: {
             pane_id: this.paneId,
             scroll: this.viewportRows === null ? null : { viewport_rows: this.viewportRows },
+            label: this.label,
           },
         }
       case 'pane.read': {

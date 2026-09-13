@@ -120,6 +120,31 @@ export interface PtyChild {
    * any caller that reports an outcome must use. Both backends implement it honestly
    * and differently — that is the contract to reason about, not this one.
    */
+  /**
+   * STOP OBSERVING AND ACTUATING THIS TERMINAL, WITHOUT ENDING IT (#539).
+   *
+   * The non-destructive counterpart of {@link PtyChild.kill}, and the distinction is the
+   * whole point: `kill` ends the process, `detach` gives up this wrapper's hold on a
+   * process that keeps running. After it returns, this child issues no further reads,
+   * delivers no further screens to its `onScreen` consumer, and sends no keystrokes — so
+   * a retired gateway can neither watch nor type into a pane it has handed on.
+   *
+   * WHY IT HAS TO EXIST. The gateway-shutdown survival branch leaves a herdr pane alive
+   * for the next gateway. Without a detach, the retiring gateway's wrapper keeps its poll
+   * loop running against that pane, still wired to the old session's detectors — so an
+   * in-process restart (supported: `gateway/index.ts` names "tests, in-process restarts,
+   * overlapping boots") ends up with TWO wrappers scanning one pane, and the retired one
+   * can still fire a detector actuation into a screen it no longer owns. That is the
+   * stale-screen keystroke hazard this feature documents, arriving from a gateway that
+   * has already been told to stop.
+   *
+   * MUST NOT CLOSE THE PANE OR SETTLE THE EXIT. A detached child's `exited` never
+   * resolves, because nothing about the process has been established — it is still
+   * running and belongs to somebody else now. Optional because a backend whose children
+   * die with this process has nothing to detach FROM; those implement it as a no-op and
+   * say so.
+   */
+  detach?(): void
   write(data: string | Uint8Array): void
   /** Send one structured key (F2): encodes the correct key for
    *  enter/escape/ctrl-c/up/down/left/right/digit. Lets recovery detectors
@@ -253,6 +278,27 @@ export interface PtyChild {
    */
   readonly wasInterruptedByUs?: () => boolean
   /**
+   * THE IDENTIFIER BY WHICH THIS CHILD CAN BE REACHED AFTER THIS PROCESS IS GONE —
+   * the herdr pane id under the herdr backend, and ABSENT under `BunTerminalHost`.
+   *
+   * PRESENCE IS THE SURVIVAL FACT, not a convenience. A `BunTerminalHost` child is a
+   * child of THIS process: it dies with the gateway, and there is nothing a later
+   * process could re-attach to, so the field is absent and that absence is true. A
+   * herdr pane is a child of the HERDR SERVER, so it outlives a gateway restart and
+   * the pane id is what the next gateway needs to find it again (#539). One field,
+   * one fact: `paneHandle !== undefined` means "this child can outlive us", which is
+   * exactly the question the shutdown path and the boot reconciliation both ask.
+   *
+   * IT IS A HANDLE, NOT A NAME WE MINTED. Its interpretation belongs to the host that
+   * issued it; nothing above here parses it. It is durable only for as long as the
+   * host that issued it is running — a herdr SERVER restart kills its panes, so a
+   * handle recorded before one names a pane that no longer exists (and, on a server
+   * that restarted with no snapshot, could name a DIFFERENT pane). Every reader must
+   * therefore re-verify the handle's identity before acting on it, which is what
+   * {@link PtyHost}'s adoption surface exists for.
+   */
+  readonly paneHandle?: string
+  /**
    * Tell the host its consumer is wired, and screens may start flowing.
    *
    * BOTH HOSTS GATE ON IT, and what they hold back differs only in mechanism.
@@ -353,4 +399,76 @@ export interface PtySpawnOpts {
  *  The returned child's `pid` is real the moment it is handed back. */
 export interface PtyHost {
   spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild>
+}
+
+/**
+ * WHAT A HOST CAN ESTABLISH ABOUT A DURABLE HANDLE IT ISSUED EARLIER (#539).
+ *
+ * THREE OUTCOMES, BECAUSE THERE ARE THREE FACTS, and collapsing the last two is the
+ * defect this shape exists to prevent. "The pane is gone" and "I could not ask" are
+ * not the same claim: the first licenses clearing the handle and cold-spawning, the
+ * second licenses neither, because the pane may be alive and holding the session's
+ * transcript. A boolean `alive` would answer `false` to both and the caller would
+ * spawn a second owner for a transcript that already has one.
+ *
+ * herdr supplies exactly this discrimination and it is why the shape is affordable:
+ * `pane.get` answers a TYPED `pane_not_found` for a pane that does not exist
+ * (`HERDR_PANE_NOT_FOUND`, measured), while a timeout or a transport error is a
+ * rejection that says nothing about the pane. A rejection measures the call, not the
+ * subject.
+ */
+export type HandleInspection =
+  /** The handle names a live child, and this is what the HOST says is running in it.
+   *  `argv` is the foreground process's argv as the host reports it — possibly EMPTY
+   *  when the host has a pane but no process sample for it, which is why it is not
+   *  by itself evidence of identity. */
+  | { readonly kind: 'live'; readonly pid?: number; readonly argv: readonly string[]; readonly label?: string }
+  /** The host positively reports the handle does not exist. A POSITIVE answer, not a
+   *  failure: nothing is running under it and nothing can be. */
+  | { readonly kind: 'gone' }
+  /** The host could not be asked, or answered in a way that establishes neither —
+   *  a timeout, a transport error, an unparseable reply. NOT a synonym for `gone`. */
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/**
+ * A {@link PtyHost} whose children outlive this process and can therefore be
+ * RE-ADOPTED by the next one (#539).
+ *
+ * Separate from `PtyHost` because the capability is genuinely absent from the
+ * in-process backend rather than merely unimplemented there: a `Bun.spawn` child dies
+ * with its parent, so "attach to the one that is still running" names nothing. A host
+ * that cannot do this must NOT satisfy this interface, because {@link
+ * hostSupportsAdoption} is what the shutdown path consults before it declines to kill
+ * a child — and declining to kill a child that cannot be re-adopted is how an orphan
+ * is manufactured.
+ */
+export interface AdoptableHost extends PtyHost {
+  /** What is running under `handle` right now, per the host. See {@link HandleInspection}. */
+  inspectHandle(handle: string): Promise<HandleInspection>
+  /**
+   * Re-attach to the live child under `handle`, returning the same {@link PtyChild}
+   * contract a fresh {@link PtyHost.spawn} returns — screens, keystrokes, exit.
+   *
+   * IT STARTS NOTHING. The process under the handle is already running and was
+   * started by some earlier incarnation of this gateway; `opts.env`/`opts.cwd` are
+   * therefore NOT applied (they were applied at spawn and cannot be re-applied to a
+   * running process), and only the callbacks and terminal preferences are honoured.
+   * Rejects when the handle names nothing — a caller that would treat a failure as
+   * "then spawn a fresh one" must have established `gone` first.
+   */
+  attach(handle: string, opts: PtySpawnOpts): Promise<PtyChild>
+  /** Terminate whatever runs under `handle` and release it. Idempotent: a handle that
+   *  is already gone resolves. */
+  closeHandle(handle: string): Promise<void>
+}
+
+/** Does this host's children survive us — i.e. can a later gateway re-adopt them?
+ *  The shutdown path asks this BEFORE it declines to kill a child. */
+export function hostSupportsAdoption(host: PtyHost): host is AdoptableHost {
+  const h = host as Partial<AdoptableHost>
+  return (
+    typeof h.inspectHandle === 'function' &&
+    typeof h.attach === 'function' &&
+    typeof h.closeHandle === 'function'
+  )
 }

@@ -169,6 +169,20 @@ export interface GatewayShutdownKillEntry {
   identity?: ProcessIdentity
 }
 
+/** The spawn-time properties {@link ReplRegistryRecord.reuse} carries. A nested
+ *  object rather than three top-level fields: they are one fact about one child —
+ *  what it was spawned as — and they are read as a set or not at all. */
+export interface ReplReuseProperties {
+  /** `session.toolSurface`: the `--tools` value as a stable comma-joined key. An
+   *  EMPTY STRING IS A REAL VALUE here (`--tools ""`, the default-deny surface an
+   *  untrusted-content REPL gets), never a missing one. */
+  tool_surface: string
+  /** `session.toolBridgeActive`: was the native-MCP tool bridge attached at spawn. */
+  tool_bridge: boolean
+  /** `session.authFingerprint`: see {@link ReplRegistryRecord.reuse}. */
+  auth_fingerprint: string
+}
+
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
   /** Pool key — opaque; follows S3 re-namespacing. */
@@ -187,6 +201,58 @@ export interface ReplRegistryRecord {
   pid?: number
   /** Dev-channel HTTP port — `/health` liveness probe target. */
   devchannel_port?: number
+  /**
+   * #539 — THE DURABLE HANDLE FOR THIS CHILD'S TERMINAL: the herdr pane id, written
+   * at spawn, read at the next gateway's boot so a REPL that OUTLIVED its gateway can
+   * be found again instead of being spawned over.
+   *
+   * PRESENT ONLY WHERE THE CHILD OUTLIVES US. A `BunTerminalHost` child is a child of
+   * the gateway process and dies with it, so it has no handle and this stays absent —
+   * `PtyChild.paneHandle` carries the same fact at runtime and this is its persisted
+   * form. Absence therefore means "nothing survives for anyone to adopt", which is
+   * exactly what the shutdown path needs in order to keep killing what it must.
+   *
+   * IT IS CLEARED WHEN A SPAWN REPLACES THE CHILD WITH ONE THAT HAS NO HANDLE
+   * (`spawn.ts`), not merely left alone. A row that keeps a handle from a previous,
+   * differently-hosted incarnation would send the next boot chasing a pane id that
+   * names nothing — or, after a herdr server restarted its pane numbering from
+   * scratch, names somebody else's pane. A handle is a claim about the CURRENT child
+   * and must not outlive it.
+   *
+   * IT IS NOT AN IDENTITY. Nothing may adopt on the strength of this field alone: the
+   * pane it names has to be re-verified (`orphan-adoption.ts` matches the pane's live
+   * argv against this row's `sessionId` AND `channelName`, and the dev-channel's
+   * `/health` has to answer with this row's session id). A pane id is an identifier
+   * the herdr server issues and can reissue across its own restart, which is the same
+   * recycling hazard a pid has and is answered the same way.
+   */
+  pane_handle?: string
+  /**
+   * #539 — THE THREE SPAWN-TIME PROPERTIES THE WARM-REUSE GUARDS COMPARE AGAINST,
+   * persisted so a RE-ADOPTED session can answer them.
+   *
+   * WITHOUT THIS THE ADOPTION IS POINTLESS. `getOrSpawnSession` refuses to serve a
+   * turn on a warm REPL whose tool surface, bridge attachment or credential
+   * fingerprint differ from the request's, and EVICTS it. A session rebuilt from a
+   * registry row knows none of the three, so all three compare unequal and the very
+   * first turn after the restart destroys the REPL that was just re-adopted — a
+   * feature that works right up until something uses it.
+   *
+   * THEY ARE PROPERTIES OF THE CHILD, WRITTEN BY THE SPAWN THAT MADE IT, in the same
+   * write as its pid, generation and pane handle. That is what keeps them from
+   * drifting: one child, one row, one write, and a respawn replaces all of it.
+   *
+   * ON `auth_fingerprint` SPECIFICALLY, since it is derived from a secret: it is the
+   * first 16 hex chars of `sha256(<the env auth secret>)` (`authFingerprintFor`) —
+   * never the secret, and already the form the in-memory guard compares. The file it
+   * lands in is written 0600 in the instance state dir, which is the SAME directory
+   * as `sinkTokenPath` — the actual reply-sink secret. So the marginal exposure is a
+   * truncated hash stored beside the plaintext key it is a hash of; what it buys is
+   * that a rotated token still EVICTS (fingerprints differ) instead of being
+   * unanswerable. Empty string where the instance has no env auth secret (the
+   * interactive-login model), which is exactly what the in-memory guard holds there.
+   */
+  reuse?: ReplReuseProperties
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
@@ -315,6 +381,34 @@ export function serializeRegistry(registry: ReplRegistry): string {
   return JSON.stringify(registry, null, 2)
 }
 
+/**
+ * The generated dev-channel form, and the ONLY one a row may carry.
+ *
+ * `spawn.ts` emits `` `neutron-${randomBytes(16).toString('hex')}` `` — 32 lowercase hex
+ * characters, always. Checked against what the spawner actually produces rather than
+ * against a guess about it.
+ */
+const GENERATED_CHANNEL_NAME = /^neutron-[0-9a-f]{32}$/
+
+/**
+ * WHY `channelName` IS THE ONE FIELD WITH A SHAPE (#539, Argus r27).
+ *
+ * `typeof x === 'string'` was enough while every channel name in the system had been
+ * generated in-process moments earlier. Adoption changed that: it is the first path that
+ * takes this value from DISK and feeds it to `replSessionConfigPaths`, which builds
+ * `join(tmpdir(), 'neutron-repl-' + channelName)` — and the child-exit path UNLINKS what
+ * those paths point at. A row carrying `x/../../../some/dir` therefore turns "the registry
+ * is garbage" into "files outside the temp directory get deleted", which is a far worse
+ * failure than the one it starts from.
+ *
+ * A row that fails this is DROPPED, and since round twenty a dropped TARGET row surfaces
+ * as `unreadable` rather than reading as absence — so the malformed row becomes a REFUSAL
+ * rather than a deletion. That is the two rounds composing: the shape check makes the bad
+ * value visible and specific here, `readRegistryState` makes the consequence safe, and
+ * `replSessionConfigPaths` enforces LEXICAL containment so no future caller can bypass
+ * it, and `unlinkSessionConfigs` checks the filesystem at the moment it deletes — which is
+ * the only place a symlinked directory is visible at all.
+ */
 function isMinimalRecord(raw: unknown): boolean {
   if (raw === null || typeof raw !== 'object') return false
   const r = raw as Record<string, unknown>
@@ -322,11 +416,70 @@ function isMinimalRecord(raw: unknown): boolean {
     typeof r.sessionId === 'string' &&
     typeof r.cwd === 'string' &&
     typeof r.channelName === 'string' &&
+    GENERATED_CHANNEL_NAME.test(r.channelName) &&
     typeof r.has_session === 'boolean'
   )
 }
 
 // ─── Disk-touching wrappers ────────────────────────────────────────────────
+
+/**
+ * THE READ THAT DISTINGUISHES "THERE IS NOTHING" FROM "I COULD NOT LOOK" (#539, Argus
+ * r19).
+ *
+ * `loadRegistry` answers `{}` for all three of: a genuinely absent file (ENOENT, the
+ * steady-state cold boot), a non-ENOENT read failure, and malformed JSON. It KNOWS the
+ * difference internally and tells nobody — and the mutation path already compensates
+ * (`loadRegistryForMutation` returns `skipSave` for exactly the read-failure case,
+ * because a write over a registry you could not read is a write over someone's data).
+ * The read path had no such compensation, and two decisions came to rest on it: a cold
+ * spawn licensed by "no row" and a pane CLOSED because "no row names it".
+ *
+ * Both of those are the branch's oldest named defect — false and unknown sharing a
+ * branch — at the bottom of the stack where every guard above reads through.
+ *
+ * `loadRegistry`'s own contract is deliberately UNCHANGED: it has many callers, and
+ * migrating them wholesale is a far larger diff than the two decisions that need this.
+ * Callers that only ever ask "give me what is there" are correct with `{}`; callers that
+ * DECIDE something on absence must use this instead.
+ *
+ * THE BOUNDARY THAT MUST NOT MOVE: ENOENT is a TRUE absence. A cold boot has no registry
+ * file, and if a missing file began refusing spawns nothing would ever start. `absent` is
+ * permission; `unreadable` is refusal.
+ */
+export function readRegistryState(
+  path: string,
+):
+  | { kind: 'loaded'; registry: ReplRegistry; droppedKeys: readonly string[] }
+  | { kind: 'absent' }
+  | { kind: 'unreadable'; reason: string } {
+  let contents: string
+  try {
+    contents = readFileSync(path, 'utf8')
+  } catch (e) {
+    // ENOENT on the read itself, not a separate `existsSync` — the same reasoning
+    // `loadRegistry` documents: a pre-check has a TOCTOU gap and collapses every stat
+    // error into "absent", which is the exact conflation this function exists to undo.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return { kind: 'unreadable', reason: `read-error: ${(e as Error).message}` }
+  }
+  // DROPPED ROWS ARE REPORTED, NOT SWALLOWED (Argus r20). `parseRegistryContents`
+  // discards individual schema-invalid rows and still answers `loaded` — deliberate, and
+  // right for a whole-file read. But for a caller asking about ONE key it reproduces the
+  // very collapse this function exists to undo, one level down: a well-formed file whose
+  // target row has `has_session: "true"` parses, the row is discarded, and the key simply
+  // is not there. `absent` again, from a row that was UNREADABLE.
+  //
+  // The keys come back so the caller can ask the only question that matters to it — was
+  // MY key dropped? A drop on somebody else's key says nothing about mine.
+  const droppedKeys: string[] = []
+  const result = parseRegistryContents(contents, (key) => droppedKeys.push(key))
+  if (result.kind === 'loaded') return { kind: 'loaded', registry: result.registry, droppedKeys }
+  // WE GOT BYTES AND COULD NOT MAKE SENSE OF THEM. For the MUTATION path that is safe to
+  // rebuild from (the original is sidecar-preserved). For a DECISION it is not: the rows
+  // that file held are unknown, so it establishes nothing about what owns a transcript.
+  return { kind: 'unreadable', reason: result.kind === 'corrupt' ? result.reason : 'unparseable registry' }
+}
 
 /** Load the registry file. Returns `{}` on absent or corrupt (the steady-state
  *  cold-boot case). Corruption is logged via `onCorrupt` so the caller can
@@ -426,7 +579,15 @@ export function saveRegistry(path: string, registry: ReplRegistry): void {
  * returns the loaded object untouched.
  */
 export function getRecord(path: string, sessionKey: string): ReplRegistryRecord | undefined {
-  const record = loadRegistry(path)[sessionKey]
+  return normaliseRecord(loadRegistry(path)[sessionKey])
+}
+
+/** The normalisation `getRecord` applies, as a pure function, so a caller that obtained
+ *  the registry another way (see {@link readRegistryState}) gets the SAME record rather
+ *  than a subtly different one. One rule, one place. */
+export function normaliseRecord(
+  record: ReplRegistryRecord | undefined,
+): ReplRegistryRecord | undefined {
   if (record === undefined) return undefined
   if (record.model === undefined) return record
   if (typeof record.model === 'string' && record.model.trim() !== '') return record
@@ -615,10 +776,65 @@ export interface WithRegistryOptions {
  * would risk turning a momentary hiccup into permanent, unrecoverable loss).
  * See `loadRegistryForMutation`.
  */
+/**
+ * Read the registry UNDER THE LOCK, without writing it back (#539).
+ *
+ * WHY THIS IS NOT `getRecord`. `getRecord` takes no lock at all, so a caller that
+ * reads with it and then ACTS on what it read has its decision ordered against a
+ * concurrent writer by nothing whatsoever. For a caller whose action is "leave a
+ * process running", that is the difference between a decision and a guess: the
+ * gateway-shutdown survival gate (`gateway-shutdown-survival.ts`) must not leave a
+ * pane alive on the strength of a row another incarnation has already replaced.
+ * Taking the same flock every writer takes serialises the two — the writer's change
+ * lands strictly before or strictly after the decision, never inside it.
+ *
+ * It does NOT save, which is the whole point of having it rather than a `withRegistry`
+ * whose mutate returns its input: a byte-identical rewrite of every row is a write
+ * this path has no business performing while the process is shutting down.
+ *
+ * `onOutcome` IS PASSED STRAIGHT THROUGH, and a caller whose correctness argument rests
+ * on the lock must consume it. `withFlockSync` runs its callback UNGUARDED in two
+ * states — no FFI, and `flock` returning nonzero — because for a generic helper running
+ * unguarded beats skipping the operation. Both are indistinguishable from success to
+ * anyone who does not ask. Taking the lock is not the same as HOLDING it, and this
+ * helper reports which happened rather than implying the stronger one.
+ */
+export function withRegistryRead<T>(
+  path: string,
+  read: (registry: ReplRegistry) => T,
+  onOutcome?: (acquired: boolean) => void,
+): T {
+  return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)), onOutcome)
+}
+
+/**
+ * Read-modify-write the registry under the flock.
+ *
+ * `onOutcome` REPORTS WHETHER THE LOCK WAS ACTUALLY HELD while the mutation ran,
+ * forwarded straight to `withFlockSync`. Optional, so no existing caller changes — but a
+ * caller whose correctness argument rests on atomicity must consume it, because a
+ * compare-and-set is only a compare-and-set while the lock holds. Run unguarded (no FFI,
+ * or `flock` returning nonzero, both of which `withFlockSync` deliberately allows) two
+ * incarnations can read the same row, both find it matching, and both write.
+ * `boot-adoption.ts`'s row claim is exactly such a caller: without this it could publish
+ * two attached owners of one live transcript, the single outcome that module exists to
+ * prevent.
+ */
 export function withRegistry<T>(
   path: string,
-  mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },
+  mutate: (registry: ReplRegistry) => {
+    registry: ReplRegistry
+    result: T
+    /** Ask for NO WRITE AT ALL. A callback that decides not to act must be able to say
+     *  so: returning the registry unchanged still SAVES it, and the snapshot it saves
+     *  was loaded before the callback ran — so a concurrent writer's newer row is
+     *  silently dropped. That is a lost update performed by a caller that refused to
+     *  act, which is the opposite of what refusing is for. Optional, so no existing
+     *  caller changes. */
+    skipSave?: true
+  },
   options: WithRegistryOptions = {},
+  onOutcome?: (acquired: boolean) => void,
 ): T {
   const mandatoryOnCorrupt = defaultCorruptHandler(path)
   const mandatoryOnDropRow = defaultDropRowHandler(path)
@@ -644,12 +860,23 @@ export function withRegistry<T>(
       log.error('caller-supplied onDropRow callback threw (ignored)', { error: String(e) })
     }
   }
-  return withFlockSync(registryLockPath(path), () => {
-    const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
-    const { registry, result } = mutate(current)
-    if (!skipSave) saveRegistry(path, registry)
-    return result
-  })
+  return withFlockSync(
+    registryLockPath(path),
+    () => {
+      const { registry: current, skipSave: corruptSkip } = loadRegistryForMutation(
+        path,
+        onCorrupt,
+        onDropRow,
+      )
+      const { registry, result, skipSave: callerSkip } = mutate(current)
+      // EITHER skip suppresses the write, and they are different facts: the corrupt-path
+      // skip protects a file this module could not parse, the caller's skip protects a
+      // file another WRITER may have changed under a lock we did not hold.
+      if (corruptSkip !== true && callerSkip !== true) saveRegistry(path, registry)
+      return result
+    },
+    onOutcome,
+  )
 }
 
 /** Upsert one record (lock-guarded). Merges onto any existing row so a

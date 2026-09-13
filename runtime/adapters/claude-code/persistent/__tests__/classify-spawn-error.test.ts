@@ -13,6 +13,26 @@ import { SUBSTRATE_ERROR_CODES } from '../../../../errors.ts'
 import { classifySpawnError } from '../classify-spawn-error.ts'
 
 describe('classifySpawnError', () => {
+  test('#539 — the boot-adoption refusal is STAMPED, so it never cools a credential', () => {
+    // The producer-side stamp is what keeps this out of the credential ladder. An
+    // UNSTAMPED retryable error maps to a 429-shaped pool cooldown
+    // (`mapStatusForPoolCooldown(null, true)` in the composer), so a refusal that has
+    // nothing to do with the credential would park a healthy one after five turns.
+    const message =
+      'persistent-repl: refusing to resume session inst user proj cred — a previous REPL for it may ' +
+      'still be running and could not be accounted for (the herdr socket did not answer). Starting a ' +
+      'second process on one transcript corrupts it, so this turn fails instead. It retries on the next turn.'
+    expect(classifySpawnError(message)).toBe('repl_unreconciled')
+    // Retryable, because the next turn re-probes: a transient failure to see the pane
+    // costs one turn rather than the session.
+    expect(SUBSTRATE_ERROR_CODES.repl_unreconciled.retryable).toBe(true)
+  })
+
+  test('a refusal is NOT confused with the channel classes that share its prefix', () => {
+    expect(classifySpawnError('persistent-repl: channel not ready')).toBe('channel_wedged')
+    expect(classifySpawnError('persistent-repl: spawn failed (dead-child; )')).toBe('channel_wedged')
+  })
+
   test('missing `claude` binary shapes → binary_not_found', () => {
     expect(classifySpawnError('Executable not found in $PATH: "claude"')).toBe('binary_not_found')
     expect(classifySpawnError('Error: spawn claude ENOENT')).toBe('binary_not_found')
