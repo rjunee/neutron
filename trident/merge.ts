@@ -285,11 +285,21 @@ export async function detectBaseBranch(
  * as `'unknown'` — the second failure in the over-refusal direction on this branch, and this
  * time in the value's own definition.
  *
- * BOTH WIDTHS, not the repository's width, because this side has no repository handle at the
- * point of the test — `diffBaseRef` is given a value, not a path. The cost is precise and
- * stated: a 64-hex value in a SHA-1 repository is accepted here and refused by git at the point
- * of use, which is the direction that fails loudly. Anything that is NOT one of these two
- * widths is still not an object name.
+ * BOTH WIDTHS HERE, THE REPOSITORY'S WIDTH IN THE WRAPPER — and the difference is which values
+ * each one sees. `diffBaseRef` is given a value, not a path, so it has no repository to ask;
+ * `codex-review.sh` has one, and it is where an OPERATOR-SUPPLIED base arrives, so it asks
+ * `git rev-parse --show-object-format` and accepts exactly that width. That matters because
+ * accepting both widths where a repository IS available opens a capture: in a SHA-256
+ * repository, 40 hex is not an object-name spelling, so a branch or tag of that name resolves
+ * and a "verbatim object name" reaches git as a ref nobody chose.
+ *
+ * WHAT REACHES THIS TEST, stated rather than assumed: `base_sha` is rev-parsed from the
+ * repository by the launch path (`orchestrator.ts`, the base fetch + `rev-parse` that pins it),
+ * so a pin arriving here is already this repository's canonical width. The residual is a caller
+ * that hands this binding a wrong-width hex string in a repository where a ref of that name
+ * exists — closed at the wrapper, named here rather than claimed away. A 64-hex value in a
+ * SHA-1 repository with no such ref is accepted here and refused by git at the point of use,
+ * which is the direction that fails loudly.
  */
 const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
@@ -2867,7 +2877,10 @@ export async function conflictEvidence(
 async function sideHistory(
   run_host: RunHostCommand,
   repo: string,
-  range: string,
+  /** The range's LEFT end, already resolved — a full object name or a `refs/…` ref (#546). */
+  base: string,
+  /** The range's RIGHT end. */
+  head: string,
   budget: CollectionBudget,
 ): Promise<EvidencePart> {
   // BOUND THE READ BEFORE IT HAPPENS (#541 round 26). `--max-count` limits HOW MANY commits,
@@ -2886,7 +2899,19 @@ async function sideHistory(
       // assumed (#541 round 25): receiving N+1 ids is positive evidence that older commits
       // exist. THIS IS THE ONLY PLACE THE MUTABLE RANGE IS RESOLVED; everything after it works
       // from the immutable ids this produced.
-      ['git', '-C', repo, 'log', `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H', range],
+      // THROUGH `gitRangeArgv` (#546): it welds `--end-of-options` between the last flag and
+      // the operand, so an operand that begins with `-` cannot be reparsed as one. This
+      // arrived on main as a hand-built argv whose left operand was the bare base branch name,
+      // with no marker — the gate this branch ships failed the merged tree on it. (The range is
+      // described rather than spelled: the gate reads text, so a comment that spells one is a
+      // hit like any other, which it proved on this very line.)
+      gitRangeArgv({
+        repo_path: repo,
+        subcommand: 'log',
+        flags: [`--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H'],
+        base,
+        head,
+      }),
       repo,
     )
   } catch {
@@ -3287,8 +3312,26 @@ async function arbitrateConflict(
   // this tier can reach, and collapsing them would hide whichever one actually dominates.
   if (hunks.kind === 'binary') return { kind: 'not-asked', why: 'evidence-binary' }
   if (hunks.kind === 'over-budget') return { kind: 'not-asked', why: 'over-budget' }
-  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`, budget)
-  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`, budget)
+  // DIFF-BASE-OK: these two operands must denote the SAME revisions `git rebase <base>` was
+  // given, because the conflict being judged is the one THAT produced; a differently-resolved
+  // base would describe a comparison that never happened.
+  //
+  // THE DISTINCTION THIS TURNS ON, since getting it right matters more than applying the rule
+  // reflexively. Everywhere else in this tree a base branch name is the wrong left-hand side of
+  // a range because the range is a QUESTION ABOUT THE BRANCH ("what did this branch change"),
+  // and a stale local base answers it with other people's commits. Here the range is a question
+  // about a CONFLICT THAT ALREADY HAPPENED: `rebaseBranchOntoBase` ran `git rebase <base>` with
+  // this very value, so whatever it resolved to IS one side of the conflict. Substituting
+  // `refs/remotes/origin/<base>` would hand the judge history for a different comparison — the
+  // failure mode being fixed, inverted.
+  //
+  // What this arm therefore owes is the OTHER half of the rule, and it is paid: the argv is
+  // built by `gitRangeArgv`, so `--end-of-options` sits between the last flag and the operand
+  // and an option-shaped ref name cannot be reparsed as a flag. Enumerated in
+  // `diff-base-option-shaped.test.ts` with this argument attached, so it cannot grow a sibling
+  // silently.
+  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, ctx.base, ctx.branch, budget)
+  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, ctx.branch, ctx.base, budget)
   // ASSEMBLED THROUGH THE ONE OWNER (#541 round 19). Each component arrives as an
   // `EvidencePart`, and `assembleEvidence` refuses — returning `missing` — the moment any of
   // them is absent, which is what makes the completeness sentence it writes true by

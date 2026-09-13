@@ -264,6 +264,72 @@ builds that fail reading files with the disk at 98%. Neither area is touched by 
 (0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
 is to name what I ran and what it did not cover, not to call the suite green.
 
+### Round thirty-four: the width belongs to the repository, and the gate caught a second merged defect
+
+**My round-thirty-three fix closed the rejection and opened a capture.** Accepting BOTH widths
+everywhere makes a 40-hex string an "object name" in a SHA-256 repository, where 40 hex is not
+an object-name spelling at all — so a BRANCH or TAG of that name resolves, the resolvability
+probe at the point of use says so (it proves the NAME resolves, never that the value is an
+object id), and a "verbatim object name" reaches `git diff` as a ref nobody chose. Exactly one
+width is an object-name spelling in any given repository, so `codex-review.sh` now asks
+`git rev-parse --show-object-format` once and accepts that width; a value of the other width
+falls to the bare-name arms, which qualify it as `refs/heads/<x>` or refuse it — the correct
+treatment of something that is, there, a NAME. Both failure directions now red the same test:
+pinning it to 40 reds it (the rejection), accepting both reds it (the capture).
+
+`diffBaseRef` keeps both widths and the reason is which values each side sees: it is handed a
+value, not a repository, while the wrapper has one and is where operator-supplied bases arrive.
+What reaches the binding is `base_sha`, rev-parsed from the repository by the launch path, so it
+is already canonical there. The residual — a caller handing the binding a wrong-width hex string
+in a repository holding a ref of that name — is named in the code rather than argued away.
+
+**The gate found a second defect in merged code, and this one was the arbiter's evidence.**
+`merge.ts`'s `sideHistory` calls composed both conflict histories from BARE names
+(`ctx.base`/`ctx.branch`) with no `--end-of-options`, landed on main hours earlier by a lane
+whose own review did not catch it. Against a stale `refs/heads/<base>` those two ranges present
+every commit merged into the base since as one side's own work — the same inflation as #546,
+feeding a JUDGE rather than a reviewer. Fixed at the two lines plus the helper they needed —
+but NOT by resolving the base, and that distinction is the round's most useful finding.
+
+**The rule does not apply here, and applying it reflexively would have been wrong.** Everywhere
+else a base branch name is the wrong left-hand side because the range asks a question ABOUT THE
+BRANCH ("what did this branch change"), which a stale base answers with other people's commits.
+The arbiter's two ranges ask about a CONFLICT THAT ALREADY HAPPENED: `rebaseBranchOntoBase` ran
+`git rebase <base>` with that very value, so whatever it resolved to IS one side of the conflict
+being judged. Substituting `refs/remotes/origin/<base>` would have handed the judge history for
+a comparison that never happened — the failure being fixed, inverted. My first attempt did
+exactly that, and forty-five #541 tests went red because their stubs do not model a probe that
+nothing should have been issuing. **The red tests were the finding, not an obstacle to it.**
+
+So the fix pays the OTHER half of the rule: the argv is built by `gitRangeArgv`, so the marker
+sits between the last flag and the operand, and the operand is argued in place with
+`DIFF-BASE-OK:` and enumerated in the test. **Neither of the two gates that reviewed that PR could have seen it: a
+gate reads one diff, and this was the defect two diffs make together.** That is the third real
+site this gate has caught that no sweep would have.
+
+**And the count went stale a second time, so the count is gone.** The spec said "six ranges
+remain — four prompt commands, two shell lines" while `OUT_OF_REACH` held seven. The fix is not
+a better number: `OUT_OF_REACH` entries now carry a `kind`, the per-file expectation is DERIVED
+from the two inventories rather than retyped, and the prose names the two sets — prompt commands
+an agent runs, wrapper commands bash runs — with no count at all. A new member now fails the
+test with its own `file:line` and its argument, which is strictly more useful than a number that
+moved.
+
+**And the constructor was a blind spot the gate could not see into.** `gitRangeArgv` guarantees
+the MARKER; it asks nothing about the OPERAND, so a bare base branch name passed through it is
+invisible to a gate that enumerates `..` in source text. That is how this site could have been
+"fixed" into silence. Test B now enumerates every `gitRangeArgv` call site with the expression it
+passes, so a new site or a changed operand must be argued rather than merely compile — and when
+mutation showed that a change at the CALLER of a forwarding helper left it green, the
+enumeration was extended to the forwarder's call sites too. **An instrument that stops at the
+constructor measures the constructor, not the operand** — the same lesson as the twelve-line
+proximity window and the `${baseRef}`-keyed scan, in a third place.
+
+**One more instance of the gate reading text, found on my own comment.** The explanation I wrote
+beside the `sideHistory` fix spelled the offending range inline, and the gate flagged it — a
+comment that spells a range is a hit like any other. The comment now describes the range instead
+of spelling it, and says why.
+
 ### Round thirty-three: the sentinel was SHA-1-specific, and so was the recogniser
 
 **Same defect shape as round thirty-two, one qualifier over.** The all-zero word is
@@ -425,15 +491,15 @@ another is not a rounding error: it is the thing that stops the next reader from
 names the position.
 
 **Where the new refusal actually lands, read from the three consumers rather than assumed.**
-`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2813`), the stranded-run
-ahead count (`:3419`) and the mutation gate's blast radius (`:5210`) — on all three a throw
+`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2842`), the stranded-run
+ahead count (`:3448`) and the mutation gate's blast radius (`:5239`) — on all three a throw
 propagates and fails the step, which is the direction wanted: no listing beats a listing against
-a base nobody established. The fourth caller (`:4570`, the stage-1 test-strategy block) is
+a base nobody established. The fourth caller (`:4599`, the stage-1 test-strategy block) is
 already inside a `try`/`catch` that sets `test_strategy = null`, so a probe that cannot answer
 now DROPS the strategy block instead of computing one against a possibly-stale base. That is
 also fail-closed, and it is stated here because the symptom a future reader will see is an
 absent block, not an error. No consumer catches the refusal and substitutes a base of its own —
-checked: there is one `return 'main'` in the harness (`merge.ts:201`, `detectBaseBranch`'s
+checked: there is one `return 'main'` in the harness (`merge.ts:275`, `detectBaseBranch`'s
 default) and it produces a NAME that still goes through this binding.
 
 **One thing this round measured and deliberately did NOT fix.** Thirty-two rounds of edits plus the catch-up merge have
@@ -545,7 +611,7 @@ case-sensitivity bug.**
 40-hex comparison on this path is lowercase-only — and correctly so: each tests a value read
 from git's own stdout, where git emits its canonical lowercase form even when asked in upper
 (measured: `git rev-parse --verify <UPPER>^{commit}` echoes lowercase). The two that parse a
-token out of prose (`orchestrator.ts:2059`, `:2069`) already use `/i` and `.toLowerCase()`. The
+token out of prose (`orchestrator.ts:2088`, `:2098`) already use `/i` and `.toLowerCase()`. The
 wrapper's was the only one testing an OPERATOR-SUPPLIED value case-sensitively, which is the
 distinction that decides the answer: **git's output is canonical; a caller's input is not.**
 
@@ -1253,7 +1319,7 @@ about what this code does.** Each was read against the code it sits above:
 - **18 held**, and they are what make the sweep worth trusting: a sha cannot go stale;
   `refs/heads/<base>` is the best available base in every no-resolving-ref state; the only
   source of a padded name is configuration (`detectBaseBranch` trims its own output at
-  `merge.ts:192-194`); only trimmed values reach the return; `diffBase` is the only name this
+  `merge.ts:266-268`); only trimmed values reach the return; `diffBase` is the only name this
   file gives a *merge-base* diff — and that heading names its own exception two lines later;
   `--end-of-options` really does stop every measured family; a `0` from the gate means
   "none of the enumerated spellings", never "no bare-base range exists"; `bindingCount`

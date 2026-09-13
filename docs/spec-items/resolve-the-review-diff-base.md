@@ -53,10 +53,15 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   `--output=<path>` made `git diff --name-only` exit 0 and write the file, the artifact diff
   honour both `--output`s, and `git rev-list --count` write it despite exiting 129. `diffBaseRef`
   now throws `TridentOptionShapedBaseError`, and **no TypeScript call site can build a range
-  without `--end-of-options`**: all eleven now go through `gitRangeArgv`
-  (`trident/git-range.ts`), which has no parameter for the marker. Six ranges remain outside
-  it — four commands inside prompt strings and two lines of shell, none of which a TypeScript
-  helper can reach — and they are enumerated by `file:line` with a reason each. This bullet
+  without `--end-of-options`**: every one goes through `gitRangeArgv` (`trident/git-range.ts`),
+  which has no parameter for the marker. What remains outside it is two NAMED SETS — commands
+  inside prompt strings, which an agent runs, and commands in the shell wrappers, which bash
+  runs; **no TypeScript helper can reach either**. They are enumerated by `file:line` with a
+  reason each in `OUT_OF_REACH`, and **this item states no count of them on purpose**: it said
+  "six — four prompt commands and two shell lines" until a merge from `main` added a prompt
+  command, the second time that number went stale while the executable list stayed right. A
+  count in prose is a copy of a fact; a named set is the fact, and a new member fails the test
+  with its own `file:line` rather than with a number that moved. This bullet
   was FALSE at one head: the coverage test searched for `${baseRef}`, `computeDiffLineCount`
   spells it `base_ref`, and it shipped unshielded. **A completeness claim is only as wide as
   the instrument that checks it** — and after three rounds of widening that instrument, the
@@ -338,7 +343,7 @@ The resolution order is evidence-first, and is the same at every site:
       while doing it. `diffBaseRef` throws rather than returning such a name — refusing to
       *probe* it (an earlier round's mitigation) only routed it to the unguarded branch.
       Verified by `trident/diff-base-option-shaped.test.ts`: the binding refuses under both
-      probe answers; **the eleven TypeScript ranges are built by `gitRangeArgv` and cannot omit
+      probe answers; **every TypeScript range is built by `gitRangeArgv` and cannot omit
       the marker** (asserted as a property over the five argv shapes the tree uses — present
       exactly once, after every flag, before the operand, with `-c` ahead of the subcommand);
       **`orchestrator.ts`, `merge.ts` and `mutation-prover.ts` now contain NO range of their
@@ -587,5 +592,19 @@ The resolution order is evidence-first, and is the same at every site:
       persisted checkpoint text, not about a rev-range base), and a persisted format is not
       something to widen in passing — filed as #667, with the exposure stated: every repository
       trident builds today is SHA-1, so it is latent rather than live.
+- [ ] **An operand that enters through `gitRangeArgv` is a resolved value or an argued one.**
+      The constructor guarantees the MARKER and asks nothing about the OPERAND, so a bare base
+      branch name passed through it is invisible to a gate that enumerates `..` in source text —
+      which is how a site could be "fixed" into silence. Verified by "B · every operand that
+      enters through `gitRangeArgv`", which reads each call site's operand out of the call and
+      requires it in a table with a reason; and, because mutation showed a change at the CALLER
+      of a forwarding helper left that green, by the same enumeration over the forwarder's call
+      sites. **Both directions**: an unenumerated operand fails, and a table entry with no call
+      site fails, so a removed site cannot leave a stale argument behind.
+      **The one operand that is deliberately NOT a resolved base** is the arbiter's conflict
+      history (`merge.ts`, `sideHistory`): those two ranges must denote the revisions
+      `git rebase <base>` was actually given, because the conflict being judged is the one THAT
+      produced — resolving them differently would describe a comparison that never happened.
+      That is argued in place with `DIFF-BASE-OK:` and carries the marker like every other.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.

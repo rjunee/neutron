@@ -389,11 +389,29 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // KIND 1: an object name, kept verbatim — not probed as a name, not refused for its shape.
     expect(await promote(w.repo, w.remote)).toBe(w.remote)
     expect(await promote(w.repo, (w.remote as string).toUpperCase())).toBe((w.remote as string).toUpperCase())
-    // …and the SHA-1 width is not silently accepted as an object name HERE: in this repository
-    // 40 hex is not an object-name spelling, so it falls through to the bare-name arms and is
-    // refused — which is the complement that stops this being "accept any hex".
-    const res = await runBlock(w.repo, '0'.repeat(40))
+    // THE CAPTURE THIS REPLACES, and it was MY fix that opened it. Accepting both widths
+    // everywhere made a 40-hex string an "object name" in a repository where 40 hex is not an
+    // object-name spelling at all — so a BRANCH or TAG of that name resolved, the resolvability
+    // probe said so (it proves the NAME resolves, never that it is an object id), and the value
+    // reached `git diff` as a ref nobody chose. The width is now the repository's, asked once.
+    //
+    // Asserted as CONTROL FLOW, not narrated: a 40-hex name that exists as a branch here is
+    // treated as a NAME and QUALIFIED, which is what the bare-name arms do and what an operator
+    // who typed it would have meant.
+    const z40 = '0'.repeat(40)
+    await git(w.repo, 'branch', z40, w.remote)
+    expect(await promote(w.repo, z40)).toBe(`refs/heads/${z40}`)
+    // …and with no such ref, the same spelling is REFUSED rather than kept verbatim — the
+    // complement that stops this being "accept any hex".
+    const res = await runBlock(w.repo, '1'.repeat(40))
     expect({ ok: res.ok, stdout: res.stdout }).toEqual({ ok: false, stdout: '' })
+    // THE MIRROR, in the SHA-1 world: 64 hex is not an object-name spelling there either, so
+    // the same rule turns it into a name. One width is an object name per repository — never
+    // two, which is the property the capture violated.
+    const w1 = await seedWorld('sha1')
+    const z64 = '0'.repeat(64)
+    await git(w1.repo, 'branch', z64, w1.remote)
+    expect(await promote(w1.repo, z64)).toBe(`refs/heads/${z64}`)
   })
 
   test('THE OTHER FAILURE DIRECTION, audited: what each arm turns away, and its remedy', async () => {

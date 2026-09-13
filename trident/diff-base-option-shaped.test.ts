@@ -934,14 +934,25 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * They still have to carry the marker — being unreachable by the helper is a reason to
    * enumerate them, not a reason to exempt them.
    */
-  const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1737, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2471, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2522, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
-    { file: 'inner-workflow.mjs', line: 2627, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5913, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
-    { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 417, why: 'shell: the standalone reviewer builds its own diff' },
+  /**
+   * THE SURVIVORS, AS TWO NAMED SETS RATHER THAN A COUNT (round thirty-four).
+   *
+   * `kind` is what the prose is allowed to say: "prompt commands and shell-wrapper commands",
+   * which stays true when a member is added or removed. The spec item used to say "six ranges
+   * remain — four prompt commands, two shell lines"; the merge that added the re-plan prompt
+   * made it seven and the prose stayed at six, the SECOND time that number went stale while
+   * this list stayed right. **A count in prose is a copy of a fact; a named set is the fact.**
+   * Adding a member now fails with the member's `file:line` and its argument, not with a
+   * number that moved.
+   */
+  const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; kind: 'prompt-command' | 'shell-wrapper'; why: string }> = [
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 1737, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2471, why: "the planner's resume inspection hint — also a prompt" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2522, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2627, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 5913, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { kind: 'shell-wrapper', file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
+    { kind: 'shell-wrapper', file: 'codex-review.sh', line: 435, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {
@@ -1041,34 +1052,138 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     // `gitRangeArgv` is the only thing that can make one.
     const perFile: Record<string, number> = {}
     for (const h of rangeHits()) perFile[h.file] = (perFile[h.file] ?? 0) + 1
-    expect(perFile).toEqual({
-      // FIVE commands inside PROMPTS — a helper cannot reach an agent's command line. It was
-      // four until the re-plan prompt arrived on main (#654/#664) with a bare-name range; this
-      // count failing on the merge is the per-file count doing its job, so it is raised
-      // deliberately rather than made a range.
-      'inner-workflow.mjs': 5,
-      // Three operator-facing notes that describe a range in prose.
-      'mutation-claim-artifact.ts': 3,
-      // Two shell wrapper commands plus the trailer label.
-      'codex-build.sh': 1,
-      // Four: the invocation, the trailer label, and the two refusal messages that quote the
-      // range they are refusing to run.
-      'codex-review.sh': 4,
-    })
+    // DERIVED FROM THE TWO INVENTORIES, never retyped: every hit is either an out-of-reach
+    // COMMAND (`OUT_OF_REACH`, argued one by one) or an argued NON-INVOCATION (`NON_INVOCATIONS`
+    // — prose that describes a range, and a label). A hand-written expectation beside a
+    // machine-checked list is a second copy of a fact, and this one had already drifted twice.
+    const expectedPerFile: Record<string, number> = {}
+    for (const o of OUT_OF_REACH) expectedPerFile[o.file] = (expectedPerFile[o.file] ?? 0) + 1
+    for (const nonInv of NON_INVOCATIONS) {
+      const occurrences = rangeHits().filter((h) => h.file === nonInv.file && h.excused === nonInv.why).length
+      expect({ needle: nonInv.needle, occurrences: occurrences > 0 }).toEqual({ needle: nonInv.needle, occurrences: true })
+      expectedPerFile[nonInv.file] = (expectedPerFile[nonInv.file] ?? 0) + occurrences
+    }
+    expect(perFile).toEqual(expectedPerFile)
     // Named explicitly, because an empty key is easy to misread as "not scanned".
     for (const gone of ['orchestrator.ts', 'merge.ts', 'mutation-prover.ts', 'git-range.ts']) {
       expect({ file: gone, ranges: perFile[gone] ?? 0 }).toEqual({ file: gone, ranges: 0 })
     }
   })
 
+  test('B · every operand that enters through `gitRangeArgv` is a RESOLVED value or an argued one', () => {
+    // THE GAP THIS CLOSES, found when a merge from `main` put a bare base branch name into a
+    // rev-range and the gate caught it — but only because that range was spelled as TEXT. The
+    // sanctioned constructor takes `base` as an ordinary argument and asks nothing about it, so
+    // the same value passed THROUGH `gitRangeArgv` is invisible to a gate that enumerates `..`.
+    // **A constructor that guarantees the marker does not guarantee the operand.** Every call
+    // site is therefore enumerated here with the expression it passes, so a new one — or a
+    // changed operand at an existing one — has to be argued rather than merely compile.
+    const CALL_SITES: ReadonlyArray<{ file: string; base: string; why: string }> = [
+      { file: 'merge.ts', base: 'base_sha', why: 'the launch-pinned sha — a full object name by construction' },
+      { file: 'merge.ts', base: 'base', why: "sideHistory's parameter; its callers are argued at the call site (the arbiter's conflict sides, which must denote what `git rebase <base>` used)" },
+      { file: 'mutation-prover.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
+      { file: 'orchestrator.ts', base: 'base_ref', why: 'the resolved ref the binding returned' },
+      { file: 'orchestrator.ts', base: 'await localForkPoint()', why: 'an object name read from git' },
+      { file: 'orchestrator.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
+      { file: 'orchestrator.ts', base: 'seenPin', why: 'a recorded object name' },
+      { file: 'orchestrator.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
+      { file: 'orchestrator.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
+    ]
+    const seen: string[] = []
+    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts'] as const) {
+      const lines = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8').split('\n')
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!(lines[i] ?? '').includes('gitRangeArgv(')) continue
+        // The operand as WRITTEN, read out of the call's own block — not inferred from a name.
+        const block = lines.slice(i, i + 12).join('\n')
+        // BOTH SPELLINGS. `base: value` and the shorthand `base,` are the same operand, and a
+        // reader that saw only the first reported UNREADABLE for the one call site whose
+        // operand most needed arguing — an instrument narrower than its subject, again.
+        // NOT ANCHORED TO A LINE START: half these calls are written on ONE line, and a
+        // line-anchored reader called them UNREADABLE — which is how this instrument got its
+        // first two revisions wrong in the same way its subject once was.
+        const m = /(?:^|[\s{,(])base:\s*([^,\n]+)/.exec(block)
+        const shorthand = /(?:^|[\s{,(])base\s*,/.test(block)
+        // A trailing `})` belongs to the CALL, not to the operand — but only when it is
+        // UNBALANCED. Excluding `}` from the match truncated `` `refs/heads/${base}` ``;
+        // stripping every trailing bracket truncated `await localForkPoint()`. Two wrong
+        // readings of the same three characters, so the trim counts brackets instead of
+        // matching them: drop a trailing `)` or `}` only while more close than open.
+        const trimOperand = (raw: string): string => {
+          let out = raw.trim()
+          for (;;) {
+            const last = out.at(-1)
+            if (last !== ')' && last !== '}') return out
+            const open = last === ')' ? '(' : '{'
+            const opens = out.split(open).length - 1
+            const closes = out.split(last).length - 1
+            if (closes <= opens) return out
+            out = out.slice(0, -1).trim()
+          }
+        }
+        const base = m !== null ? trimOperand(m[1] ?? '') : shorthand ? 'base' : 'UNREADABLE'
+        seen.push(`${file} ${base}`)
+        const argued = CALL_SITES.some((c) => c.file === file && c.base === base)
+        expect({ site: `${file}:${i + 1}`, operand: base, argued }).toEqual({
+          site: `${file}:${i + 1}`,
+          operand: base,
+          argued: true,
+        })
+      }
+    }
+    // A FORWARDER IS PART OF THE SUBJECT, and leaving it out was this test's first blind spot.
+    // `sideHistory` takes the operand and hands it to `gitRangeArgv`, so the constructor's call
+    // site shows the PARAMETER and says nothing about what any caller passes. Mutation-checked:
+    // changing the arbiter's operand to something else left this test green until the callers
+    // were enumerated too. **An instrument that stops at the constructor measures the
+    // constructor, not the operand.**
+    const FORWARDED: ReadonlyArray<{ base: string; head: string; why: string }> = [
+      { base: 'ctx.base', head: 'ctx.branch', why: "the arbiter's conflict sides: the value `git rebase <base>` itself was given, argued at the call site" },
+      { base: 'ctx.branch', head: 'ctx.base', why: 'the same two revisions, the other way round — what the base added that the branch lacks' },
+    ]
+    const mergeSrc = readFileSync(fileURLToPath(new URL('./merge.ts', import.meta.url)), 'utf8').split('\n')
+    const forwardedSeen: string[] = []
+    for (let i = 0; i < mergeSrc.length; i += 1) {
+      const line = mergeSrc[i] ?? ''
+      if (!line.includes('sideHistory(') || line.includes('async function sideHistory')) continue
+      const args = /sideHistory\(([^)]*)\)/.exec(line)?.[1]?.split(',').map((a) => a.trim()) ?? []
+      // (run_host, repo, base, head, budget) — the two middle arguments are the operands.
+      const pair = `${args[2] ?? 'UNREADABLE'} ${args[3] ?? 'UNREADABLE'}`
+      forwardedSeen.push(pair)
+      expect({ site: `merge.ts:${i + 1}`, operands: pair, argued: FORWARDED.some((f) => `${f.base} ${f.head}` === pair) }).toEqual({
+        site: `merge.ts:${i + 1}`,
+        operands: pair,
+        argued: true,
+      })
+    }
+    expect([...new Set(forwardedSeen)].sort()).toEqual([...new Set(FORWARDED.map((f) => `${f.base} ${f.head}`))].sort())
+    for (const f of FORWARDED) expect({ pair: `${f.base} ${f.head}`, argued: f.why.length > 20 }).toEqual({ pair: `${f.base} ${f.head}`, argued: true })
+
+    // …and the table holds nothing that no longer exists, so a removed call site cannot leave a
+    // stale argument behind. Deduplicated, because several sites legitimately pass `baseRef`.
+    const unique = [...new Set(seen)].sort()
+    expect(unique).toEqual([...new Set(CALL_SITES.map((c) => `${c.file} ${c.base}`))].sort())
+    for (const c of CALL_SITES) expect({ site: `${c.file} ${c.base}`, argued: c.why.length > 20 }).toEqual({ site: `${c.file} ${c.base}`, argued: true })
+  })
+
   test('A · every surviving range is shielded in its OWN command, or is argued prose', () => {
     const hits = rangeHits()
     expect(offenders(hits)).toEqual([])
-    // The seven out-of-reach commands are exactly the shielded survivors — so a new one cannot
-    // appear without being argued here, and one that disappears cannot go unnoticed.
+    // The out-of-reach commands are exactly the shielded survivors — so a new one cannot appear
+    // without being argued here, and one that disappears cannot go unnoticed. Stated as SETS:
+    // the prompt commands (an agent's command line, which no TypeScript helper can reach) and
+    // the shell-wrapper commands (bash, likewise). No count appears here or in the prose that
+    // describes this list, because a count is a copy that drifts and a set is not.
     const shielded = hits.filter((h) => h.excused === null).map((h) => `${h.file}:${h.line}`)
     expect(shielded.sort()).toEqual(OUT_OF_REACH.map((o) => `${o.file}:${o.line}`).sort())
     for (const o of OUT_OF_REACH) expect({ site: `${o.file}:${o.line}`, argued: o.why.length > 20 }).toEqual({ site: `${o.file}:${o.line}`, argued: true })
+    // THE TWO SETS, named. A member joining either one shows up as its own `file:line`, which
+    // is what the prose can then describe without stating how many there are.
+    expect({
+      prompts: OUT_OF_REACH.filter((o) => o.kind === 'prompt-command').every((o) => o.file.endsWith('.mjs')),
+      wrappers: OUT_OF_REACH.filter((o) => o.kind === 'shell-wrapper').every((o) => o.file.endsWith('.sh')),
+      unclassified: OUT_OF_REACH.filter((o) => o.kind !== 'prompt-command' && o.kind !== 'shell-wrapper').map((o) => `${o.file}:${o.line}`),
+    }).toEqual({ prompts: true, wrappers: true, unclassified: [] })
     for (const h of hits.filter((x) => x.excused !== null)) {
       expect({ site: `${h.file}:${h.line}`, why: (h.excused ?? '').length > 20 }).toEqual({ site: `${h.file}:${h.line}`, why: true })
     }
