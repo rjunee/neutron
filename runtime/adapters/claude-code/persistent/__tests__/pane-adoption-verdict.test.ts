@@ -16,7 +16,12 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { argvCarriesChannel, classifyPaneForAdoption } from '../orphan-adoption.ts'
+import {
+  argvCarriesChannel,
+  argvMatchesSession,
+  classifyPaneForAdoption,
+  cmdlineMatchesSession,
+} from '../orphan-adoption.ts'
 import type { HandleInspection } from '../pty-host.ts'
 
 const SESSION = 'b1f3c0de-1234-5678-9abc-def012345678'
@@ -131,5 +136,73 @@ describe('argvCarriesChannel', () => {
     expect(argvCarriesChannel(['claude', '--dangerously-load-development-channels', 'server:'], '')).toBe(
       false,
     )
+  })
+})
+
+
+describe('the argv is matched as a VECTOR, because flattening it defeats the binary gate', () => {
+  /**
+   * ARGUS r7 BLOCKER. The classifier used to `join(' ')` the host's argv and hand the
+   * string to `cmdlineMatchesSession`, which re-split it on whitespace. POSIX lets a
+   * process choose any argv[0], so an argv whose FIRST ELEMENT is `'claude --resume'`
+   * reparses with `tokens[0] === 'claude'` and passes a gate whose whole job is to
+   * require that argv[0] be a claude binary. The pane in that case is a stranger's,
+   * and the two things this classifier licenses — attach, and close — are both
+   * destructive when pointed at one.
+   */
+  const SMUGGLED = [
+    `${'claude'} --resume`,
+    SESSION,
+    '--dangerously-load-development-channels',
+    `server:${CHANNEL}`,
+  ]
+
+  it('REFUSES an argv[0] that only looks like a claude once the vector is flattened', () => {
+    // The proof the attack is real: flatten-and-reparse says yes...
+    expect(cmdlineMatchesSession(SMUGGLED.join(' '), SESSION)).toBe(true)
+    // ...and the element-wise matcher, which is what the classifier now uses, says no.
+    expect(argvMatchesSession(SMUGGLED, SESSION)).toBe(false)
+  })
+
+  it('and the classifier neither adopts nor closes that pane', () => {
+    const verdict = classifyPaneForAdoption(live(SMUGGLED, { pid: 4242 }), ROW)
+    // NOT `adopt` (we would attach to a stranger's screen) and NOT
+    // `close-foreign-owner` (we would kill it). `unverifiable` routes to the pid
+    // identity probe, which is the only safe direction for a pane we cannot read.
+    expect(verdict.kind).toBe('unverifiable')
+    expect(verdict.kind === 'unverifiable' && verdict.reason).toMatch(/whitespace/i)
+  })
+
+  it('refuses whitespace ANYWHERE in the vector, not only in argv[0]', () => {
+    // A tab and a newline are the same lossy character class as a space, and an
+    // element after argv[0] is the one a caller is least likely to think about.
+    for (const smuggle of ['--resume\t--dangerously-load-development-channels', 'x\ny']) {
+      const argv = ['/usr/local/bin/claude', '--resume', SESSION, smuggle]
+      expect(argvMatchesSession(argv, SESSION)).toBe(false)
+      expect(classifyPaneForAdoption(live(argv), ROW).kind).toBe('unverifiable')
+    }
+  })
+
+  it('THE POSITIVE CONTROL: the ordinary argv is still adopted', () => {
+    // A matcher that refused every vector would satisfy all three cases above and
+    // deliver nothing, so the real launch shape must still pass element-wise.
+    expect(argvMatchesSession(oursArgv(), SESSION)).toBe(true)
+    expect(classifyPaneForAdoption(live(oursArgv(), { pid: 4242 }), ROW)).toEqual({
+      kind: 'adopt',
+      pid: 4242,
+    })
+  })
+
+  it('the ps KILL path is unchanged: its tokens can never carry whitespace', () => {
+    // `cmdlineMatchesSession` splits on whitespace, so the new rule is vacuous for it
+    // and the recycled-pid gate behaves exactly as it did.
+    expect(cmdlineMatchesSession(oursArgv().join(' '), SESSION)).toBe(true)
+    expect(cmdlineMatchesSession(`tail -f /x/.claude/projects/${SESSION}.jsonl`, SESSION)).toBe(false)
+    expect(cmdlineMatchesSession(undefined, SESSION)).toBe(false)
+  })
+
+  it('an empty session id matches nothing, in either form', () => {
+    expect(argvMatchesSession(oursArgv(), '')).toBe(false)
+    expect(cmdlineMatchesSession(oursArgv().join(' '), '')).toBe(false)
   })
 })

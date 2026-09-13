@@ -202,8 +202,17 @@ export function classifyPaneForAdoption(
       reason: 'the host reported no foreground argv for this pane — nothing identifies what is in it',
     }
   }
-  const cmdline = inspection.argv.join(' ')
-  const onOurTranscript = cmdlineMatchesSession(cmdline, record.sessionId, claudeBasename)
+  const smuggled = inspection.argv.find(argvElementCarriesWhitespace)
+  if (smuggled !== undefined) {
+    return {
+      kind: 'unverifiable',
+      reason:
+        `the host reported an argv element containing whitespace (${JSON.stringify(smuggled.slice(0, 40))}) — ` +
+        'our spawn cannot produce one, and a vector that has them does not describe a launch this gate ' +
+        'can read, so nothing is established about the pane',
+    }
+  }
+  const onOurTranscript = argvMatchesSession(inspection.argv, record.sessionId, claudeBasename)
   if (!onOurTranscript) {
     return {
       kind: 'leave-not-ours',
@@ -315,18 +324,63 @@ export function cmdlineMatchesSession(
   sessionId: string,
   claudeBasename: string = 'claude',
 ): boolean {
-  if (!cmdline || !sessionId) return false
+  if (!cmdline) return false
   const tokens = cmdline.trim().split(/\s+/).filter((t) => t.length > 0)
-  // Need at least `<claude> --resume <id>` (or `--session-id`): 3 tokens.
-  if (tokens.length < 3) return false
+  return argvMatchesSession(tokens, sessionId, claudeBasename)
+}
+
+/** Does this argv element contain whitespace? A space, tab or newline INSIDE one
+ *  element is what makes a vector un-flattenable without loss, so it is the exact
+ *  property {@link argvMatchesSession} refuses. Exported for the case that pins it. */
+export function argvElementCarriesWhitespace(element: string): boolean {
+  return /\s/.test(element)
+}
+
+/**
+ * The same question as {@link cmdlineMatchesSession}, asked of the STRUCTURED argv —
+ * and this is the form to use wherever the vector is in hand (#539, Argus r7 BLOCKER).
+ *
+ * WHY THE ARRAY IS NOT AN OPTIMISATION. `classifyPaneForAdoption` used to flatten the
+ * host's argv with `join(' ')` and hand the string to `cmdlineMatchesSession`, which
+ * re-split it on whitespace. Flatten-then-reparse is LOSSY, and the loss lands exactly
+ * on this gate's first rule. POSIX lets a process choose any argv[0], so
+ *
+ *     argv = ['claude --resume', '<uuid>', '--dangerously-load-…', 'server:<chan>']
+ *
+ * flattens to a string whose `tokens[0]` is `'claude'` — passing the basename gate —
+ * while the REAL argv[0] is `'claude --resume'`, which is not a claude binary at all.
+ * The consequence is the one this module exists to prevent: the gateway attaches to,
+ * or closes, a pane belonging to somebody else. Matching the array element-wise means
+ * there is no reparse to fool.
+ *
+ * AND EMBEDDED WHITESPACE IS REFUSED OUTRIGHT rather than tolerated. `buildReplArgv`
+ * pushes a binary path, bare flags, a uuid and `server:<channel>` — not one of which
+ * can contain a space, tab or newline. So an element that has one is not our launch
+ * shape, and this gate's whole discipline is to require the exact shape rather than to
+ * accept anything that resembles it. Refusing is also what keeps the two forms honest
+ * with each other: the string form's tokens can never contain whitespace, so the rule
+ * is vacuous there and the `ps` kill path is unchanged by it.
+ *
+ * Pure — no IO. ALL must hold: no element carries whitespace; argv[0] is a genuine
+ * `claudeBasename` invocation; and `sessionId` is the element IMMEDIATELY after a
+ * `--resume`/`--session-id` element.
+ */
+export function argvMatchesSession(
+  argv: readonly string[],
+  sessionId: string,
+  claudeBasename: string = 'claude',
+): boolean {
+  if (!sessionId) return false
+  // Need at least `<claude> --resume <id>` (or `--session-id`): 3 elements.
+  if (argv.length < 3) return false
+  // (0) No element may carry whitespace — see the docblock. This is what makes the
+  // element-wise match unspoofable rather than merely different from the string one.
+  if (argv.some(argvElementCarriesWhitespace)) return false
   // (1) argv[0] must be a genuine claude invocation — excludes tail/vim/less/etc.
-  if (!argv0IsClaude(tokens, claudeBasename)) return false
+  if (!argv0IsClaude(argv, claudeBasename)) return false
   // (2) sessionId must be the VALUE immediately following --resume / --session-id.
-  for (let i = 1; i + 1 < tokens.length; i++) {
-    if (
-      (tokens[i] === '--resume' || tokens[i] === '--session-id') &&
-      tokens[i + 1] === sessionId
-    ) {
+  for (let i = 1; i + 1 < argv.length; i++) {
+    if ((argv[i] === '--resume' || argv[i] === '--session-id') && argv[i + 1] === sessionId) {
       return true
     }
   }

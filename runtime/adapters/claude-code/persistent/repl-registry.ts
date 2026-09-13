@@ -681,6 +681,26 @@ export interface WithRegistryOptions {
  * would risk turning a momentary hiccup into permanent, unrecoverable loss).
  * See `loadRegistryForMutation`.
  */
+/**
+ * Read the registry UNDER THE LOCK, without writing it back (#539).
+ *
+ * WHY THIS IS NOT `getRecord`. `getRecord` takes no lock at all, so a caller that
+ * reads with it and then ACTS on what it read has its decision ordered against a
+ * concurrent writer by nothing whatsoever. For a caller whose action is "leave a
+ * process running", that is the difference between a decision and a guess: the
+ * gateway-shutdown survival gate (`gateway-shutdown-survival.ts`) must not leave a
+ * pane alive on the strength of a row another incarnation has already replaced.
+ * Taking the same flock every writer takes serialises the two — the writer's change
+ * lands strictly before or strictly after the decision, never inside it.
+ *
+ * It does NOT save, which is the whole point of having it rather than a `withRegistry`
+ * whose mutate returns its input: a byte-identical rewrite of every row is a write
+ * this path has no business performing while the process is shutting down.
+ */
+export function withRegistryRead<T>(path: string, read: (registry: ReplRegistry) => T): T {
+  return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)))
+}
+
 export function withRegistry<T>(
   path: string,
   mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },

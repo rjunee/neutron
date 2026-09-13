@@ -22,7 +22,7 @@ import {
   type PendingShutdownKillReport,
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
-import { shutdownSurvivalVerdict } from './gateway-shutdown-survival.ts'
+import { claimShutdownSurvival } from './gateway-shutdown-survival.ts'
 import { resetBootAdoption } from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
@@ -938,7 +938,8 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * #539 — EXCEPT THE CHILDREN THAT CAN BE FOUND AGAIN. A herdr-hosted child is a child
  * of the herdr SERVER, so it does not die with this process and the next gateway can
  * re-adopt it — but ONLY if a persisted row names its pane AND its generation.
- * `shutdownSurvivalVerdict` (`gateway-shutdown-survival.ts`) is that check, and it
+ * `claimShutdownSurvival` (`gateway-shutdown-survival.ts`) is that check — taken under
+ * the registry lock, so another incarnation cannot replace the row inside it — and it
  * runs BEFORE the marking phase below, because a child we do not kill must never be
  * recorded as killed. Everything it does not clear is killed and reported exactly as
  * described above. Read that module before widening this: the kill it gates exists
@@ -1023,11 +1024,20 @@ export async function shutdownAllPersistentRepls(
       // READ AT SHUTDOWN, not remembered from spawn: the row is what the NEXT boot
       // will read, so it is the only thing that can answer whether this child is
       // findable. A respawn may have rewritten it since this session was created.
+      //
+      // AND READ UNDER THE REGISTRY LOCK, not with an unlocked `getRecord` snapshot.
+      // The registry is shared across processes, so an unlocked read leaves this
+      // decision unordered against a concurrent writer: another incarnation can replace
+      // the row between the snapshot and the choice, and this loop then leaves a pane
+      // alive that the only durable row no longer names. `claimShutdownSurvival` takes
+      // the same flock every writer takes — see its docblock for what that does and does
+      // not guarantee.
       const registryPath = owner?.replRegistryPath
-      const survival = shutdownSurvivalVerdict({
+      const survival = claimShutdownSurvival({
+        registryPath,
+        sessionKey: key,
         paneHandle: session.child.paneHandle,
         childGeneration: session.childGeneration,
-        record: registryPath === undefined ? undefined : getRecord(registryPath, key),
       })
       if (survival.kind === 'survive') {
         // LEFT RUNNING, AND LEFT INTACT. No kill, no marker, no sink unregister that

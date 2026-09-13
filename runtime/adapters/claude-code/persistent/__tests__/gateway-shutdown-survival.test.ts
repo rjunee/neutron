@@ -16,14 +16,15 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { shutdownSurvivalVerdict } from '../gateway-shutdown-survival.ts'
+import { claimShutdownSurvival, shutdownSurvivalVerdict } from '../gateway-shutdown-survival.ts'
 import { pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
+import { withRegistryRead } from '../repl-registry.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 
@@ -185,5 +186,123 @@ describe('shutdownAllPersistentRepls', () => {
     await shutdownAllPersistentRepls()
 
     expect(child.killed).toBe(true)
+  })
+})
+
+
+describe('the survival decision is taken UNDER THE LOCK, against the row that is there now', () => {
+  /**
+   * ARGUS r7 BLOCKER. The shutdown path took an unlocked `getRecord` snapshot and then
+   * decided from it. A registry is shared across PROCESSES — that is why every writer
+   * takes a flock — so an unlocked read orders this decision against a concurrent
+   * writer by nothing at all:
+   *
+   *   A writes (H1,G1) → A snapshots (H1,G1) → B writes (H2,G2) → A leaves H1 alive.
+   *
+   * The only durable row then names H2, so nothing will ever look for H1 again. That is
+   * the 2026-06-11 orphan in its herdr-shaped form, and it is the same defect this
+   * branch already fixed in `clearPaneHandleIfUnchanged` and `claimRowOrUnwind`.
+   *
+   * THE DECISION IS HELD OPEN, which is the only way to construct the race. The
+   * injected reader replaces the row on disk and THEN delegates to the REAL
+   * `withRegistryRead`, so the row the decision sees genuinely comes off disk under the
+   * real flock — a mock returning a literal would prove only that a mock was called.
+   */
+  it('KILLS when another incarnation replaced the row inside the decision', () => {
+    const registryPath = registryWith(row())
+    let replaced = false
+    const verdict = claimShutdownSurvival({
+      registryPath,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+      deps: {
+        withRegistryRead: (path, read) => {
+          // B wins the lock immediately before us and takes the key for its own child.
+          writeFileSync(
+            path,
+            JSON.stringify({ [KEY]: { ...row(), pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer' } }),
+          )
+          replaced = true
+          return withRegistryRead(path, read)
+        },
+      },
+    })
+    expect(replaced).toBe(true)
+    expect(verdict.kind).toBe('kill')
+    // The reason must name the ROW's pane, not ours — that is what shows the decision
+    // read the new row rather than the snapshot it started from.
+    expect(verdict.kind === 'kill' && verdict.reason).toMatch(/w9:p-NEWER/)
+  })
+
+  it('and KILLS when the replacement keeps the pane but moves the generation', () => {
+    // A pane id the herdr server reissued is the same recycling hazard a pid has: the
+    // handle alone cannot tell two children apart, so the generation is compared too.
+    const registryPath = registryWith(row())
+    const verdict = claimShutdownSurvival({
+      registryPath,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+      deps: {
+        withRegistryRead: (path, read) => {
+          writeFileSync(path, JSON.stringify({ [KEY]: { ...row(), child_generation: 'gen-newer' } }))
+          return withRegistryRead(path, read)
+        },
+      },
+    })
+    expect(verdict.kind).toBe('kill')
+    expect(verdict.kind === 'kill' && verdict.reason).toMatch(/generation/i)
+  })
+
+  it('THE POSITIVE CONTROL: an uncontended decision still survives', () => {
+    // A gate that killed unconditionally would satisfy both cases above and deliver
+    // nothing. With nobody racing, the same call must leave the child alive.
+    const registryPath = registryWith(row())
+    const verdict = claimShutdownSurvival({
+      registryPath,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+    })
+    expect(verdict).toEqual({ kind: 'survive', handle: HANDLE })
+  })
+
+  it('a child with no handle never takes the lock, and a missing registry is still a kill', () => {
+    let took = 0
+    const noHandle = claimShutdownSurvival({
+      registryPath: registryWith(row()),
+      sessionKey: KEY,
+      paneHandle: undefined,
+      childGeneration: GENERATION,
+      deps: { withRegistryRead: (path, read) => { took += 1; return withRegistryRead(path, read) } },
+    })
+    expect(noHandle.kind).toBe('kill')
+    expect(took).toBe(0)
+    // No registry configured is not an empty registry, and both are a kill.
+    const noRegistry = claimShutdownSurvival({
+      registryPath: undefined,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+    })
+    expect(noRegistry.kind).toBe('kill')
+  })
+
+  it('withRegistryRead does NOT write the registry back', () => {
+    // The reason it exists rather than a `withRegistry` whose mutate returns its input:
+    // a byte-identical rewrite of every row is a write the shutdown path has no business
+    // performing. Byte comparison, because a re-serialised file can differ in whitespace
+    // alone and still be a write.
+    // WRITTEN COMPACTLY ON PURPOSE. `saveRegistry` pretty-prints, so a fixture that is
+    // already pretty-printed would survive a stray save byte-for-byte and this case
+    // would pass against a helper that writes. The formatting is the witness.
+    const registryPath = registryWith(row())
+    writeFileSync(registryPath, JSON.stringify({ [KEY]: row() }))
+    const bytesBefore = readFileSync(registryPath, 'utf8')
+    expect(bytesBefore).not.toContain('\n')
+    const seen = withRegistryRead(registryPath, (registry) => registry[KEY]?.pane_handle)
+    expect(seen).toBe(HANDLE)
+    expect(readFileSync(registryPath, 'utf8')).toBe(bytesBefore)
   })
 })

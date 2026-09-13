@@ -129,6 +129,75 @@ present in that screen was just latched; both read the same ring), and an early 
 would have been a second guard masking which mechanism holds the line. With one
 mechanism, the mutation that removes it reddens the test.
 
+### Round seven: a vector flattened, a decision unordered, and a scanner reading a name
+
+**The argv was flattened and reparsed, which defeated the gate it fed.**
+`classifyPaneForAdoption` joined the host's argv with `join(' ')` and handed the string
+to `cmdlineMatchesSession`, which re-split it on whitespace. Flatten-then-reparse is
+lossy and the loss landed exactly on rule (1). POSIX lets a process choose its own
+argv[0], so `['claude --resume', '<uuid>', '--dangerously-load-…', 'server:<chan>']`
+reparses with `tokens[0] === 'claude'` — passing a basename gate whose entire purpose is
+to establish that argv[0] IS a claude binary — while the real argv[0] is
+`'claude --resume'`, which is not a binary at all. Both things this classifier licenses,
+attach and close, are destructive when pointed at a stranger's pane.
+
+The structured vector was already in hand: the very next line read `inspection.argv[0]`
+directly for its error message. `argvMatchesSession` now matches element-wise, and
+`cmdlineMatchesSession` is a thin wrapper that tokenises for the one caller that
+genuinely only has a string (the `ps` kill path), so that path's behaviour is unchanged.
+An element carrying whitespace is refused outright and reaches `unverifiable` — not
+`leave-not-ours`, which would be a positive claim about a process we cannot read — so a
+vector we cannot trust routes to the pid identity probe and neither adopts nor closes.
+
+**The shutdown decision was ordered against a concurrent writer by nothing.** The
+survival gate read the row with `getRecord`, which takes no lock, and then acted on what
+it read. The registry is shared across processes by design — that is why every writer
+takes a flock — so: A writes (H1,G1), A snapshots (H1,G1), B writes (H2,G2), A leaves H1
+alive because its snapshot said so. The only durable row then names H2 and nothing will
+ever look for H1 again: the 2026-06-11 orphan in its herdr-shaped form. `withRegistryRead`
+(new, in `repl-registry.ts`) takes the same flock every writer takes and does NOT save;
+`claimShutdownSurvival` decides inside it. B's write now lands strictly before the
+compare (we see H2 and kill) or strictly after it (B held the lock, so B is a writer that
+read (H1,G1) and chose to replace it — and every such writer goes through the adoption
+pass, which closes or adopts the pane it displaces first).
+
+**This is the fourth instance of the branch's named habit, in its other form.** The first
+three were a classifier's answer computed and dropped. This one is the same mistake one
+step earlier: the answer was *correct* and the evidence under it was stale, because the
+read that produced it was not ordered against anyone. `clearPaneHandleIfUnchanged` and
+`claimRowOrUnwind` both already refuse to act on a row that has moved. The shutdown
+boundary was simply never given the treatment, and it is the boundary where the cost is a
+process nobody can reap rather than a refused spawn.
+
+**What the lock does not buy, said plainly.** No lock binds a writer that arrives after
+this process has exited. The residual in `gateway-shutdown-survival.ts`'s header — a LOST
+registry strands the pane it named — is unchanged, and is still the price of the feature.
+
+**The CodeQL alert is a false positive at the sink, and here is the path.** Alert #69,
+`js/insecure-randomness`, high, against `boot-adoption.ts:1300`. `Math.random` appears in
+no file this branch touches; the result is a dataflow, and the SARIF for analysis
+1767833024 gives it in full:
+
+    credential-pool.ts:244  Math.floor(Math.random() * available.length)   ← source
+      → idx → available[idx] → candidate → pick   (the `'random'` load-balancing arm)
+      → build-import-substrate.ts:300 / build-llm-call-substrate.ts:177  cred
+      → cred.id → opts.credential_identity
+      → adapters/claude-code/index.ts:471 → :549  poolKeyFor(p)
+      → pool.ts:294-298  [instance, user, project, credential_identity].join(SEP)
+      → boot-adoption.ts:1300  sessionKey                                  ← sink
+
+The source picks WHICH already-provisioned credential serves a request; what propagates
+is that credential's **id**, not its secret. The sink is the `sessionKey` parameter of
+`startBootAdoption`, and it is a sink only because its name matches the query's
+key-material heuristic. It is not a security context: the value is an in-process Map key
+and a registry row key — never transmitted, never compared against attacker input, never
+used as a key, nonce, salt or secret. Nothing in `boot-adoption.ts` derives anything
+cryptographic from it; the reply-sink credential is `HMAC(root token, childGeneration)`
+and `childGeneration` is `randomUUID()` (`spawn.ts:122`), a CSPRNG. Dismissed as a false
+positive with that path named, rather than left to age out — a required security check
+that fails once and passes later with nobody having read the path is the silent-success
+shape this branch spent its rounds removing.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -137,9 +206,17 @@ and reverted mechanically, with the tree verified clean afterwards.
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number
 written once and then never re-derived, in the one section whose whole purpose is
-auditability. The last full harness run covered **every live row in one pass against this head —
-M1–M36 less the superseded M31: 35/35 reddened their target** — with the worktree
-verified clean afterwards.
+auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
+superseded M31: 35/35 reddened their target** — with the worktree verified clean
+afterwards. M37–M41 were added in round seven and verified individually as they were
+written; each is listed with the count it reddens.
+
+**M41 did not red on its first writing, and the test was the thing at fault.** The
+no-write case compared the registry file's bytes before and after — against a fixture
+that was already pretty-printed, which is exactly what `saveRegistry` emits. A stray save
+reproduced it byte-for-byte and the case passed. The fixture is now written COMPACTLY, so
+the formatting is the witness, and the mutation reds. A byte comparison is only as strong
+as the bytes being distinguishable.
 
 **M31 stopped applying, and the harness said so rather than passing.** The write it
 mutated was replaced by `claimRowOrUnwind`, so its patch matched nothing — reported as
@@ -195,6 +272,11 @@ count from the rows below rather than trusting this sentence.
 | M34 | the close path never REPORTS a moved row | `boot-adoption.test.ts` (1) |
 | M35 | a failed row claim publishes the adoption anyway | `boot-adoption.test.ts` (1) |
 | M36 | the row claim does not compare handle and generation | `boot-adoption.test.ts` (1) |
+| M37 | the classifier flattens the argv and reparses it again | `pane-adoption-verdict.test.ts` (2) |
+| M38 | the whitespace refusal is removed from the matcher | `pane-adoption-verdict.test.ts` (1) |
+| M39 | the argv matcher refuses every vector (**over-strict**) | `pane-adoption-verdict.test.ts` (7) |
+| M40 | the survival decision reads an UNLOCKED snapshot again | `gateway-shutdown-survival.test.ts` (2) |
+| M41 | `withRegistryRead` writes the registry back | `gateway-shutdown-survival.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

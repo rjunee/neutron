@@ -37,7 +37,8 @@
  * once per registry loss rather than once per restart.
  */
 
-import type { ReplRegistryRecord } from './repl-registry.ts'
+import type { ReplRegistry, ReplRegistryRecord } from './repl-registry.ts'
+import { withRegistryRead } from './repl-registry.ts'
 
 /** Whether one pooled child may be left running when the gateway stops. */
 export type ShutdownSurvivalVerdict =
@@ -98,4 +99,73 @@ export function shutdownSurvivalVerdict(input: ShutdownSurvivalInput): ShutdownS
     }
   }
   return { kind: 'survive', handle }
+}
+
+
+/** The one seam {@link claimShutdownSurvival} needs, so a case can model another
+ *  incarnation winning the lock immediately before this decision. */
+export interface ShutdownSurvivalDeps {
+  /** Defaults to {@link withRegistryRead} — the registry read taken UNDER THE FLOCK. */
+  readonly withRegistryRead?: <T>(path: string, read: (registry: ReplRegistry) => T) => T
+}
+
+/**
+ * THE SURVIVAL DECISION, TAKEN UNDER THE REGISTRY LOCK (#539, Argus r7 BLOCKER).
+ *
+ * WHAT WAS WRONG WITH READING FIRST AND DECIDING AFTER. The shutdown path used to take
+ * an unlocked `getRecord` snapshot and hand it to {@link shutdownSurvivalVerdict}. A
+ * registry is shared across PROCESSES by design — that is why every writer in this
+ * module family takes a flock — so an unlocked read orders this decision against a
+ * concurrent writer by nothing at all:
+ *
+ *   A writes (H1,G1) → A starts shutting down and snapshots (H1,G1)
+ *                    → B writes (H2,G2)
+ *                    → A leaves H1 alive because its SNAPSHOT said the row named it.
+ *
+ * The durable row now names H2 and nothing will ever look for H1 again: an unreferenced
+ * pane, which is the 2026-06-11 orphan in its herdr-shaped form and the symptom this
+ * gate exists to prevent. It is the same defect this branch has already fixed twice
+ * elsewhere — `clearPaneHandleIfUnchanged` and `claimRowOrUnwind` both refuse to act on
+ * a row that has moved — and the shutdown boundary simply never got the treatment.
+ *
+ * WHAT TAKING THE LOCK BUYS, stated exactly so nobody reads more into it. B's write
+ * lands strictly before this compare (we see H2 and KILL) or strictly after it (B held
+ * the lock, so B is a writer that read (H1,G1) and chose to replace it — and every
+ * writer that does so goes through the boot-adoption pass, which closes or adopts the
+ * pane it displaces before writing over its handle). What it does NOT buy, because no
+ * lock can: a guarantee about a writer arriving after this process has exited. The
+ * residual named in this file's header — a LOST registry strands the pane it named —
+ * is unchanged by this and is still the price of the feature.
+ *
+ * The verdict is {@link shutdownSurvivalVerdict}'s, unchanged; this function only
+ * decides WHICH ROW that function is allowed to see.
+ */
+export function claimShutdownSurvival(args: {
+  readonly registryPath: string | undefined
+  readonly sessionKey: string
+  readonly paneHandle: string | undefined
+  readonly childGeneration: string
+  readonly deps?: ShutdownSurvivalDeps
+}): ShutdownSurvivalVerdict {
+  // No handle → no row can rescue it, and no lock need be taken to say so. This is the
+  // in-process host's every child, so it is also the common case.
+  if (args.paneHandle === undefined) {
+    return shutdownSurvivalVerdict({
+      paneHandle: undefined,
+      childGeneration: args.childGeneration,
+      record: undefined,
+    })
+  }
+  const read = args.deps?.withRegistryRead ?? withRegistryRead
+  // NO registry configured is NOT an empty registry: either way nothing durable names
+  // this pane, and `shutdownSurvivalVerdict` turns that into a kill with its own reason.
+  const record =
+    args.registryPath === undefined
+      ? undefined
+      : read(args.registryPath, (registry) => registry[args.sessionKey])
+  return shutdownSurvivalVerdict({
+    paneHandle: args.paneHandle,
+    childGeneration: args.childGeneration,
+    record,
+  })
 }
