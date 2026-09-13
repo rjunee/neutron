@@ -2615,6 +2615,9 @@ function shSingleQuote(s) {
 // terminal-but-garbled harvest guard is the required backstop; this keeps the
 // two columns from ever disagreeing at the source.
 async function writeTerminalResult(result) {
+  // EVERY TERMINAL RESULT NAMES WHY IT IS TERMINAL (#520). Before the write and before
+  // the early return, so a dry run sees what the harvest would; see the function.
+  stampTerminalCause(result, log)
   if (!dbPath || !runId) return
   // REQUEST_CHANGES is RESERVED for a reviewer that judged the CODE and produced
   // at least one finding — the same discriminator as `recordedTerminalVerdict`
@@ -4199,6 +4202,11 @@ function mergedTerminalResult(prNumber, branch, round) {
     prMerged: true,
     remainingTasks: 0,
     blockKind: 'none',
+    // THE THREE MERGED EXITS SHARE ONE CAUSE BECAUSE THEY ARE ONE EVENT (#520): a
+    // resume that found the PR merged, a merge observed the instant the build
+    // returned, and a merge observed at the end of a fix round. Which of the three
+    // noticed is a fact about this process's timing, not about why the run stopped.
+    terminalCauseKind: 'pr-already-merged',
   }
 }
 
@@ -4499,6 +4507,220 @@ function redactProbeText(text) {
 const TERMINAL_CAUSE_MAX = 500
 function infraCause(text) {
   return redactProbeText(text).slice(0, TERMINAL_CAUSE_MAX)
+}
+// ── WHY THIS RUN STOPPED (#520) ─────────────────────────────────────────────────
+// THE CLOSED VOCABULARY, MIRRORED. `trident/terminal-cause.ts` owns it; this file
+// imports nothing (it is a standalone workflow script — see the header), so the list
+// is repeated here and `inner-workflow-terminal-cause.test.ts` fails if the two ever
+// disagree, exactly as `inner-loop.test.ts` does for TERMINAL_CAUSE_MAX above.
+//
+// It is a SEPARATE FIELD from `terminalCause`, not a replacement: that one carries
+// the probe's/lane's/thrown error's own words and is quotable but not routable; this
+// one says WHICH of the known exits happened and is routable but says nothing the
+// vocabulary does not already contain. `checkpoint` is neither — it records the PHASE
+// the run reached, which is why deducing a cause from it was wrong four times in one
+// night (see docs/spec-items/a-terminal-cause-on-every-terminal-path.md).
+//
+// DECLARED AFTER ITS ONE READER, AND THAT IS SAFE — CHECKED, NOT ASSUMED. This file is a
+// linear script, not a module of definitions. `stampTerminalCause` is the only reader; it is
+// called only from `writeTerminalResult`, which is DECLARED above this line but never CALLED
+// above it — the earliest call is inside the `try {` that opens well below. So the const is
+// initialised long before any reader can reach it and the temporal dead zone is unreachable.
+// `TERMINAL_CAUSE_MAX` directly above has the identical shape for the identical reason.
+const TERMINAL_CAUSE_KINDS = [
+  'review-approved',
+  'round-budget-exhausted',
+  'review-advisory-only',
+  'review-infra-only',
+  'review-escalated',
+  'round-lost-work',
+  'round-lost-no-diff',
+  'pr-already-merged',
+  'resume-approved-unchanged',
+  'resume-head-unreadable',
+  'built-head-unverified',
+  'wave-member-built',
+  'handoff-publish',
+  'ralph-task-built',
+  'workflow-threw',
+  'unknown',
+]
+// THE REVIEW LOOP'S EXIT, READ OFF THE GUARDS IT EXITED ON — a MEASUREMENT, not an
+// inference. The arms below are the FOUR clauses of the `while (...)` head at the top of
+// the fix loop — `escalation === null`, `round < maxRounds`, and the two `blockKind`
+// exclusions — plus the two `break`s inside it, in the order the terminal result's own
+// `blockKind` expression already uses. Nothing here consults `checkpoint`.
+//
+// THIS LIST IS A CLAIM OF COMPLETENESS AND IT HAS ALREADY BEEN WRONG ONCE. #654 added
+// `escalation === null` to that `while` head, and this function did not read it — so an
+// escalated run reported `'unknown'`, which is this vocabulary's word for "could not be
+// established" about an exit sitting in a variable three lines above the call. WHEN THE
+// LOOP HEAD GAINS A CLAUSE, THIS FUNCTION GAINS AN ARM. A list that claims completeness
+// needs the same scrutiny as the code it describes.
+//
+// THE LAST ARM IS 'unknown' AND IT MUST STAY THAT WAY. If the loop ever exits in a
+// shape none of these describe, the honest answer is that this function cannot tell —
+// not the nearest plausible member. "Could not establish" and "established that it was
+// X" are different facts, and a vocabulary that collapses them is the defect this whole
+// field exists to close.
+// THE BACKSTOP FOR A TERMINAL RESULT THAT DID NOT NAME ITS EXIT (#520).
+//
+// Every one of the twelve call sites passes an explicit kind and a source-level test
+// refuses a thirteenth that does not. This exists for what that test cannot reach — a
+// result assembled somewhere the scanner cannot see — and for the drift the spec item
+// records under HOW IT GOT THIS WAY: every early exit added since the initial commit
+// landed in the catch-all without anyone adding a terminal branch, one plausible commit
+// at a time.
+//
+// IT STAMPS 'unknown', WHICH IS AN ANSWER, and the answer is "this path did not say". The
+// alternative was to throw, which trades a missing sentence for a LOST TERMINAL WRITE:
+// the outer loop would then have no harvest and the run would sit `running` until the
+// stall guard — strictly worse than an honest non-answer. So it records the gap and says
+// so on the run log rather than papering over it.
+//
+// A VALUE OUTSIDE THE VOCABULARY IS TREATED AS ABSENT, and logged differently, because
+// the two are different mistakes: one path forgot, the other invented a member the
+// decoder will refuse anyway. Neither may travel — `parseTerminalCause` would decode an
+// invented kind to `null`, and `null` means "the field did not arrive", so an invented
+// kind that reached the DB would be indistinguishable from a legacy row.
+//
+// MUTATES IN PLACE, deliberately: every call site RETURNS the same object it hands to
+// `writeTerminalResult`, so a dry run with no database threaded must see the same value
+// the harvest would.
+// HOW MUCH OF AN UNRECOGNISED VALUE THE RUN LOG IS WILLING TO QUOTE. A legitimate kind is
+// a short lowercase-hyphen token, so 120 characters identifies any real mistake several
+// times over — and a value that needs more than that is itself the finding, which the
+// truncation marker preserves. Deliberately far below TERMINAL_CAUSE_MAX: that cap governs
+// a cause being PERSISTED for an operator to read, this one governs an unexpected value
+// being quoted into a log, and the second has no reason to be generous.
+const TERMINAL_CAUSE_DIAGNOSTIC_MAX = 120
+// LINE COMMENTS ONLY BETWEEN HERE AND `probeCause`, AND THE REASON IS MECHANICAL.
+// `trident/__tests__/ci-gate.test.ts` lifts `classifyCi` and everything it closes over by
+// slicing from `const CI_FAILED_STATES` to the next JSDoc opener, and `probeCause` and
+// `redactProbeText` live inside that slice. Opening a JSDoc block anywhere in this stretch
+// truncates it and takes those two functions out, which reds 44 unrelated cases with a
+// bare ReferenceError. That guard documents the hazard in its own words and it caught this
+// change twice: once for the block comment, and again for a comment that merely SPELLED
+// the opener, because the slice is found by substring search and does not care that the
+// occurrence is inside a comment. Hence the circumlocution here.
+// TEXT FOR A VALUE THAT ARRIVED WHEN SOMETHING ELSE WAS EXPECTED — redacted, capped, and
+// INCAPABLE OF THROWING.
+//
+// All three properties are load-bearing and none was there when this was a bare `String()`:
+//
+//  - INCAPABLE OF THROWING is the important one. `String(v)` runs user-reachable code —
+//    `toString` and `Symbol.toPrimitive` — and a value whose coercion throws made
+//    `stampTerminalCause` throw, which prevented the `writeTerminalResult` the backstop
+//    exists to protect. The stamp is the thing that must survive; the diagnostic is a
+//    courtesy. A courtesy may never take the guarantee down with it.
+//
+//    THE COERCION IS THIS FUNCTION'S HALF, AND IT IS NOT THE WHOLE HAZARD. A hostile value
+//    can also throw from a PROPERTY READ or WRITE — a Proxy trap — which happens in the
+//    caller, before and after this is reached. That half is closed by `stampTerminalCause`
+//    constraining its input to a plain record and guarding the whole read-and-stamp; see
+//    its contract. This sentence used to name the Proxy trap among the hazards handled
+//    here, which was untrue: the read ahead of it was unprotected, and the comment
+//    describing the class is what eventually found the code fixing only the instance.
+//  - REDACTED, through the same helper every persisted cause goes through. This text is
+//    written to the run log verbatim, and a value shaped like a credential had nothing
+//    between it and that log.
+//  - CAPPED, because the value is unexpected BY DEFINITION and nothing bounds its length.
+//
+// The stamp happens BEFORE either call to this, so even a catastrophic logger — or a
+// checkpoint whose own read throws — cannot cost the field its value. That was written
+// here one round before it was true; it is true now, and `stampTerminalCause` carries the
+// note about why the ordering keeps being got wrong.
+function terminalCauseDiagnostic(value) {
+  let text
+  try {
+    // `String()` rather than a template literal: a template throws outright on a symbol,
+    // which is a real value someone can put in a JSON-shaped object by mistake.
+    text = String(value)
+  } catch {
+    // The coercion itself was hostile or broken. Saying so is more useful than saying
+    // nothing, and it is the one description that cannot fail to be produced.
+    return '(a value whose conversion to text threw)'
+  }
+  if (typeof text !== 'string') return '(a value that did not convert to text)'
+  const redacted = redactProbeText(text)
+  return redacted.length > TERMINAL_CAUSE_DIAGNOSTIC_MAX
+    ? `${redacted.slice(0, TERMINAL_CAUSE_DIAGNOSTIC_MAX)}… (${redacted.length} chars, truncated)`
+    : redacted
+}
+// Report without letting the reporting channel become a failure of its own. `log` writes to
+// stdout, and a closed pipe raises there like anywhere else.
+function reportQuietly(report, line) {
+  try {
+    report(line)
+  } catch {}
+}
+// THE CONTRACT: `result` IS A PLAIN RECORD THIS FILE BUILT, and the function is written to
+// that and says so. Every one of the twelve call sites hands over an object literal
+// assembled a few lines above it; nothing else is in scope for this backstop.
+//
+// AND A VALUE THAT IS NOT ONE IS REPORTED, NOT TRUSTED, NOT CHASED. A Proxy can throw from
+// `get`, from `set`, from `getPrototypeOf` and from `ownKeys`, so there is no probe that
+// makes a later read safe and no copy that can be taken without touching it — any
+// formulation that tries to READ such a value defensively is still one trap away from the
+// failure it was written against. So the whole read-and-stamp runs inside one guard, and a
+// value that resists being read or written is named on the log and left alone. That is a
+// closed answer: for a plain record the stamp always happens, and for anything else no
+// implementation could have stamped it, because the write is exactly what it refuses.
+//
+// WHY THIS IS HERE AT ALL. `terminalCauseDiagnostic` below hardened the COERCION of an
+// untrusted value, and its own comment named a Proxy trap among the hazards — while the
+// first property read in this function sat unprotected, ahead of everything. The comment
+// described the class; the code had fixed the instance. Reading the two against each other
+// is what found it.
+function stampTerminalCause(result, report) {
+  if (typeof result !== 'object' || result === null) return result
+  let stamped = false
+  try {
+    const kind = result.terminalCauseKind
+    if (TERMINAL_CAUSE_KINDS.includes(kind)) return result
+    const missing = kind === undefined
+    // THE STAMP COMES FIRST, AND NOW IT ACTUALLY DOES. Reporting is best-effort; recording
+    // the honest non-answer is not. An earlier cut reported and then stamped; the cut after
+    // it composed BOTH diagnostics and then stamped, which left `terminalCauseDiagnostic`'s
+    // own docblock claiming an ordering the code did not have. The only work between the
+    // decisive read and the write is the `undefined` test, which cannot fail.
+    result.terminalCauseKind = 'unknown'
+    stamped = true
+    const at = terminalCauseDiagnostic(result.checkpoint)
+    reportQuietly(
+      report,
+      missing
+        ? `trident-v2 TERMINAL CAUSE MISSING at checkpoint ${at} — recording 'unknown'`
+        : `trident-v2 TERMINAL CAUSE UNRECOGNISED: ${terminalCauseDiagnostic(kind)} — recording 'unknown'`,
+    )
+  } catch {
+    // The value resisted. `stamped` says which half got through, because "we could not
+    // record a cause" and "we recorded one but could not describe it" are different facts
+    // and this file does not put different facts on one branch.
+    reportQuietly(
+      report,
+      stamped
+        ? "trident-v2 TERMINAL CAUSE stamped 'unknown', but its own diagnostic could not be composed — the terminal result is not a plain record"
+        : 'trident-v2 TERMINAL CAUSE UNSTAMPABLE: the terminal result is not a plain record — it resisted being read or written, so no cause could be recorded on it',
+    )
+  }
+  return result
+}
+function reviewLoopTerminalCause(exit) {
+  if (exit.roundLostItsWork !== null && exit.roundLostItsWork !== undefined) return 'round-lost-work'
+  if (exit.roundLostItsDiff !== null && exit.roundLostItsDiff !== undefined) return 'round-lost-no-diff'
+  // THE ESCALATION EXIT, WHICH IS THE FIRST CLAUSE OF THE `while` HEAD (#654). Read
+  // BEFORE the verdict, because an escalation forces the verdict to REQUEST_CHANGES a few
+  // lines above the call and would otherwise be indistinguishable from an ordinary
+  // rejection. Placed after the round-lost arms for the same reason they come first in
+  // the terminal result's own `blockKind` expression — a lost round ends the loop by
+  // `break` before any escalation for that round can be decided.
+  if (exit.escalation !== null && exit.escalation !== undefined) return 'review-escalated'
+  if (exit.finalVerdict === 'APPROVE') return 'review-approved'
+  if (exit.blockKind === 'infra-only') return 'review-infra-only'
+  if (exit.blockKind === 'advisory-only') return 'review-advisory-only'
+  if (exit.finalVerdict === 'REQUEST_CHANGES' && exit.round >= exit.maxRounds) return 'round-budget-exhausted'
+  return 'unknown'
 }
 // The first non-empty line(s) of what the probe actually said, redacted + capped.
 // '' when there is nothing usable (caller then keeps its bare generic reason).
@@ -7294,6 +7516,7 @@ try {
       // Redacted + capped through the SAME helper as the build-completion stop below —
       // one failure class, one shape, including how its text is persisted.
       terminalCause: infraCause(stopCause),
+      terminalCauseKind: 'resume-head-unreadable',
     }
     await writeTerminalResult(stopResult)
     return stopResult
@@ -7346,6 +7569,7 @@ try {
       reviewedHead: recordedResumeHead,
       remainingTasks: 0,
       blockKind: 'none',
+      terminalCauseKind: 'resume-approved-unchanged',
     }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
@@ -7437,7 +7661,7 @@ try {
   // run re-reads, and the checkpoint columns this stop leaves untouched record where the
   // branch actually got to.
   const builtHeadStop = async (cause) => {
-    const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: null, round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), remainingTasks: 0 }
+    const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: null, round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), terminalCauseKind: 'built-head-unverified', remainingTasks: 0 }
     await writeTerminalResult(stop)
     return stop
   }
@@ -7977,6 +8201,7 @@ ${task}${reflectionGuidance}`,
         checkpoint: 'built',
         remainingTasks: 0,
         blockKind: 'none',
+        terminalCauseKind: 'wave-member-built',
       }
       log(`trident-v2 member BUILT: task=${pinnedMemberTaskId} branch=${forgeBranch} commit=${commitSha} — skipping publish, Argus, and re-fire`)
       await writeTerminalResult(builtResult)
@@ -7989,7 +8214,7 @@ ${task}${reflectionGuidance}`,
       // which the outer publisher `rev-parse --verify`s to get the real head.
       // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
       // abbreviated claim must never discard a build that is already committed.
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: claim, remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated }
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: claim, remainingTasks: ralphRemaining, deviatedFromSpec: taskDeviated, terminalCauseKind: 'handoff-publish' }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -8052,6 +8277,7 @@ ${task}${reflectionGuidance}`,
       round,
       checkpoint: builtCheckpoint,
       remainingTasks: ralphRemaining,
+      terminalCauseKind: 'ralph-task-built',
     }
     await writeTerminalResult(refireResult)
     return refireResult
@@ -8505,7 +8731,7 @@ ${task}${rePlanNote}${reflectionGuidance}`,
       // carries `verdict: 'REQUEST_CHANGES'`, which never reaches `applyResult`'s
       // merge branch, and the outer's publish path nulls `inner_result` the moment it
       // has published — so the value cannot outlive the publish it was written for.
-      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead: fixClaim, remainingTasks: ralphRemaining, ...(normalizeOid(reviewedHead) === '' ? {} : { reviewedHead: normalizeOid(reviewedHead) }) }
+      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead: fixClaim, remainingTasks: ralphRemaining, terminalCauseKind: 'handoff-publish', ...(normalizeOid(reviewedHead) === '' ? {} : { reviewedHead: normalizeOid(reviewedHead) }) }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -8655,6 +8881,20 @@ ${task}${rePlanNote}${reflectionGuidance}`,
   // log AND the terminal result, and the two must not be able to disagree. Already
   // redacted by `infraTerminalCause`, so it is safe to print.
   const terminalCause = infraTerminalCause(synthesis)
+  // …AND WHY THE LOOP STOPPED (#520), from the same three variables the `blockKind`
+  // expression below already reads plus the loop's own budget guard. Computed HERE, at
+  // the exit, because here is where those guards still hold their exit values; anywhere
+  // downstream it would be a deduction from `(round, checkpoint)`, which is the specific
+  // mistake this field exists to retire.
+  const terminalCauseKind = reviewLoopTerminalCause({
+    finalVerdict,
+    round,
+    maxRounds,
+    blockKind: synthesis.blockKind,
+    roundLostItsWork,
+    roundLostItsDiff,
+    escalation,
+  })
   const isInfraOnlyStop =
     roundLostItsWork === null &&
     roundLostItsDiff === null &&
@@ -8663,7 +8903,7 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     synthesis.blockKind === 'infra-only' &&
     terminalCause !== ''
   log(
-    `trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr}` +
+    `trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr} why=${terminalCauseKind}` +
       (isInfraOnlyStop ? ` cause=${terminalCause}` : ''),
   )
   // The inner workflow RETURNS {PR#, verdict}; the OUTER/human layer does the
@@ -8744,6 +8984,14 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     // for want of exactly this field — and it stays generic wherever it is absent,
     // because a specific message must ship WITH the measured signal, never before it.
     ...(isInfraOnlyStop ? { terminalCause } : {}),
+    // …AND THE CAUSE IS UNCONDITIONAL, unlike the prose above it (#520). The prose is
+    // present only where something MEASURED a sentence worth quoting; the kind is
+    // present always, because "which exit was this" always has an answer — and where it
+    // genuinely does not, that answer is `'unknown'`, which is a member. This is the
+    // half the review-verdict exits ('code' → `round-budget-exhausted`, 'round-lost' →
+    // `round-lost-work`/`round-lost-no-diff`, 'none' → `review-approved`) were missing:
+    // they emitted nothing at all, so the outer loop had one sentence for all of them.
+    terminalCauseKind,
     // Present ONLY when a fix round left no trace on the branch, so the operator
     // is told which round to recover rather than being handed stale findings.
     ...(roundLostItsWork !== null
@@ -8798,6 +9046,10 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     // bounded stops use. No `blockKind` is asserted alongside it: a throw is not a review
     // verdict, and `null` keeps the outer loop from claiming the code was judged.
     terminalCause: infraCause(thrownMessage),
+    // A THROW IS ITS OWN CAUSE. No review verdict is asserted beside it (`blockKind`
+    // stays absent) and none is implied here: this names the EXIT, and the prose above
+    // carries the sentence the workflow composed where the fact was known.
+    terminalCauseKind: 'workflow-threw',
   }
   if (awaiting) {
     failureResult.checkpoint = 'awaiting-trailer'
