@@ -50,5 +50,13 @@ export function classifySpawnError(message: string): SubstrateErrorClass | undef
   // ladder re-attempts forever — ~1 bind budget per attempt, indefinitely.
   if (/^repl-sink: could not bind/i.test(message)) return 'channel_wedged'
   if (/persistent-repl:\s*channel not ready/i.test(message)) return 'channel_wedged'
+  // #539 — the boot-adoption gate refused to start a REPL because a previous one for
+  // this key could not be accounted for. STAMPED, not left to the message regexes
+  // downstream, for the reason this file's header gives and one more specific to the
+  // consumer: an UNSTAMPED retryable error is mapped by the composer to a 429-shaped
+  // pool cooldown (`mapStatusForPoolCooldown(null, true)`), so a refusal that has
+  // nothing to do with the credential would cool it — and park it for an hour after
+  // five. Every stamped class except `rate_limited`/`http_status` skips the cooldown.
+  if (/persistent-repl:\s*refusing to resume session/i.test(message)) return 'repl_unreconciled'
   return undefined
 }

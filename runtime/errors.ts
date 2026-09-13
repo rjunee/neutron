@@ -141,6 +141,11 @@ export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, Substra
     retryable: true,
     description: 'Every credential is in cooldown (429/402/401) — retry once the window passes.',
   },
+  repl_unreconciled: {
+    retryable: true,
+    description:
+      'The persistent-REPL substrate REFUSED to start a REPL because a previous one for this session key could not be accounted for — a pane it could not inspect, a close it knows failed, or a host that cannot reach the pane at all (#539). Starting a second `claude` on one transcript corrupts it, so the turn fails instead. NOTHING TO DO WITH THE CREDENTIAL, and that is why this class exists rather than an unstamped message: an unstamped retryable error maps to a 429-shaped pool cooldown (`mapStatusForPoolCooldown(null, true)`), so a reconciliation problem would have parked a healthy credential — five in a row for an hour. Retryable because the next turn re-probes: a transient failure to see the pane costs one turn, and a real unreaped owner keeps costing turns until it is resolved.',
+  },
   oauth_refresh: {
     retryable: false,
     description: 'Max OAuth token refresh failed at dispatch — re-auth needed.',
