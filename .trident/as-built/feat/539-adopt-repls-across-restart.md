@@ -2206,6 +2206,51 @@ refusal. And because resolving the root is a WIDENING, a second case shows it di
 too far: a victim outside the real temp tree is still refused while the root is reached through
 a symlink.
 
+### Round forty-six: the tick kept acting on a key its own renewal had just fenced
+
+`renewOwnAdoptionClaim` detached the child, unregistered the sink and removed the session from
+the pool — and returned `void`. The tick threw that away and went on to probe and actuate
+**using the snapshot it had loaded before the fencing**. If the probe then reported the pane
+unhealthy, the losing tick emitted a crash notice, patched the winner's row and attempted a
+respawn: **a gateway that had just concluded it does not own the pane declaring the rightful
+owner crashed and respawning over it.**
+
+**This is the second instance of "the caller ignored it" on this branch and the first repeat
+at the same site.** Round thirty-nine asked for exactly this to be impossible — *"make the
+return value impossible to drop, the way `clearHandleThenVerdict` was reshaped to produce the
+caller's verdict"* — and what landed was fencing that worked beside a value that was still
+droppable. So the remedy this time is the type, not the diligence: the renewal returns a
+DISCRIMINATED `OwnershipTickOutcome` and the tick switches **exhaustively**, with a `never`
+default. An exhaustive switch does not guarantee a correct mapping (round twenty-three showed
+that); it guarantees the next arm cannot default into "carry on" without the compiler naming
+it, which is the property that was missing.
+
+**The fence also persists across ticks, which the first cut would not have.** Fencing removes
+the session from the pool, so the NEXT tick finds nothing to renew, would answer `proceed`, and
+would probe and actuate a row that now belongs to somebody else — the same destructive path one
+tick later. The renewal asks the fence map first, so a fenced key stays out of this gateway's
+supervision until a construction of this substrate reconciles it.
+
+#### What the tick uses after the renewal, and whether it survives a fence
+
+The r31 per-structure question applied to a control-flow boundary rather than a data one.
+
+| Downstream use | Still valid after a successful renewal? | After a fence? |
+|---|---|---|
+| `record` (the pre-loop snapshot) | **yes** — a renewal writes only `adoption_claim_at` / `adoption_claim_pid`, and nothing downstream reads either: the probe uses pid / devchannel_port / sessionId, `decideWedgeAction` uses `first_ready_at`, `capped_at`, `respawn_in_flight_at`, `last_respawn_at`, and the crash sink uses `child_generation` / `child_crash_notified_at` | unreachable — `continue` is before the probe |
+| the pooled session (via `pool`) | yes | **removed by the fence** — unreachable |
+| `keyOptions` (`supervisedBySessionKey`) | yes — fencing does not touch that map | unreachable |
+
+**The boundary is BEFORE the probe, not after it.** The probe's own verdict is what turns a
+fenced tick from inert into destructive, so "probe but do not act" would be the wrong place to
+stop.
+
+**Why the whole class was invisible: every existing fencing case pinned the probe HEALTHY.**
+`unhealthyTickAt` is the instrument that was missing — a tick whose probe says the REPL is dead,
+with the crash sink, the alert channel and the actuation results all captured. The new case
+asserts the winner's row is **byte-identical** afterwards, which is the assertion a
+"nothing happened" claim actually needs.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2216,7 +2261,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four and M125–M129 in round forty-five, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five and M130–M131 in round forty-six, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2376,6 +2421,8 @@ count from the rows below rather than trusting this sentence.
 | M127 | the fresh spawn writes ownership with no contest — the r45 defect exactly | `pane-handle-persistence.test.ts` (1) |
 | M128 | the loser serves instead of ending its own child | `pane-handle-persistence.test.ts` (1) |
 | M129 | the predicate drops the same-process exception | `pane-handle-persistence.test.ts` (1 — **and it did not red until the respawn case existed**) |
+| M130 | the tick drops the fenced continuation — the r46 defect exactly | `adoption-claim-is-a-compare-and-set.test.ts` (3) |
+| M131 | the guard fires when the renewal SUCCEEDED | `adoption-claim-is-a-compare-and-set.test.ts` (1) + `repl-supervision.test.ts` (4 — the watchdog itself) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

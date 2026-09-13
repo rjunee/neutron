@@ -1394,23 +1394,57 @@ export function fenceLostSession(
   log(`row ${sessionKey.slice(0, 32)}: ${reason}`)
 }
 
+/**
+ * WHAT THE SUPERVISION TICK MUST DO ABOUT THIS KEY — a value it cannot proceed without
+ * handling (#539, Argus r46).
+ *
+ * THE DEFECT: the renewal fenced correctly and returned `void`, and the tick carried on with
+ * the snapshot it had loaded BEFORE the fencing. If the probe then called the new owner's
+ * session unhealthy, the losing tick emitted a crash notice, patched the winner's row and
+ * attempted a respawn — **a gateway that had just concluded it does not own the pane
+ * declaring the rightful owner crashed and respawning over it.**
+ *
+ * Round thirty-nine asked for exactly this to be impossible ("make the return value
+ * impossible to drop"). What landed was fencing that worked and a value that was still
+ * droppable, and it was dropped at the same two lines. So this is a DISCRIMINATED result and
+ * the caller switches exhaustively: a future arm cannot default into "carry on", because the
+ * compiler will name it.
+ */
+export type OwnershipTickOutcome =
+  | { readonly kind: 'proceed' }
+  | { readonly kind: 'fenced'; readonly why: string }
+
 export function renewOwnAdoptionClaim(
   registryPath: string,
   sessionKey: string,
   now: number,
   log: (msg: string) => void = defaultLog,
-): void {
+): OwnershipTickOutcome {
+  // ALREADY FENCED, AND THAT PERSISTS ACROSS TICKS. The fence removes the session from the
+  // pool, so a later tick would find nothing to renew, return `proceed`, and go on to probe
+  // and actuate a row that now belongs to somebody else — the same destructive path one tick
+  // later. A fenced key is not this gateway's to supervise until a construction of this
+  // substrate reconciles it.
+  const fenced = fencedKeys.get(sessionKey)
+  if (fenced !== undefined) return { kind: 'fenced', why: fenced }
   // SCOPED TO THIS REGISTRY, for the reason the tick's own key filter already gives: `pool`
   // is module-global, so in a hosted single-process deployment this key may belong to
   // ANOTHER instance's registry. Renewing there would ask a row that has never heard of this
   // session, get `not-ours`, and print the takeover sentence — a loud, alarming, false
   // report of a takeover that did not happen, on every tick.
-  if (supervisedBySessionKey.get(sessionKey)?.replRegistryPath !== registryPath) return
+  if (supervisedBySessionKey.get(sessionKey)?.replRegistryPath !== registryPath) {
+    return { kind: 'proceed' }
+  }
   const pooled = pool.get(sessionKey)
-  if (pooled === undefined) return
+  if (pooled === undefined) return { kind: 'proceed' }
   const session = Bun.peek(pooled) as ReplSession | undefined
-  if (session === undefined) return
+  if (session === undefined) return { kind: 'proceed' }
   renewClaimForSession(registryPath, sessionKey, session, now, log)
+  // RE-READ AFTER THE ATTEMPT, not inferred from it: `renewClaimForSession` fences through
+  // two different paths (an observed takeover, and the self-deadline), and asking the fence
+  // map is the one answer that covers both without this function having to know which fired.
+  const after = fencedKeys.get(sessionKey)
+  return after === undefined ? { kind: 'proceed' } : { kind: 'fenced', why: after }
 }
 
 /**

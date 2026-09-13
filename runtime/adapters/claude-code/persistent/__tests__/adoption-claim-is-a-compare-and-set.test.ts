@@ -180,6 +180,39 @@ async function tickAt(f: Fixture, nowMs: number): Promise<void> {
   })
 }
 
+/**
+ * A tick whose probe says the REPL is DEAD, with every actuation it might take captured.
+ *
+ * THE PROBE'S VERDICT IS WHAT TURNS A FENCED TICK FROM INERT INTO DESTRUCTIVE, and every
+ * existing fencing case pinned the probe healthy — so the whole class was invisible: a tick
+ * that has just concluded it does not own the pane would otherwise emit a crash notice, patch
+ * the winner's row and respawn over it.
+ */
+async function unhealthyTickAt(
+  f: Fixture,
+  nowMs: number,
+): Promise<{ crashes: string[]; alerts: string[]; results: Array<{ action: string; respawned: boolean }> }> {
+  const crashes: string[] = []
+  const alerts: string[] = []
+  const options = {
+    ...f.options,
+    onChildCrash: async (n: { sessionKey: string }) => {
+      crashes.push(n.sessionKey)
+    },
+  } as unknown as PersistentReplSubstrateOptions
+  const results = await runReplWatchdogTick(options, {
+    now: () => nowMs,
+    // DEAD in both of the ways the probe can say so, because `detectReplWedged` needs the
+    // combination to reach a wedge verdict rather than an inconclusive one.
+    healthProbe: async () => false,
+    isPidAlive: () => false,
+    postAlert: (text: string) => {
+      alerts.push(text)
+    },
+  })
+  return { crashes, alerts, results: results.map((r) => ({ action: r.action, respawned: r.respawned })) }
+}
+
 /** The gateway owns this key, which is what makes the tick visit it. */
 function supervise(f: Fixture): void {
   supervisedBySessionKey.set(KEY, {
@@ -784,5 +817,70 @@ describe('a lease holder stops on its OWN evidence, without observing the winner
     expect(await pool.get(KEY)).toBe(session)
     child?.push('an ordinary screen')
     expect(child?.screensDelivered).toEqual(['an ordinary screen'])
+  })
+})
+
+
+describe('a FENCED key is no longer this gateway\'s to supervise', () => {
+  /**
+   * ARGUS r46, and the second instance of "the caller ignored it" at the same two lines.
+   *
+   * The renewal fenced correctly and returned `void`; the tick carried on with the snapshot
+   * it had loaded BEFORE the fencing. If the probe then reported the pane unhealthy, the
+   * losing tick emitted a crash notice, patched the winner's row and attempted a respawn —
+   * **a gateway that had just concluded it does not own the pane declaring the rightful owner
+   * crashed and respawning over it.** Round thirty-nine asked for that to be impossible; what
+   * landed was fencing that worked and a value that was still droppable.
+   *
+   * Every existing fencing case pinned the probe HEALTHY, which is exactly why this was
+   * invisible: the probe's verdict is what turns a fenced tick from inert into destructive.
+   */
+  it('a fenced key with an UNHEALTHY probe raises nothing, patches nothing and respawns nothing', async () => {
+    // `first_ready_at` WELL IN THE PAST, because without it `decideWedgeAction` answers
+    // `ignore: never-ready` and the tick does nothing for reasons that have nothing to do with
+    // fencing — a control that cannot act proves nothing about a guard that stops it acting.
+    const f = fixture({ first_ready_at: Date.now() - 600_000 })
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const aSession = await pool.get(KEY)
+    expect(aSession).toBeDefined()
+
+    // B takes the row over legitimately; A's next renewal observes it and fences.
+    resetBootAdoptionForTests()
+    const t1 = t0 + ADOPTION_CLAIM_TAKEOVER_MS + 1
+    expect(
+      (await pass(f, { now: () => t1, claimantLiveness: () => 'unknown', claimantPid: process.pid + 1 }))
+        .kind,
+    ).toBe('adopted')
+    renewClaimForSession(f.registryPath, KEY, aSession as ReplSession, t1 + 1_000, () => {})
+    const winnersRow = readFileSync(f.registryPath, 'utf8')
+
+    // THE TICK RUNS WITH A DEAD-LOOKING PANE. Before r46 this is where the losing gateway
+    // declared the winner crashed.
+    const { crashes, alerts, results } = await unhealthyTickAt(f, t1 + 2_000)
+
+    // NOTHING WAS RAISED and nothing was actuated for this key.
+    expect(crashes).toEqual([])
+    expect(alerts).toEqual([])
+    expect(results.filter((r) => r.respawned)).toEqual([])
+    // AND THE WINNER'S ROW IS BYTE-IDENTICAL — no patch, no respawn stamp, nothing.
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(winnersRow)
+  })
+
+  it('...and an UNFENCED key with the same unhealthy probe still acts', async () => {
+    // THE POSITIVE CONTROL, and its second job is the one that matters: a guard that fired on
+    // every tick would pass the case above and disable the watchdog for every healthy
+    // gateway — turning a two-owner fix into a no-supervision bug.
+    const f = fixture({ first_ready_at: Date.now() - 600_000 })
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+
+    const { crashes, results } = await unhealthyTickAt(f, t0 + 1_000)
+
+    // The watchdog still sees a dead REPL and still acts on it.
+    expect(crashes).toEqual([KEY])
+    expect(results.some((r) => r.action !== 'ignore')).toBe(true)
   })
 })

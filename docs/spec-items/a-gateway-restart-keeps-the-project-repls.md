@@ -312,6 +312,19 @@ it must not swallow.
       field-for-field; and an ordinary spawn claiming, serving and giving both back on exit)
       and `__tests__/pane-ownership-is-one-fact.test.ts` (no module outside the funnel writes
       either field, with a positive control so the check cannot go vacuous).
+- [ ] **A FENCED KEY IS NO LONGER THIS GATEWAY'S TO SUPERVISE.** The supervision tick cannot
+      proceed past a renewal that fenced: the renewal returns a discriminated outcome and the
+      tick switches exhaustively, so a future arm cannot default into "carry on". Before this,
+      the tick discarded that answer and probed with the snapshot loaded before the fencing —
+      and if the probe called the pane unhealthy, the losing gateway emitted a crash notice,
+      patched the WINNER's row and attempted a respawn over it. The boundary is before the
+      probe, because the probe's verdict is what turns a fenced tick from inert into
+      destructive; and a fenced key stays out of supervision on every later tick too, not just
+      the one that fenced it.
+      *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` — a fenced key with
+      an UNHEALTHY probe raises no crash notice, no alert and no respawn, and the winner's row
+      is byte-identical afterwards; with an unfenced key under the same unhealthy probe still
+      alerting and acting as the control.
 - [ ] **A LEASE HOLDER STOPS ON ITS OWN EVIDENCE, WITHOUT OBSERVING THE WINNER.** Fencing
       only when a renewal answers "not ours" made safety depend on READING the other
       gateway's marker — which cannot work, because the same failure that costs a lease (an

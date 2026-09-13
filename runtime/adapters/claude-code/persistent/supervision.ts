@@ -494,7 +494,42 @@ export async function runReplWatchdogTick(
     //   - and a gateway wedged badly enough that this loop stops running loses its claims.
     //     That is the correct outcome and not an accident: a gateway that cannot tick cannot
     //     serve that REPL either, and the pane is better off adopted by one that can.
-    renewOwnAdoptionClaim(registryPath, sessionKey, now)
+    //
+    // AND THE ANSWER IS HANDLED EXHAUSTIVELY (Argus r46). This call used to return `void`, so
+    // the body below ran even when the renewal had just FENCED this key — probing with the
+    // snapshot loaded before the fencing, and, if that probe called the new owner's session
+    // unhealthy, emitting a crash notice, patching the winner's row and attempting a respawn.
+    // A gateway that had just concluded it does not own the pane would declare the rightful
+    // owner crashed and respawn over it. The switch is exhaustive so a future arm cannot
+    // default into "carry on": the compiler names it instead.
+    const ownership = renewOwnAdoptionClaim(registryPath, sessionKey, now)
+    switch (ownership.kind) {
+      case 'fenced':
+        // NOTHING BELOW RUNS FOR THIS KEY. Not "probe but do not act": the probe's own
+        // verdict is what turns a fenced tick from inert into destructive, so the boundary is
+        // before it.
+        continue
+      case 'proceed':
+        break
+      default: {
+        const unreachable: never = ownership
+        throw new Error(
+          `supervision: unhandled ownership outcome ${JSON.stringify(unreachable)} for ${sessionKey.slice(0, 32)}`,
+        )
+      }
+    }
+    // STILL VALID AFTER A SUCCESSFUL RENEWAL, enumerated rather than assumed (r31's
+    // per-structure question, applied to a control-flow boundary):
+    //   - `record` — the pre-loop snapshot. A renewal writes ONLY `adoption_claim_at` and
+    //     `adoption_claim_pid`, and nothing below reads either: the probe uses pid /
+    //     devchannel_port / sessionId, `decideWedgeAction` uses first_ready_at, capped_at,
+    //     respawn_in_flight_at and last_respawn_at, and the crash sink uses child_generation
+    //     and child_crash_notified_at. So the snapshot is stale only in fields nobody here
+    //     consults.
+    //   - the POOLED SESSION — read below through `pool`, and a fence removes it; unreachable
+    //     after `continue`.
+    //   - `keyOptions` — `supervisedBySessionKey` is not touched by fencing, and a fenced key
+    //     never reaches it.
     const record = registry[sessionKey]
     const probe = await probeReplLiveness(sessionKey, record, healthProbe, isPidAlive)
     const verdict = detectReplWedged(probe)
