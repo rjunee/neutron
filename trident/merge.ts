@@ -2731,11 +2731,34 @@ async function arbitrateConflict(
   // construction rather than by convention. The ref names live here rather than in the
   // question (round 17); both are folded through `foldRefName`.
   const assembled = assembleEvidence(
+    // REPOSITORY-AUTHORED, END TO END. Not one untrusted value is interpolated here, which is
+    // what lets the prompt call every unprefixed line its own (#541 round 31).
     `Rebasing \`${safeBranch}\` onto \`${safeBase}\`. ` +
-      `Conflicted files (markers still present in your cwd): ${files}. The resolver was ` +
-      `asked to keep both intents and stage the result; it reported instead: ` +
-      `"${shortened.fold(ctx.resolver_question)}".`,
+      `Conflicted files (markers still present in your cwd): ${files}.`,
     [
+      {
+        // THE RESOLVER'S MESSAGE IS QUOTED EVIDENCE, NOT PREAMBLE (#541 round 31).
+        //
+        // It used to be interpolated into the sentence above, inside quote MARKS — which are
+        // punctuation, not a boundary — on a line carrying no `|` prefix, immediately after
+        // `EVIDENCE:`. The prompt tells the judge that every line beginning with `|` is content
+        // this repository did not author, and duly prefixes `run.task`; this value got the
+        // framing rule applied to neither.
+        //
+        // AND IT IS THE MORE ATTACKER-CONTROLLED OF THE TWO. `run.task` is card text; this is
+        // MODEL-AUTHORED PROSE FROM A CREDENTIALED, WRITE-CAPABLE AGENT. Folding removes what
+        // can end or reorder a line and does nothing to INTENT — which is the conclusion this
+        // branch already reached twice when it DELETED the guidance channel rather than
+        // sanitising it, because filtering a sentence for intent is not a thing that can be
+        // done. The value that reasoning was about then went into the prompt unquoted.
+        //
+        // Its own heading names the party, so the judge cannot mistake whose words these are,
+        // and `quoteAll` puts every line of it behind the marker. The residual is unchanged and
+        // is the real guarantee: one option id, no tools, nothing written.
+        heading:
+          "WHAT THE RESOLVER SAID WHEN IT GAVE UP — its own words, not this repository's. It was asked to keep both intents and stage the result; it reported instead:",
+        part: { kind: 'present', text: quoteAll(ctx.resolver_question) },
+      },
       {
         heading: 'THE CONFLICT (`-` is the base\'s version, `+` is the branch\'s):',
         part: { kind: 'present', text: hunks.body },

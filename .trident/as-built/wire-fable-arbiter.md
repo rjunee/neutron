@@ -1322,6 +1322,7 @@ four separate defects on this branch were a real bound on the wrong quantity.**
 | 3 | `isBinaryNumstat` | `split('\n')`, `trim()`, `split('\t')` | **not on the evidence path**: reads git's numstat to CLASSIFY; produces no evidence text |
 | 4 | `unmergedStages` | `split('\u0000')`, `indexOf`, `slice` | **not on the evidence path**: parses the index into a stage/sha map used for classification and blob lookup; the section label uses the CALLER's path, not this one |
 | 5 | section label | `shortened.fold(path)` | **routed** through the truncation channel |
+| 18 | the resolver's escalation message | was interpolated into the PREAMBLE, unquoted | **its own quoted section** (round 31): `quoteAll`, under a heading naming the party. Lossless, so nothing to route |
 | 6 | section label | `QUOTE.trim()` | **lossless**: operates on a repo-authored constant (`'\| '`), never on evidence |
 | 7 | two-sided body | `res.stdout.trim().length > 0` | **lossless**: the trim is in the PREDICATE only; the value rendered is `res.stdout`, untrimmed |
 | 8 | `conflictEvidence` | `sections.join('\n')` | **lossless**: joins sections this file built |
@@ -1628,6 +1629,44 @@ drives both `git log` failure shapes and the over-budget shapes to not-asked). W
 that the contract now agrees with the code it sits above — **a docblock is the instruction a
 future author follows, and this one was instructing them to undo the PR.**
 
+### ROUND 31 — the prompt claimed a boundary one of its own values crossed
+
+The resolver's escalation message was interpolated into the evidence **preamble** — inside quote
+MARKS, which are punctuation and not a boundary — on a line carrying no `|` prefix, immediately
+after `EVIDENCE:`. The prompt tells the judge that every line beginning with `|` is content this
+repository did not author, and prefixes `run.task` accordingly. **The framing rule was applied to
+one untrusted scalar and not the other.**
+
+**And it was the more attacker-controlled of the two.** `run.task` is card text; this is
+**model-authored prose from a credentialed, write-capable agent**. Folding removes what can end
+or reorder a line and does nothing to intent — which is the conclusion this branch reached twice
+when it DELETED the guidance channel rather than sanitising it, *because filtering a sentence
+for intent is not a thing that can be done*. `arbiter-prompt.ts` says so in as many words, and
+then the value that reasoning was about went in unquoted.
+
+It now has **its own section, under a heading that names the party** — so the judge cannot
+mistake whose words these are — with every line behind the marker. The residual is unchanged and
+is the real guarantee: one option id, no tools, nothing written.
+
+**The test asserts the structural property, not the absence of one sentence.** Every untrusted
+scalar is driven at once with a distinct marker — resolver message, task, path, commit subject,
+ref name — and the assertion is that no line of the evidence block carrying a marker is
+unprefixed. A scalar added here later and left unquoted fails as soon as anyone drives it, which
+a test naming one sentence could not do.
+
+**One deliberate exception, and the mutation made me prove its basis rather than assert it.**
+Ref names appear in repository-authored headings without a prefix. That is sound because
+`foldRefName` collapses every whitespace and forgery codepoint to `?` — a character git's own ref
+rules forbid — so the value arrives as a SINGLE TOKEN, and a token with no whitespace cannot
+forge prose, a heading, or a line. My first fixture used `feat-ZZBRANCHZZ`, which has no
+whitespace, so it could not tell that fold from one that preserves it; **M137 passed against a
+marker that could not exercise the property the exemption depends on**. The marker now carries
+whitespace, and the test asserts the rendered name has none.
+
+**Four mutations:** the question back in the unquoted preamble; the section present but
+unquoted; the heading no longer attributing the words; and ref names no longer folded to a token
+— the last red only after the fixture was fixed.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1891,7 +1930,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and thirty-three mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and thirty-seven mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
