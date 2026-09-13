@@ -274,6 +274,18 @@ failed OPEN at the arm that mattered. A sentence that is true of one position an
 another is not a rounding error: it is the thing that stops the next reader from checking. It now
 names the position.
 
+**Where the new refusal actually lands, read from the three consumers rather than assumed.**
+`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2741`), the stranded-run
+ahead count (`:3337`) and the mutation gate's blast radius (`:5125`) — on all three a throw
+propagates and fails the step, which is the direction wanted: no listing beats a listing against
+a base nobody established. The fourth caller (`:4485`, the stage-1 test-strategy block) is
+already inside a `try`/`catch` that sets `test_strategy = null`, so a probe that cannot answer
+now DROPS the strategy block instead of computing one against a possibly-stale base. That is
+also fail-closed, and it is stated here because the symptom a future reader will see is an
+absent block, not an error. No consumer catches the refusal and substitutes a base of its own —
+checked: there is one `return 'main'` in the harness (`merge.ts:201`, `detectBaseBranch`'s
+default) and it produces a NAME that still goes through this binding.
+
 **One thing this round measured and deliberately did NOT fix.** Thirty rounds of edits have
 moved `inner-workflow.mjs` by roughly two hundred lines, and citations into it from files this
 branch does not touch have drifted with it — the CI-rollup pair cited in `GLOSSARY.md:176` as
