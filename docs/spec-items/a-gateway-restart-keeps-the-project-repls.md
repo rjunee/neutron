@@ -284,6 +284,19 @@ it must not swallow.
       point that does not consume the outcome), and
       `gateway/wiring/__tests__/build-llm-call-substrate.test.ts` (the credential is NOT
       cooled, asserted at the surface that spends the money, with a genuine-429 control).
+- [ ] **A CLAIM PRECEDES CAPABILITY, NOT PUBLICATION.** An adopted pane's wrapper is blind and
+      mute until its claim is confirmed: no screen is recorded, primed or scanned, so no
+      detector can answer a prompt on a pane another gateway owns (priming does not cover this
+      — it latches the FIRST screen, and the hazard is a fresh rising edge during the race). A
+      fresh spawn reserves the session KEY under the registry lock before `PtyHost.spawn` is
+      called, so the loser never starts a `claude --resume` at all — killing it afterwards
+      would not unwrite what it had already appended to the transcript.
+      *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` (a fresh actionable
+      prompt delivered at attach time while the loser is mid-race: it sends no key and takes no
+      screen, while the winner's priming line shows the same screen WAS delivered) and
+      `__tests__/pane-handle-persistence.test.ts` (the loser never calls `PtyHost.spawn` — the
+      spawn COUNT, not the cleanup — with an uncontended spawn and a dead reserver's expired
+      reservation as controls, and a failed first spawn leaving the key usable).
 - [ ] **EVERY SESSION THAT OWNS A PANE CONTENDS FOR IT, HOWEVER IT CAME TO EXIST.** A fresh
       spawn CONTENDS for the claim in the same write that records the pane handle, through the
       same predicate the adoption compare-and-set uses — writing a claim without contending

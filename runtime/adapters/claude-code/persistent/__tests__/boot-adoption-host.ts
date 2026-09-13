@@ -60,6 +60,16 @@ export class FakeAdoptableHost implements AdoptableHost {
   inspectQueue: HandleInspection[] | undefined
   /** Every `inspectHandle` call, so a case can assert the re-check happened at all. */
   readonly inspections: string[] = []
+  /**
+   * A SCREEN THE PANE RENDERS THE MOMENT A WRAPPER ATTACHES, before anyone calls
+   * `beginOutput`.
+   *
+   * The instrument for the r47 ordering invariant: a live pane is rendering all the time, so
+   * a wrapper that attaches during a claim race can be handed a FRESH actionable prompt
+   * before it learns it lost. Delivering only through `beginOutput` would make the handler's
+   * own gate untestable — and the handler is where a screen can actually be ANSWERED.
+   */
+  deliverOnAttach: string | undefined
   /** Make `attach` reject. */
   attachError: Error | undefined
   /** Make `closeHandle` reject — a close that closes nothing. */
@@ -222,6 +232,8 @@ export class FakeAdoptableHost implements AdoptableHost {
       },
     }
     this.attached.push(child)
+    // BEFORE `beginOutput`, deliberately — see `deliverOnAttach`.
+    if (this.deliverOnAttach !== undefined) opts.onScreen?.(this.deliverOnAttach)
     return child
   }
 

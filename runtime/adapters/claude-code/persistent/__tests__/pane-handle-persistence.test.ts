@@ -50,10 +50,18 @@ function scratch(): string {
 /** Kills observed on children this host handed out — the observable for "the spawn
  *  refused AND cleaned up after itself" rather than "the spawn refused". */
 const killsByHandle: string[] = []
+/** Every `PtyHost.spawn` this file's hosts were asked for. The r47 assertion surface: what
+ *  matters is that the loser NEVER STARTED a process, not that one was tidied up after. */
+const spawnCalls: string[] = []
 
-function echoHost(paneHandle?: string): PtyHost {
+function echoHost(paneHandle?: string, onSpawn?: () => void): PtyHost {
   return {
     async spawn(argv: string[]): Promise<PtyChild> {
+      spawnCalls.push(paneHandle ?? '(no handle)')
+      // FIRES INSIDE THE SPAWN, which is the only point between the r47 reservation and the
+      // ownership write that a case can reach — the seam for "the lock worked long enough to
+      // reserve and then stopped".
+      onSpawn?.()
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
@@ -140,6 +148,7 @@ function readRow(path: string, key: string): ReplRegistryRecord | undefined {
 afterEach(async () => {
   setFlockImplForTests(undefined)
   killsByHandle.length = 0
+  spawnCalls.length = 0
   await shutdownAllPersistentRepls()
   for (const s of servers.splice(0)) {
     try {
@@ -533,7 +542,7 @@ describe('an ownership transition that could not hold the lock writes NOTHING', 
    * `withOwnedRegistry` and these cases pin what each site DOES about it, because "nothing
    * was written" is only half of a correct answer.
    */
-  it('a spawn that cannot RECORD its pane refuses and ends the child it made', async () => {
+  it('a spawn that cannot RESERVE its key refuses before starting anything', async () => {
     // THE DISPOSITION, stated rather than implied. A durable pane whose ownership was
     // never recorded is a REPL nothing can find again AND one any other gateway may claim
     // while this one serves it. Degrading — the policy for every other field on this row —
@@ -555,8 +564,14 @@ describe('an ownership transition that could not hold the lock writes NOTHING', 
     const err = events.find((e) => e.kind === 'error')
     const message = err?.kind === 'error' ? err.message : ''
 
-    // THE DISPOSITION: refused, and said why.
-    expect(message).toMatch(/could not be RECORDED as owned/i)
+    // THE DISPOSITION, AND IT MOVED EARLIER AT r47. With no lock the SPAWN RESERVATION fails
+    // first, so this turn now refuses BEFORE any process exists — strictly better than
+    // spawning one and killing it, and the reason names the reservation rather than the
+    // ownership write it never reached.
+    expect(message).toMatch(/could not be RESERVED/i)
+    expect(message).toMatch(/Nothing was started/i)
+    // NO CHILD WAS EVER CREATED, which is the point: nothing to kill.
+    expect(killsByHandle).toEqual([])
     // AND IT CARRIES ITS CLASS (r42). Unstamped, this arrives at the composer as a bare
     // retryable error, which maps to a synthetic 429 and cools the credential the caller
     // just picked — a local registry-lock failure spending provider capacity. The
@@ -566,12 +581,35 @@ describe('an ownership transition that could not hold the lock writes NOTHING', 
     expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
     // Retryable: the lock may be free on the next turn.
     expect(err?.kind === 'error' && err.retryable).toBe(true)
-    // AND CLEANED UP: the child it made is ended, not left running unrecorded.
-    expect(killsByHandle).toContain('w9:p-lock')
     // AND NOTHING WAS WRITTEN. The whole file, because what an unguarded save costs is
     // every OTHER key in it, not this one.
     expect(readFileSync(registryPath, 'utf8')).toBe(before)
     expect(readRow(registryPath, key)).toBeUndefined()
+  })
+
+  it('a spawn that RESERVED but could not RECORD ownership kills the child it made', async () => {
+    // THE r41 DISPOSITION, still reachable and still required — just no longer the FIRST thing
+    // a lockless spawn meets. Here the lock works long enough to reserve the key and fails
+    // before the ownership write, which is a transient failure rather than a configuration
+    // one: a child now exists, holds a pane, and cannot be recorded as owning it. A durable
+    // pane whose ownership is unrecorded is a REPL nothing can find again and one any other
+    // gateway may claim, so it is ENDED and the turn refuses.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(
+      // The lock breaks INSIDE the spawn — after the reservation, before the ownership write.
+      echoHost('w9:p-late-lock', () => setFlockImplForTests(() => 1)),
+      registryPath,
+    )
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/could not be RECORDED as owned/i)
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    // AND THE CHILD IT MADE IS ENDED.
+    expect(killsByHandle).toContain('w9:p-late-lock')
   })
 
   it('...and with the lock held the same spawn serves normally', async () => {
@@ -629,5 +667,167 @@ describe('an ownership transition that could not hold the lock writes NOTHING', 
 
     expect(readRow(registryPath, key)?.pane_handle).toBeUndefined()
     expect(readRow(registryPath, key)?.adoption_claim_by).toBeUndefined()
+  })
+})
+
+describe('a spawn RESERVES the session key before any process exists', () => {
+  /**
+   * ARGUS r47, second citation of the ordering invariant (stated in full at the top of
+   * `boot-adoption.ts`).
+   *
+   * Round forty-five made the fresh spawn CONTEND — but only after the process existed, which
+   * is all a pane claim can do, since a pane cannot be claimed before it is created. So two
+   * `claude --resume` processes still ran against one transcript through startup and
+   * readiness, and killing the loser afterwards does not unwrite what it appended. **The
+   * corruption this module exists to prevent is two processes resuming into one file**, not a
+   * duplicated wrapper — so the loser must never start.
+   *
+   * The assertion is therefore the SPAWN COUNT, not the cleanup.
+   */
+  it('the loser never calls PtyHost.spawn at all', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const mine = optionsFor(echoHost('w9:p-reserved'), registryPath)
+    const key = poolKeyFor(mine)
+
+    // ANOTHER GATEWAY HOLDS THE RESERVATION: a live marker, its process alive, taken a moment
+    // ago. Written by hand because the other gateway is another PROCESS — that is the whole
+    // point of a durable reservation, and a second substrate in this process would model a
+    // different thing.
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          // SCHEMA-VALID, and it has to be: a row carrying only a reservation is dropped by
+          // `readRegistryState`, and a dropped row refuses the turn before the reservation is
+          // ever consulted — the fixture would then pass for a reason unrelated to the
+          // contest. No `pane_handle`, so reconciliation answers `no-handle` and the spawn
+          // path is actually reached.
+          [key]: {
+            sessionKey: key,
+            sessionId: 'cccccccc-1111-2222-3333-444444444444',
+            cwd: '/tmp/neutron-handle',
+            channelName: 'neutron-904a860d597f559a30a30e0748dcec8e',
+            has_session: false,
+            spawn_reservation_by: 'the-other-gateway',
+            spawn_reservation_at: Date.now(),
+            spawn_reservation_pid: process.pid,
+          },
+        },
+        null,
+        2,
+      ),
+    )
+    const options = {
+      ...mine,
+      // Two gateways, two pids — otherwise the same-process exception (a retry must not refuse
+      // itself) makes the contest vacuous.
+      claimantPid: process.pid + 1,
+      claimantLiveness: () => 'alive' as const,
+    } as PersistentReplSubstrateOptions
+
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
+    }
+
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/has RESERVED this session key/i)
+    expect(err?.kind === 'error' && err.message).toMatch(/Nothing was started/i)
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    expect(err?.kind === 'error' && err.retryable).toBe(true)
+    // THE ASSERTION THAT CARRIES IT: no process was ever started, so nothing appended to the
+    // transcript. "The loser was cleaned up" would be a strictly weaker claim.
+    expect(spawnCalls).toEqual([])
+    expect(killsByHandle).toEqual([])
+  })
+
+  it('...and an uncontended spawn still spawns', async () => {
+    // THE POSITIVE CONTROL. A reservation that refused everything would pass the case above
+    // and stop every REPL starting — the feature, switched off by its own guard.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-free'), registryPath)
+    const text = await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(text).toContain('echo')
+    expect(spawnCalls).toEqual(['w9:p-free'])
+    // AND THE RESERVATION IS GIVEN BACK, so the next turn is not refused by our own leftovers.
+    const row = readRow(registryPath, poolKeyFor(options))
+    expect(row?.spawn_reservation_by).toBeUndefined()
+    expect(row?.spawn_reservation_at).toBeUndefined()
+  })
+
+  it('a reservation whose holder DIED does not wedge the key', async () => {
+    // The TTL's reason for existing, and the pid path that makes the common case instant. A
+    // gateway that dies between reserving and spawning leaves a marker nothing will clear; if
+    // that blocked the key forever, a crash would make a transcript permanently unservable —
+    // worse than the race being prevented.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const mine = optionsFor(echoHost('w9:p-after-death'), registryPath)
+    const key = poolKeyFor(mine)
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          [key]: {
+            sessionKey: key,
+            sessionId: 'dddddddd-1111-2222-3333-444444444444',
+            cwd: '/tmp/neutron-handle',
+            channelName: 'neutron-904a860d597f559a30a30e0748dcec8e',
+            has_session: false,
+            spawn_reservation_by: 'a-gateway-that-never-came-back',
+            spawn_reservation_at: Date.now(),
+            spawn_reservation_pid: 4242,
+          },
+        },
+        null,
+        2,
+      ),
+    )
+    const options = {
+      ...mine,
+      claimantPid: process.pid + 1,
+      // ITS PROCESS IS PROVABLY GONE, which is a finding rather than a wait.
+      claimantLiveness: () => 'gone' as const,
+    } as PersistentReplSubstrateOptions
+
+    const text = await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(text).toContain('echo')
+    expect(spawnCalls).toEqual(['w9:p-after-death'])
+  })
+})
+
+describe('a failed first spawn costs a turn, not the key', () => {
+  it('leaves no reservation stub behind, so the next turn still works', async () => {
+    // A REGRESSION I NEARLY SHIPPED, and it is worth its own case because its failure mode is
+    // permanent. A reservation taken on a key with no row yet has to create a row to carry it,
+    // and a row carrying only a reservation is SCHEMA-INVALID: `readRegistryState` drops it,
+    // and a dropped row makes reconciliation answer `undecided`, which refuses every later
+    // turn for that key — with no TTL to end it. So the release removes the stub rather than
+    // leaving it, and this case is what tells the difference.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const throwing: PtyHost = {
+      async spawn(): Promise<PtyChild> {
+        throw new Error('the host could not start a child this time')
+      },
+    }
+    const failing = optionsFor(throwing, registryPath)
+    const key = poolKeyFor(failing)
+
+    let firstFailed = false
+    try {
+      await drain(createPersistentReplSubstrate(failing).start(spec('one')))
+    } catch {
+      firstFailed = true
+    }
+    expect(firstFailed).toBe(true)
+    // NOTHING WEDGING THE KEY: no stub row, and in particular no reservation.
+    const after = readRow(registryPath, key)
+    expect(after?.spawn_reservation_by).toBeUndefined()
+
+    // AND THE NEXT TURN SERVES — the assertion that would fail if a dropped stub survived.
+    const working = optionsFor(echoHost('w9:p-after-failure'), registryPath)
+    expect(poolKeyFor(working)).toBe(key)
+    const text = await drain(createPersistentReplSubstrate(working).start(spec('two')))
+    expect(text).toContain('echo')
   })
 })

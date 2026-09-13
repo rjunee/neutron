@@ -235,6 +235,49 @@ export const SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG
  * replacement. A claim stamped with our pid cannot belong to a competitor: pids are unique
  * per host, and a same-pid claim on this key can only be our own earlier session for it.
  */
+/**
+ * #539 r47 — HOW LONG A SPAWN RESERVATION HOLDS A SESSION KEY, derived from the claim's own
+ * takeover window.
+ *
+ * Derived rather than chosen, for the reason the self-fencing deadline is: a reservation must
+ * comfortably outlive the slowest spawn (herdr connect, layout, readiness handshake) and must
+ * not outlive the window in which another gateway would be entitled to take the pane anyway —
+ * so the claim's window is exactly the right ceiling, and one constant cannot be reordered
+ * against itself by a later edit.
+ *
+ * A reservation whose holder dies expires on this deadline, and — like the claim — a holder
+ * whose PROCESS is provably gone expires at once rather than waiting it out.
+ */
+export const SPAWN_RESERVATION_TTL_MS = ADOPTION_CLAIM_TAKEOVER_MS
+
+/**
+ * Is somebody else's spawn reservation on this key still live (#539 r47)?
+ *
+ * The same three-part rule as {@link paneClaimBlocksUs}, over the reservation's own fields:
+ * ours never blocks us, our own process's never blocks us (a retry after a spawn that died
+ * without releasing must not refuse itself), a provably dead holder never blocks us, and
+ * otherwise the TTL decides.
+ */
+export function spawnReservationBlocksUs(
+  row: { spawn_reservation_at?: number; spawn_reservation_by?: string; spawn_reservation_pid?: number },
+  args: {
+    readonly ours: string
+    readonly now: number
+    readonly ourPid: number
+    readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+  },
+): boolean {
+  const by = row.spawn_reservation_by
+  if (by === undefined || by === args.ours) return false
+  const pid = row.spawn_reservation_pid
+  if (pid !== undefined && pid === args.ourPid) return false
+  const at = row.spawn_reservation_at
+  const recent = at !== undefined && args.now - at < SPAWN_RESERVATION_TTL_MS
+  if (!recent) return false
+  const liveness = pid === undefined ? 'unknown' : (args.liveness ?? probeClaimantLiveness)(pid)
+  return liveness !== 'gone'
+}
+
 export function paneClaimBlocksUs(
   row: { adoption_claim_at?: number; adoption_claim_by?: string; adoption_claim_pid?: number },
   args: {

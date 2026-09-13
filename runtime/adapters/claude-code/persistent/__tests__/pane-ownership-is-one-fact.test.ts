@@ -47,7 +47,18 @@ const SUBSYSTEM = join(HERE, '..')
 /** The one module allowed to write these fields. */
 const FUNNEL = 'repl-registry.ts'
 
-const FIELDS = ['pane_handle', 'adoption_claim_at', 'adoption_claim_by', 'adoption_claim_pid']
+const FIELDS = [
+  'pane_handle',
+  'adoption_claim_at',
+  'adoption_claim_by',
+  'adoption_claim_pid',
+  // r47 — the spawn reservation is the same kind of fact (who may touch this transcript) and
+  // is written through the same funnel, so it is covered by the same check rather than by a
+  // second one nobody would remember to extend.
+  'spawn_reservation_at',
+  'spawn_reservation_by',
+  'spawn_reservation_pid',
+]
 
 /** A write is: an object-literal key (`pane_handle:`), an assignment (`.pane_handle =`),
  *  or a rest-destructure that removes it (`pane_handle: _x, ...rest`). All three are how
@@ -68,7 +79,14 @@ function writesOf(source: string): string[] {
 }
 
 /** The four named transitions. A call to any of them IS an ownership write. */
-const TRANSITIONS = ['ownPane', 'disownPane', 'handOverPane', 'refreshPaneClaim']
+const TRANSITIONS = [
+  'ownPane',
+  'disownPane',
+  'handOverPane',
+  'refreshPaneClaim',
+  'reservePaneSpawn',
+  'releasePaneSpawnReservation',
+]
 
 /**
  * Which registry entry point encloses each transition CALL — found by walking back to the

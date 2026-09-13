@@ -62,6 +62,41 @@
  * (`adoptOrKillOrphan`), and where THAT is inconclusive it says so loudly and leaves
  * the pane alone — an unverified pane must never be closed, because it may be the
  * owner's own work under a pane id herdr reissued.
+ *
+ * ───────────────────────────────────────────────────────────────────────────────────────
+ * THE ORDERING INVARIANT — stated ONCE, cited by both paths (#539, Argus r47)
+ * ───────────────────────────────────────────────────────────────────────────────────────
+ *
+ * Rounds thirty-seven to forty-seven turned "re-adopt a REPL" into a single-owner protocol
+ * over a shared registry, one question at a time: verify, then claim, then keep the claim
+ * meaningful, then act on losing it, then cover every owner, then be safe without observing
+ * the winner, then contend rather than record — and now this, which is the one that orders
+ * all of them:
+ *
+ *     **A PROCESS MUST HOLD ITS CLAIM (or a reservation for the key) BEFORE IT BECOMES
+ *     CAPABLE OF TOUCHING THE TRANSCRIPT — not before it PUBLISHES.**
+ *
+ * "Capable" is the word that does the work, and it is earlier than it looks. Publishing —
+ * entering the pool, becoming servable — was where the claim used to sit, and by then the
+ * damage is already possible:
+ *
+ *   - AN ADOPTED PANE becomes capable at `beginOutput()` and the detector set: from that
+ *     moment a screen can be delivered and a detector can ANSWER it, so a losing claimant
+ *     could type `1`+Enter into the winner's live session. Priming does not save this — it
+ *     latches signatures present on the FIRST screen, and the hazard is a fresh rising edge
+ *     arriving during the race. So: attach (the pid is needed for the claim), then CLAIM,
+ *     and only then enable delivery and the watchers.
+ *   - A FRESH SPAWN becomes capable the instant `PtyHost.spawn` starts a
+ *     `claude --resume <id>`: that process appends to the transcript through startup and
+ *     readiness. Killing the loser afterwards does not unwrite what it appended, and the
+ *     corruption this module exists to prevent is two processes resuming into one file, not
+ *     a duplicated wrapper. A pane cannot be claimed before it exists, so the spawn path
+ *     reserves the SESSION KEY under the registry lock first, and the loser never spawns.
+ *
+ * Both reservations are the same idiom as `respawn_in_flight_at`: a marker, a holder
+ * identity, a TTL derived from the claim's own takeover window, a compare-and-set under the
+ * flock, and a fail-closed refusal when the lock was not held. And both release on every
+ * path that stops owning — which is the round-thirty-one table, one row wider.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -1733,8 +1768,10 @@ async function claimRowOrUnwind(args: {
    *  establish this one's death rather than wait it out. */
   readonly claimantPid: number
   readonly deps: BootAdoptionDeps
-  /** Install the session and answer `adopted`. Runs ONLY if the row is still ours. */
-  readonly publish: () => RowAdoptionOutcome
+  /** Install the session and answer `adopted`. Runs ONLY if the row is still ours — which
+   *  is also when the caller is permitted to enable output delivery and the detectors, so
+   *  this may be async (see the ordering invariant in the module docblock). */
+  readonly publish: () => RowAdoptionOutcome | Promise<RowAdoptionOutcome>
   /** Take everything back — pool entry, child, sink registration, watchers, pane. */
   readonly unwind: (reason: string) => Promise<RowAdoptionOutcome>
   /** Take back only OUR registrations, leaving the pane and the row exactly as they are.
@@ -1746,7 +1783,7 @@ async function claimRowOrUnwind(args: {
   // Unsupervised: there is no row, so there is nothing to race for and nothing to
   // claim. (`reconcileOwnRepl` cannot reach an adoption without a registry, so this is
   // a total-function guard rather than a live path.)
-  if (args.registryPath === undefined) return args.publish()
+  if (args.registryPath === undefined) return await args.publish()
   const registryPath = args.registryPath
   /** What the claim's critical section concluded. THREE, not a boolean: the row is ours,
    *  the row moved, or we never held the lock — and the third must not be able to reach
@@ -1909,7 +1946,7 @@ async function claimRowOrUnwind(args: {
   // THE CLAIM IS TAKEN AND NOTHING IS PUBLISHED YET — the window a second incarnation
   // must lose in. See {@link BootAdoptionDeps.afterRowClaim}.
   await args.deps.afterRowClaim?.()
-  return args.publish()
+  return await args.publish()
 }
 
 /**
@@ -2362,12 +2399,22 @@ async function adoptRow(
   const claimTakenAt = (deps.now ?? Date.now)()
 
   let primed = false
+  /** Set only when the durable claim has succeeded — the gate the ordering invariant names.
+   *  Everything that can READ the pane or WRITE to it is behind this. */
+  let claimConfirmed = false
   let child: PtyChild
   try {
     child = await host.attach(handle, {
       cwd: record.cwd,
       env: {},
       onScreen: (screen) => {
+        // THE ORDERING INVARIANT, ENFORCED AT THE HANDLER (see the module docblock). Not
+        // only by withholding `beginOutput()`: that relies on the HOST honouring the
+        // contract, and this is the one place where a screen arriving early can be ANSWERED
+        // by a detector — `1`+Enter into a session another gateway owns. Until the claim is
+        // confirmed this wrapper is blind and mute: nothing is recorded, nothing is primed,
+        // nothing is scanned.
+        if (!claimConfirmed) return
         session.ring.replace(screen)
         const now = Date.now()
         session.lastDataAt = now
@@ -2432,7 +2479,31 @@ async function adoptRow(
       label: 'boot-adoption.exit',
       registryPath,
     })
-    // Only NOW may screens flow: the scan target and the activity handle both exist.
+    // DELIVERY AND THE WATCHERS ARE NOT STARTED HERE ANY MORE (Argus r47). They are the
+    // moment this wrapper becomes CAPABLE of reading the pane and answering it, and the
+    // ordering invariant puts that after the claim, not before. They now run inside
+    // `publish` below — see the module docblock.
+  } catch (e) {
+    // A WATCHER THAT WOULD NOT START MUST NOT STRAND A LIVE CHILD. Everything between
+    // the attach and the pool insert can throw — a host's `beginOutput`, a watcher
+    // whose transcript path is unreadable — and until `pool.set` runs, nothing owns
+    // this session: the next turn would spawn over a child that is attached,
+    // registered and invisible. Unwind, close, and say what happened.
+    return await unwind(
+      `wiring the adopted session failed: ${e instanceof Error ? e.message : String(e)}`,
+      child,
+    )
+  }
+
+  /**
+   * TURN THE EYES AND HANDS ON. Called ONLY after the claim has succeeded, which is what
+   * the ordering invariant requires: before this returns, a delivered screen is neither
+   * recorded nor scanned, and no detector can answer one.
+   */
+  const enableAfterClaim = (): void => {
+    claimConfirmed = true
+    // Only NOW may screens flow: the scan target and the activity handle both exist, and the
+    // row has confirmed this child is ours to drive.
     child.beginOutput?.()
 
     const projectsDir = options.projectsDir
@@ -2457,19 +2528,6 @@ async function adoptRow(
       ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
     })
 
-    // The pool insert is the LAST thing, and it is now inside the row claim below:
-    // being in the pool is what makes this session servable, and it must not become
-    // servable until the durable row has been confirmed to still name THIS child.
-  } catch (e) {
-    // A WATCHER THAT WOULD NOT START MUST NOT STRAND A LIVE CHILD. Everything between
-    // the attach and the pool insert can throw — a host's `beginOutput`, a watcher
-    // whose transcript path is unreadable — and until `pool.set` runs, nothing owns
-    // this session: the next turn would spawn over a child that is attached,
-    // registered and invisible. Unwind, close, and say what happened.
-    return await unwind(
-      `wiring the adopted session failed: ${e instanceof Error ? e.message : String(e)}`,
-      child,
-    )
   }
 
   // CLAIM THE ROW, THEN PUBLISH — one act, and the only place this function can answer
@@ -2488,7 +2546,7 @@ async function adoptRow(
     now: claimTakenAt,
     claimantPid: deps.claimantPid ?? process.pid,
     deps,
-    publish: () => {
+    publish: async () => {
       // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive
       // inside it; publishing into a pool that has already been drained would reinstall
       // this key behind the teardown's back.
@@ -2498,6 +2556,17 @@ async function adoptRow(
       // CONFIRMED AT THE CLAIM. The compare-and-set above succeeded, which is the same
       // evidence a renewal produces — so the self-fencing deadline runs from here.
       session.paneClaimConfirmedAt = claimTakenAt
+      // AND ONLY NOW IS THIS WRAPPER ALLOWED TO SEE OR TOUCH THE PANE (Argus r47). A
+      // watcher that will not start still must not strand a live child, so the same unwind
+      // the pre-claim wiring had applies — it just runs on the other side of the claim now.
+      try {
+        enableAfterClaim()
+      } catch (e) {
+        return await unwind(
+          `wiring the adopted session failed after the claim: ${e instanceof Error ? e.message : String(e)}`,
+          child,
+        )
+      }
       pool.set(sessionKey, Promise.resolve(session))
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
     },

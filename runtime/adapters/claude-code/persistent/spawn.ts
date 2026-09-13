@@ -14,7 +14,7 @@ import { herdrHost } from './herdr-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { SubstrateClassed } from './classify-spawn-error.ts'
-import { paneClaimBlocksUs } from './signatures.ts'
+import { paneClaimBlocksUs, spawnReservationBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
@@ -32,6 +32,8 @@ import {
   getRecord,
   ownPane,
   patchRecord,
+  releasePaneSpawnReservation,
+  reservePaneSpawn,
   withOwnedRegistry,
   withRegistry,
 } from './repl-registry.ts'
@@ -355,435 +357,479 @@ async function spawnSession(
   // concurrent respawn that already re-registered this id is not evicted by our
   // failure.
   sink.register(sessionId, session)
+  // ─── THE SPAWN RESERVATION (#539 r47) ──────────────────────────────────────────────────
+  //
+  // TAKEN BEFORE `PtyHost.spawn`, because that call is the moment this gateway becomes
+  // CAPABLE of touching the transcript: a `claude --resume <id>` appends through startup and
+  // readiness, and two of them resuming into one file is the corruption this module exists to
+  // prevent — not a duplicated wrapper, which is merely how it shows up. Contending AFTER the
+  // spawn (which is what r45 built, and all it could build with a pane claim) still lets the
+  // loser's process write. So the loser never spawns.
+  //
+  // See the ordering invariant at the top of `boot-adoption.ts`; this is its second citation.
+  const spawnReserver = randomUUID()
+  const reservationPid = options.claimantPid ?? process.pid
+  const reservation = reserveSpawnForKey(options, sessionKey, spawnReserver, Date.now(), reservationPid, {
+    sessionId,
+    cwd,
+    channelName,
+    hasSession: resume !== undefined,
+  })
+  if (reservation === 'taken' || reservation === 'unwritable') {
+    // NOTHING WAS STARTED, so there is nothing to kill and nothing to unwind except the sink
+    // registration taken one line above. The refusal carries `repl_unreconciled` like every
+    // other "this turn cannot be served here" — a key another gateway is spawning for, or a
+    // lock we could not take, is not the provider's fault.
+    sink.unregisterIf(sessionId, session)
+    throw new PaneOwnershipRefusedError(
+      `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — ` +
+        (reservation === 'taken'
+          ? 'another gateway has RESERVED this session key and is starting a REPL for it, so spawning now would ' +
+            'put two `claude --resume` processes on one transcript. Nothing was started'
+          : 'the registry lock was not acquired, so this spawn could not be RESERVED and a second gateway could ' +
+            'be starting one for the same transcript. Nothing was started') +
+        ' and this turn fails instead; it retries on the next turn.',
+    )
+  }
   // `Awaited<...>`: `PtyHost.spawn` is ASYNC under herdr — it connects, applies the
   // layout and learns the pane's pid before it can hand back a child, and `child.pid`
   // is read synchronously just below.
-  let child: Awaited<ReturnType<typeof ptyHost.spawn>>
+  // RELEASED ON EVERY PATH OUT, which is why it is a `finally` rather than a release at the
+  // sites that happen to be on the success route. A reservation left behind blocks its own
+  // key until the TTL — a bounded cost, but a self-inflicted one, and this function has many
+  // ways to fail between the spawn and the ownership write (a readiness handshake, a config
+  // write, a watcher). Once the row records ownership the claim protects the key, so the
+  // reservation has done its whole job by the time this returns either way.
   try {
-    child = await ptyHost.spawn(argv, {
-    cwd,
-    env: childEnv,
-    // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
-    // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
-    // keeps the detector falling edge working: a cleared screen arrives with nothing
-    // on it. Where the screen comes from differs (herdr polls a rendered pane; the
-    // in-process host accumulates the byte stream), and `pty-host.ts` records the one
-    // consequence — a repaint collapses under herdr and does not under a pty.
-    onScreen: (screen) => {
-      session.ring.replace(screen)
-      const now = Date.now()
-      session.lastDataAt = now
-      // F4 — feed the watchdog's live-process view: any child output is activity,
-      // so keep the ProcessRegistry entry fresh. NOTE this is `last_activity_at`
-      // ONLY — it is NOT what stuck-agent measures. Stuck is `busy_since` (an
-      // OUTSTANDING dispatched turn, marked from pool.ts), because for a
-      // request/response REPL silence between turns is the normal resting state,
-      // so output-age judged every healthy warm session stuck. Guarded no-op when
-      // no ambient registry is registered; the handle identity-guards so it only
-      // ever touches THIS child's entry.
-      liveHandle?.touch()
-      const target = scanChild
-      if (target === undefined) return
-      // Run the registered detectors against the ring and actuate the ones that
-      // fired on the rising edge (disclaimer Enter, wedged-prompt recovery, …).
-      // `scan` stamps each detector's latch BEFORE returning, so the keystroke
-      // write is fire-once even if the transport throws — a failed write can't
-      // retry next tick and double-send onto an approval prompt (invariant §4).
-      runOutputScan(session, target, options, now)
-    },
-  })
-  scanChild = child
-  session.attachChild(child)
-  // Synchronous handle mirror so a respawn can detect alive-but-wedged without
-  // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
-  childByKey.set(sessionKey, child)
-  // F4 — publish this child's PID into the watchdog's live-process view (the
-  // single PTY chokepoint serves BOTH the pooled REPL and the ephemeral/dispatch
-  // children, so ONE writer here covers every spawn site). UPSERT-safe against a
-  // respawn re-using `sessionKey`; unregistered in `child.exited` below. Guarded
-  // no-op when no ambient ProcessRegistry is registered (unit tests / LLM-less).
-  liveHandle = registerLiveProcessSafe({
-    name: sessionKey,
-    pid: child.pid,
-    tool_name: 'cc-repl',
-    meta: { session_id: sessionId, channel: channelName },
-  })
-  // Publish the handle on the session so the DISPATCH site (pool.ts) can declare
-  // a turn outstanding / settled. That outstanding-turn window — NOT this child's
-  // output age — is what stuck-agent detection measures, so an idle warm REPL
-  // between turns is correctly never stuck.
-  session.liveHandle = liveHandle
-
-  // EVERY CONSUMER THE `onScreen` CLOSURE READS IS NOW WIRED — `scanChild` (the
-  // keystroke target) and `liveHandle` (the activity touch) — so screens may start
-  // flowing. Until this call the host does not poll at all.
-  //
-  // This must be the LAST step of the wiring, and it exists because `spawn` is async:
-  // the closure above is built before `child` exists, so a host that began polling
-  // before returning could deliver the FIRST screen while `scanChild` was still
-  // undefined. That screen was dropped unscanned — and because the ring is
-  // snapshot-replace, which suppresses an unchanged screen, it was never delivered
-  // again: a startup trust prompt or approval dialog left undismissed for the life of
-  // a REPL that stayed alive and polling. `PtyChild.beginOutput` carries the full
-  // reasoning; the general form is that an `await` between a producer and its consumer
-  // opens a window for everything the producer already started.
-  child.beginOutput?.()
-
-  // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
-  // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
-  // /`rate_limit_error`) aborts the turn before `reply()`, so the substrate's
-  // `completion` never resolves and the user sees NOTHING (Ryan 2026-06-16). The
-  // watcher tails the transcript JSONL and edge-fires a "resend your last message"
-  // notice through `onDeadTurnNotice` (default: a structured stderr notice — no
-  // feature flag, ON by default). sessionId + cwd are both known here, so the
-  // `<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl` path resolves immediately
-  // (session-validation.ts layout). Resolve the transcript root the SAME way the
-  // JSONL ghost gate does (`makeJsonlExistsProbe(options.projectsDir)` below): an
-  // explicit `options.projectsDir` wins (custom / per-instance transcript root —
-  // Codex P2), then `CLAUDE_CONFIG_DIR`'s `projects` (CC writes transcripts there
-  // when `claudeConfigDir` is set), then the default `~/.claude/projects`.
-  const projectsDir = resolveTranscriptProjectsDir(options)
-  const deadTurnNotify =
-    options.onDeadTurnNotice ??
-    ((notice: DeadTurnNotice): void => {
-      process.stderr.write(
-        `[repl-api5xx] dead turn on session=${sessionId.slice(0, 8)} matched=${notice.matched} — user should resend last message\n`,
-      )
-    })
-  session.deadTurnWatcher = startApi5xxDeadTurnWatcher({
-    jsonlPath: join(projectsDir, dashifyCwd(cwd), `${sessionId}.jsonl`),
-    notify: deadTurnNotify,
-  })
-
-  // Wire process death → fail in-flight turn + evict from pool so the next
-  // start() respawns. Leaves cleanup to GC; the dev-channel SIGTERMs itself.
-  // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
-  // dying OLD child must not evict the NEW session a concurrent respawn already
-  // installed (the resume race the P2-3 regression caught).
-  wireChildExit({
-    session,
-    child,
-    sessionKey,
-    sessionId,
-    // BY GETTER, NOT BY VALUE. It happens to be assigned already on this path; it is
-    // NOT on every path (the handle needs a pid, so a caller that wires the exit
-    // before registering the pid holds `undefined` here), and a by-value capture
-    // would silently skip the crash reconciliation there. See `ChildExitWiring`.
-    liveHandle: () => liveHandle,
-    label: 'spawn.then',
-    registryPath: options.replRegistryPath,
-  })
-  } catch (e) {
-    // The spawn never produced a child, so the registration it was made for must not
-    // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
-    // already hold this session id, and evicting ITS credential would turn our failure
-    // into a second one. The configs go too — they carry the credential in plaintext.
-    sink.unregisterIf(sessionId, session)
-    unlinkSessionConfigs(session)
-    throw e
-  }
-
-  // Post-spawn assertion: child alive → /channel-ready (transport attached) →
-  // HTTP /health → /channel-bound (MCP handshake complete).
-  const assertion = await assertReplAlive(
-    { pid: child.pid },
-    {
-      isChildAlive: () => !child.hasExited(),
-      getChannelPort: () => session.channelPort,
-      hasHttpHealth: (port) => httpHealth(port),
-      // Stage 4 (channel-MCP-bound, port row #6): the dev-channel posts
-      // `/channel-bound` from `mcp.oninitialized` once claude completes the MCP
-      // handshake — the TRUE readiness gate, replacing the false-positive "no MCP
-      // server configured with that name" TUI scan (claude 2.1.186 always prints
-      // that warning even for a fully-wired, working channel).
-      isChannelBound: () => session.channelBound,
-      sleep: (ms) => Bun.sleep(ms),
-      now: () => Date.now(),
-    },
-    options.assertConfig ?? {},
-  )
-  if (!assertion.ok) {
-    if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
-    sink.unregister(sessionId)
-    // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw
-    // the TYPED error and DON'T pool.delete here — the wrapper holds the pool
-    // entry and either retries on the same key or propagates the cap, so deleting
-    // it mid-loop would orphan a successful retry's warm session. Every OTHER
-    // reason keeps the original kill-and-throw (the wrapper passes it straight
-    // through as a non-wedged failure, no retry).
-    if (assertion.reason === 'channel-wedged') {
-      // AWAIT the wedged child's exit (graceful SIGTERM→await→SIGKILL) BEFORE the
-      // wrapper launches the next attempt: on a supervised/resume spawn a
-      // SIGTERM-slow old `claude` must not overlap a new `claude --resume` on the
-      // same transcript (the one-owner-per-transcript invariant). Codex r1 [P1].
-      await terminateChild(child)
-      throw new ChannelWedgedSpawnError(sessionKey, assertion.detail)
-    }
-    child.kill()
-    pool.delete(sessionKey)
-    throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
-  }
-
-  // the legacy harness port row #13: start the warm-session size watchdog now the REPL is
-  // verified alive. It measures the POST-COMPACT JSONL size (bytes after the last
-  // `"isCompactSummary":true` marker — NEVER raw `stat.size`, or "Compact does
-  // nothing" re-fires forever) on a cadence and surfaces a Reset/Compact
-  // affordance before the transcript grows large enough to block `--resume` (the
-  // 2026-04-16 11.8 MB infinite-restart incident). `requestCompact()` actuates
-  // `escape` + `/compact` + `enter` through the same write seam the disclaimer-dismiss
-  // path uses, behind the surfaced affordance (see `requestSessionCompact`). The
-  // timer is unref'd and stopped on child exit / teardown.
-  //
-  // POLICY (gap #4): the surfaced alert alone is a dead end on Open's WS-native
-  // web chat — there is no inline keyboard and `requestSessionCompact` has no
-  // caller, so the single-owner session would just keep growing until `--resume`
-  // wedges. We therefore wire `isIdle` so the watchdog idle-gates an AUTOMATIC
-  // compaction at the critical band: it injects the SAME `escape`+`/compact` the
-  // affordance surfaces, but ONLY when no turn is in flight AND the PTY has been
-  // quiet ≥ SESSION_COMPACT_IDLE_QUIESCE_MS (never mid-turn). Edge-latched +
-  // debounced in the watchdog so a still-large session can't re-fire. NOT a
-  // feature flag — the policy is on wherever a live PTY child is wired.
-  session.sizeWatchdog = startSessionSizeWatchdog({
-    readSize: () => measurePostCompactSize(sessionJsonlPath(sessionId, cwd, options.projectsDir)),
-    surface: (severity, sizeBytes) =>
-      surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
-    writeKey: (key) => sendKey(child, key),
-    write: (data) => child.write(data),
-    isIdle: () =>
-      session.activeTurn === undefined &&
-      Date.now() - session.lastDataAt >=
-        (options.sizeCompactIdleQuiesceMs ?? SESSION_COMPACT_IDLE_QUIESCE_MS),
-    ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
-  })
-
-  // Sprint-2 supervision: persist a registry record so this session is
-  // recoverable across crash / gateway-restart. has_session starts true on a
-  // resume (we already know the JSONL exists) and false on a fresh spawn (the
-  // capture gate below flips it once the JSONL lands).
-  if (options.replRegistryPath !== undefined) {
-    // Persist the resume-picker recovery (row #7) DECISION into the durable
-    // registry, not the optimistic stale-id resume (Codex P2). The recovery runs
-    // mid-spawn (escape during the post-spawn assertion wait); by the time we write
-    // here it may have already (a) recovered a different session from disk
-    // (`pendingResumeSessionId`) or (b) found nothing (`forceFreshRespawn`). The
-    // crash/watchdog respawn reads the REGISTRY, not this in-memory session — which
-    // is dropped from the pool on child exit — so the decision MUST land on disk or
-    // a child that exits before the next turn would re-`--resume` the stale id and
-    // reopen the picker. (The recovery callbacks ALSO `patchRecord` directly, so the
-    // OTHER ordering — recovery finishing AFTER this write — is covered too.)
-    const recoveredSessionId = session.pendingResumeSessionId
-    const recoveryForcesFresh = session.forceFreshRespawn
-    const record: ReplRegistryRecord = {
-      sessionKey,
-      sessionId: recoveredSessionId ?? sessionId,
-      cwd,
-      channelName,
-      has_session: recoveryForcesFresh
-        ? false
-        : recoveredSessionId !== undefined
-          ? true
-          : resume !== undefined,
-      model,
-      pid: child.pid,
-      child_generation: childGeneration,
-      first_ready_at: Date.now(),
-    }
-    if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
-    // #539 — the durable terminal handle, when this host issues one. Applied at the merge
-    // below through {@link ownPane}, NOT set here: the handle and the claim that says who
-    // is serving it are one fact, and a row that carries one without the other is the
-    // round-forty defect. `ownPane` is the only thing that writes either.
-    //
-    // A CLAIM IDENTITY FOR A FRESH SPAWN, minted per spawn and recorded on the session,
-    // exactly as the adoption path does. Ownership is not a property of how the session
-    // came to exist: while only adoption claimed, a spawner served a pane it had not
-    // claimed and an adopter could take it out from under a live gateway.
-    const paneClaimant = randomUUID()
-    /** Also this session's FIRST CONFIRMED ownership, if the write below lands — the origin
-     *  the r44 self-fencing deadline is measured from, and the same instant the row's
-     *  takeover threshold runs from. */
-    const paneClaimedAt = Date.now()
-    /** Which gateway this claim names — see `PersistentReplSubstrateOptions.claimantPid`. */
-    const claimantPid = options.claimantPid ?? process.pid
-    if (child.paneHandle !== undefined) session.paneClaimBy = paneClaimant
-    // #539 — and WHAT THIS CHILD WAS SPAWNED AS, so a re-adopted session can answer
-    // the warm-reuse guards instead of failing all three and being evicted on the
-    // first turn after the restart. Read off the session, which is where the same
-    // values were just stamped for the in-memory guards, so the persisted copy and
-    // the live one cannot disagree.
-    record.reuse = {
-      tool_surface: session.toolSurface,
-      tool_bridge: session.toolBridgeActive,
-      auth_fingerprint: session.authFingerprint,
-    }
+    let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {
-      // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
-      // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
-      // must not survive to block the next tick's recovery (Codex P2-3).
-      const ownershipRecorded = withOwnedRegistry(
-        options.replRegistryPath,
-        (registry) => {
-        const prev = registry[sessionKey]
-        const {
-          respawn_in_flight_at: _drop,
-          child_crash_notified_at: _oldCrashEdge,
-          // #518 — `killed_by_gateway_shutdown` is DELIBERATELY NOT DROPPED HERE. It
-          // is keyed by generation, so an entry for the child we are replacing can
-          // never be read as describing this one, and it has to outlive that child:
-          // a QUARANTINED generation is superseded by this very write, and its entry
-          // is the only durable record that a deploy killed it.
-          //
-          // #539 — `pane_handle` IS dropped here, and the contrast with the field
-          // above is the whole reason both comments exist. That one describes a
-          // child that is GONE and must stay describable; this one describes the
-          // child that is RUNNING, so a value inherited from its predecessor is a
-          // claim about a pane this child does not have. It is re-stated below from
-          // `record` when this spawn actually produced one.
-          ...merged
-        } = prev ? { ...prev, ...record } : record
-        // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
-        // move together. A spread carries the PRIOR row's `pane_handle` through whenever
-        // this spawn produced none (the in-process host, a test double), so the row would
-        // keep asserting a pane for a child that has no pane — and the next boot would go
-        // looking for it. It also carried the prior child's CLAIM: a replacement spawn
-        // inherited an ownership marker belonging to a child that no longer existed, and a
-        // restart inside the takeover window then refused adoption on the strength of it.
-        //
-        // `disownPane` first, unconditionally, so nothing from the predecessor survives;
-        // then `ownPane` only when THIS child actually has a pane.
-        //
-        // AND THE SPAWN CONTENDS FOR THE CLAIM (Argus r45), using the SAME predicate the
-        // adoption compare-and-set uses. Round forty gave the fresh spawn a claim and no
-        // CONTEST: this write replaced ownership unconditionally, so two gateways
-        // reconciling one resumable row both spawned `--resume` panes and both published —
-        // A recorded claim A, B took the lock and replaced it with claim B, and both served
-        // one transcript until some later renewal happened to fence A. Participating in the
-        // protocol means contending, not merely writing.
-        //
-        // Only when THIS child has a pane: a handle-less spawn owns nothing, so there is
-        // nothing to contend for and the disown below still clears the predecessor's.
-        if (
-          child.paneHandle !== undefined &&
-          prev !== undefined &&
-          paneClaimBlocksUs(prev, {
-            ours: paneClaimant,
-            now: paneClaimedAt,
-            ourPid: claimantPid,
-            ...(options.claimantLiveness !== undefined
-              ? { liveness: options.claimantLiveness }
-              : {}),
-          })
-        ) {
-          return { registry, result: 'lost' as const, skipSave: true as const }
-        }
-        const disowned = disownPane(merged as ReplRegistryRecord)
-        registry[sessionKey] =
-          child.paneHandle !== undefined
-            ? ownPane(disowned, {
-                handle: child.paneHandle,
-                generation: childGeneration,
-                claimant: paneClaimant,
-                now: paneClaimedAt,
-                pid: claimantPid,
-              })
-            : disowned
-          return { registry, result: 'recorded' as const }
-        },
-        // THE DISPOSITION FOR AN UNACQUIRED LOCK, said rather than implied (Argus r41).
-        // Writing an unlocked whole-registry snapshot would drop a concurrent gateway's
-        // rows and would claim a pane on the strength of a row nobody had the right to
-        // read. So: nothing is written, and the caller below decides what that means.
-        () => 'unwritable' as const,
-      )
-      // A CHILD WITH A PANE NOBODY CAN FIND IS THE UNRECOVERABLE DIRECTION, and this
-      // branch is the one place that can still choose. The general policy here is that a
-      // registry write failure must not brick a live REPL — supervision degrades to "no
-      // auto-resume" and the next write repairs it — and that remains right for every
-      // other field, because losing them costs a bounded degradation.
-      //
-      // OWNERSHIP IS NOT ONE OF THOSE. A durable pane whose ownership was never recorded
-      // is a live REPL no gateway can find again AND one any other gateway may claim while
-      // this one serves it: the two-owner state, produced by the spawn that was supposed
-      // to prevent it. Four rounds of this branch have established which way to fail.
-      //
-      // So the child is KILLED and the spawn refused. It is seconds old and serving
-      // nobody; the turn fails retryably and the next one re-spawns against a registry
-      // whose lock may by then be available. Refusing without killing would leave exactly
-      // the unrecorded live child this branch is refusing to create.
-      // CONFIRMED, on the same evidence a renewal produces: the compare-and-set landed.
-      if (ownershipRecorded === 'recorded' && child.paneHandle !== undefined) {
-        session.paneClaimConfirmedAt = paneClaimedAt
-      }
-      // LOST THE CONTEST. Another gateway owns this row and is serving it, so this child —
-      // spawned moments ago, holding its own handle, serving nobody — is ENDED. It cannot be
-      // claimed before it is spawned (the handle does not exist until then), so the ordering
-      // is spawn → contend → the loser kills its own child. The asymmetry is the familiar
-      // one: killing costs one respawn, leaving it alive costs a second owner on one
-      // transcript.
-      if (ownershipRecorded === 'lost' && child.paneHandle !== undefined) {
-        try {
-          child.kill()
-        } catch {
-          /* best-effort: the refusal below is what protects the invariant */
-        }
-        throw new PaneOwnershipRefusedError(
-          `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — another gateway already ` +
-            `OWNS this session's row and is serving it, so the pane ${child.paneHandle} this spawn just created ` +
-            'would be a second owner of one transcript. The child was ended and this turn fails instead; it ' +
-            'retries on the next turn, which will find the winner\'s session or reconcile it.',
+      child = await ptyHost.spawn(argv, {
+      cwd,
+      env: childEnv,
+      // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
+      // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
+      // keeps the detector falling edge working: a cleared screen arrives with nothing
+      // on it. Where the screen comes from differs (herdr polls a rendered pane; the
+      // in-process host accumulates the byte stream), and `pty-host.ts` records the one
+      // consequence — a repaint collapses under herdr and does not under a pty.
+      onScreen: (screen) => {
+        session.ring.replace(screen)
+        const now = Date.now()
+        session.lastDataAt = now
+        // F4 — feed the watchdog's live-process view: any child output is activity,
+        // so keep the ProcessRegistry entry fresh. NOTE this is `last_activity_at`
+        // ONLY — it is NOT what stuck-agent measures. Stuck is `busy_since` (an
+        // OUTSTANDING dispatched turn, marked from pool.ts), because for a
+        // request/response REPL silence between turns is the normal resting state,
+        // so output-age judged every healthy warm session stuck. Guarded no-op when
+        // no ambient registry is registered; the handle identity-guards so it only
+        // ever touches THIS child's entry.
+        liveHandle?.touch()
+        const target = scanChild
+        if (target === undefined) return
+        // Run the registered detectors against the ring and actuate the ones that
+        // fired on the rising edge (disclaimer Enter, wedged-prompt recovery, …).
+        // `scan` stamps each detector's latch BEFORE returning, so the keystroke
+        // write is fire-once even if the transport throws — a failed write can't
+        // retry next tick and double-send onto an approval prompt (invariant §4).
+        runOutputScan(session, target, options, now)
+      },
+    })
+    scanChild = child
+    session.attachChild(child)
+    // Synchronous handle mirror so a respawn can detect alive-but-wedged without
+    // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
+    childByKey.set(sessionKey, child)
+    // F4 — publish this child's PID into the watchdog's live-process view (the
+    // single PTY chokepoint serves BOTH the pooled REPL and the ephemeral/dispatch
+    // children, so ONE writer here covers every spawn site). UPSERT-safe against a
+    // respawn re-using `sessionKey`; unregistered in `child.exited` below. Guarded
+    // no-op when no ambient ProcessRegistry is registered (unit tests / LLM-less).
+    liveHandle = registerLiveProcessSafe({
+      name: sessionKey,
+      pid: child.pid,
+      tool_name: 'cc-repl',
+      meta: { session_id: sessionId, channel: channelName },
+    })
+    // Publish the handle on the session so the DISPATCH site (pool.ts) can declare
+    // a turn outstanding / settled. That outstanding-turn window — NOT this child's
+    // output age — is what stuck-agent detection measures, so an idle warm REPL
+    // between turns is correctly never stuck.
+    session.liveHandle = liveHandle
+
+    // EVERY CONSUMER THE `onScreen` CLOSURE READS IS NOW WIRED — `scanChild` (the
+    // keystroke target) and `liveHandle` (the activity touch) — so screens may start
+    // flowing. Until this call the host does not poll at all.
+    //
+    // This must be the LAST step of the wiring, and it exists because `spawn` is async:
+    // the closure above is built before `child` exists, so a host that began polling
+    // before returning could deliver the FIRST screen while `scanChild` was still
+    // undefined. That screen was dropped unscanned — and because the ring is
+    // snapshot-replace, which suppresses an unchanged screen, it was never delivered
+    // again: a startup trust prompt or approval dialog left undismissed for the life of
+    // a REPL that stayed alive and polling. `PtyChild.beginOutput` carries the full
+    // reasoning; the general form is that an `await` between a producer and its consumer
+    // opens a window for everything the producer already started.
+    child.beginOutput?.()
+
+    // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
+    // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
+    // /`rate_limit_error`) aborts the turn before `reply()`, so the substrate's
+    // `completion` never resolves and the user sees NOTHING (Ryan 2026-06-16). The
+    // watcher tails the transcript JSONL and edge-fires a "resend your last message"
+    // notice through `onDeadTurnNotice` (default: a structured stderr notice — no
+    // feature flag, ON by default). sessionId + cwd are both known here, so the
+    // `<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl` path resolves immediately
+    // (session-validation.ts layout). Resolve the transcript root the SAME way the
+    // JSONL ghost gate does (`makeJsonlExistsProbe(options.projectsDir)` below): an
+    // explicit `options.projectsDir` wins (custom / per-instance transcript root —
+    // Codex P2), then `CLAUDE_CONFIG_DIR`'s `projects` (CC writes transcripts there
+    // when `claudeConfigDir` is set), then the default `~/.claude/projects`.
+    const projectsDir = resolveTranscriptProjectsDir(options)
+    const deadTurnNotify =
+      options.onDeadTurnNotice ??
+      ((notice: DeadTurnNotice): void => {
+        process.stderr.write(
+          `[repl-api5xx] dead turn on session=${sessionId.slice(0, 8)} matched=${notice.matched} — user should resend last message\n`,
         )
-      }
-      if (ownershipRecorded === 'unwritable' && child.paneHandle !== undefined) {
-        try {
-          child.kill()
-        } catch {
-          /* best-effort: the refusal below is what protects the invariant */
-        }
-        throw new PaneOwnershipRefusedError(
-          `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — its pane ` +
-            `${child.paneHandle} could not be RECORDED as owned (the registry lock was not acquired, so a ` +
-            'write would have dropped a concurrent gateway\'s rows). A durable pane whose ownership is ' +
-            'unrecorded is a REPL nothing can find again and one any other gateway may claim, so the child ' +
-            'was ended and this turn fails instead. It retries on the next turn.',
-        )
-      }
+      })
+    session.deadTurnWatcher = startApi5xxDeadTurnWatcher({
+      jsonlPath: join(projectsDir, dashifyCwd(cwd), `${sessionId}.jsonl`),
+      notify: deadTurnNotify,
+    })
+
+    // Wire process death → fail in-flight turn + evict from pool so the next
+    // start() respawns. Leaves cleanup to GC; the dev-channel SIGTERMs itself.
+    // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
+    // dying OLD child must not evict the NEW session a concurrent respawn already
+    // installed (the resume race the P2-3 regression caught).
+    wireChildExit({
+      session,
+      child,
+      sessionKey,
+      sessionId,
+      // BY GETTER, NOT BY VALUE. It happens to be assigned already on this path; it is
+      // NOT on every path (the handle needs a pid, so a caller that wires the exit
+      // before registering the pid holds `undefined` here), and a by-value capture
+      // would silently skip the crash reconciliation there. See `ChildExitWiring`.
+      liveHandle: () => liveHandle,
+      label: 'spawn.then',
+      registryPath: options.replRegistryPath,
+    })
     } catch (e) {
-      // THE OWNERSHIP REFUSAL IS NOT A WRITE FAILURE and must not be swallowed by the
-      // degrade policy that follows it. Keyed on a TYPE, not on the message text: matching
-      // a sentence this file also composes would make the two facts — "the refusal fired"
-      // and "the wording still says so" — the same fact, and this branch has paid for that
-      // collapse before.
-      if (e instanceof PaneOwnershipRefusedError) throw e
-      // A registry write failure must never brick a live REPL; supervision
-      // degrades to "no auto-resume for this session" until the next write.
+      // The spawn never produced a child, so the registration it was made for must not
+      // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
+      // already hold this session id, and evicting ITS credential would turn our failure
+      // into a second one. The configs go too — they carry the credential in plaintext.
+      sink.unregisterIf(sessionId, session)
+      unlinkSessionConfigs(session)
+      throw e
     }
-  }
 
-  // Ghost-session gate (best-effort, non-blocking): confirm the JSONL lands so
-  // a Sprint-2 respawn can `--resume` safely. We do NOT block the first turn on
-  // it — the warm REPL is already serving. CONSUME the result (closing the S1
-  // fire-and-forget gap, brief § 0): on a fresh spawn, flip the registry
-  // record's `has_session` true once the transcript exists, so a future
-  // respawn / next-turn-after-crash resolves to `--resume` instead of fresh.
-  const jsonlProbe = options.jsonlExistsProbe ?? makeJsonlExistsProbe(options.projectsDir)
-  fireAndForget('spawn.captureSession', captureSession(
-    sessionId,
-    cwd,
-    { jsonlExists: jsonlProbe, sleep: (ms) => Bun.sleep(ms) },
-    options.captureConfig ?? {},
-  )
-    .then((result) => {
-      if (result.captured && resume === undefined && options.replRegistryPath !== undefined) {
-        try {
-          patchRecord(options.replRegistryPath, sessionKey, { has_session: true })
-        } catch {
-          /* best-effort: a registry patch failure degrades to a fresh spawn
-             next time, not a fatal — kept local, not surfaced. */
-        }
+    // Post-spawn assertion: child alive → /channel-ready (transport attached) →
+    // HTTP /health → /channel-bound (MCP handshake complete).
+    const assertion = await assertReplAlive(
+      { pid: child.pid },
+      {
+        isChildAlive: () => !child.hasExited(),
+        getChannelPort: () => session.channelPort,
+        hasHttpHealth: (port) => httpHealth(port),
+        // Stage 4 (channel-MCP-bound, port row #6): the dev-channel posts
+        // `/channel-bound` from `mcp.oninitialized` once claude completes the MCP
+        // handshake — the TRUE readiness gate, replacing the false-positive "no MCP
+        // server configured with that name" TUI scan (claude 2.1.186 always prints
+        // that warning even for a fully-wired, working channel).
+        isChannelBound: () => session.channelBound,
+        sleep: (ms) => Bun.sleep(ms),
+        now: () => Date.now(),
+      },
+      options.assertConfig ?? {},
+    )
+    if (!assertion.ok) {
+      if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
+      sink.unregister(sessionId)
+      // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw
+      // the TYPED error and DON'T pool.delete here — the wrapper holds the pool
+      // entry and either retries on the same key or propagates the cap, so deleting
+      // it mid-loop would orphan a successful retry's warm session. Every OTHER
+      // reason keeps the original kill-and-throw (the wrapper passes it straight
+      // through as a non-wedged failure, no retry).
+      if (assertion.reason === 'channel-wedged') {
+        // AWAIT the wedged child's exit (graceful SIGTERM→await→SIGKILL) BEFORE the
+        // wrapper launches the next attempt: on a supervised/resume spawn a
+        // SIGTERM-slow old `claude` must not overlap a new `claude --resume` on the
+        // same transcript (the one-owner-per-transcript invariant). Codex r1 [P1].
+        await terminateChild(child)
+        throw new ChannelWedgedSpawnError(sessionKey, assertion.detail)
       }
-    }))
+      child.kill()
+      pool.delete(sessionKey)
+      throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
+    }
 
-  return session
+    // the legacy harness port row #13: start the warm-session size watchdog now the REPL is
+    // verified alive. It measures the POST-COMPACT JSONL size (bytes after the last
+    // `"isCompactSummary":true` marker — NEVER raw `stat.size`, or "Compact does
+    // nothing" re-fires forever) on a cadence and surfaces a Reset/Compact
+    // affordance before the transcript grows large enough to block `--resume` (the
+    // 2026-04-16 11.8 MB infinite-restart incident). `requestCompact()` actuates
+    // `escape` + `/compact` + `enter` through the same write seam the disclaimer-dismiss
+    // path uses, behind the surfaced affordance (see `requestSessionCompact`). The
+    // timer is unref'd and stopped on child exit / teardown.
+    //
+    // POLICY (gap #4): the surfaced alert alone is a dead end on Open's WS-native
+    // web chat — there is no inline keyboard and `requestSessionCompact` has no
+    // caller, so the single-owner session would just keep growing until `--resume`
+    // wedges. We therefore wire `isIdle` so the watchdog idle-gates an AUTOMATIC
+    // compaction at the critical band: it injects the SAME `escape`+`/compact` the
+    // affordance surfaces, but ONLY when no turn is in flight AND the PTY has been
+    // quiet ≥ SESSION_COMPACT_IDLE_QUIESCE_MS (never mid-turn). Edge-latched +
+    // debounced in the watchdog so a still-large session can't re-fire. NOT a
+    // feature flag — the policy is on wherever a live PTY child is wired.
+    session.sizeWatchdog = startSessionSizeWatchdog({
+      readSize: () => measurePostCompactSize(sessionJsonlPath(sessionId, cwd, options.projectsDir)),
+      surface: (severity, sizeBytes) =>
+        surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
+      writeKey: (key) => sendKey(child, key),
+      write: (data) => child.write(data),
+      isIdle: () =>
+        session.activeTurn === undefined &&
+        Date.now() - session.lastDataAt >=
+          (options.sizeCompactIdleQuiesceMs ?? SESSION_COMPACT_IDLE_QUIESCE_MS),
+      ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
+    })
+
+    // Sprint-2 supervision: persist a registry record so this session is
+    // recoverable across crash / gateway-restart. has_session starts true on a
+    // resume (we already know the JSONL exists) and false on a fresh spawn (the
+    // capture gate below flips it once the JSONL lands).
+    if (options.replRegistryPath !== undefined) {
+      // Persist the resume-picker recovery (row #7) DECISION into the durable
+      // registry, not the optimistic stale-id resume (Codex P2). The recovery runs
+      // mid-spawn (escape during the post-spawn assertion wait); by the time we write
+      // here it may have already (a) recovered a different session from disk
+      // (`pendingResumeSessionId`) or (b) found nothing (`forceFreshRespawn`). The
+      // crash/watchdog respawn reads the REGISTRY, not this in-memory session — which
+      // is dropped from the pool on child exit — so the decision MUST land on disk or
+      // a child that exits before the next turn would re-`--resume` the stale id and
+      // reopen the picker. (The recovery callbacks ALSO `patchRecord` directly, so the
+      // OTHER ordering — recovery finishing AFTER this write — is covered too.)
+      const recoveredSessionId = session.pendingResumeSessionId
+      const recoveryForcesFresh = session.forceFreshRespawn
+      const record: ReplRegistryRecord = {
+        sessionKey,
+        sessionId: recoveredSessionId ?? sessionId,
+        cwd,
+        channelName,
+        has_session: recoveryForcesFresh
+          ? false
+          : recoveredSessionId !== undefined
+            ? true
+            : resume !== undefined,
+        model,
+        pid: child.pid,
+        child_generation: childGeneration,
+        first_ready_at: Date.now(),
+      }
+      if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
+      // #539 — the durable terminal handle, when this host issues one. Applied at the merge
+      // below through {@link ownPane}, NOT set here: the handle and the claim that says who
+      // is serving it are one fact, and a row that carries one without the other is the
+      // round-forty defect. `ownPane` is the only thing that writes either.
+      //
+      // A CLAIM IDENTITY FOR A FRESH SPAWN, minted per spawn and recorded on the session,
+      // exactly as the adoption path does. Ownership is not a property of how the session
+      // came to exist: while only adoption claimed, a spawner served a pane it had not
+      // claimed and an adopter could take it out from under a live gateway.
+      const paneClaimant = randomUUID()
+      /** Also this session's FIRST CONFIRMED ownership, if the write below lands — the origin
+       *  the r44 self-fencing deadline is measured from, and the same instant the row's
+       *  takeover threshold runs from. */
+      const paneClaimedAt = Date.now()
+      /** Which gateway this claim names — see `PersistentReplSubstrateOptions.claimantPid`. */
+      const claimantPid = options.claimantPid ?? process.pid
+      if (child.paneHandle !== undefined) session.paneClaimBy = paneClaimant
+      // #539 — and WHAT THIS CHILD WAS SPAWNED AS, so a re-adopted session can answer
+      // the warm-reuse guards instead of failing all three and being evicted on the
+      // first turn after the restart. Read off the session, which is where the same
+      // values were just stamped for the in-memory guards, so the persisted copy and
+      // the live one cannot disagree.
+      record.reuse = {
+        tool_surface: session.toolSurface,
+        tool_bridge: session.toolBridgeActive,
+        auth_fingerprint: session.authFingerprint,
+      }
+      try {
+        // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
+        // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
+        // must not survive to block the next tick's recovery (Codex P2-3).
+        const ownershipRecorded = withOwnedRegistry(
+          options.replRegistryPath,
+          (registry) => {
+          const prev = registry[sessionKey]
+          const {
+            respawn_in_flight_at: _drop,
+            child_crash_notified_at: _oldCrashEdge,
+            // #518 — `killed_by_gateway_shutdown` is DELIBERATELY NOT DROPPED HERE. It
+            // is keyed by generation, so an entry for the child we are replacing can
+            // never be read as describing this one, and it has to outlive that child:
+            // a QUARANTINED generation is superseded by this very write, and its entry
+            // is the only durable record that a deploy killed it.
+            //
+            // #539 — `pane_handle` IS dropped here, and the contrast with the field
+            // above is the whole reason both comments exist. That one describes a
+            // child that is GONE and must stay describable; this one describes the
+            // child that is RUNNING, so a value inherited from its predecessor is a
+            // claim about a pane this child does not have. It is re-stated below from
+            // `record` when this spawn actually produced one.
+            ...merged
+          } = prev ? { ...prev, ...record } : record
+          // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
+          // move together. A spread carries the PRIOR row's `pane_handle` through whenever
+          // this spawn produced none (the in-process host, a test double), so the row would
+          // keep asserting a pane for a child that has no pane — and the next boot would go
+          // looking for it. It also carried the prior child's CLAIM: a replacement spawn
+          // inherited an ownership marker belonging to a child that no longer existed, and a
+          // restart inside the takeover window then refused adoption on the strength of it.
+          //
+          // `disownPane` first, unconditionally, so nothing from the predecessor survives;
+          // then `ownPane` only when THIS child actually has a pane.
+          //
+          // AND THE SPAWN CONTENDS FOR THE CLAIM (Argus r45), using the SAME predicate the
+          // adoption compare-and-set uses. Round forty gave the fresh spawn a claim and no
+          // CONTEST: this write replaced ownership unconditionally, so two gateways
+          // reconciling one resumable row both spawned `--resume` panes and both published —
+          // A recorded claim A, B took the lock and replaced it with claim B, and both served
+          // one transcript until some later renewal happened to fence A. Participating in the
+          // protocol means contending, not merely writing.
+          //
+          // Only when THIS child has a pane: a handle-less spawn owns nothing, so there is
+          // nothing to contend for and the disown below still clears the predecessor's.
+          if (
+            child.paneHandle !== undefined &&
+            prev !== undefined &&
+            paneClaimBlocksUs(prev, {
+              ours: paneClaimant,
+              now: paneClaimedAt,
+              ourPid: claimantPid,
+              ...(options.claimantLiveness !== undefined
+                ? { liveness: options.claimantLiveness }
+                : {}),
+            })
+          ) {
+            return { registry, result: 'lost' as const, skipSave: true as const }
+          }
+          const disowned = disownPane(merged as ReplRegistryRecord)
+          registry[sessionKey] =
+            child.paneHandle !== undefined
+              ? ownPane(disowned, {
+                  handle: child.paneHandle,
+                  generation: childGeneration,
+                  claimant: paneClaimant,
+                  now: paneClaimedAt,
+                  pid: claimantPid,
+                })
+              : disowned
+            return { registry, result: 'recorded' as const }
+          },
+          // THE DISPOSITION FOR AN UNACQUIRED LOCK, said rather than implied (Argus r41).
+          // Writing an unlocked whole-registry snapshot would drop a concurrent gateway's
+          // rows and would claim a pane on the strength of a row nobody had the right to
+          // read. So: nothing is written, and the caller below decides what that means.
+          () => 'unwritable' as const,
+        )
+        // A CHILD WITH A PANE NOBODY CAN FIND IS THE UNRECOVERABLE DIRECTION, and this
+        // branch is the one place that can still choose. The general policy here is that a
+        // registry write failure must not brick a live REPL — supervision degrades to "no
+        // auto-resume" and the next write repairs it — and that remains right for every
+        // other field, because losing them costs a bounded degradation.
+        //
+        // OWNERSHIP IS NOT ONE OF THOSE. A durable pane whose ownership was never recorded
+        // is a live REPL no gateway can find again AND one any other gateway may claim while
+        // this one serves it: the two-owner state, produced by the spawn that was supposed
+        // to prevent it. Four rounds of this branch have established which way to fail.
+        //
+        // So the child is KILLED and the spawn refused. It is seconds old and serving
+        // nobody; the turn fails retryably and the next one re-spawns against a registry
+        // whose lock may by then be available. Refusing without killing would leave exactly
+        // the unrecorded live child this branch is refusing to create.
+        // CONFIRMED, on the same evidence a renewal produces: the compare-and-set landed.
+        if (ownershipRecorded === 'recorded' && child.paneHandle !== undefined) {
+          session.paneClaimConfirmedAt = paneClaimedAt
+        }
+        // LOST THE CONTEST. Another gateway owns this row and is serving it, so this child —
+        // spawned moments ago, holding its own handle, serving nobody — is ENDED. It cannot be
+        // claimed before it is spawned (the handle does not exist until then), so the ordering
+        // is spawn → contend → the loser kills its own child. The asymmetry is the familiar
+        // one: killing costs one respawn, leaving it alive costs a second owner on one
+        // transcript.
+        if (ownershipRecorded === 'lost' && child.paneHandle !== undefined) {
+          try {
+            child.kill()
+          } catch {
+            /* best-effort: the refusal below is what protects the invariant */
+          }
+          throw new PaneOwnershipRefusedError(
+            `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — another gateway already ` +
+              `OWNS this session's row and is serving it, so the pane ${child.paneHandle} this spawn just created ` +
+              'would be a second owner of one transcript. The child was ended and this turn fails instead; it ' +
+              'retries on the next turn, which will find the winner\'s session or reconcile it.',
+          )
+        }
+        if (ownershipRecorded === 'unwritable' && child.paneHandle !== undefined) {
+          try {
+            child.kill()
+          } catch {
+            /* best-effort: the refusal below is what protects the invariant */
+          }
+          throw new PaneOwnershipRefusedError(
+            `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — its pane ` +
+              `${child.paneHandle} could not be RECORDED as owned (the registry lock was not acquired, so a ` +
+              'write would have dropped a concurrent gateway\'s rows). A durable pane whose ownership is ' +
+              'unrecorded is a REPL nothing can find again and one any other gateway may claim, so the child ' +
+              'was ended and this turn fails instead. It retries on the next turn.',
+          )
+        }
+      } catch (e) {
+        // THE OWNERSHIP REFUSAL IS NOT A WRITE FAILURE and must not be swallowed by the
+        // degrade policy that follows it. Keyed on a TYPE, not on the message text: matching
+        // a sentence this file also composes would make the two facts — "the refusal fired"
+        // and "the wording still says so" — the same fact, and this branch has paid for that
+        // collapse before.
+        if (e instanceof PaneOwnershipRefusedError) throw e
+        // A registry write failure must never brick a live REPL; supervision
+        // degrades to "no auto-resume for this session" until the next write.
+      }
+    }
+
+    // Ghost-session gate (best-effort, non-blocking): confirm the JSONL lands so
+    // a Sprint-2 respawn can `--resume` safely. We do NOT block the first turn on
+    // it — the warm REPL is already serving. CONSUME the result (closing the S1
+    // fire-and-forget gap, brief § 0): on a fresh spawn, flip the registry
+    // record's `has_session` true once the transcript exists, so a future
+    // respawn / next-turn-after-crash resolves to `--resume` instead of fresh.
+    const jsonlProbe = options.jsonlExistsProbe ?? makeJsonlExistsProbe(options.projectsDir)
+    fireAndForget('spawn.captureSession', captureSession(
+      sessionId,
+      cwd,
+      { jsonlExists: jsonlProbe, sleep: (ms) => Bun.sleep(ms) },
+      options.captureConfig ?? {},
+    )
+      .then((result) => {
+        if (result.captured && resume === undefined && options.replRegistryPath !== undefined) {
+          try {
+            patchRecord(options.replRegistryPath, sessionKey, { has_session: true })
+          } catch {
+            /* best-effort: a registry patch failure degrades to a fresh spawn
+               next time, not a fatal — kept local, not surfaced. */
+          }
+        }
+      }))
+
+    return session
+  } finally {
+    releaseSpawnReservation(options, sessionKey, spawnReserver)
+  }
 }
 
 /**
@@ -1021,6 +1067,102 @@ async function notifyEvictedChild(
   }
 }
 
+
+/**
+ * TAKE THE SESSION KEY BEFORE ANY PROCESS EXISTS (#539 r47) — see the ordering invariant at
+ * the top of `boot-adoption.ts`.
+ *
+ * A fresh spawn becomes capable of corrupting the transcript the instant `PtyHost.spawn`
+ * starts a `claude --resume <id>`: it appends through startup and readiness, and killing the
+ * loser afterwards does not unwrite what it appended. The pane claim cannot help — there is
+ * no pane yet — so what is contended for here is the KEY.
+ *
+ * FAIL-CLOSED, like every other write whose correctness rests on the lock: an unacquired lock
+ * answers `unwritable`, and the caller refuses rather than spawning a process it cannot
+ * reserve. An unsupervised substrate (no registry) has no shared state to race over, so it
+ * proceeds — that is the same reasoning `beginBootAdoption` uses for a missing registry.
+ */
+function reserveSpawnForKey(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+  reserver: string,
+  now: number,
+  ourPid: number,
+  /** What a row for this key must carry to be READABLE — see the note at the write below. */
+  identity: { sessionId: string; cwd: string; channelName: string; hasSession: boolean },
+): 'reserved' | 'taken' | 'unwritable' | 'unsupervised' {
+  const registryPath = options.replRegistryPath
+  if (registryPath === undefined) return 'unsupervised'
+  try {
+    return withOwnedRegistry<'reserved' | 'taken' | 'unwritable'>(
+      registryPath,
+      (registry) => {
+        const prev = registry[sessionKey]
+        if (
+          prev !== undefined &&
+          spawnReservationBlocksUs(prev, {
+            ours: reserver,
+            now,
+            ourPid,
+            ...(options.claimantLiveness !== undefined ? { liveness: options.claimantLiveness } : {}),
+          })
+        ) {
+          return { registry, result: 'taken', skipSave: true as const }
+        }
+        // A row may not exist yet (a cold first turn), and the reservation still has to be
+        // durable — so one is created. IT MUST BE SCHEMA-VALID, and that is not a nicety: a
+        // row carrying only a reservation fails `isMinimalRecord`, and the registry layer then
+        // DROPS it on every subsequent read and refuses to save over a file it had to repair
+        // (`loadRegistryForMutation`'s corrupt-skip). The stub would therefore be
+        // unmaintainable — impossible to release, and permanently answering `undecided` for
+        // that key, which refuses every later turn with no TTL to end it. Measured, not
+        // reasoned: a reservation-only row survived its own release and the log showed the
+        // drop.
+        //
+        // So the reservation writes the identity the spawn is about to write anyway. Nothing
+        // here is invented: these are the same values the argv was built from.
+        registry[sessionKey] = reservePaneSpawn(
+          prev ?? ({ sessionKey, sessionId: identity.sessionId, cwd: identity.cwd, channelName: identity.channelName, has_session: identity.hasSession } as ReplRegistryRecord),
+          { by: reserver, now, pid: ourPid },
+        )
+        return { registry, result: 'reserved' }
+      },
+      () => 'unwritable',
+    )
+  } catch {
+    return 'unwritable'
+  }
+}
+
+/** Give the reservation back, CAS'd on it still being ours. Best-effort: the TTL is the
+ *  backstop, and a failed release costs one bounded refusal rather than a lost key. */
+function releaseSpawnReservation(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+  reserver: string,
+): void {
+  const registryPath = options.replRegistryPath
+  if (registryPath === undefined) return
+  try {
+    withOwnedRegistry(
+      registryPath,
+      (registry) => {
+        const prev = registry[sessionKey]
+        const released = prev === undefined ? undefined : releasePaneSpawnReservation(prev, reserver)
+        if (released === undefined) return { registry, result: undefined, skipSave: true as const }
+        // NO STUB TO CLEAN UP: the reservation wrote a schema-VALID row (see the note at
+        // `reserveSpawnForKey`), so removing the reservation fields leaves a row the registry
+        // can still read — a session with no pane and no claim, which is exactly what "this
+        // spawn did not finish" means and what the next turn should find.
+        registry[sessionKey] = released
+        return { registry, result: undefined }
+      },
+      () => undefined,
+    )
+  } catch {
+    /* the TTL is the backstop */
+  }
+}
 
 /**
  * The spawn refused because its pane's OWNERSHIP could not be durably recorded (#539 r41).

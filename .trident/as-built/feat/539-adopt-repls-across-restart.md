@@ -2251,6 +2251,66 @@ with the crash sink, the alert channel and the actuation results all captured. T
 asserts the winner's row is **byte-identical** afterwards, which is the assertion a
 "nothing happened" claim actually needs.
 
+### Round forty-seven: claim before you are CAPABLE, not before you publish
+
+Two findings, one invariant — and because rounds thirty-seven to forty-seven are one thing
+(turning "re-adopt a REPL" into a single-owner protocol over a shared registry), this round is
+built as a protocol rather than as two local fixes. **The invariant is stated once, at the top
+of `boot-adoption.ts`, and both paths cite it:**
+
+> **A process must hold its claim (or a reservation for the key) BEFORE it becomes capable of
+> touching the transcript — not before it PUBLISHES.**
+
+"Capable" is the word that does the work, and it is earlier than publishing in both paths.
+
+**1 — adoption enabled the eyes and hands before it claimed.** Output delivery and the
+detector set went live, and the durable claim was attempted afterwards; in between, `onScreen`
+scanned the attached child. So both gateways attached and **the eventual loser could see the
+pane and type into it before it learned somebody else owned it** — `1`+Enter into the winner's
+live session, which is this issue's one destructive failure mode. Priming does not save it:
+priming latches signatures present on the FIRST screen, and the hazard is a fresh rising edge
+arriving *during* the race.
+
+Now: attach (the pid is needed for the claim), **claim**, then enable. And the gate is on the
+HANDLER as well as on `beginOutput()`, because withholding `beginOutput` trusts the host to
+honour a contract, while the handler is the one place a screen can actually be *answered*.
+Until the claim is confirmed the wrapper records nothing, primes nothing and scans nothing.
+
+**The case that proves it delivers a FRESH actionable prompt at attach time** — which is what
+a live pane really does — and asserts the loser sent no key and never took a screen in, with
+the winner's own priming line as the control that something was in fact delivered.
+
+**2 — the fresh spawn contended only after the duplicate process was fully operational.**
+Round forty-five made it contend, and with a pane claim that is all it *could* do: a pane
+cannot be claimed before it exists. So two `claude --resume` processes ran against one
+transcript through startup and readiness before one was killed — and **killing the loser does
+not unwrite what it appended.** The corruption this module exists to prevent is two processes
+resuming into one file; the duplicated wrapper is only how it shows up.
+
+So the spawn path **reserves the session key** under the registry lock before `PtyHost.spawn`
+is called, and the loser never spawns. Same idiom as `respawn_in_flight_at` (marker, holder,
+pid, TTL, CAS, fail-closed) but a distinct field, because that one means "a respawn has been
+dispatched" and `decideWedgeAction` reads it — stamping it on every fresh spawn would change
+that gate's meaning on every first turn. The TTL is derived from the claim's takeover window,
+so the two cannot be reordered by a later edit. **The assertion is the SPAWN COUNT, not the
+cleanup.**
+
+**A regression I nearly shipped, found by measuring rather than reasoning.** A reservation on a
+key with no row yet has to create a row — and my first version wrote one carrying only the
+reservation. That row fails `isMinimalRecord`, so the registry layer DROPS it on every read
+*and* refuses to save over a file it had to repair — making the stub **impossible to release**
+and leaving the key answering `undecided` for ever, with no TTL to end it. A failed first spawn
+would have cost the key permanently. The reservation now writes the identity the spawn was
+about to write anyway (sessionId, cwd, channelName — the values the argv was built from), so
+the row is valid from the first byte and the release leaves a readable row behind. Its own case
+drives a spawn that throws and then asserts the NEXT turn still serves.
+
+**Where the r41 disposition went.** With no lock at all, the refusal now happens at the
+RESERVATION — before any process exists, which is strictly better than spawning one and killing
+it — so the round-forty-one case was rewritten to assert that nothing was started, and the
+"reserved but could not record ownership" disposition got its own case, reached by breaking the
+lock *inside* the spawn (the only seam between the two writes).
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2261,7 +2321,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five and M130–M131 in round forty-six, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six and M132–M136 in round forty-seven, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2423,6 +2483,11 @@ count from the rows below rather than trusting this sentence.
 | M129 | the predicate drops the same-process exception | `pane-handle-persistence.test.ts` (1 — **and it did not red until the respawn case existed**) |
 | M130 | the tick drops the fenced continuation — the r46 defect exactly | `adoption-claim-is-a-compare-and-set.test.ts` (3) |
 | M131 | the guard fires when the renewal SUCCEEDED | `adoption-claim-is-a-compare-and-set.test.ts` (1) + `repl-supervision.test.ts` (4 — the watchdog itself) |
+| M132 | the screen handler accepts screens before the claim — the r47 destructive path | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M133 | delivery and the watchers are enabled BEFORE the claim again (structurally) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M134 | no reservation — contend only after spawning (the r45 state) | `pane-handle-persistence.test.ts` (2) |
+| M135 | the reservation never expires | `pane-handle-persistence.test.ts` (1 — the dead reserver) |
+| M136 | the reservation is never released | `pane-handle-persistence.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

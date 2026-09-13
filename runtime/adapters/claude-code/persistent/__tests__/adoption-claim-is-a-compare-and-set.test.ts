@@ -138,6 +138,9 @@ function fixture(over: RowOverride = {}): Fixture {
  *  whether the process holding any existing claim is still there. */
 interface PassOpts {
   afterRowClaim?: () => Promise<void> | void
+  /** Capture this pass's diagnostics, so a case can assert what the pass DID and did not do
+   *  — the priming line is the observable for "a screen was delivered to this wrapper". */
+  log?: (msg: string) => void
   /** WHICH GATEWAY this pass is, as its claim records it. Two incarnations in one test
    *  process share `process.pid`, and the claim predicate deliberately does not let a
    *  gateway be blocked by its OWN process's earlier claim (a respawn must not refuse
@@ -882,5 +885,83 @@ describe('a FENCED key is no longer this gateway\'s to supervise', () => {
     // The watchdog still sees a dead REPL and still acts on it.
     expect(crashes).toEqual([KEY])
     expect(results.some((r) => r.action !== 'ignore')).toBe(true)
+  })
+})
+
+
+describe('a claimant is blind and mute until it holds the claim', () => {
+  /**
+   * ARGUS r47 — THE ORDERING INVARIANT (stated in full at the top of `boot-adoption.ts`).
+   *
+   * Adoption used to enable output delivery and the detector set BEFORE the durable claim,
+   * and publish afterwards. So both gateways attached, and the eventual loser could SEE the
+   * pane and TYPE into it before it learned somebody else owned it — `1`+Enter into the
+   * winner's live session, which is this issue's one destructive failure mode.
+   *
+   * Priming does not save it: priming latches the signatures present on the FIRST screen,
+   * and the hazard is a FRESH rising edge arriving during the race. So this case delivers a
+   * fresh actionable prompt at attach time, which is when a live pane really does render.
+   */
+  const ACTIONABLE = '❯ 1. Yes, proceed\n  2. No'
+
+  it('the loser delivers no screen and sends no key, even with a fresh prompt on the pane', async () => {
+    const f = fixture()
+    f.host.deliverOnAttach = ACTIONABLE
+
+    let enteredGap!: () => void
+    const inGap = new Promise<void>((res) => {
+      enteredGap = res
+    })
+    let releaseGap!: () => void
+    const gap = new Promise<void>((res) => {
+      releaseGap = res
+    })
+    const winnerLog: string[] = []
+    const a = pass(f, {
+      log: (m) => winnerLog.push(m),
+      afterRowClaim: async () => {
+        enteredGap()
+        await gap
+      },
+    })
+    await inGap
+
+    // THE LOSER RUNS while the winner holds the claim. Its attach hands it the actionable
+    // prompt immediately — before it can possibly know it lost.
+    const loserLog: string[] = []
+    const b = await pass(f, { claimantPid: process.pid + 1, log: (m) => loserLog.push(m) })
+    expect(b.kind).toBe('undecided')
+
+    const loserChild = f.host.attached[1]
+    expect(loserChild).toBeDefined()
+    // NO KEY. The destructive half: a detector answering that prompt would type into a
+    // session another gateway owns.
+    expect(loserChild?.keysSent).toEqual([])
+    // AND NO SCREEN WAS EVER TAKEN IN. The priming line is emitted by the handler on the
+    // first screen it accepts, so its absence is the observable for "this wrapper never
+    // looked at the pane".
+    expect(loserLog.filter((m) => m.includes('baseline screen'))).toEqual([])
+
+    releaseGap()
+    expect((await a).kind).toBe('adopted')
+    // AND THE WINNER DOES SEE IT — the same screen, the same pane, the other side of the
+    // claim. Without this the case would pass if nothing ever delivered anything.
+    expect(winnerLog.filter((m) => m.includes('baseline screen')).length).toBeGreaterThan(0)
+  })
+
+  it('...and an uncontended adoption still enables output and serves', async () => {
+    // THE POSITIVE CONTROL for the reordering itself: moving delivery behind the claim must
+    // not leave it switched off. A session that never accepts a screen is a REPL that cannot
+    // answer a turn, which is the feature.
+    const f = fixture()
+    f.host.deliverOnAttach = ACTIONABLE
+    const logs: string[] = []
+    const outcome = await pass(f, { log: (m) => logs.push(m) })
+    expect(outcome.kind).toBe('adopted')
+    expect(logs.filter((m) => m.includes('baseline screen')).length).toBeGreaterThan(0)
+    // And it goes on accepting screens after the claim.
+    const child = f.host.attached[0]
+    child?.push('a later screen')
+    expect(child?.screensDelivered).toEqual(['a later screen'])
   })
 })

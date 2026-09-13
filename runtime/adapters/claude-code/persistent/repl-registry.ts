@@ -341,6 +341,25 @@ export interface ReplRegistryRecord {
    * matters, since the opposite would hand a live pane to a second owner.
    */
   adoption_claim_pid?: number
+  /**
+   * #539 r47 — A SPAWN RESERVATION on this session key: "I am about to start a
+   * `claude --resume` for this transcript."
+   *
+   * WHY A SECOND MARKER RATHER THAN THE PANE CLAIM. A pane cannot be claimed before it
+   * exists, and the spawn becomes capable of corrupting the transcript the INSTANT the
+   * process starts — it appends through startup and readiness, and killing the loser
+   * afterwards does not unwrite what it appended. The claim covers "who drives this pane";
+   * this covers the window before a pane exists at all.
+   *
+   * WHY NOT `respawn_in_flight_at`, which is the same idiom. That field means "a respawn has
+   * been dispatched and has not completed", and `decideWedgeAction` reads it to suppress a
+   * duplicate respawn. Stamping it on every FRESH spawn would change what that gate means on
+   * every first turn. Same shape — marker, holder, pid, TTL, compare-and-set under the flock
+   * — different fact, so a different field.
+   */
+  spawn_reservation_at?: number
+  spawn_reservation_by?: string
+  spawn_reservation_pid?: number
   /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
    *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
    *  or a deploy). Written just before each kill, read back so the death is reported as
@@ -506,6 +525,36 @@ export interface PaneOwner {
   /** The claiming gateway's OS process, so its death can be established rather than
    *  waited out. */
   readonly pid: number
+}
+
+/** TAKE a spawn reservation on this key — see `spawn_reservation_at`. Written through the
+ *  funnel like every other ownership field, so the same source-level check covers it. */
+export function reservePaneSpawn(
+  prev: ReplRegistryRecord,
+  args: { readonly by: string; readonly now: number; readonly pid: number },
+): ReplRegistryRecord {
+  return {
+    ...prev,
+    spawn_reservation_at: args.now,
+    spawn_reservation_by: args.by,
+    spawn_reservation_pid: args.pid,
+  }
+}
+
+/** GIVE THE RESERVATION BACK, CAS'd on it still being ours — a reservation released by
+ *  somebody else's pass would hand the key to a third. */
+export function releasePaneSpawnReservation(
+  prev: ReplRegistryRecord,
+  by: string,
+): ReplRegistryRecord | undefined {
+  if (prev.spawn_reservation_by !== by) return undefined
+  const {
+    spawn_reservation_at: _a,
+    spawn_reservation_by: _b,
+    spawn_reservation_pid: _p,
+    ...rest
+  } = prev
+  return rest
 }
 
 /** TAKE (or keep) ownership: the handle, its generation and this gateway's claim, in one
