@@ -30,6 +30,7 @@ import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
+import { setFlockImplForTests } from '../registry-lock.ts'
 
 const KEY = 'inst user proj cred'
 const SESSION_ID = 'aaaaaaaa-1111-2222-3333-444444444444'
@@ -1168,5 +1169,90 @@ describe('the evidence bound and the shutdown, in both orders', () => {
     const outcome = await pass
     expect(outcome.kind).toBe('closed-unadoptable')
     expect(f.host.closed).toEqual([HANDLE])
+  })
+})
+
+
+describe('the row claim rests on a lock, and says so when it does not get one', () => {
+  /**
+   * ARGUS r14, and it is round eight's finding standing in the other half of the module.
+   * The claim is a cross-process compare-and-set, and a CAS is only a CAS while the lock
+   * holds. `withFlockSync` deliberately runs its callback unguarded when FFI is missing
+   * or `flock` returns nonzero, and both are indistinguishable from success to a caller
+   * that does not ask. Unguarded, two incarnations read the same row, both find it
+   * matching, and both publish an attached owner — two owners of one live transcript.
+   *
+   * THE FLOCK SYSCALL IS THE ONLY FAKE. `withFlockSync`, `withRegistry` and
+   * `clearPaneHandleIfUnchanged` are all the real ones, so these cases distinguish
+   * "claimed under the lock" from "claimed" — which a mocked registry could not.
+   */
+  afterEach(() => setFlockImplForTests(undefined))
+
+  it('REFUSES to publish when the lock was not acquired, and does not close the pane', async () => {
+    const f = fixture()
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
+    const before = readRow(f.registryPath)
+    setFlockImplForTests(() => 1)
+    const outcome = await run(f)
+
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    // THE LOCK, NOT THE ROW. "Someone else owns this" and "I could not find out who owns
+    // this" are different facts and must not print the same sentence.
+    expect(reason).toMatch(/lock was NOT acquired/i)
+    expect(reason).not.toMatch(/replaced by another incarnation/i)
+    // Nothing of ours survives...
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(childByKey.get(KEY)).toBeUndefined()
+    expect(await postReply(credential)).toBe(401)
+    // ...and NOTHING of the world's is destroyed: the pane is still running, because
+    // another incarnation may have legitimately claimed it.
+    expect(f.host.closed).toEqual([])
+    expect(readRow(f.registryPath)).toEqual(before)
+  })
+
+  it('REFUSES to clear the handle on a non-atomic write, and the pane is still closed', async () => {
+    // A close whose clear could not be atomic must not erase the row: the row it would
+    // erase may be one another incarnation just wrote for a LIVE pane, which strands it.
+    // A stale row pointing at a pane we DID close is the recoverable direction — the next
+    // boot probes that handle and gets a positive absence.
+    //
+    // The row deliberately MATCHES, so the refusal is the only thing that can stop the
+    // clear; a fixture whose row already failed the comparison would make this case
+    // vacuous, which is the shape that has bitten this branch three times.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+    setFlockImplForTests(() => 1)
+    const outcome = await run(f)
+
+    // The pane was a claude on our transcript without our channel, so it is closed —
+    // that half is unchanged and is what licenses a later resume.
+    expect(outcome.kind).toBe('closed-foreign-owner')
+    expect(f.host.closed).toEqual([HANDLE])
+    // ON DISK, not on the return value: the handle is LEFT rather than erased.
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+  })
+
+  it('THE POSITIVE CONTROL: with the lock granted, the same fixture is adopted and published', async () => {
+    // Two jobs. It stops "refuse everything" from satisfying both cases above, and it
+    // proves the claim path is REACHABLE on this runner — if FFI or `flock` were
+    // unavailable here, every case above would pass for a reason that had nothing to do
+    // with the code under test.
+    const f = fixture()
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('adopted')
+    expect(await pool.get(KEY)).toBeDefined()
+    expect(childByKey.get(KEY)).toBeDefined()
+    expect(f.host.closed).toEqual([])
+  })
+
+  it('and the CLEAR still happens when the lock IS granted — the clear case\'s control', async () => {
+    // Same fixture as the refusal above, lock granted: the handle must actually be
+    // stripped, so that case cannot be passing because the clear stopped working.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('closed-foreign-owner')
+    expect(f.host.closed).toEqual([HANDLE])
+    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
   })
 })

@@ -164,6 +164,12 @@ export interface BootAdoptionDeps {
  * check fired instead, and says it proved something it did not. The same collapse this
  * tree keeps paying for, in a string.
  */
+/** The claim could not be established because the lock was not held. Distinct from
+ *  {@link ROW_MOVED_REASON}: "someone else owns this row" is a finding, and "I could not
+ *  find out who owns it" is the absence of one. */
+const LOCK_UNACQUIRED_REASON =
+  'the registry lock was NOT acquired for this adoption\'s row claim, so the compare-and-set was not atomic — the pane is left running and the row left alone, and the next boot reconciles it'
+
 const shutdownAbandonReason = (
   at: 'before the attach' | 'with the attach in flight' | 'at the row claim',
   boundExpired = false,
@@ -868,14 +874,14 @@ async function closeAndClear(
     // already holds, and the handle is stale — unless the ROW has moved, in which case
     // the handle on disk is somebody else's and this pass has nothing to say.
     if (registryPath === undefined) return { kind: 'closed' }
-    return clearPaneHandleIfUnchanged(
-      registryPath,
-      sessionKey,
-      { handle, generation: record.child_generation },
-      deps,
-    ) === 'row-moved'
-      ? { kind: 'row-moved' }
-      : { kind: 'closed' }
+    return closeOutcomeOfClear(
+      clearPaneHandleIfUnchanged(
+        registryPath,
+        sessionKey,
+        { handle, generation: record.child_generation },
+        deps,
+      ),
+    )
   }
   if (recheck.kind === 'unavailable') {
     log(`pane ${handle}: the pre-close re-check could not be made (${recheck.reason}) — not closing`)
@@ -906,14 +912,40 @@ async function closeAndClear(
     return { kind: 'failed', reason: 'the close FAILED' }
   }
   if (registryPath === undefined) return { kind: 'closed' }
-  return clearPaneHandleIfUnchanged(
-    registryPath,
-    sessionKey,
-    { handle, generation: record.child_generation },
-    deps,
-  ) === 'row-moved'
-    ? { kind: 'row-moved' }
-    : { kind: 'closed' }
+  return closeOutcomeOfClear(
+    clearPaneHandleIfUnchanged(
+      registryPath,
+      sessionKey,
+      { handle, generation: record.child_generation },
+      deps,
+    ),
+  )
+}
+
+/**
+ * Turn the clear's outcome into the CLOSE's outcome — exhaustively, so a new
+ * `ClearOutcome` fails the typecheck here instead of defaulting into `closed`.
+ *
+ * The ternary this replaces read `=== 'row-moved' ? … : { kind: 'closed' }`, which lumped
+ * every other answer — including a refused write — into "the pane is closed and the row
+ * is tidy". Only `row-moved` changes what the CLOSE established: the pane really is
+ * closed in every other branch, and a row that still carries a handle is recoverable
+ * because the next boot probes it and gets a positive absence.
+ */
+function closeOutcomeOfClear(cleared: ClearOutcome): CloseOutcome {
+  switch (cleared) {
+    case 'row-moved':
+      // The key now describes another incarnation's child, so our close licenses nothing.
+      return { kind: 'row-moved' }
+    case 'cleared':
+    case 'absent':
+    case 'error':
+    case 'lock-unacquired':
+      // The pane IS closed — that is what this outcome reports, and it is what licenses a
+      // resume. Whether the row was tidied afterwards is a separate, recoverable fact and
+      // `clearPaneHandleIfUnchanged` has already logged which happened.
+      return { kind: 'closed' }
+  }
 }
 
 /**
@@ -1004,6 +1036,10 @@ async function claimRowOrUnwind(args: {
   readonly publish: () => RowAdoptionOutcome
   /** Take everything back — pool entry, child, sink registration, watchers, pane. */
   readonly unwind: (reason: string) => Promise<RowAdoptionOutcome>
+  /** Take back only OUR registrations, leaving the pane and the row exactly as they are.
+   *  For the case where the claim could not be established at all — see the
+   *  `!acquired` branch, which must neither publish nor close. */
+  readonly release: (reason: string) => RowAdoptionOutcome
 }): Promise<RowAdoptionOutcome> {
   const log = args.deps.log ?? defaultLog
   // Unsupervised: there is no row, so there is nothing to race for and nothing to
@@ -1012,27 +1048,57 @@ async function claimRowOrUnwind(args: {
   if (args.registryPath === undefined) return args.publish()
   const registryPath = args.registryPath
   let stillOurs: boolean
+  // THE CLAIM IS A COMPARE-AND-SET, AND A CAS IS ONLY A CAS WHILE THE LOCK HOLDS
+  // (Argus r14). `withFlockSync` deliberately runs unguarded when FFI is missing or
+  // `flock` returns nonzero, and both look exactly like success to a caller that does not
+  // ask. Unguarded, two incarnations read this row, both find it matching, and both
+  // publish an attached owner — two owners of one live transcript, the single outcome
+  // this module exists to prevent. Round eight gave the shutdown decision this treatment;
+  // the claim is its neighbour and inherited nothing.
+  let acquired = false
   try {
-    stillOurs = withRegistry(registryPath, (registry) => {
-      const prev = registry[args.sessionKey]
-      if (
-        prev === undefined ||
-        prev.pane_handle !== args.expected.handle ||
-        prev.child_generation !== args.expected.generation
-      ) {
-        return { registry, result: false }
-      }
-      // THE PID IS THE ONE FIELD AN ADOPTION MAY CORRECT: the child is the same process
-      // it always was, so a disagreement means the row was stale — and a stale pid is
-      // what every liveness probe above here uses.
-      if (args.recordedPid !== args.pid) registry[args.sessionKey] = { ...prev, pid: args.pid }
-      return { registry, result: true }
-    })
+    stillOurs = withRegistry(
+      registryPath,
+      (registry) => {
+        const prev = registry[args.sessionKey]
+        if (
+          prev === undefined ||
+          prev.pane_handle !== args.expected.handle ||
+          prev.child_generation !== args.expected.generation
+        ) {
+          return { registry, result: false }
+        }
+        // THE PID IS THE ONE FIELD AN ADOPTION MAY CORRECT: the child is the same process
+        // it always was, so a disagreement means the row was stale — and a stale pid is
+        // what every liveness probe above here uses.
+        if (args.recordedPid !== args.pid) registry[args.sessionKey] = { ...prev, pid: args.pid }
+        return { registry, result: true }
+      },
+      {},
+      (ok) => {
+        acquired = ok
+      },
+    )
   } catch (e) {
     // The registry could not be read or written. We cannot establish that the row is
     // still ours, and an adoption that cannot be confirmed is not one: give the child
     // back rather than publish on an unverified claim.
     return await args.unwind(`the registry could not be claimed for this adoption: ${errorText(e)}`)
+  }
+  if (!acquired) {
+    // NOT PUBLISHED, AND NOT CLOSED. "Someone else owns this row" and "I could not find
+    // out who owns it" are different facts and get different acts. `undecided` maps to
+    // `{ ok: false }` in the spawn gate, so no cold spawn follows and no second owner can
+    // arise from the refusal — while CLOSING would destroy a live REPL that another
+    // incarnation may have legitimately claimed. We verified the child is ours; we did
+    // not establish that we are still its rightful owner, and an unestablished claim
+    // licenses neither act.
+    log(
+      `row ${args.sessionKey.slice(0, 32)}: the registry LOCK WAS NOT ACQUIRED for this adoption's claim, so ` +
+        `the compare-and-set is not atomic and two incarnations could both have claimed pane ` +
+        `${args.expected.handle}. Giving the child back and leaving the pane and the row alone.`,
+    )
+    return args.release(LOCK_UNACQUIRED_REASON)
   }
   if (!stillOurs) {
     log(
@@ -1098,7 +1164,7 @@ const ROW_MOVED_REASON =
 
 /** What a compare-and-clear did. `row-moved` is the one that matters: the row is no
  *  longer the one the caller decided about, so nothing was touched. */
-type ClearOutcome = 'cleared' | 'row-moved' | 'absent' | 'error'
+type ClearOutcome = 'cleared' | 'row-moved' | 'absent' | 'error' | 'lock-unacquired'
 
 /**
  * Strip `pane_handle` — but ONLY from the row the caller actually inspected.
@@ -1134,12 +1200,23 @@ function clearPaneHandleIfUnchanged(
   deps: BootAdoptionDeps,
 ): ClearOutcome {
   const log = deps.log ?? defaultLog
+  let acquired = false
   try {
-    const outcome = withRegistry(registryPath, (registry) => {
+    const outcome = withRegistry(
+      registryPath,
+      (registry) => {
       const prev = registry[sessionKey]
       if (prev === undefined) return { registry, result: 'absent' as ClearOutcome }
       if (prev.pane_handle !== expected.handle || prev.child_generation !== expected.generation) {
         return { registry, result: 'row-moved' as ClearOutcome }
+      }
+      if (!acquired) {
+        // REFUSED RATHER THAN WRITTEN. Without the lock this compare-and-clear is not
+        // atomic, and the row it would erase may be one another incarnation has just
+        // written for a LIVE pane — stranding that pane, which is the unrecoverable
+        // direction. A stale row pointing at a pane we did close is the recoverable one:
+        // the next boot probes the handle, gets a positive `gone`, and clears it then.
+        return { registry, result: 'lock-unacquired' as ClearOutcome }
       }
       // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
       // whose `pane_handle` key is present-but-undefined would serialise to a key the
@@ -1147,7 +1224,20 @@ function clearPaneHandleIfUnchanged(
       const { pane_handle: _gone, ...rest } = prev
       registry[sessionKey] = rest
       return { registry, result: 'cleared' as ClearOutcome }
-    })
+      },
+      {},
+      (ok) => {
+        acquired = ok
+      },
+    )
+    if (outcome === 'lock-unacquired') {
+      log(
+        `row ${sessionKey.slice(0, 32)}: the registry LOCK WAS NOT ACQUIRED, so pane_handle ` +
+          `${expected.handle} is LEFT IN PLACE rather than cleared on a non-atomic write. The pane is ` +
+          'closed; the next boot probes that handle, gets a positive absence, and clears it then.',
+      )
+      return outcome
+    }
     if (outcome === 'row-moved') {
       const now = getRecord(registryPath, sessionKey)
       log(
@@ -1393,6 +1483,18 @@ async function adoptRow(
     return { kind: 'undecided', sessionKey, reason }
   }
 
+  /** {@link release} with an explicit sentence rather than an abandonment cause — the
+   *  give-back is the same, and only the reason differs. */
+  const releaseWithReason = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
+    sink.unregisterIf(record.sessionId, session)
+    if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
+    pool.delete(sessionKey)
+    session.sizeWatchdog?.stop()
+    session.deadTurnWatcher?.stop()
+    log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
+    return { kind: 'undecided', sessionKey, reason }
+  }
+
   let primed = false
   let child: PtyChild
   try {
@@ -1525,6 +1627,7 @@ async function adoptRow(
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
     },
     unwind: (reason) => unwind(reason, child),
+    release: (reason) => releaseWithReason(reason, child),
   })
 }
 

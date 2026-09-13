@@ -503,6 +503,62 @@ and a bound that had simply stopped working would satisfy both. A third case run
 evidence timeout with no shutdown at all and requires `closed-unadoptable` with the pane
 closed, so the bound is still proved to do its job.
 
+### Round fourteen: the claim rested on a lock it never confirmed
+
+**Round eight's finding, standing untouched in the other half of the module.**
+`claimRowOrUnwind` does its cross-process compare-and-set through `withRegistry` and
+publishes when it returns true. `withRegistry` passed no `onOutcome` to `withFlockSync`,
+and `withFlockSync` deliberately runs its callback unguarded when FFI is missing or
+`flock` returns nonzero — both indistinguishable from success to a caller that does not
+ask. **A compare-and-set is only a compare-and-set while the lock holds.** Unguarded, two
+incarnations read the same row, both find it matching, and both publish an attached owner:
+two owners of one live transcript, the single outcome this module exists to prevent.
+
+This is the **fifth instance of the branch's named habit** and the one with the worst
+consequence. The shutdown decision was given this treatment in round eight; the claim is
+its neighbour and inherited nothing. The pattern is not "a value computed and dropped"
+this time but its parent: **a property established for one caller and not carried to the
+caller beside it.** `withRegistryRead` grew an `onOutcome` passthrough in round eight and
+`withRegistry` — the same file, twenty lines down — did not.
+
+**What each site does with a lock it did not get.** The claim **releases**: it gives back
+the pool entry, the child mirror, the sink registration and the watchers, and leaves the
+pane and the row exactly as they are. It does not close, and the reason is not timidity —
+`undecided` already maps to `{ ok: false }` in the spawn gate, so no cold spawn follows
+and no second owner can arise from the refusal, while closing would destroy a live REPL
+another incarnation may have legitimately claimed. We verified the child is ours; we did
+not establish that we are still its rightful owner, and **an unestablished claim licenses
+neither act**. The reason text names the lock and is deliberately distinct from the
+row-moved one: "someone else owns this row" is a finding, "I could not find out who owns
+it" is the absence of one.
+
+The clear **refuses**. Without the lock the compare-and-clear is not atomic, and the row
+it would erase may be one another incarnation has just written for a LIVE pane — which
+strands it, and that is the unrecoverable direction. A stale row pointing at a pane we did
+close is the recoverable one: the next boot probes the handle, gets a positive absence,
+and clears it then. The coordinator asked to be told if refusing left something worse; it
+does not, and the reason it does not is that the close's own outcome is unaffected — the
+pane really is closed, which is what licenses a resume.
+
+**And the mapping that would have swallowed the new answer was a ternary.**
+`clearPaneHandleIfUnchanged(...) === 'row-moved' ? {row-moved} : {closed}` lumped every
+other outcome — including a refused write — into "closed and tidy". It is now an
+exhaustive `switch` in `closeOutcomeOfClear`, so a future `ClearOutcome` fails the
+typecheck rather than defaulting into permission. That is the type-level remedy this
+branch keeps reaching for, applied one function further out.
+
+**Every case forces the REAL failure.** `setFlockImplForTests(() => 1)` fakes the flock
+syscall and nothing else: `withFlockSync`, `withRegistry` and
+`clearPaneHandleIfUnchanged` are all the real ones, so the cases distinguish "claimed
+under the lock" from "claimed". Two controls, each with a stated second job — the adoption
+control proves the claim path is reachable on this runner (so the refusals cannot be
+passing because FFI is unavailable), and the clear control proves the clear still happens
+when the lock is granted (so the refusal case cannot be passing because the clear stopped
+working). The clear fixture's row deliberately MATCHES, so the refusal is the only thing
+that can stop the write — checked rather than assumed, because a non-matching fixture
+would make the mutation unobservable, which is the M41/M48/M51 shape this branch has now
+hit three times.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -513,7 +569,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve and M52–M53 in round thirteen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen and M54–M56 in round fourteen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -597,6 +653,9 @@ count from the rows below rather than trusting this sentence.
 | M51 | `argv0IsClaude` compares argv[0]'s first whitespace-delimited word | `pane-adoption-verdict.test.ts` (1) |
 | M52 | `abandonInFlightPasses` skips an already-abandoned pass again | `boot-adoption.test.ts` (1) |
 | M53 | the evidence timer overwrites a `shutdown` cause | `boot-adoption.test.ts` (1) |
+| M54 | the row claim does not consume the lock outcome | `boot-adoption.test.ts` (1) |
+| M55 | the clear writes anyway on an unacquired lock | `boot-adoption.test.ts` (1) |
+| M56 | the unacquired-lock branch CLOSES instead of releasing | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

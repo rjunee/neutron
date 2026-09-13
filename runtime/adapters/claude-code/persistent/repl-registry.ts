@@ -712,10 +712,24 @@ export function withRegistryRead<T>(
   return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)), onOutcome)
 }
 
+/**
+ * Read-modify-write the registry under the flock.
+ *
+ * `onOutcome` REPORTS WHETHER THE LOCK WAS ACTUALLY HELD while the mutation ran,
+ * forwarded straight to `withFlockSync`. Optional, so no existing caller changes — but a
+ * caller whose correctness argument rests on atomicity must consume it, because a
+ * compare-and-set is only a compare-and-set while the lock holds. Run unguarded (no FFI,
+ * or `flock` returning nonzero, both of which `withFlockSync` deliberately allows) two
+ * incarnations can read the same row, both find it matching, and both write.
+ * `boot-adoption.ts`'s row claim is exactly such a caller: without this it could publish
+ * two attached owners of one live transcript, the single outcome that module exists to
+ * prevent.
+ */
 export function withRegistry<T>(
   path: string,
   mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },
   options: WithRegistryOptions = {},
+  onOutcome?: (acquired: boolean) => void,
 ): T {
   const mandatoryOnCorrupt = defaultCorruptHandler(path)
   const mandatoryOnDropRow = defaultDropRowHandler(path)
@@ -741,12 +755,16 @@ export function withRegistry<T>(
       log.error('caller-supplied onDropRow callback threw (ignored)', { error: String(e) })
     }
   }
-  return withFlockSync(registryLockPath(path), () => {
-    const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
-    const { registry, result } = mutate(current)
-    if (!skipSave) saveRegistry(path, registry)
-    return result
-  })
+  return withFlockSync(
+    registryLockPath(path),
+    () => {
+      const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
+      const { registry, result } = mutate(current)
+      if (!skipSave) saveRegistry(path, registry)
+      return result
+    },
+    onOutcome,
+  )
 }
 
 /** Upsert one record (lock-guarded). Merges onto any existing row so a
