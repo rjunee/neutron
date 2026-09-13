@@ -315,6 +315,7 @@ first cut actually shipped.
 | N14 | the composer NAME is looked up file-wide, keeping the LAST match | 2 fail |
 | N15 | `walkOwnScope` stops respecting the boundary at all | 3 fail |
 | N16 | as N14, but keeping the FIRST match | 2 fail |
+| N17 | a fifth traversal added without the audit | 1 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -382,6 +383,15 @@ the file was audited against that one question, and the file now carries the tab
 | `bindsInPattern` | one binding pattern | `walkOwnScope` | **no** — descended into default-value functions |
 | `composerReturnLiteral` | one function body | `walkOwnScope` | **no** — the reported blocker |
 
+**And the audit table is itself a claim of completeness, so it is counted rather than
+written.** A table nobody is forced to update goes stale exactly the way this record's
+member counts did. `the traversal inventory is pinned` parses the guard file's own source
+and pins the number of `walk` and `walkOwnScope` call sites, so a fifth traversal cannot be
+added without someone deciding in the diff which kind it is. Failing that test does not mean
+the new traversal is wrong — it means nobody has said which kind it is yet, and that is
+precisely the decision the last two rounds were lost to. N17 adds an unaudited traversal and
+reds it.
+
 `bindsInPattern` is the one the audit earned. Its bug fails SAFE — it answers "yes, bound"
 for a name belonging to a default value's own parameters, producing a false REFUSAL rather
 than a false pass — so no false-pass control could ever have found it, and it would have
@@ -413,7 +423,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus sixteen against the guard itself, each applied to the
+- The seventeen mutations above, plus seventeen against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

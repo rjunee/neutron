@@ -26,6 +26,8 @@
  */
 import { describe, expect, test } from 'bun:test'
 import ts from 'typescript'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { TERMINAL_CAUSES, type TerminalCause } from './terminal-cause.ts'
 
 const SRC = await Bun.file(new URL('./inner-workflow.mjs', import.meta.url)).text()
@@ -135,6 +137,13 @@ function parse(src: string): ts.SourceFile {
  *
  * The first is the only one whose construct genuinely IS the whole file, which is why it
  * is the only remaining use of the unrestricted walk.
+ *
+ * AND THAT TABLE IS ITSELF A CLAIM OF COMPLETENESS, so it is pinned by a test rather than
+ * left as prose — the lesson of the round that produced it. `the traversal inventory is
+ * pinned` below counts the call sites in THIS file and fails when either number moves, so
+ * a new traversal cannot be added without someone deciding, in the diff, which kind it is.
+ * A table nobody is forced to update is a table that goes stale exactly like the counts in
+ * the as-built did.
  */
 function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
   visit(node)
@@ -512,6 +521,36 @@ function decoyHolder() {
 }
 
 describe('#520 — every terminal path of the inner workflow names its cause', () => {
+  /**
+   * THE GUARD'S GUARD. Four narrowings of this scanner, and the last two were one bug —
+   * a traversal that did not stop where its construct stops — in two different helpers.
+   * The audit that followed is written as a table at `walk`, and a table nobody is forced
+   * to update goes stale. So the inventory is COUNTED, from this file's own source.
+   *
+   * Failing here does not mean the new traversal is wrong. It means nobody has yet said
+   * which kind it is, and that is exactly the decision the last two rounds were lost to.
+   */
+  test('the traversal inventory is pinned — a new walk forces the audit', () => {
+    const self = ts.createSourceFile(
+      'guard.test.ts',
+      readFileSync(fileURLToPath(new URL('./inner-workflow-terminal-cause.test.ts', import.meta.url)), 'utf8'),
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TS,
+    )
+    const calls = { walk: 0, walkOwnScope: 0 }
+    walk(self, (n) => {
+      if (!ts.isCallExpression(n) || !ts.isIdentifier(n.expression)) return
+      if (n.expression.text === 'walk') calls.walk += 1
+      if (n.expression.text === 'walkOwnScope') calls.walkOwnScope += 1
+    })
+    // `walk`: its own recursive call, plus `terminalSites` — whose construct really is the
+    // whole file — plus this inventory, which is also scanning a whole file.
+    // `walkOwnScope`: `bindsInPattern` and `composerReturnLiteral`, the two that reason
+    // about a single construct and must stop at its edge.
+    expect(calls).toEqual({ walk: 3, walkOwnScope: 2 })
+  })
+
   test('the parse is COMPLETE — a truncated tree would make every assertion below vacuous', () => {
     // The floor under the floor. A parse that stopped early would yield few statements and
     // few calls, and every "no failing sites" assertion would pass on a tree that never
