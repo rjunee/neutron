@@ -50,6 +50,82 @@ describe('the committed index matches the renderer', () => {
   })
 })
 
+// The blocker list answers "what is still in the way", but `cutover` answers "does this
+// item gate the cutover" — provenance, which stays true after the work lands. Filtering on
+// the flag alone conflated the two, and the index went on naming finished items as
+// blockers. Unobservable until an item was first both `cutover` and not `open`, so pin
+// BOTH directions here: presence for open, absence for each terminal status.
+describe('the blocker list is what is still in the way, not what ever gated the cutover', () => {
+  const base = { group: 'trident', priority: 'P0', cutover: true, needs_spec: false } as const
+  /** The `## Blocking the cutover` section alone. A done item still appears in the main
+   *  table below it, so a whole-document `not.toContain` would pass for the wrong reason. */
+  function blockerSection(rendered: string): string {
+    const start = rendered.indexOf('## Blocking the cutover')
+    if (start === -1) return ''
+    const rest = rendered.slice(start + 1)
+    const end = rest.indexOf('\n## ')
+    return end === -1 ? rest : rest.slice(0, end)
+  }
+
+  // The OTHER half of the conjunction, and the mutant the cases below do not catch on
+  // their own: dropping the flag entirely (`i.status === 'open'`) passes every one of them
+  // while listing the whole open queue as cutover blockers.
+  test('an open item that does NOT gate the cutover is absent from the list and the count', () => {
+    const rendered = renderIndex([
+      { ...base, slug: 'gates-it', title: 'Gates it', status: 'open' },
+      { ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' },
+    ])
+    expect(blockerSection(rendered)).not.toContain('unrelated')
+    expect(blockerSection(rendered)).toContain('gates-it')
+    expect(rendered).toContain('(unrelated.md)') // still an item; only the blocker list drops it
+    expect(rendered).toContain('**2 items.** 1 blocks the harness-orchestrator cutover')
+  })
+
+  // A tree with open work but nothing gating the cutover must drop the heading, same as
+  // the all-done tree below — for the other reason.
+  test('no cutover item at all leaves no blocker section', () => {
+    const rendered = renderIndex([{ ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' }])
+    expect(rendered).not.toContain('## Blocking the cutover')
+    expect(rendered).toContain('**1 items.** 0 block the harness-orchestrator cutover')
+  })
+
+  test('an open cutover item is listed', () => {
+    const section = blockerSection(renderIndex([{ ...base, slug: 'still-open', title: 'Still open', status: 'open' }]))
+    expect(section).toContain('still-open')
+  })
+
+  test('a done cutover item is NOT listed, though it is still in the table', () => {
+    const rendered = renderIndex([{ ...base, slug: 'landed', title: 'Landed', status: 'done' }])
+    expect(blockerSection(rendered)).not.toContain('landed')
+    expect(rendered).toContain('(landed.md)') // still an item; only the blocker list drops it
+  })
+
+  test('a wont-do cutover item is NOT listed either', () => {
+    const rendered = renderIndex([{ ...base, slug: 'abandoned', title: 'Abandoned', status: 'wont-do' }])
+    expect(blockerSection(rendered)).not.toContain('abandoned')
+    expect(rendered).toContain('(abandoned.md)')
+  })
+
+  // The count in the summary line is computed from the same list, so it must move too —
+  // a fix applied to the section but not the sentence would leave the prose lying.
+  test('the summary count counts only the open ones', () => {
+    const rendered = renderIndex([
+      { ...base, slug: 'still-open', title: 'Still open', status: 'open' },
+      { ...base, slug: 'landed', title: 'Landed', status: 'done' },
+      { ...base, slug: 'abandoned', title: 'Abandoned', status: 'wont-do' },
+    ])
+    expect(rendered).toContain('**3 items.** 1 blocks the harness-orchestrator cutover')
+  })
+
+  // With no open cutover item the heading must be absent entirely, not an empty section
+  // captioned "These are the items the cutover is gated on."
+  test('all-done leaves no blocker section at all', () => {
+    const rendered = renderIndex([{ ...base, slug: 'landed', title: 'Landed', status: 'done' }])
+    expect(rendered).not.toContain('## Blocking the cutover')
+    expect(rendered).toContain('**1 items.** 0 block the harness-orchestrator cutover')
+  })
+})
+
 describe('every committed spec item has valid frontmatter', () => {
   const items = readSpecItems(DIR)
 

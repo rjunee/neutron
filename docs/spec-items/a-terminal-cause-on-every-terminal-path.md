@@ -1,7 +1,7 @@
 ---
 title: Emit a terminal cause on every terminal path, and report it
 group: trident
-status: open
+status: done
 priority: P0
 cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
