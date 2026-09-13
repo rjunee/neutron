@@ -85,6 +85,12 @@ it must not swallow.
       is not remembered: the next turn re-probes.
       *Verified by* `runtime/adapters/claude-code/persistent/__tests__/adoption-refuses-a-second-owner.test.ts`,
       which drives the real `getOrSpawnSession` and asserts on the HOST's spawn counter.
+- [ ] **A REFUSAL DOES NOT COOL THE CREDENTIAL.** The turn error is stamped
+      `repl_unreconciled` at the producer, so the composer's ladder routes it to no
+      cooldown — an UNSTAMPED retryable error is read as a 429 and would park a healthy
+      credential for an hour after five refusals.
+      *Verified by* `runtime/adapters/claude-code/persistent/__tests__/classify-spawn-error.test.ts`,
+      with the table/union parity check in `runtime/__tests__/o3-substrate-error-codes.test.ts`.
 - [ ] **AND A CONCLUSIVE ONE LETS IT THROUGH.** A pane positively gone, a survivor
       closed, a recorded pid the kernel says is dead or belongs to a stranger, or a row
       with no durable handle: the spawn proceeds. Without this half, a gate that refuses

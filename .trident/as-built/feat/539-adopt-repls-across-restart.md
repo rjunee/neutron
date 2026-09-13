@@ -162,6 +162,7 @@ target.
 | M22 | an `undecided` pass is cached | `adoption-refuses-a-second-owner.test.ts` (1) |
 | M23 | the pid fallback kills a healthy REPL after a host blip | `boot-adoption.test.ts` (1) |
 | M24 | the host switch never terminates a verified survivor | `boot-adoption.test.ts` (1) |
+| M25 | the refusal is not stamped with its error class | `classify-spawn-error.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -217,6 +218,16 @@ everywhere else the fallback is an IDENTITY probe with no side effect
 (`identifyOrphanPid`, split out of `adoptOrKillOrphan` so the two share one matcher),
 and a verified-alive survivor yields `undecided`: the pane stays, the turn refuses, the
 next turn adopts it.
+
+**A FOURTH, which the refusal itself created.** A turn error the producer does not
+stamp arrives at the composer with no code, and `mapStatusForPoolCooldown(null, true)`
+turns any unstamped RETRYABLE error into a 429-shaped pool cooldown — so the refusal
+would have cooled the selected credential for a minute, and parked it for an hour after
+five. A reconciliation problem laundered into "this credential is rate-limited": exactly
+the class `classify-spawn-error.ts`'s own header warns about, committed by the change
+that cites it. It is stamped `repl_unreconciled` now (a registered
+`SubstrateErrorClass`, retryable), which the composer routes to `cooldownStatus = null`
+along with every other non-credential class.
 
 **The fix surfaced a third, smaller one.** Leaning on `adoptOrKillOrphan` for a SPAWN
 decision exposed a false/unknown collapse in its own verdict set: `not-ours` was
