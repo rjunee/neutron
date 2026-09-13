@@ -1,5 +1,5 @@
 ---
-title: "Rev-range base: pinned sha, else the ref verified, never a shorthand"
+title: "Rev-range base: the pinned sha, else a ref nobody can mistake"
 group: trident
 status: open
 priority: P0
@@ -7,25 +7,51 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/` — AND
-THE GATE THAT ENFORCES THIS EXEMPTS NOTHING THAT IS NOT ITSELF ONE OF THOSE TWO FORMS.**
-Nothing else — that is the property, and it is about what git RECEIVES rather than about which
-caller produced it, which is what makes it exhaustive where four earlier statements of the rule
-were enumerations of paths. The second clause is not decoration: `scripts/ci/diff-base-check.mjs`
-exempted `origin/` while the runtime path refused it, so **the regression alarm for this exact
-class was blind to it**. That clause is checkable by reading `QUALIFIERS` against this sentence —
-two lines, not a sweep. **"Contains a slash" is not "fully qualified":** `origin/main` is a
-shorthand git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
-captures it.
+## THE INVARIANT — stated once, cited everywhere else
 
-Concretely: every rev-range base resolves to the launch-pinned sha; else to
-`refs/remotes/origin/<base>` when that ref resolves to a commit; else to `refs/heads/<base>` when
-THAT resolves; else it is REFUSED. No arm hands back a bare name, and the standalone wrapper
-asserts the SHAPE at the point where the value meets the command, so a classifier mistake
-upstream cannot reach git. Every arm names the ref it verified: a shorthand is a
-different thing from the ref it looks like, because git permits `refs/tags/origin/main` and
-`refs/tags/main`, prefers tags when disambiguating, and resolves a bare word against every
-namespace — so an unqualified base is a base nobody chose.
+**Every other mention of this rule in this item, in the as-built record and in the code points
+HERE instead of restating it.** Six review rounds found six neighbouring sentences asserting a
+shape the code had already replaced — the headline invariant, a precondition, the exception-class
+names, three live documents in one round, an acceptance criterion written the same round as its
+fix, and this sentence itself. Each correction was locally right and each left a copy standing.
+**A claim written in six places can only be corrected in the one that was read**, so it is
+written in one. (The same move as the counts: the number was deleted and the inventory derived,
+and it has not gone stale since.)
+
+**THE BASE OPERAND — the LEFT-hand side of a rev-range — is one of these, in order:**
+
+1. **the launch-pinned base sha**, a full object name;
+2. **`refs/remotes/origin/<base>`, VERIFIED** to resolve to a commit before it is used;
+3. **`refs/heads/<base>`** — which the TypeScript binding also verifies, and which the workflow
+   composer **emits UNVERIFIED**. That asymmetry is deliberate and is not a probe that was
+   forgotten: the composer builds a shell word in one process for another to evaluate, so it
+   cannot refuse; a `refs/heads/<base>` that does not exist is refused BY GIT, loudly — fatal,
+   exit 128, nothing written. **That arm is FAIL-CLOSED rather than verified, and saying so is
+   stronger than implying a probe that does not happen.**
+4. **a named REFUSAL** — `TridentUnresolvableBaseError` when both probes answered "no such ref",
+   `TridentUndeterminedBaseError` when the remote probe could not answer at all, and, because the
+   composer cannot throw, the all-zero object id at the repository's own hash width, which git
+   cannot resolve.
+
+**No arm hands back a bare name**, because a bare word is not inert: git resolves it against every
+namespace and prefers TAGS, so `refs/tags/main` answers to `main` and `refs/tags/origin/main`
+answers to `origin/main`. **"Contains a slash" is not "fully qualified".** This repository holds a
+live instance — `archive/agent-replies-prior-iter-3b35767` exists as a tag and as no branch.
+
+**WHAT THIS DOES NOT GOVERN: the RIGHT-hand operand.** `HEAD`, a build-branch name, a caller's own
+ref — those are shorthand by design and stay that way. The question a review diff asks is "what
+did THIS branch change", so the branch is the subject, named by the run that created it; the
+defect this item exists for is a stale or shadowed BASELINE. An earlier version of this sentence
+said "every value that reaches a git rev-range", which the tests falsify on their own right-hand
+operands — an absolute that read as rigour and was simply false.
+
+**HOW IT IS HELD.** `scripts/ci/diff-base-check.mjs` fails CI on a base operand composed from a
+branch name, and **exempts nothing by shape except an operand beginning with `refs/` or a full
+object name** — the clause is load-bearing, because that gate once exempted `origin/` while the
+runtime refused it, and the alarm for this exact class was blind to it. `gitRangeArgv` welds
+`--end-of-options` between the last flag and the operand, so no operand can be reparsed as a
+flag; and because a constructor that guarantees the marker asks nothing about the value, the
+test enumerates every operand that enters through it, and every operand its callers forward.
 
 That last condition is **"the ref does not resolve"**, not "the repository has no remote". They are
 different states and the second is wider than what the code establishes: a repository can have
@@ -84,7 +110,8 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   (128), and ` main ..HEAD` is a fatal operand that the wrappers' `2>/dev/null || true` turns into
   an empty diff;
 - `codex-review.sh`'s **standalone** handling CLASSIFIES THE INPUT'S KIND ONCE — already
-  shaped (40-hex either case, or `refs/…`), `HEAD`-rooted, `origin/`-prefixed, or a bare name —
+  shaped (a full object name at the repository's own hash width, either case, or `refs/…`),
+  `HEAD`-rooted, `origin/`-prefixed, or a bare name —
   and then applies that kind's single rule. A bare name is never probed as `origin/<x>` and an
   `origin/<x>` is never probed as a bare name, **because the rules are unreachable from the
   wrong kind, not because the arms are in a lucky order**. (It was an `if/elif` chain ordered by
@@ -136,13 +163,13 @@ boundary that depends on the next author noticing the right form thirty lines aw
 mode `docs/agent-legible-architecture.md` §1 names explicitly. So the unit of the fix is the
 **rule**, not the call sites.
 
-**What enforces this is structural, not a grep.** The invariant is *every value that reaches a
-rev-range operand is a full object name or begins with `refs/`* — **a base branch NAME never
-reaches one at all.** (This sentence read "a base branch NAME reaches a rev-range operand only
-where no remote-tracking ref for it exists" until round twenty-six: that was the rule through
-round eighteen, and round nineteen replaced the bare fallback with `refs/heads/<base>` and a
-refusal. It contradicted this item's own headline and `trident/merge.ts`'s order list — binding
-acceptance text describing a fallback the code no longer has.) It is carried by two things:
+**What enforces the invariant is structural, not a grep** — the invariant itself is at the top of
+this item and is not restated here, because this paragraph has now carried two superseded
+versions of it: "a base branch NAME reaches a rev-range operand only where no remote-tracking ref
+exists" (the rule through round eighteen, false from round nineteen), then "every value that
+reaches a rev-range operand", which the tests falsify on their own right-hand operands. **Both
+were written as the strong form of a true thing, and that is the tell**: the strong form is where
+a claim outruns its code. It is carried by two things:
 
 - **one binding per boundary** — `diffBase` in `trident/inner-workflow.mjs` and the
   exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a base
@@ -172,87 +199,35 @@ enumerated", and this one has been wrong about that twice in the same shape. Its
 and its blind spots are stated in its own header, and the criteria below say which claim
 rests on which instrument.
 
-The resolution order is evidence-first, and is the same at every site:
+**The arms are stated once, in THE INVARIANT at the top of this item.** What follows is the
+evidence behind them, not a second statement of them — if the two ever disagree, the invariant is
+the claim and this is commentary.
 
-1. the **launch-pinned base sha** — the commit `origin/<base>` held when the launcher observed it
-   and cut the build branch. A sha cannot go stale, and it IS the cut point;
-2. **`refs/remotes/origin/<base>` whenever that ref resolves, in EITHER merge mode** — fully
-   qualified, because that is the ref the probe verified. The shorthand `origin/<base>` names a
-   DIFFERENT thing when a tag of that name exists: git prefers `refs/tags/` over
-   `refs/remotes/`, so `origin/main..HEAD` silently resolves to the tag — measured on git 2.43
-   as two files where the qualified form gives one, with a stderr warning and exit 0, and both
-   wrappers send that stderr to `/dev/null`. **A value verified in one form and returned in
-   another has not been verified.** The remote-tracking
-   ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
-   refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
-   as launch; in local mode it is preferred too, whenever the repository has one;
-3. **`refs/heads/<base>` whenever the remote probe answers ABSENT — git looked and there is no
-   such remote-tracking ref — and the local branch resolves.** Absent, not merely "did not
-   resolve": since round thirty-one a probe that could not ANSWER is a third outcome and takes
-   arm 4, because the reason the remote ref is preferred is that the local one may be stale and
-   a failed probe says nothing about staleness. Qualified for the same reason arm 2 is, and it matters MORE here, not less:
-   the fallback runs when the environment is already unusual (a fresh clone, a missing remote,
-   a detached CI checkout), which is where a stray `refs/tags/<base>` is likeliest and least
-   noticed. `refs/heads/main` and `refs/tags/main` coexist happily and git prefers the tag, so
-   the bare word named something nobody had checked. **A fallback deserves the same rigour as
-   the primary path, not less, because it executes in worse conditions.**
-4. **REFUSED, in two distinct states with two distinct exceptions.** (a) NEITHER ref resolves —
-   git answered "no such ref" for both — and `diffBaseRef` throws `TridentUnresolvableBaseError`
-   while the workflow composes `refs/heads/<base>` anyway, which git rejects (fatal, 128).
-   (b) The REMOTE probe could not answer at all: not exit 1 with empty stdout, but a rejected
-   spawn, exit 128, or output that is not an object name. `diffBaseRef` throws
-   `TridentUndeterminedBaseError` **without asking the second question**, and the workflow emits
-   the all-zero object id. Keeping (b) out of (a) is the round-thirty-one fix: they were one
-   value, and that value selected the local branch. The
-   bare word is NOT inert, which is what "git errors loudly on an unknown revision" missed: git
-   resolves it against every namespace, and a same-named TAG answers to it. **This repository
-   holds a live instance** — `archive/agent-replies-prior-iter-3b35767` exists as a tag and as
-   no branch, so the bare name resolved happily, exit 0. A tag that shares a branch's name is
-   the least likely thing an operator meant by "the base branch".
+**Why arm 1 is a sha and not a ref.** The launch-pinned value is the commit `origin/<base>` held
+when the launcher observed it and cut the build branch: it cannot go stale, and it IS the cut
+point, so a range from it asks exactly "what has this branch added since it was cut".
 
-   The two implementations differ here and only here, stated rather than papered over: a shell
-   substitution is composed in one process and evaluated in another, so it cannot refuse — it
-   can only emit a word the other process will reject. For state (a) that word is
-   `refs/heads/<base>`; for state (b) it is the ALL-ZERO OBJECT ID **at the repository's own
-   hash width** — 40 zeros under SHA-1, 64 under `--object-format=sha256` — which is why that
-   arm is a shell expression rather than a literal: the width is a property of the repository
-   asking the question, not of this process. Measured on git 2.43.0: `fatal: Invalid revision
-   range`, exit 128, no output, and it stays that way with a tag AND a branch of that name
-   present, because git ignores a ref whose name is exactly the hash width in hex — **and
-   nothing else**.
+**Why arms 2 and 3 name the ref in full.** `origin/<base>` is a SHORTHAND, and git resolves a
+shorthand across namespaces with TAGS outranking remote-tracking refs: measured on git 2.43, a
+repository holding `refs/tags/origin/main` answers `origin/main..HEAD` with the TAG's diff — two
+files where the qualified ref gives one — at exit 0, with a stderr warning both wrappers send to
+`/dev/null`. **A value verified in one form and returned in another has not been verified.**
 
-   **This sentinel's guarantee has been overstated twice, the same way both times.** It was
-   `refs/trident-probe-failed/<base>` for one round: that namespace is ordinary and writable,
-   so `git update-ref` on it makes the range resolve and return a wrong diff at exit 0. It was
-   then a fixed 40 zeros for one round: in a SHA-256 repository that is an ordinary ref NAME,
-   and a branch of that name makes the range resolve at exit 0 — with the mirror hole in SHA-1,
-   where a branch named 64 zeros does the same. Each time the qualifier left out was the one
-   that made the measurement true — "while nobody has created that ref", then "in a SHA-1
-   repository" — so the property was stated of the VALUE when it had been measured of one
-   repository's CONFIGURATION.
+**Why arm 3's condition is "the remote ref does not resolve", never "there is no remote".** They
+are different states and the second is wider than anything the code establishes: `origin` can be
+configured while `refs/remotes/origin/<base>` is missing, deleted or never fetched — an ordinary
+worktree that has not fetched, and every fresh clone. The local branch is the base of record
+there, and there is no better answer **without a fetch, which this deliberately does not do**: a
+build worktree should not reach the network to answer a diff-base question.
 
-   The qualifier that remains is named rather than argued away: if `git rev-parse
-   --show-object-format` cannot answer, the arm falls back to 40 zeros. In every failure mode
-   measured — outside a repository, and `.git/objects` unreadable — the probe, the format read
-   and `git diff <x>..HEAD` all fail together (128, 128, 129), so where the fallback is reached
-   git refuses the range on its own account. Both halves are asserted, including that the
-   emitted word is one git rejects AFTER every ref that could shadow it has been created, in
-   BOTH object formats.
-
-   Arm 3 is what a repository with no remote gets, what a worktree whose `origin` is configured
-   but whose base ref is missing, deleted or unfetched gets, and what a fresh clone gets: the
-   local branch IS the base of record there, and there is no better answer without a fetch,
-   which this deliberately does not do.
-
-   This step used to read "the bare name in **local mode** only — the one world where it is right
-   rather than tolerated: a local-mode run has no origin to be behind". **That was false, and it
-   was the last place the defect lived.** `merge_mode: 'local'` means the OUTER LOOP MERGES
-   LOCALLY; it says nothing about whether the repository has a remote — and this file's own
-   `branchLogBase` comment had said since before #546 that "a plain local base branch may be stale
-   in NON-PR mode". Measured in the review-diff fixture: local mode against a `main` four commits
-   behind `origin/main` produced **five files where the branch changed one**, exactly as pr mode
-   did. Step 2 is therefore not pr-mode-specific, and the question "is there a remote?" is asked of
-   the repository at the moment the range is built rather than inferred from the merge mode.
+**And arm 3 is not merge-mode-keyed, which is where this defect lived longest.** The step once
+read "the bare name in local mode only — a local-mode run has no origin to be behind". That is
+false twice over: `merge_mode: 'local'` means the OUTER LOOP MERGES LOCALLY and says nothing
+about whether a remote exists, and the answer was a bare name rather than a qualified ref.
+Measured in the review-diff fixture: local mode against a `main` four commits behind
+`origin/main` produced **five files where the branch changed one**, exactly as pr mode did. The
+question "does the ref resolve" is therefore asked OF THE REPOSITORY at the moment the range is
+built, never inferred from the merge mode.
 
 ## Acceptance
 
@@ -398,7 +373,8 @@ The resolution order is evidence-first, and is the same at every site:
       (the detached CI checkout is the ordinary case, and requiring a local branch rejected it
       until round twenty-six), a tag is not promoted, an ambiguous branch+tag name is REFUSED,
       a tag-only name is REFUSED, and an unresolvable name is REFUSED. What is kept VERBATIM is
-      now only what already satisfies the shape property: a 40-hex object name that resolves,
+      now only what already satisfies the shape property: an object name of THIS repository's
+      hash width that resolves,
       and an explicit `refs/…` path. (`origin/<x>` is QUALIFIED to `refs/remotes/origin/<x>`
       and `HEAD~1` is RESOLVED to an object name — this criterion listed both, plus an unknown
       name, as "kept verbatim" until rounds twenty-two and twenty-three.) The block under test
@@ -579,7 +555,7 @@ The resolution order is evidence-first, and is the same at every site:
       because it HAS one and accepting both there lets a wrong-width REF capture the base; and
       the refusing word is derived from the same question where it is evaluated.
       **WHAT THIS CRITERION DOES NOT CLAIM.** The launch path pins the base sha behind a 40-only
-      test (`orchestrator.ts:4143`, which fails the run, and `:4174`, which silently declines to
+      test (`orchestrator.ts:4179`, which fails the run, and `:4210`, which silently declines to
       pin), so in a SHA-256 repository a valid base tip does not pin. That is a NON-GOAL here
       rather than an oversight: `FULL_OID` and the persisted `outer-published:<40hex>:…`
       checkpoint vocabulary assume SHA-1 as well, so widening the launch recognisers alone would

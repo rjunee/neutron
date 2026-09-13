@@ -1437,7 +1437,13 @@ const pinnedBase = typeof baseSha === 'string' && OBJECT_NAME_RE.test(baseSha.tr
  * pinned ref) while two other sites in this same file still composed the bare name —
  * which is what a boundary that depends on the next author remembering buys you.
  *
- * THE ORDER IS EVIDENCE-FIRST:
+ * THE ORDER IS STATED ONCE, in `docs/spec-items/resolve-the-review-diff-base.md` under THE
+ * INVARIANT, and the arms below are this file's HALF of it — including the one asymmetry, which
+ * the spec item names rather than glosses: the local arm here is emitted UNVERIFIED and refused
+ * by git if absent, where `diffBaseRef` verifies and throws. A composer cannot refuse; it can
+ * only emit a word the other process rejects.
+ *
+ * THE ORDER, EVIDENCE-FIRST:
  *  • `pinnedBase` — the sha `origin/<base>` held AT LAUNCH, observed by the outer
  *    launcher (`orchestrator.ts`, base pinning) and the exact commit the build branch
  *    was cut from. A sha cannot go stale, and it is the cut point, so this branch's own

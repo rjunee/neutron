@@ -1,4 +1,11 @@
-## 2026-09-12 — Rev-range base: pinned sha, else the ref verified, never a shorthand (#546)
+## 2026-09-12 — Rev-range base: the pinned sha, else a ref nobody can mistake (#546)
+
+> **The rule itself lives in `docs/spec-items/resolve-the-review-diff-base.md`, under THE
+> INVARIANT.** This record says what was found, what it cost and what was measured; where it
+> needs the rule it points there. The previous title — "pinned sha, else the ref verified, never
+> a shorthand" — is exactly the kind of copy that goes stale: the workflow composer emits
+> `refs/heads/<base>` UNVERIFIED and relies on git's refusal, so "the ref verified" was true of
+> one implementation and not the other for nineteen rounds.
 
 `git diff main..<head>` in a shared build checkout diffs against whatever
 `refs/heads/main` happens to hold, and that ref is only as fresh as the last time
@@ -37,7 +44,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:6080` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:6308` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -237,7 +244,7 @@ conclusion.
 Catching up to `main` (six PRs, `c4a292f0`) brought a NEW re-plan prompt that composes
 `git diff ${baseBranch}..${forgeBranch}` — a bare local branch name, no `--end-of-options`,
 in a command an agent is told to run. **The gate this PR ships failed the merged tree on it**,
-at `inner-workflow.mjs:2522`, before any of it could reach a reviewer's diff. Repointed at
+at `inner-workflow.mjs:2528`, before any of it could reach a reviewer's diff. Repointed at
 `diffBase`, which is what the neighbouring resume hint fifty lines above already uses.
 
 Three things worth keeping from that:
@@ -264,10 +271,42 @@ builds that fail reading files with the disk at 98%. Neither area is touched by 
 (0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
 is to name what I ran and what it did not cover, not to call the suite green.
 
+### Round thirty-six: stop patching sentences — the invariant is written once
+
+**Six rounds, six copies, each fix locally right.** The headline invariant, a precondition, the
+exception-class names, three live documents in one round, an acceptance criterion written the
+same round as its fix — and then two more: the headline said *every value that reaches a git
+rev-range* (the tests falsify that on their own RIGHT-hand operands: `HEAD`, `h`, `b`), and the
+title said *else the ref verified* while the workflow composer emits `refs/heads/<base>`
+**unverified** and lets git refuse it. **A claim written in six places can only be corrected in
+the one that was read.**
+
+So the rule is now stated ONCE, in the spec item under `## THE INVARIANT`, and everything else
+points at it: the as-built's header, `merge.ts`'s doc block, the workflow's order comment, and
+`codex-review.sh`'s shape assertion each say what THEY guarantee and cite the statement instead
+of restating the rule. Three restatements inside the spec item itself — the "concretely" summary,
+the evidence-first arm list, and the "what enforces this" paragraph — were collapsed into
+evidence FOR the invariant rather than second statements OF it.
+
+**Two corrections the single statement forced, which patching would have missed:**
+
+* **It governs the BASE operand, not every operand.** The right-hand side is the branch under
+  review and is shorthand by design — the question is "what did THIS branch change". The
+  absolute read as rigour and was simply false; the tests had been contradicting it for rounds.
+* **Arm 3 is FAIL-CLOSED, not verified.** `diffBaseRef` verifies `refs/heads/<base>` and refuses;
+  the composer emits it unverified and git refuses it — fatal, 128, nothing written. Saying so is
+  stronger than implying a probe that does not happen, and the tag-only rows in the parity table
+  are exactly that behaviour, asserted.
+
+**This is the counts move, applied to the claim.** The number was deleted and the inventory
+derived, and it has not gone stale since; the rule is now written where it can be corrected in
+one place. **The generalisation: a document that states one strong claim in several voices will
+drift in whichever voice nobody read this round — so state it once and cite it, or derive it.**
+
 ### Round thirty-five: a criterion written this round already outran the code
 
 **The criterion said "the rule does not assume SHA-1"; the LAUNCH path still does.**
-`orchestrator.ts:4143` fails the run when a rev-parsed base tip is not 40 hex, and `:4174`
+`orchestrator.ts:4179` fails the run when a rev-parsed base tip is not 40 hex, and `:4210`
 silently declines to pin on the same test — so in a SHA-256 repository a valid base tip either
 kills the run or is quietly dropped. **And the test could not see it**, because it calls
 `diffBaseRef` and the composer directly and never fires a launch: *a case that proves the claim
@@ -516,10 +555,10 @@ another is not a rounding error: it is the thing that stops the next reader from
 names the position.
 
 **Where the new refusal actually lands, read from the three consumers rather than assumed.**
-`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2842`), the stranded-run
-ahead count (`:3448`) and the mutation gate's blast radius (`:5239`) — on all three a throw
+`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2873`), the stranded-run
+ahead count (`:3479`) and the mutation gate's blast radius (`:5275`) — on all three a throw
 propagates and fails the step, which is the direction wanted: no listing beats a listing against
-a base nobody established. The fourth caller (`:4599`, the stage-1 test-strategy block) is
+a base nobody established. The fourth caller (`:4635`, the stage-1 test-strategy block) is
 already inside a `try`/`catch` that sets `test_strategy = null`, so a probe that cannot answer
 now DROPS the strategy block instead of computing one against a possibly-stale base. That is
 also fail-closed, and it is stated here because the symptom a future reader will see is an
@@ -530,8 +569,8 @@ default) and it produces a NAME that still goes through this binding.
 **One thing this round measured and deliberately did NOT fix.** Thirty-two rounds of edits plus the catch-up merge have
 moved `inner-workflow.mjs` by roughly eight hundred lines (the CI-rollup anchor alone by 794), and citations into it from files this
 branch does not touch have drifted with it — the CI-rollup pair cited in `GLOSSARY.md:176` as
-`:4708-4712` is now at `:5539`/`:5543`, and `run-evidence-probes.ts:201`'s `:1796` is at
-`:2107`. They were approximately right when written. Repointing them would widen a PR under
+`:4708-4712` is now at `:5767`/`:5771`, and `run-evidence-probes.ts:201`'s `:1796` is at
+`:2113`. They were approximately right when written. Repointing them would widen a PR under
 review with changes unrelated to its subject, and the drift is not this branch's defect but a
 property of citing a 7,000-line file by line number at all: **every merge that edits it does
 this to every citation into it.** Recorded here with measured values rather than silently left,
@@ -636,7 +675,7 @@ case-sensitivity bug.**
 40-hex comparison on this path is lowercase-only — and correctly so: each tests a value read
 from git's own stdout, where git emits its canonical lowercase form even when asked in upper
 (measured: `git rev-parse --verify <UPPER>^{commit}` echoes lowercase). The two that parse a
-token out of prose (`orchestrator.ts:2088`, `:2098`) already use `/i` and `.toLowerCase()`. The
+token out of prose (`orchestrator.ts:2089`, `:2099`) already use `/i` and `.toLowerCase()`. The
 wrapper's was the only one testing an OPERATOR-SUPPLIED value case-sensitively, which is the
 distinction that decides the answer: **git's output is canonical; a caller's input is not.**
 
@@ -1800,7 +1839,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5913`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:6141`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

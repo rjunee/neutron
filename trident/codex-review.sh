@@ -385,8 +385,12 @@ else
   fi
   # THE SHAPE ASSERTION — the one point where the value meets the command.
   #
-  # EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.
-  # Nothing else. "Contains a slash" is not "fully qualified": `origin/main` is a shorthand
+  # THE BASE OPERAND THIS SCRIPT PASSES TO GIT IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.
+  # Nothing else — and the rule in full, with its arms and its one asymmetry, is stated in
+  # `docs/spec-items/resolve-the-review-diff-base.md` under THE INVARIANT. This comment says
+  # what THIS script guarantees and points there rather than restating it, because six rounds
+  # of review found six copies of that claim and each fix corrected only the copy that was read.
+  # "Contains a slash" is not "fully qualified": `origin/main` is a shorthand
   # git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
   # captures it. That was the fourth position of one defect on this branch — the qualified
   # path, the `refs/heads` fallback, the no-ref fallback, and then the argument nobody

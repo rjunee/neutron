@@ -307,6 +307,13 @@ const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
  * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
  * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
  *
+ * THE RULE IS STATED ONCE, in `docs/spec-items/resolve-the-review-diff-base.md` under THE
+ * INVARIANT — the arms, what they verify, and the one asymmetry between this binding and the
+ * workflow composer. What follows here is why THIS function is shaped the way it is; where the
+ * two touch, the spec item is the claim and this is the reason. That indirection is itself a
+ * finding: six rounds corrected six copies of one sentence, each locally right, each leaving a
+ * neighbour asserting the shape the code had left behind.
+ *
  * WHY A BARE LOCAL BRANCH NAME IS NEVER THE ANSWER — and why saying so took nineteen
  * rounds. **This heading said "ALWAYS" for twelve rounds while step 3 below, twenty lines
  * away, returned the bare name**, and twenty lines is the informative distance: a comment is
