@@ -1204,8 +1204,15 @@ async function claimRowOrUnwind(args: {
         // whatever this returns, so a check placed after the call is a check placed after
         // the write. An earlier revision refused the adoption at the outer branch and had
         // already rewritten the pid without mutual exclusion, while logging that it had
-        // left the row alone. The clear below got this right; the claim beside it did not
-        // inherit it.
+        // left the row alone.
+        //
+        // BOTH SITES NOW CHECK ACQUISITION FIRST. An earlier version of this comment named
+        // the clear below as the exemplar the claim had failed to inherit from. That was
+        // true of the clear's FINAL branch and false of its early returns, which returned
+        // `absent`/`row-moved` above their own `acquired` check and wrote the snapshot
+        // back — so the comment was a false claim about the code three lines above the
+        // correct implementation. Argus r21 hoisted that check too; the clear's early
+        // returns were the last place this rule had not reached.
         // NO WRITE AT ALL, not "write the same thing back". Without `skipSave` this
         // returns the snapshot loaded before the callback ran and `withRegistry` saves
         // it — dropping any row a concurrent incarnation wrote in between. A lost update
@@ -1363,19 +1370,32 @@ function clearPaneHandleIfUnchanged(
     const outcome = withRegistry(
       registryPath,
       (registry) => {
-      const prev = registry[sessionKey]
-      if (prev === undefined) return { registry, result: 'absent' as ClearOutcome }
-      if (prev.pane_handle !== expected.handle || prev.child_generation !== expected.generation) {
-        return { registry, result: 'row-moved' as ClearOutcome }
-      }
-      if (!acquired) {
-        // REFUSED RATHER THAN WRITTEN. Without the lock this compare-and-clear is not
-        // atomic, and the row it would erase may be one another incarnation has just
-        // written for a LIVE pane — stranding that pane, which is the unrecoverable
-        // direction. A stale row pointing at a pane we did close is the recoverable one:
-        // the next boot probes the handle, gets a positive `gone`, and clears it then.
-        return { registry, result: 'lock-unacquired' as ClearOutcome, skipSave: true }
-      }
+        // FIRST, BEFORE ANY READING OR WRITING (Argus r21). This check used to sit BELOW
+        // the two early returns, so an absent row and a moved row both returned without
+        // `skipSave` and `withRegistry` wrote the snapshot back — dropping any row a
+        // concurrent incarnation had written in between. The lost update round eighteen
+        // fixed, surviving in the two branches that returned early.
+        //
+        // AND IT CHANGES THE ANSWER, WHICH IS THE HONEST PART. Those two readings came
+        // from an UNGUARDED snapshot: without the lock we do not know the row is absent
+        // or moved, only that we read something we had no right to trust. So both become
+        // `lock-unacquired` — the truthful answer and the fail-closed one — rather than
+        // being preserved by checking `acquired` on the write alone.
+        //
+        // REFUSED RATHER THAN WRITTEN, for the reason the clear exists: without the lock
+        // this compare-and-clear is not atomic, and the row it would erase may be one
+        // another incarnation has just written for a LIVE pane — stranding it, the
+        // unrecoverable direction. A stale row pointing at a pane we did close is the
+        // recoverable one: the next boot probes the handle, gets a positive absence, and
+        // clears it then.
+        if (!acquired) {
+          return { registry, result: 'lock-unacquired' as ClearOutcome, skipSave: true }
+        }
+        const prev = registry[sessionKey]
+        if (prev === undefined) return { registry, result: 'absent' as ClearOutcome }
+        if (prev.pane_handle !== expected.handle || prev.child_generation !== expected.generation) {
+          return { registry, result: 'row-moved' as ClearOutcome }
+        }
       // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
       // whose `pane_handle` key is present-but-undefined would serialise to a key the
       // next reader has to special-case. Absent is the only representation of absent.

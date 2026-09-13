@@ -1661,3 +1661,119 @@ describe('a row DROPPED as schema-invalid is unreadable, not absent — and only
     expect(f.host.closed).toEqual([HANDLE])
   })
 })
+
+
+describe("the clear's EARLY RETURNS write nothing either", () => {
+  /**
+   * ARGUS r21. The `acquired` check sat BELOW the two early returns, so an absent row and
+   * a moved row both returned without `skipSave` and `withRegistry` wrote the snapshot
+   * back — the same lost update round eighteen fixed, surviving in the branches that
+   * returned early. The answers were wrong too: both readings came from an unguarded
+   * snapshot, so without the lock we do not know the row is absent or moved, only that we
+   * read something we had no right to trust.
+   *
+   * TWO THINGS THE FIRST VERSION OF THESE CASES GOT WRONG, both of which made them pass
+   * against the defect:
+   *
+   *   - the absent case used an EMPTY registry, and `JSON.stringify({}, null, 2)` is
+   *     byte-identical to `JSON.stringify({})` — so the very rewrite being hunted was
+   *     invisible to the byte comparison. It now holds another incarnation's row, which
+   *     is also the thing the lost update would destroy;
+   *   - the moved case drove the CLOSE path, and since round eighteen the pre-close gate
+   *     refuses on a moved row before the clear is ever reached. It now drives the
+   *     pid-fallback path (`handle-cleared`), which reaches the clear directly.
+   */
+  afterEach(() => setFlockImplForTests(undefined))
+
+  const OTHERKEY = 'other-instance other-user other-proj other-cred'
+  const otherRow = {
+    sessionKey: OTHERKEY,
+    sessionId: 'cccccccc-1111-2222-3333-444444444444',
+    cwd: '/srv/other',
+    channelName: 'neutron-otherotherotherotherotherother11',
+    has_session: true,
+    pid: 9191,
+  }
+
+  /** The pid-fallback path: the host cannot be asked, the recorded pid is dead, and no
+   *  live process owns the transcript — so the handle is CLEARED rather than the pane
+   *  closed. It reaches the clear with no pre-close gate in front of it, which the close
+   *  path does not: with the flock failing, that gate refuses the close and the clear is
+   *  never reached at all. The first version of the absent case drove the close path and
+   *  passed for exactly that reason. */
+  function pidFallbackPass(f: Fixture): { entered: Promise<void>; release: () => void; pass: Promise<unknown> } {
+    f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => false,
+        readCmdline: () => undefined,
+        terminatePid: async () => {},
+      }),
+      listProcesses: () => [],
+    })
+    return { entered, release, pass }
+  }
+
+  it('an ABSENT row with the lock refused writes nothing — and another incarnation keeps its row', async () => {
+    const f = fixture()
+    const { entered, release, pass } = pidFallbackPass(f)
+    await entered
+    // OUR key is gone; somebody else's row is there — which is exactly what the lost
+    // update would destroy. Compact, so `saveRegistry`'s pretty-printing is visible.
+    writeFileSync(f.registryPath, JSON.stringify({ [OTHERKEY]: otherRow }))
+    const before = readFileSync(f.registryPath, 'utf8')
+    expect(before).not.toContain('\n')
+    setFlockImplForTests(() => 1)
+    release()
+    await pass
+
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
+
+  it('a MOVED row with the lock refused writes nothing', async () => {
+    // The pid-fallback path reaches the clear without the pre-close gate in front of it:
+    // the host cannot be asked, the recorded pid is dead, and no live process owns the
+    // transcript — so the handle is cleared rather than the pane closed.
+    const f = fixture()
+    const { entered, release, pass } = pidFallbackPass(f)
+    await entered
+    const row = readRow(f.registryPath) as unknown as Record<string, unknown>
+    writeFileSync(
+      f.registryPath,
+      JSON.stringify({
+        [KEY]: { ...row, pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer' },
+        [OTHERKEY]: otherRow,
+      }),
+    )
+    const before = readFileSync(f.registryPath, 'utf8')
+    setFlockImplForTests(() => 1)
+    release()
+    await pass
+
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
+
+  it('THE CONTROLS: with the lock granted, both paths DO change the file', async () => {
+    // Non-vacuity. Without these, a clear that had simply stopped writing would satisfy
+    // both cases above.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    const row = readRow(f.registryPath) as unknown as Record<string, unknown>
+    writeFileSync(f.registryPath, JSON.stringify({ [KEY]: row }))
+    const before = readFileSync(f.registryPath, 'utf8')
+    release()
+    await pass
+    expect(readFileSync(f.registryPath, 'utf8')).not.toBe(before)
+    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+})

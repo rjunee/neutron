@@ -848,7 +848,7 @@ already migrated (`boot-adoption.ts:560` and `:1027`), and it does.
 | `rowStillNames` (`:1027`) | `not-named` → close proceeds | `unreadable` → refused | `unreadable` → refused | **All three correct**, same cases. |
 | `claimShutdownSurvival` (`gateway-shutdown-survival.ts:207`) | kill | kill | kill | **Correct, and for the right reason** — not a collapse. Survival requires POSITIVE evidence that a row names this pane; every failure to produce that evidence is a kill by design, and the cost is one `--resume` on our own child. Recorded because "all three answers agree" is exactly what a collapse looks like from outside, and here the agreement is the rule rather than an accident. |
 | `planRespawn` (`session-respawn.ts:96`) | `session-not-found` → refuses | refuses | refuses | **Correct.** A respawn it cannot plan does not happen and the tick retries; refusing on all three is the conservative direction. |
-| `runWedgeWatchdogTick` (`supervision.ts:481`) | `record` undefined → probe with no record | same | same | **Correct, via a downstream gate.** A missing record can reach `respawn-and-alert`, but the respawn itself goes through `planRespawn`, which refuses. Worth knowing that the protection is downstream rather than here. |
+| `runWedgeWatchdogTick` (`supervision.ts:481`) | `record` undefined → probe with no record | same | same | **Correct, via a downstream gate.** A missing record can reach `respawn-and-alert`, but the respawn itself goes through `planRespawn`, which refuses. **The protection is not where a reader would look**, so anyone changing `planRespawn`'s `session-not-found` branch needs to know this tick depends on that refusal — relaxing it there would let a wedge watchdog act on a row it never read. |
 | cwd-drift check (`supervision.ts:618`) | `continue` — nothing to compare | same | same | **Correct.** No canonical cwd means no comparison, not a failed comparison. |
 | registry sweeps (`supervision.ts:468/602/957/1080/1144`, `:302`) | no rows → no work this tick | same | same | **Correct.** "No work this tick, and the tick retries" is a right answer to all three. |
 | orphan identity (`supervision.ts:116`) | no pid → never kills | same | same | **Correct** — the gate's whole rule is that it never touches an unverified pid. |
@@ -875,7 +875,50 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M67 less M31 and M38 = 65**.
+only dead row. The live count is therefore **M1–M69 less M31 and M38 = 67**.
+
+### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
+
+**`clearPaneHandleIfUnchanged`'s early returns wrote without the lock.** `prev ===
+undefined` returned `'absent'` and a row mismatch returned `'row-moved'`, both **above**
+the `!acquired` check and neither with `skipSave` — so on a failed flock both wrote the
+snapshot loaded before the callback ran. The lost update round eighteen fixed, surviving
+in the two branches that returned early.
+
+**And the hoist changes the answer, which is the honest part.** Those readings came from an
+unguarded snapshot: without the lock we do not know the row is absent or moved, only that
+we read something we had no right to trust. Both now answer `lock-unacquired` — the
+truthful answer and the fail-closed one — rather than being preserved by checking
+`acquired` on the write alone.
+
+**The comment was the finding.** Round fifteen's note at the claim said *"The clear below
+got this right; the claim beside it did not inherit it."* True of the clear's FINAL branch
+and false of its early returns — a false claim about the code three lines above the correct
+implementation, naming the file's other half as the exemplar while that half was the
+defect. **Sixth instance of the sibling pattern, found inside the comment about the sibling
+pattern.** The comment now says what is true: both sites check acquisition first, and the
+clear's early returns were the last place the rule had not reached.
+
+**Both test cases passed against the defect on the first writing, for two different
+reasons, and both are worth recording because neither is about this fix.**
+
+1. The absent case used an **empty** registry — and `JSON.stringify({}, null, 2)` is
+   byte-identical to `JSON.stringify({})`. The very rewrite being hunted was invisible to
+   the instrument chosen to see it. It now holds another incarnation's row, which is also
+   what the lost update would destroy.
+2. Both cases drove the **close** path — and since round eighteen the pre-close gate reads
+   the row under the lock, so with the flock failing it refuses the CLOSE and the clear is
+   never reached. The cases were green because nothing ran. They now drive the
+   **pid-fallback** path (`handle-cleared`), which reaches the clear with no gate in front
+   of it.
+
+The second is a general hazard worth naming: **a fix that fails closed earlier in a path
+can make a later guard's test unreachable without making the test fail.** The earlier
+refusal is correct, the later test still passes, and the coverage is gone silently. I found
+it by mutating rather than by reading, and the mechanism was confirmed with a standalone
+probe — a direct `withRegistry` call on a compact file, showing a no-`skipSave` return does
+rewrite it — so the conclusion "the clear is never reached" rests on a measurement rather
+than on my reading of the control flow.
 
 ### Mutation table
 
@@ -887,7 +930,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen and M66–M67 in round twenty, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty and M68–M69 in round twenty-one, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -985,6 +1028,8 @@ count from the rows below rather than trusting this sentence.
 | M65 | `absent` is treated as `unreadable` (**system-breaking direction**) | `boot-adoption.test.ts` (2) |
 | M66 | a dropped TARGET row reads as `absent` again | `boot-adoption.test.ts` (2) |
 | M67 | ANY dropped row refuses, not just this key's (**over-strict**) | `boot-adoption.test.ts` (2) |
+| M68 | the clear's ABSENT early return goes back above the acquisition check | `boot-adoption.test.ts` (1) |
+| M69 | the clear's MOVED early return goes back above the acquisition check | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
