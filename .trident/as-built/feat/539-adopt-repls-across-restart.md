@@ -2698,9 +2698,9 @@ made the as-built's claim that "the spawn-rejection site got the same fix" untru
 | `boot-adoption.ts` `deleteOwnPoolEntry` (fulfilled) | ours | yes — `Bun.peek` identity, same tick | at the read | M87/M88 | same; one effect, one guard, `boot-adoption.ts:1288-1299` |
 | `child-exit-wiring.ts` teardown | the entry this session was published under | yes | **publish time** (`session.pooledAs`, r55) | `child-exit-pool-identity.test.ts` | clears the claim, cancels the self-fence timer, disowns the row, unlinks the configs, drops `childByKey` — **all of it above and outside** the `if (ownEntry !== undefined)` block (`child-exit-wiring.ts:136-170`); only the `await ownEntry` is inside, and that await exists *for* the delete |
 | `spawn.ts` readiness failure | it owns nothing it can NAME — the promise is its caller's | **fixed r56: it no longer deletes at all**; the rejection reaches the guarded catch | — | `pane-handle-persistence.test.ts` (r56 case) | nothing left to scope — the site no longer writes the map |
-| `spawn.ts` `spawning.catch` | its own published entry | yes (r55) | publish time (`spawning`) | the same case | also clears the respawn in-flight stamp — **outside** the one-line `if` (`spawn.ts:1491-1497`), which is right: the stamp is this spawn's whoever owns the entry |
-| `spawn.ts` warm-reuse eviction | the entry this turn resolved through | **fixed r56** | `existing`, before the await | `evict-deletes-only-its-own-entry.test.ts` | drops `childByKey`, awaits the old child's termination, latches the death via `notifyEvictedChild` — all **outside** the one-line `if` (`spawn.ts:1441-1450`) |
-| `spawn.ts` exited-child eviction | same | **fixed r56** | `existing` | same file | nothing else; the arm is a single statement (`spawn.ts:1455`) |
+| `spawn.ts` `spawning.catch` | its own published entry | yes (r55) | publish time (`spawning`) | the same case | also clears the respawn in-flight stamp — **outside** the one-line `if` (`spawn.ts:1531-1537`), which is right: the stamp is this spawn's whoever owns the entry |
+| `spawn.ts` warm-reuse eviction | the entry this turn resolved through | **fixed r56** | `existing`, before the await | `evict-deletes-only-its-own-entry.test.ts` | drops `childByKey`, awaits the old child's termination, latches the death via `notifyEvictedChild` — all **outside** the one-line `if` (`spawn.ts:1450-1459`) |
+| `spawn.ts` exited-child eviction | same | **fixed r56** | `existing` | same file | nothing else; the arm is a single statement (`spawn.ts:1464`) |
 | `spawn.ts` `quarantineChild` | the quarantined child's entry | **fixed r56** — it could not name what it owned, so it is passed the caller's `existing` | `existing` | same file | **THIS IS THE ONE THAT WAS WRONG.** It also removes the child from `childByKey`, registers it with the quarantine reaper, installs the exit notification, and reports the verdict — and r56 wrote the guard as an early `return`, so a foreign pool entry silenced **all four** (`spawn.ts:977-1008`). Scoped to the delete line in r57 |
 | `supervision.ts` `evictPool` | clears the key **so a respawn can publish** | unconditional **by design** — this is the "about to replace our own entry" case the rule explicitly allows | n/a | the respawn suites | single-statement callback (`supervision.ts:158-160`); nothing to gate |
 
@@ -2746,15 +2746,17 @@ nobody.**
 
 The fix is two lines and one type: the identity check now sits on the `pool.delete` line alone
 (`spawn.ts:986`), and `quarantineChild` returns `boolean` — *is this child now quarantined* —
-which the caller consumes (`spawn.ts:1408`). "Verdict computed and discarded" for the fourth time
+which the caller consumes (`spawn.ts:1417`). "Verdict computed and discarded" for the fourth time
 on this branch; the remedy each time has been to make the caller unable to assume it.
 
-**Two: the stale turn published over the winner** (`spawn.ts:1464-1475`). Guarding the deletes was
+**Two: the stale turn published over the winner** (`spawn.ts:1501 — now `:1501-1515`, see the next section`). Guarding the deletes was
 half the job. A turn that resolved through `existing`, found the map now holding somebody else's
 entry, and then ran `pool.set(sessionKey, spawning)` took B out of the map just as surely as
 deleting it would have. The harm is *"B is no longer the pool entry"*; by-delete versus
-by-overwrite is a detail of **how**. It now serves the current entry instead — which is also the
-useful answer, since that entry is a live session for the key the caller asked about.
+by-overwrite is a detail of **how**. It stopped publishing over that entry — and the first version
+then *returned* it, **which round fifty-eight had to correct: the winner was published for a
+different request, and handing it back skipped every reuse guard.** See the next section; this
+paragraph is left as written, with the correction attached, because the mistake is the record.
 
 **And the reason the existing cases could not see it: they measured the call and dismissed the
 outcome.** The r56 fixture recorded every `pool.delete` and explicitly reasoned that the final map
@@ -2782,6 +2784,62 @@ them are instructive: `deleteOwnPoolEntry`'s early `return`s are safe **because 
 function's only effect**, and the child-exit teardown keeps every non-pool obligation above and
 outside its `if` block (`child-exit-wiring.ts:136-170`). The difference between a safe early return
 and this round's defect is not the guard — it is how many effects the function has.
+
+### Round fifty-eight: what you return is part of the decision
+
+**The finding is a privilege boundary, and round fifty-seven's fix opened it.** `getOrSpawnSession`
+refuses a pooled session whose tool surface, bridge state, credential fingerprint, poison state or
+child liveness do not match the current request — the surface guard exists precisely so a
+less-privileged turn cannot inherit a more-privileged warm session's tools. The stale-turn branch
+returned the concurrently published promise **directly**, skipping all of it: a turn asking for
+`[Read]` could be handed a REPL spawned with `[Write]`.
+
+The r57 fixture even constructed the violation — a `Write` request against a `Read,Bash`
+replacement — and then **discarded the returned value**, so it could not see what came back. Three
+layers of assertion now, and each was added when the layer below it turned out to be satisfiable by
+broken code:
+
+| Layer | What it asserts | Added | Why the one below it was not enough |
+|---|---|---|---|
+| mechanism | no `pool.delete` was issued while the winner was registered | r56 | — |
+| outcome | the winner is still the pool entry when the turn finishes | r57 | the publish one line later overwrote it |
+| **return value** | **the session handed back satisfies THIS request** | **r58** | the turn returned the winner unvalidated |
+
+**The fix is to re-enter, not to re-check.** `getOrSpawnSession` *is* the decision procedure for
+"there is a pooled entry for this key, may it serve me": it validates, and when the answer is no it
+evicts through the proper path (identity-guarded delete, terminate, latch the death) rather than
+publishing over the entry. So the loser calls it again (`spawn.ts:1501-1515`) — which is exactly
+what this turn would have done had it arrived a microsecond later, and it is the only answer that
+does not keep a second copy of the predicate in step with the first. This file has produced four
+defects of that shape already.
+
+Bounded: `STALE_TURN_REENTRY_LIMIT = 3`, after which the turn throws the classed
+`PaneOwnershipRefusedError` (`repl_unreconciled`, retryable, no credential cooldown — r42's
+vocabulary). Contention resolves on the first re-entry in every case we can construct; the bound
+exists so a pathological interleaving degrades to a refusal rather than to unbounded recursion.
+Spawning anyway would be the two-owner outcome this whole change exists to prevent, and publishing
+anyway is the r57 defect.
+
+**What a re-entry deliberately does not carry:** this turn's `evictedResume` / `evictedForceFresh`.
+They describe the session *we* evicted; the re-entered turn decides against whatever is pooled now,
+and if it evicts that session it captures that session's own recovery directives. Said at the site
+so it is a decision rather than an oversight.
+
+**Second finding: a fixture that leaked global state, and an assertion loosened to accommodate it.**
+The quarantine case left an entry in `quarantinedChildren` (its hosted-work count never reached
+zero and its fake child's exit was pending), `afterEach` did not clear it, and the leaked-child case
+then measured a nonzero baseline and accepted `>= 1` reaps. The nine earlier fixture defects on this
+branch asserted the wrong thing by accident; **this one was weakened to fit a known-dirty fixture**,
+which is worse, because it looks deliberate. The hosted-work counter is now module-level so
+`afterEach` can drain it through the production reaper, `beforeEach` asserts a zero baseline, and
+every count in the case is exact. M165 measures it: removing the drain reds five cases.
+
+**A near-miss worth recording about mutation hygiene.** One re-run in this round used a search
+string that matched two lines (a six-space indent that is a substring of an eight-space one), and
+the patch did not land — the run would have been reported as "did not red". It was caught only
+because the mutation helper asserts the anchor is unique before writing. Every mutation this branch
+records went through that assertion; without it, a silently unapplied mutation is indistinguishable
+from a guard that is not tested.
 
 ### Mutation table
 
@@ -3025,6 +3083,8 @@ count from the rows below rather than trusting this sentence.
 | ~~M161~~ | the caller sets `quarantined = true` from having CALLED `quarantineChild` instead of from what it reports | ~~nothing~~ — **subsumed**: the function has no reachable refusal path once the guard is scoped to the delete line, so ignoring its return is only harmful in the world M160 creates. Kept because the return value's job is to keep the caller honest if such a path is ever added |
 | M162 | the stale-turn publish guard is removed — `pool.set` runs unconditionally again | `evict-deletes-only-its-own-entry.test.ts` (4 — all of them) |
 | M163 | M162, **plus** the "B is still the entry" assertions removed | **nothing reds** — which is the point: this is precisely the r56 fixture, and it is how a real defect sat under three passing cases |
+| M164 | the stale-turn branch returns the winner's promise unvalidated again (the r57 shape) | `evict-deletes-only-its-own-entry.test.ts` (1 — the `Write`-request / `Read,Bash`-winner case, and only it) |
+| M165 | `afterEach` no longer drains `quarantinedChildren` | `evict-deletes-only-its-own-entry.test.ts` (5 — the zero-baseline assertion and every case downstream of the contamination) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

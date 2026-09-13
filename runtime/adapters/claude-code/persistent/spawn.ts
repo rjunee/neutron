@@ -1236,11 +1236,20 @@ class PaneOwnershipRefusedError extends Error implements SubstrateClassed {
   readonly substrateErrorClass = 'repl_unreconciled' as const
 }
 
+/** How many times a turn that lost the pool to a concurrent publish may re-enter
+ *  {@link getOrSpawnSession} before refusing. Contention resolves on the first re-entry in
+ *  every case we can construct; the bound exists so that a pathological interleaving degrades
+ *  to a RETRYABLE refusal rather than to an unbounded recursion. */
+const STALE_TURN_REENTRY_LIMIT = 3
+
 export async function getOrSpawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
   spec: AgentSpec,
   forceResume?: ResumeDirective,
+  /** INTERNAL. Counts this turn's re-entries after losing the pool to a concurrent publish
+   *  (see the stale-turn branch below). Callers pass nothing. */
+  staleTurnReentries: number = 0,
 ): Promise<ReplSession> {
   // #539 — NOTHING MAY SPAWN ON A KEY WHOSE SURVIVING REPL HAS NOT BEEN RECONCILED.
   // Under the herdr host a gateway restart leaves the previous REPL running, so a
@@ -1461,17 +1470,48 @@ export async function getOrSpawnSession(
   // (`evictedResume`); else the normal registry-resolved directive.
   const resume = forceResume
     ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
-  // A STALE TURN DOES NOT PUBLISH OVER THE WINNER (Argus r57). Guarding the DELETES was only
-  // half of it: this turn resolved through `existing`, and if the map now holds something else,
-  // another turn published while we were deciding. Overwriting that entry orphans a live REPL
-  // out of the map just as surely as deleting it would — the harm is "B is no longer the pool
-  // entry", and by-delete versus by-overwrite is a detail of how.
+  // A STALE TURN DOES NOT PUBLISH OVER THE WINNER — AND DOES NOT SERVE IT UNCHECKED EITHER
+  // (Argus r57, corrected r58). Guarding the DELETES was only half of it: this turn resolved
+  // through `existing`, and if the map now holds something else, another turn published while
+  // we were deciding. Overwriting that entry takes a live REPL out of the map just as surely
+  // as deleting it would — the harm is "the winner is no longer the pool entry", and
+  // by-delete versus by-overwrite is a detail of how.
   //
-  // Serving the current entry is the useful answer as well as the safe one: it is a live
-  // session for this key, which is what the caller asked for.
+  // BUT THE FIRST VERSION RETURNED THE WINNER'S PROMISE DIRECTLY, AND THAT IS A PRIVILEGE
+  // BOUNDARY. The winner was published for a DIFFERENT request: the reuse guards above
+  // (tool surface, tool bridge, credential freshness, abandon-poison, child liveness) are
+  // exactly what decides whether a pooled session may serve THIS one, and returning the raw
+  // promise skipped all of them. A turn asking for `[Read]` could be handed a session spawned
+  // with `[Write]` — the inheritance the surface guard at the top of this block exists to
+  // forbid, arriving through the back door.
+  //
+  // SO THE LOSER RE-ENTERS instead of hand-rolling a second opinion. `getOrSpawnSession` IS
+  // the decision procedure for "there is a pooled entry for this key, may it serve me" — it
+  // validates, and when the answer is no it EVICTS and respawns properly rather than
+  // publishing over the entry. A re-entry is what this turn would have done had it arrived a
+  // microsecond later, which is the only defensible answer to losing a race. Validating
+  // inline against a copy of the predicate would have been a second copy to keep in step,
+  // and this file has now produced four defects of exactly that shape.
+  //
+  // The re-entry repeats `beginBootAdoption` (idempotent per key) and the quarantine
+  // heartbeat (a fired sweep, never on the turn's path). It does NOT carry this turn's
+  // `evictedResume` / `evictedForceFresh` across: those describe the session WE evicted, and
+  // the re-entered turn decides against whatever is pooled now — if it evicts that session
+  // too, it captures that session's own recovery directives.
   const currentBeforePublish = pool.get(sessionKey)
   if (currentBeforePublish !== undefined && currentBeforePublish !== existing) {
-    return currentBeforePublish
+    if (staleTurnReentries >= STALE_TURN_REENTRY_LIMIT) {
+      // A REFUSAL, NOT A SPAWN, and classed so it costs a turn rather than a credential
+      // (r42's vocabulary). Repeatedly losing the key means somebody else is actively
+      // serving it; spawning anyway is the two-owner outcome this whole change exists to
+      // prevent, and publishing anyway is the r57 defect.
+      throw new PaneOwnershipRefusedError(
+        `persistent-repl: refusing to spawn for session ${sessionKey.slice(0, 32)} — the pool entry for it ` +
+          `was replaced by a concurrent turn ${staleTurnReentries} times while this turn was deciding. ` +
+          'It retries on the next turn.',
+      )
+    }
+    return getOrSpawnSession(sessionKey, options, spec, forceResume, staleTurnReentries + 1)
   }
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)

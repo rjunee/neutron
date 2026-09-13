@@ -1,21 +1,34 @@
 /**
- * evict-deletes-only-its-own-entry.test.ts — #539, Argus r56.
+ * evict-deletes-only-its-own-entry.test.ts — #539, Argus r56/r57/r58.
  *
  * `getOrSpawnSession` resolves a warm session by AWAITING the pooled promise, and then, if the
  * reuse guards refuse it, evicts. The await is a suspension point: a concurrent turn can evict
  * and republish under the same key while we wait, and the eviction that follows used to delete
  * whatever was registered — **taking a live REPL out of the map every turn resolves through.**
  *
- * These are the two sites the round-fifty-six enumeration turned up that no case reached. Both
- * are driven the same way: a pooled promise the case controls, a replacement installed while it
- * is pending, and a warm session that fails its reuse guard so the eviction path runs.
+ * WHAT EACH CASE OBSERVES, in three layers, because each layer was added when the one below it
+ * turned out to be satisfiable by broken code:
  *
- * WHY A DELIBERATELY MISMATCHED TOOL SURFACE: it is the guard that is cheapest to fail on
- * purpose, and failing it is what routes the turn into the eviction branch at all. The case is
- * about what the eviction DELETES, not about which guard refused.
+ *   1. **the mechanism** — no `pool.delete` was issued while the replacement was registered
+ *      (r56, and on its own it is not enough);
+ *   2. **the outcome** — the replacement is still the pool entry when the stale turn finishes
+ *      (r57: the publish one line later was overwriting it, and layer 1 could not see that);
+ *   3. **what comes back** — the value the turn RETURNS (r58: the loser was handed the winner's
+ *      promise unvalidated, so a turn could receive a REPL with a tool surface it never asked
+ *      for; layers 1 and 2 both passed while it did).
+ *
+ * WHY A DELIBERATELY MISMATCHED TOOL SURFACE ON THE WARM SESSION: it is the guard that is
+ * cheapest to fail on purpose, and failing it is what routes the turn into the eviction branch
+ * at all. The case is about what the eviction DELETES, not about which guard refused.
+ *
+ * WHY THE WINNER'S SURFACE MATCHES: after r58 the loser RE-ENTERS `getOrSpawnSession` rather
+ * than returning the winner's promise, so the winner is validated like any pooled candidate. A
+ * winner that matched nothing would be legitimately evicted, and then "the replacement is still
+ * the entry" would be asserting the wrong thing. A matching winner is also the positive control
+ * the ruling asks for: it is REUSED, not respawned.
  */
 
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { getOrSpawnSession, quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
 import { childByKey, pool, sink } from '../pool-state.ts'
@@ -27,7 +40,29 @@ const KEY = 'inst r56 evict identity'
 const SESSION_ID = 'r56r56r5-1111-2222-3333-444444444444'
 const CHANNEL = 'neutron-56565656565656565656565656565656'
 
-afterEach(() => {
+/** How much live work the quarantine guard is told the poisoned child hosts. MODULE-LEVEL so
+ *  `afterEach` can drain it (r58): a quarantined child is only reaped once its hosted count
+ *  reaches zero, and a case that leaves one behind contaminates the NEXT case's count. That is
+ *  how the first version of the leaked-child case came to accept `>= 1` where an exact number
+ *  belongs — an assertion shaped around a known-dirty fixture, which is worse than a wrong
+ *  assertion because it looks deliberate. */
+let hostedWork = 0
+/** How many times the quarantine guard asked. A case asserts its own premise with it. */
+let hostedAsks = 0
+
+beforeEach(() => {
+  hostedWork = 0
+  hostedAsks = 0
+  // A CLEAN BASELINE, ASSERTED. Every count below is exact, and an exact count is only
+  // meaningful from zero.
+  expect(quarantinedChildCount()).toBe(0)
+})
+
+afterEach(async () => {
+  // Drain this case's quarantined children before the next one runs: zero the hosted work the
+  // guard consults, then sweep, which is the production path for reaping them.
+  hostedWork = 0
+  await sweepQuarantinedChildren()
   pool.clear()
   childByKey.clear()
   sink.unregister(SESSION_ID)
@@ -53,7 +88,18 @@ function optionsFor(extra: Partial<PersistentReplSubstrateOptions> = {}): Persis
   } as unknown as PersistentReplSubstrateOptions
 }
 
-/** A warm session whose child is alive and whose tool surface will NOT match the turn's. */
+/** Options whose quarantine guard reports live work, counting the asks. */
+function optionsWithLiveWork(): PersistentReplSubstrateOptions {
+  return optionsFor({
+    hostsLiveWork: () => {
+      hostedAsks += 1
+      return hostedWork
+    },
+  })
+}
+
+/** A session whose child is alive. By default its tool surface does NOT match the turn's, which
+ *  is what routes the turn into the eviction branch. */
 function warmSession(
   opts: {
     poisoned?: boolean
@@ -61,6 +107,7 @@ function warmSession(
     key?: string
     generation?: string
     sessionId?: string
+    surface?: string
     onKill?: () => void
   } = {},
 ): ReplSession {
@@ -96,9 +143,18 @@ function warmSession(
   // POISONED routes the eviction through the quarantine branch, which is the only way to
   // reach `quarantineChild` — asserted by the premise check in that case rather than assumed.
   if (opts.poisoned === true) s.poisoned = true
-  s.toolSurface = 'Read,Bash'
+  s.toolSurface = opts.surface ?? 'Read,Bash'
   s.authFingerprint = 'fp'
   s.toolBridgeActive = false
+  return s
+}
+
+/** The concurrent turn's session — SATISFIES this request: same tool surface, no bridge, and
+ *  the empty credential fingerprint `authFingerprintFor(undefined)` returns for these options.
+ *  A pooled session like this one is reusable, so the loser that re-enters must reuse it. */
+function winnerSession(key: string = KEY): ReplSession {
+  const s = warmSession({ key, surface: 'Write', generation: 'gen-r58-winner' })
+  s.authFingerprint = ''
   return s
 }
 
@@ -113,31 +169,24 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 8; i += 1) await Promise.resolve()
 }
 
+type Settled = { ok: true; value: ReplSession } | { ok: false; error: unknown }
+
 /**
  * Drive one eviction with a replacement published during the await, and report what the pool
- * holds afterwards.
- */
-/**
- * WHAT IS OBSERVED — and round fifty-seven changed the answer, because the first version
- * **asserted the mechanism and dismissed the harm.**
- *
- * It recorded deletes and explicitly ignored the final map state, on the reasoning that a turn
- * which refuses a warm session legitimately publishes its own entry afterwards. But the harm is
- * *"B is no longer the pool entry"*, and by-delete versus by-overwrite is a detail of HOW — so a
- * case that watched only deletes passed while the unconditional publish orphaned B anyway. The
- * ninth fixture vacuity on this branch and the sharpest of the family.
- *
- * So both are asserted now: no delete was issued while the replacement was registered, **and the
- * replacement is still the entry when the stale turn finishes.** The second is what turned the
- * unconditional publish into a finding.
+ * holds afterwards AND what the turn returned.
  */
 async function evictWithReplacementMidAwait(
   options: PersistentReplSubstrateOptions,
   sessionOpts: { poisoned?: boolean; exited?: boolean } = {},
+  /** The session the concurrent turn's entry resolves to. Defaults to one that satisfies this
+   *  request, so the re-entering loser reuses it. */
+  winner: ReplSession = winnerSession(),
 ): Promise<{
   deletedWhileRegistered: unknown[]
   pooledAfter: unknown
   replacement: Promise<ReplSession>
+  returned: Settled
+  winner: ReplSession
 }> {
   let resolveWarm: (s: ReplSession) => void = () => {}
   const warm = new Promise<ReplSession>((res) => {
@@ -155,14 +204,13 @@ async function evictWithReplacementMidAwait(
 
   try {
     // The turn starts and suspends on the pooled promise.
-    const turn = getOrSpawnSession(KEY, options, spec).catch(() => undefined)
+    const turn: Promise<Settled> = getOrSpawnSession(KEY, options, spec).then(
+      (value) => ({ ok: true, value }) as Settled,
+      (error) => ({ ok: false, error }) as Settled,
+    )
     await settle()
 
     // A concurrent turn evicts and republishes under the same key.
-    // IT RESOLVES, and late (Argus r57). Under the fix a stale turn SERVES the entry it found
-    // rather than publishing over it, so the turn's own promise now adopts the replacement — a
-    // replacement that never settled would hang the case rather than fail it, which is exactly
-    // the kind of "green because nothing finished" the fixture audits are about.
     let resolveReplacement: (s: ReplSession) => void = () => {}
     const replacement = new Promise<ReplSession>((res) => {
       resolveReplacement = res
@@ -172,13 +220,15 @@ async function evictWithReplacementMidAwait(
     // Only now does our awaited promise resolve — with a session the reuse guards will refuse.
     resolveWarm(warmSession(sessionOpts))
     await settle()
-    resolveReplacement(warmSession())
-    await turn
+    resolveReplacement(winner)
+    const returned = await turn
 
     return {
       deletedWhileRegistered: deleted.filter((v) => v === replacement),
       pooledAfter: pool.get(KEY),
       replacement,
+      returned,
+      winner,
     }
   } finally {
     ;(pool as unknown as { delete: (k: string) => boolean }).delete = realDelete
@@ -187,42 +237,41 @@ async function evictWithReplacementMidAwait(
 
 describe('an eviction deletes only the entry it resolved through', () => {
   it('the warm-reuse eviction leaves a replacement published mid-await alone', async () => {
-    const { deletedWhileRegistered, pooledAfter, replacement } =
+    const { deletedWhileRegistered, pooledAfter, replacement, returned, winner } =
       await evictWithReplacementMidAwait(optionsFor())
     expect(deletedWhileRegistered).toEqual([])
     // THE OUTCOME, not just the mechanism: B is still the entry this key resolves through.
     expect(pooledAfter).toBe(replacement)
+    // AND WHAT CAME BACK (r58). The winner satisfies this request, so the loser re-entered,
+    // validated it and REUSED it — which is also the control that the r58 fix cannot be
+    // passing by never reusing anything.
+    expect(returned).toEqual({ ok: true, value: winner })
   })
 
   it('...and so does the quarantine path, which could not name its own entry at all', async () => {
     // `hostsLiveWork` routes the eviction through `quarantineChild`, which took no reference to
     // the entry it was removing — the enumeration counts "cannot name what it owns" as the
     // finding rather than as a site to leave alone, so it is passed one now.
-    let asked = 0
-    const { deletedWhileRegistered, pooledAfter, replacement } = await evictWithReplacementMidAwait(
-      optionsFor({
-        hostsLiveWork: () => {
-          asked += 1
-          return 1
-        },
-      }),
-      { poisoned: true },
-    )
+    hostedWork = 1
+    const { deletedWhileRegistered, pooledAfter, replacement, returned, winner } =
+      await evictWithReplacementMidAwait(optionsWithLiveWork(), { poisoned: true })
     // THE PREMISE, ASSERTED: without this the case could pass while never entering the
     // quarantine branch at all — which is how a mutation on that branch fails to red and the
     // row looks like evidence it is not.
-    expect(asked).toBeGreaterThan(0)
+    expect(hostedAsks).toBeGreaterThan(0)
     expect(deletedWhileRegistered).toEqual([])
     expect(pooledAfter).toBe(replacement)
+    expect(returned).toEqual({ ok: true, value: winner })
   })
 
   it('the EXITED-child branch leaves a replacement published mid-await alone too', async () => {
     // The third eviction site: when the warm child has already exited, a different line does
     // the delete. Same suspension point, same rule, and no case reached it until now.
-    const { deletedWhileRegistered, pooledAfter, replacement } =
+    const { deletedWhileRegistered, pooledAfter, replacement, returned, winner } =
       await evictWithReplacementMidAwait(optionsFor(), { exited: true })
     expect(deletedWhileRegistered).toEqual([])
     expect(pooledAfter).toBe(replacement)
+    expect(returned).toEqual({ ok: true, value: winner })
   })
 
   it('...and with NO replacement the eviction still removes its own entry', async () => {
@@ -242,6 +291,45 @@ describe('an eviction deletes only the entry it resolved through', () => {
 })
 
 /**
+ * THE PRIVILEGE BOUNDARY THE r57 FIX OPENED (#539, Argus r58).
+ *
+ * Round fifty-seven stopped the stale turn publishing over the winner, and returned the
+ * winner's promise instead. But the winner was published for a DIFFERENT request, and the
+ * reuse guards — tool surface, tool bridge, credential freshness, abandon-poison, child
+ * liveness — are exactly what decides whether a pooled session may serve THIS one. Returning
+ * the raw promise skipped all of them: a turn asking for one tool surface could be handed a
+ * REPL spawned with another, which is the inheritance the surface guard exists to forbid.
+ *
+ * The fix is to RE-ENTER `getOrSpawnSession`, so the loser asks the same question of the winner
+ * that any arriving turn asks of any pooled candidate.
+ */
+describe('a turn that loses the pool is still subject to the reuse guards', () => {
+  it('is not handed a winner whose tool surface it never asked for', async () => {
+    // The winner here is a `Read,Bash` session, and the request is for `Write`.
+    const mismatched = warmSession({ surface: 'Read,Bash', generation: 'gen-r58-mismatch' })
+    mismatched.authFingerprint = ''
+    const { returned, winner } = await evictWithReplacementMidAwait(optionsFor(), {}, mismatched)
+
+    // WHATEVER CAME BACK, IT IS NOT THAT SESSION. The turn re-entered, the surface guard
+    // refused the winner exactly as it refuses any mismatched pooled session, and the turn went
+    // on to spawn (which this host refuses, so the turn rejects — a rejection is a refusal to
+    // serve, and serving a `Read,Bash` REPL to a `Write` request is what must not happen).
+    if (returned.ok) expect(returned.value).not.toBe(winner)
+    else expect(String(returned.error)).toContain('r56-host')
+    // Stated positively so the case cannot pass by the turn hanging or returning undefined.
+    expect(returned.ok).toBe(false)
+  })
+
+  it('...and IS handed one whose surface matches, rather than respawning over it', async () => {
+    // The complement, and the control: "never reuse" would pass the case above and be wrong.
+    const { returned, winner, pooledAfter, replacement } =
+      await evictWithReplacementMidAwait(optionsFor())
+    expect(returned).toEqual({ ok: true, value: winner })
+    expect(pooledAfter).toBe(replacement)
+  })
+})
+
+/**
  * THE OTHER DIRECTION OF THE SAME MISTAKE (#539, Argus r57).
  *
  * Rounds fifty-three through fifty-six put identity guards on the pool deletes. Round
@@ -257,8 +345,8 @@ describe('a pool-scoped guard does not drop the obligations that are not about t
   it('quarantines the poisoned child even when the pool entry belongs to somebody else', async () => {
     const LEAK_KEY = `${KEY} leak`
     const GENERATION = 'gen-r57-leak'
-    let hosted = 1
     let killed = false
+    hostedWork = 1
 
     let resolveWarm: (s: ReplSession) => void = () => {}
     const warm = new Promise<ReplSession>((res) => {
@@ -280,12 +368,7 @@ describe('a pool-scoped guard does not drop the obligations that are not about t
     // about it says nothing.
     childByKey.set(LEAK_KEY, session.child)
 
-    const quarantinedBefore = quarantinedChildCount()
-    const turn = getOrSpawnSession(
-      LEAK_KEY,
-      optionsFor({ hostsLiveWork: () => hosted }),
-      spec,
-    ).catch(() => undefined)
+    const turn = getOrSpawnSession(LEAK_KEY, optionsWithLiveWork(), spec).catch(() => undefined)
     await settle()
 
     // A concurrent turn republishes under this key while we are suspended, so the pool entry
@@ -297,21 +380,24 @@ describe('a pool-scoped guard does not drop the obligations that are not about t
     pool.set(LEAK_KEY, replacement)
     resolveWarm(session)
     await settle()
-    resolveReplacement(warmSession({ key: LEAK_KEY }))
+    resolveReplacement(winnerSession(LEAK_KEY))
     await turn
 
     // The guard still does its job: B is untouched.
     expect(pool.get(LEAK_KEY)).toBe(replacement)
-    // And the three obligations that are not about the pool happened anyway.
-    expect(quarantinedChildCount()).toBe(quarantinedBefore + 1)
+    // And the three obligations that are not about the pool happened anyway. EXACT counts,
+    // from the zero baseline `beforeEach` asserts (r58).
+    expect(quarantinedChildCount()).toBe(1)
     expect(childByKey.get(LEAK_KEY)).toBeUndefined()
     expect(killed).toBe(false) // left RUNNING: it hosts live work
 
     // REGISTERED MEANS REACHABLE. The count is the mechanism; being reaped once the hosted
     // work drains is the outcome, and it is the outcome that says the child is not leaked.
-    hosted = 0
-    expect(await sweepQuarantinedChildren()).toBeGreaterThanOrEqual(1)
+    hostedWork = 0
+    expect(await sweepQuarantinedChildren()).toBe(1)
     expect(killed).toBe(true)
-    expect(quarantinedChildCount()).toBe(quarantinedBefore)
+    expect(quarantinedChildCount()).toBe(0)
+
+    pool.delete(LEAK_KEY)
   })
 })
