@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M71 less M31 and M38 = 69**.
+only dead row. The live count is therefore **M1–M74 less M31 and M38 = 72**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1013,6 +1013,65 @@ bystander case in round seventeen it was inverted rather than deleted, with the 
 written into the case: it required `closed-foreign-owner` — a spawn-permitting outcome —
 after a lock failure, on precisely the argument the comment made.
 
+### Round twenty-four: the same race with the window moved, and a latch whose clearing is the dangerous half
+
+Round nine closed *"a pass already running when shutdown starts"*. This is the other
+window: `settleBootAdoptionsForShutdown` snapshots the live passes and returns immediately
+when that snapshot is empty, and nothing stopped a request constructing a substrate a
+moment later and starting a pass that blocks in `attach` — never marked, never abandoned,
+publishing into a pool already torn down. `resetBootAdoption` preserving a still-running
+pass, correct for the passes it was written for, is what lets this one survive to publish.
+
+**A latch, set before the settle takes its snapshot**, and a pass begun after it is born
+`shutdown`-abandoned rather than refused outright: the caller still gets a well-formed
+`undecided` with the existing reason, and the spawn gate refuses it exactly as it refuses
+every other abandoned pass. One disposition for "this gateway is going away", not a second
+one every consumer would have to learn. The latch is read and the pass registered in the
+same synchronous step, or the race would simply move one level down.
+
+**The clearing semantics are the dangerous half, and the suite proved it before the
+mutation did.** Production never clears: a real restart is a fresh process, shutdown is
+one-way within this one, and clearing would re-open the window. The only clear is
+`resetBootAdoptionForTests`. The moment the latch existed,
+`adopted-repl-serves-a-turn.test.ts` went red — it calls `shutdownAllPersistentRepls` in
+`afterEach`, so every case after the first inherited a latched module. That file is now the
+reason the clear exists, and it says so.
+
+**Then it failed again for a reason the file could not fix by itself.** Passing alone and
+failing in the full run: bun runs many test FILES in one process, so a suite that shuts a
+gateway down latches adoption off for whatever file runs next. Clearing after each case
+protects a file from itself; clearing **before** each case also protects it from every
+other file. All four adoption suites now clear in `beforeEach`, and the failure mode is
+worth naming because it is green-looking: the first case passes and the rest adopt nothing.
+
+**Two fixture defects found on the way, both the same shape as ones this branch has already
+paid for.** Key B initially had no row, so the pass answered `no-handle` before reaching
+any abandonment checkpoint — the case proved nothing about the latch. Then B was given a
+copy of A's row, so `postReply` read A's sink registration and answered 200: the case could
+not tell the two sessions apart, which is the one thing it exists to do. B is now a
+genuinely distinct session — own key, session id, generation, channel and pane.
+
+**On the reachability hazard from round twenty-one — it fired, and the check is why I know.**
+The latch is a new early refusal, so the round-nine mutations were re-run against it. M45
+and M46 still red. **M47 stopped redding**: its case drove `resetBootAdoption` through a
+full `shutdownAllPersistentRepls`, and a pass begun after that is now born abandoned — so
+it was refused whatever the reset did with the dedup entry, and the case passed for a
+reason that had nothing to do with the property it is named for. Exactly the shape round
+twenty-one named, caught by re-running old mutations against a new guard rather than by
+reading.
+
+The case now calls `resetBootAdoption` **directly**, with no shutdown, which isolates the
+retention. And its assertions had to move too: with no shutdown the pass legitimately
+ADOPTS, so "both outcomes are `undecided`" was pinning the shutdown rather than the
+retention. The property is now asserted where it actually lives — **`host.attached` has
+length one** — because the second caller receives the first pass's outcome under either
+implementation, which is precisely what makes an outcome assertion unable to tell them
+apart. M47 reds again, and now for the reason it claims.
+
+**The rule this leaves behind:** when a guard is added early in a path, re-run the
+mutations of every guard downstream of it. A mutation that stops redding is not noise; it
+is the new guard having eaten the old one's coverage.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1023,7 +1082,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one and M70–M71 in round twenty-three, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three and M72–M74 in round twenty-four, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1125,6 +1184,9 @@ count from the rows below rather than trusting this sentence.
 | M69 | the clear's MOVED early return goes back above the acquisition check | `boot-adoption.test.ts` (1) |
 | M70 | `lock-unacquired` maps back into the spawn-permitting case | `boot-adoption.test.ts` (4) |
 | M71 | `absent` refuses too, so a cold boot never spawns (**system-breaking**) | `boot-adoption.test.ts` (5) |
+| M72 | the shutdown latch is never set | `boot-adoption.test.ts` (1) |
+| M73 | the latch is never cleared — a silent kill switch (**system-breaking**) | `boot-adoption.test.ts` (7) |
+| M74 | the latch is set AFTER the settle snapshot instead of before | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

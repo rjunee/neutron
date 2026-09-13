@@ -71,6 +71,7 @@ export {
   awaitBootAdoption,
   reconcileOwnRepl,
   resetBootAdoption,
+  resetBootAdoptionForTests,
   BOOT_ADOPTION_BUDGET_MS,
   type BootAdoptionDeps,
   type RowAdoptionOutcome,

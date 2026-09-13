@@ -18,7 +18,7 @@
  * (`adopted-pane-latches.test.ts`), because it is the one defect here that ACTS.
  */
 
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -26,6 +26,7 @@ import {
   adoptionPermitsSpawn,
   beginBootAdoption,
   reconcileOwnRepl,
+  resetBootAdoption,
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
@@ -126,6 +127,15 @@ async function run(
   })
 }
 
+async function postReplyFor(sessionId: string, credential: string): Promise<number> {
+  const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
+    body: JSON.stringify({ session_id: sessionId, text: 'hello' }),
+  })
+  return resp.status
+}
+
 async function postReply(credential: string): Promise<number> {
   const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
     method: 'POST',
@@ -142,6 +152,15 @@ beforeAll(async () => {
   // particular value.
   await sink.ensureStarted({ tokenPath: join(scratch(), 'sink-token') })
 })
+
+
+// CLEARED BEFORE EACH CASE, NOT ONLY AFTER IT. The shutdown latch and the pass map are
+// module-global, and bun runs many test FILES in one process — so a suite that shuts a
+// gateway down leaves adoption latched off for whatever file runs next. Clearing after
+// each case protects this file's own cases from each other; clearing before each one also
+// protects them from every other file. The failure mode is silent and green-looking: the
+// first case passes and the rest adopt nothing.
+beforeEach(() => resetBootAdoptionForTests())
 
 afterEach(() => {
   resetBootAdoptionForTests()
@@ -924,7 +943,16 @@ describe('a shutdown that arrives mid-pass', () => {
     })
     await entered
     expect(f.host.attached).toHaveLength(0)
-    await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
+    // `resetBootAdoption` DIRECTLY, not via `shutdownAllPersistentRepls` (Argus r24).
+    // Since the shutdown latch exists, a pass begun after a full shutdown is born
+    // abandoned and would be refused whatever the reset did with the dedup entry — so
+    // driving this case through shutdown made it pass for a new reason and stopped M47
+    // reddening. The reachability hazard from round twenty-one, caught by re-running the
+    // older mutations against the new early refusal rather than by reading.
+    //
+    // Calling the reset on its own isolates the property this case is named for: an
+    // in-flight pass keeps its entry, so a second pass for the same key cannot start.
+    resetBootAdoption()
 
     // A later boot in the SAME process asks for this key again.
     const second = beginBootAdoption(f.options, KEY, {
@@ -935,12 +963,14 @@ describe('a shutdown that arrives mid-pass', () => {
     release()
     const [a, b] = await Promise.all([first, second])
 
-    // REFUSED, not merely deduplicated: the second call must not produce a second
-    // attach on this pane, and it must not report an adoption it did not perform.
+    // ONE ATTACH, NOT TWO. That is the property the retained entry buys and the only one
+    // this case is about: a second pass for a key that already has one in flight must not
+    // reach `host.attach` at all. Asserted on the host rather than on the outcome, because
+    // the outcome is the FIRST pass's either way — which is exactly what makes a bare
+    // outcome assertion unable to tell the two implementations apart.
     expect(f.host.attached).toHaveLength(1)
-    expect(a.kind).toBe('undecided')
-    expect(b.kind).toBe('undecided')
-    expect(pool.get(KEY)).toBeUndefined()
+    // And the second caller got the first pass's answer rather than one of its own.
+    expect(b).toEqual(a)
     expect(f.host.closed).toEqual([])
   })
 })
@@ -1827,5 +1857,130 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
     await pass
     expect(readFileSync(f.registryPath, 'utf8')).not.toBe(before)
     expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+})
+
+
+describe('a pass that STARTS after shutdown has looked', () => {
+  /**
+   * ARGUS r24. Round nine closed "a pass already running when shutdown starts"; this is
+   * the other window. `settleBootAdoptionsForShutdown` snapshots the live passes and
+   * returns immediately when that snapshot is empty — and nothing stopped a request
+   * constructing a substrate a moment later and starting a pass that blocks in `attach`.
+   * Never marked, never abandoned, it publishes into a pool already torn down, and
+   * `resetBootAdoption` preserves a still-running pass rather than stopping it, which is
+   * what lets it survive to publish.
+   *
+   * The latch is set BEFORE the settle takes its snapshot, so everything begun from that
+   * moment on is born `shutdown`-abandoned — one disposition for "this gateway is going
+   * away" rather than a second refusal every consumer would have to learn.
+   */
+  const supervise = (f: Fixture): void => {
+    supervisedBySessionKey.set(KEY, {
+      replRegistryPath: f.registryPath,
+    } as unknown as PersistentReplSubstrateOptions)
+  }
+
+  it('is born abandoned: it publishes nothing and leaves the pane and row alone', async () => {
+    // THE WINDOW ITSELF. An in-flight pass for key A holds the settle open, and key B's
+    // pass begins during that await — genuinely after the snapshot and before the second
+    // drain. Without a pass to hold it, settle→drain2 contains no yield at all and the
+    // window is not enterable in-process; this is the construction that reaches it.
+    const a = fixture({ record: { pid: 1 } })
+    supervise(a)
+    const heldA = a.host.holdAttach()
+    const passA = beginBootAdoption(a.options, KEY, {
+      host: a.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await heldA.entered
+
+    // B IS A GENUINELY DIFFERENT SESSION — its own key, session id, generation, channel
+    // and pane. An earlier version copied A's row, so the sink assertion read A's
+    // registration and answered 200: the case could not tell the two apart, which is the
+    // whole thing it is supposed to do.
+    const KEY_B = 'inst user projB cred'
+    const SESSION_B = 'eeeeeeee-1111-2222-3333-444444444444'
+    const GEN_B = 'gen-bbbb-2222'
+    const CHANNEL_B = 'neutron-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const HANDLE_B = 'w9:pB'
+    const b = fixture()
+    b.host.addPane(HANDLE_B, { argv: oursArgv(SESSION_B, CHANNEL_B), screens: ['idle B'], pid: 8181 })
+    const rowB = {
+      ...(readRow(b.registryPath) as object),
+      sessionKey: KEY_B,
+      sessionId: SESSION_B,
+      channelName: CHANNEL_B,
+      child_generation: GEN_B,
+      pane_handle: HANDLE_B,
+      pid: 8181,
+    }
+    writeFileSync(b.registryPath, JSON.stringify({ [KEY_B]: rowB }))
+    const optionsB = { ...b.options, project_id: 'projB' } as PersistentReplSubstrateOptions
+    const credentialB = deriveChildSinkToken(sink.token, GEN_B)
+
+    let passB!: ReturnType<typeof beginBootAdoption>
+    // Started while the settle is awaiting A — after the snapshot, before drain two.
+    setTimeout(() => {
+      passB = beginBootAdoption(optionsB, KEY_B, {
+        host: b.host,
+        health: async () => true,
+        log: () => {},
+      })
+    }, 5)
+    const shutdown = shutdownAllPersistentRepls({ adoptionGraceMs: 200 })
+    await Bun.sleep(30)
+    heldA.release()
+    await shutdown
+
+    const outcome = await passB
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/shut down/i)
+    // Nothing published, nothing mirrored, nothing authorised...
+    expect(pool.get(KEY_B)).toBeUndefined()
+    expect(childByKey.get(KEY_B)).toBeUndefined()
+    expect(await postReplyFor(SESSION_B, credentialB)).toBe(401)
+    // ...and the pane is LEFT RUNNING with its row intact, exactly as the round-nine
+    // window behaves. One disposition, not two.
+    expect(b.host.closed).toEqual([])
+    const rowAfter = (JSON.parse(readFileSync(b.registryPath, 'utf8')) as ReplRegistry)[KEY_B]
+    expect(rowAfter?.pane_handle).toBe(HANDLE_B)
+    expect(rowAfter?.child_generation).toBe(GEN_B)
+  })
+
+  it('THE POSITIVE CONTROL: a pass begun BEFORE shutdown still adopts and is still torn down', async () => {
+    // Second job, and it is the one that matters: the latch must not be passing by
+    // refusing everything. A pass that started before shutdown and settles inside the
+    // grace still lands in the pool and still gets a real survival verdict.
+    const f = fixture()
+    supervise(f)
+    const { entered, release } = f.host.holdAttach()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    setTimeout(release, 10)
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 2_000 })
+
+    expect((await pass).kind).toBe('adopted')
+    expect(f.host.attached).toHaveLength(1)
+    expect(f.host.attached[0]?.hasExited()).toBe(false)
+    expect(f.host.closed).toEqual([])
+  })
+
+  it('and adoption WORKS AGAIN after the module is reset — the latch is not a one-way kill switch', async () => {
+    // Production never clears the latch because a restart is a fresh process. In-process
+    // the clear is `resetBootAdoptionForTests`, and this is the case that would red if it
+    // stopped clearing: without it every suite that shuts a gateway down would silently
+    // adopt nothing forever after.
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 10 })
+    resetBootAdoptionForTests()
+    const f = fixture()
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('adopted')
+    expect(await pool.get(KEY)).toBeDefined()
   })
 })

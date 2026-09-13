@@ -252,6 +252,28 @@ interface PassHandle {
 const passes = new Map<string, Map<string, PassHandle>>()
 
 /**
+ * SHUTDOWN HAS BEGUN — set BEFORE the settle takes its snapshot, and never cleared in
+ * production (Argus r24).
+ *
+ * Round nine closed "a pass already running when shutdown starts". This closes the other
+ * window: a pass that starts AFTER the settle has looked. The settle snapshots the live
+ * passes and returns immediately when that snapshot is empty; nothing stopped a request
+ * constructing a substrate a moment later and starting a pass that blocks in `attach`,
+ * which is then never marked, never abandoned, and publishes into a pool already torn
+ * down. `resetBootAdoption` preserves a still-running pass rather than stopping it —
+ * correct for the passes it was written for, and it is what lets this one survive to
+ * publish.
+ *
+ * NOT CLEARED IN PRODUCTION, DELIBERATELY. A real gateway restart is a fresh process with
+ * a fresh module, so the latch costs it nothing; within THIS process, shutdown is
+ * one-way, and clearing it would re-open the window it exists to close. The only clear is
+ * {@link resetBootAdoptionForTests}, because a suite runs many gateway lifetimes in one
+ * process and would otherwise inherit a dead module from the first case that shuts down.
+ * That asymmetry is the whole design: production never needs the clear, tests always do.
+ */
+let shutdownLatched = false
+
+/**
  * Start this substrate's own boot reconciliation, ONCE per (registry, session key).
  *
  * Idempotent because the substrate factory runs per construction — many times per
@@ -277,7 +299,16 @@ export function beginBootAdoption(
   }
   const live = forRegistry.get(sessionKey)
   if (live !== undefined) return live.promise
-  const signal: AbandonSignal = { abandoned: false, cause: null, boundExpired: false }
+  // READ AND REGISTERED IN THE SAME SYNCHRONOUS STEP as the pass below — a latch checked
+  // and then awaited before registering would reproduce the very race one level down.
+  //
+  // ALREADY-ABANDONED RATHER THAN REFUSED OUTRIGHT: the caller still gets a well-formed
+  // `undecided` carrying the existing shutdown reason, and the spawn gate refuses it
+  // exactly as it refuses every other abandoned pass. One disposition for "this gateway
+  // is going away", rather than a second one that every consumer would have to learn.
+  const signal: AbandonSignal = shutdownLatched
+    ? { abandoned: true, cause: 'shutdown', boundExpired: false }
+    : { abandoned: false, cause: null, boundExpired: false }
   const started = reconcileOwnRepl(options, sessionKey, deps, signal).catch((e: unknown) => {
     // A pass that THREW decided nothing, and must not be mistaken for one that found
     // nothing: `reconcileRow` converts every expected failure into a verdict, so
@@ -479,6 +510,9 @@ export async function settleBootAdoptionsForShutdown(
   graceMs: number = SHUTDOWN_ADOPTION_GRACE_MS,
   log: (msg: string) => void = defaultLog,
 ): Promise<void> {
+  // BEFORE THE SNAPSHOT, not after. Everything begun from here on is born abandoned; the
+  // snapshot below deals with what was already running.
+  shutdownLatched = true
   const inFlight = [...passes.values()].flatMap((m) => [...m.values()]).filter((h) => !h.settled)
   if (inFlight.length === 0) return
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -532,6 +566,10 @@ export function resetBootAdoption(): void {
  *  key it never created. */
 export function resetBootAdoptionForTests(): void {
   passes.clear()
+  // AND THE SHUTDOWN LATCH. Production never clears it — see its docblock — but a suite
+  // runs many gateway lifetimes in one module, so without this the first case that shuts
+  // down leaves every later case adopting nothing, silently and green.
+  shutdownLatched = false
 }
 
 /**

@@ -25,7 +25,7 @@
  * merely exists but is not awaited by the spawn path would pass every other case here.
  */
 
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -35,6 +35,7 @@ import type { SessionHandle } from '../../../../session-handle.ts'
 import {
   createPersistentReplSubstrate,
   poolKeyFor,
+  resetBootAdoptionForTests,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
@@ -272,8 +273,23 @@ beforeAll(async () => {
   await sink.ensureStarted({ tokenPath: join(scratch(), 'sink-token') })
 })
 
+
+// CLEARED BEFORE EACH CASE, NOT ONLY AFTER IT. The shutdown latch and the pass map are
+// module-global, and bun runs many test FILES in one process — so a suite that shuts a
+// gateway down leaves adoption latched off for whatever file runs next. Clearing after
+// each case protects this file's own cases from each other; clearing before each one also
+// protects them from every other file. The failure mode is silent and green-looking: the
+// first case passes and the rest adopt nothing.
+beforeEach(() => resetBootAdoptionForTests())
+
 afterEach(async () => {
   await shutdownAllPersistentRepls()
+  // AND CLEAR THE MODULE, INCLUDING THE SHUTDOWN LATCH. `shutdownAllPersistentRepls`
+  // latches adoption off for the rest of the process — correct in production, where a
+  // restart is a fresh process, and fatal in a suite that runs several gateway lifetimes
+  // in one module: without this, every case after the first inherits a dead module and
+  // adopts nothing. This file is the reason that clear exists.
+  resetBootAdoptionForTests()
   for (const s of servers.splice(0)) {
     try {
       s.stop(true)

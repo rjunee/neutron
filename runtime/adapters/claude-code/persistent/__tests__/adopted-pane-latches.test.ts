@@ -23,7 +23,7 @@
  * because the second delivery is a rising edge for a detector with no history.
  */
 
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -112,6 +112,15 @@ async function adopt(screens: string[]): Promise<FakeAttachedChild> {
 beforeAll(async () => {
   await sink.ensureStarted({ tokenPath: join(scratch(), 'sink-token') })
 })
+
+
+// CLEARED BEFORE EACH CASE, NOT ONLY AFTER IT. The shutdown latch and the pass map are
+// module-global, and bun runs many test FILES in one process — so a suite that shuts a
+// gateway down leaves adoption latched off for whatever file runs next. Clearing after
+// each case protects this file's own cases from each other; clearing before each one also
+// protects them from every other file. The failure mode is silent and green-looking: the
+// first case passes and the rest adopt nothing.
+beforeEach(() => resetBootAdoptionForTests())
 
 afterEach(() => {
   resetBootAdoptionForTests()
