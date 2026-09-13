@@ -47,6 +47,19 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await Bun.sleep(10)
 }
 
+/** Wait until `cond()` holds and REPORT whether it did, rather than throwing.
+ *  A bounded wait that throws on timeout produces a stack trace naming this helper; a
+ *  wait that reports lets the case assert the property with the backend in the message,
+ *  which is the half of a conformance failure worth reading. */
+async function waitUntil(cond: () => boolean, timeoutMs = 3000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (!cond()) {
+    if (Date.now() > deadline) return false
+    await Bun.sleep(5)
+  }
+  return true
+}
+
 /** Wait until `cond()` holds, or throw. */
 async function until(cond: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -62,6 +75,13 @@ interface Spawned {
    *  process exiting under a pty. Each backend arranges it in its own terms; what the
    *  shared case asserts is what the CONTRACT says afterwards. */
   endChild(): void
+}
+
+/** A {@link Spawned} whose substrate can be made to produce ANOTHER changed screen on
+ *  demand — the observable a "delivery continues" claim needs and cannot borrow. */
+interface SpawnedProducer extends Spawned {
+  /** Produce one more CHANGED screen containing `text`. */
+  emit(text: string): void
 }
 
 interface Backend {
@@ -89,6 +109,23 @@ interface Backend {
   spawnAlreadyExiting(onScreen: (s: string) => void): Promise<Spawned>
   /** Spawn with an `onExit` consumer, so the exit-path contract can be driven. */
   spawnWithExit(onExit: (code: number | null) => void): Promise<Spawned>
+  /**
+   * Spawn a child whose substrate can be driven to produce FURTHER screens on demand.
+   *
+   * ADDED BECAUSE A CASE ASSERTED HALF ITS OWN TITLE. The throwing-consumer case is
+   * named "does not propagate into the caller, and does not stop LATER DELIVERY", and it
+   * asserted that the first delivery happened and the host had not exited — never that
+   * anything arrived AFTER the throw. A host that catches the first exception and then
+   * permanently disables its consumer satisfies every one of those assertions. That is
+   * `asserting an outcome the broken implementation also produces`, and it is worse here
+   * than an untested property would be, because the NAME tells the next reader the
+   * property is covered.
+   *
+   * The second screen has to be controllable rather than incidental: waiting for one the
+   * substrate might emit on its own makes the case timing-dependent, and a case that can
+   * pass because something else happened to arrive is the same defect again.
+   */
+  spawnWithMoreOutput(onScreen: (s: string) => void): Promise<SpawnedProducer>
   /**
    * What `exited` resolves to when `endChild()` ends this child NORMALLY.
    *
@@ -162,6 +199,22 @@ const herdrBackend: Backend = {
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onExit })
     child.beginOutput?.()
     return { child, endChild: () => server.exitPane() }
+  },
+  async spawnWithMoreOutput(onScreen) {
+    const server = new FakeHerdrServer()
+    server.screen = STARTUP
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    // The pane's screen is REPLACED; the poll loop sees a changed snapshot on its next
+    // read. Nothing about that path is special-cased for the first read, which is the
+    // point — the second delivery goes through the same code as the one that threw.
+    return { child, endChild: () => server.exitPane(), emit: (t) => (server.screen = t) }
   },
   async spawnAlreadyExiting(onScreen) {
     const server = new FakeHerdrServer()
@@ -237,6 +290,27 @@ const bunBackend: Backend = {
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onExit })
     child.beginOutput?.()
     return { child, endChild: () => endProcess(0) }
+  },
+  async spawnWithMoreOutput(onScreen) {
+    let endProcess: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endProcess = res
+    })
+    // CAPTURED FROM INSIDE `createTerminal`, because that is the only handle on the
+    // pty's data callback — the substrate pushes, nothing pulls.
+    let push: (t: string) => void = () => {}
+    const host = new BunTerminalHost({
+      createTerminal: (o) => {
+        const term = { write: () => 0, resize: () => undefined, close: () => undefined }
+        o.data?.(term, new TextEncoder().encode(`${STARTUP}\n`))
+        push = (t) => o.data?.(term, new TextEncoder().encode(t))
+        return term
+      },
+      spawn: () => ({ pid: 4245, exited: exitedPromise, exitCode: null, kill: () => undefined }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    return { child, endChild: () => endProcess(0), emit: (t) => push(t) }
   },
   async spawnAlreadyExiting(onScreen) {
     const host = new BunTerminalHost({
@@ -374,18 +448,40 @@ describe('PtyHost conformance — the readiness gate', () => {
         // delivers synchronously from `beginOutput()`, so the same throw came back out
         // of the caller's readiness handshake. Found while enumerating latch-before-a-
         // fallible-act sites — a different rule, the same sweep.
-        let calls = 0
-        const { child } = await backend.spawn(() => {
-          calls += 1
-          throw new Error('the detector threw')
+        //
+        // AND THE SECOND HALF OF THE TITLE IS ASSERTED, which it was not. This case used
+        // `backend.spawn` and checked only that the first delivery happened and the host
+        // had not exited — both of which a host that catches the first exception and then
+        // permanently disables its consumer also produces. The claim in the name is about
+        // what happens AFTER the throw, so the fixture has to be able to produce it.
+        const seen: string[] = []
+        const { child, emit } = await backend.spawnWithMoreOutput((screen) => {
+          seen.push(screen)
+          // THE FIRST DELIVERY ONLY. A consumer that threw forever could not distinguish
+          // "recovered" from "never called again" — the later calls have to be able to
+          // succeed, or the observable is gone.
+          if (seen.length === 1) throw new Error('the detector threw')
         })
         // The handshake itself must survive it.
         expect(() => child.beginOutput?.()).not.toThrow()
-        await settle()
-        expect(`${backend.name} sawScreen: ${String(calls > 0)}`).toBe(
+        const sawFirst = await waitUntil(() => seen.length >= 1)
+        expect(`${backend.name} sawScreen: ${String(sawFirst)}`).toBe(
           `${backend.name} sawScreen: true`,
         )
         // ...and the host is still alive afterwards, not wedged by its consumer.
+        expect(child.hasExited()).toBe(false)
+
+        // THE ACTUAL CLAIM: a screen produced after the throw still reaches the consumer.
+        const AFTER = 'after-the-throw'
+        emit(`${AFTER}\n`)
+        // SLICED PAST THE FIRST, so the call that threw can never be the one that
+        // satisfies this — the screen has to arrive on a LATER call.
+        const deliveredAfter = await waitUntil(() =>
+          seen.slice(1).some((screen) => screen.includes(AFTER)),
+        )
+        expect(`${backend.name} deliveredAfterThrow: ${String(deliveredAfter)}`).toBe(
+          `${backend.name} deliveredAfterThrow: true`,
+        )
         expect(child.hasExited()).toBe(false)
         child.kill()
       })

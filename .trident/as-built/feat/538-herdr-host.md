@@ -2667,6 +2667,74 @@ came from.
 
 The count went 50 → 49, which is the least interesting fact about the sweep.
 
+### The invariant, not the default — answering the question underneath the question
+
+`trimToBytes` defaulted to the production-wide 384 KiB regardless of the `maxBytes` it
+was meant to sit under, so `newScreenAccumulator(64)` never trimmed. I derived the default
+from `maxBytes` and called it fixed. It was not: `newScreenAccumulator(64, 128)` still
+retained 100 bytes, because the overflow is detected against the cap and the trim then
+clamps to the LARGER target.
+
+**The invariant is `0 <= trimToBytes <= maxBytes`. The bad default was one way to break
+it; an explicit argument is another.** My own comment on the fix had already written the
+general rule down — *a default that ignores its sibling argument is only wrong when
+someone passes one of them* — and I then implemented only the half the report named. That
+is answering the question asked rather than the question underneath it, and it is the same
+thing that was done to me on the `pane_not_found` round.
+
+REJECTED, NOT CLAMPED. A silent clamp has the shape of the bug it replaces: the caller
+asks for 128, quietly gets 64, and no instrument anywhere reports the contradiction. These
+are programmer-supplied constants rather than environmental input, and construction
+happens once per spawn, so a throw lands at the earliest point where the contradiction is
+visible. The boundaries are asserted in both directions, because an over-strict check is
+the mutation a one-sided test cannot see: `trimToBytes === maxBytes` is LEGAL (it clamps
+every chunk, forfeiting the amortisation — a cost, not a violation) and so is `0`. The cap
+is validated FIRST and that order is load-bearing: with a `NaN` cap the derived default is
+`NaN` too, so a trim-first check blames an argument the caller never passed (M-A6).
+
+### A case that asserted half of its own title
+
+`pty-host-conformance.test.ts` had a case named *"does not propagate into the caller, and
+does not stop later delivery"*. It threw from `onScreen`, then asserted that a delivery had
+happened and that the host had not exited. It never produced a SECOND changed screen, so
+nothing observed delivery after the throw — **a host that catches the first exception and
+then permanently disables its consumer passes every assertion in it.**
+
+Asserting an outcome the broken implementation also produces, which is now the shape named
+on four branches. It is worse here than an untested property would be, because the NAME
+tells the next reader the property is covered. An untested property at least looks
+untested.
+
+The fixture gained `spawnWithMoreOutput`, which hands back an `emit(text)` the case drives
+directly — the second screen has to be CONTROLLABLE, not incidental, or the case can pass
+because something else happened to arrive. The consumer throws on the first delivery only
+(a consumer that threw forever could not distinguish "recovered" from "never called
+again"), and the assertion slices past the first call so the throwing call can never be
+the one that satisfies it.
+
+Two things the mutations turned up that reading would not have:
+
+- **M-C1 SURVIVED, and the reason is a fact about the host rather than a gap.** Disabling
+  the consumer in the Bun host's data callback changes nothing, because that backend's
+  FIRST delivery does not go through it: a screen produced before release is held and
+  handed over from `releaseOutput()`, a genuinely separate path. The defect has to be
+  modelled on both paths to be the defect (M-C1b), and then it reds. A mutation has to
+  break the property, not resemble it — including when the resemblance is mine.
+- The bounded waits now REPORT rather than throw. A wait that throws on timeout produces a
+  stack trace naming the helper; this suite's whole argument is that the interesting half
+  of a conformance failure is which participant broke which promise, and a thrown timeout
+  discards exactly that. The `expect` carries the backend name.
+
+### A test comment preserving superseded behaviour as current guidance
+
+`bun-terminal-host.test.ts:165` said `beginOutput` had "no gate to release" on this
+backend. True of the pass-through implementation; false from the moment this branch gave
+the Bun host its own output gate — and the line sat directly above the call that now
+releases it. Same class as the `HerdrHost` class docblock that still described one
+connection per spawn two rounds ago: the code changed, the prose beside it kept teaching
+the old behaviour, and prose next to a call is read as current. Swept: this was the only
+occurrence.
+
 ### Mutation table
 
 Every guard was mutated. **Not every mutation reddened**, and the survivors are in the
@@ -2948,6 +3016,17 @@ Run against the named suites.
 | M75c | accept ONLY an array `data` | RED 1 (its own case) |
 | M75d | accept ONLY a string `data` | RED 1 (its own case) |
 | M75e | accept ONLY a number `data` | RED 1 (its own case) |
+| M-A1 | the `trimToBytes` range check is removed entirely | RED 2 |
+| M-A2 | an out-of-range trim target is silently CLAMPED instead of refused | RED 2 — the choice of reject-over-clamp is itself pinned |
+| M-A3 | over-strict: `trimToBytes === maxBytes` rejected | RED 2 |
+| M-A4 | over-strict: a ZERO trim target rejected | RED 2 |
+| M-A5 | the `maxBytes` check is removed | RED 1 |
+| M-A6 | the trim check runs BEFORE the cap check | RED 1 — a `NaN` cap must not blame an argument the caller never passed |
+| M-C1 | Bun host: catch the first throw in the DATA callback, then disable the consumer | SURVIVED — that backend's first delivery comes from `releaseOutput()`, a separate path; see M-C1b |
+| M-C1b | Bun host: disable the consumer on BOTH delivery paths | RED 1 (the Bun arm of the throwing-consumer case) |
+| M-C2 | herdr host: catch the first throw in the poll loop, then disable the consumer | RED 1 (the herdr arm) |
+| M-C3 | Bun host: rethrow from the data callback instead of swallowing | RED 1 |
+| M-C4 | Bun host: remove the `releaseOutput()` catch — the throw reaches the caller's handshake | RED 1 (the "does not propagate" half, the case's original subject) |
 | M234 | `envRef` drops the dot form | RED 2 (the dot write, the dot delete) |
 | M235 | `envRef` drops the bracket forms | RED 7 (4 writes, 2 deletes, and the tree guard) |
 | M236 | `envRef`'s quote class loses `"` | RED 2 (the double-quoted write and delete) |

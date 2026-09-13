@@ -510,7 +510,45 @@ not-new. That is accepted and recorded here rather than hidden.
       zero-argument case as the control, or deriving it may quietly shrink what
       production uses. The general form: **a default that ignores its sibling is only
       wrong when someone passes one of them.**
+      AND THE RULE THE SENTENCE STATES IS THE INVARIANT, NOT THE DEFAULT. Deriving the
+      default fixed the one-argument call and left the two-argument call unconstrained:
+      `newScreenAccumulator(64, 128)` detected the overflow against 64 and then clamped to
+      128, retaining 100 bytes under a 64-byte cap. The invariant is
+      `0 <= trimToBytes <= maxBytes`; a bad default was one way to break it and an
+      explicit argument is another. Fixing only the reported half is answering the
+      question asked rather than the one underneath it.
+      REFUSED RATHER THAN CLAMPED, because a silent clamp has the shape of the bug it
+      replaces — the caller asks for 128, quietly gets 64, and nothing reports the
+      contradiction. These are programmer-supplied constants, not environmental input, and
+      construction happens once per spawn.
+      BOTH DIRECTIONS AT EVERY BOUNDARY, since an over-strict check is the mutation a
+      one-sided test cannot see: `trimToBytes === maxBytes` is LEGAL (it clamps on every
+      chunk, forfeiting the amortisation — a cost, not a violation), `0` is legal, and
+      negative or non-finite is refused. The CAP is validated first and the order is
+      load-bearing: with a non-finite cap the derived default is non-finite too, so a
+      trim-first check blames an argument the caller never passed.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
+- [ ] **A CONFORMANCE CASE MUST ASSERT ITS WHOLE TITLE.** The throwing-consumer case is
+      named "does not propagate into the caller, and does not stop LATER DELIVERY", and it
+      asserted that the first delivery had happened and the host had not exited — both of
+      which a host that catches the first exception and then permanently disables its
+      consumer also produces. Asserting an outcome the broken implementation also
+      produces, and worse here than an untested property, because the NAME tells the next
+      reader it is covered.
+      THE SECOND SCREEN MUST BE CONTROLLABLE, not incidental: the backend table gains a
+      fixture that hands back an `emit(text)` the case drives, because a case that can
+      pass because something else happened to arrive is the same defect again. The
+      consumer throws on the FIRST delivery only (one that threw forever could not
+      distinguish "recovered" from "never called again"), and the assertion slices past
+      that call so the throwing one can never satisfy it.
+      THE MUTATION MUST BREAK THE PROPERTY, NOT RESEMBLE IT: disabling the consumer in the
+      Bun host's data callback alone SURVIVES, because that backend's first delivery comes
+      from the gate-release path instead. Both paths have to be disabled before the
+      mutation is the defect.
+      AND A BOUNDED WAIT HERE REPORTS RATHER THAN THROWS — a thrown timeout yields a stack
+      trace naming the helper, discarding the one thing this suite exists to say: which
+      participant broke which promise.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
 - [ ] **THE OBLIGATION STARTS WHEN THE TIMER IS ARMED, so the connector is called INSIDE
       the guard.** Invoking it above the surrounding `try` let a SYNCHRONOUS throw escape
       past the failure path, leaving the RPC deadline armed and the handlers registered.

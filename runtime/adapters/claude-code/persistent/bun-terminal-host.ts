@@ -96,6 +96,32 @@ export function newScreenAccumulator(
   // when someone passes one of them.
   trimToBytes: number = Math.floor(maxBytes * SCREEN_TRIM_RATIO),
 ): { push: (text: string) => string } {
+  // THE INVARIANT IS `0 <= trimToBytes <= maxBytes`, AND THE DEFAULT WAS ONLY ONE WAY TO
+  // BREAK IT. Deriving the default fixed the one-argument call and left the two-argument
+  // call unconstrained: `newScreenAccumulator(64, 128)` detected the overflow at 100
+  // bytes and then clamped to the LARGER target, retaining all 100. The comment above
+  // diagnosed a default; the sentence it ends with — a default that ignores its sibling
+  // argument is only wrong when someone passes one of them — is the argument for the
+  // general rule, not for the narrow fix. An explicit argument is simply the other way
+  // to pass a trim target that does not sit under its own cap.
+  //
+  // REJECTED RATHER THAN CLAMPED, because a silent clamp has the same shape as the bug
+  // it replaces: the caller asks for one thing, quietly gets another, and no instrument
+  // anywhere says so. These are programmer-supplied constants, not environmental input,
+  // and construction happens once per spawn — so a throw lands at the earliest point
+  // where the contradiction is visible, which is the only place it can still be cheap.
+  // `trimToBytes === maxBytes` is legal (it clamps on every chunk, forfeiting the
+  // amortisation, which is a cost and not a violation) and so is `0` (trim to nothing).
+  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
+    throw new RangeError(
+      `newScreenAccumulator: maxBytes must be a finite number >= 0, got ${maxBytes}`,
+    )
+  }
+  if (!Number.isFinite(trimToBytes) || trimToBytes < 0 || trimToBytes > maxBytes) {
+    throw new RangeError(
+      `newScreenAccumulator: trimToBytes must be within [0, ${maxBytes}], got ${trimToBytes}`,
+    )
+  }
   let screen = ''
   // TRACKED INCREMENTALLY. Measuring the whole accumulation on every delivery would be
   // O(screen) per chunk — cheap per call and quadratic over a session, which is exactly

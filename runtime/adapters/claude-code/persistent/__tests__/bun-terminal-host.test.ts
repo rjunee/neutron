@@ -161,8 +161,11 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
 
   it('satisfies the PtyChild shape the substrate consumes', async () => {
     const child: PtyChild = await bunTerminalHost.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
-    // `beginOutput` exists so a caller can call it unconditionally on either backend;
-    // here there is no gate to release.
+    // `beginOutput` RELEASES A REAL GATE ON THIS BACKEND TOO. This said "here there is
+    // no gate to release", which was true of the pass-through implementation and became
+    // false the moment the Bun host grew its own output gate — a test comment preserving
+    // superseded behaviour as current guidance, which is the same class as the class
+    // docblock that still described one connection per spawn.
     expect(typeof child.beginOutput).toBe('function')
     child.beginOutput?.()
     expect(typeof child.writeKey).toBe('function')
@@ -206,6 +209,59 @@ describe('the screen accumulator is bounded in BYTES', () => {
     for (let i = 0; i < 50; i++) screen = acc.push('x'.repeat(65))
     expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(64)
     expect(screen.length).toBeGreaterThan(0)
+  })
+
+  // THE INVARIANT, NOT THE DEFAULT. The case above fixed the one-argument call; the
+  // two-argument call was still unconstrained, and `newScreenAccumulator(64, 128)` kept
+  // 100 bytes because the overflow was detected against 64 and then clamped to 128. The
+  // sentence in the comment above — a default that ignores its sibling argument is only
+  // wrong when someone passes one of them — is an argument for `trimToBytes <= maxBytes`
+  // as a rule. A bad default was one way to break it; an explicit argument is another,
+  // and answering only the first is answering the question asked rather than the one
+  // underneath it.
+  //
+  // REJECTED, NOT CLAMPED. A silent clamp has the shape of the bug it replaces: the
+  // caller asks for 128, quietly gets 64, and nothing anywhere reports the contradiction.
+  it('REFUSES a trim target above its own cap — the case a derived default cannot reach', () => {
+    expect(() => newScreenAccumulator(64, 128)).toThrow(/trimToBytes/)
+    // The defect stated as behaviour rather than as a constructor contract: if this were
+    // permitted, the accumulator would retain 100 bytes under a 64-byte cap.
+    expect(() => newScreenAccumulator(64, 65)).toThrow(/trimToBytes/)
+  })
+
+  it('ACCEPTS a trim target EQUAL to the cap — legal, and only a cost', () => {
+    // Degenerate but not a violation: it clamps on every chunk, forfeiting the
+    // amortisation the low-water mark buys. Rejecting it would be over-strict, and an
+    // over-strict boundary is the mutation that a one-sided test cannot see.
+    const acc = newScreenAccumulator(64, 64)
+    let screen = ''
+    for (let i = 0; i < 10; i++) screen = acc.push('x'.repeat(65))
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(64)
+  })
+
+  it('ACCEPTS a ZERO trim target — trim to nothing is a budget, not an error', () => {
+    const acc = newScreenAccumulator(64, 0)
+    const screen = acc.push('x'.repeat(100))
+    expect(Buffer.byteLength(screen, 'utf8')).toBe(0)
+  })
+
+  it('REFUSES a NEGATIVE or non-finite trim target', () => {
+    expect(() => newScreenAccumulator(64, -1)).toThrow(/trimToBytes/)
+    expect(() => newScreenAccumulator(64, Number.NaN)).toThrow(/trimToBytes/)
+    expect(() => newScreenAccumulator(64, Number.POSITIVE_INFINITY)).toThrow(/trimToBytes/)
+  })
+
+  it('REFUSES a NEGATIVE or non-finite cap — the sibling argument is checked FIRST', () => {
+    // Order is load-bearing: with a NaN cap the DERIVED default is NaN too, so a
+    // trim-target-first check would blame the argument the caller never passed.
+    expect(() => newScreenAccumulator(-1)).toThrow(/maxBytes/)
+    expect(() => newScreenAccumulator(Number.NaN)).toThrow(/maxBytes/)
+    expect(() => newScreenAccumulator(Number.POSITIVE_INFINITY)).toThrow(/maxBytes/)
+  })
+
+  it('CONTROL — a cap of ZERO is legal and bounds to nothing', () => {
+    const acc = newScreenAccumulator(0)
+    expect(Buffer.byteLength(acc.push('x'.repeat(100)), 'utf8')).toBe(0)
   })
 
   it('CONTROL — the ZERO-argument default is the production pair, not a shrunken one', () => {
