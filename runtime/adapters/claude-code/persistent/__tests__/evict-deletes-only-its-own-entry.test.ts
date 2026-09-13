@@ -31,6 +31,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { getOrSpawnSession, quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
+import { classifyThrownSpawnError } from '../classify-spawn-error.ts'
 import { childByKey, pool, sink } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
@@ -399,5 +400,115 @@ describe('a pool-scoped guard does not drop the obligations that are not about t
     expect(quarantinedChildCount()).toBe(0)
 
     pool.delete(LEAK_KEY)
+  })
+})
+
+/**
+ * THE TERMINATION BOUND (#539, Argus r59).
+ *
+ * The r58 fix re-enters `getOrSpawnSession` when the pool entry has been replaced, which raises
+ * the question the fix itself has to answer: **what stops a turn that keeps losing?** Unbounded
+ * re-entry is a livelock; spawning anyway is the two-owner outcome the whole change exists to
+ * prevent; publishing anyway is the r57 defect. So the bound refuses, retryably and classified.
+ *
+ * The as-built claimed that guarantee and no case established it. These two do, in both
+ * directions: contention JUST UNDER the bound still resolves normally, and contention past it
+ * refuses — spawning nothing, publishing nothing, and carrying the class that keeps the refusal
+ * off the credential cooldown.
+ *
+ * HOW SUCCESSIVE STALE DECISIONS ARE FORCED. Every earlier race fixture performs exactly one
+ * replacement, which can only ever produce one re-entry. Here each pooled session replaces the
+ * entry itself, from inside `hasChildExited()` — a synchronous call the turn makes after
+ * awaiting the entry and before it reaches the publish point, so the interleaving is exact
+ * rather than timing-dependent.
+ */
+const BOUND_KEY = `${KEY} bound`
+
+/** Build a chain of pooled entries, each of which publishes the next one while the turn that
+ *  resolved through it is still deciding. The last link publishes nothing, so the turn that
+ *  reaches it decides normally.
+ *
+ *  Reports what it published and how many replacements it had left, so each case can assert its
+ *  own premise — a chain that never fired would make both cases pass for the wrong reason, which
+ *  is the vacuity this branch has now produced ten times. */
+function publishContendingChain(
+  replacements: number,
+  finalSession: ReplSession,
+): { remaining: () => number; lastPublished: () => Promise<ReplSession> } {
+  let left = replacements
+  let last: Promise<ReplSession>
+  const link = (): Promise<ReplSession> => {
+    const session = left > 0 ? warmSession({ key: BOUND_KEY }) : finalSession
+    const asExited = session.hasChildExited.bind(session)
+    session.hasChildExited = (): boolean => {
+      if (left > 0) {
+        left -= 1
+        last = link()
+        pool.set(BOUND_KEY, last)
+      }
+      return asExited()
+    }
+    return Promise.resolve(session)
+  }
+  last = link()
+  pool.set(BOUND_KEY, last)
+  return { remaining: () => left, lastPublished: () => last }
+}
+
+describe('the stale-turn re-entry terminates', () => {
+  it('resolves normally when the contention stops just under the bound', async () => {
+    let spawnAttempts = 0
+    const winner = winnerSession(BOUND_KEY)
+    // Three replacements: the turn re-enters at counters 0, 1 and 2 — the last re-entry the
+    // bound permits — and the fourth pass finds a winner it may reuse.
+    const chain = publishContendingChain(3, winner)
+    const options = optionsFor({
+      ptyHost: {
+        async spawn(): Promise<PtyChild> {
+          spawnAttempts += 1
+          throw new Error('r59-host: a spawn here means the re-entry gave up too early')
+        },
+      },
+    })
+    const returned = await getOrSpawnSession(BOUND_KEY, options, spec)
+    // THE PREMISE: all three replacements fired, so the turn really did re-enter three times.
+    // Without this the case passes on a chain that never contended at all.
+    expect(chain.remaining()).toBe(0)
+    expect(returned).toBe(winner)
+    expect(spawnAttempts).toBe(0)
+    pool.delete(BOUND_KEY)
+  })
+
+  it('refuses — retryably and classified — when the contention outlasts the bound', async () => {
+    let spawnAttempts = 0
+    // One more replacement than the bound allows.
+    const chain = publishContendingChain(4, winnerSession(BOUND_KEY))
+    const options = optionsFor({
+      ptyHost: {
+        async spawn(): Promise<PtyChild> {
+          spawnAttempts += 1
+          throw new Error('r59-host: the refusal must not spawn')
+        },
+      },
+    })
+    const outcome = await getOrSpawnSession(BOUND_KEY, options, spec).then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error }),
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error('unreachable')
+    // THE CLASS, THROUGH THE CLASSIFIER rather than by reading the field: the stamp is only
+    // worth anything if it survives the taxonomy validation the consumer performs (r43).
+    expect(classifyThrownSpawnError(outcome.error)).toBe('repl_unreconciled')
+    expect(String(outcome.error)).toContain('replaced by a concurrent turn')
+    // NOTHING SPAWNED, AND NOTHING PUBLISHED. The refusal's whole point is that it takes no
+    // action on a key another turn is actively serving.
+    expect(spawnAttempts).toBe(0)
+    // THE PREMISE, and the "published nothing" assertion in one: the entry is exactly the last
+    // one the CHAIN published, so the refusing turn neither spawned over it nor removed it —
+    // and `remaining() === 0` says the contention really outlasted the bound.
+    expect(chain.remaining()).toBe(0)
+    expect(pool.get(BOUND_KEY)).toBe(chain.lastPublished())
+    pool.delete(BOUND_KEY)
   })
 })

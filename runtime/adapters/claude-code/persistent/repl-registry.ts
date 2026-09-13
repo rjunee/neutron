@@ -44,6 +44,7 @@
  * with zero rework (brief § 8).
  */
 
+import { noteLocalOwnership } from './local-ownership.ts'
 import { createLogger } from '@neutronai/logger'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
@@ -533,6 +534,10 @@ export function reservePaneSpawn(
   prev: ReplRegistryRecord,
   args: { readonly by: string; readonly now: number; readonly pid: number },
 ): ReplRegistryRecord {
+  // THE RESERVATION IS NOTED HERE, and this one is not redundant (r59): a reserver id belongs
+  // to a spawn in flight, not to a session — there is no `ReplSession` yet to carry it, which
+  // is the whole point of reserving BEFORE the spawn. Released in `releaseSpawnReservation`.
+  noteLocalOwnership(args.by)
   return {
     ...prev,
     spawn_reservation_at: args.now,
@@ -560,6 +565,11 @@ export function releasePaneSpawnReservation(
 /** TAKE (or keep) ownership: the handle, its generation and this gateway's claim, in one
  *  write. There is no ordering in which the row is owned but unclaimed. */
 export function ownPane(prev: ReplRegistryRecord, owner: PaneOwner): ReplRegistryRecord {
+  // NO LOCAL NOTE HERE (r59). A claim always lands on a `ReplSession`, whose `paneClaimBy`
+  // accessor IS this process's register of what it holds — and M169 proved this line added
+  // nothing: removing it reddened nothing, because the session had already noted the id. Two
+  // mechanisms for one fact is the defect family this branch keeps finding; the owner keeps
+  // the fact, and a row write is not an owner.
   return {
     ...prev,
     pane_handle: owner.handle,
@@ -574,6 +584,11 @@ export function ownPane(prev: ReplRegistryRecord, owner: PaneOwner): ReplRegistr
  *  the claim leave together. The generation stays — it identifies the child for the
  *  crash/shutdown records that must outlive it. */
 export function disownPane(prev: ReplRegistryRecord): ReplRegistryRecord {
+  // NO LOCAL DROP HERE, DELIBERATELY (r59). This helper clears whatever claim the ROW carries,
+  // and one of its callers (`clearPaneHandle`, for a pane that is provably gone) legitimately
+  // clears a claim this process does not own. Dropping from the process-wide register there
+  // would erase ANOTHER in-process gateway's ownership evidence and re-open the very defect
+  // this register exists to close. The drop belongs to the owner — `ReplSession.paneClaimBy`.
   const {
     pane_handle: _h,
     adoption_claim_at: _a,
@@ -605,6 +620,7 @@ export function refreshPaneClaim(
   pid: number,
 ): ReplRegistryRecord | undefined {
   if (prev.adoption_claim_by !== claimant) return undefined
+  // Likewise no local note: a renewal renews a claim its session already holds.
   return { ...prev, adoption_claim_at: now, adoption_claim_pid: pid }
 }
 

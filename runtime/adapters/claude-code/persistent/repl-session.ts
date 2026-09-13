@@ -2,6 +2,7 @@
 // The ReplSession warm-REPL class + child-termination / env / http-health
 // helpers (D2 split).
 
+import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
 import { createHash, randomBytes } from 'node:crypto'
 import { realpathSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -203,7 +204,26 @@ export class ReplSession {
    * teardown — are the paths that must give it back, and only the session travels to all
    * of them.
    */
-  paneClaimBy: string | undefined
+  /** THE BACKING FIELD, and the accessor below is not decoration (r59). This field IS this
+   *  process's record of which claim ids it holds, so the process-wide register the ownership
+   *  predicates consult is maintained BY the assignment rather than beside it: every path that
+   *  stops owning a pane already clears this field, and there is no sixth place to forget. */
+  #paneClaimBy: string | undefined
+  get paneClaimBy(): string | undefined {
+    return this.#paneClaimBy
+  }
+  set paneClaimBy(next: string | undefined) {
+    // DROPPED ON THE INTENT, not on the durable write succeeding. The row release can be
+    // prevented (an unacquired lock), and then the row still names this id — but the owner is
+    // gone either way, and the worst a premature drop costs is that this process may later
+    // overwrite a stale claim of its OWN, which is the one claim it is entitled to overwrite.
+    // Leaving it would instead refuse this process's own replacement for the takeover window.
+    if (this.#paneClaimBy !== undefined && this.#paneClaimBy !== next) {
+      dropLocalOwnership(this.#paneClaimBy)
+    }
+    this.#paneClaimBy = next
+    noteLocalOwnership(next)
+  }
   /**
    * #539 r44 — WHEN THIS SESSION LAST CONFIRMED that it still owns its pane: the moment a
    * compare-and-set actually succeeded, not the moment one was attempted.

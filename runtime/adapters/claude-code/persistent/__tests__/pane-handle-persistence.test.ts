@@ -307,6 +307,78 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
     expect(readRow(registryPath, key)?.adoption_claim_by).toBe(row?.adoption_claim_by)
   })
 
+  it('...and blocks one IN THE SAME PROCESS, which is the supported case the pid shortcut broke', async () => {
+    /**
+     * THE CASE THE CASE ABOVE AVOIDS (#539, Argus r59 — found by a whole-branch review).
+     *
+     * The overlap case hands the adopter `claimantPid: process.pid + 1`, and says why: two
+     * gateways in one test process share a pid, and the predicate treated ANY claim carrying
+     * this process's pid as ours. But overlapping boots **in one process** are exactly what
+     * this repo supports (`gateway/index.ts`, the overlapping-boot note), so substituting a
+     * different pid did not make the fixture fair — **it substituted the defect away.** The
+     * headline ownership case exercised the easy direction and left the supported one untested
+     * for nineteen rounds.
+     *
+     * With the same pid, everything about the two gateways is identical except the one thing
+     * that IS identity: the claimant id. The rule that makes this case pass is that a claim
+     * whose id differs is not ours, whatever pid it carries — the pid is evidence about
+     * liveness, and a process that still holds the id is the evidence that settles it.
+     */
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p77'), registryPath)
+    const key = poolKeyFor(options)
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+
+    const row = readRow(registryPath, key)
+    expect(row?.pane_handle).toBe('w9:p77')
+    const firstClaim = row?.adoption_claim_by
+    expect(typeof firstClaim).toBe('string')
+    // THE PREMISE: one process, one pid, on both sides of the contest below.
+    expect(row?.adoption_claim_pid).toBe(process.pid)
+    const served = await pool.get(key)
+    expect(served).toBeDefined()
+
+    const adopter = new FakeAdoptableHost()
+    adopter.addPane('w9:p77', {
+      argv: [
+        'claude',
+        '--resume',
+        row?.sessionId as string,
+        '--dangerously-load-development-channels',
+        `server:${row?.channelName as string}`,
+      ],
+      screens: ['idle'],
+      pid: 4242,
+    })
+    resetBootAdoptionForTests()
+    // NO `claimantPid` OVERRIDE: this second logical gateway is in this process, as a second
+    // boot of the same gateway binary is.
+    const outcome = await reconcileOwnRepl(options, key, {
+      host: adopter,
+      health: async () => true,
+      log: () => {},
+    })
+
+    // REFUSED, naming the claim — the first gateway is alive and serving.
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/holds the adoption claim/i)
+    // ONE WRAPPER: the adopter handed its child back rather than closing the pane.
+    expect(adopter.attached).toHaveLength(1)
+    expect(adopter.attached[0]?.detached).toBe(true)
+    expect(adopter.closed).toEqual([])
+    // AND THE FIRST GATEWAY IS STILL SERVING: its session is still the pool entry, its claim
+    // is still the row's, and a turn dispatched now still reaches it.
+    expect(await pool.get(key)).toBe(served)
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBe(firstClaim)
+    // "STILL SERVING" IN THE CHECKABLE SENSE: it was not fenced, and it did not lose its
+    // in-memory claim — the two states in which a session stops answering for its key. (A
+    // second dispatch is not the instrument: this host's child exits with its turn, so a
+    // failure there would say something about the fixture's echo child, not about ownership.)
+    expect(served?.fenced).toBe(false)
+    expect(served?.paneClaimBy).toBe(firstClaim)
+  })
+
   it('A FRESH SPAWN LOSES THE CONTEST for a row another gateway owns, and ends its own child', async () => {
     // ARGUS r45, and it completes round forty's lesson. Round forty gave the fresh spawn a
     // claim; it did not give it a CONTEST. The ownership write replaced the row
@@ -416,7 +488,20 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
     expect(typeof firstClaim).toBe('string')
     expect(readRow(registryPath, key)?.adoption_claim_pid).toBe(process.pid)
 
-    // The child is gone and its teardown did not reach the row: its claim is still there.
+    // The child is gone and its teardown DID NOT REACH THE ROW: its claim is still there.
+    //
+    // MODELLED AS THE PROSE ABOVE DESCRIBES IT, WHICH IT WAS NOT (r59). This used to drop the
+    // pool entry and stop, i.e. it modelled a teardown that never ran AT ALL — leaving a live
+    // session object still holding its claim. Under the r59 identity rule that is
+    // indistinguishable from a live owner, and refusing the respawn is then the CORRECT answer,
+    // so the case was failing for a right reason. What the case is actually about is the
+    // teardown running and the durable release not landing (an unacquired lock): the owner has
+    // given the claim up in this process, and only the ROW still names it. The exit wiring's
+    // first synchronous act is exactly this assignment (`child-exit-wiring.ts:137-138`), so
+    // performing it here is modelling the teardown, not weakening the case.
+    const dying = Bun.peek(pool.get(key) as Promise<ReplSession>) as ReplSession
+    expect(dying.paneClaimBy).toBe(firstClaim)
+    dying.paneClaimBy = undefined
     pool.delete(key)
     childByKey.delete(key)
 

@@ -8,6 +8,7 @@ import type { TokenUsage } from '../../../events.ts'
 import { type Key, encodeKey, encodeKeys } from './keystrokes.ts'
 import type { PtyChild } from './pty-host.ts'
 import { severityForBannerDetectorId } from './rate-limit-banner.ts'
+import { isHeldLocally } from './local-ownership.ts'
 import { patchRecord } from './repl-registry.ts'
 import { RESUME_PICKER_DETECTOR_ID, runResumePickerRecovery } from './resume-picker-detector.ts'
 import { findLatestResumableSession } from './session-disk-recovery.ts'
@@ -232,8 +233,15 @@ export const SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG
  * child's claim — its claimant id is different (one is minted per spawn) and its pid is this
  * process, which is alive — so without this the predicate would refuse a respawn on the
  * strength of a claim held by a child that just exited, and the gateway would kill its own
- * replacement. A claim stamped with our pid cannot belong to a competitor: pids are unique
- * per host, and a same-pid claim on this key can only be our own earlier session for it.
+ * replacement.
+ *
+ * THE LAST SENTENCE OF THIS PARAGRAPH USED TO READ: "a claim stamped with our pid cannot belong
+ * to a competitor: pids are unique per host, and a same-pid claim on this key can only be our
+ * own earlier session for it." **That is false, and it was the load-bearing assumption of both
+ * predicates** (r59, found by a whole-branch review). Pids are unique per host and per LIVE
+ * process; they say nothing about how many logical gateways run inside one process, and this
+ * repo supports two. The exception is now conditioned on whether a live owner in this process
+ * actually holds that id — see `local-ownership.ts`.
  */
 /**
  * #539 r47 — HOW LONG A SPAWN RESERVATION HOLDS A SESSION KEY, derived from the claim's own
@@ -265,12 +273,22 @@ export function spawnReservationBlocksUs(
     readonly now: number
     readonly ourPid: number
     readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+    /** Injected for the same reason `liveness` is: two logical gateways in one test process
+     *  share a pid, and this is the fact that separates them. Defaults to the process-wide
+     *  register the ownership funnel maintains. */
+    readonly heldLocally?: (id: string) => boolean
   },
 ): boolean {
   const by = row.spawn_reservation_by
   if (by === undefined || by === args.ours) return false
   const pid = row.spawn_reservation_pid
-  if (pid !== undefined && pid === args.ourPid) return false
+  // SAME PID IS NOT SAME OWNER (r59) — see {@link paneClaimBlocksUs} for the whole argument.
+  // A reservation is the stronger of the two: it exists to stop two `claude --resume` processes
+  // reaching one transcript, and two logical gateways in ONE process is a supported deployment,
+  // so the old shortcut disabled the guard exactly where it is most needed.
+  if (pid !== undefined && pid === args.ourPid && !(args.heldLocally ?? isHeldLocally)(by)) {
+    return false
+  }
   const at = row.spawn_reservation_at
   const recent = at !== undefined && args.now - at < SPAWN_RESERVATION_TTL_MS
   if (!recent) return false
@@ -289,12 +307,29 @@ export function paneClaimBlocksUs(
     /** Injected so a case can reach the `gone` branch; two incarnations in one test process
      *  share a pid, so the real probe can only ever answer `alive`. */
     readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+    /** Does a live owner in THIS process hold that claimant id? Defaults to the register the
+     *  ownership funnel maintains; injected by cases that construct two gateways. */
+    readonly heldLocally?: (id: string) => boolean
   },
 ): boolean {
   const by = row.adoption_claim_by
+  // IDENTITY IS THE CLAIMANT ID. Only this line answers "is this claim mine".
   if (by === undefined || by === args.ours) return false
   const pid = row.adoption_claim_pid
-  if (pid !== undefined && pid === args.ourPid) return false
+  // AND THE PID IS EVIDENCE ABOUT LIVENESS, NOT ABOUT IDENTITY (r59). This used to read
+  // `pid === args.ourPid` alone — any claim stamped with this process's pid was treated as
+  // ours — and that is false in the deployment this repo explicitly supports: two logical
+  // gateways in one process. The second boot passed this predicate, overwrote the first's
+  // claim and replaced its pool entry while the first was still serving.
+  //
+  // What the shortcut was really covering is a claim of our OWN earlier incarnation that was
+  // never released (a child that exited without giving it back). That claim's id is one no
+  // live owner in this process holds, which is exactly what `isHeldLocally` answers — and a
+  // recycled pid from a dead process answers the same way, correctly. See
+  // `local-ownership.ts` for the four-case table.
+  if (pid !== undefined && pid === args.ourPid && !(args.heldLocally ?? isHeldLocally)(by)) {
+    return false
+  }
   const at = row.adoption_claim_at
   const recent = at !== undefined && args.now - at < ADOPTION_CLAIM_TAKEOVER_MS
   if (!recent) return false

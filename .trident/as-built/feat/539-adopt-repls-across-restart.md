@@ -2726,6 +2726,96 @@ attributed to a case that cannot reach the mutated line*, which is round twenty-
 hazard in its attribution form. Every row below now names the file that actually executes the
 mutated line, and each was verified by printing the line the patch landed on.
 
+## The ownership model, stated once — and the code walked against it (#539, Argus r59)
+
+Rounds fifty-one to fifty-nine were all one subsystem: pool-entry and child ownership identity
+across concurrent paths, patched a site at a time. Each patch was right; each also created a small
+new surface that the next round found something in — the guard, then its scope, then its return
+value, then its termination bound. **The finding rate was not falling because the surface kept
+growing under the fixes.** So the rules are written out here, in the order they must hold, and the
+code is walked against them. Divergences are listed as findings; only the one the whole-branch
+review named is fixed in this round.
+
+### 1. What an owner is
+
+An **owner** of a pane is the single logical gateway entitled to write that pane's transcript,
+for as long as it keeps saying so. Not a process, not a session object, not a pool entry: those
+are *representations* of the fact, and there are three of them.
+
+| # | Representation | Where it lives | Lifetime |
+|---|---|---|---|
+| R1 | the durable row — `pane_handle`, `child_generation`, `adoption_claim_at/_by/_pid`, `spawn_reservation_at/_by/_pid` | the registry file, one row per `sessionKey` | survives this process |
+| R2 | the pool entry — `pool.get(key)`, plus `childByKey` | memory, one per key | this process |
+| R3 | the in-memory claim — `ReplSession.paneClaimBy`, `paneClaimConfirmedAt`, `selfFenceTimer`, `fenced` | memory, one per session | this session |
+
+**R1 is the authority; R2 is routing; R3 is the owner's own record of what it holds.** Everything
+below follows from that ordering: a disagreement is resolved in R1's favour, R2 may never make a
+key resolve to something R1 does not name, and R3 may never outlive a fact R1 has taken away —
+which is what fencing is for.
+
+### 2. Identity: what makes two owners different
+
+> **The claimant id is identity. The pid is evidence about liveness, and nothing else.**
+
+Claimant ids (`randomUUID()`, minted per adoption pass and per spawn reservation) are the only
+thing that distinguishes two owners. A pid is not: pids are unique per live process, and this
+system supports **two logical gateways in one process** (`gateway/index.ts:1094-1100`). The four
+cases, in full, because folding any two of them together is how this was got wrong:
+
+| row claimant | pid | held by a live owner here? | verdict |
+|---|---|---|---|
+| ours | any | — | not blocking — ours by identity |
+| other | ours | yes | **blocking** — another logical gateway in this process |
+| other | ours | no | not blocking — our own dead incarnation's, or a recycled pid |
+| other | other | — | recency, then a liveness probe |
+
+"Held by a live owner here" is `ReplSession.paneClaimBy`'s accessor maintaining a process-wide
+register (`local-ownership.ts`, `repl-session.ts`) — the owner's own record (R3) answering for
+the process, rather than a fourth representation to keep in step.
+
+### 3. Who may write each representation, and what licenses it
+
+| Representation | Who may write | Who may clear | The identity test that licenses it |
+|---|---|---|---|
+| R1 claim | the winner of `paneClaimBlocksUs` under the registry lock, through `ownPane` | its own claimant, through `handOverPane`/`disownPane` | `by === ours` for a release; the contest for a take |
+| R1 reservation | the winner of `spawnReservationBlocksUs`, through `reservePaneSpawn` | its own reserver, through `releasePaneSpawnReservation` | `spawn_reservation_by === ours` |
+| R1 handle | the owner, in the same write as the claim (`ownPane`) | the owner, or anyone who has PROVED the pane is gone | handle + generation match |
+| R2 | the turn that spawned or adopted the session it publishes | only the turn whose own entry it is | `pool.get(key) === <the promise I published / resolved through>` |
+| R3 | the session's own paths | the same, on every give-up path | `session.selfFenceTimer === mine`, `childByKey.get(k) === child`, `session.pooledAs` |
+
+**Every write is under the registry lock, and every prevented write is a refusal** — the three
+environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are failures;
+`caller-skipped` is a decision.
+
+### 4. The ordering rules
+
+1. **Reserve before spawn.** The reservation is taken before `PtyHost.spawn`, because that call is
+   the moment this gateway becomes *capable* of touching the transcript.
+2. **Claim before capability.** A pass may not see or touch a pane before its claim lands.
+3. **Publish only after the claim.** R2 may not name a session R1 does not.
+4. **Renew, or fence.** A claim is kept alive by renewal on the supervision tick; an owner that
+   cannot confirm within `SELF_FENCE_AFTER_MS` fences itself without observing a winner.
+5. **Fence before takeover.** `ADOPTION_CLAIM_TAKEOVER_MS` exceeds the self-fence deadline by one
+   watchdog interval, so the loser has stopped before the winner starts.
+6. **Give the claim back on every path that stops owning.**
+
+### 5. The walk — divergences, as findings
+
+| # | Divergence | Where | Status |
+|---|---|---|---|
+| **D1** | **The pid was folded into identity in both predicates**, so a second logical gateway in one process passed `paneClaimBlocksUs`, overwrote the first's claim and replaced its pool entry while it was serving — and `spawnReservationBlocksUs` likewise, which is the worse half: that guard exists to stop two `claude --resume` processes reaching one transcript | `signatures.ts` (both predicates) | **FIXED this round** (rule 2), with cases at the predicate and through two gateways in one process |
+| **D2** | `disownPane` applies **no identity test of its own**. One caller (`clearPaneHandle`, `boot-adoption.ts:2199`) legitimately clears a claim this process does not own — licensed by "the pane is provably gone" — while another (`child-exit-wiring.ts:196-205`) CASes on the claim it held. The licence is prose at each call site; the helper cannot tell a proved-gone pane from a live foreign claim | `repl-registry.ts:576` | **finding** — the r40 shape (a rule enforced by call sites) in the one funnel that was supposed to end it |
+| **D3** | `ownPane` has no internal contest either: `paneClaimBlocksUs` is called at each of its two call sites (`boot-adoption.ts:1952`, `spawn.ts:713`). Round forty-five exists because one of those call sites did not have it | `repl-registry.ts:562` | **finding** — same shape as D2; the contest could be a required argument |
+| **D4** | The **adoption publish is unguarded**: `pool.set(sessionKey, published)` writes over whatever the key holds, while the spawn publish was given an identity check and a re-validation in r57/r58. No reachable interleaving is known today (the gate serialises a key's pass against its spawns, and an `undecided` pass publishes nothing) — but "it cannot be reached" was also the argument for the readiness-failure delete, until r56 showed it reachable | `boot-adoption.ts:2728` | **finding** |
+| **D5** | Nothing asserts the **three representations agree**. Each pairwise relation is enforced where it is written, and a session can hold R3 for a row whose R1 has moved (fencing exists precisely because that is detectable only at renewal) — but no invariant check, and no test, states the whole agreement | across the subsystem | **finding** — the shape that makes D1-type defects invisible to a per-site review |
+| **D6** | The in-memory claim (R3) was a plain field, so "what does this process hold" was not answerable — which is *why* the pid shortcut existed | `repl-session.ts` | **closed by the D1 fix**: the field is an accessor that maintains the register |
+
+**What the list says about method.** D1 was invisible to every incremental round: no single round's
+diff contained both the predicate and the fact that makes a pid ambiguous. D2 and D3 are the same
+shape as the defect round forty fixed — a rule that lives at call sites rather than in the thing it
+governs — and they survived nine rounds of review *of those call sites*. That is the argument for
+writing the rules down before the next patch, not after.
+
 ### Round fifty-seven: a guard belongs to the effect, and the publish is a write too
 
 Two findings, and they are the same finding pointed in opposite directions.
@@ -2749,7 +2839,7 @@ The fix is two lines and one type: the identity check now sits on the `pool.dele
 which the caller consumes (`spawn.ts:1417`). "Verdict computed and discarded" for the fourth time
 on this branch; the remedy each time has been to make the caller unable to assume it.
 
-**Two: the stale turn published over the winner** (`spawn.ts:1501 — now `:1501-1515`, see the next section`). Guarding the deletes was
+**Two: the stale turn published over the winner** (`spawn.ts:1501-1515`; the branch was rewritten in round fifty-eight, see the next section). Guarding the deletes was
 half the job. A turn that resolved through `existing`, found the map now holding somebody else's
 entry, and then ran `pool.set(sessionKey, spawning)` took B out of the map just as surely as
 deleting it would have. The harm is *"B is no longer the pool entry"*; by-delete versus
@@ -2876,7 +2966,7 @@ live evidence) and the remedy is the one used then — name the kinds and count 
 > | Kind | Rows | What the row records |
 > |---|---|---|
 > | **superseded** | M31, M38 | the code the mutation targeted no longer exists; the row is history |
-> | **subsumed** | M80, M116, M161 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
+> | **subsumed** | M80, M116, M161, M169, M173 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
 > | **probe, not a guard** | M91, M147 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
 > | **not isolable** | M93 | the case is reachable by a second guard, so removing this one alone changes nothing; removing the mechanism entirely DOES red |
 >
@@ -3085,6 +3175,14 @@ count from the rows below rather than trusting this sentence.
 | M163 | M162, **plus** the "B is still the entry" assertions removed | **nothing reds** — which is the point: this is precisely the r56 fixture, and it is how a real defect sat under three passing cases |
 | M164 | the stale-turn branch returns the winner's promise unvalidated again (the r57 shape) | `evict-deletes-only-its-own-entry.test.ts` (1 — the `Write`-request / `Read,Bash`-winner case, and only it) |
 | M165 | `afterEach` no longer drains `quarantinedChildren` | `evict-deletes-only-its-own-entry.test.ts` (5 — the zero-baseline assertion and every case downstream of the contamination) |
+| M166 | `STALE_TURN_REENTRY_LIMIT` is infinite | `evict-deletes-only-its-own-entry.test.ts` (1 — the past-the-bound case) |
+| M167 | `STALE_TURN_REENTRY_LIMIT` is zero | `evict-deletes-only-its-own-entry.test.ts` (7 — every case that depends on a re-entry resolving) |
+| M168 | the pid is folded back into the CLAIM predicate's identity test (the pre-r59 code) | `adoption-claim-is-a-compare-and-set.test.ts` (1), `pane-handle-persistence.test.ts` (1 — the same-process overlap) |
+| ~~M169~~ | `ownPane` does not record the claim in the process-wide register | ~~nothing~~ — **subsumed**: the claim always lands on a `ReplSession`, whose accessor already recorded it. The mutation is what showed the funnel note was a second mechanism for one fact, and it was **removed** rather than kept |
+| M170 | `ReplSession.paneClaimBy` no longer drops the id when the owner gives it up | `adoption-claim-is-a-compare-and-set.test.ts` (1), `pane-handle-persistence.test.ts` (1 — a replacement spawn refused by its own predecessor) |
+| M171 | the pid is folded back into the RESERVATION predicate | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M172 | `reservePaneSpawn` does not record the reserver | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| ~~M173~~ | `releaseSpawnReservation` does not drop the reserver locally | ~~nothing~~ — **subsumed**: every reachable fixture releases the ROW too, and the predicate then never sees the id. The local drop covers the prevented-write path only, which is the parallel of M170's case and would need a lock failure to construct |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

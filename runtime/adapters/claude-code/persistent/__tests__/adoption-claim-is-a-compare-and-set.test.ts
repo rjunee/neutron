@@ -41,6 +41,9 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import { paneClaimBlocksUs, spawnReservationBlocksUs } from '../signatures.ts'
+import { reservePaneSpawn } from '../repl-registry.ts'
+import { resetLocalOwnershipForTests } from '../local-ownership.ts'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -55,7 +58,7 @@ import {
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { getOrSpawnSession } from '../spawn.ts'
-import type { ReplSession } from '../repl-session.ts'
+import { ReplSession } from '../repl-session.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
@@ -1197,5 +1200,95 @@ describe('the self-fence fires on its own, with nothing else running', () => {
     child?.push('an ordinary screen')
     expect(child?.screensDelivered).toEqual(['an ordinary screen'])
     expect((session as ReplSession).fenced).toBe(false)
+  })
+})
+
+/**
+ * WHAT MAKES TWO OWNERS DIFFERENT (#539, Argus r59).
+ *
+ * Both ownership predicates used to treat any claim or reservation stamped with this process's
+ * pid as OURS, whatever claimant id it carried — and the deployment this repo supports puts two
+ * logical gateways in one process, so the shortcut disabled both guards exactly where they are
+ * needed. The rule is now stated once and tested here at the predicate:
+ *
+ *   **the claimant id is identity; the pid is evidence about liveness.**
+ *
+ * A same-pid claim is only OURS-to-take when no live owner in this process holds that id — our
+ * own dead incarnation's leftover, or a pid the OS recycled from a process that is gone.
+ *
+ * The reservation half matters more than the claim half, and had NO case before this one: a
+ * reservation exists to stop two `claude --resume` processes reaching one transcript, which is
+ * the corruption the whole change exists to prevent.
+ */
+describe('identity is the claimant id; the pid is only evidence about liveness', () => {
+  const NOW = 1_000_000
+
+  beforeEach(() => {
+    resetLocalOwnershipForTests()
+  })
+  afterEach(() => {
+    resetLocalOwnershipForTests()
+  })
+
+  it('a claim from another gateway IN THIS PROCESS blocks us', () => {
+    // A is a live owner in this process: its claim landed on a session, which is what notes it.
+    const a = new ReplSession('key', 'gen-a', 'sid-a', 'chan', '/tmp')
+    a.paneClaimBy = 'claimant-A'
+    expect(
+      paneClaimBlocksUs(
+        { adoption_claim_by: 'claimant-A', adoption_claim_at: NOW, adoption_claim_pid: process.pid },
+        { ours: 'claimant-B', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(true)
+  })
+
+  it('...and the same claim does NOT block us once its owner has given it up', () => {
+    // THE COMPLEMENT, and the reason the old shortcut existed: a replacement spawn must not be
+    // refused by the claim its own dead predecessor left in the row. The teardown clears the
+    // session's claim, which is this process's record of holding it.
+    const a = new ReplSession('key', 'gen-a', 'sid-a', 'chan', '/tmp')
+    a.paneClaimBy = 'claimant-A'
+    a.paneClaimBy = undefined
+    expect(
+      paneClaimBlocksUs(
+        { adoption_claim_by: 'claimant-A', adoption_claim_at: NOW, adoption_claim_pid: process.pid },
+        { ours: 'claimant-B', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(false)
+  })
+
+  it('a SPAWN RESERVATION from another gateway in this process blocks us too', () => {
+    // Through the funnel, because that is what notes a reserver: a reservation has no session
+    // to carry it (there is no session yet — that is the point of reserving first).
+    reservePaneSpawn({ sessionKey: 'key' } as never, { by: 'reserver-A', now: NOW, pid: process.pid })
+    expect(
+      spawnReservationBlocksUs(
+        { spawn_reservation_by: 'reserver-A', spawn_reservation_at: NOW, spawn_reservation_pid: process.pid },
+        { ours: 'reserver-B', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(true)
+  })
+
+  it('...and a reservation this process no longer holds does not', () => {
+    // A spawn that died without releasing, or a recycled pid. Both must let the next attempt
+    // through — a reservation nobody holds may not wedge the key for its whole TTL.
+    expect(
+      spawnReservationBlocksUs(
+        { spawn_reservation_by: 'reserver-gone', spawn_reservation_at: NOW, spawn_reservation_pid: process.pid },
+        { ours: 'reserver-B', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(false)
+  })
+
+  it('our OWN id never blocks us, whichever process the row says wrote it', () => {
+    // The identity line itself: `by === ours` is the only thing that answers "is this mine".
+    const mine = new ReplSession('key', 'gen-m', 'sid-m', 'chan', '/tmp')
+    mine.paneClaimBy = 'claimant-MINE'
+    expect(
+      paneClaimBlocksUs(
+        { adoption_claim_by: 'claimant-MINE', adoption_claim_at: NOW, adoption_claim_pid: process.pid + 1 },
+        { ours: 'claimant-MINE', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(false)
   })
 })
