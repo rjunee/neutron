@@ -147,23 +147,33 @@ export function wireChildExit(args: ChildExitWiring): void {
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
       const pooled = pool.get(sessionKey)
       if (pooled !== undefined) {
+        // MAP IDENTITY, NOT VALUE IDENTITY (Argus r54; the same defect is live on main and is
+        // filed as #679 — this file is the extracted copy, so the branch fixes a pre-existing
+        // defect rather than one it introduced).
+        //
+        // This read `if ((await pooled) === session) pool.delete(sessionKey)`, which compares
+        // the RESOLVED VALUE to our session — true by construction, since `pooled` is the very
+        // promise our session was published under — and says nothing about what the map holds
+        // NOW. The await is a suspension point: capture A, a respawn replaces `pool[key]` with
+        // B, A resolves, the condition passes, and `pool.delete` evicts **B**. A live REPL
+        // orphaned out of the map every turn resolves through, and the next turn spawns a third
+        // child. Not independent events either: the watchdog respawns on a dead pid, and a
+        // child exiting is what makes the pid dead.
+        //
+        // `pool.get(sessionKey) === pooled` is the question that licenses a delete — "is my
+        // session still the one registered" rather than "is this my session".
+        //
+        // ONE GUARD, NOT THREE ARMS. Round thirty documented fulfilled-ours, fulfilled-other
+        // and rejected as three cases; under map identity they collapse, because a map entry
+        // that is still `pooled` can only resolve to our own session. The `await` is kept
+        // solely to let a rejection settle — it no longer decides anything.
         try {
-          if ((await pooled) === session) pool.delete(sessionKey)
+          await pooled
         } catch {
-          // THE REJECT ARM IS IDENTITY-GUARDED TOO (Argus r53), and this is the third arm of
-          // the same rule rather than a new one. Round thirty said to keep this arm because "a
-          // pooled promise that rejects owns no child, so deleting it is right, and dropping
-          // the arm would wedge a rejected entry under the key forever" — sound about the
-          // FULFILLED-versus-REJECTED axis and silent about IDENTITY. A rejected STALE promise
-          // owning nothing is not a licence to delete a different, CURRENT entry: capture A,
-          // the key is replaced by B, A rejects, and A's catch evicts B — a live session with
-          // no pool entry, which is the map every turn resolves through.
-          //
-          // `pool.get(...) === pooled` rather than awaiting again: the current value is what
-          // matters, and re-awaiting a rejected promise would only re-throw. Both halves are
-          // kept — a genuinely current rejected entry is still removed.
-          if (pool.get(sessionKey) === pooled) pool.delete(sessionKey)
+          // A rejected entry owns no child, which is why the arm exists (r30) — and it is
+          // still subject to the same identity question, which is why it no longer branches.
         }
+        if (pool.get(sessionKey) === pooled) pool.delete(sessionKey)
       }
     }),
   )

@@ -2486,8 +2486,8 @@ were one question asked repeatedly, each answer exposing the next:
 Every one of those was a state in which two gateways could serve one transcript, which is the
 corruption the item exists to prevent. The adoption path itself is a few hundred lines; the
 rest is the protocol, its failure dispositions, and the instruments that prove each one — and
-**the mutation table is the part to read first** — see its own header for the counted breakdown
-(143 rows with a red behind them, 7 recorded as evidence of something other than a guard).
+**the mutation table is the part to read first** — its header states which rows are evidence and
+which are not, and derives the live count rather than restating it.
 
 ### Round fifty-one: a new guard inherits every existing path's obligations
 
@@ -2544,21 +2544,22 @@ qualifier in `pool.ts`'s and `boot-adoption.ts`'s comments went with it.
 > which is a pattern rather than a coincidence — so the unit is now "every path that stops
 > owning", with nothing for a later reader to reason past.
 
-**2 — the mutation headline was false by one row.** It said all 147 rows name a guard and a case
+**2 — the mutation headline was false by one row.** It said EVERY row names a guard and a case
 that dies without it; seven do not, and say so in their own cells. **This matters more than its
 size**: the mutation table is this branch's primary evidence that its guards are tested, and a
 headline that overstates it is the same defect as a stale count in a criterion — in the one
 artefact whose whole purpose is to be checkable. Round twenty caught the identical shape (M38
 presented as live evidence) and the remedy is the one used then: name the kinds, count them, and
-exclude them from the live number. **147 = 140 live + 7 recorded-but-not-evidence**, classified
-four ways, with the breakdown at the table's head.
+exclude them from the live number: **the table's length minus the seven named rows**, classified
+four ways, with the breakdown at the table's head. (Round fifty-four then removed the restated
+totals entirely — see below.)
 
 **The consistency check, run rather than asserted** (and it is the check this round asked for):
-147 rows, 147 unique ids, no duplicates; 7 rows marked not-evidence by their own strikethrough
-and named individually — M31, M38 (superseded), M80, M116 (subsumed), M91, M147 (probe, not a
-guard), M93 (not isolable); 140 live; the scope note, the table header and the taxonomy all
-print the same two numbers; the per-structure table has six columns on every one of its nine
-rows.
+every row id unique, no duplicates; exactly seven rows marked not-evidence by their own
+strikethrough and named individually — M31, M38 (superseded), M80, M116 (subsumed), M91, M147
+(probe, not a guard), M93 (not isolable); the per-structure table well-formed on every row. **The
+counts this section originally printed have been removed rather than updated** — round fifty-four
+found them stale two rounds later, which is the argument for deriving them instead.
 
 ### Round fifty-three: the table caught the code, and three claims caught themselves
 
@@ -2590,32 +2591,77 @@ exactly the wedge round thirty was protecting against.
 - **The mutation introduction restated the claim its own correction had just fixed.** Round
   fifty-two added the counted breakdown and left the blanket sentence standing three lines above
   it — *the "correcting it in one artefact moves the lag" shape from round twenty-two, happening
-  inside a single file.* The introduction is scoped to the 140 live rows now.
+  inside a single file.* The introduction is scoped to the rows that are not struck through.
 - **The watcher cell overstated.** It said both watchers were "stopped, and set to `undefined`";
   child exit stopped `sizeWatchdog` and retained the reference. Given round thirty-one's
   live-handle lesson, a retained reference on a path that stops owning gets the question rather
   than the softer wording: both readers already tolerate `undefined`, so the reference is cleared
   and the cell is true.
 
+### Round fifty-four: the exemplar I was told to copy had the bug in it
+
+**The fulfilled arm had the same race as the rejected one, and its guard was on the wrong
+thing.** It compared the RESOLVED VALUE to our session — `(await pooled) === session`, true by
+construction, since `pooled` is the promise our session was published under — and said nothing
+about what the map holds now. The `await` is a suspension point: capture A, a respawn replaces
+`pool[key]` with B, A resolves, the condition passes, and the delete evicts **B**. A live REPL
+orphaned out of the map every turn resolves through, and the next turn spawns a third child. The
+two events are correlated, not independent: the watchdog respawns on a dead pid, and a child
+exiting is what makes the pid dead.
+
+**This is a PRE-EXISTING defect, live on `origin/main` (`spawn.ts:641`) and filed as #679.** The
+file here is the extracted copy — the branch fixes it rather than introducing it, and that
+framing matters because it is what stops someone later "restoring consistency with main".
+**`spawn.ts` is deliberately not touched on this branch**: separate defect, separate acceptance
+criteria, and this diff is large enough.
+
+> **AN IN-TREE EXEMPLAR IS EVIDENCE OF CONVENTION, NOT OF CORRECTNESS.** The round-thirty
+> instruction was to copy this code and *"preserve the `catch` semantics as well as the happy
+> path"*, which is how the comparison reached two more sites. The corollary is sharper: a
+> neighbouring CORRECT guard is a hint that the exemplar is wrong, not a reason to trust it —
+> `childByKey` three lines above was properly identity-guarded, with a comment naming the exact
+> interleaving, and that contrast was visible at round thirty to both of us.
+
+**ONE GUARD, NOT THREE ARMS.** Round thirty documented fulfilled-ours, fulfilled-other and
+rejected as three cases. Under map identity they collapse: an entry that is still `pooled` can
+only resolve to our own session, so the settlement stops deciding anything and the `await`
+remains only to let a rejection settle. Three arms with one rule between them was how one of them
+came to have a different rule.
+
+**The propagated copy is CLEAN, checked rather than assumed.** `deleteOwnPoolEntry` reads the map,
+peeks the status and deletes with **no suspension point between the read and the delete** — so
+its `Bun.peek(pooled) === session` is simultaneously value *and* map identity, and the window this
+round is about does not exist there. Its round-thirty mutations were re-run (M87, M88): both still
+red, so that coverage was never resting on the wrong comparison.
+
+**And the test file's own header claimed three arms while covering one settlement.** A file-level
+claim is the same kind of instrument as a criterion. Four cases now — stale and current, rejected
+and fulfilled — and the header is true.
+
 ### Mutation table
 
-**The 143 LIVE rows** each revert one guard and name the file that goes red; every mutation is
-applied and reverted mechanically, with the tree verified clean afterwards. The other seven
-record why a mutation CANNOT red, and are not evidence that a guard is tested — the breakdown is
-immediately below.
+**Every row that is not struck through** reverts one guard and names the file that goes red;
+each is applied and reverted mechanically, with the tree verified clean afterwards. The
+struck-through rows record why a mutation CANNOT red and are **not** evidence that a guard is
+tested — they are listed by id immediately below.
 
-*(Round fifty-three: this introduction is the second attempt at this sentence. Round fifty-two
-added the counted breakdown and left the blanket claim standing three lines above it — the
-"correcting it in one artefact moves the lag" shape from round twenty-two, happening inside one
-file. The claim is scoped to the live rows now rather than restated beside its own correction.)*
+> **THE LIVE COUNT IS A SUBTRACTION, AND IT IS PERFORMED IN ONE PLACE: HERE.** *Live = the
+> table's length, minus the seven rows named in the taxonomy below.* No number is restated
+> anywhere else in this file, and that is deliberate rather than terse.
+>
+> *(Rounds fifty-two, fifty-three and fifty-four were all the same sentence. Fifty-two added a
+> counted breakdown and left the blanket claim above it; fifty-three scoped the claim and left
+> two stale numbers behind it; **three attempts at one sentence is a signal about the form, not
+> about care** — a restated count has as many places to be wrong as it has copies. So the count
+> is derived from the classification and written down nowhere.)*
 
 **THE COUNT, BROKEN DOWN, because a headline that overstates this table is the same defect as a
 stale count in a criterion — in the artefact whose whole purpose is to be checkable.** Round
-fifty-two caught exactly that: a sentence claiming all 147 rows had a red behind them, when
-seven do not and say so in their own cells. Round twenty caught the same shape (M38 presented as
+fifty-two caught exactly that: a sentence claiming EVERY row had a red behind it, when seven do
+not and say so in their own cells. Round twenty caught the same shape (M38 presented as
 live evidence) and the remedy is the one used then — name the kinds and count them.
 
-> **150 rows = 143 LIVE + 7 RECORDED-BUT-NOT-EVIDENCE.**
+> **THE SEVEN ROWS THAT ARE NOT EVIDENCE** — everything else in the table is live.
 >
 > A live row has been applied and observed to redden the named case(s). The other seven are
 > kept because *why* a mutation cannot red is itself a finding — but they are not evidence that
@@ -2637,7 +2683,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one and M148–M150 in round fifty-three, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one M148–M150 in round fifty-three and M151–M152 in round fifty-four, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2818,6 +2864,8 @@ count from the rows below rather than trusting this sentence.
 | M148 | the reject arm drops its identity check — the r53 defect | `child-exit-pool-identity.test.ts` (1) |
 | M149 | the reject arm is dropped entirely | `child-exit-pool-identity.test.ts` (1 — the current-rejection control; without it the "fix" wedges the key) |
 | M150 | the size-watchdog reference is retained again | `child-exit-pool-identity.test.ts` (1) |
+| M151 | the guard compares the resolved VALUE again — the r54 defect, and #679's shape | `child-exit-pool-identity.test.ts` (2 — both stale cases) |
+| M152 | the pool delete is dropped entirely | `child-exit-pool-identity.test.ts` (2 — both current cases) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

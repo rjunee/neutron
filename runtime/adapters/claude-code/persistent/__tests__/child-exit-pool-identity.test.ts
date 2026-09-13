@@ -14,9 +14,16 @@
  * FULFILLED-versus-REJECTED, and nothing about IDENTITY — a rejected STALE promise owning
  * nothing is not a licence to delete a different, CURRENT entry.
  *
- * So both halves are tested: a stale rejection must not evict its replacement, and a current
- * rejection must still be removed. Without the second, the fix would be "never delete on
- * rejection", which wedges the key — the exact failure round thirty was protecting against.
+ * BOTH SETTLEMENTS, BOTH DIRECTIONS — four cases, because the header used to claim three arms
+ * while covering one settlement (r54 caught that too: a file-level claim is the same kind of
+ * instrument as a criterion and must not describe coverage the file does not have). A stale
+ * entry of either kind must not evict its replacement; a current entry of either kind must still
+ * be removed. Without the "still removed" halves the fix would be "never delete", which wedges
+ * the key — the exact failure round thirty was protecting against.
+ *
+ * AND THE FULFILLED ARM HAD THE SAME DEFECT ONE ROUND LATER (r54). It compared the RESOLVED
+ * VALUE to our session — true by construction — instead of asking what the map holds now. It is
+ * live on main as #679; this file is the extracted copy.
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
@@ -166,5 +173,64 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
     expect(stopped).toBe(2)
     expect(dying.deadTurnWatcher).toBeUndefined()
     expect(dying.sizeWatchdog).toBeUndefined()
+  })
+
+  it('a STALE fulfilled entry does not evict its replacement', async () => {
+    // The r54 defect. `(await pooled) === session` is TRUE for a stale entry — it is our own
+    // session's promise — so the delete ran and evicted whatever had replaced it.
+    const dying = session()
+    const { child, exit } = fakeChild()
+    let resolveStale: (s: ReplSession) => void = () => {}
+    const stale = new Promise<ReplSession>((res) => {
+      resolveStale = res
+    })
+    pool.set(KEY, stale)
+
+    wireChildExit({
+      session: dying,
+      child,
+      sessionKey: KEY,
+      sessionId: SESSION_ID,
+      liveHandle: () => undefined,
+      label: 'r54.stale-fulfilled',
+      registryPath: undefined,
+    })
+
+    exit()
+    await settle()
+
+    // The replacement lands while the handler is suspended on the stale promise.
+    const replacement = session()
+    pool.set(KEY, Promise.resolve(replacement))
+
+    // NOW the stale promise fulfils — with our own session, which is exactly why the old
+    // value comparison passed.
+    resolveStale(dying)
+    await settle()
+
+    expect(await pool.get(KEY)).toBe(replacement)
+  })
+
+  it('...but a CURRENT fulfilled entry is still removed', async () => {
+    // The positive control for the fulfilled arm: without it the fix is "never delete", and a
+    // dead child's session stays in the pool for every later turn to resolve through.
+    const dying = session()
+    const { child, exit } = fakeChild()
+    pool.set(KEY, Promise.resolve(dying))
+
+    wireChildExit({
+      session: dying,
+      child,
+      sessionKey: KEY,
+      sessionId: SESSION_ID,
+      liveHandle: () => undefined,
+      label: 'r54.current-fulfilled',
+      registryPath: undefined,
+    })
+
+    exit()
+    await settle()
+
+    expect(pool.get(KEY)).toBeUndefined()
   })
 })
