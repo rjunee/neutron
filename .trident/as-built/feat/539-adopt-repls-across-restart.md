@@ -1971,9 +1971,67 @@ nothing to observe; and the whole-file byte assertion was wrong for that path be
 lands. Asserting bytes there would have been asserting that another caller's classification
 had not changed.
 
+**And the refusal has to survive the `catch` it passes through.** The registry write is
+wrapped in a deliberate swallow — a write failure must not brick a live REPL — so the
+ownership refusal travels straight through the one construct designed to discard errors. It
+is keyed on a TYPE (`PaneOwnershipUnrecordedError`), not on its own message text: matching a
+sentence this file also composes would make "the refusal fired" and "the wording still says
+so" the same fact, which is this branch's oldest collapse in a new place. M115 pins it.
+
 > **The lesson, narrower than "you missed one": a structural fix that ADDS call sites
 > inherits every rule those call sites are subject to, and the enumeration that checks it
 > has to run over the new sites in the same push, not the next one.**
+
+### Round forty-two: a refusal that did not join the error vocabulary, and what that cost
+
+The round-forty-one spawn refusal threw `persistent-repl: refusing to SERVE session …`, and
+`classifySpawnError` recognised only *"refusing to RESUME session"*. So it classified as
+`undefined`, `pool.ts` emitted an unstamped `retryable: true`, and the composer's `else`
+branch mapped that to `mapStatusForPoolCooldown(null, true)` → a synthetic 429 →
+`reportFailure` on the credential the caller had just picked. **Repeated registry-lock
+failures would rotate through and park HEALTHY credentials: a local filesystem problem
+spending the owner's provider capacity.**
+
+**The shape, which is the point.** A new refusal has to join the error vocabulary or it is
+classified as whatever the default is — and here the default means *"the provider pushed
+back"*. That is **false and unknown sharing a branch in the error taxonomy** rather than in a
+boolean, and it has the property that makes this branch's recurring defect expensive: the
+wrong answer is silent, and its cost lands somewhere else entirely.
+
+**Fixed at the throw as well as in the prose.** `PaneOwnershipUnrecordedError` now carries
+`substrateErrorClass = 'repl_unreconciled'`, and `pool.ts` classifies from the THROWN ERROR
+(`classifyThrownSpawnError`) before falling back to the message matcher. A producer that
+knows its own class should not have to encode it in prose and hope a regex downstream still
+matches — that makes "the refusal fired" and "its wording is still recognised" one fact, and
+the wording is the half that drifts. The matcher was widened to both verbs as well, because
+the composer's regex ladder is a consumer that only ever sees the message.
+
+**Neither mechanism reds alone, and that is recorded rather than hidden.** M116 (drop the
+carrier) and M117 (narrow the matcher) each leave the other covering the end-to-end path;
+M117 reds the classifier's own case and M119 — **both removed, which is the r41 defect
+exactly** — reds the end-to-end one. The redundancy is deliberate: the carrier serves
+consumers that get the error object, the matcher serves consumers that get prose.
+
+**The no-cooldown assertion lives where the money is spent**, not at the classifier: the
+classifier returning the right string is not the property that matters. `#539 r42 — a REPL
+refusal must not cool a healthy credential` asserts `cooldown_until` / `cooldown_reason` /
+`consecutive_failures` on the pool, with a genuine-429 control beside it that differs only
+in the stamped class.
+
+#### Every failure disposition this branch introduces, and what it costs
+
+Asked for after the second instance rather than the third. **Only one was mis-classified.**
+
+| Disposition | How it surfaces | What classifies it | What it costs |
+|---|---|---|---|
+| `undecided` adoption verdict — incl. `lock-unacquired`, `claimed-elsewhere`, a dropped row, an unreadable registry, and the r39 fence | `getOrSpawnSession` throws *refusing to resume session* | `repl_unreconciled` | one retryable turn; no credential touched |
+| **ownership-unrecorded spawn refusal (r41)** | `spawnSession` throws *refusing to serve session* | **was `undefined` → synthetic 429 → credential cooled**; now `repl_unreconciled` | one retryable turn |
+| child-exit disown refused on an unacquired lock (r41) | no throw, no event | nothing downstream | a row naming an exited child; the next boot's probe answers `pane_not_found` |
+| renewal `unwritable` (r38) | internal return | nothing | the claim ages toward its takeover threshold |
+| renewal `not-ours` → fence (r39) | the next turn takes the `undecided` path above | `repl_unreconciled` | one retryable refusal per turn until this gateway restarts |
+| give-back refused (r37/r41) | silent | nothing | the claim stands until its takeover threshold |
+| shutdown-survival fail-closed (r14) | the child is killed at shutdown | nothing — no turn is in flight | one cold `--resume` on the next boot |
+| an in-flight turn on a fenced session (r39) | the per-turn inactivity watchdog | `turn_timeout`, retryable | one turn, retryable |
 
 ### Mutation table
 
@@ -1985,7 +2043,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty and M112–M114 in round forty-one, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one and M116–M119 in round forty-two, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2130,6 +2188,11 @@ count from the rows below rather than trusting this sentence.
 | M112 | the child-exit disown drops the acquisition check | `pane-handle-persistence.test.ts` (1) + `pane-ownership-is-one-fact.test.ts` (1) |
 | M113 | the fresh-spawn ownership write drops the acquisition check | `pane-handle-persistence.test.ts` (1) + `pane-ownership-is-one-fact.test.ts` (1) |
 | M114 | the spawn proceeds silently when ownership was not recorded | `pane-handle-persistence.test.ts` (1) |
+| M115 | the refusal is swallowed by the write-failure degrade policy it passes through | `pane-handle-persistence.test.ts` (1) |
+| M116 | ~~the refusal carries no class~~ — **subsumed**: the prose matcher still classifies it, which is what the redundancy is for | no red alone; see M119 |
+| M117 | the classifier stops matching the SERVE refusal | `classify-spawn-error.test.ts` (1) |
+| M118 | a genuine `rate_limited` stops cooling the credential | `build-llm-call-substrate.test.ts` (2 — the r42 control AND the pre-existing taxonomy matrix) |
+| M119 | **both** the carrier and the matcher removed — the r41 defect exactly | `pane-handle-persistence.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

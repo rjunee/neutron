@@ -13,6 +13,7 @@ import { buildSettings } from './build-settings.ts'
 import { herdrHost } from './herdr-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
+import type { SubstrateClassed } from './classify-spawn-error.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
@@ -683,7 +684,7 @@ async function spawnSession(
         } catch {
           /* best-effort: the refusal below is what protects the invariant */
         }
-        throw new Error(
+        throw new PaneOwnershipUnrecordedError(
           `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — its pane ` +
             `${child.paneHandle} could not be RECORDED as owned (the registry lock was not acquired, so a ` +
             'write would have dropped a concurrent gateway\'s rows). A durable pane whose ownership is ' +
@@ -692,9 +693,12 @@ async function spawnSession(
         )
       }
     } catch (e) {
-      // The ownership refusal above is NOT a write failure and must not be swallowed by
-      // the degrade policy that follows it.
-      if (e instanceof Error && e.message.includes('could not be RECORDED as owned')) throw e
+      // THE OWNERSHIP REFUSAL IS NOT A WRITE FAILURE and must not be swallowed by the
+      // degrade policy that follows it. Keyed on a TYPE, not on the message text: matching
+      // a sentence this file also composes would make the two facts — "the refusal fired"
+      // and "the wording still says so" — the same fact, and this branch has paid for that
+      // collapse before.
+      if (e instanceof PaneOwnershipUnrecordedError) throw e
       // A registry write failure must never brick a live REPL; supervision
       // degrades to "no auto-resume for this session" until the next write.
     }
@@ -960,6 +964,26 @@ async function notifyEvictedChild(
       `[repl] onChildCrash sink threw on eviction generation=${childGeneration.slice(0, 8)}: ${String(err)}\n`,
     )
   }
+}
+
+
+/**
+ * The spawn refused because its pane's OWNERSHIP could not be durably recorded (#539 r41).
+ *
+ * A distinct type rather than a distinguished message: the `catch` around the registry
+ * write deliberately swallows write failures (a live REPL must not be bricked by one), and
+ * this refusal has to pass through it. Keying that on text would make the refusal's
+ * survival depend on its own wording.
+ */
+class PaneOwnershipUnrecordedError extends Error implements SubstrateClassed {
+  /**
+   * ITS CLASS TRAVELS WITH IT (r42). `repl_unreconciled` is the vocabulary this refusal
+   * belongs to — the same one the boot-adoption gate's refusal uses — and every stamped
+   * class except `rate_limited` / `http_status` skips the credential cooldown. Stamped on
+   * the error rather than left to a downstream regex, because a refusal that has to be
+   * recognised by its prose is one rewording away from costing a credential.
+   */
+  readonly substrateErrorClass = 'repl_unreconciled' as const
 }
 
 export async function getOrSpawnSession(

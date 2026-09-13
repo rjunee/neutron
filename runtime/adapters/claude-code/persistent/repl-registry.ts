@@ -1034,12 +1034,14 @@ export function withRegistry<T>(
  * for an ownership transition is now visible at the call site instead of invisible by
  * omission.
  *
- * WHY NOT INVERT `withRegistry`'S OWN DEFAULT, which was the alternative on the table. Its
- * callers were enumerated rather than guessed: ten production call sites, six lock-critical
- * (the claim, the renewal, the give-back, the handle clear, the fresh-spawn ownership write
- * and the child-exit disown) and four lock-INDIFFERENT — `upsertRecord`, `patchRecord`,
- * `removeRecord` and `clearRespawnInFlight`, whose losses are bounded degradations rather
- * than invariant breaks. Inverting the default would put the "unguarded is fine" opt-in on
+ * WHY NOT INVERT `withRegistry`'S OWN DEFAULT, which was the alternative on the table. The
+ * callers were enumerated rather than guessed — ten registry writes at the time of the
+ * split, six lock-critical (the claim, the renewal, the give-back, the handle clear, the
+ * fresh-spawn ownership write and the child-exit disown) and four lock-INDIFFERENT
+ * (`upsertRecord`, `patchRecord`, `removeRecord`, `clearRespawnInFlight`), whose losses are
+ * bounded degradations rather than invariant breaks. **The six now come through here, so
+ * what is left below is the indifferent four** — which is the shape the decision was made
+ * to produce. Inverting the default would instead have put the "unguarded is fine" opt-in on
  * the three generic helpers, which between them carry ten transitive callers and are
  * exactly the path a future ownership-ish field would travel through — the same failure
  * mode, one level up and harder to see. And `withFlockSync` reports `acquired: false` when

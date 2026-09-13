@@ -57,6 +57,40 @@ export function classifySpawnError(message: string): SubstrateErrorClass | undef
   // pool cooldown (`mapStatusForPoolCooldown(null, true)`), so a refusal that has
   // nothing to do with the credential would cool it — and park it for an hour after
   // five. Every stamped class except `rate_limited`/`http_status` skips the cooldown.
-  if (/persistent-repl:\s*refusing to resume session/i.test(message)) return 'repl_unreconciled'
+  //
+  // #539 r42 — BOTH REFUSAL VERBS. `refusing to RESUME` is the boot-adoption gate (a
+  // previous REPL for this key could not be accounted for); `refusing to SERVE` is the
+  // spawn that could not durably RECORD its pane's ownership. They are the same class and
+  // the same disposition, and the second one shipped unmatched — classified `undefined`,
+  // which `pool.ts` emits as an unstamped `retryable: true`, which the composer maps to a
+  // synthetic 429 and a credential cooldown. **A local registry-lock failure spending the
+  // owner's provider capacity**, because a new refusal was added without joining the
+  // vocabulary that already existed for it.
+  if (/persistent-repl:\s*refusing to (?:resume|serve) session/i.test(message)) {
+    return 'repl_unreconciled'
+  }
   return undefined
+}
+
+/**
+ * The same classification for a THROWN error — preferring what the thrower SAID over what
+ * it wrote (#539 r42).
+ *
+ * A producer that knows its own class should not have to encode it in prose and hope a
+ * regex downstream still matches: that makes "the refusal fired" and "its wording is still
+ * recognised" one fact, and the wording is the half that drifts. An error carrying
+ * {@link SubstrateClassed.substrateErrorClass} is believed outright; everything else falls
+ * back to the message matcher above, which is still the only option for the many failures
+ * that arrive as bare strings from elsewhere.
+ */
+export interface SubstrateClassed {
+  readonly substrateErrorClass: SubstrateErrorClass
+}
+
+export function classifyThrownSpawnError(err: unknown): SubstrateErrorClass | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const stamped = (err as Partial<SubstrateClassed>).substrateErrorClass
+    if (typeof stamped === 'string') return stamped
+  }
+  return classifySpawnError(err instanceof Error ? err.message : String(err))
 }

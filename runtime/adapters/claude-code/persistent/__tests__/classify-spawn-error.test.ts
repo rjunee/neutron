@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { SUBSTRATE_ERROR_CODES } from '../../../../errors.ts'
-import { classifySpawnError } from '../classify-spawn-error.ts'
+import { classifySpawnError, classifyThrownSpawnError } from '../classify-spawn-error.ts'
 
 describe('classifySpawnError', () => {
   test('#539 — the boot-adoption refusal is STAMPED, so it never cools a credential', () => {
@@ -84,5 +84,36 @@ describe('classifySpawnError', () => {
   test('an ordinary retryable turn error is unclassified (undefined → composer ladder decides)', () => {
     expect(classifySpawnError('persistent-repl: REPL process exited')).toBeUndefined()
     expect(classifySpawnError('some transient inner hiccup')).toBeUndefined()
+  })
+})
+
+describe('#539 r42 — BOTH refusal verbs join the same class', () => {
+  test('classifies the boot-adoption gate\'s refusal', () => {
+    expect(classifySpawnError('persistent-repl: refusing to resume session abc — a previous REPL')).toBe(
+      'repl_unreconciled',
+    )
+  })
+
+  test('classifies the ownership-unrecorded refusal, which shipped unmatched', () => {
+    // THE PROSE FALLBACK, kept even though the thrower now stamps its own class: a
+    // consumer that only ever sees the message (the composer's regex ladder) would
+    // otherwise map this to a synthetic 429 and cool a healthy credential.
+    expect(
+      classifySpawnError(
+        'persistent-repl: refusing to serve session abc — its pane w9:p7 could not be RECORDED as owned',
+      ),
+    ).toBe('repl_unreconciled')
+  })
+
+  test('prefers what a thrower STAMPED over what it wrote', () => {
+    const stamped = Object.assign(new Error('something the regexes have never seen'), {
+      substrateErrorClass: 'repl_unreconciled' as const,
+    })
+    expect(classifyThrownSpawnError(stamped)).toBe('repl_unreconciled')
+    // ...and still falls back to prose for the many failures that arrive as bare strings.
+    expect(classifyThrownSpawnError(new Error('Executable not found in $PATH: "claude"'))).toBe(
+      'binary_not_found',
+    )
+    expect(classifyThrownSpawnError('an ordinary crash')).toBeUndefined()
   })
 })

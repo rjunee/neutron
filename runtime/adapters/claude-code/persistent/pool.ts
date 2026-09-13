@@ -5,7 +5,7 @@
 import { getBestModel } from '../../../models.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { AgentSpec, Substrate } from '../../../substrate.ts'
-import { classifySpawnError } from './classify-spawn-error.ts'
+import { classifyThrownSpawnError } from './classify-spawn-error.ts'
 import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
@@ -445,8 +445,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // the taxonomy-consistent recovery hint (both classes are FATAL /
           // non-retryable) so a DIRECT runtime consumer — not just the gateway
           // composer — reads the correct `retryable`. An unclassified spawn error
-          // (e.g. a transient crash) keeps the default retryable:true.
-          const code = classifySpawnError(message)
+          // (e.g. a transient crash) keeps the default retryable:true — and that default
+          // is EXPENSIVE (#539 r42): the composer maps an unstamped retryable error to
+          // `mapStatusForPoolCooldown(null, true)` → a synthetic 429 → a cooldown on the
+          // selected credential. A refusal that has nothing to do with the provider must
+          // never take that branch, so the class is read FROM THE THROWN ERROR when the
+          // producer stamped one, and only then from its prose.
+          const code = classifyThrownSpawnError(err)
           const retryable = code !== undefined ? SUBSTRATE_ERROR_CODES[code].retryable : true
           channel.push({ kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) })
           channel.close()
@@ -625,8 +630,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             turn.settled = true
             const message = err instanceof Error ? err.message : String(err)
             // O3 — a classified fatal spawn/channel failure emits the taxonomy's
-            // non-retryable hint; an ordinary mid-turn crash stays retryable:true.
-            const code = classifySpawnError(message)
+            // non-retryable hint; an ordinary mid-turn crash stays retryable:true. Same
+            // producer-first rule as the spawn catch above.
+            const code = classifyThrownSpawnError(err)
             const retryable = code !== undefined ? SUBSTRATE_ERROR_CODES[code].retryable : true
             channel.push({ kind: 'error', message, retryable, ...(code !== undefined ? { code } : {}) })
             channel.close()

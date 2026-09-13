@@ -419,15 +419,25 @@ describe('an ownership transition that could not hold the lock writes NOTHING', 
     const before = readFileSync(registryPath, 'utf8')
 
     setFlockImplForTests(() => 1)
-    let message = ''
-    try {
-      await drain(createPersistentReplSubstrate(options).start(spec('hi')))
-    } catch (e) {
-      message = e instanceof Error ? e.message : String(e)
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
     }
+    const err = events.find((e) => e.kind === 'error')
+    const message = err?.kind === 'error' ? err.message : ''
 
     // THE DISPOSITION: refused, and said why.
     expect(message).toMatch(/could not be RECORDED as owned/i)
+    // AND IT CARRIES ITS CLASS (r42). Unstamped, this arrives at the composer as a bare
+    // retryable error, which maps to a synthetic 429 and cools the credential the caller
+    // just picked — a local registry-lock failure spending provider capacity. The
+    // no-cooldown half is asserted where the money is spent
+    // (`gateway/wiring/__tests__/build-llm-call-substrate.test.ts`); this is the half that
+    // proves the adapter emits what that surface reads.
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    // Retryable: the lock may be free on the next turn.
+    expect(err?.kind === 'error' && err.retryable).toBe(true)
     // AND CLEANED UP: the child it made is ended, not left running unrecorded.
     expect(killsByHandle).toContain('w9:p-lock')
     // AND NOTHING WAS WRITTEN. The whole file, because what an unguarded save costs is

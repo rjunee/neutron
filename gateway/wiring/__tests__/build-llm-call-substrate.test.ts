@@ -525,6 +525,72 @@ test('2026-06-17 import-blocker — spawn ENOENT (claude not on PATH) is FATAL, 
   expect(err!.kind === 'error' && /not found on the server PATH/i.test(err!.message)).toBe(true)
 })
 
+test('#539 r42 — a REPL refusal (repl_unreconciled) must not cool a healthy credential', async () => {
+  // THE DEFECT THIS PINS cost money, not correctness. `spawnSession` refuses when it
+  // cannot durably record its pane's ownership — a REGISTRY LOCK failure, entirely local.
+  // That refusal shipped unmatched by `classifySpawnError`, so it arrived here unstamped
+  // and retryable, and the `else` branch below maps `mapStatusForPoolCooldown(null, true)`
+  // → 429 → `reportFailure` on the credential the caller just picked. Repeated lock
+  // failures would rotate through and park HEALTHY credentials: a filesystem problem
+  // spending the owner's provider capacity.
+  //
+  // ASSERTED HERE, at the surface that spends the money, rather than at the classifier —
+  // the classifier returning the right string is not the property that matters.
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({
+    retryable: true,
+    code: 'repl_unreconciled',
+    message:
+      'persistent-repl: refusing to serve session abc — its pane w9:p7 could not be RECORDED as owned',
+  })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+
+  // NOT A CREDENTIAL FAULT: no cooldown, no failure counted against it.
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  // And it stays RETRYABLE: the lock may be free on the next turn, so the turn is worth
+  // re-attempting — unlike a missing binary, which never recovers by waiting.
+  const err = events.find((e) => e.kind === 'error')
+  expect(err).toBeDefined()
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+})
+
+test('#539 r42 positive control — a genuine provider 429 still cools the credential', async () => {
+  // Without this, a change that simply disabled the cooldown path would pass the case
+  // above. The two cases differ ONLY in the stamped class.
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-1' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, code: 'rate_limited', message: 'rate_limit: slow down' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  for await (const _ev of handle.events) {
+    // drain
+  }
+  expect(pool.credentials[0]!.cooldown_reason).toBe('rate_limit_429')
+  expect(pool.credentials[0]!.cooldown_until).toBeDefined()
+})
+
 test('2026-06-26 dev-channel wedge — channel-wedged spawn failure is a SUBSTRATE failure, NOT a cred cooldown: no reportFailure, re-emitted non-retryable + actionable', async () => {
   const pool = newCredentialPool({
     strategy: 'fill_first',
