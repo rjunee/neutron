@@ -461,6 +461,9 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     const reason = innerTerminalFailureReason(
       { max_rounds: 10, round: 10, inner_checkpoint: 'argus-request-changes' },
       {
+        // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+        // these, and a fixture that omitted the field would leave that untested.
+        escalation: null,
         ok: false,
         verdict: 'REQUEST_CHANGES',
         round: 10,

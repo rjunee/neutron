@@ -709,8 +709,19 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     // opinion about. (2026-08-09: the clause added was `blockKind !== 'infra-only'`,
     // which stops the loop re-Forging in response to a lane that could not run;
     // behaviour covered in lane-retry.test.ts.)
-    expect(SRC).toMatch(/while \(\s*finalVerdict === 'REQUEST_CHANGES'/)
-    expect(SRC).toMatch(/round < maxRounds/)
+    //
+    // 2026-09-12 — AND IT HAPPENED AGAIN, to the regex that comment describes. Pinning
+    // `finalVerdict` as the FIRST clause still encoded an opinion about the condition's
+    // SHAPE: a pending re-plan became its own reason to iterate (a declaration is about
+    // the work's viability, not the code's quality), so the condition no longer opens
+    // with `finalVerdict` and this failed on a correct change for the second time. Both
+    // clauses are now asserted INSIDE the loop's condition without any claim about their
+    // order or their neighbours — which is what "the two PROPERTIES rather than the
+    // literal condition text" meant in the first place.
+    const loop = /while \(([\s\S]{0,800}?)\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
+    expect(loop).not.toBeNull()
+    expect(loop?.[1]).toContain("finalVerdict === 'REQUEST_CHANGES'")
+    expect(loop?.[1]).toContain('round < maxRounds')
   })
 
   test('Codex [P1]: fix rounds RE-ENTER the existing branch/PR (no `git switch -c` collision, no duplicate PR)', () => {
@@ -1881,8 +1892,19 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
   test('APPENDS the reflection guidance AFTER the task on EVERY Forge fix-round prompt too', () => {
     // Each `forge:fix-round-*` is a FRESH agent, so the corrections are re-appended
     // (else Forge loses them while revising) — still after the task, never before.
-    const appendSites = SRC.match(/TASK:\n\$\{task\}\$\{reflectionGuidance\}/g) ?? []
+    //
+    // THE FIX-ROUND SITE NOW CARRIES ONE MORE TRUSTED BLOCK between the two: the bounded
+    // re-plan's revised execution spec (`rePlanNote`), which comes from a `plan:fable`
+    // seat — the SAME authority the task itself has. The invariant this test protects is
+    // unchanged and is stated exactly as before: the UNTRUSTED reflection block is
+    // appended LAST, after the task, never before the contract. Trusted plan material
+    // sitting between them does not weaken that; the assertion below is what stops the
+    // optional group from being used to smuggle anything else in.
+    const appendSites = SRC.match(/TASK:\n\$\{task\}(?:\$\{rePlanNote\})?\$\{reflectionGuidance\}/g) ?? []
     expect(appendSites).toHaveLength(2) // forge:build + the forge:fix-round-* prompt
+    // The build site takes the bare form; the fix site is the one with the re-plan note.
+    expect(appendSites).toContain('TASK:\n${task}${reflectionGuidance}')
+    expect(appendSites).toContain('TASK:\n${task}${rePlanNote}${reflectionGuidance}')
   })
 
   // SECURITY (FIX 1) — the reflection block is UNTRUSTED NL; giving it to a reviewer

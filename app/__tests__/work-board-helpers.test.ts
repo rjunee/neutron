@@ -21,6 +21,7 @@ import {
   reorderTarget,
   roundText,
   runNotice,
+  type RunNotice,
   splitBoard,
   statusLabel,
   stepTag,
@@ -92,39 +93,43 @@ describe('statusLabel', () => {
 });
 
 describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
+  // `stepTag` takes the ITEM now, because the BLOCKED lane wins over the bound run's
+  // step (see its docblock). These cases are all about the step, so the item is the
+  // run wrapped in an ordinary in_progress card.
+  const withRun = (rp: RunProgress): WorkBoardItem => item({ status: 'in_progress', run_progress: rp });
   it('building → "Building" tag + round N', () => {
     const rp = progress({ step_label: 'building', round: 2 });
-    expect(stepTag(rp)).toEqual({ label: 'Building', colorKey: 'build' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Building', colorKey: 'build' });
     expect(roundText(rp)).toBe('round 2');
   });
 
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
-    expect(stepTag(rp)).toEqual({ label: 'Reviewing', colorKey: 'review' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });
     expect(roundText(rp)).toBe('round 3');
   });
 
   it('fixing → "Fixing" tag + round N', () => {
     const rp = progress({ step_label: 'fixing', round: 4 });
-    expect(stepTag(rp)).toEqual({ label: 'Fixing', colorKey: 'fix' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Fixing', colorKey: 'fix' });
     expect(roundText(rp)).toBe('round 4');
   });
 
   it('merging → "Merging" tag + round N', () => {
     const rp = progress({ step_label: 'merging', round: 5 });
-    expect(stepTag(rp)).toEqual({ label: 'Merging', colorKey: 'merge' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Merging', colorKey: 'merge' });
     expect(roundText(rp)).toBe('round 5');
   });
 
   it('done (terminal) → "Merged" tag, NO round', () => {
     const rp = progress({ step_label: 'done' });
-    expect(stepTag(rp)).toEqual({ label: 'Merged', colorKey: 'merge' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Merged', colorKey: 'merge' });
     expect(roundText(rp)).toBeNull();
   });
 
   it('failed (terminal) → "Failed" tag, NO round', () => {
     const rp = progress({ step_label: 'failed' });
-    expect(stepTag(rp)).toEqual({ label: 'Failed', colorKey: 'failed' });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Failed', colorKey: 'failed' });
     expect(roundText(rp)).toBeNull();
   });
 
@@ -134,16 +139,16 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     // undefined (which the row would treat as non-null → crash). Codex P2.
     const legacy = progress({ phase_label: 'reviewing', round: 2 });
     delete (legacy as { step_label?: unknown }).step_label;
-    expect(stepTag(legacy)).toEqual({ label: 'Reviewing', colorKey: 'review' });
+    expect(stepTag(withRun(legacy))).toEqual({ label: 'Reviewing', colorKey: 'review' });
     expect(roundText(legacy)).toBe('round 2');
     const legacyMerged = progress({ phase_label: 'merged' });
     delete (legacyMerged as { step_label?: unknown }).step_label;
-    expect(stepTag(legacyMerged)).toEqual({ label: 'Merged', colorKey: 'merge' });
+    expect(stepTag(withRun(legacyMerged))).toEqual({ label: 'Merged', colorKey: 'merge' });
     expect(roundText(legacyMerged)).toBeNull();
   });
 
   it('is null/idle for an unbound item (no run_progress)', () => {
-    expect(stepTag(undefined)).toBeNull();
+    expect(stepTag(item({ status: 'upcoming' }))).toBeNull();
     expect(roundText(undefined)).toBeNull();
   });
 });
@@ -156,6 +161,12 @@ describe('briefAlertText', () => {
     expect(briefAlertText(progress({ brief_alert: '' }))).toBeNull();
   });
 
+  // `runNotice` takes the ITEM now, because a BLOCKED card's reason is the
+  // escalation's own sentence and must not wear the failure tone. These cases are all
+  // about the run, so the item is the run wrapped in an ordinary in_progress card.
+  const noticeFor = (rp: RunProgress): RunNotice | null =>
+    runNotice(item({ status: 'in_progress', run_progress: rp }));
+
   it('never lets a sticky recovered alert mask the terminal failure outcome', () => {
     const rp = progress({
       phase_label: 'failed',
@@ -163,15 +174,15 @@ describe('briefAlertText', () => {
       failure_reason: 'publish failed: outer publisher could not open a PR',
       brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.',
     });
-    expect(runNotice(rp)).toEqual({
+    expect(noticeFor(rp)).toEqual({
       text: 'publish failed: outer publisher could not open a PR',
       tone: 'failure',
     });
-    expect(runNotice(progress({ brief_alert: 'recovered alert' }))).toEqual({
+    expect(noticeFor(progress({ brief_alert: 'recovered alert' }))).toEqual({
       text: 'recovered alert',
       tone: 'alert',
     });
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
@@ -182,7 +193,7 @@ describe('briefAlertText', () => {
   it('a failed run that recorded REVIEW_NOT_RUN says so instead of showing a blank', () => {
     // The card's measured cost, at the reading end: built work recorded as rejected.
     // A row that recorded no review and no reason can still say the one true thing.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
@@ -192,14 +203,14 @@ describe('briefAlertText', () => {
       tone: 'failure',
     });
     // A LEGACY frame (null verdict) claims nothing — the blank stays a blank.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: null,
       verdict: null,
     }))).toBeNull();
     // A recorded reason still wins: it says more than the verdict does.
-    expect(runNotice(progress({
+    expect(noticeFor(progress({
       phase_label: 'failed',
       step_label: 'failed',
       failure_reason: 'merge failed: the branch could not be landed',
@@ -523,5 +534,102 @@ describe('row/rail lockstep — the row dot and the project rail dot must agree 
 
     expect(dotState(item({ status: 'in_progress', inline_active: true, linked_run_id: null })).pulse).toBe(true);
     expect(railDotKind(activity, false)).toBe('work');
+  });
+});
+
+describe('a BLOCKED card offers neither play nor retry', () => {
+  // The lane exists so the owner can tell "this needs a decision" from "this broke".
+  // A ▶ on it would produce the dispatch chokepoint's `card_blocked` refusal, and a ↻
+  // would say "retry" — the one instruction that changes nothing here.
+  it('canPlay is false, and it is NOT because of a live run or inline activity', () => {
+    const blocked = item({ status: 'blocked', linked_run_id: null, inline_active: false });
+    expect(canPlay(blocked)).toBe(false);
+    // Named, so a future change that suppresses ▶ for some other reason does not make
+    // this test pass for the wrong one.
+    expect(isLinkedRunning(blocked)).toBe(false);
+    expect(blocked.inline_active).toBe(false);
+  });
+
+  it('is NOT "linked running" with a kept link and NO run_progress', () => {
+    // `isLinkedRunning` reads "no progress reported" as "still running" — right for a
+    // live run that has not reported yet, wrong for one that ENDED. The reconcile
+    // deliberately KEEPS the run link on a blocked card so the reported reason stays
+    // reachable, and `run_progress` is derived from a run row that ages out, so this is
+    // the shape that actually occurs. Without the lane check the card reads as RUNNING:
+    // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+    // wrong reason (which is what made the canPlay test above pass either way).
+    const blocked = item({ status: 'blocked', linked_run_id: 'run-esc' });
+    expect(blocked.run_progress).toBeUndefined();
+    expect(isLinkedRunning(blocked)).toBe(false);
+    expect(canPlay(blocked)).toBe(false);
+    // CONTROL: an in_progress card with the identical link and no progress IS running —
+    // so this is the lane deciding, not the absent run_progress.
+    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc' }))).toBe(true);
+  });
+
+  it('isRetry is false EVEN THOUGH the card keeps its run link', () => {
+    // The link is kept on purpose — it is how the reported reason stays reachable — and
+    // it used to be sufficient on its own to label the card a retry.
+    const blocked = item({ status: 'blocked', linked_run_id: 'run-a' });
+    expect(blocked.linked_run_id).toBe('run-a');
+    expect(isRetry(blocked)).toBe(false);
+  });
+
+  it('CONTROL: a FAILED card with the same link is still playable and still a retry', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'run-a' });
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
+  });
+
+  it('the TAG says Blocked, in a non-failed colour, even with a terminal failed run bound', () => {
+    // The reconcile KEEPS the terminal run link so the reason stays reachable, and that
+    // run's `step_label` is `failed` — so a renderer deriving from the run step tags this
+    // card "Failed" and paints it red, which is exactly the belief the lane exists to
+    // prevent. Measured: it did.
+    const blocked = item({
+      status: 'blocked',
+      linked_run_id: 'run-esc',
+      run_progress: progress({ step_label: 'failed', phase_label: 'failed' }),
+    });
+    expect(stepTag(blocked)).toEqual({ label: 'Blocked', colorKey: 'blocked' });
+    expect(dotState(blocked)).toEqual({ colorKey: 'blocked', pulse: false });
+  });
+
+  it("the reason line keeps the escalation's sentence, in a NON-failure tone", () => {
+    // The most useful line on the card is the escalation's own sentence, so it stays —
+    // but painting it in the failure tone beside a "Blocked" tag would have the two
+    // halves of one row disagree about what happened.
+    const rp = progress({
+      step_label: 'failed',
+      phase_label: 'failed',
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency) — card X must land first',
+    });
+    expect(runNotice(item({ status: 'blocked', linked_run_id: 'run-esc', run_progress: rp }))).toEqual({
+      text: 'build BLOCKED at round 2 of 10 (missing-dependency) — card X must land first',
+      tone: 'blocked',
+    });
+    // CONTROL: the same run on a FAILED card is still the failure tone.
+    expect(runNotice(item({ status: 'failed', linked_run_id: 'run-esc', run_progress: rp }))?.tone).toBe('failure');
+  });
+
+  it('CONTROL: the same card in the FAILED lane still tags and paints as failed', () => {
+    // Without this, renaming every tag to "Blocked" would pass the test above.
+    const failed = item({
+      status: 'failed',
+      linked_run_id: 'run-esc',
+      run_progress: progress({ step_label: 'failed', phase_label: 'failed' }),
+    });
+    expect(stepTag(failed)).toEqual({ label: 'Failed', colorKey: 'failed' });
+    expect(dotState(failed)).toEqual({ colorKey: 'failed', pulse: false });
+  });
+
+  it('and the lane is labelled Blocked — a different word from Failed', () => {
+    expect(statusLabel('blocked')).toBe('Blocked');
+    expect(statusLabel('blocked')).not.toBe(statusLabel('failed'));
+  });
+
+  it('advancing a blocked card re-queues it rather than claiming it shipped', () => {
+    expect(nextStatus('blocked')).toBe('upcoming');
+    expect(nextStatus('blocked')).not.toBe('done');
   });
 });

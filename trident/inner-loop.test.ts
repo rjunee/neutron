@@ -180,6 +180,10 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_requested: false,
       publish_head: null,
       block_kind: null,
+      // NOT ESCALATING — the payload carries no `escalation`, and the decoder invents
+      // none. A half-filled escalation would be exactly the bare complaint the
+      // workflow's own gate refuses.
+      escalation: null,
       terminal_cause: null,
       // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
       // a reader must be able to tell "nobody told me" from "I was told it could not be
@@ -385,6 +389,10 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_requested: false,
       publish_head: null,
       block_kind: null,
+      // NOT ESCALATING — the payload carries no `escalation`, and the decoder invents
+      // none. A half-filled escalation would be exactly the bare complaint the
+      // workflow's own gate refuses.
+      escalation: null,
       terminal_cause: null,
       // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
       // a reader must be able to tell "nobody told me" from "I was told it could not be

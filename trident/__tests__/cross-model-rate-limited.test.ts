@@ -820,7 +820,7 @@ describe('#542 a 429 mid-panel does not mark the panel as having reviewed', () =
     const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' }, {}, { kimi: true })
     expect(
       recordedTerminalVerdict(
-        { verdict: 'REQUEST_CHANGES', block_kind: 'infra-only', checkpoint: 'argus-request-changes-round-1' },
+        { verdict: 'REQUEST_CHANGES', block_kind: 'infra-only', checkpoint: 'argus-request-changes-round-1', escalation: null },
         JSON.stringify(peers.map((p) => ({ severity: 'blocker', kind: 'lane', title: p.title }))),
       ),
     ).toBe('REVIEW_NOT_RUN')
@@ -850,6 +850,9 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
         ok: false,
         verdict: 'REQUEST_CHANGES',
         block_kind: 'infra-only',
+        // NOT ESCALATING — a rate-limited provider is an infrastructure stop, and the
+        // escalation branch must not fire on it.
+        escalation: null,
         terminal_cause: title(),
         round: 1,
         checkpoint: null,
@@ -1171,7 +1174,7 @@ describe('#542 a GENUINE findings-carrying REQUEST_CHANGES is untouched — stil
   test('and it is still RECORDED as a rejection, with its findings preserved', () => {
     expect(
       recordedTerminalVerdict(
-        { verdict: 'REQUEST_CHANGES', block_kind: 'code', checkpoint: 'argus-request-changes-round-1' },
+        { verdict: 'REQUEST_CHANGES', block_kind: 'code', checkpoint: 'argus-request-changes-round-1', escalation: null },
         JSON.stringify([REAL_FINDING]),
       ),
     ).toBe('REQUEST_CHANGES')

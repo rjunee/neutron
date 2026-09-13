@@ -306,6 +306,26 @@ first cut actually shipped.
 | N5 | composer following removed | 13 fail |
 | N6 | a shorthand property no longer counts | 13 fail |
 | N7 | a call reached through a property access stops being recognised | 1 fail |
+| N8 | the scope walk reverted to the scope-blind nearest-declaration rule | 4 fail |
+| N9 | the scope walk refuses EVERYTHING (resolves nothing) | 18 fail |
+| N10 | parameters stop counting as bindings | 3 fail |
+| N11 | the parse is truncated — a tree that never contained the code | 19 fail |
+
+**N8–N10 are the third instance of the same defect, and the one that was a live false
+pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
+`VariableDeclaration` matching by name text and position, consulting no scope — and a
+function PARAMETER is not a `VariableDeclaration`, so it was invisible rather than
+out-ranked. A terminal path inside a function whose parameter shadowed an outer stamped
+`const` was *seen*, counted, and then classified as stamped **from the wrong binding**:
+`failingSites()` came back empty for a silent path. The fix is lexical, not a type checker
+— walk up from the use site, and the first scope that binds the name decides; a parameter,
+a catch variable, a destructured binding or an uninitialised declaration all END the walk
+and produce `'unresolved'`, which already fails loudly.
+
+Four controls, not one. The three shadowing shapes must be refused, **and** an ordinary
+top-level `const` → literal must still resolve — because "a shadowed name is unresolved" is
+satisfied by a resolver that resolves nothing, and being caught by N5/N6's collateral
+damage is not the same as being asserted.
 
 **N2 and N4 survived their first run, and the fix was to the CONTROLS, not the scanner.**
 The comment-trap case put its comment *outside* the object literal, where a raw-source
@@ -314,6 +334,26 @@ to reproduce. The spread case bound its object to a name first, so the field nev
 in the spread's own text. Both are now spelled the way this file really writes them:
 comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
 is not a control, and the only way to find out is to break the thing it guards.
+
+### The rule this guard kept re-learning, written down so the next author inherits it
+
+Three times the scanner was narrowed to **the shapes this file happens to contain today**,
+and three times that was wrong:
+
+1. the argument had to be an identifier — until someone could write an inline literal;
+2. the callee had to be an identifier — until someone could write a property access;
+3. a name resolved by matching text across the file — until a parameter shadowed one.
+
+Each time the defence available beforehand was *"the other shape is unreachable in this
+file."* That is true, and it is true in exactly the way that stops being true the moment
+someone writes the code the guard exists to catch. **A recogniser narrowed to what a file
+currently contains is a recogniser that stops working the moment the file changes** — and
+because it fails by going *quiet*, nothing announces that it stopped.
+
+So the standing rule for anything added here: match the broad thing (a call to this name,
+in any spelling) and then *classify*, with an explicit bucket for "I could not tell" that
+**fails**. Never filter at the entry. Filtering at the entry is how a site becomes
+invisible rather than refused, and an invisible site is indistinguishable from a clean one.
 
 N7 closes the twin of the argument axis. The callee match required a bare identifier, and
 `PropertyAccessExpression` is unreachable in a flat script where every call is one —
@@ -329,12 +369,36 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus seven against the guard itself, each applied to the
+- The seventeen mutations above, plus eleven against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct
   reasons, four distinct summaries, and `'unknown'` reproducing the pre-change sentence
   exactly.
+
+### What #654 changed under this card, found by checking the prose against the code
+
+Two things, and both are the same failure as the scanner's, one layer up — *a list that
+claims completeness is a claim.*
+
+**An escalation is a loop exit, and the classifier did not read it.** #654 added
+`escalation === null` as the FIRST clause of the fix loop's `while` head. The classifier's
+docblock said its arms mirrored that head; after #654 that sentence was false, and an
+escalated run reported `'unknown'` — this vocabulary's word for *could not be established*
+— about an exit sitting in a variable three lines above the call. **Saying "I cannot tell"
+when you can is the same defect as saying something determinate when you cannot**: both put
+a false value on the honest branch. The vocabulary gains `'review-escalated'`; it carries no
+sentence and no announce, because `escalationStopSentence` and `deriveEscalationBlock`
+already own that story and both run ahead of this field's readers. The member exists so the
+exit is NAMED, not told twice. The docblock now states the standing obligation: **when the
+loop head gains a clause, this function gains an arm.**
+
+**A number in a comment is not evidence.** The parse docblock carried "checked: 214
+statements" — true when written, silently false once `main` moved (229 now). A truncated
+parse is the one failure that makes every assertion in the guard vacuous while looking
+clean, so it is measured rather than asserted in prose: statement count against the file's
+real size, and the last statement's end line against the file's last line. N11 truncates the
+parse to a tenth and reds 19 cases.
 
 ### What was checked against `main` and found to have moved
 

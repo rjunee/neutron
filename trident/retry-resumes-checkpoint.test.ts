@@ -1293,6 +1293,26 @@ describe('THE PRIOR IS THE RUN THE CARD NAMES, not the newest row sharing its sl
       phase: 'failed', inner_checkpoint: 'fix-round-9', inner_checkpoint_head: HEAD,
       inner_verdict: 'REVIEW_NOT_RUN', base_sha: BASE, ralph_round: 2,
     })
+    // MAKE "LATER" TRUE INSTEAD OF LIKELY. `latestTerminalBySlug` orders by
+    // `started_at DESC, id DESC` (`store.ts:1103`), and `store.ts:1087` already records WHY
+    // the `id` tiebreak is there: "two rows can share a timestamp on a fast clock". These
+    // two rows are created in the same tick, so the tiebreak decides — and ids are random
+    // UUIDs, which made the precondition below a coin flip and this case fail on CI at
+    // random. Stamping `started_at` is what the sentence above has always claimed.
+    //
+    // THE OBSERVED FAILURE, since the two kinds of evidence answer different questions.
+    // The 491/1000 measurement against the `ORDER BY` establishes the RATE; this
+    // establishes that the mechanism is the one that actually fired. On #654's CI the
+    // assertion reported `expected a49ae3c5…, got e7e1fdb9…` — two random UUIDs, 'e' > 'a',
+    // which is the id-tiebreak signature and not a timestamp comparison at all. The same
+    // case passed five times running on a contended local box, where the clock is slow
+    // enough for the two `started_at` reads to land in different milliseconds and the
+    // tiebreak is never consulted. "Passes locally, fails on CI" is the operational tell
+    // for this whole class: the faster machine is the one that loses the race.
+    db.prepare<unknown, [string, string]>(
+      'UPDATE code_trident_runs SET started_at = ? WHERE id = ?',
+    ).run(new Date(Date.parse(priorA.started_at) + 1_000).toISOString(), priorB.id)
+    // The precondition, now ASSERTED AND ESTABLISHED rather than asserted and hoped for.
     expect(store.latestTerminalBySlug('proj-1', slugifyTask(CARD_A))!.id).toBe(priorB.id)
 
     // Card A retries, naming ITS OWN run.

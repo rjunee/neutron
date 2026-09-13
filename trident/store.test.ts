@@ -1345,6 +1345,123 @@ describe('wave children (migration 0137)', () => {
 })
 
 describe('empty-findings rejection guard — an empty finding set is never a rejection', () => {
+  /** A terminal result carrying a VALID escalation: kind and payload agree. */
+  const escalated = (kind: 'design-gap' | 'missing-dependency' | 'not-converging'): string =>
+    JSON.stringify({
+      ok: true, prNumber: 12, branch: 'trident/x', verdict: 'REQUEST_CHANGES',
+      round: 2, checkpoint: 'argus-request-changes', blockKind: kind,
+      escalation: { kind, whatIsMissing: 'the plan is wrong', triggers: [kind], evidence: 'e', round: 2 },
+    })
+
+  test('HEADLINE: the escalation exemption requires a COHERENT REJECTING escalation', async () => {
+    // THE GUARD MUST NOT TRUST THE PAYLOAD IT IS GUARDING AGAINST. `resultCarriesEscalation`
+    // checked the escalation shape and the routing kind but never the VERDICT, so a result
+    // that explicitly APPROVED bought the findings-free exemption — an approving row
+    // accepted as a rejection, at the last line of defence before persistence. Same rule
+    // that sent the `inline_active` refusal to the store: an invariant that holds only
+    // where someone remembered it is not one.
+    const store = new TridentRunStore(db)
+    const base = {
+      ok: true, prNumber: 12, branch: 'trident/x', round: 2, checkpoint: 'argus-request-changes',
+    }
+    const kind = 'design-gap'
+    const payload = { kind, whatIsMissing: 'the plan is wrong', triggers: [kind], evidence: 'e', round: 2 }
+
+    // EVERY REFUSAL CASE, each a different way of not being a coherent rejection.
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ['it APPROVED', { ...base, verdict: 'APPROVE', blockKind: kind, escalation: payload }],
+      ['no verdict at all', { ...base, blockKind: kind, escalation: payload }],
+      ['an unrecognised verdict', { ...base, verdict: 'COMMENT', blockKind: kind, escalation: payload }],
+      ['a case-variant verdict', { ...base, verdict: 'request_changes', blockKind: kind, escalation: payload }],
+      ['no payload', { ...base, verdict: 'REQUEST_CHANGES', blockKind: kind }],
+      ['a kind outside the three', { ...base, verdict: 'REQUEST_CHANGES', blockKind: 'nope', escalation: { ...payload, kind: 'nope' } }],
+      ['a blank whatIsMissing', { ...base, verdict: 'REQUEST_CHANGES', blockKind: kind, escalation: { ...payload, whatIsMissing: '   ' } }],
+      ['a routing kind that disagrees', { ...base, verdict: 'REQUEST_CHANGES', blockKind: 'missing-dependency', escalation: payload }],
+    ]
+    for (const [why, result] of refused) {
+      const run = await store.create({ slug: `refuse-${refused.findIndex(([w]) => w === why)}`, project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { inner_result: JSON.stringify(result) })
+      await expect(
+        store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' }),
+      ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    }
+  })
+
+  test('CONTROL: a COHERENT findings-free escalation still writes', async () => {
+    // Without this, "the predicate is stricter" is satisfied by a predicate that refuses
+    // EVERYTHING — which silently restores the `REVIEW_NOT_RUN` mislabel this whole card
+    // exists to remove, with every refusal assertion above still green.
+    const store = new TridentRunStore(db)
+    for (const kind of ['design-gap', 'missing-dependency', 'not-converging'] as const) {
+      const run = await store.create({ slug: `coherent-${kind}`, project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { inner_result: escalated(kind) })
+      await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' })
+      expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+
+  test('HEADLINE: update() ACCEPTS a findings-free REQUEST_CHANGES when the row carries an escalation', async () => {
+    // The guard's thesis — "an empty finding set is an approval or an infrastructure
+    // failure, never a rejection" — was EXHAUSTIVE only while a rejection could come from
+    // nothing but findings. An escalation is a third thing: a rejection whose evidence is
+    // the DECLARATION. A panel that concludes the plan is wrong often has no individual
+    // code finding to write, because the code is a faithful implementation of a bad plan.
+    //
+    // Found by enumerating the READERS of `inner_verdict`, not the sites that mention
+    // escalation kinds — this copy of the rule and `save()`'s carried the identical blind
+    // spot as `saveIfActive`'s, and only the consumer sweep names them.
+    const store = new TridentRunStore(db)
+    for (const kind of ['design-gap', 'missing-dependency', 'not-converging'] as const) {
+      const run = await store.create({ slug: `esc-${kind}`, project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { inner_result: escalated(kind) })
+      await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' })
+      expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+
+  test('update() accepts the escalation arriving in the SAME patch as the verdict', async () => {
+    // Patch-wins: the write about to happen is what the row will hold, so the guard must
+    // judge the incoming `inner_result` and not only the stored one.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'esc-same-patch', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES', inner_result: escalated('design-gap') })
+    expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+  })
+
+  test('CONTROL: a HALF-WRITTEN escalation buys nothing in update()', async () => {
+    // The kind and the payload must agree, exactly as every other reader requires, so a
+    // row that merely LABELS itself falls back to the findings requirement.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'esc-half', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, {
+      inner_result: JSON.stringify({
+        ok: true, prNumber: 12, branch: 'trident/x', verdict: 'REQUEST_CHANGES',
+        round: 2, checkpoint: 'argus-request-changes', blockKind: 'design-gap',
+        escalation: { kind: 'missing-dependency', whatIsMissing: 'x', triggers: [], evidence: '', round: 2 },
+      }),
+    })
+    await expect(
+      store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+  })
+
+  test('HEADLINE: save() ACCEPTS a findings-free REQUEST_CHANGES carrying an escalation, and still refuses one without', async () => {
+    const store = new TridentRunStore(db)
+    const ok = await store.create({ slug: 'save-esc', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.save({
+      ...store.get(ok.id)!,
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_result: escalated('design-gap'),
+    })
+    expect(store.get(ok.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+
+    // CONTROL, in the same test so the two cannot drift apart: no escalation, still refused.
+    const bad = await store.create({ slug: 'save-plain', project_slug: 't1', repo_path: '/r', task: 't' })
+    await expect(
+      store.save({ ...store.get(bad.id)!, inner_verdict: 'REQUEST_CHANGES', inner_result: null }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+  })
+
   test('FALSIFICATION 2 — update() refuses REQUEST_CHANGES on a row with no findings (delete the guard in update() and this goes RED)', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'guard-update-empty', project_slug: 't1', repo_path: '/r', task: 't' })

@@ -133,9 +133,9 @@ describe("the orchestrator's sentence — specific only where the vocabulary lic
     expect(new Set(said).size).toBe(speaks.length)
   })
 
-  test('the other eleven members say nothing, so the caller keeps its generic sentence', () => {
+  test('the other twelve members say nothing, so the caller keeps its generic sentence', () => {
     const silent = TERMINAL_CAUSES.filter((c) => !speaks.includes(c))
-    expect(silent.length).toBe(11)
+    expect(silent.length).toBe(12)
     for (const c of silent) expect(terminalCauseReason(c, 3, 10)).toBeNull()
   })
 
@@ -250,6 +250,10 @@ describe("innerTerminalFailureReason — it reports the MEASURED kind, and the g
     block_kind: 'code' as const,
     terminal_cause: null,
     findings_present: true,
+    // #654's field. `null` on every fixture here on purpose: these exercise the
+    // review-loop exits, and an escalation is a DIFFERENT exit with its own sentence
+    // upstream of the branch under test.
+    escalation: null,
     ...over,
   })
 
@@ -333,6 +337,7 @@ describe("innerTerminalFailureReason — it reports the MEASURED kind, and the g
       terminal_cause: 'CODEX_HOME could not be resolved',
       terminal_cause_kind: 'workflow-threw',
       findings_present: false,
+      escalation: null,
     })
     expect(reason).not.toContain('exhausted')
     expect(reason).not.toContain('round budget')

@@ -14,6 +14,7 @@ import {
   docLinkLabel,
   docPathFromDesignRef,
   parseWorkBoardItems,
+  WORK_BOARD_STATUSES,
   type WorkBoardItem,
 } from '../lib/work-board-client';
 
@@ -246,3 +247,35 @@ describe('WorkBoardClient.start + doc-ref helpers', () => {
     expect(docPathFromDesignRef('https://example.test/x')).toBeNull();
   });
 });
+
+describe('every lane the server can send survives the decoder', () => {
+  // THE DEFECT THIS CLOSES. The status union and the parser's allowlist were two
+  // separate statements of one closed set, and they drifted twice: 0130 added
+  // 'archived' and 0140 added 'blocked' to the type while the parser kept rejecting
+  // them. A rejected row is DROPPED, so those cards did not render as shelved or
+  // blocked — they vanished from the board, which is strictly worse than the behaviour
+  // before either lane existed. The type is now derived from the array, and this
+  // asserts the runtime half over EVERY member rather than the two someone remembered.
+  for (const status of WORK_BOARD_STATUSES) {
+    it(`keeps a '${status}' card`, () => {
+      const out = parseWorkBoardItems([{ id: 'a', title: 'T', status }])
+      expect(out.length).toBe(1)
+      expect(out[0]?.status).toBe(status)
+    })
+  }
+
+  it("'blocked' is a lane of its own and is NOT rewritten to failed or upcoming", () => {
+    // The two specific wrong answers: one says the build broke, the other says the card
+    // is startable. The whole point of the lane is that it is neither.
+    const out = parseWorkBoardItems([{ id: 'a', title: 'T', status: 'blocked' }])
+    expect(out[0]?.status).toBe('blocked')
+    expect(out[0]?.status).not.toBe('failed')
+    expect(out[0]?.status).not.toBe('upcoming')
+  })
+
+  it('a status NOT in the set is still dropped — the guard did not become a passthrough', () => {
+    expect(parseWorkBoardItems([{ id: 'a', title: 'T', status: 'bogus' }])).toEqual([])
+    expect(parseWorkBoardItems([{ id: 'a', title: 'T', status: 42 }])).toEqual([])
+    expect(parseWorkBoardItems([{ id: 'a', title: 'T' }])).toEqual([])
+  })
+})

@@ -21,6 +21,24 @@ function mk(overrides: Partial<InlineActivityScanItem> = {}): InlineActivityScan
 }
 
 describe('deriveInlineActive', () => {
+  test('a BLOCKED card never reads as inline-active, even with an explicit flag + fresh evidence', () => {
+    // The STORE refuses to write the claim; this refuses to READ one, so a flag stored
+    // before the card was blocked cannot outlive the block. `inline_active: true` plus
+    // fresh evidence is the strongest input this function takes — it is the shape that
+    // activates any other non-terminal card — so if the lane did not win here, an
+    // agent-set flag would make a blocked card pulse.
+    const blocked = mk({ status: 'blocked', inline_active: true })
+    expect(deriveInlineActive(blocked, { now: NOW, last_write_activity_at: NOW - 1_000 })).toBe(false)
+    // CONTROL: the identical input on an in_progress card IS active, so this is the
+    // lane deciding and not the evidence failing.
+    expect(
+      deriveInlineActive(mk({ status: 'in_progress', inline_active: true }), {
+        now: NOW,
+        last_write_activity_at: NOW - 1_000,
+      }),
+    ).toBe(true)
+  })
+
   test('(a) fresh evidence activates in-progress work without a flag write', () => {
     // Pins the flag-only mutant.
     expect(deriveInlineActive(mk({ status: 'in_progress' }), { now: NOW, last_write_activity_at: NOW - 1_000 })).toBe(true)

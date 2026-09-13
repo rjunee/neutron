@@ -51,10 +51,19 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
       // kept binding (detachRun #340 preserves linked_run_id and sets
       // status='failed') must NOT show ·building — status='failed' is the
       // durable signal and the agent needs to see it, not an incorrect ·building.
+      //
+      // AND NEITHER MAY A BLOCKED ONE, for the same reason and with more at stake.
+      // `detachRun` keeps the link on a `blocked` card too (so the reported reason
+      // stays reachable), so this said `·building` about a run that had STOPPED and
+      // escalated. This fragment is the ORCHESTRATOR'S OWN VIEW of the board — the
+      // thing that is supposed to read the escalation and decide the sequencing — so
+      // telling it the card is building is telling the one reader who must act that
+      // there is nothing to act on.
       const activity =
         item.linked_run_id !== null &&
         item.linked_run_id.length > 0 &&
-        item.status !== 'failed'
+        item.status !== 'failed' &&
+        item.status !== 'blocked'
           ? ' ·building'
           : item.inline_active
             ? ' ·inline'

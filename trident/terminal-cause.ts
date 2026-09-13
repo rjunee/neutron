@@ -76,6 +76,21 @@ export const TERMINAL_CAUSES = [
   /** The panel could not run. No seat judged the code, so the stop says nothing
    *  about the diff. */
   'review-infra-only',
+  /**
+   * A REVIEWER DECLARED THE WORK UNBUILDABLE AS PLANNED AND THE LOOP STOPPED (#654).
+   *
+   * Added when #654 landed `escalation === null` in the fix loop's `while` head — a NEW
+   * exit condition, and therefore a new answer to "why did the loop stop". Without it an
+   * escalated run reported `'unknown'`, which is this vocabulary's word for "could not be
+   * established" about an exit that is sitting in a variable at the exit. Saying "I could
+   * not tell" when you can is the same defect as saying something determinate when you
+   * cannot; both put a false value on the honest branch.
+   *
+   * It carries NO sentence and NO announce of its own — `escalationStopSentence` and
+   * `deriveEscalationBlock` already own that story end to end, and both run ahead of this
+   * field's readers. The member exists so the EXIT IS NAMED, not to tell it a second time.
+   */
+  'review-escalated',
   /** A fix round's work never reached the branch — the round is lost and the
    *  code was not re-judged. */
   'round-lost-work',
@@ -199,7 +214,8 @@ export function terminalCauseReason(
     //    and `workflow-threw` already have a specific sentence UPSTREAM of this
     //    call, composed from the prose cause they carry (or `infraDeathSentence`
     //    when that prose did not survive redaction). A second sentence for the
-    //    same exit is a second owner for one fact.
+    //    same exit is a second owner for one fact. `review-escalated` is the same
+    //    rule for #654's `escalationStopSentence`, which fires above this line.
     //  - `review-approved`, `pr-already-merged`, `resume-approved-unchanged`,
     //    `wave-member-built`, `handoff-publish` and `ralph-task-built` are not
     //    failures. Reaching a terminal FAILURE reason with one of them means the
@@ -207,6 +223,7 @@ export function terminalCauseReason(
     //  - `unknown` is the whole reason `'unknown'` is a member: it buys silence.
     case 'review-approved':
     case 'review-infra-only':
+    case 'review-escalated':
     case 'pr-already-merged':
     case 'resume-approved-unchanged':
     case 'resume-head-unreadable':

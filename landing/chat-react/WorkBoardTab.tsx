@@ -86,6 +86,10 @@ function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'in_progress') return 'done'
   if (status === 'failed') return 'upcoming'
   if (status === 'archived') return 'upcoming'
+  // BLOCKED → upcoming, like the other two non-linear lanes. Advancing a blocked card
+  // is the owner saying the block is cleared; it must NOT advance to 'done', which
+  // would claim work shipped that never built.
+  if (status === 'blocked') return 'upcoming'
   return 'done'
 }
 
@@ -95,6 +99,9 @@ function statusLabel(status: WorkBoardStatus): string {
   if (status === 'done') return 'Done'
   if (status === 'failed') return 'Failed'
   if (status === 'archived') return 'Shelved'
+  // TWO DIFFERENT WORDS, and that is the whole point of the lane: a blocked card needs
+  // a decision or a dependency, a failed one needs a retry.
+  if (status === 'blocked') return 'Blocked'
   return 'Upcoming'
 }
 
@@ -108,7 +115,16 @@ const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'ca
 function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
   if (!linked) return false
-  if (item.status === 'failed') return false
+  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
+  // fall-through below reads "no progress reported" as "still running", which is right
+  // for a card whose run is live and has not reported yet — and wrong for one whose run
+  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
+  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
+  // reported reason stays reachable, so this is the shape that actually occurs. Without
+  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
+  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+  // wrong reason.
+  if (item.status === 'failed' || item.status === 'blocked') return false
   const rp = item.run_progress
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
 }
@@ -130,16 +146,33 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
  * re-reads while any card is inline-active), and inline work that writes nothing
  * for 90 s (a long test run, a research turn) reads NOT active and ▶ returns.
  * That false negative is deliberate: a hint, never a lock, and nothing here
- * blocks (mirrors app/lib/work-board-helpers.ts canPlay).
+ * blocks (mirrors app/lib/work-board-helpers.ts canPlay). *
+ * AND `blocked` IS A FOURTH SUPPRESSOR, and unlike `inline_active` it IS a lock. A
+ * blocked card is one whose build STOPPED ON PURPOSE and reported why; the dispatch
+ * chokepoint refuses it outright (`trident/board-dispatch.ts`, `card_blocked`), so a ▶
+ * here could only produce that refusal. Offering a control that cannot work is worse
+ * than offering none: it reads as "try again", which is the one thing that changes
+ * nothing. Clearing the block is a status write the owner or the orchestrator makes
+ * deliberately, and the card is playable again the moment it is made.
  */
 function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active
+  return (
+    item.status !== 'done' &&
+    item.status !== 'blocked' &&
+    !isLinkedRunning(item) &&
+    !item.inline_active
+  )
 }
 
 /** ▶ vs ↻ — a card that carries a (now-detached) binding, a failed run, or a
  *  durable status='failed' lane RETRIES. The last check covers the runless failed
- *  card whose link was cleared by reconcile. */
+ *  card whose link was cleared by reconcile. *
+ *  A BLOCKED card is NEITHER. It keeps its `linked_run_id` (so the reported reason
+ *  stays reachable), which used to be enough to label it ↻ — telling the owner to retry
+ *  a card that the dispatch chokepoint will refuse. It is not a retry; it is a
+ *  decision. */
 function isRetry(item: WorkBoardItem): boolean {
+  if (item.status === 'blocked') return false
   if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true
   if (item.run_progress?.step_label === 'failed') return true
   return item.status === 'failed'
@@ -155,9 +188,20 @@ interface PhaseTag {
 /**
  * The phase TAG for a bound run's inner step, or null when the item has no run
  * progress (a plain upcoming card shows just the gray dot + title). Sentence-case
- * copy, tinted capsule; failure uses the non-technical-owner-friendly "Didn't finish".
+ * copy, tinted capsule; failure uses the non-technical-owner-friendly "Didn't finish". *
+ * THE CARD'S OWN LANE WINS OVER THE RUN STEP, for `blocked` and only for `blocked`.
+ * Every other state here is REFINED by the bound run, which is right: a live run knows
+ * more about what is happening than a status column written at dispatch. `blocked` is
+ * the exception because the reconcile KEEPS the terminal run link (so the reported
+ * reason stays reachable), and that run's `step_label` is `failed` — so deriving from
+ * it painted a blocked card red and tagged it "Failed", which is the one thing the lane
+ * exists to stop the owner believing. The lane is written by the terminal reconcile
+ * from the run's own escalation; it is not a guess, and it is more recent than the step.
+ * (Mirrors app/lib/work-board-helpers.ts `stepTag`/`dotState`.)
  */
-function stepTag(rp: RunProgress | undefined): PhaseTag | null {
+function stepTag(item: WorkBoardItem): PhaseTag | null {
+  if (item.status === 'blocked') return { label: 'Blocked', cls: 'cwb-tag-blocked' }
+  const rp = item.run_progress
   if (rp === undefined) return null
   switch (resolveStepLabel(rp)) {
     case 'building':
@@ -195,11 +239,16 @@ function briefAlertText(rp: RunProgress | undefined): string | null {
 
 interface RunNotice {
   text: string
-  tone: 'failure' | 'alert'
+  tone: 'failure' | 'alert' | 'blocked'
 }
 
-function runNotice(rp: RunProgress | undefined): RunNotice | null {
+function runNotice(item: WorkBoardItem): RunNotice | null {
+  const rp = item.run_progress
+  // A BLOCKED card's reason is the escalation's own sentence — the most useful line on
+  // the card — but it is not a FAILURE, and painting it in the failure tone beside a
+  // "Blocked" tag would have the two halves of one row disagree.
   const failure = failureReasonText(rp)
+  if (item.status === 'blocked') return failure === null ? null : { text: failure, tone: 'blocked' }
   if (failure !== null) return { text: failure, tone: 'failure' }
   // A failed run that recorded REVIEW_NOT_RUN and no reason: say the one thing the
   // row proves instead of a blank. A null verdict (legacy frame) claims nothing.
@@ -225,6 +274,8 @@ interface DotState {
  * is bound, upcoming → faint gray outline).
  */
 function dotState(item: WorkBoardItem): DotState {
+  // See `stepTag` for why the BLOCKED lane wins over the bound run's step.
+  if (item.status === 'blocked') return { cls: 'cwb-dot-blocked', pulse: false }
   const rp = item.run_progress
   if (rp !== undefined) {
     switch (resolveStepLabel(rp)) {
@@ -321,15 +372,29 @@ export interface WorkBoardSummary {
   running: number
   failed: number
   active: number
+  /** Cards whose build STOPPED ON PURPOSE and reported why. Its own count, not folded
+   *  into `failed` (a different word, a different response) and not into `active` (which
+   *  means in-flight — a blocked card is waiting, and folding it there would hide it). */
+  blocked: number
 }
 
 export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   let running = 0
   let failed = 0
   let active = 0
+  let blocked = 0
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
+      // CHECKED BEFORE THE FAILED BRANCH, and that ordering is the whole fix. The
+      // reconcile KEEPS the terminal run link on a blocked card, and that run's
+      // `step_label` is `failed` — so the branch below matched it and the pane counted
+      // a blocked card as a failure. This is the third rendering path to make that
+      // mistake (the decoder dropped the card, the row said Failed, the summary counted
+      // it Failed), and all three had the same cause: the card's own lane is the
+      // durable fact and it has to be asked FIRST.
+    } else if (it.status === 'blocked') {
+      blocked += 1
     } else if (it.status === 'failed' || (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed')) {
       // Count durable status='failed' cards even when run_progress has been cleared.
       failed += 1
@@ -339,7 +404,7 @@ export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
       active += 1
     }
   }
-  return { running, failed, active }
+  return { running, failed, active, blocked }
 }
 
 export function WorkBoardTab({
@@ -996,9 +1061,9 @@ function WorkBoardRow({
   onMoveDown: () => void
 }): React.JSX.Element {
   const dot = dotState(item)
-  const tag = stepTag(item.run_progress)
+  const tag = stepTag(item)
   const round = roundText(item.run_progress)
-  const notice = runNotice(item.run_progress)
+  const notice = runNotice(item)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -1149,7 +1214,13 @@ function WorkBoardRow({
           {round !== null ? <span className="cwb-round">{round}</span> : null}
           {notice !== null ? (
             <span
-              className={notice.tone === 'failure' ? 'cwb-fail-reason' : 'cwb-brief-alert'}
+              className={
+                notice.tone === 'failure'
+                  ? 'cwb-fail-reason'
+                  : notice.tone === 'blocked'
+                    ? 'cwb-blocked-reason'
+                    : 'cwb-brief-alert'
+              }
               title={notice.text}
             >
               {notice.text}

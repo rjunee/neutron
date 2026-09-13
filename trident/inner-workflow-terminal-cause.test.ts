@@ -93,9 +93,18 @@ interface TerminalSite {
   why: string
 }
 
-/** Parse the shipped workflow. The file's top-level `return` is a SEMANTIC error, not a
- *  syntactic one, so the parser produces a complete tree for it (checked: 214 statements,
- *  12 calls). Same compiler API `open/__tests__/chat-command-filter-scan.ts` scans with. */
+/**
+ * Parse the shipped workflow. The file's top-level `return` is a SEMANTIC error, not a
+ * syntactic one, so the parser produces a complete tree for it. Same compiler API
+ * `open/__tests__/chat-command-filter-scan.ts` scans with.
+ *
+ * THE COMPLETENESS OF THE PARSE IS ASSERTED, NOT CLAIMED IN PROSE. This docblock used to
+ * carry "checked: 214 statements", a number that was true when written and silently false
+ * the moment `main` moved under it — a list claiming completeness is a claim, and it needs
+ * the same scrutiny as the code it describes. A truncated parse is the one failure that
+ * would make every assertion in this file vacuous while looking clean, so the test below
+ * measures it instead of trusting a comment.
+ */
 function parse(src: string): ts.SourceFile {
   return ts.createSourceFile('inner-workflow.mjs', src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
 }
@@ -112,7 +121,9 @@ function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
  * already a site by the time we look at it, so no argument form can remove a path from
  * the enumeration. Three shapes resolve to an object literal — an inline literal, an
  * identifier bound to one, and an identifier bound to a composer call whose body returns
- * one (three of the twelve sites share `mergedTerminalResult`). Everything else is
+ * one (three of the twelve sites share `mergedTerminalResult`). An identifier is resolved
+ * through the SCOPE CHAIN (`resolveName`), not by matching name text across the file, so a
+ * shadowing binding refuses rather than being stepped over. Everything else is
  * `'unresolved'` and fails.
  */
 function terminalSites(src: string): TerminalSite[] {
@@ -168,30 +179,115 @@ function callsTerminalWrite(n: ts.CallExpression): boolean {
 function resolveToObjectLiteral(sf: ts.SourceFile, arg: ts.Expression): ts.ObjectLiteralExpression | null {
   if (ts.isObjectLiteralExpression(arg)) return arg
   if (!ts.isIdentifier(arg)) return null
-  const init = nearestDeclarationBefore(sf, arg.text, arg.getStart(sf))
-  if (init === null) return null
-  if (ts.isObjectLiteralExpression(init)) return init
+  const bound = resolveName(sf, arg)
+  if (bound === null) return null
+  if (ts.isObjectLiteralExpression(bound)) return bound
   // A composer call — follow it into the function's own `return`.
-  if (ts.isCallExpression(init) && ts.isIdentifier(init.expression)) {
-    return composerReturnLiteral(sf, init.expression.text)
+  if (ts.isCallExpression(bound) && ts.isIdentifier(bound.expression)) {
+    return composerReturnLiteral(sf, bound.expression.text)
   }
   return null
 }
 
-/** The initialiser of the nearest `const <name> =` declared before `pos`. */
-function nearestDeclarationBefore(sf: ts.SourceFile, name: string, pos: number): ts.Expression | null {
-  let best: ts.Expression | null = null
-  let bestPos = -1
-  walk(sf, (n) => {
-    if (!ts.isVariableDeclaration(n)) return
-    if (!ts.isIdentifier(n.name) || n.name.text !== name) return
-    const at = n.getStart(sf)
-    if (at < pos && at > bestPos && n.initializer !== undefined) {
-      best = n.initializer
-      bestPos = at
+/**
+ * WHAT DOES THIS IDENTIFIER NAME, AT THIS USE SITE? — the initialiser of the binding that
+ * is actually in scope, or `null`, which the caller turns into a loud `'unresolved'`.
+ *
+ * THE DEFECT THIS REPLACES, AND IT IS THIS FILE'S OWN DEFECT FOR THE THIRD TIME. The
+ * previous resolver walked the WHOLE source for any `VariableDeclaration` whose name text
+ * matched and whose position was earlier, and took the nearest. It consulted no scope at
+ * all — and a function PARAMETER is not a `VariableDeclaration`, so it did not merely lose
+ * the ranking, it was INVISIBLE:
+ *
+ *     const result = { terminalCauseKind: 'workflow-threw' }
+ *     function newExitPath(result) {
+ *       writeTerminalResult(result)          // ← an unstamped parameter
+ *     }
+ *
+ * The callee matches, so the site is SEEN and the count grows to 13 — and then the
+ * argument resolves to the OUTER literal, the site is classified as stamped, and
+ * `failingSites()` comes back empty. Seen, counted, and silently passing: exactly what
+ * the control below calls a defect, and it defeats the whole "a thirteenth path cannot be
+ * added silently" claim.
+ *
+ * THE RULE, WHICH IS CHEAP AND SOUND IN THE DIRECTION THAT MATTERS. Walk UP from the use
+ * site through the enclosing scopes. The FIRST scope that binds the name decides, and
+ * only a `const`/`let`/`var` with an initialiser resolves — a parameter, a catch-clause
+ * variable, a destructured binding and a declaration with no initialiser all return
+ * `null`. So a shadowing binding stops the walk instead of being stepped over, and the
+ * answer is "I cannot tell" rather than an answer taken from the wrong binding.
+ *
+ * IT ERRS TOWARD REFUSAL, WHICH IS THE ONLY DIRECTION THIS GUARD MAY FAIL IN. Anything it
+ * cannot follow becomes `'unresolved'`, which fails the guard as loudly as a missing
+ * property. A scanner that guesses is worse than one that stops, because the guess is
+ * indistinguishable from a clean result.
+ *
+ * NOT A TYPE CHECKER, and deliberately not. It answers a lexical question from the tree,
+ * which is what naming a binding is.
+ */
+function resolveName(sf: ts.SourceFile, use: ts.Identifier): ts.Expression | null {
+  const name = use.text
+  for (let scope: ts.Node | undefined = use.parent; scope !== undefined; scope = scope.parent) {
+    if (!introducesScope(scope)) continue
+    const found = bindingIn(scope, name)
+    if (found === 'not-here') continue
+    // The nearest binding decides, whatever it turns out to be. `'opaque'` — a parameter,
+    // a catch variable, a destructured name, an uninitialised declaration — ENDS the walk
+    // rather than being skipped, which is the whole fix.
+    return found === 'opaque' ? null : found
+  }
+  return null
+}
+
+function introducesScope(n: ts.Node): boolean {
+  return ts.isSourceFile(n) || ts.isBlock(n) || ts.isCatchClause(n) || ts.isFunctionLike(n)
+}
+
+/**
+ * Does this one scope bind `name`, and if so with what?
+ *
+ * `'not-here'` means keep walking outward; `'opaque'` means it IS bound here by something
+ * this scanner will not read through; an expression means it is bound to that initialiser.
+ */
+function bindingIn(scope: ts.Node, name: string): ts.Expression | 'opaque' | 'not-here' {
+  if (ts.isFunctionLike(scope)) {
+    for (const param of scope.parameters) {
+      // A plain parameter, and a destructured one that binds the name anywhere inside it.
+      if (ts.isIdentifier(param.name) ? param.name.text === name : bindsInPattern(param.name, name)) {
+        return 'opaque'
+      }
     }
+  }
+  if (ts.isCatchClause(scope) && scope.variableDeclaration !== undefined) {
+    const v = scope.variableDeclaration.name
+    if (ts.isIdentifier(v) ? v.text === name : bindsInPattern(v, name)) return 'opaque'
+  }
+  const statements = ts.isSourceFile(scope) || ts.isBlock(scope) ? scope.statements : undefined
+  if (statements !== undefined) {
+    for (const st of statements) {
+      if (ts.isFunctionDeclaration(st) && st.name?.text === name) return 'opaque'
+      if (!ts.isVariableStatement(st)) continue
+      for (const d of st.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name)) {
+          if (bindsInPattern(d.name, name)) return 'opaque'
+          continue
+        }
+        if (d.name.text !== name) continue
+        return d.initializer ?? 'opaque'
+      }
+    }
+  }
+  return 'not-here'
+}
+
+/** Does a destructuring pattern bind `name` anywhere inside it? */
+function bindsInPattern(pattern: ts.BindingName, name: string): boolean {
+  if (ts.isIdentifier(pattern)) return pattern.text === name
+  let hit = false
+  walk(pattern, (n) => {
+    if (ts.isBindingElement(n) && ts.isIdentifier(n.name) && n.name.text === name) hit = true
   })
-  return best
+  return hit
 }
 
 /** The object literal a named function returns, or `null`. */
@@ -293,9 +389,45 @@ const terminal = { writeTerminalResult }
 async function newExitPath() {
   await terminal.writeTerminalResult({ ok: false, checkpoint: 'new-exit' })
 }`,
+  // THE SHADOWING CASE. The outer `const` IS stamped, and a resolver that matches by name
+  // text across the whole file answers from it — reporting a stamped site for a path that
+  // hands over an unstamped parameter. The name is deliberately one this file already
+  // uses at a real call site, because that is what makes the wrong answer available.
+  'a parameter that shadows an outer stamped const': `
+const stamped = { ok: false, terminalCauseKind: 'workflow-threw' }
+async function newExitPath(stamped) {
+  await writeTerminalResult(stamped)
+}`,
+  'a catch variable that shadows an outer stamped const': `
+const caught = { ok: false, terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  try {
+    throw new Error('x')
+  } catch (caught) {
+    await writeTerminalResult(caught)
+  }
+}`,
+  'a destructured parameter that shadows an outer stamped const': `
+const picked = { ok: false, terminalCauseKind: 'workflow-threw' }
+async function newExitPath({ picked }) {
+  await writeTerminalResult(picked)
+}`,
 }
 
 describe('#520 — every terminal path of the inner workflow names its cause', () => {
+  test('the parse is COMPLETE — a truncated tree would make every assertion below vacuous', () => {
+    // The floor under the floor. A parse that stopped early would yield few statements and
+    // few calls, and every "no failing sites" assertion would pass on a tree that never
+    // contained the code. Measured against the file's real size rather than a number
+    // copied into a comment, so `main` moving cannot make it quietly untrue.
+    const sf = parse(SRC)
+    expect(sf.statements.length).toBeGreaterThan(100)
+    // The tail of the file must be inside the tree, not past where a parse gave up.
+    const lastStatement = sf.statements[sf.statements.length - 1]!
+    const endLine = sf.getLineAndCharacterOfPosition(lastStatement.getEnd()).line + 1
+    expect(endLine).toBeGreaterThan(SRC_LINES - 50)
+  })
+
   test('the enumeration is the twelve calls main carries', () => {
     // THE SCANNER'S OWN FLOOR. If the recogniser stops matching, every assertion below
     // passes vacuously — so the count is pinned, and the shapes-controls further down
@@ -378,6 +510,41 @@ describe('#520 — every terminal path of the inner workflow names its cause', (
     const doctored = SRC.replace("    terminalCauseKind: 'workflow-threw',\n", '')
     expect(doctored).not.toBe(SRC)
     expect(failingSites(doctored).map((f) => f.split(' ')[0])).toEqual(['failureResult'])
+  })
+
+  /**
+   * THE OTHER HALF OF THE SHADOWING RULE, AND IT NEEDS ITS OWN TEST.
+   *
+   * "A shadowed name is unresolved" is satisfied by a resolver that resolves NOTHING, and
+   * that resolver still fails the whole guard — N5 and N6 show it as a 13-case collapse,
+   * so it would be noticed. But being noticed by collateral damage is not the same as
+   * being asserted: this pins the INTENT, which is that the scope walk refuses a shadowed
+   * binding WITHOUT losing the ordinary one it exists to read.
+   */
+  test('an ordinary binding still resolves — the scope walk refuses, it does not give up', () => {
+    const ordinary = `${SRC}
+const newExit = { ok: false, checkpoint: 'new-exit', terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  await writeTerminalResult(newExit)
+}
+`
+    const sites = terminalSites(ordinary)
+    expect(sites.length).toBe(13)
+    const added = sites.find((s) => s.line > SRC_LINES)!
+    // Resolved, read, and found stamped — so the guard stays SILENT on it, which is the
+    // half a refuse-everything resolver could never produce.
+    expect({ stamped: added.stamped, kind: added.kind }).toEqual({ stamped: 'literal', kind: 'workflow-threw' })
+    expect(failingSites(ordinary)).toEqual([])
+  })
+
+  test('a shadowed binding is refused by NAME, not by position — the nearest scope wins', () => {
+    // Spelled as an equality against the ordinary case above, so the difference is
+    // isolated to the shadowing and nothing else: identical outer const, identical call,
+    // and the ONLY change is that a parameter in between binds the same name.
+    const shadowed = `${SRC}\n${THIRTEENTH['a parameter that shadows an outer stamped const']}\n`
+    const added = terminalSites(shadowed).find((s) => s.line > SRC_LINES)!
+    expect(added.stamped).toBe('unresolved')
+    expect(added.why).toContain('cannot resolve to an object literal')
   })
 
   test('POSITIVE CONTROL — the scan sees through the shared composer', () => {
@@ -516,6 +683,7 @@ describe('#520 — reviewLoopTerminalCause: the exit is measured, and may be und
     blockKind: string | null | undefined
     roundLostItsWork: unknown
     roundLostItsDiff: unknown
+    escalation: unknown
   }
   const load = (): ((e: Exit) => string) => {
     const at = SRC.indexOf('function reviewLoopTerminalCause(')
@@ -530,6 +698,7 @@ describe('#520 — reviewLoopTerminalCause: the exit is measured, and may be und
     blockKind: 'code',
     roundLostItsWork: null,
     roundLostItsDiff: null,
+    escalation: null,
     ...over,
   })
 
@@ -549,6 +718,47 @@ describe('#520 — reviewLoopTerminalCause: the exit is measured, and may be und
     expect(f(exit({ round: 2, roundLostItsDiff: 2 }))).toBe('round-lost-no-diff')
     // …and it outranks it AT the ceiling too, which is where the two can be confused.
     expect(f(exit({ round: 10, roundLostItsDiff: 10 }))).toBe('round-lost-no-diff')
+  })
+
+  /**
+   * THE CLAUSE #654 ADDED, AND THE REASON THIS ARM EXISTS.
+   *
+   * `escalation === null` is the FIRST clause of the fix loop's `while` head, so an
+   * escalation is a genuine terminal exit — and this function did not read it when #654
+   * landed. An escalated run therefore reported `'unknown'`, which is this vocabulary's
+   * word for "could not be established" about an exit sitting in a variable three lines
+   * above the call. Saying "I cannot tell" when you CAN is the same defect as saying
+   * something determinate when you cannot: both put a false value on the honest branch.
+   */
+  test("an escalation is its own exit, not 'unknown'", () => {
+    const f = load()
+    expect(f(exit({ round: 3, escalation: { kind: 'plan-wrong', round: 3 } }))).toBe('review-escalated')
+    // BELOW the ceiling, which is the case that would otherwise fall through every arm.
+    expect(f(exit({ round: 3 }))).toBe('unknown')
+  })
+
+  test('an escalation is read BEFORE the verdict, which it has already rewritten', () => {
+    // `if (escalation !== null && finalVerdict === 'APPROVE') finalVerdict = 'REQUEST_CHANGES'`
+    // runs just above the call, so by the time this function sees it an escalated run is
+    // indistinguishable from an ordinary rejection by verdict alone.
+    const f = load()
+    expect(f(exit({ round: 10, escalation: { kind: 'plan-wrong', round: 3 } }))).toBe('review-escalated')
+    // …and a lost round still outranks it: the break fires before that round's review
+    // could declare anything.
+    expect(f(exit({ round: 4, escalation: { kind: 'plan-wrong', round: 3 }, roundLostItsDiff: 4 }))).toBe(
+      'round-lost-no-diff',
+    )
+  })
+
+  test('MUTATION — without the escalation arm, a real escalation reports "could not establish"', () => {
+    const at = SRC.indexOf('function reviewLoopTerminalCause(')
+    const mutated = braceMatchFrom(SRC, at).replace(
+      "  if (exit.escalation !== null && exit.escalation !== undefined) return 'review-escalated'",
+      '',
+    )
+    const f = new Function(`${mutated}\nreturn reviewLoopTerminalCause`)() as (e: Exit) => string
+    expect(f(exit({ round: 3, escalation: { kind: 'plan-wrong', round: 3 } }))).toBe('unknown')
+    expect(load()(exit({ round: 3, escalation: { kind: 'plan-wrong', round: 3 } }))).toBe('review-escalated')
   })
 
   test('the two block kinds that exit the loop are told apart', () => {
