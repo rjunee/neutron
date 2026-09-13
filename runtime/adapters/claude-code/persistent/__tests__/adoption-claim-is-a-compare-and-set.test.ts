@@ -45,6 +45,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  armSelfFence,
+  setFenceTimerFactoryForTests,
   releaseAdoptionClaim,
   renewAdoptionClaim,
   renewClaimForSession,
@@ -230,6 +232,7 @@ beforeAll(async () => {
 beforeEach(() => resetBootAdoptionForTests())
 
 afterEach(() => {
+  setFenceTimerFactoryForTests(undefined)
   setFlockImplForTests(undefined)
   resetBootAdoptionForTests()
   supervisedBySessionKey.clear()
@@ -963,5 +966,126 @@ describe('a claimant is blind and mute until it holds the claim', () => {
     const child = f.host.attached[0]
     child?.push('a later screen')
     expect(child?.screensDelivered).toEqual(['a later screen'])
+  })
+})
+
+describe('the self-fence fires on its own, with nothing else running', () => {
+  /**
+   * ARGUS r49, and it is the hole in round forty-four's ruling rather than in its code.
+   *
+   * Round forty-four specified the CONDITION — fence when the last confirmed renewal is older
+   * than the takeover window — and not what EVALUATES it. The deadline was checked in exactly
+   * two places: when a new turn enters `beginBootAdoption`, and when a watchdog renewal runs.
+   * **Both are things the losing gateway has stopped doing**, which is the one circumstance
+   * the deadline exists for. A gateway mid-turn whose tick loop had stalled, with no next turn
+   * arriving, was never fenced at all — it stayed attached and sink-registered while another
+   * gateway took the pane, and could still complete its turn with a reply produced on it.
+   *
+   * **A predicate is not a mechanism.** So the fence is a timer, and this case runs with no
+   * tick, no new turn and no probe — the crutch every earlier fencing case leaned on.
+   */
+  /** A fence timer the case fires by hand, because a suite cannot wait out the real deadline
+   *  and shortening the constant would pin a different relationship than production runs. */
+  function manualFenceTimer(): {
+    fire: (which?: number) => void
+    armed: () => number
+    cancelled: () => number
+  } {
+    const armedCbs: Array<(() => void) | undefined> = []
+    let cancels = 0
+    setFenceTimerFactoryForTests((cb) => {
+      const i = armedCbs.push(cb) - 1
+      return {
+        cancel: () => {
+          cancels += 1
+          armedCbs[i] = undefined
+        },
+      }
+    })
+    return {
+      // Fires the LATEST armed timer by default, or a specific one by index — so a case can
+      // fire a timer that a renewal has since cancelled and show that nothing happens.
+      fire: (which) => {
+        const i = which ?? armedCbs.length - 1
+        const f = armedCbs[i]
+        armedCbs[i] = undefined
+        f?.()
+      },
+      armed: () => armedCbs.length,
+      cancelled: () => cancels,
+    }
+  }
+
+  it('fences mid-turn with no tick, no new turn and no probe', async () => {
+    const timer = manualFenceTimer()
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = await pool.get(KEY)
+    const child = f.host.attached[0]
+    expect(session).toBeDefined()
+    // ARMED AT THE CLAIM, not at the first tick — which a stalled gateway never reaches.
+    expect(timer.armed()).toBe(1)
+
+    // A TURN IS IN FLIGHT. Nothing else runs: no `tickAt`, no second pass, no probe.
+    const turnId = 'incarnation:1'
+    ;(session as ReplSession).activeTurn = {
+      turnId,
+      settled: false,
+      settle: () => {},
+      sessionId: SESSION_ID,
+      substrateInstanceId: 'inst',
+      channel: { push: () => {}, close: () => {}, closed: false } as never,
+    } as never
+
+    // The deadline arrives. In production this is `setTimeout` firing; here the case fires it,
+    // which is the same call with a clock it can control.
+    timer.fire()
+
+    // FENCED, ON ITS OWN. Detached, out of the pool, and blind and mute from here.
+    expect(child?.detached).toBe(true)
+    child?.push('❯ 1. Yes, proceed')
+    expect(child?.screensDelivered).toEqual([])
+    expect(child?.keysSent).toEqual([])
+    expect(await pool.get(KEY)).toBeUndefined()
+    // AND THE PANE IS LEFT ALIVE for whoever owns it next.
+    expect(f.host.closed).toEqual([])
+
+    // AND THE OUTSTANDING REPLY IS REFUSED. It arrives over the sink, not over the pane, so
+    // detaching alone would not have stopped it — this is "claim before you are capable"
+    // applied to the inbound direction.
+    const turn = (session as ReplSession).activeTurn
+    ;(session as ReplSession).onReply('the answer B produced', turnId)
+    expect(turn?.settled).toBe(false)
+  })
+
+  it('...and a healthy gateway whose renewals succeed never fences mid-turn', async () => {
+    // THE POSITIVE CONTROL. A timer that fired regardless would pass the case above and stop
+    // every REPL a deadline after it was adopted — the feature, switched off by its own guard.
+    const timer = manualFenceTimer()
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = await pool.get(KEY)
+    const child = f.host.attached[0]
+
+    // A renewal confirms, which CANCELS the armed timer and re-arms from the new confirmation.
+    await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    expect(session?.paneClaimConfirmedAt).toBe(t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    expect(timer.armed()).toBe(2)
+    expect(timer.cancelled()).toBeGreaterThan(0)
+
+    // THE SUPERSEDED TIMER FIRES ANYWAY — a factory that did not cancel, a process resumed
+    // from suspend. Nothing happens, because the deadline is re-checked against the CURRENT
+    // confirmation, which the renewal moved forward.
+    timer.fire(0)
+
+    expect(child?.detached).toBe(false)
+    expect(await pool.get(KEY)).toBe(session)
+    child?.push('an ordinary screen')
+    expect(child?.screensDelivered).toEqual(['an ordinary screen'])
+    expect((session as ReplSession).fenced).toBe(false)
   })
 })

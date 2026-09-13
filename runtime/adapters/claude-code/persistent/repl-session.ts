@@ -215,6 +215,9 @@ export class ReplSession {
    * serving on its own account, WITHOUT needing to observe the winner.
    */
   paneClaimConfirmedAt?: number
+  /** #539 r49 — the autonomous self-fence timer's cancel handle. Cleared by every path that
+   *  stops owning the pane, so a retired session leaves no timer behind. */
+  selfFenceTimer: { cancel: () => void } | undefined
   private readonly incarnation: string = randomBytes(4).toString('hex')
 
   /** Mint this incarnation's next turn-id as `<incarnation>:<seq>` — globally
@@ -320,7 +323,30 @@ export class ReplSession {
     this.channelBound = true
   }
 
+  /**
+   * #539 r49 — THIS SESSION HAS BEEN FENCED: it no longer owns its pane.
+   *
+   * Set by `fenceLostSession`, and consulted on the INBOUND path as well as the outbound
+   * one. Fencing detaches the wrapper, which stops this gateway reading the pane or typing
+   * into it — but a reply already in flight arrives over the sink, not over the pane, and
+   * the sink authorises on the credential alone. A fenced session accepting that reply would
+   * complete a turn using output produced on a pane another gateway now owns.
+   */
+  fenced = false
+
   onReply(text: string, turnId?: string): void {
+    // FENCED SESSIONS ACCEPT NOTHING (r49). This is round forty-seven's "claim before you are
+    // capable" applied to the inbound direction: capability is not only what this wrapper can
+    // WRITE to the pane, it is also what it will ACT on from it. The self-fencing timer closes
+    // the window in which this can happen; this check is what makes the remainder harmless
+    // rather than merely unlikely.
+    if (this.fenced) {
+      process.stderr.write(
+        `[repl-sink] dropped reply for a FENCED session=${this.sessionId.slice(0, 8)}: this gateway no ` +
+          'longer owns that pane, so the reply belongs to whoever does\n',
+      )
+      return
+    }
     const t = this.activeTurn
     // Accept a reply ONLY if its turn-id correlates to the CURRENT turn (Argus
     // r5 / r6 / Codex GPT-5 BLOCKER — see `ActiveTurn.turnId`). The

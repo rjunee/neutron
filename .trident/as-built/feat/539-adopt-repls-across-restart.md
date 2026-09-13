@@ -2108,6 +2108,13 @@ gateway whose tick loop has died renews nothing, and a deadline evaluated only t
 let it serve past the moment another gateway may take the row. One timestamp comparison per
 turn, and it reads nothing but this session's own last confirmation.
 
+> **AND THAT WAS NOT ENOUGH, which round forty-nine found and this paragraph used to deny.**
+> Both of those evaluations are things the losing gateway has STOPPED DOING — a stalled tick
+> loop renews nothing and a session mid-turn receives no new turn — so a gateway in exactly
+> the state the deadline exists for was never fenced at all. **A predicate is not a
+> mechanism.** The deadline is now maintained by an autonomous timer (r49); this section is
+> left standing, with its overclaim marked, because the sequence is the record.
+
 **The consequence to state rather than discover: a substrate that never registers itself for
 supervision self-fences.** The claim is taken by the adoption or the spawn; it is RENEWED by
 the supervision tick, and the tick only visits keys whose owning substrate registered
@@ -2366,6 +2373,46 @@ could not get the lock" because r15 built that distinction and three facts still
 sentences. Routing the throw through the report rather than through an exception is what stops
 it being swallowed further out; keeping its own branch is what stops it being flattened.
 
+### Round forty-nine: a predicate is not a mechanism
+
+Round forty-four specified the CONDITION — fence when the last confirmed renewal is older than
+the takeover window — and did not say **what evaluates it**. It was evaluated in exactly two
+places: when a new turn enters `beginBootAdoption`, and when a watchdog renewal runs. **Both
+are things the losing gateway has stopped doing**, which is precisely the circumstance the
+deadline exists for. A gateway in a long turn whose tick loop had stalled, with no next turn
+arriving, was **never fenced**: it stayed attached and sink-registered while another gateway
+took the pane, and could still complete its turn on a reply produced there.
+
+> **The standing rule, second half.** After round forty-two: *a new outcome must join an
+> existing vocabulary*. Now: **a new invariant must name the mechanism that maintains it
+> continuously.** A condition checked only by callers that a failing party has stopped running
+> is not an invariant, it is a hope.
+
+**An autonomous timer.** Armed when the claim is confirmed, re-armed on each CONFIRMED renewal
+(never on an attempted one — that is round forty-four's lesson and M141 pins it), fired at the
+deadline regardless of ticks, turns or probes. It depends on no path a stalled gateway would
+also have stopped travelling, which is the whole property and is said at the site. Unref'd, so
+it can never be the reason a process stays alive.
+
+**Evaluated AS OF its own deadline.** The firing passes the instant it was armed for rather
+than reading the clock again — the timer IS the deadline — while the predicate still decides,
+so a stale firing (a factory that did not cancel, a process resumed from suspend) finds the
+current confirmation and leaves a renewed session alone. The control fires a SUPERSEDED timer
+deliberately and asserts nothing happens.
+
+**And the inbound direction, which detaching does not cover.** A reply already in flight
+arrives over the SINK, not over the pane, and the sink authorises on the credential alone —
+which an adopted session restores rather than mints, so the loser's credential is still valid.
+`ReplSession.fenced` makes the reply path refuse. That is round forty-seven's "claim before you
+are capable" applied to what a wrapper will ACT ON, not only to what it can write: it turns the
+timer's residual race from unlikely into harmless.
+
+**The documents said the stronger thing before it was true.** The spec item claimed the holder
+stops "at least a tick before" takeover and explicitly covered a dead tick loop; the as-built
+repeated it unconditionally. Both were false for the no-tick-no-turn case. The spec item now
+states the mechanism, and the round-forty-four section keeps its text with the overclaim marked
+— the sequence of what was believed when is the record's job.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2376,7 +2423,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven and M137–M139 in round forty-eight, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight and M140–M142 in round forty-nine, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2546,6 +2593,9 @@ count from the rows below rather than trusting this sentence.
 | M137 | a `skipSave` decline counts as success again — the r48 defect | `pane-handle-persistence.test.ts` (1 — the EISDIR case) |
 | M138 | the throw propagates again, to be swallowed by the caller | `pane-handle-persistence.test.ts` (1 — the thrown-save case) |
 | M139 | a healthy write reports a PREVENTING decline | `pane-handle-persistence.test.ts` (4+ — the control and most of the file) |
+| M140 | the timer is removed, leaving only the call-site checks — the r49 defect | `adoption-claim-is-a-compare-and-set.test.ts` (2) |
+| M141 | the timer re-arms on an ATTEMPTED renewal rather than a confirmed one | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M142 | a fenced session accepts a reply again | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

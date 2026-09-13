@@ -1391,6 +1391,72 @@ export function fencedReasonFor(sessionKey: string): string | undefined {
 }
 
 /**
+ * THE TIMER THAT MAKES THE SELF-FENCING DEADLINE AN INVARIANT RATHER THAN A HOPE
+ * (#539, Argus r49).
+ *
+ * ROUND FORTY-FOUR SPECIFIED THE CONDITION AND NOT THE MECHANISM. The deadline was evaluated
+ * in exactly two places: when a new turn enters `beginBootAdoption`, and when a watchdog
+ * renewal runs. **Both are things the losing gateway has stopped doing** — which is the one
+ * circumstance the deadline exists for. A gateway in a long turn whose tick loop has stalled
+ * and whose next turn never arrives was never fenced at all: it stayed attached and
+ * sink-registered while another gateway took the pane.
+ *
+ * So the fence is armed as a TIMER when the claim is confirmed, re-armed on each CONFIRMED
+ * renewal, and fires on its own. **It must not depend on any path a stalled gateway would
+ * also have stopped travelling** — no tick, no turn, no probe, no pool lookup. That is the
+ * whole property, and it is why this is a timer rather than one more check at one more
+ * caller.
+ *
+ * RE-ARMED ON CONFIRMED, NOT ON ATTEMPTED, for round forty-four's reason: an attempt that
+ * failed tells this gateway nothing about who owns the pane, so treating it as evidence would
+ * reinstate exactly the defect the deadline exists to close.
+ */
+type FenceTimerFactory = (fire: () => void, ms: number) => { cancel: () => void }
+
+const defaultFenceTimerFactory: FenceTimerFactory = (fire, ms) => {
+  const handle = setTimeout(fire, ms)
+  // UNREF'd: this timer must never be the reason a process stays alive. It exists to stop a
+  // gateway serving, and a gateway that is otherwise finished has nothing left to stop.
+  ;(handle as unknown as { unref?: () => void }).unref?.()
+  return { cancel: () => clearTimeout(handle) }
+}
+
+let fenceTimerFactory: FenceTimerFactory = defaultFenceTimerFactory
+
+/** Test-only seam, in the idiom of `setFlockImplForTests`: a suite cannot wait out a
+ *  seventy-five-second deadline, and shortening the constant in a case would test a
+ *  different relationship than the one production runs. */
+export function setFenceTimerFactoryForTests(f: FenceTimerFactory | undefined): void {
+  fenceTimerFactory = f ?? defaultFenceTimerFactory
+}
+
+/**
+ * Arm (or re-arm) this session's autonomous fence. Called at the claim and on every confirmed
+ * renewal; cancelled by every path that stops owning the pane.
+ */
+export function armSelfFence(
+  registryPath: string,
+  sessionKey: string,
+  session: ReplSession,
+  log: (msg: string) => void = defaultLog,
+): void {
+  session.selfFenceTimer?.cancel()
+  // THE INSTANT THIS TIMER IS FOR, captured at arm time. A firing is evaluated AS OF its own
+  // deadline rather than against the wall clock: the timer IS the deadline, and reading the
+  // clock again would only re-derive what the delay already encoded.
+  const armedFor = (session.paneClaimConfirmedAt ?? Date.now()) + SELF_FENCE_AFTER_MS
+  session.selfFenceTimer = fenceTimerFactory(() => {
+    session.selfFenceTimer = undefined
+    // THE PREDICATE STILL DECIDES. A re-arm cancels this timer, so a stale firing should be
+    // impossible — and if one arrives anyway (a factory that does not cancel, a suspended
+    // process), the deadline is re-checked against the CURRENT confirmation and a session that
+    // has since renewed is left alone. Belt and braces, cheaply.
+    fenceIfPastSelfDeadline(sessionKey, session, armedFor, 'no-renewal-observed-on-this-turn', log)
+    void registryPath
+  }, SELF_FENCE_AFTER_MS)
+}
+
+/**
  * STOP SERVING A PANE THIS GATEWAY NO LONGER OWNS — and do not close it (#539, Argus r39).
  *
  * THE DEFECT: detecting `not-ours` and only logging. The renewal correctly discovered that
@@ -1417,6 +1483,13 @@ export function fenceLostSession(
   reason: string,
   log: (msg: string) => void = defaultLog,
 ): void {
+  // THE TIMER IS PART OF OWNING, so it goes with everything else. A fenced session that left
+  // one behind would fence itself a second time on a pane it had already let go.
+  session.selfFenceTimer?.cancel()
+  session.selfFenceTimer = undefined
+  // AND THE INBOUND DIRECTION (r49): a reply already in flight arrives over the sink, not over
+  // the pane, so detaching does not stop it. See `ReplSession.fenced`.
+  session.fenced = true
   // REFUSE FUTURE TURNS FIRST. Everything below is teardown; if any of it threw, a key left
   // unfenced would keep serving a pane somebody else owns, which is the state being escaped.
   fencedKeys.set(sessionKey, reason)
@@ -1510,8 +1583,10 @@ export function renewClaimForSession(
   const outcome = renewAdoptionClaim(registryPath, sessionKey, claimedBy, now)
   if (outcome === 'renewed') {
     // CONFIRMED. This is the only thing that moves the self-fencing deadline, because it is
-    // the only outcome that proves this gateway still owns the pane.
+    // the only outcome that proves this gateway still owns the pane — and the only thing that
+    // re-arms the autonomous timer, for the same reason.
     session.paneClaimConfirmedAt = now
+    armSelfFence(registryPath, sessionKey, session, log)
     return
   }
   if (outcome === 'not-ours') {
@@ -2582,6 +2657,9 @@ async function adoptRow(
       // CONFIRMED AT THE CLAIM. The compare-and-set above succeeded, which is the same
       // evidence a renewal produces — so the self-fencing deadline runs from here.
       session.paneClaimConfirmedAt = claimTakenAt
+      // AND THE AUTONOMOUS FENCE IS ARMED FROM THE SAME INSTANT (r49) — not from the first
+      // tick, which a stalled gateway never reaches.
+      if (registryPath !== undefined) armSelfFence(registryPath, sessionKey, session, log)
       // AND ONLY NOW IS THIS WRAPPER ALLOWED TO SEE OR TOUCH THE PANE (Argus r47). A
       // watcher that will not start still must not strand a live child, so the same unwind
       // the pre-claim wiring had applies — it just runs on the other side of the claim now.

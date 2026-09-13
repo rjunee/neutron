@@ -56,7 +56,7 @@ import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, 
 import { wireChildExit } from './child-exit-wiring.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import { registerReplDetectors } from './repl-detectors.ts'
-import { adoptionPermitsSpawn, beginBootAdoption } from './boot-adoption.ts'
+import { adoptionPermitsSpawn, armSelfFence, beginBootAdoption } from './boot-adoption.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 async function spawnSession(
@@ -771,6 +771,12 @@ async function spawnSession(
         // CONFIRMED, on the same evidence a renewal produces: the compare-and-set landed.
         if (ownershipRecorded === 'recorded' && child.paneHandle !== undefined) {
           session.paneClaimConfirmedAt = paneClaimedAt
+          // ARMED FROM THE SAME INSTANT (r49). A spawned session owns its pane exactly as an
+          // adopted one does, so it self-fences on the same deadline and by the same
+          // mechanism — one that does not depend on a tick this gateway may have stopped.
+          if (options.replRegistryPath !== undefined) {
+            armSelfFence(options.replRegistryPath, sessionKey, session)
+          }
         }
         // LOST THE CONTEST. Another gateway owns this row and is serving it, so this child —
         // spawned moments ago, holding its own handle, serving nobody — is ENDED. It cannot be

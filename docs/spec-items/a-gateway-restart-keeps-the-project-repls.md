@@ -357,13 +357,20 @@ it must not swallow.
       has gone `SELF_FENCE_AFTER_MS` without a CONFIRMED renewal, whatever the reason, and
       that constant is DERIVED from the takeover window by subtracting one renewal interval —
       both measured from the same instant, so the holder stops at least a tick before any
-      other gateway may take over. Checked on the turn path as well as the tick, since a
-      gateway whose tick loop has died renews nothing.
+      other gateway may take over. **Enforced by an autonomous timer** armed when the claim is
+      confirmed and re-armed on each CONFIRMED renewal, so it fires without a tick, a turn or a
+      probe — the earlier version evaluated the deadline only when a new turn arrived or a
+      watchdog renewal ran, and both are things a stalled gateway has stopped doing, which is
+      the one circumstance the deadline exists for. The fenced session also REFUSES an
+      outstanding reply: a reply in flight arrives over the sink rather than over the pane, so
+      detaching alone would not stop it.
       *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` — the first case
       has NO second gateway in it at all (if safety needed one, the case could not be
       written): renewals fail at the real flock, the deadline passes, and the session delivers
       no screen, sends no key, loses its pool entry and is refused a turn, with the pane left
-      alive. Then the same with a second gateway taking over afterwards, asserting it serves
+      alive. A further case runs with an ACTIVE turn, the tick loop stopped and no new turn
+      arriving — nothing that could evaluate the deadline on the session's behalf — and asserts
+      it fences itself anyway and refuses the outstanding reply. Then the same with a second gateway taking over afterwards, asserting it serves
       and the old one does not; and a control where renewals keep confirming and the session
       serves indefinitely.
 - [ ] **THE GATEWAY THAT LOSES THE CLAIM STOPS SERVING THE PANE, AND DOES NOT CLOSE IT.**
