@@ -536,6 +536,66 @@ describe('a dead pid is not proof the transcript is free', () => {
   })
 })
 
+describe('a clear only ever touches the row it decided about', () => {
+  /**
+   * THE RACE, CONSTRUCTED RATHER THAN ARGUED. The pass reads the row, then makes an
+   * async call, and ANOTHER incarnation can complete a whole spawn in that window —
+   * writing a new pane and a new generation into the same key. A clear that re-reads
+   * the row under the lock is atomic with respect to the ROW and not with respect to
+   * the DECISION, so it would strip the newer child's handle: that child is then
+   * unfindable, the next boot cannot adopt it, and the shutdown gate kills it. The
+   * continuity this item exists to provide, destroyed by its own cleanup path.
+   *
+   * The inspection is HELD OPEN so the replacement lands inside the window. Without
+   * the hold there is no window and the case proves nothing.
+   */
+  it('does NOT strip the handle when the row moved under it', async () => {
+    const f = fixture()
+    // The pane this pass will decide about is gone...
+    f.host.panes.delete(HANDLE)
+    const release = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })
+
+    // ...and while the inspection is in flight, another incarnation finishes a spawn
+    // and writes ITS child into the same key.
+    await Bun.sleep(20)
+    writeRegistry(f.registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 5150 })
+    release()
+
+    const outcome = await pass
+    expect(outcome.kind).toBe('handle-cleared')
+    // THE NEWER ROW IS INTACT — handle and generation both.
+    const row = readRow(f.registryPath)
+    expect(row?.pane_handle).toBe('w9:p-NEWER')
+    expect(row?.child_generation).toBe('gen-newer')
+    expect(row?.pid).toBe(5150)
+  })
+
+  it('DOES strip it when the row is still the one it decided about', async () => {
+    // The positive control: without it, a clear that never clears anything passes the
+    // case above and silently stops reaping stale handles.
+    const f = fixture()
+    f.host.panes.delete(HANDLE)
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('handle-cleared')
+    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+
+  it('does not write an adopted pid onto a row that moved under it either', async () => {
+    // The same exposure on the other write this pass makes.
+    const f = fixture({ record: { pid: 1 } })
+    const release = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })
+    await Bun.sleep(20)
+    writeRegistry(f.registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 777 })
+    release()
+    await pass
+    const row = readRow(f.registryPath)
+    expect(row?.pid).toBe(777)
+    expect(row?.pane_handle).toBe('w9:p-NEWER')
+  })
+})
+
 describe('the pane is re-identified at the moment of the close', () => {
   it('does NOT close a pane whose identity changed after the inspection', async () => {
     // The window is real: between the inspection that decided and the close that acts

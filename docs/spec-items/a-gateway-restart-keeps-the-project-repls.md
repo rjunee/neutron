@@ -122,6 +122,14 @@ it must not swallow.
       *Verified by* `__tests__/boot-adoption.test.ts` ("does NOT close a pane whose
       identity changed after the inspection", plus its vanished and positive-control
       siblings).
+- [ ] **A WRITE ONLY EVER TOUCHES THE ROW IT DECIDED ABOUT.** Clearing a handle, and
+      correcting an adopted pid, are compare-and-set on the (handle, generation) pair
+      the pass inspected. A row another incarnation replaced mid-pass is left exactly as
+      it is — stripping ITS handle would leave a live child unfindable, so the next boot
+      could not adopt it and the shutdown gate would kill it.
+      *Verified by* `__tests__/boot-adoption.test.ts` ("does NOT strip the handle when
+      the row moved under it", its pid sibling, and the positive control), with the
+      inspection held open so the race is actually constructed.
 - [ ] **AN UNVERIFIED PANE IS NEVER CLOSED.** A pane running something else, or one the
       host could not speak for and whose pid the process table does not confirm, is left
       alone and reported undecided — the recycled-identifier rule, applied to a pane id.

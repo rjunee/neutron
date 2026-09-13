@@ -59,12 +59,33 @@ export class FakeAdoptableHost implements AdoptableHost {
   /** Held until released, so a test can drive the in-flight window. */
   private attachHold: Promise<void> | undefined
   private releaseAttach: (() => void) | undefined
+  /**
+   * The same lever on `inspectHandle`, and it exists for the race the pass is most
+   * exposed to: the DECISION is taken from a registry snapshot read before this call,
+   * and another incarnation can write a whole new child into that row while it is in
+   * flight. A fixture that answers instantly collapses that window to nothing and the
+   * case cannot be constructed at all — which is how a "we checked" test proves
+   * nothing.
+   */
+  private inspectHold: Promise<void> | undefined
+  private releaseInspect: (() => void) | undefined
 
   holdAttach(): () => void {
     this.attachHold = new Promise<void>((res) => {
       this.releaseAttach = res
     })
     return () => this.releaseAttach?.()
+  }
+
+  /** Hold the NEXT (and every) `inspectHandle` until the returned function is called. */
+  holdInspect(): () => void {
+    this.inspectHold = new Promise<void>((res) => {
+      this.releaseInspect = res
+    })
+    return () => {
+      this.inspectHold = undefined
+      this.releaseInspect?.()
+    }
   }
 
   addPane(handle: string, pane: FakePane): void {
@@ -77,6 +98,7 @@ export class FakeAdoptableHost implements AdoptableHost {
 
   async inspectHandle(handle: string): Promise<HandleInspection> {
     this.inspections.push(handle)
+    if (this.inspectHold !== undefined) await this.inspectHold
     const queued = this.inspectQueue
     if (queued !== undefined && queued.length > 0) {
       // The last entry repeats: a case scripts the CHANGE it cares about and does not

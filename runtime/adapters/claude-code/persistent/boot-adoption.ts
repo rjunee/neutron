@@ -76,7 +76,7 @@ import {
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
 import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
-import { getRecord, loadRegistry, patchRecord, withRegistry, type ReplRegistryRecord } from './repl-registry.ts'
+import { getRecord, loadRegistry, withRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
@@ -432,8 +432,17 @@ async function reconcileRow(
     switch (verdict.kind) {
       case 'gone': {
         // The handle is stale. Clear it so the next boot does not ask again — and so
-        // nothing later mistakes it for evidence that a pane exists.
-        if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+        // nothing later mistakes it for evidence that a pane exists. COMPARED, not
+        // assumed: this decision came from a snapshot taken before the inspection, and
+        // another incarnation can have written a new pane into this row since.
+        if (registryPath !== undefined) {
+          clearPaneHandleIfUnchanged(
+            registryPath,
+            sessionKey,
+            { handle, generation: record.child_generation },
+            deps,
+          )
+        }
         return { kind: 'handle-cleared', sessionKey }
       }
       case 'leave-not-ours':
@@ -522,6 +531,11 @@ async function pidFallback(
         ),
     } satisfies OrphanAdoptionDeps)
   const log = deps.log ?? defaultLog
+  // THE PAIR THIS FALLBACK DECIDED ABOUT, captured from the snapshot it was handed so
+  // a clear below can compare against it. `pane_handle` is what put this row on this
+  // path at all; if it is somehow absent, the compare-and-clear will simply find the
+  // row moved and touch nothing.
+  const decidedHandle = record.pane_handle ?? ''
   // IDENTIFY FIRST, ACT SECOND. `identifyOrphanPid` has no side effect, so the branch
   // below decides whether anything is ended — the kill is not smuggled inside the
   // question.
@@ -554,7 +568,14 @@ async function pidFallback(
   switch (verdict) {
     case 'killed':
       // We ended it. Nothing of ours runs under that handle now.
-      if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+      if (registryPath !== undefined) {
+        clearPaneHandleIfUnchanged(
+          registryPath,
+          sessionKey,
+          { handle: decidedHandle, generation: record.child_generation },
+          deps,
+        )
+      }
       return { kind: 'closed-by-pid', sessionKey }
     case 'dead':
     case 'not-ours': {
@@ -581,7 +602,14 @@ async function pidFallback(
           `key=${sessionKey.slice(0, 32)}: ${why}; the recorded pid is '${verdict}' AND no live process is a ` +
             `claude on session ${record.sessionId.slice(0, 8)}, so the transcript has no owner and the handle is stale`,
         )
-        if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+        if (registryPath !== undefined) {
+          clearPaneHandleIfUnchanged(
+            registryPath,
+            sessionKey,
+            { handle: decidedHandle, generation: record.child_generation },
+            deps,
+          )
+        }
         return { kind: 'handle-cleared', sessionKey }
       }
       if (scan.kind === 'owners') {
@@ -657,7 +685,7 @@ async function closeAndClear(
   if (recheck.kind === 'gone') {
     // It closed itself between the two looks. The post-condition the caller wanted
     // already holds, and the handle is stale.
-    if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+    if (registryPath !== undefined) clearPaneHandleIfUnchanged(registryPath, sessionKey, { handle, generation: record.child_generation }, deps)
     return { kind: 'closed' }
   }
   if (recheck.kind === 'unavailable') {
@@ -688,7 +716,7 @@ async function closeAndClear(
     log(`pane ${handle} could NOT be closed (${errorText(e)}) — it is still running`)
     return { kind: 'failed', reason: 'the close FAILED' }
   }
-  if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+  if (registryPath !== undefined) clearPaneHandleIfUnchanged(registryPath, sessionKey, { handle, generation: record.child_generation }, deps)
   return { kind: 'closed' }
 }
 
@@ -726,34 +754,89 @@ function errorText(e: unknown): string {
  * Drop `pane_handle` from a row, and CHECK WHAT IS ON DISK AFTERWARDS rather than
  * assuming the write took.
  *
- * `patchRecord` is a no-op when the row has gone (a concurrent respawn removed it),
- * and its own write can be skipped when the registry is unreadable. Either way the
- * caller must not go on believing it cleared something: a stale handle left on disk
- * sends the NEXT boot to a pane id that may by then name someone else's pane.
+ * The write is a no-op when the row has gone (a concurrent respawn removed it), and
+ * can be skipped entirely when the registry is unreadable. Either way the caller must
+ * not go on believing it cleared something: a stale handle left on disk sends the NEXT
+ * boot to a pane id that may by then name someone else's pane.
  */
-function clearPaneHandle(registryPath: string, sessionKey: string, deps: BootAdoptionDeps): void {
+/** What a compare-and-clear did. `row-moved` is the one that matters: the row is no
+ *  longer the one the caller decided about, so nothing was touched. */
+type ClearOutcome = 'cleared' | 'row-moved' | 'absent' | 'error'
+
+/**
+ * Strip `pane_handle` — but ONLY from the row the caller actually inspected.
+ *
+ * THE LOCK MAKES THE WRITE ATOMIC WITH RESPECT TO THE ROW; IT DOES NOT MAKE IT ATOMIC
+ * WITH RESPECT TO THE DECISION. Every caller here decided from a snapshot taken before
+ * a chain of `await`s — an `inspectHandle` round trip, a `/health` probe, a close —
+ * and another gateway can complete a whole spawn in that window. An earlier revision
+ * re-read the row under the lock (correctly) and then stripped the handle from
+ * WHATEVER row now occupied the key:
+ *
+ *   1. A reads `(H1, G1)` and starts inspecting `H1`.
+ *   2. B finishes a spawn and writes `(H2, G2)`.
+ *   3. A's inspection answers `gone` — true of `H1`, and irrelevant to `H2`.
+ *   4. A strips `H2`.
+ *
+ * B's live child is then unfindable: no durable handle, so the next boot cannot adopt
+ * it and the shutdown gate kills it. The continuity this whole item exists to provide,
+ * destroyed by its own cleanup path — and silently, because clearing a handle looks
+ * like tidying up.
+ *
+ * So the write is a COMPARE-AND-CLEAR against the pair the caller inspected. A row that
+ * has moved is left exactly as it is and said out loud; the handle it now carries
+ * belongs to a child somebody else is responsible for.
+ *
+ * The generation is compared too, not just the handle: a respawn can reuse a pane id
+ * the server reissued, and a handle alone cannot tell those apart.
+ */
+function clearPaneHandleIfUnchanged(
+  registryPath: string,
+  sessionKey: string,
+  expected: { readonly handle: string; readonly generation: string | undefined },
+  deps: BootAdoptionDeps,
+): ClearOutcome {
   const log = deps.log ?? defaultLog
   try {
-    // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
-    // whose `pane_handle` key is present-but-undefined would serialise to a key the
-    // next reader has to special-case. Absent is the only representation of absent.
-    withRegistry(registryPath, (registry) => {
+    const outcome = withRegistry(registryPath, (registry) => {
       const prev = registry[sessionKey]
-      if (prev !== undefined) {
-        const { pane_handle: _gone, ...rest } = prev
-        registry[sessionKey] = rest
+      if (prev === undefined) return { registry, result: 'absent' as ClearOutcome }
+      if (prev.pane_handle !== expected.handle || prev.child_generation !== expected.generation) {
+        return { registry, result: 'row-moved' as ClearOutcome }
       }
-      return { registry, result: undefined }
+      // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
+      // whose `pane_handle` key is present-but-undefined would serialise to a key the
+      // next reader has to special-case. Absent is the only representation of absent.
+      const { pane_handle: _gone, ...rest } = prev
+      registry[sessionKey] = rest
+      return { registry, result: 'cleared' as ClearOutcome }
     })
-    const after = getRecord(registryPath, sessionKey)
-    if (after !== undefined && after.pane_handle !== undefined) {
+    if (outcome === 'row-moved') {
+      const now = getRecord(registryPath, sessionKey)
       log(
-        `row ${sessionKey.slice(0, 32)} STILL carries pane_handle ${after.pane_handle} after a clear — ` +
-          `the next boot will re-inspect it`,
+        `row ${sessionKey.slice(0, 32)} MOVED while this pass was deciding — it now names pane ` +
+          `${now?.pane_handle ?? '<none>'} / generation ${(now?.child_generation ?? '<none>').slice(0, 8)}, not ` +
+          `${expected.handle} / ${(expected.generation ?? '<none>').slice(0, 8)}. Left untouched: that handle ` +
+          'belongs to a child another incarnation is responsible for.',
       )
+      return outcome
     }
+    if (outcome === 'cleared') {
+      // WHAT IS ON DISK, not what was asked for — the read-back convention this tree
+      // keeps, because a write that silently did nothing looks exactly like one that
+      // worked.
+      const after = getRecord(registryPath, sessionKey)
+      if (after !== undefined && after.pane_handle !== undefined) {
+        log(
+          `row ${sessionKey.slice(0, 32)} STILL carries pane_handle ${after.pane_handle} after a clear — ` +
+            `the next boot will re-inspect it`,
+        )
+      }
+    }
+    return outcome
   } catch (e) {
-    log(`could not clear pane_handle for ${sessionKey.slice(0, 32)}: ${e instanceof Error ? e.message : String(e)}`)
+    log(`could not clear pane_handle for ${sessionKey.slice(0, 32)}: ${errorText(e)}`)
+    return 'error'
   }
 }
 
@@ -1046,18 +1129,42 @@ async function adoptRow(
   // one field adoption can legitimately correct — the child is the same process, so a
   // disagreement means the row was stale, and a stale pid is what every liveness probe
   // above here uses.
+  //
+  // AND ONLY ONTO THE ROW THIS PASS ADOPTED FROM. Same hazard as the handle clear: the
+  // decision came from a snapshot taken before the inspection, the health probe and the
+  // attach, and another incarnation can have written a whole new child into this key
+  // meanwhile. Writing our pid over THAT row would point every liveness probe at a
+  // process belonging to a different child.
   if (registryPath !== undefined && record.pid !== child.pid) {
     try {
-      patchRecord(registryPath, sessionKey, { pid: child.pid })
-      const after = getRecord(registryPath, sessionKey)
-      if (after?.pid !== child.pid) {
+      const wrote = withRegistry(registryPath, (registry) => {
+        const prev = registry[sessionKey]
+        if (
+          prev === undefined ||
+          prev.pane_handle !== handle ||
+          prev.child_generation !== generation
+        ) {
+          return { registry, result: false }
+        }
+        registry[sessionKey] = { ...prev, pid: child.pid }
+        return { registry, result: true }
+      })
+      if (!wrote) {
         log(
-          `row ${sessionKey.slice(0, 32)} still records pid ${String(after?.pid)} after adopting pid ${child.pid} — ` +
-            'liveness probes will ask about the wrong process',
+          `row ${sessionKey.slice(0, 32)} moved while this adoption was running — NOT writing pid ${child.pid} ` +
+            'over it; the row now describes a child this pass did not adopt',
         )
+      } else {
+        const after = getRecord(registryPath, sessionKey)
+        if (after?.pid !== child.pid) {
+          log(
+            `row ${sessionKey.slice(0, 32)} still records pid ${String(after?.pid)} after adopting pid ${child.pid} — ` +
+              'liveness probes will ask about the wrong process',
+          )
+        }
       }
     } catch (e) {
-      log(`could not update pid for ${sessionKey.slice(0, 32)}: ${e instanceof Error ? e.message : String(e)}`)
+      log(`could not update pid for ${sessionKey.slice(0, 32)}: ${errorText(e)}`)
     }
   }
   return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }

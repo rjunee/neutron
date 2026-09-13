@@ -137,9 +137,9 @@ and reverted mechanically, with the tree verified clean afterwards.
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number
 written once and then never re-derived, in the one section whose whole purpose is
-auditability. It is stated here as a property of the list below rather than as a
-remembered figure, and the last full re-run against the head was 24/24 at the time,
-with M25–M29 verified individually as they were added.
+auditability. The last full harness run covered **M1–M29 in one pass: 29/29 reddened
+their target**, and M30–M31 were verified individually as they were added. Re-derive it
+from the rows below rather than trusting this sentence.
 
 | # | Mutation | Reddens |
 |---|---|---|
@@ -172,6 +172,8 @@ with M25–M29 verified individually as they were added.
 | M27 | the adopt path attaches a DIFFERENT pane | `adopted-repl-serves-a-turn.test.ts` (2) |
 | M28 | a dead recorded pid alone clears the handle | `boot-adoption.test.ts` (2) |
 | M29 | no identity re-check immediately before the close | `boot-adoption.test.ts` (2) |
+| M30 | the handle clear does not compare the row it decided about | `boot-adoption.test.ts` (1) |
+| M31 | the adopted-pid write does not compare it either | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -287,6 +289,34 @@ A check is not a lock and the record does not claim one: what is removed is the 
 predictable window, not the instant between the reply and the call. The fake host grew a
 scripted inspection queue for this — a fixture that cannot change cannot test that two
 reads agree.
+
+### Round four: the lock was atomic with respect to the row, not to the decision
+
+`clearPaneHandle` re-read the row inside `withRegistry` — correctly — and then stripped
+`pane_handle` from whatever row now occupied that key:
+
+1. gateway A reads `(H1, G1)` and starts inspecting `H1`;
+2. gateway B completes a spawn and writes `(H2, G2)`;
+3. A's inspection answers `gone`, which is true of `H1` and irrelevant to `H2`;
+4. A strips `H2`.
+
+B's live child is then unfindable — no durable handle, so the next boot cannot adopt it
+and the shutdown gate kills it. **The continuity this item exists to provide, destroyed
+by its own cleanup path**, and silently, because clearing a handle looks like tidying
+up. The lock made the write atomic with respect to the ROW; the DECISION came from a
+snapshot taken before a chain of awaits, and nothing compared the two.
+
+Every write this pass makes is now a COMPARE-AND-SET on the pair it decided about — the
+handle AND the generation, because a respawn can reuse a pane id the server reissued and
+a handle alone cannot tell those apart. A row that moved is left exactly as it is and
+said out loud. That covers the four exposures: the `gone` clear, the post-close clear,
+the pid-fallback clear, and the adopted-pid update.
+
+The race is CONSTRUCTED in the test rather than argued: the fixture's `inspectHandle`
+is held open, the row is replaced inside that window, and the assertion is that the
+newer row is intact — handle, generation and pid. Without the hold there is no window
+and the case proves nothing, which is the third time on this branch that a fixture
+unable to produce the input under test would have made a guard look tested.
 
 ### The protocol gate covers the adoption surface, not just the spawn
 
