@@ -1,7 +1,7 @@
 ---
 title: Emit a terminal cause on every terminal path, and report it
 group: trident
-status: done
+status: open
 priority: P0
 cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
@@ -49,6 +49,12 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > review-verdict exit itself. `.../inner-workflow-terminal-cause.test.ts` enumerates
 > them from source with a positive control, so a thirteenth cannot be added silently
 > — which is the drift this item's HOW IT GOT THIS WAY paragraph describes.
+>
+> **`status` STAYS `open` UNTIL THE MERGE SHA EXISTS.** The standard says nothing is
+> closed without an as-built record AND a merge SHA (§5 step 3). The record ships in the
+> PR that earns it; the SHA does not exist until that PR lands, and marking this done
+> beforehand is an assertion ahead of its evidence — the same category as every other
+> claim in this item. The promotion flips it.
 
 **A terminal `failure_reason` must name what actually happened — today it always says "exhausted 10
 rounds"** (owner-asked 2026-08-13: *"why does the failure reason keep saying the old 10 rounds

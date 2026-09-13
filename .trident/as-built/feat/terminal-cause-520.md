@@ -92,10 +92,18 @@ The spec item's own HOW IT GOT THIS WAY paragraph is the reason a prose rule wou
 do: the catch-all sentence was TRUE when it was written, and every early exit added since
 landed in it without anyone adding a terminal branch — one plausible commit at a time.
 
-1. **A source-level refusal.** `inner-workflow-terminal-cause.test.ts` scans the shipped
-   `.mjs` for every `await writeTerminalResult(<ident>)`, resolves the identifier to its
-   object literal (following the one composer indirection), and fails naming any site that
-   hands over a result with no `terminalCauseKind`.
+1. **A source-level refusal.** `inner-workflow-terminal-cause.test.ts` parses the shipped
+   `.mjs` with the TypeScript compiler API (the file's top-level `return` is a *semantic*
+   error, so the parser yields a complete tree), finds every call whose callee is
+   `writeTerminalResult` — **matched on the callee alone, whatever the argument** — then
+   CLASSIFIES the argument. Three shapes resolve to an object literal: an inline literal,
+   an identifier bound to one, and an identifier bound to a composer whose body returns
+   one. Anything else is `'unresolved'`, which **fails exactly as loudly as a missing
+   property**: the scanner saying it could not tell is a finding about this guard's
+   coverage, not a pass. Presence is an actual `terminalCauseKind` property — a
+   `PropertyAssignment` or shorthand — never a substring of the object's source, and a
+   conditional spread deliberately does not count, because a property that arrives only
+   sometimes is the silence this guard refuses.
 2. **A runtime answer.** `stampTerminalCause` stamps `'unknown'` on a bare result and
    writes the gap to the run log. It does NOT throw: throwing would trade a missing
    sentence for a lost terminal write, and the run would then sit `running` until the
@@ -107,6 +115,28 @@ Every scan in that file carries a POSITIVE CONTROL: the identical scan is re-run
 doctored copy of the same source with the defect reintroduced, and must find it. A
 scanner that silently stopped matching would otherwise read as a clean bill of health,
 which is how eight paths went years without a cause.
+
+**And the controls test the RECOGNISER, not only the resolver — which the first cut did
+not, and that was a blocker.** Its recogniser was a regex that matched only an *identifier*
+argument: `writeTerminalResult({ checkpoint: 'new-exit' })` never became a site at all, the
+count still read 12, and every per-site assertion was silent about it. A thirteenth path
+added the most obvious way anyone would add one was invisible to the whole file. Its
+controls deleted a known property line, which exercises the resolver on sites the
+recogniser had already found; nothing exercised the recogniser. **The sweep had inherited
+its own domain's blind spot** — this file's stated rule is that a site it cannot parse is
+reported and never skipped, and that rule had been applied one level in (at the resolver)
+and not at the entry.
+
+So seven controls now append a real thirteenth call in each named argument shape and
+require the guard to go red on every one, asserting BOTH halves: the site is **seen** (the
+enumeration grows to 13) and it is **refused**. A shape that is seen but silently passes is
+the same defect in a different coat. The shapes are: an inline object literal; an
+identifier bound to a literal; an identifier bound to a composer; an object whose interior
+*comment* mentions the field but which has no such property; an inline conditional spread
+that carries it only sometimes; a shape the scanner does not handle (a conditional
+expression); and no argument at all. The two refusals — `'absent'` and `'unresolved'` —
+both fail the guard but are reported apart, so the next author knows whether to add a stamp
+or to teach the scanner a shape.
 
 ### What the orchestrator does with it
 
@@ -261,6 +291,29 @@ The general lesson is the reason the table is re-run rather than transcribed: a 
 that fails to APPLY is not a passing row, it is a report that the code no longer looks the
 way the mutation assumed — and that is worth reading every time.
 
+### The guard's own mutation table
+
+The scanner is the instrument every "every terminal path" claim in this record rests on, so
+it is mutated too — reintroducing each defect it is written against, including the two the
+first cut actually shipped.
+
+| # | Mutation of the guard | Result |
+|---|---|---|
+| N1 | the recogniser accepts only an identifier argument (**the shipped defect**) | 5 fail |
+| N2 | presence is a substring of the object's source again | 2 fail |
+| N3 | an `'unresolved'` site stops failing — dropped rather than reported | 3 fail |
+| N4 | a conditional spread counts as the property being present | 1 fail |
+| N5 | composer following removed | 12 fail |
+| N6 | a shorthand property no longer counts | 12 fail |
+
+**N2 and N4 survived their first run, and the fix was to the CONTROLS, not the scanner.**
+The comment-trap case put its comment *outside* the object literal, where a raw-source
+presence check would never have seen it — so it could not reproduce the defect it existed
+to reproduce. The spread case bound its object to a name first, so the field never appeared
+in the spread's own text. Both are now spelled the way this file really writes them:
+comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
+is not a control, and the only way to find out is to break the thing it guards.
+
 ### Verified by running, not by reading
 
 - `bun test trident/` — 4178 pass, 0 fail, 119 files (4122 before this change).
@@ -269,7 +322,12 @@ way the mutation assumed — and that is worth reading every time.
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, each applied to the shipped source and reverted.
+- The seventeen mutations above, plus six against the guard itself, each applied to the
+  shipped source and reverted.
+- An end-to-end pass through the shipped modules (`parseInnerResult` →
+  `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct
+  reasons, four distinct summaries, and `'unknown'` reproducing the pre-change sentence
+  exactly.
 
 ### What was checked against `main` and found to have moved
 

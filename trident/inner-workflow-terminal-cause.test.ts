@@ -25,9 +25,15 @@
  * fine"; it is "a thirteenth cannot be added silently."
  */
 import { describe, expect, test } from 'bun:test'
+import ts from 'typescript'
 import { TERMINAL_CAUSES, type TerminalCause } from './terminal-cause.ts'
 
 const SRC = await Bun.file(new URL('./inner-workflow.mjs', import.meta.url)).text()
+/** Where the shipped file ends. Anything the controls below append starts after this, so
+ *  the thirteenth site is identifiable by LINE without needing a marker inside its own
+ *  source — a marker would have to be something the scanner reads, and the scanner is the
+ *  thing under test. */
+const SRC_LINES = SRC.split('\n').length
 
 /** Brace-match one function or object out of the workflow source, from `at`. */
 function braceMatchFrom(src: string, at: number): string {
@@ -46,107 +52,319 @@ function braceMatchFrom(src: string, at: number): string {
   throw new Error('could not brace-match from offset')
 }
 
+/**
+ * WHAT ONE TERMINAL PATH LOOKS LIKE TO THE SCANNER.
+ *
+ * `stamped` is the verdict, and it has FOUR values rather than a boolean because two
+ * different things go wrong and they are not the same finding:
+ *
+ *  - `'literal'`  — the object carries `terminalCauseKind: '<member>'`. The normal case.
+ *  - `'computed'` — the property is there but its value is an expression, not a literal
+ *                   (the main terminal result computes its kind at the exit and passes it
+ *                   by shorthand). Present, and correctly so; just not checkable here.
+ *  - `'absent'`   — the object was resolved and has no such property. A silent path.
+ *  - `'unresolved'` — the CALL was found but its argument could not be resolved to an
+ *                   object literal at all. NOT a pass: it is the scanner saying it could
+ *                   not tell, which is a finding about this file's coverage and must fail
+ *                   exactly as loudly as a missing property.
+ *
+ * THE LAST VALUE IS THE WHOLE POINT AND IT IS WHY THIS FILE WAS REWRITTEN. The first cut
+ * recognised a call only when its argument was a bare IDENTIFIER — the shape all twelve
+ * of today's sites happen to use. `writeTerminalResult({ checkpoint: 'new-exit' })` did
+ * not match the recogniser at all, so it never became a site, the count still read 12,
+ * and every per-site assertion below was silent about it. A thirteenth path added with an
+ * inline literal was invisible to the entire file.
+ *
+ * That is this file's own stated failure mode, one level up from where it was applied:
+ * the resolver reported what it could not parse, and the RECOGNISER dropped it. A scanner
+ * that silently drops what it cannot parse is a scanner that passes by construction, and
+ * a sweep inherits its own domain's blind spot unless something exercises the recogniser
+ * rather than only the resolver.
+ */
 interface TerminalSite {
-  /** The identifier handed to `writeTerminalResult`. */
-  name: string
-  /** 1-based line of the call, for a failure message that points at the defect. */
+  /** How the site is named in a failure message — the identifier, or the shape. */
+  label: string
+  /** 1-based line of the call. */
   line: number
-  /** The source of the object literal that identifier ultimately resolves to. */
-  literal: string
+  stamped: 'literal' | 'computed' | 'absent' | 'unresolved'
+  /** The stamped member, when it is a string literal. */
+  kind: string | null
+  /** Why it could not be resolved — empty unless `stamped` is `'unresolved'`. */
+  why: string
+}
+
+/** Parse the shipped workflow. The file's top-level `return` is a SEMANTIC error, not a
+ *  syntactic one, so the parser produces a complete tree for it (checked: 214 statements,
+ *  12 calls). Same compiler API `open/__tests__/chat-command-filter-scan.ts` scans with. */
+function parse(src: string): ts.SourceFile {
+  return ts.createSourceFile('inner-workflow.mjs', src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+}
+
+function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
+  visit(node)
+  ts.forEachChild(node, (c) => walk(c, visit))
 }
 
 /**
- * EVERY `writeTerminalResult(<ident>)` CALL, PAIRED WITH THE OBJECT IT HANDS OVER.
+ * EVERY CALL TO `writeTerminalResult`, MATCHED ON THE CALLEE AND NOTHING ELSE.
  *
- * The binding is found by walking BACKWARDS from the call for the nearest `const <ident> =`,
- * which is what the file does at every site: build the value, write it, return it. TWO
- * shapes appear there and both are followed:
- *
- *  - an object literal (`const stopResult = { … }`) — brace-matched in place;
- *  - a CALL to a composer (`const mergedResult = mergedTerminalResult(pr, …)`) — resolved
- *    to that function's own body, because three of the twelve sites share one composer and
- *    a scanner that could not see through it would report three false bares.
- *
- * A site matching neither is reported as a site with NO literal rather than skipped. A
- * scanner that silently drops what it cannot parse is a scanner that passes by
- * construction, which is the failure mode this whole file is written against.
- *
- * The DEFINITION of `writeTerminalResult` is excluded by requiring `await ` in front of the
- * call: it is not a terminal path, it is the thing every terminal path calls.
+ * The argument is then CLASSIFIED rather than filtered: whatever shape it is, the call is
+ * already a site by the time we look at it, so no argument form can remove a path from
+ * the enumeration. Three shapes resolve to an object literal — an inline literal, an
+ * identifier bound to one, and an identifier bound to a composer call whose body returns
+ * one (three of the twelve sites share `mergedTerminalResult`). Everything else is
+ * `'unresolved'` and fails.
  */
 function terminalSites(src: string): TerminalSite[] {
+  const sf = parse(src)
   const sites: TerminalSite[] = []
-  const call = /await writeTerminalResult\(([A-Za-z_$][\w$]*)\)/g
-  for (let m = call.exec(src); m !== null; m = call.exec(src)) {
-    const name = m[1]!
-    const line = src.slice(0, m.index).split('\n').length
-    sites.push({ name, line, literal: resolveBinding(src, name, m.index) })
-  }
+  const lineOf = (n: ts.Node): number => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
+  walk(sf, (n) => {
+    if (!ts.isCallExpression(n)) return
+    if (!ts.isIdentifier(n.expression) || n.expression.text !== 'writeTerminalResult') return
+    const arg = n.arguments[0]
+    const line = lineOf(n)
+    if (arg === undefined) {
+      sites.push({ label: '(no argument)', line, stamped: 'unresolved', kind: null, why: 'called with no argument' })
+      return
+    }
+    const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
+    const resolved = resolveToObjectLiteral(sf, arg)
+    if (resolved === null) {
+      sites.push({
+        label,
+        line,
+        stamped: 'unresolved',
+        kind: null,
+        // The shape is NAMED, not just refused — a guard that says only "no" leaves the
+        // next author guessing which of the handled forms they missed.
+        why: `argument is a ${ts.SyntaxKind[arg.kind]} the scanner cannot resolve to an object literal`,
+      })
+      return
+    }
+    sites.push({ label, line, ...readCause(resolved) })
+  })
   return sites
 }
 
-/** The source of the object `name` is bound to, following one composer call. */
-function resolveBinding(src: string, name: string, before: number): string {
-  const at = src.lastIndexOf(`const ${name} = `, before)
-  if (at === -1) return ''
-  const rhs = src.slice(at + `const ${name} = `.length)
-  if (rhs.startsWith('{')) return braceMatchFrom(rhs, 0)
-  const composer = /^([A-Za-z_$][\w$]*)\(/.exec(rhs)?.[1]
-  if (composer === undefined) return ''
-  const fn = src.indexOf(`function ${composer}(`)
-  if (fn === -1) return ''
-  return braceMatchFrom(src, fn)
+/** The object literal an argument ultimately names, or `null` when it names none. */
+function resolveToObjectLiteral(sf: ts.SourceFile, arg: ts.Expression): ts.ObjectLiteralExpression | null {
+  if (ts.isObjectLiteralExpression(arg)) return arg
+  if (!ts.isIdentifier(arg)) return null
+  const init = nearestDeclarationBefore(sf, arg.text, arg.getStart(sf))
+  if (init === null) return null
+  if (ts.isObjectLiteralExpression(init)) return init
+  // A composer call — follow it into the function's own `return`.
+  if (ts.isCallExpression(init) && ts.isIdentifier(init.expression)) {
+    return composerReturnLiteral(sf, init.expression.text)
+  }
+  return null
+}
+
+/** The initialiser of the nearest `const <name> =` declared before `pos`. */
+function nearestDeclarationBefore(sf: ts.SourceFile, name: string, pos: number): ts.Expression | null {
+  let best: ts.Expression | null = null
+  let bestPos = -1
+  walk(sf, (n) => {
+    if (!ts.isVariableDeclaration(n)) return
+    if (!ts.isIdentifier(n.name) || n.name.text !== name) return
+    const at = n.getStart(sf)
+    if (at < pos && at > bestPos && n.initializer !== undefined) {
+      best = n.initializer
+      bestPos = at
+    }
+  })
+  return best
+}
+
+/** The object literal a named function returns, or `null`. */
+function composerReturnLiteral(sf: ts.SourceFile, name: string): ts.ObjectLiteralExpression | null {
+  let fn: ts.FunctionDeclaration | null = null
+  walk(sf, (n) => {
+    if (ts.isFunctionDeclaration(n) && n.name?.text === name) fn = n
+  })
+  if (fn === null) return null
+  let out: ts.ObjectLiteralExpression | null = null
+  walk(fn, (n) => {
+    if (out === null && ts.isReturnStatement(n) && n.expression !== undefined && ts.isObjectLiteralExpression(n.expression)) {
+      out = n.expression
+    }
+  })
+  return out
+}
+
+/**
+ * IS `terminalCauseKind` AN ACTUAL PROPERTY OF THIS OBJECT?
+ *
+ * A PROPERTY, NOT A SUBSTRING. The first cut asked `literal.includes('terminalCauseKind')`
+ * over the object's raw source, so a site passed if it merely mentioned the field in a
+ * COMMENT — and this file's objects are heavily commented, so that is not a hypothetical
+ * near-miss. Presence of a string is not presence of a property.
+ *
+ * A SPREAD DOES NOT COUNT, deliberately. `...(cond ? { terminalCauseKind: x } : {})` is a
+ * property that arrives only sometimes, which is exactly the silence this guard exists to
+ * refuse; only a direct assignment or shorthand is a promise the field is always there.
+ */
+function readCause(obj: ts.ObjectLiteralExpression): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
+  for (const prop of obj.properties) {
+    if (ts.isShorthandPropertyAssignment(prop) && prop.name.text === 'terminalCauseKind') {
+      return { stamped: 'computed', kind: null, why: '' }
+    }
+    if (!ts.isPropertyAssignment(prop)) continue
+    const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null
+    if (key !== 'terminalCauseKind') continue
+    return ts.isStringLiteralLike(prop.initializer)
+      ? { stamped: 'literal', kind: prop.initializer.text, why: '' }
+      : { stamped: 'computed', kind: null, why: '' }
+  }
+  return { stamped: 'absent', kind: null, why: 'the result object has no terminalCauseKind property' }
+}
+
+/** The sites this guard refuses: a silent path, and a path it could not read. */
+function failingSites(src: string): string[] {
+  return terminalSites(src)
+    .filter((s) => s.stamped === 'absent' || s.stamped === 'unresolved')
+    .map((s) => `${s.label} (line ${s.line}): ${s.why}`)
+}
+
+/** A thirteenth terminal path, appended in a named argument shape. Valid JS in every
+ *  case, so the control tests the RECOGNISER rather than the parser's error recovery. */
+const THIRTEENTH: Record<string, string> = {
+  'inline object literal': `
+async function newExitPath() {
+  await writeTerminalResult({ ok: false, checkpoint: 'new-exit' })
+}`,
+  'identifier bound to an inline literal': `
+async function newExitPath() {
+  const newExit = { ok: false, checkpoint: 'new-exit' }
+  await writeTerminalResult(newExit)
+}`,
+  'identifier bound to a composer call': `
+function newExitResult() {
+  return { ok: false, checkpoint: 'new-exit' }
+}
+async function newExitPath() {
+  const newExit = newExitResult()
+  await writeTerminalResult(newExit)
+}`,
+  'an object whose COMMENT mentions the field but has no such property': `
+async function newExitPath() {
+  await writeTerminalResult({
+    ok: false,
+    checkpoint: 'new-exit',
+    // terminalCauseKind is stamped by whoever reads this result
+  })
+}`,
+  'a shape the scanner does NOT handle': `
+async function newExitPath() {
+  await writeTerminalResult(Date.now() > 0 ? { ok: false } : null)
+}`,
+  'an inline conditional spread that only SOMETIMES carries the field': `
+async function newExitPath() {
+  await writeTerminalResult({
+    ok: false,
+    checkpoint: 'new-exit',
+    ...(Date.now() > 0 ? { terminalCauseKind: 'workflow-threw' } : {}),
+  })
+}`,
+  'no argument at all': `
+async function newExitPath() {
+  await writeTerminalResult()
+}`,
 }
 
 describe('#520 — every terminal path of the inner workflow names its cause', () => {
-  test('the enumeration itself is non-empty and covers every known exit', () => {
-    // THE SCANNER'S OWN POSITIVE CONTROL. If this regex stops matching, every assertion
-    // below passes vacuously. Twelve is what main carries: the resume stop, the resume
-    // merged/approved shortcuts, the built-head stop, the wave-member build, two publish
-    // handoffs, two mid-run merges, the Ralph re-fire, the main terminal result and the
-    // catch path.
+  test('the enumeration is the twelve calls main carries', () => {
+    // THE SCANNER'S OWN FLOOR. If the recogniser stops matching, every assertion below
+    // passes vacuously — so the count is pinned, and the shapes-controls further down
+    // prove the recogniser can still GROW when a path is added.
     const sites = terminalSites(SRC)
     expect(sites.length).toBe(12)
-    expect(new Set(sites.map((s) => s.name)).size).toBeGreaterThan(1)
+    // …and none of them is a site the scanner merely guessed at.
+    expect(sites.filter((s) => s.stamped === 'unresolved')).toEqual([])
   })
 
   test('every call site hands over an explicit terminalCauseKind', () => {
-    const bare = terminalSites(SRC)
-      .filter((s) => !s.literal.includes('terminalCauseKind'))
-      .map((s) => `${s.name} (line ${s.line})`)
-    // Named, not counted: the failure message has to say WHICH path went out silent.
-    expect(bare).toEqual([])
+    // Named, not counted: the failure message has to say WHICH path went out silent, and
+    // whether it went silent or was merely unreadable.
+    expect(failingSites(SRC)).toEqual([])
   })
 
-  test('POSITIVE CONTROL — the same scan fails when one site loses its cause', () => {
-    // The guard above is an absence claim. This is the evidence that it can be false:
-    // the identical scan, over the identical source with ONE stamp deleted, must find
-    // it. Chosen for the catch path because it is the site whose omission produced the
-    // measured defect (run 3d2696c3, reported as "…without Argus APPROVE" on a path
-    // Argus never reached).
+  test('eleven sites name a literal member; the review loop computes its own', () => {
+    const sites = terminalSites(SRC)
+    const literal = sites.filter((s) => s.stamped === 'literal')
+    const computed = sites.filter((s) => s.stamped === 'computed')
+    expect(computed.map((s) => s.label)).toEqual(['terminalResult'])
+    expect(literal.length).toBe(11)
+    for (const s of literal) expect(TERMINAL_CAUSES).toContain(s.kind as TerminalCause)
+  })
+
+  /**
+   * THE CONTROL THE FIRST CUT WAS MISSING.
+   *
+   * Its positive controls deleted a known property line, which exercises the RESOLVER on
+   * sites the recogniser had already found. Nothing exercised the recogniser. So a
+   * thirteenth path written in a shape the regex did not know — an inline object literal,
+   * the most obvious way anyone would add one — was invisible, and the guard reported a
+   * clean tree.
+   *
+   * Each case below appends a real thirteenth call in a named argument shape and requires
+   * the guard to go RED. The two halves are both asserted: the site must be SEEN (the
+   * count grows to 13) and it must be REFUSED. A shape that is seen but silently passes
+   * is the same defect wearing a different coat.
+   */
+  describe('POSITIVE CONTROL — a thirteenth path is refused in every argument shape', () => {
+    for (const [shape, code] of Object.entries(THIRTEENTH)) {
+      test(`a new terminal path written as ${shape} fails the guard`, () => {
+        const doctored = `${SRC}\n${code}\n`
+        const sites = terminalSites(doctored)
+        // SEEN: the enumeration grew. This is the half the first cut could not do — an
+        // inline literal never became a site at all and the count stayed at 12.
+        expect(sites.length).toBe(13)
+        const added = sites.filter((s) => s.line > SRC_LINES)
+        expect(added.length).toBe(1)
+        // REFUSED: and it is the new one that fails, not some pre-existing site.
+        const failing = failingSites(doctored)
+        expect(failing.length).toBe(1)
+        expect(failing[0]).toContain(`line ${added[0]!.line}`)
+      })
+    }
+  })
+
+  test('POSITIVE CONTROL — the two refusals are told apart, not merged into one "no"', () => {
+    // A path that says nothing and a path the scanner cannot read are different findings
+    // with different fixes, and this file's own rule is that "could not establish" never
+    // shares a branch with a determinate answer. The guard fails on both; the REPORT
+    // still distinguishes them.
+    const added = (code: string) => terminalSites(`${SRC}\n${code}\n`).find((s) => s.line > SRC_LINES)
+    expect(added(THIRTEENTH['inline object literal']!)?.stamped).toBe('absent')
+    expect(added(THIRTEENTH['a shape the scanner does NOT handle']!)?.stamped).toBe('unresolved')
+    expect(added(THIRTEENTH['no argument at all']!)?.stamped).toBe('unresolved')
+    // …and the report says WHICH, so the next author knows whether to add a stamp or to
+    // teach this scanner a shape.
+    const why = failingSites(`${SRC}\n${THIRTEENTH['a shape the scanner does NOT handle']}\n`)[0]!
+    expect(why).toContain('cannot resolve to an object literal')
+    expect(why).toContain('ConditionalExpression')
+  })
+
+  test('POSITIVE CONTROL — deleting a stamp from an existing site is still caught', () => {
+    // The resolver control the first cut had. Kept, because it covers the other
+    // direction: a path that exists today losing its cause, rather than a new one
+    // arriving without one. Chosen for the catch path because its omission produced the
+    // measured defect (run 3d2696c3, reported as "…without Argus APPROVE" on a path Argus
+    // never reached).
     const doctored = SRC.replace("    terminalCauseKind: 'workflow-threw',\n", '')
     expect(doctored).not.toBe(SRC)
-    const bare = terminalSites(doctored).filter((s) => !s.literal.includes('terminalCauseKind'))
-    expect(bare.map((s) => s.name)).toEqual(['failureResult'])
+    expect(failingSites(doctored).map((f) => f.split(' ')[0])).toEqual(['failureResult'])
   })
 
-  test('POSITIVE CONTROL — the scan sees through the shared composer too', () => {
-    // The three merged exits reach their cause through `mergedTerminalResult`, not
-    // through a literal at the call site. A scanner that could not follow that would
-    // report three false bares (caught while writing this file) — or, worse, a later
-    // one that stopped following it would report three false CLEANS. So the indirection
-    // gets its own control: delete the stamp inside the composer and all three sites
-    // must go bare at once.
+  test('POSITIVE CONTROL — the scan sees through the shared composer', () => {
+    // Three of the twelve reach their cause through `mergedTerminalResult`, not through a
+    // literal at the call site. A scanner that could not follow that would report three
+    // false bares — or, later, three false CLEANS.
     const doctored = SRC.replace("    terminalCauseKind: 'pr-already-merged',\n", '')
     expect(doctored).not.toBe(SRC)
-    const bare = terminalSites(doctored).filter((s) => !s.literal.includes('terminalCauseKind'))
-    expect(bare.length).toBe(3)
-  })
-
-  test('every stamped kind is a member of the closed vocabulary', () => {
-    const stamped = [...SRC.matchAll(/terminalCauseKind: '([a-z-]+)'/g)].map((m) => m[1]!)
-    expect(stamped.length).toBeGreaterThan(0)
-    for (const kind of stamped) expect(TERMINAL_CAUSES).toContain(kind as TerminalCause)
+    expect(failingSites(doctored).length).toBe(3)
   })
 
   /**
