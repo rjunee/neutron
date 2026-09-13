@@ -19,9 +19,9 @@
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { beginBootAdoption, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
@@ -1189,9 +1189,16 @@ describe('the row claim rests on a lock, and says so when it does not get one', 
   afterEach(() => setFlockImplForTests(undefined))
 
   it('REFUSES to publish when the lock was not acquired, and does not close the pane', async () => {
-    const f = fixture()
+    // THE ROW'S PID IS DELIBERATELY STALE. The claim's critical section repairs a stale
+    // pid, and an earlier revision of this case used a row whose pid already matched —
+    // so the repair branch was unreachable and the case could not see that the write
+    // happened anyway, without the lock, while the log said the row had been left alone.
+    // A fixture that cannot reach the write cannot prove the write was refused.
+    const f = fixture({ record: { pid: 1 } })
     const credential = deriveChildSinkToken(sink.token, GENERATION)
     const before = readRow(f.registryPath)
+    // The premise: the repair branch IS live for this fixture.
+    expect(before?.pid).toBe(1)
     setFlockImplForTests(() => 1)
     const outcome = await run(f)
 
@@ -1207,6 +1214,46 @@ describe('the row claim rests on a lock, and says so when it does not get one', 
     expect(await postReply(credential)).toBe(401)
     // ...and NOTHING of the world's is destroyed: the pane is still running, because
     // another incarnation may have legitimately claimed it.
+    expect(f.host.closed).toEqual([])
+    // FIELD FOR FIELD, and the pid above all: the row must be exactly what it was.
+    expect(readRow(f.registryPath)).toEqual(before)
+    expect(readRow(f.registryPath)?.pid).toBe(1)
+  })
+
+  it('AND THE PID REPAIR STILL HAPPENS when the lock IS granted — that case\'s control', async () => {
+    // Without this, the refusal above would pass equally well against a claim that had
+    // simply stopped repairing pids, and the mutation would be unobservable.
+    const f = fixture({ record: { pid: 1 } })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('adopted')
+    expect(readRow(f.registryPath)?.pid).toBe(4242)
+  })
+
+  it('a claim that THROWS releases too, and leaves the pane running', async () => {
+    // The third fact: not "someone else owns this row" and not "I could not get the
+    // lock", but "I could not ask at all". This branch used to call `unwind`, which
+    // CLOSES the pane — on evidence that establishes nothing about who owns it.
+    //
+    // Made to throw the way production would: the lock path is a DIRECTORY, so the
+    // lock's `openSync` fails on it. No injected mock, so the real failure mode is what
+    // is exercised.
+    const f = fixture({ record: { pid: 1 } })
+    const before = readRow(f.registryPath)
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
+    mkdirSync(join(dirname(f.registryPath), '.registry.lock'), { recursive: true })
+    const outcome = await run(f)
+
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    // Its own sentence — neither of the other two.
+    expect(reason).toMatch(/could NOT BE READ OR WRITTEN/)
+    expect(reason).not.toMatch(/replaced by another incarnation/i)
+    expect(reason).not.toMatch(/lock was NOT acquired/i)
+    // Registrations released...
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(childByKey.get(KEY)).toBeUndefined()
+    expect(await postReply(credential)).toBe(401)
+    // ...and the pane LEFT RUNNING, with the row untouched.
     expect(f.host.closed).toEqual([])
     expect(readRow(f.registryPath)).toEqual(before)
   })

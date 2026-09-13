@@ -1047,7 +1047,11 @@ async function claimRowOrUnwind(args: {
   // a total-function guard rather than a live path.)
   if (args.registryPath === undefined) return args.publish()
   const registryPath = args.registryPath
-  let stillOurs: boolean
+  /** What the claim's critical section concluded. THREE, not a boolean: the row is ours,
+   *  the row moved, or we never held the lock — and the third must not be able to reach
+   *  the code that writes. */
+  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired'
+  let claim: ClaimResult
   // THE CLAIM IS A COMPARE-AND-SET, AND A CAS IS ONLY A CAS WHILE THE LOCK HOLDS
   // (Argus r14). `withFlockSync` deliberately runs unguarded when FFI is missing or
   // `flock` returns nonzero, and both look exactly like success to a caller that does not
@@ -1057,22 +1061,30 @@ async function claimRowOrUnwind(args: {
   // the claim is its neighbour and inherited nothing.
   let acquired = false
   try {
-    stillOurs = withRegistry(
+    claim = withRegistry<ClaimResult>(
       registryPath,
       (registry) => {
+        // CHECKED INSIDE THE CALLBACK, BEFORE ANY WRITE (Argus r15). `onOutcome` fires
+        // before `fn`, so `acquired` is already correct here — and `withRegistry` SAVES
+        // whatever this returns, so a check placed after the call is a check placed after
+        // the write. An earlier revision refused the adoption at the outer branch and had
+        // already rewritten the pid without mutual exclusion, while logging that it had
+        // left the row alone. The clear below got this right; the claim beside it did not
+        // inherit it.
+        if (!acquired) return { registry, result: 'lock-unacquired' as ClaimResult }
         const prev = registry[args.sessionKey]
         if (
           prev === undefined ||
           prev.pane_handle !== args.expected.handle ||
           prev.child_generation !== args.expected.generation
         ) {
-          return { registry, result: false }
+          return { registry, result: 'row-moved' as ClaimResult }
         }
         // THE PID IS THE ONE FIELD AN ADOPTION MAY CORRECT: the child is the same process
         // it always was, so a disagreement means the row was stale — and a stale pid is
         // what every liveness probe above here uses.
         if (args.recordedPid !== args.pid) registry[args.sessionKey] = { ...prev, pid: args.pid }
-        return { registry, result: true }
+        return { registry, result: 'ours' as ClaimResult }
       },
       {},
       (ok) => {
@@ -1080,12 +1092,19 @@ async function claimRowOrUnwind(args: {
       },
     )
   } catch (e) {
-    // The registry could not be read or written. We cannot establish that the row is
-    // still ours, and an adoption that cannot be confirmed is not one: give the child
-    // back rather than publish on an unverified claim.
-    return await args.unwind(`the registry could not be claimed for this adoption: ${errorText(e)}`)
+    // THE REGISTRY COULD NOT BE READ OR WRITTEN, and that establishes nothing about who
+    // owns this pane (Argus r15). A thrown lockfile open, a read error, an EACCES — none
+    // of them say the pane is ours to end, and this branch used to call `unwind`, which
+    // CLOSES it. Six lines down, the unacquired-lock branch argues correctly that an
+    // unestablished claim licenses neither act; the same argument applies here verbatim,
+    // and this is a THIRD fact with its own sentence: not "someone else owns this row",
+    // not "I could not get the lock", but "I could not ask at all".
+    return args.release(
+      `the registry could NOT BE READ OR WRITTEN for this adoption's row claim (${errorText(e)}) — ` +
+        'nothing establishes who owns this pane, so it is left running and the row left alone',
+    )
   }
-  if (!acquired) {
+  if (claim === 'lock-unacquired') {
     // NOT PUBLISHED, AND NOT CLOSED. "Someone else owns this row" and "I could not find
     // out who owns it" are different facts and get different acts. `undecided` maps to
     // `{ ok: false }` in the spawn gate, so no cold spawn follows and no second owner can
@@ -1100,7 +1119,7 @@ async function claimRowOrUnwind(args: {
     )
     return args.release(LOCK_UNACQUIRED_REASON)
   }
-  if (!stillOurs) {
+  if (claim === 'row-moved') {
     log(
       `row ${args.sessionKey.slice(0, 32)} was REPLACED while this adoption was attaching — it now names another ` +
         `incarnation's child. Giving pane ${args.expected.handle} back rather than serving a second owner.`,

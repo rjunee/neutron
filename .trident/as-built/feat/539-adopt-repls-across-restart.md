@@ -559,6 +559,56 @@ that can stop the write — checked rather than assumed, because a non-matching 
 would make the mutation unobservable, which is the M41/M48/M51 shape this branch has now
 hit three times.
 
+### Round fifteen: the habit inside the fix for the habit, and the audit that should have caught it
+
+**The claim wrote the row on an unacquired lock, then logged that it had left it alone.**
+The pid repair sat inside the mutate callback and `withRegistry` saves whatever that
+callback returns, so the `!acquired` check — placed *after* the call — was a check placed
+after the write. The clear, forty lines down, already did this correctly: it tests
+`acquired` INSIDE the callback and returns without mutating, which works because
+`onOutcome` fires before `fn`. **The claim beside it inherited nothing** — which is the
+sentence round fourteen wrote about `withRegistryRead` and `withRegistry`, now true of the
+fix for that. The callback's result is also no longer a boolean: `ClaimResult` is
+`'ours' | 'row-moved' | 'lock-unacquired'`, so the refusal cannot be confused with a
+comparison failure and the outer branch reads a fact rather than reconstructing one.
+
+**And the test could not have seen it**, because the fixture's row pid already matched the
+pane's, so the repair branch was unreachable. Fourth time this branch has been bitten by a
+fixture that cannot reach the code the mutation changes, and the first time it hid a real
+write rather than an absent assertion. The case now uses a stale pid (`pid: 1`), asserts
+that premise before acting, and compares the row field-for-field afterwards — with a
+lock-granted control proving the repair still happens, so the refusal cannot be passing
+because the repair stopped working.
+
+**The exception branch closed a pane whose ownership was equally unestablished.** A thrown
+lockfile open, a read error, an EACCES: none of them say the pane is ours to end, and all
+of them called `unwind`, which closes. It now releases, with a third reason — "the registry
+could NOT BE READ OR WRITTEN" — distinct from both "someone else owns this row" and "I
+could not get the lock", and the case asserts it matches none of the other two. The case
+makes the throw happen the way production would (the lock path is a directory) rather than
+by injecting one.
+
+### The guard-coverage audit, because finding the sibling one round late does not scale
+
+Five consecutive rounds found the same shape: a property established at one site and not
+carried to its neighbour. The instrument that generalises is not more care; it is a list.
+For each guard this branch adds, every call site of the thing it guards, and why each one
+is or is not covered. **Checkable by someone who did not write it**, which is the point.
+
+| Guard | Call sites of what it guards | Covered? |
+|---|---|---|
+| **Lock outcome consumed** (`onOutcome`) | `withFlockSync` has three production callers: `sink-coordinates.ts:755` (already consumed it before this branch — the precedent I should have followed), `repl-registry.ts:712` `withRegistryRead`, `repl-registry.ts:758` `withRegistry`. | **All three.** The two registry helpers forward it; both of this branch's correctness-critical callers now consume it. |
+| — its consumers | `withRegistryRead`: `claimShutdownSurvival`. `withRegistry`: the row claim (`boot-adoption.ts:1064`), the handle clear (`:1224`), `spawn.ts:600` + `:1180`, `repl-registry.ts:777/795/808`, `supervision.ts:239`. | **The three whose correctness rests on atomicity.** The others are merges and unsets with last-writer-wins semantics that predate this branch and do not compare-then-write — `supervision.ts:239` is the one shaped like a claim (the respawn in-flight latch) and is pre-existing on `main`; it is **not** covered here and is named rather than silently skipped. |
+| **Row CAS on (handle, generation)** | Every place this branch writes or erases a row it decided about: the claim, the clear. | **Both**, and the decision is refused rather than applied when the row moved. |
+| **Abandonment cause** (`signal`) | Three points past which a pass must not act: pre-attach, post-attach, publish. | **All three**, each with its own reason string so a case cannot claim one and exercise another. |
+| **Element-wise argv match** | `argvMatchesSession`: `classifyPaneForAdoption` (host vector) and `cmdlineMatchesSession` (string form). `cmdlineMatchesSession`: `boot-adoption.ts:721`, `orphan-adoption.ts:489`/`:574`, `supervision.ts:140`. | **The vector caller.** The four string callers are `ps`-derived and cannot be given a vector — filed as **#672**, and the docblock says the rule is vacuous for that form rather than implying coverage. |
+| **Protocol gate** (`verifyHerdrProtocol`) | Every `HerdrHost` method that opens a connection: `spawn`/`attach` (shared `open`, `:239`), `inspectHandle` (`:795`), `closeHandle` (`:851`). | **All of them**, which is why round five's finding closed rather than moving. |
+| **Shutdown survival gate** | Three kill sites in `shutdownAllPersistentRepls`: the pooled walk (`pool.ts:1177`), the late-arriving spawn (`:1228`), the ephemeral sweep (`:1254`). | **One of three, deliberately — and the second is a real gap.** The ephemeral sweep is correctly uncovered: those sessions are never pooled and never in a row, so the gate would answer `kill` anyway. **The late-arriving spawn at `:1228` is NOT gated and could be a herdr-hosted child whose row names its pane.** The consequence is over-killing, not orphaning — the conservative direction, costing a `--resume` rather than leaking a process — so it is not a correctness hazard, but it does defeat the feature for a session that was mid-spawn when the deploy landed. **Flagged for a ruling rather than changed here**: gating it means touching the shutdown phase ordering after the point where two rounds have already shown me that ordering is load-bearing. |
+
+The audit is the deliverable, not the table's current contents: the next guard this branch
+or its successors add should extend it, and a row that says "not covered, and here is why"
+is worth more than one that says "covered" without the enumeration behind it.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -569,7 +619,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen and M54–M56 in round fourteen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen and M57–M58 in round fifteen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -656,6 +706,8 @@ count from the rows below rather than trusting this sentence.
 | M54 | the row claim does not consume the lock outcome | `boot-adoption.test.ts` (1) |
 | M55 | the clear writes anyway on an unacquired lock | `boot-adoption.test.ts` (1) |
 | M56 | the unacquired-lock branch CLOSES instead of releasing | `boot-adoption.test.ts` (1) |
+| M57 | the pid write is unconditional again (guard outside the callback) | `boot-adoption.test.ts` (1) |
+| M58 | a claim that throws closes the pane again | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
