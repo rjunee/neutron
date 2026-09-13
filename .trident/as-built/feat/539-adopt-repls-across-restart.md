@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M91 less M31, M38, M80 and M91 = 87**.
+only dead row. The live count is therefore **M1–M92 less M31, M38, M80 and M91 = 88**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1531,6 +1531,35 @@ place the claim was missed twice:
 | `gateway-shutdown-survival.ts` | 1 — the quotation in its own correction | 3 |
 | as-built | 5 — all quotations inside corrections | 7 |
 
+### Round thirty-four: the backstop was weaker than the thing it backs up
+
+`unlinkSessionConfigs` read `real !== root && !real.startsWith(root + sep)`. A directory
+resolving to the temp ROOT satisfies neither disjunct, so nothing was rejected and the
+unlink ran — while `replSessionConfigPaths` explicitly refuses that same equality. **The
+stricter check was the one that only BUILDS paths; the looser one was the one that
+DELETES.**
+
+**Severity, stated honestly rather than inflated: no live route.** `configPaths` is
+populated from `replSessionConfigPaths`, which refuses the equality case, so on today's
+code cleanup never sees a path whose directory is the temp root. Reaching it requires
+assigning `configPaths` directly, which nothing does.
+
+**Fixed anyway, and the reason is the whole point of the two-layer split.** The filesystem
+check exists precisely to hold when the builder is bypassed; a backstop must be at least as
+strict as the thing it backs up, or it is not a backstop. Round twenty-seven's argument was
+that containment must hold "for every caller, including ones that do not exist yet" — this
+is that caller. No caller needs the root accepted: every path this function receives is
+nested under `neutron-repl-<channel>/`, so a directory resolving to `tmpdir()` means
+something went wrong upstream, and deleting a `session-*.json` sitting loose in the temp
+root would be deleting a file that is not ours.
+
+**The fixture places the file at the root ITSELF, not one level down** — and asserts that
+premise (`resolve(dirname(p)) === resolve(tmpdir())`) before acting. A file in
+`mkdtempSync(join(tmpdir(), …))` is NESTED and would be deleted correctly by either
+version, which is round twenty-eight's mistake inverted: that fixture was meant to be
+outside the boundary and was one level inside; this one is meant to be ON the boundary and
+would have been one level below it.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1541,7 +1570,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty and M90–M91 in round thirty-one, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one and M92 in round thirty-four, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1663,6 +1692,7 @@ count from the rows below rather than trusting this sentence.
 | M89 | the rejected-promise arm is dropped | `boot-adoption.test.ts` (1) |
 | M90 | the survival branch does not unregister the live-process handle | `gateway-shutdown-survival.test.ts` (1) |
 | M91 | ~~`unwind` unregisters the live handle too~~ — **probe, not a guard**: nothing reds, because the handle is identity-scoped and a second `unregister()` is a no-op. Recorded because that is what makes the retained cell "not needed" rather than "must not" | no-op by design |
+| M92 | the cleanup guard permits `real === root` again | `session-config-containment.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

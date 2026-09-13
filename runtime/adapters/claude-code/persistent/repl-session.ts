@@ -508,7 +508,19 @@ export function unlinkSessionConfigs(session: ReplSession): void {
       // The directory is gone — so is anything we would have deleted in it.
       continue
     }
-    if (real !== root && !real.startsWith(root + sep)) {
+    // `=== root` IS REJECTED HERE TOO (Argus r34). This read `real !== root && !…` — so a
+    // directory that resolved to the temp ROOT satisfied neither disjunct and the unlink
+    // ran, while `replSessionConfigPaths` explicitly refuses that same equality. The
+    // stricter check was the one that only BUILDS paths and the looser one the one that
+    // DELETES, which is backwards: a backstop must be at least as strict as the thing it
+    // backs up. The whole reason the filesystem check lives here is to hold when the
+    // builder is bypassed — so it has to hold for the case the builder already refuses.
+    //
+    // No caller needs the root accepted: every path this function receives is nested under
+    // `neutron-repl-<channel>/`, so a directory resolving to `tmpdir()` itself means
+    // something has gone wrong upstream, and deleting a `session-*.json` sitting loose in
+    // the temp root would be deleting a file that is not ours.
+    if (real === root || !real.startsWith(root + sep)) {
       process.stderr.write(
         `[repl] REFUSING to unlink ${p}: its directory resolves to ${real}, outside the temp ` +
           'directory — a symlinked component would make this delete a file we do not own. The ' +

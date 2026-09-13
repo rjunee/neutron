@@ -20,7 +20,7 @@
 import { describe, it, expect } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { replSessionConfigPaths } from '../session-config-paths.ts'
 import { ReplSession, unlinkSessionConfigs } from '../repl-session.ts'
 import { loadRegistry } from '../repl-registry.ts'
@@ -190,6 +190,27 @@ describe('cleanup checks the FILESYSTEM, because the lexical check cannot see a 
 
     // THE ASSERTION THAT CARRIES IT: the stranger's file is still there.
     expect(existsSync(victimFile)).toBe(true)
+  })
+
+  it('a file directly under the TEMP ROOT survives cleanup — the two layers agree on equality', () => {
+    // ARGUS r34. The cleanup guard read `real !== root && !real.startsWith(root + sep)`, so
+    // a directory resolving to the temp ROOT satisfied neither disjunct and the unlink ran
+    // — while `replSessionConfigPaths` explicitly refuses that same equality. The stricter
+    // check was the one that only builds paths; the looser one the one that deletes.
+    //
+    // THE FIXTURE PUTS THE FILE AT THE ROOT ITSELF, not one level down. A file in
+    // `mkdtempSync(join(tmpdir(), …))` is NESTED and would be deleted correctly by either
+    // version — the same mistake as round twenty-eight's "outside" victim that was
+    // actually inside, one level in rather than one level out.
+    const atRoot = join(tmpdir(), `session-mcp-r34-${process.pid}.json`)
+    writeFileSync(atRoot, '{"credential":"loose in the temp root"}')
+    // The premise: its directory really IS tmpdir(), not a subdirectory of it.
+    expect(resolve(dirname(atRoot))).toBe(resolve(tmpdir()))
+
+    unlinkSessionConfigs(sessionWith([atRoot]))
+
+    expect(existsSync(atRoot)).toBe(true)
+    rmSync(atRoot, { force: true })
   })
 
   it('THE POSITIVE CONTROL: an ordinary real directory under tmpdir IS cleaned up', () => {
