@@ -528,6 +528,11 @@ async function pidFallback(
       reason: `${why}; the process table confirms the recorded child is STILL RUNNING and still ours, so it is left alone and nothing may resume its transcript until it can be adopted or ended deliberately`,
     }
   }
+  // THE KILL PATH RE-ESTABLISHES IDENTITY ITSELF, and that second look is deliberate
+  // rather than a leftover: this one is a read, the kill is an act, and between them
+  // the pid can die and be reissued. If the second read disagrees, `adoptOrKillOrphan`
+  // declines and we land on `not-ours` — the conservative direction — instead of
+  // SIGTERMing whatever now holds the number. The cost is one extra `ps`.
   const verdict: OrphanAdoptionVerdict =
     identity === 'ours'
       ? await adoptOrKillOrphan(record.pid, record.sessionId, orphanDeps, claudeBasename)
