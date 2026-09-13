@@ -420,7 +420,10 @@ function isMinimalRecord(raw: unknown): boolean {
  */
 export function readRegistryState(
   path: string,
-): { kind: 'loaded'; registry: ReplRegistry } | { kind: 'absent' } | { kind: 'unreadable'; reason: string } {
+):
+  | { kind: 'loaded'; registry: ReplRegistry; droppedKeys: readonly string[] }
+  | { kind: 'absent' }
+  | { kind: 'unreadable'; reason: string } {
   let contents: string
   try {
     contents = readFileSync(path, 'utf8')
@@ -431,8 +434,18 @@ export function readRegistryState(
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
     return { kind: 'unreadable', reason: `read-error: ${(e as Error).message}` }
   }
-  const result = parseRegistryContents(contents)
-  if (result.kind === 'loaded') return { kind: 'loaded', registry: result.registry }
+  // DROPPED ROWS ARE REPORTED, NOT SWALLOWED (Argus r20). `parseRegistryContents`
+  // discards individual schema-invalid rows and still answers `loaded` — deliberate, and
+  // right for a whole-file read. But for a caller asking about ONE key it reproduces the
+  // very collapse this function exists to undo, one level down: a well-formed file whose
+  // target row has `has_session: "true"` parses, the row is discarded, and the key simply
+  // is not there. `absent` again, from a row that was UNREADABLE.
+  //
+  // The keys come back so the caller can ask the only question that matters to it — was
+  // MY key dropped? A drop on somebody else's key says nothing about mine.
+  const droppedKeys: string[] = []
+  const result = parseRegistryContents(contents, (key) => droppedKeys.push(key))
+  if (result.kind === 'loaded') return { kind: 'loaded', registry: result.registry, droppedKeys }
   // WE GOT BYTES AND COULD NOT MAKE SENSE OF THEM. For the MUTATION path that is safe to
   // rebuild from (the original is sidecar-preserved). For a DECISION it is not: the rows
   // that file held are unknown, so it establishes nothing about what owns a transcript.

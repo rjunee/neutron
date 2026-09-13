@@ -1554,3 +1554,110 @@ describe('a registry that could not be READ is not a registry with nothing in it
     rmSync(f.registryPath, { recursive: true, force: true })
   })
 })
+
+
+describe('a row DROPPED as schema-invalid is unreadable, not absent — and only for its own key', () => {
+  /**
+   * ARGUS r20. Round nineteen fixed the collapse at FILE granularity; the registry
+   * discards individual schema-invalid rows and still reports `loaded`, so the same
+   * collapse survived one level down. A well-formed file whose target row carries
+   * `has_session: "true"` parses, the row is discarded, and the key is simply not there —
+   * `absent` again, from a row that was unreadable. A live pane's durable record vanishes
+   * from every decision that matters while the read reports success.
+   *
+   * AND THE OTHER DIRECTION IS THE ONE MOST EASILY MISSED: a dropped row belonging to
+   * SOME OTHER key says nothing about this one, and refusing on it would turn any
+   * corruption anywhere into a gateway that serves nothing.
+   */
+  const OTHER = 'other-instance other-user other-proj other-cred'
+
+  /**
+   * A registry with our row present-but-invalid, or someone else's.
+   *
+   * THE VALID ROW IS TAKEN FROM DISK, not hand-written. A hand-rolled "valid" row encodes
+   * my model of what a valid row is — the first attempt omitted `reuse` and the pass
+   * answered `closed-unadoptable`, so the case failed for a reason that had nothing to do
+   * with dropped rows. Same lesson as building argv with the real builder.
+   */
+  function writeWithDrop(path: string, which: 'ours' | 'theirs'): void {
+    const valid = readRow(path) as unknown as Record<string, unknown>
+    // `has_session` as a STRING is the whole corruption: the file is well-formed JSON
+    // and the row fails the record schema.
+    const invalid = { ...valid, has_session: 'true' }
+    writeFileSync(
+      path,
+      JSON.stringify(
+        which === 'ours'
+          ? { [KEY]: invalid }
+          : { [KEY]: valid, [OTHER]: { ...invalid, sessionKey: OTHER } },
+      ),
+    )
+  }
+
+  it('SPAWN: a dropped TARGET row refuses, naming the drop', async () => {
+    const f = fixture()
+    writeWithDrop(f.registryPath, 'ours')
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    expect(reason).toMatch(/ROW WAS DROPPED/)
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(false)
+  })
+
+  it('SPAWN: a dropped row for ANOTHER key changes nothing — the case that keeps the fix honest', async () => {
+    const f = fixture()
+    writeWithDrop(f.registryPath, 'theirs')
+    const outcome = await run(f)
+    // Our row is intact and is adopted, exactly as if the other row were not there.
+    expect(outcome.kind).toBe('adopted')
+    expect(await pool.get(KEY)).toBeDefined()
+  })
+
+  it('CLOSE: a dropped TARGET row refuses to close', async () => {
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    writeWithDrop(f.registryPath, 'ours')
+    release()
+    const outcome = await pass
+    // THE PANE SURVIVES: a row we could not read does not license ending a live REPL.
+    expect(f.host.closed).toEqual([])
+    expect(outcome.kind).toBe('undecided')
+  })
+
+  it('CLOSE: a dropped row for ANOTHER key still closes a pane no row names', async () => {
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    // Someone else's row is invalid AND our row now names a different pane, so nothing
+    // names the one we hold — the close must still proceed.
+    writeFileSync(
+      f.registryPath,
+      JSON.stringify({
+        [KEY]: {
+          sessionKey: KEY,
+          sessionId: SESSION_ID,
+          cwd: '/tmp',
+          channelName: CHANNEL,
+          has_session: true,
+          pane_handle: 'w9:p-ELSEWHERE',
+          child_generation: 'gen-newer',
+        },
+        [OTHER]: { sessionKey: OTHER, sessionId: SESSION_ID, cwd: '/x', channelName: 'c', has_session: 'no' },
+      }),
+    )
+    release()
+    await pass
+    expect(f.host.closed).toEqual([HANDLE])
+  })
+})

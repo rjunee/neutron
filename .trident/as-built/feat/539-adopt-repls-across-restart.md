@@ -604,7 +604,7 @@ is or is not covered. **Checkable by someone who did not write it**, which is th
 | **Element-wise argv match** | `argvMatchesSession`: `classifyPaneForAdoption` (host vector), `cmdlineMatchesSession` (string form). `cmdlineMatchesSession`: `boot-adoption.ts:721`, `orphan-adoption.ts:489`/`:574`, `supervision.ts:140`. | **The vector caller.** Tests: "REFUSES an argv[0] that only looks like a claude once the vector is flattened", "REFUSES a smuggled argv[0] even when every OTHER rule is satisfied", "ACCEPTS a real builder argv whose paths contain spaces". The four string callers are `ps`-derived and cannot be handed a vector — **not covered, filed as #672**, and the docblock says the rule is vacuous for that form rather than implying coverage. |
 | **Protocol gate** (`verifyHerdrProtocol`) | Every `HerdrHost` method that opens a connection: `spawn`/`attach` (shared `open`, `:239`), `inspectHandle` (`:795`), `closeHandle` (`:851`). | **All of them.** Tests: `herdr-adoption.test.ts` protocol-gate cases for inspect and close; M15/M16 red when either gate is removed. |
 | **Absence is instrument-relative** (`scanTranscriptOwners` → `none`) | Its one consumer: the pid-fallback's handle clear at `boot-adoption.ts:788`, which is also what licenses the cold spawn at `spawn.ts:927`. | **Covered.** Tests: `orphan-adoption.test.ts` "answers UNKNOWN for a live owner whose spaced binary path the listing renders ambiguously", "a bystander holding the transcript open is UNKNOWN, not none", "a strict match still OUTRANKS an ambiguous one", control "a genuinely empty machine is still a positive absence"; and through the consumer, `boot-adoption.test.ts` "REFUSES rather than clears when a process merely MENTIONS the session id". M59 reds the unit, M60 reds the consumer. |
-| **Absence is read-relative** (`readRegistryState`) | Every production reader of `loadRegistry`/`getRecord`. **Migrated (they decide on absence):** `reconcileOwnRepl` (licenses a cold spawn), `rowStillNames` (licenses a close). **Not migrated, and why:** `boot-adoption.ts:1255/1385/1398` are read-BACKS after a write, used only for log text; `supervision.ts:468/602/957/1080/1144` and `:302` iterate the registry for rows to act on, so `{}` means "no work this tick" and the tick retries — the conservative direction; `supervision.ts:116` yields no pid, so the orphan gate never kills an unverified one; `gateway-shutdown-kill.ts` writes no marker, a missed record rather than a destructive act; `pool.ts:181` falls back to the best model, cosmetic; `gateway/diagnostics/instance-sources.ts:112` is display. **One does decide and is filed rather than fixed here:** `spawn.ts:722` `resumeDirectiveFor` returns `undefined` on absence, which means a FRESH session instead of a `--resume` — so under corruption it silently starts a new conversation rather than resuming the old one. Reached only through paths that do not go through the adoption gate (which now refuses on `unreadable`), so this branch narrows it without closing it. | **Covered** for the two migrated consumers: `boot-adoption.test.ts` "ENOENT … still PERMITS the spawn", "MALFORMED JSON refuses the spawn", "A NON-ENOENT READ FAILURE refuses the spawn too", "the CLOSE proceeds when the registry is genuinely gone", "but REFUSES to close when the registry is malformed", "and REFUSES to close on a non-ENOENT read failure". M64 and M65 red both directions. |
+| **Absence is read-relative** (`readRegistryState`) | Every production reader of `loadRegistry`/`getRecord`. **Migrated (they decide on absence):** `reconcileOwnRepl` (licenses a cold spawn), `rowStillNames` (licenses a close). **Not migrated, and why:** `boot-adoption.ts:1255/1385/1398` are read-BACKS after a write, used only for log text; `supervision.ts:468/602/957/1080/1144` and `:302` iterate the registry for rows to act on, so `{}` means "no work this tick" and the tick retries — the conservative direction; `supervision.ts:116` yields no pid, so the orphan gate never kills an unverified one; `gateway-shutdown-kill.ts` writes no marker, a missed record rather than a destructive act; `pool.ts:181` falls back to the best model, cosmetic; `gateway/diagnostics/instance-sources.ts:112` is display. **One does decide and is filed as #676:** `spawn.ts:722` `resolveResumeDirective` returns `undefined` on absence, which means a FRESH session instead of a `--resume` — so under corruption it silently starts a new conversation rather than resuming the old one. Reached only through paths that do not go through the adoption gate (which now refuses on `unreadable`), so this branch narrows it without closing it — see the absence-decision sweep below for the full three-input classification. | **Covered** for the two migrated consumers: `boot-adoption.test.ts` "ENOENT … still PERMITS the spawn", "MALFORMED JSON refuses the spawn", "A NON-ENOENT READ FAILURE refuses the spawn too", "the CLOSE proceeds when the registry is genuinely gone", "but REFUSES to close when the registry is malformed", "and REFUSES to close on a non-ENOENT read failure". M64 and M65 red both directions. |
 | **Shutdown survival gate** | The three kill sites in `shutdownAllPersistentRepls`: the pooled walk (`pool.ts:1177`), the late-arriving spawn (`:1228`), the ephemeral sweep (`:1254`). | **One of three, and the other two for different reasons.** The pooled walk is covered — `gateway-shutdown-survival.test.ts` "LEAVES a findable herdr-hosted child alive…" with its kill-direction counterparts. The ephemeral sweep is **correctly** uncovered: never pooled, never in a row, so the gate would answer `kill` regardless. The late-arriving spawn is **not covered and is a real gap — filed as #674**, a known residual of the survival feature rather than a defect introduced here: it can end a herdr-hosted child whose row names its pane. |
 
 **On #674's difficulty, corrected, because a wrong reason recorded is how the next person
@@ -809,6 +809,74 @@ Same shape as the findings this branch has spent nineteen rounds on: **absence o
 read as evidence**. The fix is the same as everywhere else — require a positive statement
 (the `ci` run reaching `completed`) rather than the absence of a pending one.
 
+### Round twenty: the same collapse one granularity down, and the sweep that should have found it
+
+**A dropped ROW reads as `loaded`.** `parseRegistryContents` discards individual
+schema-invalid rows and still reports success — correct for a whole-file read, and it
+reproduced round nineteen's collapse one level down. A well-formed file whose target row
+carries `has_session: "true"` parses, the row is discarded, and the key simply is not
+there: `absent` again, from a row that was **unreadable**. Both migrated consumers read it
+as a positive absence — one licensing a cold spawn, the other licensing a close. One line
+of JSON, and a live pane's durable record vanishes from every decision that matters while
+the read reports success.
+
+`readRegistryState` now returns `droppedKeys`, and both consumers ask the only question
+that concerns them: **was MY key dropped?** A drop on somebody else's key says nothing
+about mine, and refusing on it would turn any corruption anywhere into a gateway that
+serves nothing — M67 mutates it to that over-strict form and reds the two other-key cases,
+which is the direction most easily missed.
+
+**A test fixture caught me encoding my own model again.** The first version hand-wrote the
+"valid" row beside the invalid one, omitted `reuse`, and the case failed with
+`closed-unadoptable` for a reason that had nothing to do with dropped rows. The valid row
+is now read from disk — the same lesson as building argv with the real builder, which this
+branch has now learned three times in three different shapes.
+
+### The absence-decision sweep: every site that branches on a row being missing
+
+The guard/call-site audit above is organised by GUARD, and that framing is what let four
+findings through one at a time — the defect is not in a guard, it is in a **decision
+shape**. So this sweep asks the other question, of every production site that reads the
+registry and branches on a row not being there, with the three inputs as columns. The grep
+is `getRecord\(|loadRegistry\(|readRegistryState\(|registry\[` over `runtime/`,
+`gateway/`, `trident/`, `scripts/`, with a **positive control**: it must find the two sites
+already migrated (`boot-adoption.ts:560` and `:1027`), and it does.
+
+| Site | Row genuinely absent | Row dropped as invalid | File unreadable / unparseable | Verdict |
+|---|---|---|---|---|
+| `reconcileOwnRepl` (`boot-adoption.ts:560`) | `no-handle` → spawn permitted | `undecided` → refused | `undecided` → refused | **All three correct.** Tests: the six r19 cases + the two r20 target-drop cases. M64/M65/M66/M67 pin all four boundaries. |
+| `rowStillNames` (`:1027`) | `not-named` → close proceeds | `unreadable` → refused | `unreadable` → refused | **All three correct**, same cases. |
+| `claimShutdownSurvival` (`gateway-shutdown-survival.ts:207`) | kill | kill | kill | **Correct, and for the right reason** — not a collapse. Survival requires POSITIVE evidence that a row names this pane; every failure to produce that evidence is a kill by design, and the cost is one `--resume` on our own child. Recorded because "all three answers agree" is exactly what a collapse looks like from outside, and here the agreement is the rule rather than an accident. |
+| `planRespawn` (`session-respawn.ts:96`) | `session-not-found` → refuses | refuses | refuses | **Correct.** A respawn it cannot plan does not happen and the tick retries; refusing on all three is the conservative direction. |
+| `runWedgeWatchdogTick` (`supervision.ts:481`) | `record` undefined → probe with no record | same | same | **Correct, via a downstream gate.** A missing record can reach `respawn-and-alert`, but the respawn itself goes through `planRespawn`, which refuses. Worth knowing that the protection is downstream rather than here. |
+| cwd-drift check (`supervision.ts:618`) | `continue` — nothing to compare | same | same | **Correct.** No canonical cwd means no comparison, not a failed comparison. |
+| registry sweeps (`supervision.ts:468/602/957/1080/1144`, `:302`) | no rows → no work this tick | same | same | **Correct.** "No work this tick, and the tick retries" is a right answer to all three. |
+| orphan identity (`supervision.ts:116`) | no pid → never kills | same | same | **Correct** — the gate's whole rule is that it never touches an unverified pid. |
+| shutdown-kill markers (`gateway-shutdown-kill.ts:471/745/826/828`) | no marker written | same | same | **Correct** — a missed record, not a destructive act. |
+| read-backs (`boot-adoption.ts:1270/1400/1413`) | log text only | same | same | **Not decisions.** |
+| replay model (`pool.ts:181`) | falls back to the best model | same | same | **Cosmetic.** |
+| diagnostics (`gateway/diagnostics/instance-sources.ts:112`) | empty list displayed | same | same | **Display, not a decision.** |
+| **`resolveResumeDirective` (`spawn.ts:722`)** | `undefined` → fresh session | `undefined` → fresh session | `undefined` → fresh session | **COLLAPSES — filed as #676.** All three produce a FRESH session instead of a `--resume`: no second owner and no lost transcript file, but the user's conversation continuity is gone with nothing surfaced. The only genuine collapse the sweep found beyond the two already fixed, and it is silent, which is why it needs an issue rather than a table note. |
+
+One genuine collapse, one already-known, and eleven sites that are fine — and the eleven
+are written down because **"all three inputs get the same answer" is what a collapse looks
+like from outside**, and the only way to tell them apart is to say why the answer is the
+same.
+
+### The mutation table was carrying a dead row, and that is the artefact whose job is to be checkable
+
+**M38 is superseded and now says so.** It records that REMOVING the whitespace refusal
+reddens a test; M50 records that RESTORING it reddens tests. Both cannot be true of the
+same code, and round twelve is why: it deleted `argvElementCarriesWhitespace` outright.
+A counted-but-dead mutation inflates the table's evidence with a check nobody can run —
+the same defect as a stale count in a criterion body, in the one artefact whose entire job
+is to be checkable.
+
+**The class was swept, not just the instance.** Every mutation subject was checked for
+existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
+the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
+only dead row. The live count is therefore **M1–M67 less M31 and M38 = 65**.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -819,7 +887,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen and M64–M65 in round nineteen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen and M66–M67 in round twenty, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -887,7 +955,7 @@ count from the rows below rather than trusting this sentence.
 | M35 | a failed row claim publishes the adoption anyway | `boot-adoption.test.ts` (1) |
 | M36 | the row claim does not compare handle and generation | `boot-adoption.test.ts` (1) |
 | M37 | the classifier flattens the argv and reparses it again | `pane-adoption-verdict.test.ts` (2) |
-| M38 | the whitespace refusal is removed from the matcher | `pane-adoption-verdict.test.ts` (1) |
+| M38 | ~~the whitespace refusal is removed from the matcher~~ — **superseded by M50**: round twelve DELETED `argvElementCarriesWhitespace` outright (whitespace in a structured argv is legitimate), so this patch applies to no code. M50 mutates the opposite way — restoring the refusal — and is the live check on the same behaviour | superseded |
 | M39 | the argv matcher refuses every vector (**over-strict**) | `pane-adoption-verdict.test.ts` (7) |
 | M40 | the survival decision reads an UNLOCKED snapshot again | `gateway-shutdown-survival.test.ts` (2) |
 | M41 | `withRegistryRead` writes the registry back | `gateway-shutdown-survival.test.ts` (1) |
@@ -915,6 +983,8 @@ count from the rows below rather than trusting this sentence.
 | M63 | the pre-close gate refuses on ANY row change (**over-strict**) | `boot-adoption.test.ts` (2) |
 | M64 | `unreadable` folds back into `absent` | `boot-adoption.test.ts` (4) |
 | M65 | `absent` is treated as `unreadable` (**system-breaking direction**) | `boot-adoption.test.ts` (2) |
+| M66 | a dropped TARGET row reads as `absent` again | `boot-adoption.test.ts` (2) |
+| M67 | ANY dropped row refuses, not just this key's (**over-strict**) | `boot-adoption.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

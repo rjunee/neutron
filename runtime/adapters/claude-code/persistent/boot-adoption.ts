@@ -558,6 +558,19 @@ export async function reconcileOwnRepl(
   // ENOENT STAYS A TRUE ABSENCE: a cold boot has no registry, and a missing file that
   // refused spawns would stop the system starting.
   const state = readRegistryState(registryPath)
+  if (state.kind === 'loaded' && state.droppedKeys.includes(sessionKey)) {
+    // THIS KEY'S ROW WAS DISCARDED AS SCHEMA-INVALID. The file read fine and the row did
+    // not, so the key is missing for a reason that is not absence — and a drop on some
+    // OTHER key says nothing about this one, which is why the question is asked per key.
+    log(`key=${sessionKey.slice(0, 32)}: this row was DROPPED as invalid — refusing to decide`)
+    return {
+      kind: 'undecided',
+      sessionKey,
+      reason:
+        'this key\'s registry ROW WAS DROPPED as schema-invalid, so what it recorded is unknown — the file ' +
+        'read cleanly and the row did not, which is the absence of a finding rather than a finding of absence',
+    }
+  }
   if (state.kind === 'unreadable') {
     log(`key=${sessionKey.slice(0, 32)}: the registry could not be READ (${state.reason}) — refusing to decide`)
     return {
@@ -1021,6 +1034,8 @@ function rowStillNames(
     // the shutdown decision already follow.
     if (!acquired) return 'unreadable'
     if (state.kind === 'unreadable') return 'unreadable'
+    // A DROPPED ROW FOR THIS KEY IS NOT "no row names this pane" — same rule, per key.
+    if (state.kind === 'loaded' && state.droppedKeys.includes(sessionKey)) return 'unreadable'
     // THE DISTINCTION THAT MATTERS IS WHICH PANE THE ROW NAMES, not merely that the row
     // changed. Refusing on any change is too strong and breaks the act this module exists
     // to perform:
