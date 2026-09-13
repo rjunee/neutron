@@ -3244,6 +3244,31 @@ const SELF_DECLARED_ESCALATION_KINDS = ['design-gap', 'missing-dependency']
  *  that fixing is not working, and say NOTHING about why — so it must not borrow a name
  *  ('design-gap', 'missing-dependency') that asserts a cause nobody measured. */
 const ARITHMETIC_ESCALATION_KIND = 'not-converging'
+/** The reviewer-authored key list, bounded: it is quoted into BOTH the evidence and the
+ *  `whatIsMissing`, and a run with many repeats would otherwise put an unbounded model
+ *  string into a persisted column and the project chat. */
+const REPEATED_KEYS_MAX = 300
+/**
+ * THE REPEATED KEYS, REDACTED AND BOUNDED AT THE POINT OF CONSTRUCTION.
+ *
+ * `repeat.repeated` holds REVIEWER-AUTHORED key strings. That was harmless while
+ * `findingIdentity` lower-cased keys and dropped every segment it did not recognise —
+ * and it stopped being harmless when this branch deliberately made keys FAITHFUL, to fix
+ * the collisions that were escalating converging runs. A key like
+ * `file:symbol:token-ghp_SECRET` now survives verbatim, and both interpolations below
+ * reach the owner: `whatIsMissing` is interpolated into the BLOCKED chat message by
+ * `trident/delivery.ts`, and `evidence` is persisted on the run row.
+ *
+ * MAKING A VALUE MORE TRUTHFUL MOVED IT INTO A CATEGORY IT WAS NOT PREVIOUSLY IN. The
+ * self-declared arm has always redacted (`validateEscalationClaim`); the arithmetic arm
+ * never did, and the widening is what turned that asymmetry into a leak.
+ *
+ * At CONSTRUCTION, not at delivery: the decoder's `ESCALATION_TEXT_MAX` truncation runs
+ * after persistence and is a bound, not a redaction.
+ */
+function redactedRepeatedKeys(keys) {
+  return redactProbeText(Array.isArray(keys) ? keys.join(', ') : '').slice(0, REPEATED_KEYS_MAX)
+}
 /** `whatIsMissing` is persisted and delivered to the owner; bound it like every other
  *  model-supplied string this file keeps. */
 const WHAT_IS_MISSING_MAX = 500
@@ -3531,7 +3556,7 @@ function decideEscalation(state) {
   const evidence = [
     `round ${round}`,
     repeat.outcome === 'repeat'
-      ? `finding(s) ${repeat.repeated.join(', ')} survived a fix round`
+      ? `finding(s) ${redactedRepeatedKeys(repeat.repeated)} survived a fix round`
       : `repeat-finding: ${repeat.outcome}${repeat.reason === '' ? '' : ` (${repeat.reason})`}`,
     `blocker+major counts ${JSON.stringify(Array.isArray(state && state.blockingCounts) ? state.blockingCounts : null)} → ${progress}`,
     claim.ok
@@ -3560,7 +3585,7 @@ function decideEscalation(state) {
   const whatIsMissing = claim.ok
     ? claim.whatIsMissing
     : repeat.outcome === 'repeat'
-      ? `the same finding(s) survived a fix round (${repeat.repeated.join(', ')}), so fixing this diff is not removing them — the plan, not the code, is what needs deciding`
+      ? `the same finding(s) survived a fix round (${redactedRepeatedKeys(repeat.repeated)}), so fixing this diff is not removing them — the plan, not the code, is what needs deciding`
       : 'the blocker+major count stopped falling across two rounds, so the fix rounds are not converging'
   return { ...base, action: 'stop', kind, whatIsMissing }
 }

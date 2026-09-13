@@ -690,6 +690,47 @@ describe('work_board_remove', () => {
  * longer has to mark them `done` — the misreport of 2026-08-14.
  */
 describe('work_board_update — the SHELVED lane (status=archived)', () => {
+  test('HEADLINE: the agent tool cannot complete a BLOCKED card, and is told why', async () => {
+    // The second public door into `done`. It funnels through the same store guard, and
+    // the refusal is surfaced as an ANSWER rather than a tool crash so the agent learns
+    // the unblocking step instead of retrying.
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const created = (await add.handler({ title: 'stopped, not shipped' }, ctx('owner'))) as {
+      item: { id: string }
+    }
+    await store.attachRun('owner', created.item.id, 'run-esc-tool')
+    await store.detachRun('owner', 'run-esc-tool', 'blocked')
+    expect(store.get('owner', created.item.id)?.status).toBe('blocked')
+
+    const res = (await update.handler(
+      { id: created.item.id, status: 'done' },
+      ctx('owner'),
+    )) as { ok?: boolean; error?: string }
+    expect(res.ok).toBe(false)
+    expect(String(res.error)).toContain('BLOCKED')
+    expect(String(res.error)).toContain('upcoming')
+    // The card did not move, and nothing claimed it shipped.
+    expect(store.get('owner', created.item.id)?.status).toBe('blocked')
+    expect(store.get('owner', created.item.id)?.completed_at).toBeNull()
+  })
+
+  test('CONTROL: the agent tool still completes an ordinary card', async () => {
+    // Without this, "the tool cannot complete a blocked card" is satisfied by a tool that
+    // completes nothing.
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const created = (await add.handler({ title: 'ordinary work' }, ctx('owner'))) as {
+      item: { id: string }
+    }
+    const res = (await update.handler(
+      { id: created.item.id, status: 'done' },
+      ctx('owner'),
+    )) as { ok?: boolean }
+    expect(res.ok).not.toBe(false)
+    expect(store.get('owner', created.item.id)?.status).toBe('done')
+  })
+
   test("the schemas advertise 'archived' but NEVER 'failed'", () => {
     for (const name of [WORK_BOARD_ADD_TOOL, WORK_BOARD_UPDATE_TOOL]) {
       const schema = registry.get(name)!.input_schema as {

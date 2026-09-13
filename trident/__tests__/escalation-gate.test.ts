@@ -112,6 +112,73 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(findingIdentity(f(':./a/b.ts:sym:rule'))).toBe('')
   })
 
+  test('HEADLINE: a SECRET-SHAPED KEY is redacted before it reaches the owner', () => {
+    const { decideEscalation } = loadEscalationGate()
+    // THE DIRECT CONSEQUENCE OF MAKING KEYS FAITHFUL. Widening `findingIdentity` to
+    // preserve case, numbers and empty segments — which is what stopped it escalating
+    // CONVERGING runs — also stopped it laundering content out of reviewer-authored keys.
+    // The self-declared arm has always redacted (`validateEscalationClaim`); the
+    // ARITHMETIC arm interpolated `repeat.repeated` raw into BOTH `whatIsMissing` (which
+    // `trident/delivery.ts` puts in the project chat) and `evidence` (which is persisted
+    // on the run row).
+    //
+    // Making a value more TRUTHFUL moved it into a category it was not previously in.
+    const leaky = 'src/a.ts:handler:token-ghp_SECRETSECRETSECRET'
+    const d = decideEscalation({
+      round: 2,
+      previousFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key: leaky }],
+      currentFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key: leaky }],
+      blockingCounts: [1, 1],
+      claim: null,
+      replansUsed: 0,
+    })
+    expect(d.action).toBe('stop')
+    // ASSERTED ON WHAT IS PERSISTED, not on what some renderer prints.
+    for (const text of [String(d.whatIsMissing), String(d.evidence)]) {
+      expect(text).not.toContain('ghp_SECRETSECRETSECRET')
+      expect(text).toContain('ghp_***')
+    }
+  })
+
+  test('an OVERSIZED key set is bounded before it is persisted', () => {
+    const { decideEscalation } = loadEscalationGate()
+    // A run with many repeats would otherwise put an unbounded model-authored string into
+    // a persisted column and the chat message.
+    const many = Array.from({ length: 80 }, (_, i) => ({
+      severity: 'blocker', title: 't', evidence: 'e', key: `src/file${i}.ts:symbol${i}:some-long-rule-name-${i}`,
+    }))
+    const d = decideEscalation({
+      round: 2,
+      previousFindings: many,
+      currentFindings: many,
+      blockingCounts: [80, 80],
+      claim: null,
+      replansUsed: 0,
+    })
+    expect(d.action).toBe('stop')
+    // The KEY LIST is bounded; the surrounding sentence is this file's own prose.
+    expect(String(d.whatIsMissing).length).toBeLessThan(600)
+    expect(String(d.evidence).length).toBeLessThan(900)
+  })
+
+  test('CONTROL: an ordinary key still APPEARS in both, unredacted', () => {
+    const { decideEscalation } = loadEscalationGate()
+    // Without this, "secrets are redacted" is satisfied by redacting EVERYTHING — which
+    // would remove the one thing the stop is supposed to tell the owner: which finding
+    // survived.
+    const key = 'src/a.ts:handler:missing-auth'
+    const d = decideEscalation({
+      round: 2,
+      previousFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key }],
+      currentFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key }],
+      blockingCounts: [1, 1],
+      claim: null,
+      replansUsed: 0,
+    })
+    expect(String(d.whatIsMissing)).toContain(key)
+    expect(String(d.evidence)).toContain(key)
+  })
+
   test('HEADLINE: an EMPTY SEGMENT makes the key undecidable — it is not deleted', () => {
     const { findingIdentity, repeatVerdict } = loadEscalationGate()
     // THE FOURTH INSTANCE OF ONE MISTAKE IN THIS FUNCTION, and the subtlest: the empty

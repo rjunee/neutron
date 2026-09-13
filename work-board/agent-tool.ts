@@ -36,7 +36,8 @@ import {
   type WorkBoardItem,
   type WorkBoardItemUpdate,
   type WorkBoardStatus,
-  type WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
+  type WorkBoardStore, WorkBoardRunStillLiveError,
+  WorkBoardBlockedCompletionError } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 import type { WorkBoardChatAck } from './chat-ack.ts'
 import {
@@ -393,7 +394,7 @@ export function registerWorkBoardToolSurface(
         // SHELVED (status:'archived') while its build is still live (see
         // WorkBoardRunStillLiveError). Surface its message so the agent learns
         // why and stops, rather than seeing a tool error and retrying.
-        if (err instanceof WorkBoardRunStillLiveError) {
+        if (err instanceof WorkBoardRunStillLiveError || err instanceof WorkBoardBlockedCompletionError) {
           return { ok: false, error: err.message }
         }
         return asErrorResult(err)
@@ -424,7 +425,7 @@ export function registerWorkBoardToolSurface(
       try {
         return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
       } catch (err) {
-        if (err instanceof WorkBoardRunStillLiveError) {
+        if (err instanceof WorkBoardRunStillLiveError || err instanceof WorkBoardBlockedCompletionError) {
           return { ok: false, error: err.message }
         }
         throw err

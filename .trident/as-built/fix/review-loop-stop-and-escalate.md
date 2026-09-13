@@ -576,6 +576,54 @@ block-kind list was the visible edit; the conjunction it sits in was the one tha
 re-reading. Adding a value to a disjunction silently re-uses every other clause as a claim
 about the new value too.
 
+### MAKING A VALUE MORE TRUTHFUL MOVED IT INTO A CATEGORY IT WAS NOT IN
+
+The four identity fixes above all made finding keys more FAITHFUL — case preserved, numbers
+preserved, `./` only where it is notation, empty segments no longer deleted. That was the
+right correction, and it had a consequence nobody asked for: the keys became verbatim
+reviewer-authored strings, and two places interpolate them into owner-facing text.
+
+`decideEscalation`'s ARITHMETIC arm built both `whatIsMissing` and `evidence` from
+`repeat.repeated.join(', ')` with neither redaction nor a bound. `whatIsMissing` is
+interpolated into the BLOCKED chat message by `trident/delivery.ts`; `evidence` is persisted
+on the run row. So a key like `src/a.ts:handler:token-ghp_SECRET`, returned twice, reached
+the owner intact. The SELF-DECLARED arm has always redacted — `validateEscalationClaim` runs
+`redactProbeText(...).slice(...)` — so this is the same rule applied to one arm of a branch
+and not the other, which is the fourth distinct instance of that shape on this PR.
+
+Both are redacted and bounded AT CONSTRUCTION now, not at delivery: the decoder's
+`ESCALATION_TEXT_MAX` truncation runs after persistence and is a bound, not a redaction.
+Tested on what is PERSISTED rather than on what a renderer prints, with a control that an
+ordinary key still appears — otherwise "secrets are redacted" is satisfied by redacting the
+one thing the stop exists to tell the owner.
+
+THE SWEEP, the one the previous round's enumeration did not cover. Consumers of a VALUE was
+the right question for the store guard; this needed the other one: **every site that builds
+owner-facing text from reviewer-supplied content.** `redactProbeText` has six call sites —
+the declared claim, the terminal cause, the brief alert, the panel title, and the two
+finding-list prompt builders — and they are the positive control that the helper exists and
+is the house rule. Against that, exactly two interpolations of reviewer content were
+UNREDACTED, and both were the `repeat.repeated` pair fixed here. `delivery.ts` interpolates
+only `whatIsMissing` and `evidence`, which are now clean at the source.
+
+### A BLOCKED CARD CANNOT BE COMPLETED
+
+`complete()` delegates to `update({status:'done'})`, and nothing checked the card's CURRENT
+lane — so a card that escalated for a design gap could be marked `done`, with `completed_at`
+stamped, through either public surface. The lane says a build STOPPED because the plan could
+not succeed; `done` says the work shipped, which is the most misleading thing this board can
+say about that card.
+
+Refused at the STORE, because both surfaces funnel through `update()`: the agent tool, the
+HTTP route, `complete()`, and any generic patch. It THROWS rather than returning null, for
+the reason the live-run refusal beside it already gives — `null` means "no such item", and a
+refusal that looks like a miss gets swallowed. The HTTP route answers 409 `card_blocked`
+(state, not fault) and the tool returns the message as an ANSWER so the agent learns the
+unblocking step instead of retrying. All four paths are tested, with controls that ordinary
+completion from `upcoming` and `in_progress` still works and that unblocking first restores
+it — without those, "a blocked card cannot complete" is satisfied by a store that completes
+nothing.
+
 ### A SOURCE-TEXT ASSERTION BREAKS WHEN THE BEHAVIOUR IS CORRECTLY IMPROVED
 
 (Instances two, three and four arrived while finishing this branch, and one of them had

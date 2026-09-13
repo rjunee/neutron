@@ -545,6 +545,36 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
  * WHICH run rather than a bare failure. `action` only selects the explanation;
  * both refusals are the same rule (a terminal claim about a live build).
  */
+/**
+ * A BLOCKED CARD CANNOT BE COMPLETED.
+ *
+ * The lane means a build STOPPED because the plan could not succeed and said why; letting
+ * the card go straight to `done` records that the work SHIPPED, which is the single most
+ * misleading thing this board can say about it — and it stamps `completed_at`, so the card
+ * leaves the active lane carrying a date that asserts delivery.
+ *
+ * Refused at the STORE because both public surfaces funnel through `update()`: the agent
+ * tool, the HTTP route, `complete()` (which delegates), and any generic
+ * `update(status:'done')`. An invariant that holds only in the caller that remembered it is
+ * not an invariant — the same reason the inline-active claim is refused here.
+ *
+ * IT THROWS RATHER THAN RETURNING NULL, exactly as the live-run refusal beside it does:
+ * `null` already means "no such item", and a refusal that looks like a miss is swallowed
+ * by every caller. The unblocking step is named, because it is the whole point — moving the
+ * card OUT of `blocked` is the decision, and it is the owner's to make and report.
+ */
+export class WorkBoardBlockedCompletionError extends Error {
+  readonly item_id: string
+  constructor(item_id: string) {
+    super(
+      `refusing to complete item ${item_id}: it is BLOCKED — a build stopped on purpose and reported why, so recording it as done would claim work shipped that nobody built. ` +
+        'Read its reported reason, act on it, then move the card back to `upcoming` — that move is the decision, and completion is reconciled from a run that actually finished.',
+    )
+    this.name = 'WorkBoardBlockedCompletionError'
+    this.item_id = item_id
+  }
+}
+
 export class WorkBoardRunStillLiveError extends Error {
   readonly item_id: string
   readonly run_id: string
@@ -851,6 +881,15 @@ export class WorkBoardStore {
         this.isRunLive(current.linked_run_id)
       ) {
         throw new WorkBoardRunStillLiveError(id, current.linked_run_id)
+      }
+      // …AND A BLOCKED CARD MAY NOT BE COMPLETED AT ALL, live run or not. The lane says a
+      // build STOPPED because the plan could not succeed; `done` says the work shipped.
+      // Checked on the CURRENT status rather than the patch, because the reachable call is
+      // `complete()` / `update({status:'done'})` on a card that is ALREADY blocked — the
+      // patch names only the destination. Unblocking first (`status:'upcoming'`) is the
+      // decision, and it is deliberately not something completion can skip past.
+      if (patch.status === 'done' && current.status === 'blocked') {
+        throw new WorkBoardBlockedCompletionError(id)
       }
       const sets: string[] = []
       const params: (string | number | null)[] = []

@@ -42,7 +42,8 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
-  type WorkBoardTaskType, WorkBoardRunStillLiveError } from '@neutronai/work-board/store.ts'
+  type WorkBoardTaskType, WorkBoardRunStillLiveError,
+  WorkBoardBlockedCompletionError } from '@neutronai/work-board/store.ts'
 import {
   WorkBoardRemovalService,
   WORK_BOARD_REMOVAL_REASONS,
@@ -564,6 +565,11 @@ async function handleUpdate(
     if (err instanceof WorkBoardRunStillLiveError) {
       return jsonError(409, 'run_still_live', err.message)
     }
+    // 409 for the same reason: a BLOCKED card refusing completion is an answer about
+    // STATE, not a fault. The client shows the message, which names the unblocking step.
+    if (err instanceof WorkBoardBlockedCompletionError) {
+      return jsonError(409, 'card_blocked', err.message)
+    }
     return mapWriteError(err)
   }
 }
@@ -589,6 +595,11 @@ async function handleComplete(
   } catch (err) {
     if (err instanceof WorkBoardRunStillLiveError) {
       return jsonError(409, 'run_still_live', err.message)
+    }
+    // 409 for the same reason: a BLOCKED card refusing completion is an answer about
+    // STATE, not a fault. The client shows the message, which names the unblocking step.
+    if (err instanceof WorkBoardBlockedCompletionError) {
+      return jsonError(409, 'card_blocked', err.message)
     }
     throw err
   }

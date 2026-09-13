@@ -10,6 +10,7 @@ import {
   validateDesignDocRef,
   workBoardProjectIdForKey,
   workBoardScopeKey,
+  WorkBoardBlockedCompletionError,
   WorkBoardRunStillLiveError,
   WorkBoardStore,
   WorkBoardValidationError,
@@ -856,6 +857,66 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(requeued?.pr).toBeNull()
     expect(requeued?.pr_url).toBeNull()
     expect(requeued?.completed_at).toBeNull()
+  })
+
+  test('HEADLINE: a BLOCKED card cannot be COMPLETED, by any door', async () => {
+    // The lane means a build STOPPED because the plan could not succeed and said why.
+    // Recording it `done` says the work SHIPPED — the most misleading thing this board can
+    // say about that card — and stamps `completed_at`, so it leaves the active lane
+    // carrying a date that asserts delivery.
+    //
+    // BOTH PUBLIC SURFACES FUNNEL THROUGH `update()`, so the refusal lives there: the
+    // agent tool, the HTTP route, `complete()` (which delegates) and any generic
+    // `update({status:'done'})`. An invariant that holds only in the caller that
+    // remembered it is not an invariant.
+    const store = new WorkBoardStore(db)
+
+    // (1) complete()
+    const a = await store.create(SLUG, { title: 'stopped, not shipped' })
+    await store.attachRun(SLUG, a.id, 'run-esc-a')
+    await store.detachRun(SLUG, 'run-esc-a', 'blocked')
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+    await expect(store.complete(SLUG, a.id)).rejects.toThrow(WorkBoardBlockedCompletionError)
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+    // …and nothing was stamped on the way past.
+    expect(store.get(SLUG, a.id)?.completed_at).toBeNull()
+
+    // (2) the generic patch path
+    await expect(store.update(SLUG, a.id, { status: 'done' })).rejects.toThrow(
+      WorkBoardBlockedCompletionError,
+    )
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+    expect(store.get(SLUG, a.id)?.completed_at).toBeNull()
+  })
+
+  test('CONTROL: ordinary completion from upcoming and in_progress still works', async () => {
+    // Without this, "a blocked card cannot complete" is satisfied by a store that
+    // completes NOTHING — which would break the only path that legitimately stamps
+    // `completed_at`.
+    const store = new WorkBoardStore(db)
+
+    const fromUpcoming = await store.create(SLUG, { title: 'shipped from upcoming' })
+    expect((await store.complete(SLUG, fromUpcoming.id))?.status).toBe('done')
+    expect(store.get(SLUG, fromUpcoming.id)?.completed_at).not.toBeNull()
+
+    const fromProgress = await store.create(SLUG, { title: 'shipped from in_progress' })
+    await store.update(SLUG, fromProgress.id, { status: 'in_progress' })
+    expect((await store.update(SLUG, fromProgress.id, { status: 'done' }))?.status).toBe('done')
+    expect(store.get(SLUG, fromProgress.id)?.completed_at).not.toBeNull()
+  })
+
+  test('UNBLOCKING FIRST is the decision, and it restores completion', async () => {
+    // The refusal is not a dead end: it names the step, and taking that step works. A
+    // guard that could never be satisfied would just be a different way of losing a card.
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'unblock then ship' })
+    await store.attachRun(SLUG, a.id, 'run-esc-b')
+    await store.detachRun(SLUG, 'run-esc-b', 'blocked')
+    await expect(store.complete(SLUG, a.id)).rejects.toThrow(WorkBoardBlockedCompletionError)
+
+    await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect((await store.complete(SLUG, a.id))?.status).toBe('done')
+    expect(store.get(SLUG, a.id)?.completed_at).not.toBeNull()
   })
 
   test('HEADLINE: a BLOCKED card cannot be marked inline-active, by any writer', async () => {

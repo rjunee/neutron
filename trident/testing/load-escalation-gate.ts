@@ -131,11 +131,16 @@ export function loadEscalationGate(): EscalationGate {
     grabConst('SELF_DECLARED_ESCALATION_KINDS'),
     grabConst('ARITHMETIC_ESCALATION_KIND'),
     grabConst('WHAT_IS_MISSING_MAX'),
+    grabConst('REPEATED_KEYS_MAX'),
     grabConst('NON_BLOCKING_SEVERITIES'),
     grabConst('ADVISORY_FINDING_KEY'),
     grabConst('LANE_FINDING_KIND'),
     grabConst('SUITE_FINDING_KIND'),
     grabFunction('redactProbeText'),
+    // Redacts and bounds the reviewer-authored key list that BOTH arms of the arithmetic
+    // escalation interpolate, so a gate assembled without it throws rather than silently
+    // testing an unredacted `decideEscalation`.
+    grabFunction('redactedRepeatedKeys'),
     grabFunction('isNonBlockingFinding'),
     grabFunction('isCodeWorkFinding'),
     grabFunction('findingIdentity'),

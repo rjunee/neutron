@@ -473,6 +473,34 @@ describe('the CARD — BLOCKED is its own lane, and the run cannot move anything
     ).rejects.toThrow(/no findings and no escalation/)
   })
 
+  test('HEADLINE: the HTTP surface REFUSES to complete a blocked card (409, not 500)', async () => {
+    // The third door into `done`, and the one a human clicks: the board row's dot
+    // advances status, so on a blocked card it lands here. A 500 would read as a fault;
+    // this is a legitimate answer about STATE, and the message names the unblocking step.
+    const { createWorkBoardSurface } = await import('@neutronai/gateway/http/work-board-surface.ts')
+    const { createAppWsAuthResolver } = await import('@neutronai/channels/adapters/app-ws/auth.ts')
+    const card = await board.create('proj-1', { title: 'stopped, not shipped' })
+    await board.attachRun('proj-1', card.id, 'run-esc-http')
+    await board.detachRun('proj-1', 'run-esc-http', 'blocked')
+    expect(board.get('proj-1', card.id)?.status).toBe('blocked')
+
+    const surface = createWorkBoardSurface({
+      store: board,
+      auth: createAppWsAuthResolver({ project_slug: 'proj-1', bypass: true }),
+    })
+    const res = await surface.handler(new Request(
+      `http://x/api/app/projects/general/work-board/${card.id}/complete`,
+      { method: 'POST', headers: { authorization: 'Bearer dev-token' } },
+    ))
+    expect(res?.status).toBe(409)
+    const body = (await res!.json()) as { ok: boolean; code: string; error?: string }
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('card_blocked')
+    // The card did not move, and nothing claimed it shipped.
+    expect(board.get('proj-1', card.id)?.status).toBe('blocked')
+    expect(board.get('proj-1', card.id)?.completed_at).toBeNull()
+  })
+
   test('HEADLINE: a missing-dependency escalation moves the card to BLOCKED', async () => {
     const obs = buildBoardReconcileObserver(board, { resolveRepoWebUrl: async () => null })!
     const card = await board.create('proj-1', { title: 'the blocked thing' })
