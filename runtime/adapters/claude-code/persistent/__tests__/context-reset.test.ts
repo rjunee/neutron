@@ -2,7 +2,8 @@
  * context-reset.test.ts — the `/reset` runtime primitive (`resetPooledSessionContext`).
  *
  * REAL behavior, not `toHaveBeenCalled` mocks: a recording PtyHost captures every
- * raw PTY `write()`, so each test asserts the LITERAL `'/clear\r'` state change
+ * raw `write()` + an `enter` key, so each test asserts the LITERAL `'/clear'` text
+ * write AND its submit (see `CLEAR_WRITES`) as the state change
  * landed (or did NOT) on the live warm REPL, in the right order, and that the
  * `claude` process stays alive across the reset (spawnCount unchanged — the pinned
  * design: clear the model transcript, keep the process).
@@ -12,7 +13,7 @@
  * the busy / wait-then-proceed paths.
  *
  * Covers:
- *  - warm one turn on `cc-agent-acme` / `proj-A`, reset → ok, exactly one `/clear\r`
+ *  - warm one turn on `cc-agent-acme` / `proj-A`, reset → ok, exactly one `/clear`+enter
  *    written AFTER the turn's message; the process survives (spawnCount === 1) and a
  *    subsequent turn still completes;
  *  - scope isolation: resetting `proj-A` never touches `proj-B`; a never-warmed
@@ -38,12 +39,15 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { resetPooledSessionContext } from '../context-reset.ts'
+import { CONTEXT_RESET_COMMAND } from '../signatures.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
 })
 
-type Timeline = Array<{ kind: 'write'; data: string } | { kind: 'message'; text: string }>
+type Timeline = Array<
+  { kind: 'write'; data: string } | { kind: 'key'; key: string } | { kind: 'message'; text: string }
+>
 
 /** A fake `claude`+dev-channel that records every raw PTY `write()` (captures the
  *  `/clear`) and every `/message` inject into a shared timeline. Replies can be
@@ -65,7 +69,7 @@ function makeRecordingHost(): {
     for (const f of fires) f()
   }
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 300000 + spawns
       const i = argv.indexOf('--session-id')
@@ -115,7 +119,19 @@ function makeRecordingHost(): {
             data: typeof data === 'string' ? data : Buffer.from(data).toString('utf8'),
           })
         },
-        resize() {},
+        // § herdr step 2b — the SUBMIT is a separate key now. `pane.send_text` never
+        // submits, so a `/clear` that is not followed by an `enter` is a command
+        // typed and left at the prompt. Recording the key is what lets
+        // `CLEAR_WRITES` below assert a COMPLETED clear rather than a typed one.
+        writeKey(key) {
+          timeline.push({ kind: 'key', key })
+        },
+        // The acknowledged pair. `submitCommand` uses ONLY this, so a reset reported
+        // as done is a reset this fake was told about and confirmed.
+        async submitLine(command: string) {
+          timeline.push({ kind: 'write', data: command })
+          timeline.push({ kind: 'key', key: 'enter' })
+        },
         kill() {
           if (hasExited) return
           hasExited = true
@@ -172,8 +188,25 @@ async function drain(handle: SessionHandle): Promise<string> {
   return text
 }
 
-const CLEAR_WRITES = (t: Timeline): Array<{ kind: 'write'; data: string }> =>
-  t.filter((e): e is { kind: 'write'; data: string } => e.kind === 'write' && e.data === '/clear\r')
+/**
+ * COMPLETED clears: a `/clear` text write IMMEDIATELY followed by an `enter` key.
+ *
+ * Both halves are required, and deliberately so. Under herdr `pane.send_text` does
+ * not submit, so counting the text write alone would count a `/clear` that was
+ * typed into the prompt and never sent — the exact silent no-op this change exists
+ * to remove. Requiring the pair means dropping the `enter` reddens every test here.
+ */
+const CLEAR_WRITES = (t: Timeline): Array<{ kind: 'write'; data: string }> => {
+  const out: Array<{ kind: 'write'; data: string }> = []
+  for (let i = 0; i < t.length; i++) {
+    const e = t[i]
+    const next = t[i + 1]
+    if (e?.kind === 'write' && e.data === CONTEXT_RESET_COMMAND && next?.kind === 'key' && next.key === 'enter') {
+      out.push(e)
+    }
+  }
+  return out
+}
 
 const RESET_ARGS = { idle_quiet_ms: 0, idle_max_ms: 50 as const }
 
@@ -205,11 +238,11 @@ describe('resetPooledSessionContext — /reset runtime primitive', () => {
     })
     expect(out).toEqual({ ok: true, sessions_reset: 1 })
 
-    // The REAL state change: exactly ONE `/clear\r` was written to the live PTY,
+    // The REAL state change: exactly ONE `/clear` + `enter` reached the live pane,
     // and it landed AFTER the turn's message (context wiped post-turn).
     const clears = CLEAR_WRITES(timeline)
     expect(clears.length).toBe(1)
-    const clearIdx = timeline.findIndex((e) => e.kind === 'write' && e.data === '/clear\r')
+    const clearIdx = timeline.findIndex((e) => e.kind === 'write' && e.data === CONTEXT_RESET_COMMAND)
     const msgIdx = timeline.findIndex((e) => e.kind === 'message')
     expect(msgIdx).toBeGreaterThanOrEqual(0)
     expect(clearIdx).toBeGreaterThan(msgIdx)
@@ -320,7 +353,7 @@ describe('resetPooledSessionContext — /reset runtime primitive', () => {
     // The /clear landed AFTER the turn's message (it waited for the turn to settle).
     const clears = CLEAR_WRITES(timeline)
     expect(clears.length).toBe(1)
-    const clearIdx = timeline.findIndex((e) => e.kind === 'write' && e.data === '/clear\r')
+    const clearIdx = timeline.findIndex((e) => e.kind === 'write' && e.data === CONTEXT_RESET_COMMAND)
     const msgIdx = timeline.findIndex((e) => e.kind === 'message')
     expect(clearIdx).toBeGreaterThan(msgIdx)
   })

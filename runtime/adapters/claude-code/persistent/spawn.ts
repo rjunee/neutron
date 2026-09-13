@@ -11,7 +11,7 @@ import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-t
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
-import { bunTerminalHost } from './bun-terminal-host.ts'
+import { herdrHost } from './herdr-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import { applyModelFloor } from './model-floor.ts'
@@ -107,7 +107,7 @@ async function spawnSession(
   // TOKEN in plaintext. 4 bytes is guessable/squattable by any same-uid process;
   // the path is also visible in `ps` because `--mcp-config <path>` is on argv.
   const channelName = `neutron-${randomBytes(16).toString('hex')}`
-  const ptyHost = options.ptyHost ?? bunTerminalHost
+  const ptyHost = options.ptyHost ?? herdrHost
   const devChannelPath = options.devChannelPath ?? DEFAULT_DEV_CHANNEL_PATH
   const toolsBridgePath = options.toolsBridgePath ?? DEFAULT_TOOLS_BRIDGE_PATH
   const appendSystemPromptFile = options.appendSystemPromptFile ?? DEFAULT_AGENT_BASE_PROMPT
@@ -474,12 +474,12 @@ async function spawnSession(
       session.turnOutputMark === undefined ? '' : session.ring.textSince(session.turnOutputMark),
     ),
   )
-  // The spawn `const child` isn't assigned when the `onData` closure is defined,
+  // The spawn `const child` isn't assigned when the `onScreen` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
-  // spawn, before any onData can fire on the event loop).
+  // spawn, before any onScreen can fire on the event loop).
   let scanChild: PtyChild | undefined
   // F4 — the ambient live-process handle for THIS child, assigned right after the
-  // register call below (before any onData can fire on the event loop). It is
+  // register call below (before any onScreen can fire on the event loop). It is
   // bound to the owning registry + this child's (name, pid), so a late touch from
   // this child can never refresh a different registry or a respawned successor.
   let liveHandle: LiveProcessHandle | undefined
@@ -498,13 +498,22 @@ async function spawnSession(
   // concurrent respawn that already re-registered this id is not evicted by our
   // failure.
   sink.register(sessionId, session)
-  let child: ReturnType<typeof ptyHost.spawn>
+  // `Awaited<...>`: `PtyHost.spawn` is ASYNC under herdr — it connects, applies the
+  // layout and learns the pane's pid before it can hand back a child, and `child.pid`
+  // is read synchronously just below.
+  let child: Awaited<ReturnType<typeof ptyHost.spawn>>
   try {
-    child = ptyHost.spawn(argv, {
+    child = await ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
-    onData: (chunk) => {
-      session.ring.append(Buffer.from(chunk).toString('utf8'))
+    // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
+    // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
+    // keeps the detector falling edge working: a cleared screen arrives with nothing
+    // on it. Where the screen comes from differs (herdr polls a rendered pane; the
+    // in-process host accumulates the byte stream), and `pty-host.ts` records the one
+    // consequence — a repaint collapses under herdr and does not under a pty.
+    onScreen: (screen) => {
+      session.ring.replace(screen)
       const now = Date.now()
       session.lastDataAt = now
       // F4 — feed the watchdog's live-process view: any child output is activity,
@@ -547,6 +556,21 @@ async function spawnSession(
   // output age — is what stuck-agent detection measures, so an idle warm REPL
   // between turns is correctly never stuck.
   session.liveHandle = liveHandle
+
+  // EVERY CONSUMER THE `onScreen` CLOSURE READS IS NOW WIRED — `scanChild` (the
+  // keystroke target) and `liveHandle` (the activity touch) — so screens may start
+  // flowing. Until this call the host does not poll at all.
+  //
+  // This must be the LAST step of the wiring, and it exists because `spawn` is async:
+  // the closure above is built before `child` exists, so a host that began polling
+  // before returning could deliver the FIRST screen while `scanChild` was still
+  // undefined. That screen was dropped unscanned — and because the ring is
+  // snapshot-replace, which suppresses an unchanged screen, it was never delivered
+  // again: a startup trust prompt or approval dialog left undismissed for the life of
+  // a REPL that stayed alive and polling. `PtyChild.beginOutput` carries the full
+  // reasoning; the general form is that an `await` between a producer and its consumer
+  // opens a window for everything the producer already started.
+  child.beginOutput?.()
 
   // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
   // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
@@ -677,7 +701,7 @@ async function spawnSession(
   // nothing" re-fires forever) on a cadence and surfaces a Reset/Compact
   // affordance before the transcript grows large enough to block `--resume` (the
   // 2026-04-16 11.8 MB infinite-restart incident). `requestCompact()` actuates
-  // `escape` + `/compact\r` through the same PTY write seam the disclaimer-dismiss
+  // `escape` + `/compact` + `enter` through the same write seam the disclaimer-dismiss
   // path uses, behind the surfaced affordance (see `requestSessionCompact`). The
   // timer is unref'd and stopped on child exit / teardown.
   //

@@ -176,9 +176,13 @@ export const RESPAWN_CAP_MAX = 3
  *  child is dead, so exactly one process owns the session transcript at a time
  *  (Argus r3 BLOCKER 1). */
 export const CHILD_KILL_GRACE_MS = 2_000
-/** Send a structured key sequence to a PTY child, degrading to a raw `write`
- *  when the backend predates the F2 `writeKeys` extension (every real
- *  `bun-terminal-host` child implements it; a lightweight test fake may not).
+/** Send a structured key sequence to a child, degrading to a raw `write` when the
+ *  child omits the F2 `writeKeys` extension — which now means ONLY a lightweight
+ *  test fake. The one real backend (`herdr-host.ts`) always implements
+ *  `writeKey`/`writeKeys`, and a test pins that, because the fallback would not
+ *  work for it: herdr's `write()` refuses `\r` (its `send_text` never submits) and
+ *  `encodeKeys(['enter'])` is exactly `\r`. A future backend on a raw write seam
+ *  may still rely on the fallback; a future backend on a herdr-like API must not.
  *  Used to actuate an output-scan detector's fired keystrokes (`output-scan.ts`,
  *  F3). The encoding is the pure `encodeKeys` (`keystrokes.ts`), so this stays a
  *  single fire-once write per detection (invariant §4). */
@@ -195,6 +199,46 @@ function sendKeys(child: PtyChild, keys: readonly Key[]): void {
 export function sendKey(child: PtyChild, key: Key): void {
   if (child.writeKey !== undefined) child.writeKey(key)
   else child.write(encodeKey(key))
+}
+
+/**
+ * Type a slash command into the REPL and SUBMIT it.
+ *
+ * THE SUBMIT IS MANDATORY, AND ITS ABSENCE IS A REFUSAL, NOT A SKIP. herdr's
+ * `pane.send_text` does not submit (measured), so `write('/clear')` alone types the
+ * command at the prompt and leaves it there — the transcript is NOT cleared, and
+ * nothing anywhere errors. The optional-chained `child.writeKey?.('enter')` this
+ * replaces made that outcome reachable from any `PtyChild` that implements `write`
+ * but not `writeKey`: the caller returned `{status:'reset'}` for a reset that never
+ * happened.
+ *
+ * `?.` on a method whose ABSENCE CHANGES THE OUTCOME is a silent skip wearing the
+ * clothes of a safe default. So this throws instead, naming the missing capability
+ * and the precondition — `actuateSessionContextReset` turns that into
+ * `{status:'failed', detail}`, which is the honest sibling of the success it would
+ * otherwise have reported.
+ *
+ * AND THE SUBMIT IS AWAITED. Refusing when the seam is missing fixed only half of
+ * it: `write` + `writeKey` are `void`, so over a socket backend they hand two frames
+ * to the transport and return, and a REFUSED frame was indistinguishable from a
+ * delivered one. The caller still reported `{status:'reset'}` — for the same reset
+ * that never happened, now for a different reason. A detached write cannot support
+ * any claim about its effect, so this returns a promise that resolves only once the
+ * backend has acknowledged BOTH the text and the Enter ({@link PtyChild.submitLine}),
+ * and every caller that reports an outcome must await it.
+ */
+export async function submitCommand(child: PtyChild, command: string): Promise<void> {
+  if (child.submitLine === undefined) {
+    throw new Error(
+      `persistent-repl: cannot submit '${command}' — this PtyChild provides no submitLine(), and ` +
+        `write()/writeKey() are fire-and-forget on every backend: they deliver bytes and cannot ` +
+        `tell us the command reached the REPL, and write() carries no promise about submission ` +
+        `either way (under herdr, pane.send_text types without firing). Submitting a slash ` +
+        `command whose success is reported REQUIRES the acknowledged seam; refusing rather than ` +
+        `typing '${command}' at the prompt and reporting success.`,
+    )
+  }
+  await child.submitLine(command)
 }
 
 /** Resolve the Claude Code transcript root the SAME way the JSONL ghost gate and

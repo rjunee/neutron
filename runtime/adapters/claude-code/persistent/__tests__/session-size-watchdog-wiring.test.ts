@@ -3,7 +3,7 @@
  * actually WIRED into the substrate spawn path (anti-pattern #1: no built-but-
  * not-wired core). A warm session whose POST-COMPACT transcript on disk is ≥5 MB
  * must surface a warn via the injected `onSizeAlert`, and the surfaced Compact
- * affordance (`requestSessionCompact`) must actuate `escape` + `/compact\r`
+ * affordance (`requestSessionCompact`) must actuate `escape` + `/compact` + `enter`
  * through the live PTY child.
  */
 
@@ -21,10 +21,25 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { sessionJsonlPath, SIZE_WARN_BYTES, SIZE_CRITICAL_BYTES } from '../session-size-watchdog.ts'
+import { COMPACT_COMMAND, sessionJsonlPath, SIZE_WARN_BYTES, SIZE_CRITICAL_BYTES } from '../session-size-watchdog.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+
+/**
+ * COMPLETED compactions: a `/compact` text write immediately followed by an `enter`
+ * key. Both halves required — under herdr `pane.send_text` does not submit, so a
+ * `/compact` with no following `enter` is a command typed at the prompt and never
+ * run. Counting the text alone would keep passing if the submit were dropped.
+ */
+const COMPACTS = (writes: readonly string[]): number => {
+  let n = 0
+  for (let i = 0; i < writes.length - 1; i++) {
+    if (writes[i] === COMPACT_COMMAND && writes[i + 1] === `KEY:${encodeKey('enter')}`) n += 1
+  }
+  return n
+}
+
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
@@ -35,7 +50,7 @@ afterEach(async () => {
 function makeHost(): { host: PtyHost; writes: () => string[] } {
   const writes: string[] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const i = argv.indexOf('--session-id')
       const sid = (i >= 0 ? argv[i + 1] : argv[argv.indexOf('--resume') + 1]) as string
       const { port: sinkPort, token } = bakedChildSinkInfo(argv)
@@ -149,7 +164,7 @@ describe('session-size watchdog — substrate wiring (row #13)', () => {
     }
   })
 
-  it('requestSessionCompact actuates escape + /compact\\r on the live child', async () => {
+  it('requestSessionCompact actuates escape + /compact + enter on the live child', async () => {
     const projectsDir = mkdtempSync(join(tmpdir(), 'neutron-size-wire-'))
     try {
       const { host, writes } = makeHost()
@@ -162,16 +177,17 @@ describe('session-size watchdog — substrate wiring (row #13)', () => {
 
       const fired = await requestSessionCompact(poolKeyFor(opts))
       expect(fired).toBe(true)
-      // escape THEN /compact\r, in order, exactly once.
+      // escape, /compact, then the enter submit — in order, exactly once. The
+      // submit is a separate key because `pane.send_text` never submits.
       const idxEsc = writes().indexOf(`KEY:${encodeKey('escape')}`)
-      const idxCompact = writes().indexOf('/compact\r')
+      const idxCompact = writes().indexOf(COMPACT_COMMAND)
       expect(idxEsc).toBeGreaterThanOrEqual(0)
       expect(idxCompact).toBeGreaterThan(idxEsc)
-      expect(writes().filter((w) => w === '/compact\r')).toHaveLength(1)
+      expect(COMPACTS(writes())).toBe(1)
 
       // A second press while mid-compact is a no-op (fire-once).
       expect(await requestSessionCompact(poolKeyFor(opts))).toBe(false)
-      expect(writes().filter((w) => w === '/compact\r')).toHaveLength(1)
+      expect(COMPACTS(writes())).toBe(1)
     } finally {
       rmSync(projectsDir, { recursive: true, force: true })
     }
@@ -207,13 +223,13 @@ describe('session-size watchdog — substrate wiring (row #13)', () => {
       wd?.tick()
 
       const idxEsc = writes().indexOf(`KEY:${encodeKey('escape')}`)
-      const idxCompact = writes().indexOf('/compact\r')
+      const idxCompact = writes().indexOf(COMPACT_COMMAND)
       expect(idxEsc).toBeGreaterThanOrEqual(0)
       expect(idxCompact).toBeGreaterThan(idxEsc)
       // Fire-once: subsequent ticks while still critical do NOT re-actuate.
       wd?.tick()
       wd?.tick()
-      expect(writes().filter((w) => w === '/compact\r')).toHaveLength(1)
+      expect(COMPACTS(writes())).toBe(1)
     } finally {
       rmSync(projectsDir, { recursive: true, force: true })
     }

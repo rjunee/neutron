@@ -18,6 +18,8 @@
  *  - the default (no flag) warm substrate writes NO `/clear` (opt-in; unchanged).
  */
 
+import { withCapturedStderr } from './capture-stderr.ts'
+import { CONTEXT_RESET_COMMAND } from '../signatures.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
@@ -37,13 +39,15 @@ afterEach(async () => {
 
 /** Ordered transcript of what the substrate did to the REPL: each PTY `write`
  *  (captures the `/clear`) and each dev-channel `/message` inject, in order. */
-type Timeline = Array<{ kind: 'write'; data: string } | { kind: 'message'; text: string }>
+type Timeline = Array<
+  { kind: 'write'; data: string } | { kind: 'key'; key: string } | { kind: 'message'; text: string }
+>
 
 /** A fake `claude`+dev-channel that (a) echoes each /message back as a /reply and
  *  (b) records every raw PTY `write()` into a shared timeline, so a test can assert
  *  a `/clear` was written before a reused turn's inject. `seen` increments per turn
  *  within one REPL (the warm-reuse signal). */
-function makeRecordingHost(): {
+function makeRecordingHost(failSubmit?: string): {
   host: PtyHost
   spawnCount: () => number
   timeline: Timeline
@@ -51,7 +55,7 @@ function makeRecordingHost(): {
   let spawns = 0
   const timeline: Timeline = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 200000 + spawns
       const i = argv.indexOf('--session-id')
@@ -97,7 +101,20 @@ function makeRecordingHost(): {
             data: typeof data === 'string' ? data : Buffer.from(data).toString('utf8'),
           })
         },
-        resize() {},
+        // § herdr step 2b — the submit is a separate key; `pane.send_text` never
+        // submits. Recorded so `CLEARS` can require the pair.
+        writeKey(key) {
+          timeline.push({ kind: 'key', key })
+        },
+        // The acknowledged pair — see `submitCommand`.
+        async submitLine(command: string) {
+          // A backend that REFUSES. The point of an acknowledged submit is that this
+          // is distinguishable from a delivered one; the fire-and-forget pair it
+          // replaces recorded both identically.
+          if (failSubmit !== undefined) throw new Error(failSubmit)
+          timeline.push({ kind: 'write', data: command })
+          timeline.push({ kind: 'key', key: 'enter' })
+        },
         kill() {
           if (hasExited) return
           hasExited = true
@@ -150,7 +167,22 @@ async function drain(handle: SessionHandle): Promise<string> {
   return text
 }
 
-const CLEARS = (t: Timeline): number => t.filter((e) => e.kind === 'write' && e.data.includes('/clear')).length
+/** Indices of COMPLETED clears: a `/clear` text write immediately followed by an
+ *  `enter` key. Both halves required — a `/clear` with no submit is a command typed
+ *  at the prompt and never run, which is exactly the silent no-op herdr's
+ *  `pane.send_text` would have produced. */
+const CLEAR_IDXS = (t: Timeline): number[] => {
+  const out: number[] = []
+  for (let i = 0; i < t.length - 1; i++) {
+    const e = t[i]
+    const next = t[i + 1]
+    if (e?.kind === 'write' && e.data === CONTEXT_RESET_COMMAND && next?.kind === 'key' && next.key === 'enter') {
+      out.push(i)
+    }
+  }
+  return out
+}
+const CLEARS = (t: Timeline): number => CLEAR_IDXS(t).length
 
 describe('PersistentReplSubstrate — reset_context_per_turn (import warm-session)', () => {
   it('reuses ONE warm REPL across chunks and writes /clear before each REUSED turn', async () => {
@@ -175,16 +207,58 @@ describe('PersistentReplSubstrate — reset_context_per_turn (import warm-sessio
 
     // Ordering: the first message is NOT preceded by a clear; every later
     // message IS immediately preceded by a clear (per-chunk isolation).
-    const firstClearIdx = timeline.findIndex((e) => e.kind === 'write' && e.data.includes('/clear'))
+    const firstClearIdx = CLEAR_IDXS(timeline)[0] ?? -1
     const firstMsgIdx = timeline.findIndex((e) => e.kind === 'message')
     expect(firstMsgIdx).toBeGreaterThanOrEqual(0)
     expect(firstClearIdx).toBeGreaterThan(firstMsgIdx) // no clear before turn 1
 
-    // The clear command terminates with a carriage return so the TUI runs it.
-    const clears = timeline.filter(
-      (e): e is { kind: 'write'; data: string } => e.kind === 'write' && e.data.includes('/clear'),
-    )
-    for (const clr of clears) expect(clr.data).toBe('/clear\r')
+    // Every clear is the exact command text with NO trailing carriage return — the
+    // submit is the `enter` key `CLEAR_IDXS` already required. A `\r` here would be
+    // typed as a literal and never fire (measured on the live herdr server).
+    for (const i of CLEAR_IDXS(timeline)) {
+      const e = timeline[i] as { kind: 'write'; data: string }
+      expect(e.data).toBe(CONTEXT_RESET_COMMAND)
+      expect(e.data).not.toContain('\r')
+    }
+  })
+
+  it('a REFUSED /clear is reported and the import proceeds — never silently skipped', async () => {
+    // THE POOL PATH'S HALF OF IT. `context-reset.ts` returns `{status:'failed'}`, so
+    // a dropped `await` there is caught by the status. HERE the policy is log +
+    // proceed (a stranded import is worse than a stale context), so the ONLY thing
+    // that distinguishes "cleared" from "failed to clear" is the operator-visible
+    // line — which means an unawaited `submitCommand` makes a reset that never
+    // happened completely invisible. What a wrong implementation gets right: the
+    // import still completes, and the turns still return. So the run succeeding is
+    // not the assertion; the diagnostic is.
+    let out1 = ''
+    const errs = await withCapturedStderr(async () => {
+      const { host, timeline } = makeRecordingHost('send_keys refused')
+      const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
+      await drain(sub.start(spec('chunk-0')))
+      out1 = await drain(sub.start(spec('chunk-1')))
+      // Nothing was submitted — the refusal means the REPL never saw the command.
+      expect(CLEARS(timeline)).toBe(0)
+    })
+    // The import was NOT stranded...
+    expect(out1).toBe('seen=1 got=chunk-1')
+    // ...and the failure was reported, with the backend's reason.
+    const reported = errs.filter((e) => e.includes('context-reset /clear failed'))
+    expect(reported.length).toBe(1)
+    expect(reported[0]).toContain('send_keys refused')
+  })
+
+  it('CONTROL — when the submit is accepted, nothing is reported as failed', async () => {
+    // Without this the case above is satisfied by a pool that reports EVERY reset as
+    // failed, which is just as blind as reporting none.
+    const errs = await withCapturedStderr(async () => {
+      const { host, timeline } = makeRecordingHost()
+      const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
+      await drain(sub.start(spec('chunk-0')))
+      await drain(sub.start(spec('chunk-1')))
+      expect(CLEARS(timeline)).toBe(1)
+    })
+    expect(errs.filter((e) => e.includes('context-reset /clear failed'))).toEqual([])
   })
 
   it('the default warm substrate (no flag) writes NO /clear — opt-in only', async () => {

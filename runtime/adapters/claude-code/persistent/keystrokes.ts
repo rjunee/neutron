@@ -21,9 +21,16 @@
  *   left    → \x1b[D
  *   <digit> → the literal '0'–'9' character (numbered menu option)
  *
- * Pure + side-effect-free so the encoding is unit-testable without a PTY; the
- * host backends (`bun-terminal-host.ts`) wire `writeKey`/`writeKeys` to
- * `child.write(encodeKey(...))`.
+ * Pure + side-effect-free so the encoding is unit-testable without a terminal.
+ *
+ * § herdr step 2b — THESE BYTES NO LONGER REACH THE REAL BACKEND. `herdr-host.ts`
+ * does not write key bytes: it maps each {@link Key} onto herdr's own key NAME and
+ * sends it via `pane.send_keys` (`herdr-protocol.ts`, `HERDR_KEY_NAMES`). The
+ * encodings below survive because they are still the right answer for a raw write
+ * seam — the `sendKey`/`sendKeys` fallback in `signatures.ts` uses them for a
+ * lightweight test fake that omits `writeKey` — but a real backend must implement
+ * `writeKey`/`writeKeys`, because herdr's `write()` REFUSES `\r` (its `send_text`
+ * does not submit) and `encodeKey('enter')` is exactly `\r`.
  */
 
 /** A single named key. A bare digit string `'0'`–`'9'` selects a numbered menu

@@ -1,8 +1,8 @@
 /**
  * Ported from Nova `gateway/tests/pty-spawn.test.ts` (stripPtyNoise block).
  * The DCS/CR strip discipline is lifted verbatim (`pty-noise.ts`); these cases
- * port 1:1. The Nova libc-FFI real-PTY block is dropped — Neutron's backend is
- * Bun-native (`bun-terminal-host.ts`), exercised by the live round-trip proof.
+ * port 1:1. The Nova libc-FFI real-PTY block is dropped — Neutron's terminal now
+ * lives in herdr (`herdr-host.ts`), exercised by the opt-in e2e proofs.
  */
 
 import { describe, expect, test } from 'bun:test'

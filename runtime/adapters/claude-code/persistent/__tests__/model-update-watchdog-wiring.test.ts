@@ -57,7 +57,7 @@ afterEach(async () => {
 function makeHost(): { host: PtyHost; spawns: () => string[][] } {
   const spawns: string[][] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns.push([...argv])
       const i = argv.indexOf('--session-id')
       const sid = (i >= 0 ? argv[i + 1] : argv[argv.indexOf('--resume') + 1]) as string

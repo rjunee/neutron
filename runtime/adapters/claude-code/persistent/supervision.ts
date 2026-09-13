@@ -942,7 +942,7 @@ export function poolHasSessionForTest(sessionKey: string): boolean {
 
 /**
  * Actuate the surfaced Compact affordance (the legacy harness port row #13) for a pooled warm
- * session: `escape` + `/compact\r`, fire-once, behind the watchdog's mid-compact
+ * session: `escape` + `/compact` + `enter`, fire-once, behind the watchdog's mid-compact
  * lock + debounce. This is the MANUAL entry point a gateway calls when the user
  * presses "🗜️ Compact" on a surfaced size alert. (The watchdog ALSO actuates the
  * same compaction automatically at the critical band when the session is idle —

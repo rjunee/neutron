@@ -36,7 +36,7 @@ function makeEchoHost(): { host: PtyHost; spawnCount: () => number; envs: Array<
   let spawns = 0
   const envs: Array<Record<string, string | undefined>> = []
   const host: PtyHost = {
-    spawn(argv: string[], hostOpts?: { env?: Record<string, string | undefined> }): PtyChild {
+    async spawn(argv: string[], hostOpts?: { env?: Record<string, string | undefined> }): Promise<PtyChild> {
       spawns += 1
       const pid = 100000 + spawns
       if (hostOpts?.env !== undefined) envs.push(hostOpts.env)

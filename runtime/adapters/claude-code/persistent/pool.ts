@@ -24,7 +24,7 @@ import {
 } from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
-import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
+import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
@@ -472,7 +472,14 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         ) {
           try {
             await waitForReplIdle(session, idleQuietMs, idleMaxMs)
-            session.child.write(`${CONTEXT_RESET_COMMAND}\r`)
+            // TEXT, THEN AN `enter` KEY. herdr's `pane.send_text` does NOT submit —
+            // a literal `\r` in the text is typed and left sitting at the prompt
+            // (measured), so the old `write('/clear\r')` would have silently done
+            // nothing. `write` now REFUSES a `\r` rather than no-op, and `writeKey`
+            // is the submit.
+            // Awaited: the catch below is the only thing that keeps a failed reset
+            // from being logged as a completed one.
+            await submitCommand(session.child, CONTEXT_RESET_COMMAND)
             // Force a beat so `waitForReplIdle` can't short-circuit before the
             // TUI starts reacting to the `/clear`, then wait for it to settle so
             // the subsequent inject lands on a cleared, idle REPL.
@@ -524,13 +531,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         // turn also 401" shape the feature exists for.
         session.authFailureAt = undefined
         session.authFailureMatched = undefined
-        // Mark where THIS turn's output begins in the ring. The auth detector matches
-        // only within `ring.textSince(turnOutputMark)` (codex r3 BLOCKER fix), so a
-        // stale banner already in the ring — appended BEFORE this mark on a prior turn
-        // — is excluded from the current-turn window and can't re-arm the latch. Set
-        // BEFORE the inject so everything the child prints in response to this turn's
-        // prompt counts; the prior turn's banner (appended earlier) does not.
-        session.turnOutputMark = session.ring.totalBytesAppended()
+        // Mark THIS turn's boundary in the ring. The auth detector matches only
+        // within `ring.textSince(turnOutputMark)` (codex r3 BLOCKER fix), so a stale
+        // banner ALREADY ON SCREEN when this mark was taken is excluded from the
+        // current-turn window and can't re-arm the latch. Set BEFORE the inject so
+        // everything the child prints in response to this turn's prompt counts.
+        // The mark captures the screen as a BASELINE (§ herdr step 2b) — the ring is
+        // snapshot-replace now, and a character count could not distinguish an Ink
+        // repaint from real output. See `pty-ring.ts`.
+        session.turnOutputMark = session.ring.mark()
         session.scanner.resetLatch(AUTH_FAILURE_DETECTOR_ID)
         // Declare this turn OUTSTANDING to the watchdog. From here until the
         // `finally` settles it, this process has work in flight and its age is
