@@ -331,6 +331,8 @@ first cut actually shipped.
 | N30 | an unreadable return is ignored rather than refusing the composer | 2 fail |
 | N31 | a duplicated key reads FIRST instead of last | 1 fail |
 | N32 | a scope binding one name twice takes the first declaration | 1 fail |
+| N33 | scope-blind resolution reinstated (search the file by name) | 5 fail |
+| N34 | a symbol with several declarations takes the first | 1 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -473,6 +475,56 @@ that binds is correct scoping semantics, not a first-instance error.
 composer and neither had a control — a fix without a control is a fix nothing is holding,
 and the mutation table is the only thing that says so out loud.
 
+### Stop enumerating cases: the compiler already resolves names
+
+The sixth construct the hand-rolled resolver did not model was a **loop binding**.
+`introducesScope` listed `SourceFile`, `Block`, `CatchClause` and `FunctionLike`; a `for`
+head is none of those, and `bindingIn` read statements only from a `SourceFile` or a
+`Block`. So
+
+```js
+const result = { terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  for (const result of [{ checkpoint: 'new-exit' }]) {
+    await writeTerminalResult(result)   // resolved outward, reported clean
+  }
+}
+```
+
+was invisible in exactly the way a shadowing parameter had been two rounds earlier.
+
+**Counting what the resolver had needed made the shape obvious.** Lexical scope, nested
+returns, duplicate declarations, duplicate object keys, loop bindings — that is not five
+accidents, it is **reimplementing JavaScript scope resolution**. After loops come `class`
+bodies, block-scoped function declarations, parameter-scope-vs-body-scope for defaults, and
+`import` bindings; each is real, each is rarer than the last, and the list does not end.
+This is the *spelling* regress in the resolution dimension, and it ends the same way: not by
+adding the reported case, but by replacing enumeration with something correct by
+construction.
+
+**So `checker.getSymbolAtLocation` answers instead.** A `ts.Program` over the one file
+(`allowJs`, `noLib`, `noResolve` — binding only, no type checking), and
+`symbol.declarations` gives the binding TypeScript itself resolves, which is the binding the
+runtime uses. That deleted `introducesScope`, `bindingIn`, `lookup` and `bindsInPattern`
+outright — **name resolution is no longer traversed at all**, and the traversal audit table
+lost two of its four rows. The shortest row in that table is the one that stopped needing a
+row.
+
+What remains this file's judgement is only which declarations it will READ THROUGH, and it
+stays deliberately narrow: a `const`/`let`/`var` **with** an initialiser, or a function
+declaration. A parameter, a catch variable, a binding element, a loop head, an import, a
+class — anything whose value is not a literal in the declaration — is `'opaque'` and becomes
+`'unresolved'`, which fails loudly. A symbol with several declarations refuses rather than
+picking one.
+
+**The cost, stated rather than hidden.** A Program is heavier than a `SourceFile`: ~180ms
+cold, ~100ms warm for this file. Results are memoised per source string because the controls
+re-scan the same doctored sources, and the whole guard file still runs in 2.5s.
+
+The control pair is both halves: a shadowing loop binding **refused** (`for…of` and
+`for…let`), and an unshadowed outer binding still **resolved** — because "loop bindings are
+handled" is satisfied by a resolver that resolves nothing.
+
 ### A count is the most compressed possible claim of completeness
 
 **This happened three times on this one document, and the second time the document asserted
@@ -612,7 +664,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus thirty-two against the guard itself, each applied to the
+- The seventeen mutations above, plus thirty-four against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

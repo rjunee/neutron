@@ -113,19 +113,58 @@ interface TerminalSite {
 }
 
 /**
- * Parse the shipped workflow. The file's top-level `return` is a SEMANTIC error, not a
- * syntactic one, so the parser produces a complete tree for it. Same compiler API
- * `open/__tests__/chat-command-filter-scan.ts` scans with.
+ * PARSE AND BIND the shipped workflow, and hand back the compiler's own resolver.
  *
- * THE COMPLETENESS OF THE PARSE IS ASSERTED, NOT CLAIMED IN PROSE. This docblock used to
- * carry "checked: 214 statements", a number that was true when written and silently false
- * the moment `main` moved under it — a list claiming completeness is a claim, and it needs
- * the same scrutiny as the code it describes. A truncated parse is the one failure that
- * would make every assertion in this file vacuous while looking clean, so the test below
- * measures it instead of trusting a comment.
+ * A `Program`, NOT A BARE `SourceFile`, AND THAT IS THE WHOLE POINT OF THIS ROUND. This
+ * scanner resolved names by hand, and the hand-rolled resolver needed five fixes: lexical
+ * scope, nested returns, duplicate declarations, duplicate object keys, and loop bindings.
+ * That is not five accidents — it is the shape of reimplementing JavaScript scope
+ * resolution. After loops come `class` bodies, block-scoped function declarations,
+ * parameter-scope-vs-body-scope for defaults, and `import` bindings; each is real, each is
+ * rarer than the last, and the list does not end.
+ *
+ * So the enumeration of cases is gone and `checker.getSymbolAtLocation` answers instead —
+ * correct for every construct in the language BY CONSTRUCTION, including the five already
+ * fixed and the ones nobody has thought of. It deleted `introducesScope`, `bindingIn`,
+ * `lookup` and `bindsInPattern` outright.
+ *
+ * THE COST, STATED HONESTLY. A Program is heavier than a SourceFile — measured at ~180ms
+ * cold and ~100ms warm for this file. `noLib`/`noResolve` keep it to binding, which is all
+ * this needs, and the results are memoised because the controls re-scan the same doctored
+ * sources. `allowJs` is required: the subject is a `.mjs`.
+ *
+ * THE COMPLETENESS OF THE PARSE IS ASSERTED, NOT CLAIMED IN PROSE. This used to carry
+ * "checked: 214 statements", a number that was true when written and silently false the
+ * moment `main` moved under it. A truncated parse is the one failure that would make every
+ * assertion in this file vacuous while looking clean, so the test below measures it.
  */
-function parse(src: string): ts.SourceFile {
-  return ts.createSourceFile('inner-workflow.mjs', src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+const ANALYSIS_FILE = '/inner-workflow.mjs'
+const analysed = new Map<string, { sf: ts.SourceFile; checker: ts.TypeChecker }>()
+function analyse(src: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
+  const cached = analysed.get(src)
+  if (cached !== undefined) return cached
+  const parsed = ts.createSourceFile(ANALYSIS_FILE, src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === ANALYSIS_FILE ? parsed : undefined),
+    getDefaultLibFileName: () => 'lib.d.ts',
+    writeFile: () => {},
+    getCurrentDirectory: () => '/',
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => '\n',
+    fileExists: (name) => name === ANALYSIS_FILE,
+    readFile: (name) => (name === ANALYSIS_FILE ? src : undefined),
+  }
+  const program = ts.createProgram({
+    rootNames: [ANALYSIS_FILE],
+    // Binding only. `noLib` and `noResolve` keep this off the filesystem and out of type
+    // checking, which is the part that would actually be slow.
+    options: { allowJs: true, noLib: true, noResolve: true, types: [] },
+    host,
+  })
+  const out = { sf: program.getSourceFile(ANALYSIS_FILE)!, checker: program.getTypeChecker() }
+  analysed.set(src, out)
+  return out
 }
 
 /**
@@ -146,14 +185,13 @@ function parse(src: string): ts.SourceFile {
  *  | site                        | scope it reasons about        | traversal      |
  *  |-----------------------------|-------------------------------|----------------|
  *  | `terminalSites`             | the whole file (every call)   | `walk`         |
- *  | `lookup` (scope chain)      | one scope at a time           | neither — it   |
- *  |                             |                               | reads          |
- *  |                             |                               | `.statements`  |
- *  | `bindsInPattern`            | one binding pattern           | `walkOwnScope` |
- *  | `composerReturnLiteral`     | one function body             | `walkOwnScope` |
+ *  | the traversal inventory     | the whole guard file          | `walk`         |
+ *  | `composerReturnLiterals`    | one function body             | `walkOwnScope` |
  *
- * The first is the only one whose construct genuinely IS the whole file, which is why it
- * is the only remaining use of the unrestricted walk.
+ * The two unrestricted walks are the only ones whose construct genuinely IS a whole file.
+ * `bindsInPattern` used to be a third entry and `lookup` a fourth; both are gone, because
+ * NAME RESOLUTION IS NO LONGER TRAVERSED AT ALL — the compiler's checker answers it. The
+ * shortest row in this table is the one that stopped needing a row.
  *
  * AND THAT TABLE IS ITSELF A CLAIM OF COMPLETENESS, so it is pinned by a test rather than
  * left as prose — the lesson of the round that produced it. `the traversal inventory is
@@ -198,7 +236,7 @@ function walkOwnScope(root: ts.Node, visit: (n: ts.Node) => void): void {
  * `'unresolved'` and fails.
  */
 function terminalSites(src: string): TerminalSite[] {
-  const sf = parse(src)
+  const { sf, checker } = analyse(src)
   const sites: TerminalSite[] = []
   const lineOf = (n: ts.Node): number => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
   walk(sf, (n) => {
@@ -211,7 +249,7 @@ function terminalSites(src: string): TerminalSite[] {
       return
     }
     const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
-    const resolved = resolveToObjectLiterals(arg)
+    const resolved = resolveToObjectLiterals(checker, arg)
     if (resolved === null) {
       sites.push({
         label,
@@ -294,126 +332,62 @@ function callsTerminalWrite(n: ts.CallExpression): boolean {
  *
  * THE QUESTION THAT FOUND IT is one level up from the traversal audit. That audit asked
  * whether each walk STOPS at the right boundary; this asks whether each walk CONSIDERS
- * EVERYTHING inside it. Three resolvers answered for the first instance they found; see
- * `readCause` and `bindingIn` for the other two.
+ * EVERYTHING inside it. Three resolvers answered for the first instance they found: this
+ * one, `readCauseOf`, and the hand-rolled scope lookup — which no longer exists, because
+ * the round after this one replaced it with the compiler's checker rather than fixing a
+ * fourth case in it.
  */
-function resolveToObjectLiterals(arg: ts.Expression): ts.ObjectLiteralExpression[] | null {
+function resolveToObjectLiterals(checker: ts.TypeChecker, arg: ts.Expression): ts.ObjectLiteralExpression[] | null {
   if (ts.isObjectLiteralExpression(arg)) return [arg]
   if (!ts.isIdentifier(arg)) return null
-  const bound = lookup(arg.text, arg)
+  const bound = lookup(checker, arg)
   // A FUNCTION DECLARATION IS NOT AN OBJECT, and neither is an opaque binding. Both refuse.
   if (bound === null || bound.kind !== 'value') return null
   if (ts.isObjectLiteralExpression(bound.init)) return [bound.init]
   // A composer call — follow it into that function's OWN returns, resolving the composer
   // name from the CALL's position so a shadowed composer refuses like any other name.
   if (ts.isCallExpression(bound.init) && ts.isIdentifier(bound.init.expression)) {
-    return composerReturnLiterals(bound.init.expression.text, bound.init.expression)
+    return composerReturnLiterals(checker, bound.init.expression)
   }
   return null
 }
 
 /**
- * WHAT DOES THIS NAME MEAN, AT THIS USE SITE? — the ONE scope-chain lookup, shared by the
- * argument resolver and the composer resolver so the two cannot drift apart.
+ * WHAT DOES THIS NAME MEAN, AT THIS USE SITE? — asked of the COMPILER, not reimplemented.
  *
- * THE DEFECT THIS REPLACED, AND IT IS THIS FILE'S OWN DEFECT MORE THAN ONCE. The first
- * resolver walked the WHOLE source for any `VariableDeclaration` whose name text matched
- * and whose position was earlier, taking the nearest. It consulted no scope — and a
- * function PARAMETER is not a `VariableDeclaration`, so it did not merely lose the
- * ranking, it was INVISIBLE:
+ * `getSymbolAtLocation` gives the binding TypeScript itself resolves, which is the binding
+ * the runtime uses. Everything the hand-rolled version got wrong one case at a time — a
+ * shadowing parameter, a catch variable, a destructured name, a name declared twice, a
+ * `for (const x of …)` head — is correct here because none of them is a case here; they are
+ * all just scope, and the checker does scope.
  *
- *     const result = { terminalCauseKind: 'workflow-threw' }
- *     function newExitPath(result) {
- *       writeTerminalResult(result)          // ← an unstamped parameter
- *     }
+ * WHAT IS STILL THIS FILE'S JUDGEMENT is only which declarations it is willing to READ
+ * THROUGH, and that stays deliberately narrow: a `const`/`let`/`var` WITH an initialiser,
+ * or a function declaration. A parameter, a catch variable, a binding element, a loop head,
+ * an import, a class — anything whose value is not a literal sitting in the declaration —
+ * is `'opaque'`, and the caller turns that into `'unresolved'`, which fails the guard
+ * loudly. It errs toward refusal, the only direction this guard may fail in.
  *
- * The callee matches, so the site is SEEN and the count grows to 13 — and then the
- * argument resolves to the OUTER literal, the site is classified as stamped, and
- * `failingSites()` comes back empty. Seen, counted, and silently passing.
- *
- * THE RULE, WHICH IS LEXICAL AND CHEAP. Walk UP from the use site through the enclosing
- * scopes. The FIRST scope that binds the name decides, whatever it turns out to be — a
- * shadowing binding STOPS the walk instead of being stepped over. `'opaque'` covers every
- * binding this scanner will not read through (a parameter, a catch variable, a
- * destructured name, a declaration with no initialiser), and the callers turn it into
- * `'unresolved'`, which already fails the guard loudly.
- *
- * IT ERRS TOWARD REFUSAL, WHICH IS THE ONLY DIRECTION THIS GUARD MAY FAIL IN. A scanner
- * that guesses is worse than one that stops, because the guess is indistinguishable from a
- * clean result. NOT A TYPE CHECKER, deliberately: it answers a lexical question from the
- * tree, which is what naming a binding is.
+ * MORE THAN ONE DECLARATION IS AN AMBIGUITY, NOT A FIRST-ONE-WINS. A symbol with several
+ * declarations (`var` twice, a `var` beside a function) has no single answer to "which
+ * literal is this", so it refuses rather than picking.
  */
 type Binding =
   | { kind: 'value'; init: ts.Expression }
   | { kind: 'function'; decl: ts.FunctionDeclaration }
   | { kind: 'opaque' }
 
-function lookup(name: string, use: ts.Node): Binding | null {
-  for (let scope: ts.Node | undefined = use.parent; scope !== undefined; scope = scope.parent) {
-    if (!introducesScope(scope)) continue
-    const found = bindingIn(scope, name)
-    if (found !== null) return found
+function lookup(checker: ts.TypeChecker, id: ts.Identifier): Binding | null {
+  const symbol = checker.getSymbolAtLocation(id)
+  const declarations = symbol?.declarations ?? []
+  if (declarations.length === 0) return null
+  if (declarations.length > 1) return { kind: 'opaque' }
+  const decl = declarations[0]!
+  if (ts.isFunctionDeclaration(decl)) return { kind: 'function', decl }
+  if (ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) && decl.initializer !== undefined) {
+    return { kind: 'value', init: decl.initializer }
   }
-  return null
-}
-
-function introducesScope(n: ts.Node): boolean {
-  return ts.isSourceFile(n) || ts.isBlock(n) || ts.isCatchClause(n) || ts.isFunctionLike(n)
-}
-
-/** Does this ONE scope bind `name`? `null` means keep walking outward. */
-function bindingIn(scope: ts.Node, name: string): Binding | null {
-  if (ts.isFunctionLike(scope)) {
-    for (const param of scope.parameters) {
-      if (ts.isIdentifier(param.name) ? param.name.text === name : bindsInPattern(param.name, name)) {
-        return { kind: 'opaque' }
-      }
-    }
-  }
-  if (ts.isCatchClause(scope) && scope.variableDeclaration !== undefined) {
-    const v = scope.variableDeclaration.name
-    if (ts.isIdentifier(v) ? v.text === name : bindsInPattern(v, name)) return { kind: 'opaque' }
-  }
-  const statements = ts.isSourceFile(scope) || ts.isBlock(scope) ? scope.statements : undefined
-  if (statements === undefined) return null
-  // EVERY DECLARATION IN THIS SCOPE, NOT THE FIRST — the third "first instance" answer the
-  // audit found. A scope can legally bind one name twice (`var`, or a `var` beside a
-  // function declaration), and taking whichever came first is a guess about which one the
-  // use site means. Two declarations is an ambiguity this scanner will not resolve, so it
-  // refuses, which fails loudly instead of answering from one of them.
-  const found: Binding[] = []
-  for (const st of statements) {
-    if (ts.isFunctionDeclaration(st) && st.name?.text === name) found.push({ kind: 'function', decl: st })
-    if (!ts.isVariableStatement(st)) continue
-    for (const d of st.declarationList.declarations) {
-      if (!ts.isIdentifier(d.name)) {
-        if (bindsInPattern(d.name, name)) found.push({ kind: 'opaque' })
-        continue
-      }
-      if (d.name.text !== name) continue
-      found.push(d.initializer === undefined ? { kind: 'opaque' } : { kind: 'value', init: d.initializer })
-    }
-  }
-  if (found.length === 0) return null
-  return found.length === 1 ? found[0]! : { kind: 'opaque' }
-}
-
-/**
- * Does a destructuring pattern bind `name` anywhere inside it?
- *
- * `walkOwnScope`, because a default value may itself be a function — `({ a = ({ x }) => x })`
- * binds `a`, and the `x` inside that arrow is the ARROW's parameter, not this pattern's.
- * The unrestricted walk answered yes for `x` and refused a site over a binding that was
- * never in scope. That direction is the safe one, so it was never going to be caught by a
- * false pass — which is exactly why it needed the audit rather than a failure to find it.
- */
-function bindsInPattern(pattern: ts.BindingName, name: string): boolean {
-  if (ts.isIdentifier(pattern)) return pattern.text === name
-  let hit = false
-  walkOwnScope(pattern, (n) => {
-    if (ts.isBindingElement(n) && ts.isIdentifier(n.name) && n.name.text === name) hit = true
-  })
-  return hit
+  return { kind: 'opaque' }
 }
 
 /**
@@ -437,8 +411,8 @@ function bindsInPattern(pattern: ts.BindingName, name: string): boolean {
  * than a verdict drawn from the returns that happen to be literals. Same for a composer
  * with no object-literal return at all.
  */
-function composerReturnLiterals(name: string, use: ts.Node): ts.ObjectLiteralExpression[] | null {
-  const bound = lookup(name, use)
+function composerReturnLiterals(checker: ts.TypeChecker, callee: ts.Identifier): ts.ObjectLiteralExpression[] | null {
+  const bound = lookup(checker, callee)
   if (bound === null || bound.kind !== 'function') return null
   const literals: ts.ObjectLiteralExpression[] = []
   let unreadable = false
@@ -629,6 +603,24 @@ async function newExitPath() {
   const newExit = newExitResult()
   await writeTerminalResult(newExit)
 }`,
+  // A LOOP HEAD THAT SHADOWS AN OUTER STAMPED CONST. The sixth construct the hand-rolled
+  // resolver did not model, and the one that ended the enumeration: `introducesScope` had
+  // no loop scopes and `bindingIn` read statements only from a SourceFile or a Block, so
+  // the name resolved outward to the stamped literal.
+  'a for-of binding that shadows an outer stamped const': `
+const looped = { terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  for (const looped of [{ ok: false, checkpoint: 'new-exit' }]) {
+    await writeTerminalResult(looped)
+  }
+}`,
+  'a for-let binding that shadows an outer stamped const': `
+const counted = { terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  for (let counted = 0; counted < 1; counted += 1) {
+    await writeTerminalResult(counted)
+  }
+}`,
   // A BRANCHING COMPOSER WITH ONE UNSTAMPED RETURN. An ordinary thing to write, which is
   // what puts it inside this guard's claim rather than outside it. The stamped branch is
   // FIRST so that a scanner reading only the first return calls the site stamped.
@@ -776,9 +768,10 @@ async function newExitPath() {
     })
     // `walk`: its own recursive call, plus `terminalSites` — whose construct really is the
     // whole file — plus this inventory, which is also scanning a whole file.
-    // `walkOwnScope`: `bindsInPattern` and `composerReturnLiteral`, the two that reason
-    // about a single construct and must stop at its edge.
-    expect(calls).toEqual({ walk: 3, walkOwnScope: 2 })
+    // `walkOwnScope`: `composerReturnLiterals` alone, the one traversal left that reasons
+    // about a single construct and must stop at its edge. It was two until the checker
+    // replaced hand-rolled name resolution and `bindsInPattern` stopped existing.
+    expect(calls).toEqual({ walk: 3, walkOwnScope: 1 })
   })
 
   test('the parse is COMPLETE — a truncated tree would make every assertion below vacuous', () => {
@@ -786,7 +779,7 @@ async function newExitPath() {
     // few calls, and every "no failing sites" assertion would pass on a tree that never
     // contained the code. Measured against the file's real size rather than a number
     // copied into a comment, so `main` moving cannot make it quietly untrue.
-    const sf = parse(SRC)
+    const { sf } = analyse(SRC)
     expect(sf.statements.length).toBeGreaterThan(100)
     // The tail of the file must be inside the tree, not past where a parse gave up.
     const lastStatement = sf.statements[sf.statements.length - 1]!
@@ -903,6 +896,34 @@ async function newExitPath() {
     expect(failingSites(ordinary)).toEqual([])
   })
 
+  /**
+   * THE CONTROL PAIR FOR LOOP SCOPES — and the argument for deleting the hand-rolled
+   * resolver rather than adding a sixth case to it.
+   *
+   * `introducesScope` listed SourceFile, Block, CatchClause and FunctionLike; a `for` head
+   * is none of those, so a loop binding was invisible exactly the way a parameter had been
+   * two rounds earlier. Counting what the resolver had needed — lexical scope, nested
+   * returns, duplicate declarations, duplicate keys, loop bindings — made the shape
+   * obvious: that is not five accidents, it is reimplementing JavaScript scope resolution.
+   * The checker does it correctly by construction, including the constructs neither of us
+   * has thought of.
+   *
+   * The pair is both halves: a shadowing loop binding REFUSED, and an unshadowed outer
+   * binding still RESOLVED — because "loop bindings are handled" is satisfied by a resolver
+   * that resolves nothing.
+   */
+  test('a loop binding shadows, and is refused rather than resolved outward', () => {
+    for (const shape of [
+      'a for-of binding that shadows an outer stamped const',
+      'a for-let binding that shadows an outer stamped const',
+    ]) {
+      const doctored = `${SRC}\n${THIRTEENTH[shape]}\n`
+      const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+      expect({ shape, stamped: added.stamped }).toEqual({ shape, stamped: 'unresolved' })
+      expect(failingSites(doctored).length).toBe(1)
+    }
+  })
+
   test('a shadowed binding is refused by NAME, not by position — the nearest scope wins', () => {
     // Spelled as an equality against the ordinary case above, so the difference is
     // isolated to the shadowing and nothing else: identical outer const, identical call,
@@ -925,15 +946,16 @@ async function newExitPath() {
   /**
    * THE OVER-STRICT DIRECTION, which no false-pass control can reach.
    *
-   * `bindsInPattern` asks whether a destructuring pattern binds a name. A default value
-   * may itself be a function, and the names in THAT function's parameters belong to it,
-   * not to the pattern — so a traversal that walks the whole subtree answers yes for a
-   * binding that was never in scope and refuses a site it should have read.
+   * A default value may itself be a function, and the names in THAT function's parameters
+   * belong to it, not to the enclosing pattern. The hand-rolled resolver walked the whole
+   * pattern subtree and answered "yes, bound" for a name that was never in scope, refusing
+   * a site it should have read.
    *
-   * That direction fails SAFE: it produces a false refusal, never a false pass, so it was
-   * never going to be caught by the controls above. It is here because the audit found it,
-   * which is the argument for auditing every traversal rather than fixing the one that was
-   * reported.
+   * That direction fails SAFE — a false refusal, never a false pass — so no false-pass
+   * control could have found it; the traversal audit did. The case is kept now that the
+   * checker owns resolution, because it is precisely the kind of construct a hand-rolled
+   * resolver gets wrong and the compiler does not, and a control that survives the fix is
+   * the one worth keeping.
    */
   test('a name bound only inside a default-value function does not shadow the outer const', () => {
     const doctored = `${SRC}
