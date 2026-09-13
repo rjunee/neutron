@@ -141,11 +141,21 @@ class CountingAdoptableHost implements AdoptableHost {
 
   constructor(private readonly survivor: SurvivingRepl) {}
 
-  hold(): () => void {
+  attachEntered: (() => void) | undefined
+
+  /** Hold the next `attach`, and hand back a HANDSHAKE as well as a release.
+   *  `entered` resolves inside `attach`, so the case knows the adoption is actually
+   *  blocked there rather than sleeping and hoping it got that far — see
+   *  `boot-adoption-host.ts` for the full argument. Resolving it here, at construction
+   *  time, would turn it back into the sleep it replaced. */
+  hold(): { entered: Promise<void>; release: () => void } {
+    const entered = new Promise<void>((res) => {
+      this.attachEntered = res
+    })
     this.attachHold = new Promise<void>((res) => {
       this.releaseAttach = res
     })
-    return () => this.releaseAttach?.()
+    return { entered, release: () => this.releaseAttach?.() }
   }
 
   async spawn(): Promise<PtyChild> {
@@ -170,7 +180,12 @@ class CountingAdoptableHost implements AdoptableHost {
   }
 
   async attach(handle: string, opts: PtySpawnOpts): Promise<PtyChild> {
-    if (this.attachHold !== undefined) await this.attachHold
+    if (this.attachHold !== undefined) {
+      // Resolved HERE, inside the held method — the only position that proves the
+      // adoption reached the attach.
+      this.attachEntered?.()
+      await this.attachHold
+    }
     // THE LINKAGE. From here the surviving child knows which pane it was taken over
     // through — and its bridge will answer a turn, but not before.
     this.survivor.attachedVia = handle
@@ -296,7 +311,7 @@ describe('the first turn after a gateway restart', () => {
   it('WAITS for the adoption rather than cold-spawning past it', async () => {
     const survivor = new SurvivingRepl()
     const host = new CountingAdoptableHost(survivor)
-    const release = host.hold()
+    const { entered, release } = host.hold()
     const registryPath = join(scratch(), 'repl-registry.json')
     const options = optionsFor(host, registryPath)
     writeSurvivorRow(registryPath, survivor.port, poolKeyFor(options))
@@ -308,9 +323,12 @@ describe('the first turn after a gateway restart', () => {
       return t
     })
 
+    // THE ADOPTION IS INSIDE THE HELD ATTACH — established, not slept for. A 150ms
+    // sleep assumed it had got that far; on a loaded runner it might not have, and the
+    // case would then be asserting "no spawn yet" about a pass that had barely started.
+    await entered
     // The attach is held, so the pass cannot finish. A spawn path that did not await
     // the gate would have launched a second `claude` by now.
-    await Bun.sleep(150)
     expect(settled).toBe(false)
     expect(host.spawns).toBe(0)
 

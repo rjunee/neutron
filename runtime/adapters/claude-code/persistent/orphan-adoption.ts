@@ -202,16 +202,6 @@ export function classifyPaneForAdoption(
       reason: 'the host reported no foreground argv for this pane — nothing identifies what is in it',
     }
   }
-  const smuggled = inspection.argv.find(argvElementCarriesWhitespace)
-  if (smuggled !== undefined) {
-    return {
-      kind: 'unverifiable',
-      reason:
-        `the host reported an argv element containing whitespace (${JSON.stringify(smuggled.slice(0, 40))}) — ` +
-        'our spawn cannot produce one, and a vector that has them does not describe a launch this gate ' +
-        'can read, so nothing is established about the pane',
-    }
-  }
   const onOurTranscript = argvMatchesSession(inspection.argv, record.sessionId, claudeBasename)
   if (!onOurTranscript) {
     return {
@@ -329,13 +319,6 @@ export function cmdlineMatchesSession(
   return argvMatchesSession(tokens, sessionId, claudeBasename)
 }
 
-/** Does this argv element contain whitespace? A space, tab or newline INSIDE one
- *  element is what makes a vector un-flattenable without loss, so it is the exact
- *  property {@link argvMatchesSession} refuses. Exported for the case that pins it. */
-export function argvElementCarriesWhitespace(element: string): boolean {
-  return /\s/.test(element)
-}
-
 /**
  * The same question as {@link cmdlineMatchesSession}, asked of the STRUCTURED argv —
  * and this is the form to use wherever the vector is in hand (#539, Argus r7 BLOCKER).
@@ -353,17 +336,28 @@ export function argvElementCarriesWhitespace(element: string): boolean {
  * or closes, a pane belonging to somebody else. Matching the array element-wise means
  * there is no reparse to fool.
  *
- * AND EMBEDDED WHITESPACE IS REFUSED OUTRIGHT rather than tolerated. `buildReplArgv`
- * pushes a binary path, bare flags, a uuid and `server:<channel>` — not one of which
- * can contain a space, tab or newline. So an element that has one is not our launch
- * shape, and this gate's whole discipline is to require the exact shape rather than to
- * accept anything that resembles it. Refusing is also what keeps the two forms honest
- * with each other: the string form's tokens can never contain whitespace, so the rule
- * is vacuous there and the `ps` kill path is unchanged by it.
+ * WHITESPACE INSIDE AN ELEMENT IS ORDINARY, AND MUST NOT BE REFUSED (Argus r12). An
+ * earlier revision of this function rejected any argv carrying a space, tab or newline
+ * in any element, justified by an enumeration of what `buildReplArgv` emits — "a binary
+ * path, bare flags, a uuid and `server:<channel>`". That enumeration was wrong.
+ * `buildReplArgv` also pushes `--mcp-config`, `--settings`,
+ * `--append-system-prompt-file` and `--add-dir`, each with a caller-supplied filesystem
+ * PATH, and the binary itself comes from `options.claude_bin` / `CLAUDE_BIN`. A project
+ * at `/srv/My Project` or a claude installed under a spaced path produces a perfectly
+ * ordinary argv with a space in it, and the rule then answered `unverifiable` for our
+ * own live, correct child — every boot, because nothing about the situation changes.
  *
- * Pure — no IO. ALL must hold: no element carries whitespace; argv[0] is a genuine
- * `claudeBasename` invocation; and `sessionId` is the element IMMEDIATELY after a
- * `--resume`/`--session-id` element.
+ * The rule was also unnecessary, which is why it is removed rather than narrowed. The
+ * attack it was added for is a flattened argv whose `tokens[0]` reads as `claude` while
+ * the real `argv[0]` is `'claude --resume'`. {@link argv0IsClaude} already refuses that
+ * with no whitespace rule at all: {@link basenameOf} splits on `/` and nothing else, so
+ * `basenameOf('claude --resume')` is `'claude --resume'` — not `'claude'` — while
+ * `basenameOf('/opt/my dir/claude')` is `'claude'`. The basename is what separates the
+ * smuggled case from the legitimate one; the space never was. The whitespace rule was
+ * the STRING form's constraint promoted to a place it does not belong.
+ *
+ * Pure — no IO. ALL must hold: argv[0] is a genuine `claudeBasename` invocation; and
+ * `sessionId` is the element IMMEDIATELY after a `--resume`/`--session-id` element.
  */
 export function argvMatchesSession(
   argv: readonly string[],
@@ -373,9 +367,6 @@ export function argvMatchesSession(
   if (!sessionId) return false
   // Need at least `<claude> --resume <id>` (or `--session-id`): 3 elements.
   if (argv.length < 3) return false
-  // (0) No element may carry whitespace — see the docblock. This is what makes the
-  // element-wise match unspoofable rather than merely different from the string one.
-  if (argv.some(argvElementCarriesWhitespace)) return false
   // (1) argv[0] must be a genuine claude invocation — excludes tail/vim/less/etc.
   if (!argv0IsClaude(argv, claudeBasename)) return false
   // (2) sessionId must be the VALUE immediately following --resume / --session-id.

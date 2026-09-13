@@ -22,6 +22,7 @@ import {
   classifyPaneForAdoption,
   cmdlineMatchesSession,
 } from '../orphan-adoption.ts'
+import { buildReplArgv } from '../build-repl-argv.ts'
 import type { HandleInspection } from '../pty-host.ts'
 
 const SESSION = 'b1f3c0de-1234-5678-9abc-def012345678'
@@ -167,20 +168,73 @@ describe('the argv is matched as a VECTOR, because flattening it defeats the bin
   it('and the classifier neither adopts nor closes that pane', () => {
     const verdict = classifyPaneForAdoption(live(SMUGGLED, { pid: 4242 }), ROW)
     // NOT `adopt` (we would attach to a stranger's screen) and NOT
-    // `close-foreign-owner` (we would kill it). `unverifiable` routes to the pid
-    // identity probe, which is the only safe direction for a pane we cannot read.
-    expect(verdict.kind).toBe('unverifiable')
-    expect(verdict.kind === 'unverifiable' && verdict.reason).toMatch(/whitespace/i)
+    // `close-foreign-owner` (we would kill it). `leave-not-ours` is the honest answer:
+    // the host DID report an argv and it says argv[0] is not a claude binary, which is a
+    // positive finding about the process rather than an absence of one.
+    expect(verdict.kind).toBe('leave-not-ours')
+    expect(verdict.kind === 'leave-not-ours' && verdict.reason).toMatch(/claude --resume/)
   })
 
-  it('refuses whitespace ANYWHERE in the vector, not only in argv[0]', () => {
-    // A tab and a newline are the same lossy character class as a space, and an
-    // element after argv[0] is the one a caller is least likely to think about.
-    for (const smuggle of ['--resume\t--dangerously-load-development-channels', 'x\ny']) {
-      const argv = ['/usr/local/bin/claude', '--resume', SESSION, smuggle]
-      expect(argvMatchesSession(argv, SESSION)).toBe(false)
-      expect(classifyPaneForAdoption(live(argv), ROW).kind).toBe('unverifiable')
-    }
+  it('REFUSES a smuggled argv[0] even when every OTHER rule is satisfied', () => {
+    // THE VECTOR ABOVE IS REFUSED BY TWO RULES AT ONCE — `argv0IsClaude` rejects the
+    // fused argv[0], and the `--resume` adjacency also fails because the flag was fused
+    // INTO argv[0] and so is not an element. An assertion with two possible causes cannot
+    // say which rule holds the line, and a mutation to either one leaves it green.
+    //
+    // This vector satisfies everything except the basename: `--resume <uuid>` are real
+    // adjacent elements, the channel flag and value are real elements, and only argv[0]
+    // is smuggled. So `argv0IsClaude` is the sole thing standing between it and an
+    // `adopt`, which is the claim the whitespace removal rests on.
+    const argv = [
+      `${'claude'} --dangerously-load-development-channels`,
+      '--resume',
+      SESSION,
+      '--dangerously-load-development-channels',
+      `server:${CHANNEL}`,
+    ]
+    // The premise, asserted: every other rule IS satisfied.
+    expect(argvCarriesChannel(argv, CHANNEL)).toBe(true)
+    expect(argv[1]).toBe('--resume')
+    expect(argv[2]).toBe(SESSION)
+    // And it is still refused, on the basename alone.
+    expect(argvMatchesSession(argv, SESSION)).toBe(false)
+    expect(classifyPaneForAdoption(live(argv, { pid: 4242 }), ROW).kind).toBe('leave-not-ours')
+    // The legitimate spaced binary is the other side of the same rule: `basenameOf`
+    // splits on `/` and nothing else, so a space in a DIRECTORY name is fine.
+    expect(argvMatchesSession(['/opt/my dir/claude', '--resume', SESSION], SESSION)).toBe(true)
+  })
+
+  it('ACCEPTS a real builder argv whose paths contain spaces — the case the old rule broke', () => {
+    // ARGUS r12. An earlier revision refused any argv with whitespace in any element,
+    // justified by an enumeration of what `buildReplArgv` emits that was simply wrong: it
+    // also pushes `--mcp-config`, `--settings`, `--append-system-prompt-file` and
+    // `--add-dir`, each a caller-supplied PATH, and the binary comes from `claude_bin` /
+    // `CLAUDE_BIN`. A self-hoster with a project at `/srv/My Project` then had their own
+    // live, correct child answered `unverifiable` — every boot, because nothing about the
+    // situation ever changes.
+    //
+    // THE REAL BUILDER, NOT A HAND-WRITTEN ARRAY. A fixture typed out here would encode
+    // the same wrong mental model of what the builder emits, which is exactly how the
+    // rule got in. This asks the builder.
+    const argv = buildReplArgv({
+      claudeBin: '/opt/my tools/claude',
+      sessionId: SESSION,
+      resume: true,
+      channelName: CHANNEL,
+      mcpConfigPath: `/srv/My Project/.neutron/neutron-repl-${CHANNEL}/session-mcp.json`,
+      settingsPath: `/srv/My Project/.neutron/neutron-repl-${CHANNEL}/settings.json`,
+      appendSystemPromptFile: '/srv/My Project/.neutron/system-prompt.md',
+      addDir: '/srv/My Project',
+      model: 'claude-opus-5',
+    })
+    // The premise, asserted rather than assumed: this argv really does carry whitespace.
+    expect(argv.some((el) => /\s/.test(el))).toBe(true)
+    expect(argvMatchesSession(argv, SESSION)).toBe(true)
+    // And the whole classifier accepts it — the channel arm reads the same vector.
+    expect(classifyPaneForAdoption(live(argv, { pid: 4242 }), ROW)).toEqual({
+      kind: 'adopt',
+      pid: 4242,
+    })
   })
 
   it('THE POSITIVE CONTROL: the ordinary argv is still adopted', () => {

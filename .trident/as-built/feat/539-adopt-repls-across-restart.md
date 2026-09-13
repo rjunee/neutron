@@ -411,6 +411,55 @@ the completed spec item) would have reverted a merged lane's work. Recorded beca
 shape recurs: **a per-diff review cannot see a merge that landed under it**, and the
 remedy is always to move the base, never to re-apply what the base already has.
 
+### Round twelve: a rule I argued for, an enumeration that was wrong, and a test that proved two things at once
+
+**The blanket whitespace refusal broke a legitimate spaced path, permanently.** Round
+seven added it and justified it with an enumeration of what `buildReplArgv` emits — "a
+binary path, bare flags, a uuid and `server:<channel>`". The enumeration was wrong.
+`build-repl-argv.ts` also pushes `--mcp-config`, `--settings`,
+`--append-system-prompt-file` and `--add-dir`, each carrying a caller-supplied filesystem
+PATH, and `spawn.ts` supplies the project `cwd` as `--add-dir` while the binary itself
+comes from `options.claude_bin` / `CLAUDE_BIN`. A self-hoster with a project at
+`/srv/My Project`, or claude installed under a spaced path, produces a perfectly ordinary
+argv containing a space — and the gate then answered `unverifiable` about its own live,
+correct child. Not once: **every boot**, because nothing about the situation ever changes.
+That is a list claiming a completeness it did not have, which is already on this branch's
+list of named shapes; it got in anyway, and it got past a reviewer who found the argument
+convincing.
+
+**It was also unnecessary, which is why it is removed rather than narrowed.** The attack
+it was added for is a flattened argv whose `tokens[0]` reads as `claude` while the real
+`argv[0]` is `'claude --resume'`. `basenameOf` splits on `/` and nothing else, so
+`basenameOf('claude --resume')` is `'claude --resume'` — not `'claude'` — while
+`basenameOf('/opt/my dir/claude')` is `'claude'`. The basename separates the smuggled case
+from the legitimate one; the space never did. The whitespace rule was the STRING form's
+constraint promoted to a place it does not belong.
+
+**The acceptance case asks the real builder.** A hand-written array would encode the same
+wrong mental model of what the builder emits — which is exactly how the rule got in — so
+the case calls `buildReplArgv` with a spaced `claudeBin`, a spaced `--add-dir` and spaced
+config paths, asserts the premise (`argv.some(el => /\s/.test(el))`) and then asserts the
+match.
+
+**And the original smuggling case was proving two things at once.** Its vector fails
+`argv0IsClaude` AND the `--resume` adjacency — the flag was fused into argv[0], so it is
+not an element either — which meant a mutation to either rule left the case green, and
+the first attempt at the `argv0IsClaude` mutation duly did not red. A second vector was
+added that satisfies **every other rule** (real adjacent `--resume <uuid>`, real channel
+flag and value, asserted as premises) so that only the basename stands between it and an
+`adopt`. Both mutations now red: restoring the blanket refusal reds the spaced-path case,
+and taking argv[0]'s first whitespace-delimited word reds the isolating one. Together they
+are the claim — legitimate whitespace is fine, smuggled whitespace is not, and the
+basename is what tells them apart.
+
+**The handshake, in the file the last round did not touch.** `adopted-repl-serves-a-turn.ts`
+still had `hold()` returning a bare release and a 150ms sleep standing in for "the
+adoption is blocked inside `attach`". It now has the same `{ entered, release }` shape and
+no sleep. Found by grepping the PATTERN rather than re-reading the file that was handed
+over — the same procedural lesson round eleven recorded for the "still covers" claim,
+applied one round later to a different pattern. A grep across the suites now shows every
+hold seam returning a handshake.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -421,7 +470,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine and M49 in round ten, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten and M50–M51 in round twelve, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -501,6 +550,8 @@ count from the rows below rather than trusting this sentence.
 | M47 | `resetBootAdoption` clears in-flight passes again | `boot-adoption.test.ts` (1) |
 | M48 | the pass reconciles whichever row it finds first | `boot-adoption.test.ts` (1) |
 | M49 | `entered` resolves at construction, not in the held method | **did NOT red — see round ten; the ordering is guaranteed elsewhere and this is recorded rather than claimed** |
+| M50 | the blanket whitespace refusal is restored | `pane-adoption-verdict.test.ts` (2) |
+| M51 | `argv0IsClaude` compares argv[0]'s first whitespace-delimited word | `pane-adoption-verdict.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
