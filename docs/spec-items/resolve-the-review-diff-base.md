@@ -326,9 +326,13 @@ The resolution order is evidence-first, and is the same at every site:
       the marker** (asserted as a property over the five argv shapes the tree uses — present
       exactly once, after every flag, before the operand, with `-c` ahead of the subcommand);
       **`orchestrator.ts`, `merge.ts` and `mutation-prover.ts` now contain NO range of their
-      own**, asserted as zero and named file by file; and the six that remain — four prompt
-      commands in `inner-workflow.mjs`, two shell lines in the wrappers — each carry the marker
-      in their own command and are listed with the reason a helper cannot reach them. Plus,
+      own**, asserted as zero and named file by file; and the ones that remain — prompt commands
+      in `inner-workflow.mjs` and two shell lines in the wrappers, which a helper cannot reach
+      because they are executed by an agent or by bash — each carry the marker in their own
+      command. **The list is `OUT_OF_REACH` in that test, compared against what the scan found,
+      and this criterion deliberately states no count of its own**: the count changed on a merge
+      from `main` (a new re-plan prompt arrived carrying a bare-name range, repointed here), and
+      a number retyped in prose is a second copy of a fact that drifts. Plus,
       per command family against real git, the marker is shown to be what stops the write while
       ordinary ranges still work.
       **The count this replaces was wrong, and the test was right.** It read "21 hits, 18

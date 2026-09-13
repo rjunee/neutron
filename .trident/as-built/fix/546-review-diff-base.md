@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5468` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:6043` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -232,6 +232,38 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### The merge that proved the gate: `main` shipped a new instance while this PR was open
+
+Catching up to `main` (six PRs, `c4a292f0`) brought a NEW re-plan prompt that composes
+`git diff ${baseBranch}..${forgeBranch}` — a bare local branch name, no `--end-of-options`,
+in a command an agent is told to run. **The gate this PR ships failed the merged tree on it**,
+at `inner-workflow.mjs:2485`, before any of it could reach a reviewer's diff. Repointed at
+`diffBase`, which is what the neighbouring resume hint fifty lines above already uses.
+
+Three things worth keeping from that:
+
+* **This is the answer to "why a gate and not a sweep".** A sweep fixes the instances that
+  existed when it ran. Between round twelve and round thirty-two, `main` grew a new one — not
+  by carelessness, but because the prompt was written by copying a neighbour that predates the
+  rule. A CI check is the only form of this fix that survives other people's merges.
+* **The per-file count failing is the count doing its job.** `inner-workflow.mjs` went 4 → 5
+  prompt ranges and the enumeration test went red on the merge, which is exactly what a pinned
+  per-file count is for. It was raised deliberately, with the new site argued in `OUT_OF_REACH`,
+  rather than loosened into a range.
+* **And the prose counts that duplicated it were removed rather than re-typed.** The spec item
+  said "the six that remain — four prompt commands, two shell lines"; it now names no count at
+  all and points at `OUT_OF_REACH`, because this merge is the second time that number has gone
+  stale while the executable list stayed correct.
+
+**Instrument discipline, stated because I nearly got it wrong the other way.** The local
+evidence for this round is: `bun test trident/ scripts/` green (4906), the 51-tsconfig matrix
+green, `lint.sh` green, leak gate clean but for the worktree's own `.git` pointer. The repo-wide
+`scripts/run-tests.sh` shows four failures — two `resolveGbrainCommand` cases (this box has
+`/usr/local/bin/gbrain` installed, which defeats a PATH-isolation test) and two chat-bundle
+builds that fail reading files with the disk at 98%. Neither area is touched by this branch
+(0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
+is to name what I ran and what it did not cover, not to call the suite green.
+
 ### Round thirty-two: the refusal was refused only because nobody had created it
 
 **A guarantee that depends on a namespace being empty is a fact about the environment, not
@@ -320,10 +352,10 @@ another is not a rounding error: it is the thing that stops the next reader from
 names the position.
 
 **Where the new refusal actually lands, read from the three consumers rather than assumed.**
-`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2741`), the stranded-run
-ahead count (`:3337`) and the mutation gate's blast radius (`:5125`) — on all three a throw
+`resolvedDiffBase` feeds the review-diff listing (`orchestrator.ts:2813`), the stranded-run
+ahead count (`:3419`) and the mutation gate's blast radius (`:5210`) — on all three a throw
 propagates and fails the step, which is the direction wanted: no listing beats a listing against
-a base nobody established. The fourth caller (`:4485`, the stage-1 test-strategy block) is
+a base nobody established. The fourth caller (`:4570`, the stage-1 test-strategy block) is
 already inside a `try`/`catch` that sets `test_strategy = null`, so a probe that cannot answer
 now DROPS the strategy block instead of computing one against a possibly-stale base. That is
 also fail-closed, and it is stated here because the symptom a future reader will see is an
@@ -331,11 +363,11 @@ absent block, not an error. No consumer catches the refusal and substitutes a ba
 checked: there is one `return 'main'` in the harness (`merge.ts:201`, `detectBaseBranch`'s
 default) and it produces a NAME that still goes through this binding.
 
-**One thing this round measured and deliberately did NOT fix.** Thirty rounds of edits have
-moved `inner-workflow.mjs` by roughly two hundred lines, and citations into it from files this
+**One thing this round measured and deliberately did NOT fix.** Thirty-two rounds of edits plus the catch-up merge have
+moved `inner-workflow.mjs` by roughly eight hundred lines (the CI-rollup anchor alone by 794), and citations into it from files this
 branch does not touch have drifted with it — the CI-rollup pair cited in `GLOSSARY.md:176` as
-`:4708-4712` is now at `:4927`/`:4931`, and `run-evidence-probes.ts:201`'s `:1796` is at
-`:1987`. They were approximately right when written. Repointing them would widen a PR under
+`:4708-4712` is now at `:5502`/`:5506`, and `run-evidence-probes.ts:201`'s `:1796` is at
+`:2070`. They were approximately right when written. Repointing them would widen a PR under
 review with changes unrelated to its subject, and the drift is not this branch's defect but a
 property of citing a 7,000-line file by line number at all: **every merge that edits it does
 this to every citation into it.** Recorded here with measured values rather than silently left,
@@ -440,7 +472,7 @@ case-sensitivity bug.**
 40-hex comparison on this path is lowercase-only — and correctly so: each tests a value read
 from git's own stdout, where git emits its canonical lowercase form even when asked in upper
 (measured: `git rev-parse --verify <UPPER>^{commit}` echoes lowercase). The two that parse a
-token out of prose (`orchestrator.ts:2015`, `:2025`) already use `/i` and `.toLowerCase()`. The
+token out of prose (`orchestrator.ts:2059`, `:2069`) already use `/i` and `.toLowerCase()`. The
 wrapper's was the only one testing an OPERATOR-SUPPLIED value case-sensitively, which is the
 distinction that decides the answer: **git's output is canonical; a caller's input is not.**
 
@@ -919,7 +951,7 @@ contract at `:1426`, `branchLogBase` at `:2229`, the planner hint at `:2160` and
 The banner now says the sweep runs LAST, because that is the only time the claim can be true.
 
 **And one citation shape that cannot drift**: `diff-base-option-shaped.test.ts`'s
-`OUT_OF_REACH` list carries the six surviving ranges as `file:line` entries and then asserts
+`OUT_OF_REACH` list carries the surviving ranges as `file:line` entries and then asserts
 them against what the scan actually found. **A `file:line` in an executable assertion is
 re-derived on every run; one in prose is re-derived when someone remembers.** That is the
 durable form of this whole class, and round seventeen demonstrated it within one round: the
@@ -1604,7 +1636,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5301`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5876`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

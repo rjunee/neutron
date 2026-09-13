@@ -2482,7 +2482,7 @@ WHAT THE REVIEWERS SAY IS MISSING OR WRONG:
 ${whatIsMissing}
 THE REVIEWERS' FINDINGS (round ${round}) — these are the input you were never given the first time:
 ${JSON.stringify(findings)}
-Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}). Inspect the branch as well as the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then \`git diff ${baseBranch}..${forgeBranch}\`.
+Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}). Inspect the branch as well as the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then \`git diff --end-of-options ${diffBase}..${forgeBranch}\`.
 1. Decide what the ORIGINAL plan got wrong. A finding that recurs every round is usually something the plan itself asked for — say so plainly rather than restating the task.
 2. Return the revised full plan body as \`implementationPlan\` (do NOT write it to disk) and the single task to build now as \`topTask\`.
 3. Emit a REVISED EXECUTION SPEC as \`executionSpec\`: the exact TARGET FILES, the ACCEPTANCE CRITERION, and the TEST PLAN — precise enough that a cheaper model carries it out WITHOUT re-reasoning the design. It MUST address every finding above, including by REMOVING or REPLACING work the old plan asked for. Do not re-issue the old spec.

@@ -831,10 +831,11 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1648, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2382, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2495, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5332, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1700, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2434, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2485, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
+    { file: 'inner-workflow.mjs', line: 2590, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5876, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
     { file: 'codex-review.sh', line: 413, why: 'shell: the standalone reviewer builds its own diff' },
   ]
@@ -937,8 +938,11 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     const perFile: Record<string, number> = {}
     for (const h of rangeHits()) perFile[h.file] = (perFile[h.file] ?? 0) + 1
     expect(perFile).toEqual({
-      // Four commands inside PROMPTS — a helper cannot reach an agent's command line.
-      'inner-workflow.mjs': 4,
+      // FIVE commands inside PROMPTS — a helper cannot reach an agent's command line. It was
+      // four until the re-plan prompt arrived on main (#654/#664) with a bare-name range; this
+      // count failing on the merge is the per-file count doing its job, so it is raised
+      // deliberately rather than made a range.
+      'inner-workflow.mjs': 5,
       // Three operator-facing notes that describe a range in prose.
       'mutation-claim-artifact.ts': 3,
       // Two shell wrapper commands plus the trailer label.
@@ -956,7 +960,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
   test('A · every surviving range is shielded in its OWN command, or is argued prose', () => {
     const hits = rangeHits()
     expect(offenders(hits)).toEqual([])
-    // The six out-of-reach commands are exactly the shielded survivors — so a new one cannot
+    // The seven out-of-reach commands are exactly the shielded survivors — so a new one cannot
     // appear without being argued here, and one that disappears cannot go unnoticed.
     const shielded = hits.filter((h) => h.excused === null).map((h) => `${h.file}:${h.line}`)
     expect(shielded.sort()).toEqual(OUT_OF_REACH.map((o) => `${o.file}:${o.line}`).sort())
