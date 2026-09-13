@@ -203,7 +203,7 @@ export class ReplSession {
    * teardown — are the paths that must give it back, and only the session travels to all
    * of them.
    */
-  paneClaimBy?: string
+  paneClaimBy: string | undefined
   /**
    * #539 r44 — WHEN THIS SESSION LAST CONFIRMED that it still owns its pane: the moment a
    * compare-and-set actually succeeded, not the moment one was attempted.

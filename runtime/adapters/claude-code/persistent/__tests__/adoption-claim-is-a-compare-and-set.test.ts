@@ -989,30 +989,40 @@ describe('the self-fence fires on its own, with nothing else running', () => {
   function manualFenceTimer(): {
     fire: (which?: number) => void
     armed: () => number
-    cancelled: () => number
+    cancelled: (which?: number) => boolean
+    cancels: () => number
   } {
-    const armedCbs: Array<(() => void) | undefined> = []
-    let cancels = 0
+    /**
+     * CANCELLED CALLBACKS ARE RETAINED, which the first version of this fake did not do — and
+     * that made the control for the very defect round fifty found VACUOUS: `cancel` deleted
+     * the stored callback, so forcing a "stale firing" retrieved `undefined` and invoked
+     * nothing. The case passed because nothing happened. **A fake that cannot produce the
+     * event under test is not a control**, and this is the seventh fixture vacuity on this
+     * branch.
+     *
+     * Real timers behave this way too: `clearTimeout` on a callback already dispatched does
+     * not un-dispatch it, which is exactly the race being modelled.
+     */
+    const armedCbs: Array<() => void> = []
+    const cancelledAt = new Set<number>()
     setFenceTimerFactoryForTests((cb) => {
       const i = armedCbs.push(cb) - 1
       return {
         cancel: () => {
-          cancels += 1
-          armedCbs[i] = undefined
+          cancelledAt.add(i)
         },
       }
     })
     return {
-      // Fires the LATEST armed timer by default, or a specific one by index — so a case can
-      // fire a timer that a renewal has since cancelled and show that nothing happens.
+      // Fires the LATEST armed timer by default, or a specific one by index — INCLUDING one
+      // that has been cancelled, which is the stale-firing case.
       fire: (which) => {
         const i = which ?? armedCbs.length - 1
-        const f = armedCbs[i]
-        armedCbs[i] = undefined
-        f?.()
+        armedCbs[i]?.()
       },
       armed: () => armedCbs.length,
-      cancelled: () => cancels,
+      cancelled: (which) => cancelledAt.has(which ?? armedCbs.length - 1),
+      cancels: () => cancelledAt.size,
     }
   }
 
@@ -1060,6 +1070,52 @@ describe('the self-fence fires on its own, with nothing else running', () => {
     expect(turn?.settled).toBe(false)
   })
 
+  it('a STALE firing does not orphan its replacement, so a released session stays released', async () => {
+    // ARGUS r50. The timer callback used to clear `session.selfFenceTimer` unconditionally, so
+    // a late firing of a SUPERSEDED timer erased its REPLACEMENT's cancellation handle. A
+    // later release could then no longer cancel that replacement, and the orphan fired and
+    // fenced a key the gateway had legitimately let go — refusing turns for a session nothing
+    // was wrong with.
+    //
+    // It is the IDENTITY GUARD from rounds thirty and thirty-one, in a resource we had not
+    // applied it to: `childByKey.get(key) === child` and `deleteOwnPoolEntry`'s peek exist
+    // because a handle can be replaced between capturing it and acting on it, and a callback
+    // is the purest form of "later".
+    const timer = manualFenceTimer()
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = (await pool.get(KEY)) as ReplSession
+
+    // A renewal replaces timer A with timer B.
+    await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    expect(timer.armed()).toBe(2)
+    const replacement = session.selfFenceTimer
+    expect(replacement).toBeDefined()
+
+    // TIMER A FIRES LATE. Before the guard this erased B's handle.
+    timer.fire(0)
+    expect(session.selfFenceTimer).toBe(replacement)
+
+    // OWNERSHIP IS RELEASED THROUGH THE REAL PATH — a surviving shutdown, the ordinary
+    // hand-over — which cancels B and gives the claim back. Driven through the production
+    // teardown rather than by calling the pieces, because what is being tested is that the
+    // teardown leaves nothing armed.
+    await shutdownAllPersistentRepls()
+    expect(timer.cancelled(1)).toBe(true)
+    expect(session.paneClaimBy).toBeUndefined()
+
+    // AND B, FIRING ANYWAY, FENCES NOTHING: the key stays usable.
+    timer.fire(1)
+    expect(session.fenced).toBe(false)
+    resetBootAdoptionForTests()
+    pool.clear()
+    childByKey.clear()
+    const again = await pass(f, { now: () => t0 + DEFAULT_WATCHDOG_INTERVAL_MS + 1_000 })
+    expect(again.kind).toBe('adopted')
+  })
+
   it('...and a healthy gateway whose renewals succeed never fences mid-turn', async () => {
     // THE POSITIVE CONTROL. A timer that fired regardless would pass the case above and stop
     // every REPL a deadline after it was adopted — the feature, switched off by its own guard.
@@ -1075,11 +1131,12 @@ describe('the self-fence fires on its own, with nothing else running', () => {
     await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
     expect(session?.paneClaimConfirmedAt).toBe(t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
     expect(timer.armed()).toBe(2)
-    expect(timer.cancelled()).toBeGreaterThan(0)
+    expect(timer.cancelled(0)).toBe(true)
 
-    // THE SUPERSEDED TIMER FIRES ANYWAY — a factory that did not cancel, a process resumed
-    // from suspend. Nothing happens, because the deadline is re-checked against the CURRENT
-    // confirmation, which the renewal moved forward.
+    // THE SUPERSEDED TIMER FIRES ANYWAY — a dispatched callback that `clearTimeout` cannot
+    // un-dispatch, a process resumed from suspend. It really is invoked now (the fake retains
+    // cancelled callbacks); nothing happens because the deadline is re-checked against the
+    // CURRENT confirmation, which the renewal moved forward.
     timer.fire(0)
 
     expect(child?.detached).toBe(false)

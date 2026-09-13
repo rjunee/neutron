@@ -1181,6 +1181,8 @@ export async function shutdownAllPersistentRepls(
         session.selfFenceTimer?.cancel()
         session.selfFenceTimer = undefined
         releaseAdoptionClaim(registryPath, key, session.paneClaimBy)
+        // Same rule as the other give-back paths (r50): no claim, nothing to fence.
+        session.paneClaimBy = undefined
         //
         // `return`, not `continue`: this is the per-child teardown closure, and the
         // walk that calls it is above.

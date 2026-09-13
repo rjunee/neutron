@@ -1445,8 +1445,18 @@ export function armSelfFence(
   // deadline rather than against the wall clock: the timer IS the deadline, and reading the
   // clock again would only re-derive what the delay already encoded.
   const armedFor = (session.paneClaimConfirmedAt ?? Date.now()) + SELF_FENCE_AFTER_MS
-  session.selfFenceTimer = fenceTimerFactory(() => {
-    session.selfFenceTimer = undefined
+  /** THIS timer's own handle, so its callback can tell whether it is still the current one.
+   *  Assigned immediately below; the callback cannot run before that. */
+  let mine: { cancel: () => void } | undefined
+  const armed = fenceTimerFactory(() => {
+    // IDENTITY-GUARDED, and it is the SAME RULE as `childByKey.get(key) === child` (r30) and
+    // `deleteOwnPoolEntry`'s `Bun.peek` comparison (r30/r31): a handle can be REPLACED between
+    // the moment you captured it and the moment you act on it, and a callback is the purest
+    // form of "later". A late firing of a superseded timer used to clear the field
+    // unconditionally — erasing its REPLACEMENT's cancellation handle, so a later release could
+    // not cancel it, and that orphan then fenced a key its gateway had legitimately let go.
+    // One idiom, three resources: the pool entry, the child mirror, and now the timer.
+    if (session.selfFenceTimer === mine) session.selfFenceTimer = undefined
     // THE PREDICATE STILL DECIDES. A re-arm cancels this timer, so a stale firing should be
     // impossible — and if one arrives anyway (a factory that does not cancel, a suspended
     // process), the deadline is re-checked against the CURRENT confirmation and a session that
@@ -1454,6 +1464,8 @@ export function armSelfFence(
     fenceIfPastSelfDeadline(sessionKey, session, armedFor, 'no-renewal-observed-on-this-turn', log)
     void registryPath
   }, SELF_FENCE_AFTER_MS)
+  mine = armed
+  session.selfFenceTimer = armed
 }
 
 /**
@@ -1646,6 +1658,10 @@ function fenceIfPastSelfDeadline(
   // No confirmation on record at all is treated as "now" rather than as "forever ago": the
   // claim was taken moments ago by definition (it is what put this session in the pool), and
   // a missing stamp must not fence a session that has never had a chance to renew.
+  // A SESSION THAT HOLDS NO CLAIM HAS NOTHING TO FENCE (r50). Every give-back path clears
+  // `paneClaimBy`, so this is the single check that makes a late timer firing inert after a
+  // release — including one dispatched before its `cancel` could land.
+  if (session.paneClaimBy === undefined) return
   const confirmedAt = session.paneClaimConfirmedAt
   if (confirmedAt === undefined) {
     session.paneClaimConfirmedAt = now
@@ -2407,6 +2423,12 @@ async function adoptRow(
     session.selfFenceTimer?.cancel()
     session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
+    // AND THE SESSION STOPS HOLDING A CLAIM AT ALL (r50). Cancelling the timer is not enough:
+    // a cancel cannot un-dispatch a callback that has already fired, and such a callback would
+    // otherwise fence a key this gateway had legitimately released — refusing turns for a
+    // session nothing was wrong with. A session with no claim has nothing to fence, which
+    // makes the timer's residual race harmless rather than merely unlikely.
+    session.paneClaimBy = undefined
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
@@ -2448,6 +2470,12 @@ async function adoptRow(
     session.selfFenceTimer?.cancel()
     session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
+    // AND THE SESSION STOPS HOLDING A CLAIM AT ALL (r50). Cancelling the timer is not enough:
+    // a cancel cannot un-dispatch a callback that has already fired, and such a callback would
+    // otherwise fence a key this gateway had legitimately released — refusing turns for a
+    // session nothing was wrong with. A session with no claim has nothing to fence, which
+    // makes the timer's residual race harmless rather than merely unlikely.
+    session.paneClaimBy = undefined
     // THE WRAPPER LETS GO OF THE PANE IT KEEPS ALIVE (Argus r26). `HerdrHost.open` starts
     // the poll loop before it returns the child, so a pass abandoned AFTER a completed
     // attach was leaving a live wrapper on a pane it had decided not to own — and the
@@ -2484,6 +2512,12 @@ async function adoptRow(
     session.selfFenceTimer?.cancel()
     session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
+    // AND THE SESSION STOPS HOLDING A CLAIM AT ALL (r50). Cancelling the timer is not enough:
+    // a cancel cannot un-dispatch a callback that has already fired, and such a callback would
+    // otherwise fence a key this gateway had legitimately released — refusing turns for a
+    // session nothing was wrong with. A session with no claim has nothing to fence, which
+    // makes the timer's residual race harmless rather than merely unlikely.
+    session.paneClaimBy = undefined
     // Same hand-over as {@link release} — see the note there.
     attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)

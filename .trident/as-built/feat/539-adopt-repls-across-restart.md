@@ -2414,6 +2414,72 @@ repeated it unconditionally. Both were false for the no-tick-no-turn case. The s
 states the mechanism, and the round-forty-four section keeps its text with the overclaim marked
 — the sequence of what was believed when is the record's job.
 
+### Round fifty: a timer handle is a handle, and the control for it was vacuous
+
+**A stale firing orphaned its replacement.** The timer callback cleared
+`session.selfFenceTimer` unconditionally, so when a renewal replaced timer A with timer B, a
+late A callback **erased B's cancellation handle** — a later release could no longer cancel B,
+and the orphan fired and fenced a key the gateway had legitimately released, refusing turns for
+a session nothing was wrong with.
+
+**This is the identity guard from rounds thirty and thirty-one, in a resource we had not
+applied it to.** `childByKey.get(key) === child` and `deleteOwnPoolEntry`'s `Bun.peek`
+comparison both exist because a handle can be REPLACED between capturing it and acting on it —
+and a callback is the purest form of "later". One idiom, three resources: the pool entry, the
+child mirror, the timer.
+
+#### Every field a callback clears after a delay — asked of TIME rather than ownership
+
+| Field | Could the handle have been replaced before the callback ran? | Guard |
+|---|---|---|
+| `session.selfFenceTimer` (r49) | **yes** — a renewal re-arms every tick | identity comparison, **added here** |
+| `childByKey` | yes — a concurrent respawn | `=== session.child` (r30) |
+| `pool` entry | yes — a newer session under the same key | `deleteOwnPoolEntry`'s peek (r30) |
+| sink registration | yes | `unregisterIf` (identity-scoped) |
+| `liveHandle` | yes | identity-scoped `unregister()` (r30/r31) |
+| `activeTurn` | yes — a later turn | `t.turnId !== turnId` (r5/r6) |
+| the spawn reservation (r47) | yes | CAS on the reserver id, released in a `finally` |
+| `paneClaimConfirmedAt` | n/a — monotonic; a later write is the newer truth | none needed |
+
+**And the deeper half, which the identity guard alone does not reach.** Cancelling cannot
+un-dispatch a callback that has already fired, so a released session could still be fenced by
+one already in flight. Every give-back path now clears `session.paneClaimBy`, and the fence
+returns early for a session that holds no claim — **a session with no claim has nothing to
+fence**. That is what makes the timer's residual race harmless rather than merely unlikely, and
+it is the same move as round forty-nine's inbound reply check.
+
+**THE SEVENTH FIXTURE VACUITY, and the most pointed.** The control that claimed to exercise "a
+factory that did not cancel" could not: the fake DELETED the callback on cancel, so forcing a
+stale firing retrieved `undefined` and invoked nothing. **It was the control for exactly this
+defect, and it reported success while the defect sat behind it.** The fake now retains
+cancelled callbacks — which is also what real timers do, since `clearTimeout` on an already
+dispatched callback does not un-dispatch it. Every round-forty-nine timer case was re-checked
+against the changed fake (M140–M142 still red), because a fake that behaves differently is a
+different instrument and cases built on the old one may have stopped measuring what they claim.
+
+### What this item turned out to require, for whoever reads the queue next
+
+The spec item is one sentence — *a gateway restart keeps the project REPLs* — and the change is
+**~18.7k lines**. That is worth explaining rather than apologising for, because the title sizes
+it wrong.
+
+Re-adopting a REPL is not a feature; it is **a single-owner protocol over a shared registry**,
+and almost none of the work is in the adoption itself. Fourteen rounds (thirty-seven to fifty)
+were one question asked repeatedly, each answer exposing the next:
+
+> verify → **claim** (a verification is not a claim) → keep the claim meaningful (renewal, not
+> a TTL) → act on losing it (fence, do not close) → cover **every** owner (spawn as well as
+> adoption) → be safe **without observing the winner** (a self-deadline) → **contend**, do not
+> merely record → claim **before you are capable**, not before you publish → make every way a
+> write can fail to land a refusal → give the invariant a **mechanism** that maintains it
+> continuously → and guard the handles that mechanism holds.
+
+Every one of those was a state in which two gateways could serve one transcript, which is the
+corruption the item exists to prevent. The adoption path itself is a few hundred lines; the
+rest is the protocol, its failure dispositions, and the instruments that prove each one — and
+**the mutation table is the part to read first**: 145 rows, each naming a guard and the case
+that dies without it.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2424,7 +2490,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight and M140–M142 in round forty-nine, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine and M143–M145 in round fifty, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2597,6 +2663,9 @@ count from the rows below rather than trusting this sentence.
 | M140 | the timer is removed, leaving only the call-site checks — the r49 defect | `adoption-claim-is-a-compare-and-set.test.ts` (2) |
 | M141 | the timer re-arms on an ATTEMPTED renewal rather than a confirmed one | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M142 | a fenced session accepts a reply again | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M143 | the timer clears its field unconditionally — the r50 defect | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M144 | the identity guard compares the wrong way round | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the stale case; the ordinary fence still fires, so it reds there rather than on the control, and that is reported as measured rather than as predicted) |
+| M145 | a released session can still be fenced (no claim guard) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
