@@ -917,10 +917,18 @@ describe('#520 — stampTerminalCause: a bare terminal result is answered, and s
    *  dependency, which reads as a failing guard rather than a stale test. */
   const preamble = (body: string): string =>
     [
+      // STRICT, BECAUSE THE SHIPPED FILE IS. `new Function` bodies are SLOPPY by default,
+      // and the difference is not cosmetic for this function: a write to a frozen or
+      // write-refusing object silently no-ops in sloppy mode and THROWS in a module. Without
+      // this line the frozen-result case passed here while the real code would have thrown —
+      // a harness quietly kinder than production, which is a test that cannot see the bug it
+      // is pointed at. Found by the Proxy round; it had been sloppy since the first extraction.
+      "'use strict'",
       /const TERMINAL_CAUSE_KINDS = \[[\s\S]*?\n\]/.exec(SRC)![0],
       /const TERMINAL_CAUSE_DIAGNOSTIC_MAX = \d+/.exec(SRC)![0],
       braceMatchFrom(SRC, SRC.indexOf('function redactProbeText(')),
       braceMatchFrom(SRC, SRC.indexOf('function terminalCauseDiagnostic(')),
+      braceMatchFrom(SRC, SRC.indexOf('function reportQuietly(')),
       body,
       'return stampTerminalCause',
     ].join('\n')
@@ -1051,6 +1059,92 @@ describe('#520 — stampTerminalCause: a bare terminal result is answered, and s
         })
       }).not.toThrow()
       expect(r.terminalCauseKind).toBe('unknown')
+    })
+
+    /**
+     * THE HAZARD THE DIAGNOSTIC'S OWN COMMENT NAMED AND THE CODE DID NOT HANDLE.
+     *
+     * A Proxy can throw from `get`, `set`, `getPrototypeOf` and `ownKeys`. The coercion
+     * hardening covered `toString`/`Symbol.toPrimitive` — the CASE that was reported — and
+     * left the first property READ in `stampTerminalCause` unprotected, ahead of
+     * everything, so the guarantee started one line after the throw.
+     *
+     * The contract is now closed rather than widened: the accepted value is a plain record,
+     * and one that resists being read or written is REPORTED and left alone. For a plain
+     * record the stamp always happens; for anything else no implementation could stamp it,
+     * because the write is precisely what it refuses.
+     */
+    test('a value whose property READ throws does not take the function down', () => {
+      const hostile = new Proxy(
+        {},
+        {
+          get() {
+            throw new Error('boom')
+          },
+        },
+      )
+      const said: string[] = []
+      expect(() => load()(hostile as Record<string, unknown>, (m) => said.push(m))).not.toThrow()
+      // Not stamped — and it says so, rather than reporting a success it did not have.
+      expect(said[0]).toContain('UNSTAMPABLE')
+      expect(said[0]).toContain('not a plain record')
+    })
+
+    test('a value whose property WRITE throws does not take the function down either', () => {
+      const hostile = new Proxy(
+        { terminalCauseKind: 'made-up' },
+        {
+          set() {
+            throw new Error('nope')
+          },
+        },
+      )
+      const said: string[] = []
+      expect(() => load()(hostile as Record<string, unknown>, (m) => said.push(m))).not.toThrow()
+      expect(said[0]).toContain('UNSTAMPABLE')
+    })
+
+    test('a FROZEN result is the same class of refusal, and is reported as one', () => {
+      // The realistic instance of the hostile case: strict mode makes the write throw.
+      const frozen = Object.freeze({ checkpoint: 'forge-done', terminalCauseKind: 'made-up' })
+      const said: string[] = []
+      expect(() => load()(frozen as Record<string, unknown>, (m) => said.push(m))).not.toThrow()
+      expect(said[0]).toContain('UNSTAMPABLE')
+    })
+
+    test('a read that throws only AFTER the stamp keeps the stamp, and says which half got through', () => {
+      // `checkpoint` is read for the diagnostic, after the field has been written. The two
+      // outcomes are different facts — "no cause could be recorded" and "a cause was
+      // recorded but could not be described" — and they do not share a branch.
+      const target: Record<string, unknown> = { terminalCauseKind: 'made-up' }
+      const hostile = new Proxy(target, {
+        get(t, k, r) {
+          if (k === 'checkpoint') throw new Error('boom')
+          return Reflect.get(t, k, r)
+        },
+      })
+      const said: string[] = []
+      expect(() => load()(hostile as Record<string, unknown>, (m) => said.push(m))).not.toThrow()
+      expect(target.terminalCauseKind).toBe('unknown')
+      expect(said[0]).toContain('could not be composed')
+      expect(said[0]).not.toContain('UNSTAMPABLE')
+    })
+
+    test('THE ORDERING the diagnostic docblock claims — the stamp precedes every diagnostic', () => {
+      // Asserted, because this sentence has been written down twice before it was true. The
+      // probe throws on the SECOND read (`checkpoint`), so the field can only be set if the
+      // write happened before that call.
+      const target: Record<string, unknown> = { terminalCauseKind: 'made-up' }
+      let reads = 0
+      const hostile = new Proxy(target, {
+        get(t, k, r) {
+          reads += 1
+          if (reads > 1) throw new Error('no more reads')
+          return Reflect.get(t, k, r)
+        },
+      })
+      load()(hostile as Record<string, unknown>, () => {})
+      expect(target.terminalCauseKind).toBe('unknown')
     })
 
     test('a hostile CHECKPOINT is handled the same way on the MISSING branch', () => {

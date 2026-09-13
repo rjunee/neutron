@@ -322,6 +322,10 @@ first cut actually shipped.
 | N21 | the diagnostic is no longer redacted | 2 fail |
 | N22 | the diagnostic is no longer capped | 1 fail |
 | N23 | the report happens BEFORE the stamp, unguarded | 1 fail |
+| N24 | the read-and-stamp guard removed — the Proxy blocker restored | 5 fail |
+| N25 | diagnostics composed BEFORE the stamp again | 2 fail |
+| N26 | the two refusal facts share one branch | 1 fail |
+| N27 | the extraction harness reverts to sloppy mode | 1 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -378,6 +382,42 @@ It then caught the same change a SECOND time: the replacement line comment *spel
 JSDoc opener while explaining why not to use one, and the slice is a substring search that
 does not care whether the occurrence is inside a comment. Worth recording as a small
 lesson about guards that match text: a comment about a pattern is an instance of it.
+
+### Round two on the same eight lines: the comment named the class, the code fixed the case
+
+The hardening above closed the COERCION — `toString`, `Symbol.toPrimitive` — and its own
+comment listed **a Proxy trap** among the hazards. Meanwhile the first thing
+`stampTerminalCause` did after its type check was an unprotected `result.terminalCauseKind`
+read. So `stampTerminalCause(new Proxy({}, { get() { throw } }), …)` threw *before anything
+was stamped* — the exact failure the block underneath it claims the ordering prevents. The
+guarantee started one line after the throw.
+
+**The contract is now closed rather than widened.** A Proxy can throw from `get`, `set`,
+`getPrototypeOf` and `ownKeys`, so there is no probe that makes a later read safe and no
+copy that can be taken without touching the value — every formulation that tries to read a
+hostile object defensively is one trap away from the same failure. So the accepted value is
+stated to be **a plain record this file built**, the whole read-and-stamp runs inside one
+guard, and a value that resists is named on the log and left alone. For a plain record the
+stamp always happens; for anything else no implementation could have stamped it, because
+the write is precisely what it refuses.
+
+The two refusal outcomes stay apart — *no cause could be recorded* and *a cause was recorded
+but could not be described* are different facts, and this file does not put different facts
+on one branch (N26).
+
+**And reading those eight lines against their own comment found a second false sentence.**
+`terminalCauseDiagnostic`'s docblock said "the stamp happens BEFORE this is called" — but
+the shipped code composed BOTH diagnostics and only then stamped. That sentence had been
+written one round before it was true. The stamp now genuinely comes first, with only an
+`undefined` test between the decisive read and the write, and N25 reds if it drifts back.
+
+**A third finding came free: the test harness was kinder than production.** `new Function`
+bodies are SLOPPY mode; the shipped `.mjs` is a module and therefore strict. A write to a
+frozen object silently no-ops in the first and throws in the second — so the frozen-result
+case *passed* while the real code would have thrown. Every extraction in this file had been
+running sloppy since the first one. The preamble now opts into strict, and N27 reds if it
+reverts. A harness quietly kinder than production is a test that cannot see the bug it is
+pointed at.
 
 ### A count is the most compressed possible claim of completeness
 
@@ -518,7 +558,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus twenty-three against the guard itself, each applied to the
+- The seventeen mutations above, plus twenty-seven against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

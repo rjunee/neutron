@@ -4609,17 +4609,27 @@ const TERMINAL_CAUSE_DIAGNOSTIC_MAX = 120
 // All three properties are load-bearing and none was there when this was a bare `String()`:
 //
 //  - INCAPABLE OF THROWING is the important one. `String(v)` runs user-reachable code —
-//    `toString`, `Symbol.toPrimitive`, a Proxy trap — and a value whose coercion throws
-//    made `stampTerminalCause` throw, which prevented the `writeTerminalResult` the
-//    backstop exists to protect. The stamp is the thing that must survive; the diagnostic
-//    is a courtesy. A courtesy may never take the guarantee down with it.
+//    `toString` and `Symbol.toPrimitive` — and a value whose coercion throws made
+//    `stampTerminalCause` throw, which prevented the `writeTerminalResult` the backstop
+//    exists to protect. The stamp is the thing that must survive; the diagnostic is a
+//    courtesy. A courtesy may never take the guarantee down with it.
+//
+//    THE COERCION IS THIS FUNCTION'S HALF, AND IT IS NOT THE WHOLE HAZARD. A hostile value
+//    can also throw from a PROPERTY READ or WRITE — a Proxy trap — which happens in the
+//    caller, before and after this is reached. That half is closed by `stampTerminalCause`
+//    constraining its input to a plain record and guarding the whole read-and-stamp; see
+//    its contract. This sentence used to name the Proxy trap among the hazards handled
+//    here, which was untrue: the read ahead of it was unprotected, and the comment
+//    describing the class is what eventually found the code fixing only the instance.
 //  - REDACTED, through the same helper every persisted cause goes through. This text is
 //    written to the run log verbatim, and a value shaped like a credential had nothing
 //    between it and that log.
 //  - CAPPED, because the value is unexpected BY DEFINITION and nothing bounds its length.
 //
-// The stamp happens BEFORE this is called at the one site that uses it, so even a
-// catastrophic logger cannot cost the field its value.
+// The stamp happens BEFORE either call to this, so even a catastrophic logger — or a
+// checkpoint whose own read throws — cannot cost the field its value. That was written
+// here one round before it was true; it is true now, and `stampTerminalCause` carries the
+// note about why the ordering keeps being got wrong.
 function terminalCauseDiagnostic(value) {
   let text
   try {
@@ -4637,28 +4647,62 @@ function terminalCauseDiagnostic(value) {
     ? `${redacted.slice(0, TERMINAL_CAUSE_DIAGNOSTIC_MAX)}… (${redacted.length} chars, truncated)`
     : redacted
 }
+// Report without letting the reporting channel become a failure of its own. `log` writes to
+// stdout, and a closed pipe raises there like anywhere else.
+function reportQuietly(report, line) {
+  try {
+    report(line)
+  } catch {}
+}
+// THE CONTRACT: `result` IS A PLAIN RECORD THIS FILE BUILT, and the function is written to
+// that and says so. Every one of the twelve call sites hands over an object literal
+// assembled a few lines above it; nothing else is in scope for this backstop.
+//
+// AND A VALUE THAT IS NOT ONE IS REPORTED, NOT TRUSTED, NOT CHASED. A Proxy can throw from
+// `get`, from `set`, from `getPrototypeOf` and from `ownKeys`, so there is no probe that
+// makes a later read safe and no copy that can be taken without touching it — any
+// formulation that tries to READ such a value defensively is still one trap away from the
+// failure it was written against. So the whole read-and-stamp runs inside one guard, and a
+// value that resists being read or written is named on the log and left alone. That is a
+// closed answer: for a plain record the stamp always happens, and for anything else no
+// implementation could have stamped it, because the write is exactly what it refuses.
+//
+// WHY THIS IS HERE AT ALL. `terminalCauseDiagnostic` below hardened the COERCION of an
+// untrusted value, and its own comment named a Proxy trap among the hazards — while the
+// first property read in this function sat unprotected, ahead of everything. The comment
+// described the class; the code had fixed the instance. Reading the two against each other
+// is what found it.
 function stampTerminalCause(result, report) {
   if (typeof result !== 'object' || result === null) return result
-  if (TERMINAL_CAUSE_KINDS.includes(result.terminalCauseKind)) return result
-  // THE STAMP COMES FIRST, AND THAT ORDERING IS THE GUARANTEE. Reporting is best-effort;
-  // recording the honest non-answer is not. An earlier cut reported and then stamped, so
-  // anything that made the report fail — a hostile coercion, a logger raising EPIPE — cost
-  // the result its field and, through the throw, cost the run its terminal write entirely.
-  // That is the exact failure this backstop was built to prevent, arriving through the
-  // backstop itself.
-  const missing = result.terminalCauseKind === undefined
-  const quoted = missing ? undefined : terminalCauseDiagnostic(result.terminalCauseKind)
-  const at = terminalCauseDiagnostic(result.checkpoint)
-  result.terminalCauseKind = 'unknown'
+  let stamped = false
   try {
-    report(
+    const kind = result.terminalCauseKind
+    if (TERMINAL_CAUSE_KINDS.includes(kind)) return result
+    const missing = kind === undefined
+    // THE STAMP COMES FIRST, AND NOW IT ACTUALLY DOES. Reporting is best-effort; recording
+    // the honest non-answer is not. An earlier cut reported and then stamped; the cut after
+    // it composed BOTH diagnostics and then stamped, which left `terminalCauseDiagnostic`'s
+    // own docblock claiming an ordering the code did not have. The only work between the
+    // decisive read and the write is the `undefined` test, which cannot fail.
+    result.terminalCauseKind = 'unknown'
+    stamped = true
+    const at = terminalCauseDiagnostic(result.checkpoint)
+    reportQuietly(
+      report,
       missing
         ? `trident-v2 TERMINAL CAUSE MISSING at checkpoint ${at} — recording 'unknown'`
-        : `trident-v2 TERMINAL CAUSE UNRECOGNISED: ${quoted} — recording 'unknown'`,
+        : `trident-v2 TERMINAL CAUSE UNRECOGNISED: ${terminalCauseDiagnostic(kind)} — recording 'unknown'`,
     )
   } catch {
-    // Nothing to do and nothing to say: the channel for saying it is what failed. The
-    // stamp above already happened, which is the part that had to.
+    // The value resisted. `stamped` says which half got through, because "we could not
+    // record a cause" and "we recorded one but could not describe it" are different facts
+    // and this file does not put different facts on one branch.
+    reportQuietly(
+      report,
+      stamped
+        ? "trident-v2 TERMINAL CAUSE stamped 'unknown', but its own diagnostic could not be composed — the terminal result is not a plain record"
+        : 'trident-v2 TERMINAL CAUSE UNSTAMPABLE: the terminal result is not a plain record — it resisted being read or written, so no cause could be recorded on it',
+    )
   }
   return result
 }
