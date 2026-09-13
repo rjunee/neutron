@@ -20,7 +20,8 @@ import { herdrCall, herdrPing, HerdrError } from '../herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION } from '../herdr-protocol.ts'
 import { newFrameReader } from '../herdr-client.ts'
 import { HerdrHost } from '../herdr-host.ts'
-import { FakeHerdrServer } from './herdr-fake-server.ts'
+import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import type { PtyChild } from '../pty-host.ts'
 
 interface FakeSocket {
   write(data: string): number
@@ -626,5 +627,129 @@ describe('a frame that is not valid UTF-8 is refused, not substituted', () => {
     // NOT AN EMPTY REPLY. A decode failure is the absence of a usable answer, and
     // resolving `{}` here would report an acknowledgement nobody sent.
     expect((e as Error).message).toContain('acknowledgement')
+  })
+})
+
+/**
+ * A CONNECTOR THAT THROWS SYNCHRONOUSLY — the failure the existing refusal case cannot
+ * produce.
+ *
+ * The connector was invoked ABOVE the surrounding `try`, so a synchronous throw escaped
+ * past `fail()`: the call rejected with the raw error while its RPC timeout stayed armed
+ * and its handlers stayed registered. The existing "refused connection" case cannot
+ * expose it because its fake connector is `async`, which converts a throw into a
+ * rejection — **a fixture that cannot produce the failure it claims to cover**, which is
+ * the same finding as the pty that could not short-write and the host whose `kill` could
+ * not fail.
+ */
+describe('a connector that throws SYNCHRONOUSLY is a failed call, not an escape', () => {
+  it('rejects through the same path as a rejected connect', async () => {
+    const e = await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      timeoutMs: 50,
+      // NOT `async`. That one keyword is the difference between the two cases.
+      connect: (() => {
+        throw new Error('EACCES: synchronous refusal')
+      }) as never,
+    }).catch((x: unknown) => x as Error)
+    expect((e as Error).message).toContain('EACCES')
+  })
+
+  it('a NON-Error thrown synchronously is NORMALISED, not passed through raw', async () => {
+    // THE SHARP CONSEQUENCE, found by asking what the escape actually changes rather
+    // than assuming the message was enough. An async function turns a synchronous throw
+    // into a rejection either way, so the MESSAGE case passes with the connector outside
+    // the `try` — measured. What does not survive is the normalisation: `fail()` wraps a
+    // non-Error in one, and an escape rejects with the raw value. Every caller in this
+    // tree reads `e instanceof Error ? e.message : …`, so a bare string arrives as a
+    // rejection nothing can describe.
+    const e = await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      timeoutMs: 50,
+      connect: (() => {
+        throw 'a bare string, not an Error'
+      }) as never,
+    }).catch((x: unknown) => x)
+    expect(e).toBeInstanceOf(Error)
+    expect((e as Error).message).toContain('a bare string')
+  })
+
+  it('and leaves no armed timer behind — the call is OVER, not merely rejected', async () => {
+    // The observable for "the timeout was cleared": if it were still armed it would fire
+    // after the call had already rejected, and `fail()` would be reached a second time.
+    // `fail` is once-only, so the visible trace is the stderr the timer's path would
+    // produce plus the process still being held awake; what is assertable here is that
+    // waiting well past the deadline produces no further settlement attempt and no
+    // unobserved rejection.
+    const unobserved: unknown[] = []
+    const record = (x: unknown): void => {
+      unobserved.push(x)
+    }
+    process.on('unhandledRejection', record)
+    try {
+      await herdrCall('pane.read', {}, {
+        socketPath: '/f',
+        timeoutMs: 10,
+        connect: (() => {
+          throw new Error('EACCES: synchronous refusal')
+        }) as never,
+      }).catch(() => undefined)
+      await new Promise((r) => setTimeout(r, 60)) // well past the deadline
+      expect(unobserved).toEqual([])
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  })
+
+  it('CONTROL — an ASYNC connector that rejects still fails the same way', async () => {
+    // The case that existed before, kept: the fix must not turn the ordinary rejection
+    // path into something else.
+    const e = await call(undefined, { connectThrows: new Error('ECONNREFUSED') }).catch(
+      (x: unknown) => x as Error,
+    )
+    expect((e as Error).message).toContain('ECONNREFUSED')
+  })
+})
+
+/**
+ * `write()` DELIVERS THE BYTES IT WAS GIVEN, or refuses them.
+ *
+ * The outbound seam decoded a `Uint8Array` with non-fatal `Buffer.toString('utf8')`, so
+ * bytes that are not valid UTF-8 were SUBSTITUTED with U+FFFD and sent as different
+ * bytes — silently, on the one method whose whole contract is byte delivery. The same
+ * defect as the inbound decoder, in the opposite direction: there the wire was trusted
+ * to carry what the server meant, here the caller's bytes were altered on the way out.
+ */
+describe('herdr write() refuses bytes it cannot carry rather than corrupting them', () => {
+  const spawnHost = async (server: FakeHerdrServer): Promise<PtyChild> => {
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 60_000,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    return child
+  }
+
+  it('REFUSES a payload that is not valid UTF-8, and sends nothing', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawnHost(server)
+    expect(() => child.write(new Uint8Array([0xc3, 0x28]))).toThrow(/not valid UTF-8/)
+    // Not a partial send: the refusal is before the wire.
+    expect(server.callsTo('pane.send_text')).toEqual([])
+    child.kill()
+  })
+
+  it('CONTROL — VALID multi-byte bytes are delivered unchanged', async () => {
+    // Without this, "refuse invalid UTF-8" is satisfied by refusing every Uint8Array,
+    // which would break the byte-delivery contract in the other direction.
+    const server = new FakeHerdrServer()
+    const child = await spawnHost(server)
+    child.write(new TextEncoder().encode('héllo ✅'))
+    await until(() => server.deliveredTo('pane.send_text').length >= 1, 'the text')
+    expect(server.deliveredTo('pane.send_text')[0]!.params['text']).toBe('héllo ✅')
+    child.kill()
   })
 })

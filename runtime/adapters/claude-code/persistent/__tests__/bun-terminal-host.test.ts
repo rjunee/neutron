@@ -194,6 +194,31 @@ describe('the screen accumulator is bounded in BYTES', () => {
   const CAP = 64 * 1024
   const TRIM_TO = 48 * 1024
 
+  // A DEFAULT THAT IGNORES ITS SIBLING ARGUMENT. `trimToBytes` defaulted to the
+  // production-wide 384 KiB regardless of the `maxBytes` it was meant to sit under, so
+  // `newScreenAccumulator(64)` trimmed to 393216 — i.e. never — and kept everything.
+  // Every other case here supplies BOTH values, which is exactly why the one-argument
+  // boundary went uncovered: this kind of default is only wrong when someone passes one
+  // of them, and a fixture that always passes both can never be that someone.
+  it('ONE-ARGUMENT construction still bounds — the trim follows the cap it was given', () => {
+    const acc = newScreenAccumulator(64) // no trim target supplied
+    let screen = ''
+    for (let i = 0; i < 50; i++) screen = acc.push('x'.repeat(65))
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(64)
+    expect(screen.length).toBeGreaterThan(0)
+  })
+
+  it('CONTROL — the ZERO-argument default is the production pair, not a shrunken one', () => {
+    // Deriving the trim target from `maxBytes` must not change what production uses.
+    const acc = newScreenAccumulator()
+    let screen = ''
+    for (let i = 0; i < 40; i++) screen = acc.push('y'.repeat(16 * 1024))
+    // 640 KiB pushed through the 512 KiB production cap: bounded, and NOT trimmed to
+    // something tiny by a ratio applied to the wrong number.
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(512 * 1024)
+    expect(Buffer.byteLength(screen, 'utf8')).toBeGreaterThan(256 * 1024)
+  })
+
   it('output with NO NEWLINES is still bounded — a line count cannot bound memory', () => {
     // A LINE IS UNBOUNDED, so a line count is not a bound. The first version of this
     // host kept "the last 2000 lines"; a child whose output contains no newline is ONE

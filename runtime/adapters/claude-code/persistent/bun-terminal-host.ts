@@ -69,7 +69,8 @@ const SCREEN_MAX_BYTES = DEFAULT_RING_MAX_BYTES
  * removed once. Cutting to three quarters buys a quarter of the budget before the next
  * clamp, so the clamp is amortised O(1) per byte.
  */
-const SCREEN_TRIM_TO_BYTES = Math.floor(SCREEN_MAX_BYTES * 0.75)
+const SCREEN_TRIM_RATIO = 0.75
+const SCREEN_TRIM_TO_BYTES = Math.floor(SCREEN_MAX_BYTES * SCREEN_TRIM_RATIO)
 
 /**
  * The screen accumulator, EXTRACTED AND EXPORTED so it can be tested without a pty.
@@ -87,7 +88,13 @@ const SCREEN_TRIM_TO_BYTES = Math.floor(SCREEN_MAX_BYTES * 0.75)
  */
 export function newScreenAccumulator(
   maxBytes: number = SCREEN_MAX_BYTES,
-  trimToBytes: number = SCREEN_TRIM_TO_BYTES,
+  // DERIVED FROM `maxBytes`, NOT A SECOND INDEPENDENT DEFAULT. This defaulted to the
+  // production-wide 384 KiB regardless of the cap it was meant to sit under, so
+  // `newScreenAccumulator(64)` trimmed to 393216 — i.e. never — and kept everything. A
+  // one-argument call is the natural way to write it, every test supplied both, and the
+  // boundary went uncovered: a default that ignores its sibling argument is only wrong
+  // when someone passes one of them.
+  trimToBytes: number = Math.floor(maxBytes * SCREEN_TRIM_RATIO),
 ): { push: (text: string) => string } {
   let screen = ''
   // TRACKED INCREMENTALLY. Measuring the whole accumulation on every delivery would be

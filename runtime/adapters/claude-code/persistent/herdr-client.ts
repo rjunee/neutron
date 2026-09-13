@@ -458,8 +458,13 @@ export async function herdrCall(
   // cannot turn a deadline into a rejection; `undefined` means the call ended while the
   // connect was still in flight, and a rejecting connect still rejects the race and
   // reaches `fail` through the catch below.
-  const connecting = (opts.connect ?? connectUnix)(socketPath, { onBytes, onClose })
   try {
+    // INSIDE THE `try`, and that is the whole of this fix. Calling the connector above
+    // it meant a connector that throws SYNCHRONOUSLY — rather than returning a rejected
+    // promise — escaped past `fail()`, so the call rejected with the raw error while its
+    // RPC timeout stayed armed and its `onClose`/`onBytes` handlers stayed registered.
+    // The obligation starts when the timer is armed, not when the connect resolves.
+    const connecting = (opts.connect ?? connectUnix)(socketPath, { onBytes, onClose })
     const s = await Promise.race([connecting, pending.then(() => undefined)])
     if (s === undefined) {
       // The settlement won: the call is over and the socket has not arrived. It may

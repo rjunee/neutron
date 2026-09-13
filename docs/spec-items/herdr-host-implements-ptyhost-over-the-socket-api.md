@@ -492,6 +492,39 @@ not-new. That is accepted and recorded here rather than hidden.
       exit path firing. The resolved VALUE is declared per host (`null` under herdr,
       which has no exit codes; the real status under a pty) rather than assumed equal.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
+- [ ] **`write()` DELIVERS THE BYTES IT WAS GIVEN, OR REFUSES THEM — never different
+      ones.** The outbound seam decoded a `Uint8Array` with non-fatal
+      `Buffer.toString('utf8')`, substituting U+FFFD and sending different bytes, on the
+      one method whose entire contract is byte delivery. The mirror of the inbound
+      defect: there the wire was trusted to carry what the server meant, here the
+      caller's bytes were altered on the way out. `pane.send_text` carries TEXT, so bytes
+      that are not valid UTF-8 cannot cross this transport at all — refusal is the honest
+      answer. The CONTROL is as load-bearing as the case: refusing every `Uint8Array`
+      breaks the same contract in the other direction.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **AN OPTIONAL ARGUMENT'S DEFAULT MAY NOT IGNORE THE ARGUMENT IT DEPENDS ON, and a
+      fixture that always supplies both can never catch one that does.** The screen
+      accumulator's trim target defaulted to the production-wide value regardless of the
+      cap passed alongside it, so a one-argument construction trimmed to a number far
+      above its own bound and kept everything. Derive the dependent default; pin the
+      zero-argument case as the control, or deriving it may quietly shrink what
+      production uses. The general form: **a default that ignores its sibling is only
+      wrong when someone passes one of them.**
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
+- [ ] **THE OBLIGATION STARTS WHEN THE TIMER IS ARMED, so the connector is called INSIDE
+      the guard.** Invoking it above the surrounding `try` let a SYNCHRONOUS throw escape
+      past the failure path, leaving the RPC deadline armed and the handlers registered.
+      THE EXISTING REFUSAL CASE CANNOT EXPOSE IT: its fake connector is `async`, which
+      converts a throw into a rejection — a fixture that cannot produce the failure it
+      claims to cover, the third of that shape on this item.
+      AND THE ASSERTION HAD TO BE FOUND, not assumed: `herdrCall` is an async function,
+      so a synchronous throw becomes a rejection with the identical message either way,
+      and a message assertion SURVIVES the mutation. What differs is NORMALISATION —
+      inside the guard a thrown non-Error is wrapped; outside it the promise rejects with
+      a bare value, and every caller here reads `e instanceof Error ? e.message : …`.
+      Recorded rather than papered: the still-armed-timer half has no in-process
+      observable worth trusting, so the case rests on the difference that is behavioural.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **A FRAME THAT IS NOT VALID UTF-8 IS A PROTOCOL ERROR, not a frame with odd
       characters in it.** `Buffer.toString('utf8')` substitutes U+FFFD for every invalid
       sequence and returns happily, so `c3 28` decodes to `"\uFFFD("` and `JSON.parse`

@@ -1527,6 +1527,53 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The same decoder discipline, pointed the other way
+
+The inbound boundary was made fatal last round; `HerdrHost.write()` was still decoding a
+`Uint8Array` payload with non-fatal `Buffer.toString('utf8')`. So
+`child.write(new Uint8Array([0xc3, 0x28]))` sent `"\uFFFD("` — **different bytes,
+silently, on the one method whose entire contract is byte delivery**. Odd next to the
+strict inbound validation, and the same defect mirrored: there the wire was trusted to
+carry what the server meant, here the caller's bytes were altered on their way out.
+
+`pane.send_text` carries TEXT, so bytes that are not valid UTF-8 cannot cross this
+transport at all — which makes refusal the honest answer and substitution the dishonest
+one. The control matters as much as the case: refusing every `Uint8Array` would break the
+byte-delivery contract in the other direction (M230).
+
+### A default that ignores its sibling argument
+
+`newScreenAccumulator`'s `trimToBytes` defaulted to the production-wide 384 KiB regardless
+of the `maxBytes` it was meant to sit under, so `newScreenAccumulator(64)` trimmed to
+393216 — i.e. never — and kept everything.
+
+**Every accumulator test supplied both values, which is exactly why this went uncovered.**
+A default that ignores its sibling is only wrong when someone passes one of them, and a
+fixture that always passes both can never be that someone. The trim target is now derived
+from the cap, with the zero-argument case pinned as its control so deriving it does not
+quietly shrink what production uses (M232).
+
+### Asking what an escape actually changes, rather than assuming the message is enough
+
+The connector was invoked above the surrounding `try`, so a synchronous throw escaped past
+`fail()` — leaving the RPC timeout armed and the handlers registered. The existing refusal
+case cannot expose it because its fake connector is `async`, which converts a throw into a
+rejection: **a fixture that cannot produce the failure it claims to cover**, the same
+finding as the pty that could not short-write and the host whose `kill` could not fail.
+
+My first attempt at the test asserted the error MESSAGE and SURVIVED the mutation, and the
+reason is worth keeping: `herdrCall` is an async function, so a synchronous throw inside
+it becomes a rejection of its own promise either way. The message is identical on both
+paths. What is not identical is the NORMALISATION — measured directly rather than
+reasoned about: with the connector inside the `try`, a thrown non-Error arrives as
+`instanceof Error === true`; outside it, the promise rejects with a bare `string`. Every
+caller in this tree reads `e instanceof Error ? e.message : …`, so the escape produces a
+rejection nothing can describe.
+
+Recorded honestly: the still-armed-timer half has no in-process observable I trust — the
+timer fires harmlessly into a once-only `fail` — so the case rests on the normalisation,
+which is a real behavioural difference rather than a structural claim.
+
 ### Three times the Bun host lacked a guard the herdr host had
 
 `BunTerminalHost` called `opts.onExit(code)` unguarded and then `exitResolve(code)`. A
@@ -2831,6 +2878,11 @@ Run against the named suites.
 | M226 | frame decoding substitutes U+FFFD again | RED 4 |
 | M227 | PAIR: decoding per CHUNK — a split multi-byte sequence is rejected | RED 2 |
 | M228 | an undecodable frame resolves EMPTY instead of failing | RED 1 |
+| M229 | `write()` substitutes U+FFFD again — different bytes sent | RED 1 |
+| M230 | PAIR: `write()` refuses EVERY `Uint8Array` | RED 1 |
+| M231 | the trim target ignores `maxBytes` again | RED 1 (the one-argument case) |
+| M232 | PAIR: the ratio applied twice — production trims to a fraction | RED 1 |
+| M233 | the connector is called OUTSIDE the `try` | SURVIVED the message case (an async fn rejects either way) → the NON-Error normalisation case → RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

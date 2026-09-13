@@ -85,6 +85,10 @@ export const HERDR_PID_WAIT_MS = 5000
 // deleted, not parked beside the new one. The reasoning that produced them is kept in
 // the as-built record, which is where dead reasoning belongs.
 
+/** Rejects invalid UTF-8 rather than substituting U+FFFD — the same discipline the
+ *  inbound frame reader uses, applied to the bytes a caller hands `write()`. */
+const FATAL_UTF8_IN = new TextDecoder('utf-8', { fatal: true })
+
 /** The `label` put on the REPL's pane, so the owner can see what it is when they
  *  attach. */
 export const HERDR_REPL_PANE_LABEL = 'neutron-repl'
@@ -409,7 +413,30 @@ export class HerdrHost implements PtyHost {
     const child: PtyChild = {
       pid,
       write(data) {
-        const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+        // FATAL, LIKE THE INBOUND BOUNDARY. `PtyChild.write` promises to deliver the
+        // BYTES it was given; `Buffer.toString('utf8')` substitutes U+FFFD for every
+        // invalid sequence and returns happily, so `write(new Uint8Array([0xc3, 0x28]))`
+        // sent `"\uFFFD("` — different bytes, silently, on the seam whose whole contract
+        // is byte delivery. Odd next to the strict inbound validation, and the same
+        // defect in the opposite direction: there the wire was trusted to carry what the
+        // server meant, here the caller's bytes were altered on their way out.
+        //
+        // `pane.send_text` takes TEXT, so a payload that is not valid UTF-8 cannot be
+        // sent over this transport at all — which is a refusal, not a substitution.
+        let text: string
+        if (typeof data === 'string') text = data
+        else {
+          try {
+            text = FATAL_UTF8_IN.decode(data)
+          } catch {
+            throw new Error(
+              'herdr-host: write() refuses bytes that are not valid UTF-8 — herdr\'s ' +
+                'pane.send_text carries TEXT, so these cannot be sent as given. Decoding them ' +
+                'with replacement characters would deliver DIFFERENT bytes than the caller ' +
+                'passed, on the one seam whose contract is byte delivery.',
+            )
+          }
+        }
         // THIS BACKEND'S OWN PRECONDITION, NOT THE INTERFACE'S. `PtyChild.write`
         // promises byte delivery and says nothing about submission, because whether a
         // `\r` submits is a property of the substrate — under an in-process pty it
