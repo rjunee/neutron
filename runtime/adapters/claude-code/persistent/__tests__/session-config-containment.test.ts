@@ -18,7 +18,15 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { replSessionConfigPaths } from '../session-config-paths.ts'
@@ -227,6 +235,82 @@ describe('cleanup checks the FILESYSTEM, because the lexical check cannot see a 
     unlinkSessionConfigs(sessionWith([f]))
 
     expect(existsSync(f)).toBe(false)
+  })
+
+  it('AN ALIASED TEMP ROOT still cleans legitimate directories (Argus r45)', () => {
+    // THE CASE THE POSITIVE CONTROL COULD NOT SEE. The control above runs under this
+    // runner's plain temp root, where a lexical `resolve(tmpdir())` and a `realpathSync` of
+    // it are the same string — so the boundary was uncovered BY CONSTRUCTION rather than by
+    // oversight. Wherever `tmpdir()` itself contains a symlink the two are measured in
+    // different spaces and every legitimate directory reads as "outside", so cleanup skips
+    // and the plaintext credential files this function exists to remove are retained.
+    // `TMPDIR=/var/run` gave `root=/var/run` against `real=/run`; macOS aliases `/var` to
+    // `/private/var`, so the ordinary temp path does this out of the box there.
+    //
+    // A control is only as good as the environment it runs in, and the environment is not
+    // visible in the code — so this case BUILDS the aliasing instead of hoping for it.
+    const realRoot = mkdtempSync(join(tmpdir(), 'neutron-r45-realroot-'))
+    const aliasRoot = join(tmpdir(), `neutron-r45-alias-${process.pid}`)
+    rmSync(aliasRoot, { recursive: true, force: true })
+    symlinkSync(realRoot, aliasRoot)
+    dirs.push(realRoot)
+    dirs.push(aliasRoot)
+
+    // The session's directory is a legitimate child of the ALIASED root — the ordinary
+    // shape, just reached through a symlinked temp root.
+    const child = join(aliasRoot, `neutron-repl-${GENERATED}`)
+    mkdirSync(child, { recursive: true })
+    const f = join(child, 'session-mcp.json')
+    writeFileSync(f, '{"credential":"must not survive"}')
+
+    const saved = process.env['TMPDIR']
+    try {
+      process.env['TMPDIR'] = aliasRoot
+      // The premise, asserted rather than assumed: the two ways of naming the root really do
+      // disagree in this environment. Without this the case could pass on a machine where
+      // nothing aliases and prove nothing at all — the very failure it exists to correct.
+      expect(resolve(tmpdir())).not.toBe(realpathSync(resolve(tmpdir())))
+
+      unlinkSessionConfigs(sessionWith([f]))
+    } finally {
+      if (saved === undefined) delete process.env['TMPDIR']
+      else process.env['TMPDIR'] = saved
+    }
+
+    // CLEANED. The credential file is gone, which is what the check is for.
+    expect(existsSync(f)).toBe(false)
+  })
+
+  it('...and an aliased root does NOT make an outside directory deletable', () => {
+    // The other direction, because resolving the root is a WIDENING and a widening has to be
+    // shown not to have widened too far. A victim outside the (real) temp root must still be
+    // refused while the root is reached through a symlink.
+    const realRoot = mkdtempSync(join(tmpdir(), 'neutron-r45-realroot2-'))
+    const aliasRoot = join(tmpdir(), `neutron-r45-alias2-${process.pid}`)
+    rmSync(aliasRoot, { recursive: true, force: true })
+    symlinkSync(realRoot, aliasRoot)
+    dirs.push(realRoot)
+    dirs.push(aliasRoot)
+
+    // A victim OUTSIDE the temp tree entirely, reached through a symlink that lives inside
+    // the aliased root — the r28 shape, under the r45 conditions.
+    const outside = mkdtempSync(join(homedir(), '.neutron-r45-outside-'))
+    outsideDirs.push(outside)
+    const victim = join(outside, 'session-mcp.json')
+    writeFileSync(victim, '{"not":"ours"}')
+    const bait = join(aliasRoot, `neutron-repl-${GENERATED}-bait`)
+    symlinkSync(outside, bait)
+
+    const saved = process.env['TMPDIR']
+    try {
+      process.env['TMPDIR'] = aliasRoot
+      unlinkSessionConfigs(sessionWith([join(bait, 'session-mcp.json')]))
+    } finally {
+      if (saved === undefined) delete process.env['TMPDIR']
+      else process.env['TMPDIR'] = saved
+    }
+
+    expect(existsSync(victim)).toBe(true)
   })
 
   it('cleanup: scratch dirs', () => {

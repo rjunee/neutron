@@ -107,7 +107,7 @@ import {
   SELF_FENCE_AFTER_MS,
   SESSION_COMPACT_IDLE_QUIESCE_MS,
   defaultIsPidAlive,
-  probeClaimantLiveness,
+  paneClaimBlocksUs,
   runOutputScan,
   surfaceSizeAlert,
 } from './signatures.ts'
@@ -197,6 +197,16 @@ export interface BootAdoptionDeps {
    *  injects one because two incarnations in one test process share a pid, so the real probe
    *  can only ever answer `alive` and the takeover path would be unreachable. */
   claimantLiveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+  /**
+   * THIS GATEWAY'S OWN PID as the claim should record it. Defaults to `process.pid`.
+   *
+   * Injectable because the claim predicate has a same-process exception — a claim stamped
+   * with our own pid is our own dead child's and must not refuse its replacement — and two
+   * "gateways" in one test process share a pid, which would collapse every contest the suite
+   * constructs. A case that models two gateways has to model two PIDS; pretending otherwise
+   * is the fixture asserting something the environment makes untrue.
+   */
+  claimantPid?: number
   /** Diagnostics sink. Defaults to stderr. */
   log?: (msg: string) => void
   budgetMs?: number
@@ -362,7 +372,7 @@ export function beginBootAdoption(
       sessionKey,
       liveForDeadline,
       (deps.now ?? Date.now)(),
-      'unwritable',
+      'no-renewal-observed-on-this-turn',
       deps.log ?? defaultLog,
     )
   }
@@ -1478,7 +1488,10 @@ function fenceIfPastSelfDeadline(
   sessionKey: string,
   session: ReplSession,
   now: number,
-  reason: ClaimRenewal,
+  /** WHAT THIS PASS ACTUALLY KNOWS. A renewal that ran reports its own outcome; the turn
+   *  path has not run one, and saying `unwritable` there would put a fact in an
+   *  operator-facing message that nobody established. */
+  reason: ClaimRenewal | 'no-renewal-observed-on-this-turn',
   log: (msg: string) => void,
 ): void {
   // No confirmation on record at all is treated as "now" rather than as "forever ago": the
@@ -1764,19 +1777,18 @@ async function claimRowOrUnwind(args: {
         // a CRASHED gateway's panes adoptable at once instead of after a threshold. The
         // threshold covers everything a pid cannot say — a wedged gateway still holding its
         // process open, a pid we may not signal, a row written before this field existed.
-        const claimedAt = prev.adoption_claim_at
-        const claimedBy = prev.adoption_claim_by
-        const claimedPid = prev.adoption_claim_pid
-        let live = false
-        if (claimedBy !== undefined && claimedBy !== args.incarnation) {
-          const liveness =
-            claimedPid === undefined ? 'unknown' : args.deps.claimantLiveness?.(claimedPid) ?? probeClaimantLiveness(claimedPid)
-          const renewedRecently =
-            claimedAt !== undefined && args.now - claimedAt < ADOPTION_CLAIM_TAKEOVER_MS
-          // `gone` is the only answer that overrides the threshold; `alive` and `unknown`
-          // both defer to it, so a question we could not ask costs a wait, never a pane.
-          live = liveness !== 'gone' && renewedRecently
-        }
+        // ONE PREDICATE, SHARED WITH THE FRESH-SPAWN CONTEST (r45). It used to be inline
+        // here, which is how the spawn path came to write ownership with no contest at all —
+        // two implementations of "is this claim live" is two things to keep in step, and one
+        // of them was missing.
+        const live = paneClaimBlocksUs(prev, {
+          ours: args.incarnation,
+          now: args.now,
+          ourPid: args.claimantPid,
+          ...(args.deps.claimantLiveness !== undefined
+            ? { liveness: args.deps.claimantLiveness }
+            : {}),
+        })
         if (live) {
           return { registry, result: 'claimed-elsewhere' as ClaimResult, skipSave: true }
         }
@@ -2440,7 +2452,7 @@ async function adoptRow(
     // path that stops owning it can give the claim back.
     incarnation: claimIdentity,
     now: claimTakenAt,
-    claimantPid: process.pid,
+    claimantPid: deps.claimantPid ?? process.pid,
     deps,
     publish: () => {
       // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive

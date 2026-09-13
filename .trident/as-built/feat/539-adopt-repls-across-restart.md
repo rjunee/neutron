@@ -2108,6 +2108,18 @@ gateway whose tick loop has died renews nothing, and a deadline evaluated only t
 let it serve past the moment another gateway may take the row. One timestamp comparison per
 turn, and it reads nothing but this session's own last confirmation.
 
+**The consequence to state rather than discover: a substrate that never registers itself for
+supervision self-fences.** The claim is taken by the adoption or the spawn; it is RENEWED by
+the supervision tick, and the tick only visits keys whose owning substrate registered
+(`registerSupervisedSubstrate`, called by the real selector at
+`adapters/claude-code/index.ts:535`). A caller that constructs a substrate directly and skips
+that registration therefore takes a claim nothing refreshes, and after the deadline that
+session stops serving. **That is the conservative direction and it is correct** — an
+unrenewed claim is one another gateway may take at the takeover window, so continuing to serve
+would be the two-owner state — but it is a behaviour change for any direct constructor, and
+the r40 harness fix (`registerSupervisedSubstrate` in the pane-persistence fixture) is the
+same fact showing up in a test.
+
 **And a third, found by a CI gate rather than by a test.** Re-basing those fixtures on
 `Date.now()` — necessary, because `getOrSpawnSession` reads the real clock and the two have to
 be commensurable — turned `expect(t - t0).toBeGreaterThan(THRESHOLD)` into a **wall-clock
@@ -2126,6 +2138,74 @@ WINNER: an injected clock has to be commensurable with the real one wherever a s
 consults both, so those fixtures now base their origin on `Date.now()` rather than a fixed
 2026 date.
 
+### Round forty-five: writing a claim is not contending for one
+
+**Two concurrent fresh spawns both served.** The ownership write `disownPane`d and replaced
+the row unconditionally under the lock, and `ownershipRecorded` meant only that the write had
+run. So two gateways reconciling the same resumable handle-less row both spawned `--resume`
+panes, A recorded claim A, B took the lock and replaced it with claim B — and **both returned
+live sessions**, until some later renewal happened to fence A. Round forty gave the fresh
+spawn a claim; it did not give it a **contest**.
+
+> **Participating in the protocol means contending for the claim, not merely writing one.**
+> That is round forty's lesson asked of the path round forty added.
+
+**ONE PREDICATE, TWO CALLERS.** `paneClaimBlocksUs` now lives beside the constant and the
+liveness probe it needs, and both the adoption compare-and-set and the fresh-spawn write call
+it. It used to be inline in the adoption path, which is precisely how the spawn path came to
+have no contest at all: two implementations of "is this claim live" is two things to keep in
+step, and one of them was missing.
+
+**The ordering, because the loser has already spawned a process.** A pane cannot be claimed
+before it exists, so the sequence is **spawn → contend → the loser kills its own child and
+refuses**. The asymmetry is the familiar one: the loser's child is its own, it holds the
+handle, killing it costs one respawn — and leaving it alive costs a second owner on one
+transcript. The refusal reuses round forty-two's vocabulary (`repl_unreconciled`, retryable,
+no credential cooldown), because "somebody else owns this row" and "I could not record
+ownership" are both *this turn cannot be served here, try again*.
+
+**THE SAME-PROCESS EXCEPTION, and it is load-bearing rather than a convenience.** A
+replacement spawn runs while the row may still carry the DEAD child's claim — its claimant id
+differs (one is minted per spawn) and its pid is this process, which is alive — so without the
+exception the predicate would refuse a respawn and **the gateway would kill its own
+replacement**. A claim stamped with our pid cannot belong to a competitor. M129 did not red
+until a case for it existed, which is how I found that I had added a guard nothing covered.
+
+**Two fixtures that could not reach the defect, both mine.** Two substrates started back to
+back do not race at the WRITE: the second one's boot reconciliation runs first, cannot speak
+to the first one's pane, and CLEARS the row — so by the time its spawn writes there is no
+claim to contend with and the case passes against the very code it exists to catch. And two
+"gateways" in one test process share `process.pid`, which the same-process exception then
+makes vacuous. So the claimant pid is injectable (`claimantPid`), and **a case that models two
+gateways models two pids** — the alternative is a fixture that passes because the environment
+makes its premise untrue, which is this branch's most expensive recurring shape.
+
+### Round forty-five, second finding: the containment root was measured in the other space
+
+`unlinkSessionConfigs` resolved the child with `realpathSync` and the ROOT only lexically. So
+wherever `tmpdir()` itself contains a symlink the two are measured in different spaces and
+**every legitimate directory reads as "outside"**: with `TMPDIR=/var/run` the gate compared
+`root=/var/run` against `real=/run` and skipped cleanup on all of them — **retaining the
+plaintext credential files it exists to remove**. Not hypothetical off Linux either: macOS
+resolves `/var` to `/private/var`, so the ordinary temp path aliases there.
+
+**This is the over-strict direction round thirty-four asked to be pinned, and the control
+could not see it** — the positive control only ever ran under this runner's plain temp root,
+where the lexical and real roots are the same string, so the boundary was uncovered **by
+construction**. Same family as the round-twenty-eight fixture that sat inside the boundary it
+was meant to be outside:
+
+> **A control is only as good as the environment it runs in, and the environment is not
+> visible in the code.** So the new case BUILDS the aliasing — a symlinked temp root — and
+> asserts the premise (that the two namings really do disagree) before asserting the
+> behaviour, so it cannot pass by running somewhere nothing aliases.
+
+Both halves of the comparison have now each been wrong once, so both are mutated: M125 (root
+back to lexical) reds the aliased case, M126 (child back to lexical) reds the outside-symlink
+refusal. And because resolving the root is a WIDENING, a second case shows it did not widen
+too far: a victim outside the real temp tree is still refused while the root is reached through
+a symlink.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2136,7 +2216,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three and M122–M124 in round forty-four, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four and M125–M129 in round forty-five, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2291,6 +2371,11 @@ count from the rows below rather than trusting this sentence.
 | M122 | the renewal fences only on `not-ours` again — the r44 defect exactly | `adoption-claim-is-a-compare-and-set.test.ts` (2) |
 | M123 | the self-fencing deadline is LONGER than the takeover window | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the ordering case) |
 | M124 | a confirmed renewal does not move the deadline | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the positive control) |
+| M125 | the containment root reverts to a lexical resolve | `session-config-containment.test.ts` (1 — the aliased root) |
+| M126 | the root is resolved but the child is not | `session-config-containment.test.ts` (2) |
+| M127 | the fresh spawn writes ownership with no contest — the r45 defect exactly | `pane-handle-persistence.test.ts` (1) |
+| M128 | the loser serves instead of ending its own child | `pane-handle-persistence.test.ts` (1) |
+| M129 | the predicate drops the same-process exception | `pane-handle-persistence.test.ts` (1 — **and it did not red until the respawn case existed**) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

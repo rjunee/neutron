@@ -525,7 +525,28 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
  * than swallowed by the existing best-effort catch.
  */
 export function unlinkSessionConfigs(session: ReplSession): void {
-  const root = resolve(tmpdir())
+  // BOTH SIDES OF THE COMPARISON MUST BE REAL PATHS (Argus r45). This resolved the child
+  // with `realpathSync` and the ROOT only lexically, so wherever `tmpdir()` itself contains
+  // a symlink the two are measured in different spaces and EVERY legitimate directory reads
+  // as "outside": with `TMPDIR=/var/run` the gate compared `root=/var/run` against
+  // `real=/run` and skipped cleanup on all of them — retaining the plaintext credential
+  // files it exists to remove. Not hypothetical off Linux either: macOS resolves `/var` to
+  // `/private/var`, so the ordinary temp path aliases there.
+  //
+  // THE OVER-STRICT DIRECTION, which round thirty-four asked to be pinned and which the
+  // control could not see, because the control only ever ran under this runner's plain temp
+  // root. A control is only as good as the environment it runs in, and the environment is
+  // not visible in the code — so there is now an explicitly ALIASED-root case.
+  let root: string
+  try {
+    root = realpathSync(resolve(tmpdir()))
+  } catch {
+    // The temp root cannot be resolved at all. Fail CLOSED rather than fall back to a
+    // lexical root: an unresolvable root makes every comparison meaningless, and deleting on
+    // the strength of a comparison we could not make is the one direction this check exists
+    // to refuse. The cost is the same retained-credential residual documented above.
+    root = resolve(tmpdir())
+  }
   for (const p of session.configPaths) {
     let real: string
     try {

@@ -210,6 +210,56 @@ export const ADOPTION_CLAIM_TAKEOVER_MS = 6 * DEFAULT_WATCHDOG_INTERVAL_MS
 export const SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG_INTERVAL_MS
 
 /**
+ * IS ANOTHER GATEWAY'S CLAIM ON THIS ROW STILL LIVE — **one predicate, every claimant**
+ * (#539, Argus r45).
+ *
+ * WHY IT IS SHARED RATHER THAN INLINE. Round forty gave the fresh spawn a claim; it did not
+ * give it a CONTEST. The spawn wrote ownership unconditionally under the lock, so two
+ * gateways reconciling the same resumable row both spawned `--resume` panes and both
+ * published: A recorded claim A, B took the lock and replaced it with claim B, and both
+ * served one transcript until a later renewal happened to fence A. **Participating in the
+ * protocol means contending for the claim, not merely writing one** — and two copies of the
+ * predicate is how the adoption path and the spawn path would drift apart later, so there is
+ * one.
+ *
+ * THE RULE: a claim blocks only while it is somebody ELSE'S, recent, and its process is not
+ * provably gone. `gone` overrides recency (a crashed gateway's pane is adoptable at once);
+ * `alive` and "could not ask" both defer to {@link ADOPTION_CLAIM_TAKEOVER_MS}, so an
+ * unanswerable question costs a bounded wait rather than a second owner.
+ *
+ * OUR OWN PROCESS'S EARLIER CLAIM DOES NOT BLOCK US, and that exception is load-bearing
+ * rather than a convenience. A replacement spawn runs while the row may still carry the DEAD
+ * child's claim — its claimant id is different (one is minted per spawn) and its pid is this
+ * process, which is alive — so without this the predicate would refuse a respawn on the
+ * strength of a claim held by a child that just exited, and the gateway would kill its own
+ * replacement. A claim stamped with our pid cannot belong to a competitor: pids are unique
+ * per host, and a same-pid claim on this key can only be our own earlier session for it.
+ */
+export function paneClaimBlocksUs(
+  row: { adoption_claim_at?: number; adoption_claim_by?: string; adoption_claim_pid?: number },
+  args: {
+    /** This pass's own claim identity — a row already claimed BY US never blocks us. */
+    readonly ours: string
+    readonly now: number
+    /** This gateway's pid, for the same-process exception above. */
+    readonly ourPid: number
+    /** Injected so a case can reach the `gone` branch; two incarnations in one test process
+     *  share a pid, so the real probe can only ever answer `alive`. */
+    readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+  },
+): boolean {
+  const by = row.adoption_claim_by
+  if (by === undefined || by === args.ours) return false
+  const pid = row.adoption_claim_pid
+  if (pid !== undefined && pid === args.ourPid) return false
+  const at = row.adoption_claim_at
+  const recent = at !== undefined && args.now - at < ADOPTION_CLAIM_TAKEOVER_MS
+  if (!recent) return false
+  const liveness = pid === undefined ? 'unknown' : (args.liveness ?? probeClaimantLiveness)(pid)
+  return liveness !== 'gone'
+}
+
+/**
  * IS THE PROCESS THAT HOLDS A CLAIM STILL THERE — three answers, because two would be a
  * defect (#539).
  *

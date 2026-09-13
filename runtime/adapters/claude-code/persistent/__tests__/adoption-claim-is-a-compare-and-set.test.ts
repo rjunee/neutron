@@ -138,6 +138,11 @@ function fixture(over: RowOverride = {}): Fixture {
  *  whether the process holding any existing claim is still there. */
 interface PassOpts {
   afterRowClaim?: () => Promise<void> | void
+  /** WHICH GATEWAY this pass is, as its claim records it. Two incarnations in one test
+   *  process share `process.pid`, and the claim predicate deliberately does not let a
+   *  gateway be blocked by its OWN process's earlier claim (a respawn must not refuse
+   *  itself) — so a case that models two gateways gives them two pids. */
+  claimantPid?: number
   /** The clock the claim reads — so a case can cross the takeover threshold without
    *  sleeping through ninety seconds. */
   now?: () => number
@@ -228,7 +233,9 @@ describe('two incarnations racing for one row', () => {
     await inGap
 
     // B RUNS TO COMPLETION IN THAT WINDOW.
-    const b = await pass(f)
+    // A DIFFERENT GATEWAY, so a different pid: the predicate does not let a gateway be
+    // blocked by its own process's earlier claim.
+    const b = await pass(f, { claimantPid: process.pid + 1 })
 
     releaseGap()
     const aOutcome = await a
@@ -335,6 +342,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     const b = await pass(f, {
       now: () => t + sinceLastRenewal,
       claimantLiveness: () => 'alive',
+      claimantPid: process.pid + 1,
     })
     expect(b.kind).toBe('undecided')
     expect(b.kind === 'undecided' && b.reason).toMatch(/holds the adoption claim/i)
@@ -429,7 +437,11 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     childByKey.clear()
     resetBootAdoptionForTests()
 
-    const b = await pass(f, { now: () => t0 + 1_000, claimantLiveness: () => 'unknown' })
+    const b = await pass(f, {
+      now: () => t0 + 1_000,
+      claimantLiveness: () => 'unknown',
+      claimantPid: process.pid + 1,
+    })
     expect(b.kind).toBe('undecided')
     expect(b.kind === 'undecided' && b.reason).toMatch(/holds the adoption claim/i)
     expect(f.host.closed).toEqual([])

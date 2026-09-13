@@ -266,6 +266,12 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
       host: adopter,
       health: async () => true,
       log: () => {},
+      // A DIFFERENT GATEWAY, so a different pid. The claim predicate deliberately does not
+      // let a gateway be blocked by its OWN process's earlier claim — a replacement spawn
+      // must not refuse itself on the strength of a claim its dead child left — and two
+      // gateways in one test process share `process.pid`, which would make this contest
+      // vacuous. A case that models two gateways models two pids.
+      claimantPid: process.pid + 1,
     })
 
     // REFUSED, naming the claim.
@@ -280,6 +286,128 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
     // row still carries its claim.
     expect(await pool.get(key)).toBe(served)
     expect(readRow(registryPath, key)?.adoption_claim_by).toBe(row?.adoption_claim_by)
+  })
+
+  it('A FRESH SPAWN LOSES THE CONTEST for a row another gateway owns, and ends its own child', async () => {
+    // ARGUS r45, and it completes round forty's lesson. Round forty gave the fresh spawn a
+    // claim; it did not give it a CONTEST. The ownership write replaced the row
+    // unconditionally under the lock, so two gateways reconciling one resumable row both
+    // spawned `--resume` panes and both published — A recorded claim A, B took the lock and
+    // replaced it with claim B, and both served one transcript until some later renewal
+    // happened to fence A. **Participating in the protocol means contending, not merely
+    // writing.**
+    //
+    // ORDERING, because the loser has already spawned a process: the handle does not exist
+    // until the spawn, so the sequence is spawn → contend → the loser KILLS ITS OWN CHILD and
+    // refuses. Killing costs one respawn; leaving it alive costs a second owner.
+    //
+    // WHERE THE CONTEST IS REACHED, stated because the obvious fixture cannot reach it. Two
+    // substrates started back to back do not race at the WRITE: the second one's boot
+    // reconciliation runs first, cannot speak to the first one's pane (a different host
+    // object), and clears the row — so by the time its spawn writes there is no claim left to
+    // contend with, and the case would pass against the very code it exists to catch. So the
+    // winner's claim is planted between a settled reconciliation and the spawn that follows
+    // it, which is exactly the interleaving the defect lived in.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = {
+      ...optionsFor(echoHost('w9:p-loser'), registryPath),
+      // TWO GATEWAYS, TWO PIDS: the predicate does not let a gateway be blocked by its own
+      // process's earlier claim (a replacement spawn must not refuse itself), so a fixture
+      // that models two gateways with one pid makes the contest vacuous.
+      claimantPid: process.pid + 1,
+      // It asks about the winner's pid and is told it is alive, which it is.
+      claimantLiveness: () => 'alive' as const,
+    } as PersistentReplSubstrateOptions
+    const key = poolKeyFor(options)
+
+    // A first turn settles this key's reconciliation verdict (the registry is empty, so it is
+    // `no-handle`) and leaves a serving session behind.
+    await drain(createPersistentReplSubstrate(options).start(spec('one')))
+    expect(readRow(registryPath, key)?.pane_handle).toBe('w9:p-loser')
+
+    // THE WINNER APPEARS: another gateway now owns this row, claim and all, and is alive.
+    pool.delete(key)
+    childByKey.delete(key)
+    const winner = 'the-other-gateway'
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          [key]: {
+            ...readRow(registryPath, key),
+            pane_handle: 'w9:p-winner',
+            adoption_claim_by: winner,
+            adoption_claim_at: Date.now(),
+            adoption_claim_pid: process.pid,
+          },
+        },
+        null,
+        2,
+      ),
+    )
+
+    // THE LOSER SPAWNS ANYWAY — it cannot know until it has a handle to claim — and then
+    // contends, and loses. The reconciliation verdict is cached from the first turn, so
+    // nothing clears the winner's row on the way in.
+    const events: Event[] = []
+    let message = ''
+    try {
+      for await (const ev of createPersistentReplSubstrate(options).start(spec('two'))
+        .events as AsyncIterable<Event>) {
+        events.push(ev)
+      }
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    if (err?.kind === 'error') {
+      message = err.message
+      // THE REFUSAL CARRIES THE CODE, so an ownership conflict never cools a credential —
+      // the same vocabulary as every other refusal this subsystem raises.
+      expect(err.code).toBe('repl_unreconciled')
+      expect(err.retryable).toBe(true)
+    }
+
+    expect(message).toMatch(/refusing to serve session/i)
+    expect(message).toMatch(/already OWNS/i)
+    // THE LOSER'S CHILD IS ENDED — not left running on a pane nobody records it as owning.
+    expect(killsByHandle).toContain('w9:p-loser')
+    // AND THE ROW STILL NAMES THE WINNER, field for field: the loser wrote nothing.
+    const row = readRow(registryPath, key)
+    expect(row?.adoption_claim_by).toBe(winner)
+    expect(row?.pane_handle).toBe('w9:p-winner')
+  })
+
+  it('...but a REPLACEMENT SPAWN is not refused by its OWN predecessor\'s claim', async () => {
+    // THE OTHER SIDE OF THE CONTEST, and the case that keeps the same-process exception
+    // honest. A replacement spawn runs while the row may still carry the DEAD child's claim:
+    // its claimant id is different (one is minted per spawn) and its pid is this process,
+    // which is alive — so a predicate that blocked on any live-looking claim would refuse the
+    // respawn and the gateway would kill its own replacement, on the strength of a claim held
+    // by a child that had just exited.
+    //
+    // The teardown that would have cleared it is skipped here (the pool entry is dropped
+    // without the exit handler running), which is the same "teardown did not reach the row"
+    // shape the merge case below covers — and exactly when the exception has to hold.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-respawn'), registryPath)
+    const key = poolKeyFor(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('one')))
+    const firstClaim = readRow(registryPath, key)?.adoption_claim_by
+    expect(typeof firstClaim).toBe('string')
+    expect(readRow(registryPath, key)?.adoption_claim_pid).toBe(process.pid)
+
+    // The child is gone and its teardown did not reach the row: its claim is still there.
+    pool.delete(key)
+    childByKey.delete(key)
+
+    const text = await drain(createPersistentReplSubstrate(options).start(spec('two')))
+
+    // IT SERVED. Not refused, and its child not killed.
+    expect(text).toContain('echo')
+    expect(killsByHandle).not.toContain('w9:p-respawn')
+    // And the row now names the replacement's claim, not its predecessor's.
+    expect(readRow(registryPath, key)?.adoption_claim_by).not.toBe(firstClaim)
   })
 
   it('a REPLACEMENT SPAWN clears ownership its predecessor left behind', async () => {

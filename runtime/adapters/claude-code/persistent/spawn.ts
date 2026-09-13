@@ -14,6 +14,7 @@ import { herdrHost } from './herdr-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { SubstrateClassed } from './classify-spawn-error.ts'
+import { paneClaimBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
@@ -602,6 +603,8 @@ async function spawnSession(
      *  the r44 self-fencing deadline is measured from, and the same instant the row's
      *  takeover threshold runs from. */
     const paneClaimedAt = Date.now()
+    /** Which gateway this claim names — see `PersistentReplSubstrateOptions.claimantPid`. */
+    const claimantPid = options.claimantPid ?? process.pid
     if (child.paneHandle !== undefined) session.paneClaimBy = paneClaimant
     // #539 — and WHAT THIS CHILD WAS SPAWNED AS, so a re-adopted session can answer
     // the warm-reuse guards instead of failing all three and being evicted on the
@@ -648,6 +651,31 @@ async function spawnSession(
         //
         // `disownPane` first, unconditionally, so nothing from the predecessor survives;
         // then `ownPane` only when THIS child actually has a pane.
+        //
+        // AND THE SPAWN CONTENDS FOR THE CLAIM (Argus r45), using the SAME predicate the
+        // adoption compare-and-set uses. Round forty gave the fresh spawn a claim and no
+        // CONTEST: this write replaced ownership unconditionally, so two gateways
+        // reconciling one resumable row both spawned `--resume` panes and both published —
+        // A recorded claim A, B took the lock and replaced it with claim B, and both served
+        // one transcript until some later renewal happened to fence A. Participating in the
+        // protocol means contending, not merely writing.
+        //
+        // Only when THIS child has a pane: a handle-less spawn owns nothing, so there is
+        // nothing to contend for and the disown below still clears the predecessor's.
+        if (
+          child.paneHandle !== undefined &&
+          prev !== undefined &&
+          paneClaimBlocksUs(prev, {
+            ours: paneClaimant,
+            now: paneClaimedAt,
+            ourPid: claimantPid,
+            ...(options.claimantLiveness !== undefined
+              ? { liveness: options.claimantLiveness }
+              : {}),
+          })
+        ) {
+          return { registry, result: 'lost' as const, skipSave: true as const }
+        }
         const disowned = disownPane(merged as ReplRegistryRecord)
         registry[sessionKey] =
           child.paneHandle !== undefined
@@ -656,16 +684,16 @@ async function spawnSession(
                 generation: childGeneration,
                 claimant: paneClaimant,
                 now: paneClaimedAt,
-                pid: process.pid,
+                pid: claimantPid,
               })
             : disowned
-          return { registry, result: true }
+          return { registry, result: 'recorded' as const }
         },
         // THE DISPOSITION FOR AN UNACQUIRED LOCK, said rather than implied (Argus r41).
         // Writing an unlocked whole-registry snapshot would drop a concurrent gateway's
         // rows and would claim a pane on the strength of a row nobody had the right to
         // read. So: nothing is written, and the caller below decides what that means.
-        () => false,
+        () => 'unwritable' as const,
       )
       // A CHILD WITH A PANE NOBODY CAN FIND IS THE UNRECOVERABLE DIRECTION, and this
       // branch is the one place that can still choose. The general policy here is that a
@@ -683,16 +711,35 @@ async function spawnSession(
       // whose lock may by then be available. Refusing without killing would leave exactly
       // the unrecorded live child this branch is refusing to create.
       // CONFIRMED, on the same evidence a renewal produces: the compare-and-set landed.
-      if (ownershipRecorded && child.paneHandle !== undefined) {
+      if (ownershipRecorded === 'recorded' && child.paneHandle !== undefined) {
         session.paneClaimConfirmedAt = paneClaimedAt
       }
-      if (!ownershipRecorded && child.paneHandle !== undefined) {
+      // LOST THE CONTEST. Another gateway owns this row and is serving it, so this child —
+      // spawned moments ago, holding its own handle, serving nobody — is ENDED. It cannot be
+      // claimed before it is spawned (the handle does not exist until then), so the ordering
+      // is spawn → contend → the loser kills its own child. The asymmetry is the familiar
+      // one: killing costs one respawn, leaving it alive costs a second owner on one
+      // transcript.
+      if (ownershipRecorded === 'lost' && child.paneHandle !== undefined) {
         try {
           child.kill()
         } catch {
           /* best-effort: the refusal below is what protects the invariant */
         }
-        throw new PaneOwnershipUnrecordedError(
+        throw new PaneOwnershipRefusedError(
+          `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — another gateway already ` +
+            `OWNS this session's row and is serving it, so the pane ${child.paneHandle} this spawn just created ` +
+            'would be a second owner of one transcript. The child was ended and this turn fails instead; it ' +
+            'retries on the next turn, which will find the winner\'s session or reconcile it.',
+        )
+      }
+      if (ownershipRecorded === 'unwritable' && child.paneHandle !== undefined) {
+        try {
+          child.kill()
+        } catch {
+          /* best-effort: the refusal below is what protects the invariant */
+        }
+        throw new PaneOwnershipRefusedError(
           `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — its pane ` +
             `${child.paneHandle} could not be RECORDED as owned (the registry lock was not acquired, so a ` +
             'write would have dropped a concurrent gateway\'s rows). A durable pane whose ownership is ' +
@@ -706,7 +753,7 @@ async function spawnSession(
       // a sentence this file also composes would make the two facts — "the refusal fired"
       // and "the wording still says so" — the same fact, and this branch has paid for that
       // collapse before.
-      if (e instanceof PaneOwnershipUnrecordedError) throw e
+      if (e instanceof PaneOwnershipRefusedError) throw e
       // A registry write failure must never brick a live REPL; supervision
       // degrades to "no auto-resume for this session" until the next write.
     }
@@ -983,7 +1030,7 @@ async function notifyEvictedChild(
  * this refusal has to pass through it. Keying that on text would make the refusal's
  * survival depend on its own wording.
  */
-class PaneOwnershipUnrecordedError extends Error implements SubstrateClassed {
+class PaneOwnershipRefusedError extends Error implements SubstrateClassed {
   /**
    * ITS CLASS TRAVELS WITH IT (r42). `repl_unreconciled` is the vocabulary this refusal
    * belongs to — the same one the boot-adoption gate's refusal uses — and every stamped

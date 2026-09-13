@@ -249,6 +249,16 @@ it must not swallow.
       process is gone losing it at once, and one we could not ask about NOT losing it; the
       renewal refusing to overwrite a legitimate takeover; and the hand-over that clears the
       marker so the next boot is not refused).
+- [ ] **CLEANUP MEASURES BOTH SIDES IN THE SAME SPACE.** The session-config containment check
+      resolves the temp ROOT with `realpathSync` as well as the directory it is testing: with
+      only the child resolved, any environment whose `tmpdir()` contains a symlink classified
+      every legitimate directory as "outside" and skipped cleanup — retaining the plaintext
+      credential files the check exists to remove. `TMPDIR=/var/run` does it on Linux; macOS
+      aliases `/var` to `/private/var` out of the box.
+      *Verified by* `__tests__/session-config-containment.test.ts` — an ALIASED temp root
+      (built by the case, with the premise that the two namings disagree asserted before the
+      behaviour) still cleans legitimate directories, and a victim outside the real temp tree
+      is still refused through that same aliased root, so the widening did not widen too far.
 - [ ] **AN OWNERSHIP WRITE THAT COULD NOT HOLD THE LOCK WRITES NOTHING, AND SAYS WHAT IT
       DID INSTEAD.** `withFlockSync` runs its callback even when `flock` fails, and the
       registry write saves whatever that callback returns — so an ownership transition that
@@ -274,8 +284,16 @@ it must not swallow.
       point that does not consume the outcome), and
       `gateway/wiring/__tests__/build-llm-call-substrate.test.ts` (the credential is NOT
       cooled, asserted at the surface that spends the money, with a genuine-429 control).
-- [ ] **EVERY SESSION THAT OWNS A PANE CLAIMS IT, HOWEVER IT CAME TO EXIST.** A fresh
-      spawn takes a claim in the same write that records the pane handle; a child's exit
+- [ ] **EVERY SESSION THAT OWNS A PANE CONTENDS FOR IT, HOWEVER IT CAME TO EXIST.** A fresh
+      spawn CONTENDS for the claim in the same write that records the pane handle, through the
+      same predicate the adoption compare-and-set uses — writing a claim without contending
+      let two gateways spawn `--resume` panes on one row and both serve. A pane cannot be
+      claimed before it exists, so the loser kills the child it just spawned and refuses the
+      turn retryably (`repl_unreconciled`, no credential cooldown): killing costs one respawn,
+      leaving it alive costs a second owner. A claim stamped with this process's own pid never
+      blocks it, or a replacement spawn would refuse itself on the strength of a claim its
+      dead child left.
+      A child's exit releases the handle and the claim together; a child's exit
       releases the handle and the claim together; a replacement spawn inherits neither.
       While only the adoption path claimed, a spawner served a pane it had not claimed — an
       adopter starting alongside it read an unclaimed row and attached a second wrapper, and
@@ -285,8 +303,11 @@ it must not swallow.
       (`ownPane`, `disownPane`, `handOverPane`, `refreshPaneClaim`); a row that is owned but
       unclaimed cannot be produced by any other module, and that is enforced rather than
       documented.
-      *Verified by* `__tests__/pane-handle-persistence.test.ts` (an actively-served fresh
-      spawn refusing an overlapping adopter, with one wrapper attached and the pane left
+      *Verified by* `__tests__/pane-handle-persistence.test.ts` (a fresh spawn LOSING the
+      contest for a row another gateway owns — its child ended, its refusal carrying the code,
+      the winner's row untouched — with a replacement spawn NOT refused by its own
+      predecessor's claim beside it; an actively-served fresh spawn refusing an overlapping
+      adopter, with one wrapper attached and the pane left
       running; a replacement spawn clearing ownership its predecessor left behind, asserted
       field-for-field; and an ordinary spawn claiming, serving and giving both back on exit)
       and `__tests__/pane-ownership-is-one-fact.test.ts` (no module outside the funnel writes

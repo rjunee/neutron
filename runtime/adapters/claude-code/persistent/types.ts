@@ -533,6 +533,21 @@ export interface PersistentReplSubstrateOptions {
    *  true (consumes `captureSession`'s result). Tests inject `() => true`;
    *  production uses `makeJsonlExistsProbe(projectsDir)`. */
   jsonlExistsProbe?: (sessionId: string, cwd: string) => boolean
+  /**
+   * #539 r45 — WHICH GATEWAY this substrate's spawns claim their panes as, and how to ask
+   * whether another claimant's process is still there. Default `process.pid` and the real
+   * `kill(pid, 0)` probe.
+   *
+   * Injectable for one reason, stated so it is not mistaken for configuration: the claim
+   * predicate deliberately does not let a gateway be blocked by its OWN process's earlier
+   * claim — a replacement spawn must not refuse itself on the strength of a claim its dead
+   * child left behind — and two "gateways" in one test process share a pid, which would make
+   * every contest the suite constructs vacuous. A case that models two gateways has to model
+   * two pids; the alternative is a fixture that passes because the environment makes its
+   * premise untrue.
+   */
+  claimantPid?: number
+  claimantLiveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
   /** Path to the model-update watchdog's persisted state JSON (the legacy harness port row
    *  #16). When set, the 6h model-version probe + idle-gated graceful upgrade run
    *  for this instance. Defaults to `<dir(replRegistryPath)>/.model-update-state.json`.
