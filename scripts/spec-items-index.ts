@@ -227,7 +227,13 @@ export function escapeCell(s: string): string {
 /** Pure: the same items always render the same bytes. That is what makes the test a
  *  drift check rather than a re-implementation of the renderer. */
 export function renderIndex(items: SpecItem[]): string {
-  const cutover = items.filter((i) => i.cutover)
+  // OPEN cutover items only. `cutover` records that an item GATES the cutover; it stays
+  // true after the work lands, because it is provenance rather than state. The blocker
+  // LIST is a different question — what is still in the way — and filtering on the flag
+  // alone answered the first question while the heading asked the second. Invisible until
+  // the first item was ever both `done` and `cutover`, which is exactly when it mattered:
+  // the index went on naming two finished items as things the cutover is gated on.
+  const cutover = items.filter((i) => i.cutover && i.status === 'open')
   const needsSpec = items.filter((i) => i.needs_spec)
   const out: string[] = []
   out.push('<!-- GENERATED FILE — do not edit by hand.')
