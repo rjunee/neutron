@@ -4,7 +4,8 @@
  * REAL state, not `toHaveBeenCalled` mocks: a recording fake PtyChild captures
  * every raw PTY `write()`, and each session's post-compact size is measured off a
  * REAL JSONL fixture on disk at `sessionJsonlPath(sessionId, cwd, tmpProjectsDir)`.
- * Every case asserts the literal `'/clear\r'` write landed (or did NOT) and the
+ * Every case asserts the literal `'/clear'` write AND its `enter` submit landed
+ * (or did NOT) and the
  * honest per-scope report reason.
  *
  * Fake pool entries (direct `pool.set`) rather than a spawned substrate, so the
@@ -31,10 +32,11 @@ import { join } from 'node:path'
 
 import { pool } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
-import { createPooledContextResetSweep, resetPooledSessionContext } from '../context-reset.ts'
+import { createPooledContextResetSweep, resetPooledSessionContext, actuateSessionContextReset } from '../context-reset.ts'
 import { sessionJsonlPath } from '../session-size-watchdog.ts'
-import { SESSION_KEY_SEP } from '../signatures.ts'
+import { CONTEXT_RESET_COMMAND, SESSION_KEY_SEP } from '../signatures.ts'
 import type { PtyChild } from '../pty-host.ts'
+import type { Key } from '../keystrokes.ts'
 
 const CWD = '/tmp/neutron-sweep-agent'
 const INSTANCE = 'cc-agent-acme'
@@ -67,6 +69,12 @@ function makeFakeSession(opts: {
   turnsServed: number
   exited?: boolean
   onClear?: () => void
+  /** Omit `submitLine` — a legal `PtyChild` (the method is optional) that can type
+   *  and can press keys, but cannot ACKNOWLEDGE either. `writeKey` is deliberately
+   *  still present: a regression that fell back to `write` + `writeKey` would look
+   *  like a working reset in this fake, so requiring the acknowledged seam is what
+   *  the refusal test actually pins. */
+  noSubmitLine?: boolean
 }): {
   session: ReplSession
   writes: string[]
@@ -81,9 +89,29 @@ function makeFakeSession(opts: {
     write(data: string | Uint8Array): void {
       const s = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
       writes.push(s)
-      if (s === '/clear\r') opts.onClear?.()
     },
-    resize(): void {},
+    // § herdr step 2b — the SUBMIT is a separate key. `pane.send_text` never
+    // submits, so a `/clear` text write on its own is a command typed at the prompt
+    // and never sent; the clear only HAPPENS on the following `enter`. Recorded as
+    // `KEY:<name>` in the same stream so ordering stays assertable, and `onClear`
+    // fires on the submit rather than on the text — otherwise a regression that
+    // dropped the `enter` would still look like a successful reset here.
+    writeKey(key: Key): void {
+      writes.push(`KEY:${key}`)
+      if (key === 'enter' && writes.at(-2) === CONTEXT_RESET_COMMAND) opts.onClear?.()
+    },
+    // The ACKNOWLEDGED submit, which is the only seam the actuation is allowed to
+    // use: it records the same text-then-`enter` pair (so ordering assertions are
+    // unchanged) but its promise is what "the reset happened" now rests on.
+    ...(opts.noSubmitLine === true
+      ? {}
+      : {
+          async submitLine(command: string): Promise<void> {
+            writes.push(command)
+            writes.push('KEY:enter')
+            if (command === CONTEXT_RESET_COMMAND) opts.onClear?.()
+          },
+        }),
     kill(): void {
       exited = true
     },
@@ -135,7 +163,16 @@ function writeJsonlWithMarker(sessionId: string, preBytes: number, tailBytes: nu
   writeFileSync(p, `${pre}\n${markerLine}${tail}`)
 }
 
-const CLEARS = (writes: string[]): number => writes.filter((w) => w === '/clear\r').length
+/** COMPLETED clears: a `/clear` text write immediately followed by an `enter` key.
+ *  Both halves required — counting the text alone would count a clear that was
+ *  typed and never submitted. */
+const CLEARS = (writes: string[]): number => {
+  let n = 0
+  for (let i = 0; i < writes.length - 1; i++) {
+    if (writes[i] === CONTEXT_RESET_COMMAND && writes[i + 1] === 'KEY:enter') n += 1
+  }
+  return n
+}
 const THRESHOLD = 1000
 const SWEEP_ARGS = { threshold_bytes: THRESHOLD, idle_quiet_ms: 0, idle_max_ms: 50 } as const
 
@@ -403,5 +440,46 @@ describe('createPooledContextResetSweep — Layer B periodic sweep', () => {
     expect(CLEARS(s.writes)).toBe(0)
     expect(r.reset).toEqual([])
     expect(r.skipped).toEqual([{ project_scope: 'proj-A', reason: 'no_transcript' }])
+  })
+})
+
+describe('a reset that cannot submit reports FAILED, never a hollow reset', () => {
+  it('a child with no submitLine yields {status:"failed"}, not {status:"reset"}', async () => {
+    // THE DEFECT. `writeKey` is OPTIONAL on `PtyChild`, and the actuation used
+    // `session.child.writeKey?.('enter')`. For a child that implements `write` but
+    // not `writeKey` that typed `/clear` at the prompt, skipped Enter, and returned
+    // `{status:'reset'}` — on a backend whose documented behaviour is that
+    // `send_text` never submits, a reset that did not happen, reported as one.
+    const { session, writes } = makeFakeSession({
+      sessionId: 'no-writekey',
+      project: 'proj-A',
+      turnsServed: 1,
+      noSubmitLine: true,
+    })
+    const out = await actuateSessionContextReset(session, {
+      acquire_wait_ms: 50,
+      idle_quiet_ms: 0,
+      idle_max_ms: 10,
+    })
+    expect(out.status).toBe('failed')
+    if (out.status === 'failed') expect(out.detail ?? '').toContain('submitLine')
+    // And it refused rather than half-actuating: nothing was typed at the prompt.
+    expect(writes).toEqual([])
+  })
+
+  it('CONTROL — the same session WITH submitLine resets and submits', async () => {
+    // Without this, "failed" could be coming from anything about the harness.
+    const { session, writes } = makeFakeSession({
+      sessionId: 'with-writekey',
+      project: 'proj-A',
+      turnsServed: 1,
+    })
+    const out = await actuateSessionContextReset(session, {
+      acquire_wait_ms: 50,
+      idle_quiet_ms: 0,
+      idle_max_ms: 10,
+    })
+    expect(out.status).toBe('reset')
+    expect(writes).toEqual([CONTEXT_RESET_COMMAND, 'KEY:enter'])
   })
 })

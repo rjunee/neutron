@@ -42,9 +42,12 @@
  *     the warn band, critical once on entering the critical band; the latch
  *     clears when the size drops back. Never time-dedupe (the stale-banner
  *     hourly-re-fire bug — cross-cutting invariant §1).
- *   • Compact action = `writeKey('escape')` THEN `child.write('/compact\r')`,
- *     fire-once per affordance press (the debounce/lock is stamped BEFORE the
- *     writes so a transport failure can't double-actuate — invariant §4).
+ *   • Compact action = `writeKey('escape')`, then `write('/compact')`, then
+ *     `writeKey('enter')` — fire-once per affordance press (the debounce/lock is
+ *     stamped BEFORE the writes so a transport failure can't double-actuate —
+ *     invariant §4). THE `enter` IS A SEPARATE KEY, not a `\r` in the text:
+ *     herdr's `pane.send_text` does not submit (measured), so a trailing `\r`
+ *     would type `/compact` and leave it sitting at the prompt.
  *   • JSONL / disk is the source of truth (invariant §5).
  *
  * Pure + DI-driven so the measurement, the tiered latch, and the compact
@@ -57,6 +60,11 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { dashifyCwd } from './session-validation.ts'
 import type { Key } from './keystrokes.ts'
+
+/** The TUI slash command that compacts the conversation transcript in place.
+ *  Carries NO trailing `\r`: herdr's `pane.send_text` does not submit (measured),
+ *  so the submit is a separate `writeKey('enter')` at the call site. */
+export const COMPACT_COMMAND = '/compact'
 
 /** Post-compact size at/above which we WARN (5 MB). */
 export const SIZE_WARN_BYTES = 5 * 1024 * 1024
@@ -220,9 +228,13 @@ export interface SessionSizeWatchdogDeps {
    * human affordance is not. */
   isIdle?: () => boolean
   /** Send one structured key to the PTY child (the `escape` of the Compact
-   *  action). Production: `(k) => child.writeKey?.(k) ?? child.write(encodeKey(k))`. */
+   *  action). Production: `(k) => sendKey(child, k)` (`spawn.ts`), which uses the
+   *  child's structured-key seam and falls back to raw key BYTES only for a child
+   *  that has none. That fallback cannot silently skip: for `'enter'` the bytes are
+   *  `\r`, which the herdr backend's `write()` refuses outright. Loud, not absent. */
   writeKey: (key: Key) => void
-  /** Raw write to the PTY child (the `/compact\r` of the Compact action). */
+  /** Raw text write to the child (the `/compact` of the Compact action). Does NOT
+   *  submit — the caller follows it with `writeKey('enter')`. */
   write: (data: string) => void
   /** Cadence in ms. Default {@link DEFAULT_SIZE_CHECK_INTERVAL_MS} (5 min). */
   intervalMs?: number
@@ -247,8 +259,8 @@ export interface SessionSizeWatchdog {
   /** Stop the cadence tick. Idempotent. */
   stop(): void
   /**
-   * Actuate the Compact affordance: `writeKey('escape')` THEN `write('/compact\r')`,
-   * fire-once. Sets the mid-compact LOCK (stamped BEFORE the writes — invariant
+   * Actuate the Compact affordance: `writeKey('escape')`, `write('/compact')`,
+   * `writeKey('enter')` — fire-once. Sets the mid-compact LOCK (stamped BEFORE the writes — invariant
    * §4) so the tick skips alerting until the new summary marker lands and the
    * post-compact size drops below the warn band. Returns true iff it fired
    * (false if a compaction is already mid-flight or within the debounce floor).
@@ -324,7 +336,12 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
     compactStartedAt = t
     lastCompactAt = t
     deps.writeKey('escape')
-    deps.write('/compact\r')
+    // TEXT, THEN AN `enter` KEY. `pane.send_text` never submits, so the old
+    // `write('/compact\r')` would have typed the command and left it unsubmitted
+    // with no error anywhere. Both writes sit AFTER the lock stamp above, so a
+    // failure of either cannot re-actuate.
+    deps.write(COMPACT_COMMAND)
+    deps.writeKey('enter')
     return true
   }
 

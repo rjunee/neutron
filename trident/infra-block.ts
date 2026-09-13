@@ -31,7 +31,13 @@
  * caller keeps its existing behaviour byte-for-byte. Mislabelling a genuine rejection as
  * infrastructure is the strictly worse error, so the ambiguous cases fall that way.
  *
- * THE ONE DERIVER. `trident/delivery.ts` (the chat result) and — next task —
+ * THE ONE DERIVER, AND SINCE #520 IT DERIVES TWO FACTS OVER ONE GATE. `deriveInfraBlock`
+ * answers "was the machine broken, or was the code rejected"; `deriveTerminalCause`
+ * answers "which of the known terminal exits was this". They share
+ * `harvestedTerminalResult` precisely so the staleness rule below cannot be widened for
+ * one question and not the other.
+ *
+ * `trident/delivery.ts` (the chat result) and — next task —
  * `trident/run-progress.ts` (the board payload) BOTH read the distinction through this
  * function. Neither re-implements the gate: two copies would drift, and the two surfaces
  * would then disagree about whether the machine or the code was broken.
@@ -39,6 +45,7 @@
 
 import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
+import type { TerminalCause } from './terminal-cause.ts'
 
 /** A terminal run that was blocked by INFRASTRUCTURE before any reviewer judged the code. */
 export interface InfraBlock {
@@ -59,13 +66,63 @@ export interface InfraBlock {
 export function deriveInfraBlock(
   run: Pick<TridentRun, 'phase' | 'harvested_at' | 'inner_result'>,
 ): InfraBlock | null {
+  const result = harvestedTerminalResult(run)
+  if (result === null || result.block_kind !== 'infra-only') return null
+  return { cause: result.terminal_cause }
+}
+
+/**
+ * THE HARVESTED TERMINAL RESULT, OR NOTHING — conditions 1 and 2 of the gate described
+ * at the top of this module, in ONE place, so the two questions this module answers about
+ * a run row are asked over exactly the same evidence.
+ *
+ * ONE COPY, AND THAT IS THE WHOLE POINT OF EXTRACTING IT. Two copies of a staleness gate
+ * is two chances to widen one of them, and the one that stayed narrow would then be the
+ * only thing standing between a stale `inner_result` and a sentence about an ending that
+ * is not this run's. This is not hypothetical: the first cut of #520 left
+ * `deriveInfraBlock`'s copy in place beside the call, so the module had exactly the two
+ * gates its own docblock said it did not have.
+ *
+ * Not exported: the gate is only meaningful together with the question it guards, and a
+ * caller holding the raw result would be one refactor away from asking it about an
+ * unharvested row.
+ */
+function harvestedTerminalResult(
+  run: Pick<TridentRun, 'phase' | 'harvested_at' | 'inner_result'>,
+): ReturnType<typeof parseInnerResult> {
   if (run.phase !== 'failed') return null
   // `harvested_at !== null`, spelled fail-closed: an absent field on a partial row must
   // read as "not harvested", never slip through as "not null".
   if (typeof run.harvested_at !== 'number') return null
-  const result = parseInnerResult(run.inner_result)
-  if (result === null || result.block_kind !== 'infra-only') return null
-  return { cause: result.terminal_cause }
+  return parseInnerResult(run.inner_result)
+}
+
+/**
+ * WHY THE INNER LOOP STOPPED, off the row (#520) — or `null` when this run cannot say.
+ *
+ * THE SECOND STRUCTURAL FACT THIS MODULE DERIVES, and the sibling of
+ * {@link deriveInfraBlock}: same gate, same fail-closed reading, different question.
+ * That one asks "was the machine broken or was the code rejected", which only the
+ * `'infra-only'` kind answers; this one asks "which of the known exits was this", which
+ * every terminal path now answers — including the review-verdict exits that emitted
+ * nothing at all before this card, and which therefore reached the owner as one
+ * undifferentiated sentence.
+ *
+ * `null` COVERS THREE DIFFERENT SILENCES AND BUYS THE SAME THING FOR ALL OF THEM: the
+ * run is not terminally failed, its result was never harvested (so a stale
+ * `inner_result` from an earlier iteration must not be read as this ending — see the
+ * gate's own note), or the result carried no recognisable kind. In every case the caller
+ * keeps the behaviour it had before this field existed, byte for byte.
+ *
+ * `'unknown'` IS NOT ONE OF THOSE SILENCES. It is the workflow asserting that it looked
+ * at its own exit conditions and could not name one, and it is returned as itself so a
+ * caller can tell "I was told nothing" from "I was told that nothing could be told".
+ * Both end in saying less; only one of them is a measurement.
+ */
+export function deriveTerminalCause(
+  run: Pick<TridentRun, 'phase' | 'harvested_at' | 'inner_result'>,
+): TerminalCause | null {
+  return harvestedTerminalResult(run)?.terminal_cause_kind ?? null
 }
 
 /**

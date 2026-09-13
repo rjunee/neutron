@@ -27,9 +27,17 @@
  *      window, so it classifies as a RETRYABLE turn_timeout, never auth_invalid.
  *
  * Drives the REAL persistent-REPL substrate with a fake `claude`+dev-channel host:
- * the inject feeds the REAL observed auth-failure line into the substrate's `onData`
- * scan seam (so the output-scan signature fires + stamps the session), then either
- * hangs (case 1) or posts a normal `/reply` completion (case 2).
+ * the inject feeds the REAL observed auth-failure line into the substrate's
+ * `onScreen` scan seam (so the output-scan signature fires + stamps the session),
+ * then either hangs (case 1) or posts a normal `/reply` completion (case 2).
+ *
+ * § herdr step 2b — THE FAKES EMIT SCREENS, NOT CHUNKS. `onScreen` delivers the
+ * pane's whole rendered screen and the ring REPLACES rather than appends, so each
+ * fake keeps an accumulating `screen` string and emits all of it. That is what a
+ * real scrolling pane looks like, and it is what keeps these scenarios meaning
+ * what they meant: case 5 in particular REQUIRES turn 1's banner to still be on
+ * screen during turn 2, which is precisely how it proves that per-turn scoping
+ * (now a baseline-screen diff — see `pty-ring.ts`) excludes it.
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
@@ -54,7 +62,7 @@ const REAL_401_LINE = '  ⎿  Please run /login · API Error: 401 OAuth access t
 
 /**
  * A fake `claude`+dev-channel host. On the `/message` inject it feeds the auth-
- * failure line into the substrate's `onData` scan seam (so the output-scan signature
+ * failure line into the substrate's `onScreen` scan seam (so the output-scan signature
  * fires + stamps the session). When `reply` is true it then posts a NORMAL `/reply`
  * completion (the healthy turn that merely echoed a credential string); when false it
  * STAYS SILENT (the observed headless "printed the error then hung" shape).
@@ -62,7 +70,7 @@ const REAL_401_LINE = '  ⎿  Please run /login · API Error: 401 OAuth access t
 function makeAuthLineHost(reply: boolean): { host: PtyHost; spawnCount: () => number } {
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
+    async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
       spawns += 1
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
@@ -73,6 +81,13 @@ function makeAuthLineHost(reply: boolean): { host: PtyHost; spawnCount: () => nu
       const exited = new Promise<number | null>((res) => {
         exitResolve = res
       })
+      // The pane's rendered screen, accumulated as the child prints. Emitted whole
+      // on every change, the way a real herdr pane reads.
+      let screen = ''
+      const print = (text: string): void => {
+        screen += text
+        opts.onScreen?.(screen)
+      }
       const post = (path: string, body: unknown): Promise<unknown> =>
         fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST',
@@ -87,9 +102,9 @@ function makeAuthLineHost(reply: boolean): { host: PtyHost; spawnCount: () => nu
           if (url.pathname === '/health') return Response.json({ ok: true })
           if (req.method === 'POST' && url.pathname === '/message') {
             const body = (await req.json()) as { text: string; turn_id?: string }
-            // Feed the auth-failure banner into the PTY scan seam (stamps the
-            // session's auth-invalid signal via the output scanner).
-            opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+            // Print the auth-failure banner onto the pane (stamps the session's
+            // auth-invalid signal via the output scanner).
+            print(REAL_401_LINE)
             if (reply) {
               // HEALTHY: the turn kept going and actually replied — echo the
               // injected turn_id so the substrate's correlation accepts it.
@@ -139,7 +154,7 @@ function makeAuthLineHost(reply: boolean): { host: PtyHost; spawnCount: () => nu
 function makeStreamingAfterAuthHost(): { host: PtyHost } {
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
+    async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
       spawns += 1
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
@@ -151,6 +166,11 @@ function makeStreamingAfterAuthHost(): { host: PtyHost } {
       const exited = new Promise<number | null>((res) => {
         exitResolve = res
       })
+      let screen = ''
+      const print = (text: string): void => {
+        screen += text
+        opts.onScreen?.(screen)
+      }
       const post = (path: string, body: unknown): Promise<unknown> =>
         fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST',
@@ -167,12 +187,16 @@ function makeStreamingAfterAuthHost(): { host: PtyHost } {
             // The credential banner prints first (stamps the auth signal), then the
             // child keeps emitting benign spinner-ish noise — a live-but-livelocked
             // turn that never settles and never goes silent.
-            opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+            print(REAL_401_LINE)
             let n = 0
             streamTimer = setInterval(() => {
               if (hasExited) return
               n += 1
-              opts.onData?.(new TextEncoder().encode(`· still working ${n}\n`))
+              // A DISTINCT line each tick, so the screen genuinely CHANGES and
+              // `lastDataAt` advances — a repeated identical screen would look
+              // like silence to the idle gate, which is the whole point of the
+              // livelock shape this host models.
+              print(`· still working ${n}\n`)
             }, 40)
             return Response.json({ status: 'delivered' })
           }
@@ -216,7 +240,7 @@ function makeWarmTwoTurnAuthHost(): { host: PtyHost; spawnCount: () => number } 
   let spawns = 0
   let turns = 0
   const host: PtyHost = {
-    spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
+    async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
       spawns += 1
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
@@ -227,6 +251,11 @@ function makeWarmTwoTurnAuthHost(): { host: PtyHost; spawnCount: () => number } 
       const exited = new Promise<number | null>((res) => {
         exitResolve = res
       })
+      let screen = ''
+      const print = (text: string): void => {
+        screen += text
+        opts.onScreen?.(screen)
+      }
       const post = (path: string, body: unknown): Promise<unknown> =>
         fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST',
@@ -242,11 +271,17 @@ function makeWarmTwoTurnAuthHost(): { host: PtyHost; spawnCount: () => number } 
           if (req.method === 'POST' && url.pathname === '/message') {
             const body = (await req.json()) as { text: string; turn_id?: string }
             turns += 1
-            // Both turns print the banner (the prior one still lingers in the ring
-            // → `present` never falls between turns → the latch stays set without the
-            // per-turn reset). The `/reply` text is posted over the sink, NOT the
-            // PTY, so it never pushes the banner out of the detector window.
-            opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+            // Both turns print the banner (the prior one is still ON SCREEN → `present`
+            // never falls between turns → the latch stays set without the per-turn
+            // reset). The `/reply` text is posted over the sink, NOT the pane, so it
+            // never pushes the banner out of the detector window.
+            //
+            // Turn 2's screen therefore carries TWO copies of the banner while turn 2's
+            // mark baseline carries one, so the per-turn window contains exactly one
+            // NEW copy. That is the multiset difference in `PtyRing.textSince` doing its
+            // job: a SET difference would suppress the second copy and this turn would
+            // wrongly classify as a generic timeout.
+            print(REAL_401_LINE)
             if (turns === 1) {
               // Turn 1 completes healthily — the warm session is NOT poisoned.
               void post('/reply', { session_id: sid, text: 'first answer', turn_id: body.turn_id })
@@ -296,7 +331,7 @@ function makeStaleBannerThenUnrelatedFreezeHost(): { host: PtyHost; spawnCount: 
   let spawns = 0
   let turns = 0
   const host: PtyHost = {
-    spawn(argv: string[], opts: PtySpawnOpts): PtyChild {
+    async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
       spawns += 1
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
@@ -307,6 +342,11 @@ function makeStaleBannerThenUnrelatedFreezeHost(): { host: PtyHost; spawnCount: 
       const exited = new Promise<number | null>((res) => {
         exitResolve = res
       })
+      let screen = ''
+      const print = (text: string): void => {
+        screen += text
+        opts.onScreen?.(screen)
+      }
       const post = (path: string, body: unknown): Promise<unknown> =>
         fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST',
@@ -326,13 +366,16 @@ function makeStaleBannerThenUnrelatedFreezeHost(): { host: PtyHost; spawnCount: 
               // Turn 1: the credential banner prints, THEN a healthy reply — the
               // transient/recovered 401. The reply is posted over the sink (not the
               // PTY), so the banner stays in the ring for turn 2's window.
-              opts.onData?.(new TextEncoder().encode(REAL_401_LINE))
+              print(REAL_401_LINE)
               void post('/reply', { session_id: sid, text: 'first answer', turn_id: body.turn_id })
             } else {
               // Turn 2: only benign, non-credential output (the stale turn-1 banner is
               // still one line up in the bottom-N window), then STAY SILENT — an
               // unrelated freeze. NO new 401 is printed this turn.
-              opts.onData?.(new TextEncoder().encode('⏺ thinking about your question…\n'))
+              // The turn-1 banner is STILL ON SCREEN above this line, and turn 2's
+              // mark baseline captured it — so the per-turn window holds only this
+              // benign line. That is what makes the verdict a retryable timeout.
+              print('⏺ thinking about your question…\n')
             }
             return Response.json({ status: 'delivered' })
           }

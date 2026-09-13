@@ -58,7 +58,7 @@ function mockFetch(body: string): typeof fetch {
  *  /message back as the given canned reply. */
 function makeReplyHost(reply: string): PtyHost {
   return {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string

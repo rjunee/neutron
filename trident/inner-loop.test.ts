@@ -185,6 +185,10 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       // workflow's own gate refuses.
       escalation: null,
       terminal_cause: null,
+      // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
+      // a reader must be able to tell "nobody told me" from "I was told it could not be
+      // established", which is what `'unknown'` asserts.
+      terminal_cause_kind: null,
       findings_present: false,
       // The findings ARRAY now travels beside the boolean. `findings_present` answers
       // "did a reviewer speak"; `findings` answers "what did they say", which is what
@@ -390,6 +394,10 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       // workflow's own gate refuses.
       escalation: null,
       terminal_cause: null,
+      // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
+      // a reader must be able to tell "nobody told me" from "I was told it could not be
+      // established", which is what `'unknown'` asserts.
+      terminal_cause_kind: null,
       findings_present: false,
       // The findings ARRAY now travels beside the boolean. `findings_present` answers
       // "did a reviewer speak"; `findings` answers "what did they say", which is what

@@ -36,6 +36,7 @@ import {
 } from '../gateway-shutdown-kill.ts'
 import { detectReplWedged } from '../dead-repl-detector.ts'
 import { probeLauncherGenerationAlive } from '../supervision.ts'
+import { withCapturedStderr, withCapturedStderrSync } from './capture-stderr.ts'
 
 /**
  * A REAL process behind the pid, because the record is only as good as what a later reader
@@ -74,34 +75,31 @@ const instantWait: WaitFactory = () => ({
   cancel: () => {},
 })
 
-/** Synchronous sibling of `captureStderr`, for pure functions. */
+/**
+ * Both DELEGATE to the one sanctioned assignment site (`capture-stderr.ts`).
+ *
+ * They arrived on this branch from #642 as hand-rolled copies and restored
+ * `original.bind(process.stderr)` — a DIFFERENT function object from the one they
+ * replaced, so nested or repeated captures stack binds and the process never returns to
+ * where it started. Five other suites had the identical bug; the guard in
+ * `tests/integration/pty-e2e-registered.test.ts` is what caught these two, on a file
+ * neither branch's author had reason to re-read.
+ */
 function captureStderrSync<T>(fn: () => T): { result: T; lines: string[] } {
-  const lines: string[] = []
-  const original = process.stderr.write.bind(process.stderr)
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
-    return true
-  }) as typeof process.stderr.write
-  try {
-    return { result: fn(), lines }
-  } finally {
-    process.stderr.write = original
-  }
+  let result!: T
+  const lines = withCapturedStderrSync(() => {
+    result = fn()
+  })
+  return { result, lines }
 }
 
 /** Capture `[repl] …` stderr for the duration of `fn`. */
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
-  const lines: string[] = []
-  const original = process.stderr.write.bind(process.stderr)
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
-    return true
-  }) as typeof process.stderr.write
-  try {
-    return { result: await fn(), lines }
-  } finally {
-    process.stderr.write = original
-  }
+  let result!: T
+  const lines = await withCapturedStderr(async () => {
+    result = await fn()
+  })
+  return { result, lines }
 }
 import {
   confirmShutdownExits,

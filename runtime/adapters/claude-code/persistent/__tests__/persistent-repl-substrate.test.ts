@@ -50,7 +50,7 @@ type Responder = (history: string[], incoming: string) => string
 function makeFakeReplHost(responder: Responder): { host: PtyHost; spawnCount: () => number } {
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 100000 + spawns
       const sid = extractSessionId(argv)
@@ -163,7 +163,7 @@ describe('PersistentReplSubstrate — conformance', () => {
     const wire: Array<{ text: string; additional?: boolean }> = []
     let replyFirst: (() => void) | undefined
     const host: PtyHost = {
-      spawn(argv): PtyChild {
+      async spawn(argv): Promise<PtyChild> {
         const sid = extractSessionId(argv)
         const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${sinkPort}${path}`, {
@@ -321,7 +321,7 @@ describe('PersistentReplSubstrate — failure + status', () => {
     // EMITTED event must carry retryable:false — a DIRECT consumer (not just the
     // gateway composer, which rewrites it) reads the correct recovery hint.
     const noChannelHost: PtyHost = {
-      spawn() {
+      async spawn(): Promise<PtyChild> {
         let hasExited = false
         let exitResolve: (c: number | null) => void = () => {}
         const exited = new Promise<number | null>((r) => {
@@ -361,7 +361,7 @@ describe('PersistentReplSubstrate — failure + status', () => {
     // classifies it `binary_not_found` (FATAL) and must emit retryable:false so a
     // missing `claude` never launders into a retry loop / 429 cooldown.
     const enoentHost: PtyHost = {
-      spawn() {
+      async spawn(): Promise<PtyChild> {
         throw new Error('spawn claude ENOENT')
       },
     }
@@ -385,7 +385,7 @@ describe('PersistentReplSubstrate — failure + status', () => {
     // Override the fake so it does NOT reply: use a responder whose post is
     // suppressed by intercepting — simplest: a host that never POSTs /reply.
     const silentHost: PtyHost = {
-      spawn(argv) {
+      async spawn(argv): Promise<PtyChild> {
         // Reuse makeFakeReplHost's machinery but swallow replies: we emulate by
         // delegating to a responder that the server ignores. Instead, just
         // build a minimal silent dev-channel inline.
@@ -461,7 +461,7 @@ describe('PersistentReplSubstrate — per-turn timeout override (AgentSpec.turn_
     // ~120ms, proving the per-spec value (not the construction default) drives
     // the timer. Without the override the drain would hang for 60s.
     const silentHost: PtyHost = {
-      spawn(argv) {
+      async spawn(argv): Promise<PtyChild> {
         const sid = extractSessionId(argv)
         const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
@@ -549,7 +549,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
       }).catch(() => undefined)
 
     const host: PtyHost = {
-      spawn(argv) {
+      async spawn(argv): Promise<PtyChild> {
         sid = extractSessionId(argv)
         const info = bakedChildSinkInfo(argv)
         sinkPort = info.port
@@ -640,7 +640,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
       }).catch(() => undefined)
 
     const host: PtyHost = {
-      spawn(argv) {
+      async spawn(argv): Promise<PtyChild> {
         sid = extractSessionId(argv)
         const info = bakedChildSinkInfo(argv)
         sinkPort = info.port
@@ -718,7 +718,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
  *  so the turn stays in flight long enough to observe liveness keepalives. */
 function makeDelayedReplyReplHost(replyDelayMs: number): PtyHost {
   return {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const sid = extractSessionId(argv)
       const pid = 700000 + Math.floor(performance.now())
       const { port: sinkPort, token } = bakedChildSinkInfo(argv)
@@ -802,7 +802,7 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
     let captured: Record<string, string | undefined> | undefined
     let spawns = 0
     const host: PtyHost = {
-      spawn(argv: string[], opts): PtyChild {
+      async spawn(argv: string[], opts): Promise<PtyChild> {
         captured = opts.env
         spawns += 1
         const pid = 200000 + spawns
@@ -899,15 +899,22 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
 // as it needs and only a GENUINELY frozen turn (no PTY output) is abandoned.
 describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout', () => {
   /**
-   * A host that never replies to `/message`, but lets the test drive PTY output
-   * through the captured `onData` (simulating the `claude` child rendering). The
+   * A host that never replies to `/message`, but lets the test drive pane output
+   * through the captured `onScreen` (simulating the `claude` child rendering). The
    * host exposes `emit()` so a test can keep the turn "active" past the idle window.
+   *
+   * § herdr step 2b — `emit()` renders a DISTINCT screen each time. `onScreen`
+   * delivers a whole rendered screen, and the real host fires it only when the
+   * screen CHANGES (an unchanged screen is indistinguishable from silence, which
+   * is what lets the idle gate resolve at all). A fake that re-emitted a constant
+   * screen would be modelling something the substrate will never see.
    */
   function makeControllablePtyHost(): { host: PtyHost; emit: () => void } {
-    let onData: ((chunk: Uint8Array) => void) | undefined
+    let onScreen: ((screen: string) => void) | undefined
+    let ticks = 0
     const host: PtyHost = {
-      spawn(argv, opts) {
-        onData = opts.onData
+      async spawn(argv, opts): Promise<PtyChild> {
+        onScreen = opts.onScreen
         const sid = extractSessionId(argv)
         const { port: sinkPort, token } = bakedChildSinkInfo(argv)
         let hasExited = false
@@ -956,7 +963,13 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
         }
       },
     }
-    return { host, emit: () => onData?.(new TextEncoder().encode('.')) }
+    return {
+      host,
+      emit: () => {
+        ticks += 1
+        onScreen?.(`working ${ticks}`)
+      },
+    }
   }
 
   it('keeps an ACTIVE turn alive past the inactivity window (PTY activity resets the deadline)', async () => {

@@ -117,6 +117,7 @@ import {
 import { escalationKindAgrees, escalationStopSentence } from './escalation-block.ts'
 import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { infraDeathSentence } from './infra-block.ts'
+import { terminalCauseReason } from './terminal-cause.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
@@ -2198,7 +2199,15 @@ export function innerTerminalFailureReason(
     | 'terminal_cause'
     | 'findings_present'
     | 'escalation'
-  >,
+  > &
+    // OPTIONAL IN THE SIGNATURE, REQUIRED ON THE TYPE (#520). `parseInnerResult` always
+    // produces `terminal_cause_kind`, so a real harvested result always carries it; the
+    // field is optional HERE because this function is also called with a hand-built
+    // result at a site that never ran an inner workflow (the resume bounded stop below),
+    // and because an absent kind must mean exactly what a `null` kind means — keep the
+    // generic sentence. Making it required would have forced every caller to assert
+    // something about an exit it did not observe.
+    Partial<Pick<InnerResult, 'terminal_cause_kind'>>,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
   // copy, which a crash can leave behind at its launch value.
@@ -2300,6 +2309,28 @@ export function innerTerminalFailureReason(
   // keeps precedence, so every sentence main already says specifically stays byte-identical.
   if (isInfraDeath(result)) {
     return infraDeathSentence(reported, ceiling)
+  }
+  // 2026-09-12 (#520) — AND NOW THE REVIEW-VERDICT EXITS SPEAK TOO. Everything above
+  // this line is untouched and still wins, because each of those branches is already
+  // holding a MEASURED sentence and a second owner for one fact is how reasons drift.
+  // What lands here is what the R1/R2 notes above describe: the exits that emitted
+  // nothing, so the catch-all below spoke for all of them at once — a fix round whose
+  // work never landed, a fix round that left no diff, a panel that ran and raised
+  // nothing actionable, and a genuine round-budget exhaustion, ALL delivered as "ended
+  // at round N of M … without Argus APPROVE".
+  //
+  // THIS IS NOT THE INFERENCE R1 AND R2 KILLED, AND THE DIFFERENCE IS WHERE THE FACT
+  // COMES FROM. Those two tried to deduce a cause HERE, from `(round, checkpoint)` —
+  // values that are equally consistent with four different endings. This reads a kind
+  // the workflow MEASURED at its own exit, off the guard variables the loop exited on
+  // (`reviewLoopTerminalCause`, inner-workflow.mjs). Nothing is deduced at this line;
+  // `terminalCauseReason` is a total function over a closed vocabulary and returns
+  // `null` — the generic sentence, unchanged — for every member that licenses no
+  // specific claim, `'unknown'` first among them.
+  const kind = result.terminal_cause_kind ?? null
+  if (kind !== null) {
+    const measured = terminalCauseReason(kind, reported, ceiling)
+    if (measured !== null) return measured
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
@@ -4043,6 +4074,11 @@ export function buildTridentOrchestrator(
             // panel judged anything here, so there is no plan defect to report.
             escalation: null,
             terminal_cause: cause,
+            // THE ORCHESTRATOR'S OWN INSTANCE OF THE WORKFLOW'S RESUME STOP (#520) —
+            // same exit, same name. This site never fires the workflow, so the kind is
+            // authored here rather than harvested; it is the one place in this file
+            // entitled to author one, because it is the site that MADE the decision.
+            terminal_cause_kind: 'resume-head-unreadable',
             findings_present: false,
           }),
           false,

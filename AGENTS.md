@@ -51,8 +51,15 @@ redacted once it is mirrored. The gate also reserves three root paths as carve
 tripwires against a private sibling repository's root docs entering this tree:
 `STATUS.md`, `ISSUES.md`, `CLAUDE.md`.
 
-**No feature flags and no dual code paths.** A new path replaces the old one and
-the old one is deleted.
+**No feature flags and no dual code paths — unless a Decisions Log entry records a
+deliberate alternative.** A new path replaces the old one and the old one is
+deleted. The exception is narrow and has exactly one instance today: the REPL
+substrate (Decisions Log 2026-09-12), where herdr is the default container and the
+in-process PTY host is RETAINED as a selectable backend. The rule is scoped rather
+than dropped because a standing absolute the tree contradicts teaches the next
+reader to ignore it — and the exception costs something real: two supported
+backends means the shared interface must stay honest about both, which is a sweep,
+not a file.
 
 **Every change is a PR from a worktree**, never a direct push to `main`, and CI
 must be green before merge.

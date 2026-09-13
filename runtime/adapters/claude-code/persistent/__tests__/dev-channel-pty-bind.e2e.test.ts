@@ -1,7 +1,10 @@
 /**
  * dev-channel-pty-bind.e2e.test.ts — REAL-PTY end-to-end proof that the
  * dev-channel MCP binds and `reply()` round-trips when `claude` is spawned under
- * a real Bun PTY (`Bun.spawn({terminal})`), exactly as the substrate does.
+ * a real PTY, exactly as the substrate does — which since herdr step 2b means a
+ * real `herdr` PANE (`HerdrHost`, below), NOT the `Bun.spawn({terminal})` this
+ * originally used. The file name still says PTY because a herdr pane IS one; what
+ * changed is who allocates it.
  *
  * THIS IS THE REGRESSION GUARD for the 2026-06-26 P0: the prior post-spawn
  * assertion fast-failed every PTY spawn as `channel-wedged` by scanning the PTY
@@ -25,10 +28,21 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { buildReplArgv } from '../build-repl-argv.ts'
 import { buildSettings } from '../build-settings.ts'
-import { BunTerminalHost } from '../bun-terminal-host.ts'
+import {
+  registerPaneLeakGuard,
+  withLiveHerdrChild,
+  type LiveChildRef,
+} from './live-herdr-child.ts'
+import type { PtySpawnOpts } from '../pty-host.ts'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
+import { withCapturedStderr } from './capture-stderr.ts'
 
-const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
+// herdr is the REPL container now, so this needs a live herdr server as well as a
+// real `claude`. Both are opt-in facts about the machine, and neither is present
+// in CI — the test stays visible-but-skipped rather than silently passing.
+const OPT_IN =
+  process.env['NEUTRON_PTY_E2E'] === '1' &&
+  (process.env['HERDR_SOCKET_PATH'] ?? '') !== ''
 const CLAUDE_BIN =
   process.env['CLAUDE_BIN'] ??
   [join(process.env['HOME'] ?? '', '.local/bin/claude'), '/usr/local/bin/claude'].find((p) =>
@@ -42,6 +56,12 @@ const PROMPT_FILE = join(PERSIST, 'repl-agent-base.md')
 
 // bun's `describe.skipIf` keeps the test visible-but-skipped in CI.
 describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guard)', () => {
+  // THE MEASUREMENT, not the habit. Counts the live server's panes before and after and
+  // FAILS if this suite left one behind — which is what a `finally` full of good
+  // intentions cannot promise, and what four orphaned `claude` processes in the owner's
+  // workspace proved. Inside the opt-in describe, so it never runs without a server.
+  registerPaneLeakGuard('dev-channel-pty-bind.e2e')
+
   it('handshakes (/channel-bound) and round-trips a reply despite the benign TUI warning', async () => {
     const channelName = `neutron-${randomBytes(4).toString('hex')}`
     const sessionId = crypto.randomUUID()
@@ -108,54 +128,85 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       skipPermissions: true,
     })
 
-    const host = new BunTerminalHost()
-    const chunks: Buffer[] = []
+    // CAPTURE STDERR so the readiness handshake can be ASSERTED, not assumed. This is
+    // the only live boundary test that can prove the production wiring order is the one
+    // exercised here; the unit test proves the warning fires when the call is missing,
+    // and this proves the real caller is on the right side of it.
+    //
+    // THE SPAWN IS INSIDE THE CAPTURE'S SCOPE, and that is the whole point of using the
+    // helper. The hand-rolled version installed the override, then awaited
+    // `host.spawn`, then restored in a `finally` that began AFTER the spawn — so a
+    // protocol mismatch, an unreachable socket or a pane that never reports a pid left
+    // `process.stderr.write` monkey-patched for the rest of the process. The worst
+    // possible shape: the one test that can see a real server fails, and its failure
+    // silently degrades every test that runs after it.
     let dismissed = false
-    let child: ReturnType<BunTerminalHost['spawn']> | null = null
-    child = host.spawn(argv, {
-      cwd: cfgDir,
-      env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
-      cols: 120,
-      rows: 40,
-      onData: (b) => {
-        chunks.push(Buffer.from(b))
-        if (dismissed) return
-        // Dismiss the --dangerously-load-development-channels disclaimer the same
-        // way the substrate's output scanner does (normalize ANSI + whitespace).
-        const norm = Buffer.concat(chunks)
-          .toString('utf8')
-          // eslint-disable-next-line no-control-regex
-          .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
-          .replace(/\s+/g, '')
-        if (/forlocalchanneldevelopment|usingthisforlocaldevelopment/i.test(norm)) {
-          dismissed = true
-          setTimeout(() => child?.writeKey?.('enter'), 400)
-        }
-      },
-    })
-
+    // A HOLDER, not a `let`. The spawn happens inside the capture callback, and TS's
+    // control-flow analysis does not see an assignment made in a closure — a plain
+    // `let child: PtyChild | null = null` narrows to `never` by the `finally` that has
+    // to kill it. The object survives the analysis and the cleanup keeps its type.
+    const ref: LiveChildRef = {}
     try {
-      // Wait for the dev-channel to report its port (transport attached).
-      for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
-      expect(channelPort).toBeGreaterThan(0)
+      await withCapturedStderr(
+        async (hostErr) => {
+          const spawnOpts: PtySpawnOpts = {
+            cwd: cfgDir,
+            env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
+            // A RENDERED SCREEN, not a chunk — see `pty-host.ts`. Each delivery is the
+            // pane's whole current screen, so the disclaimer check runs against the
+            // screen instead of an accumulation of chunks.
+            onScreen: (screen) => {
+              if (dismissed) return
+              // Dismiss the --dangerously-load-development-channels disclaimer the same
+              // way the substrate's output scanner does (normalize ANSI + whitespace).
+              const norm = screen
+                // eslint-disable-next-line no-control-regex
+                .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+                .replace(/\s+/g, '')
+              if (/forlocalchanneldevelopment|usingthisforlocaldevelopment/i.test(norm)) {
+                dismissed = true
+                setTimeout(() => ref.child?.writeKey?.('enter'), 400)
+              }
+            },
+          }
+          await withLiveHerdrChild(ref, argv, spawnOpts, async () => {
 
-      // The TRUE bind signal: claude completed the MCP handshake. This is what the
-      // old TUI-string detector got wrong — it fired even though THIS fires too.
-      for (let i = 0; i < 40 && !bound; i++) await Bun.sleep(500)
-      expect(bound).toBe(true)
+            // THE OUTPUT GATE IS RELEASED BY THE HELPER, once the spawn resolves — the
+            // readiness handshake the production caller performs in `spawn.ts`. Doing it
+            // there rather than here is the point: every one of these proofs forgot it
+            // once and silently took the fail-open path, which the assertion at the end
+            // of this body now refuses.
 
-      // And a real turn round-trips through the channel's reply tool.
-      const r = await fetch(`http://127.0.0.1:${channelPort}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Sink-Token': 'e2e-token' },
-        body: JSON.stringify({ text: 'Reply with exactly the word PONG.', turn_id: '1:1' }),
-      })
-      expect(r.status).toBe(200)
-      for (let i = 0; i < 60 && reply === undefined; i++) await Bun.sleep(500)
-      expect(reply).toBeDefined()
-      expect(reply).toContain('PONG')
+            // Wait for the dev-channel to report its port (transport attached).
+            for (let i = 0; i < 60 && channelPort === 0; i++) await Bun.sleep(500)
+            expect(channelPort).toBeGreaterThan(0)
+
+            // The TRUE bind signal: claude completed the MCP handshake. This is what the
+            // old TUI-string detector got wrong — it fired even though THIS fires too.
+            for (let i = 0; i < 40 && !bound; i++) await Bun.sleep(500)
+            expect(bound).toBe(true)
+
+            // And a real turn round-trips through the channel's reply tool.
+            const r = await fetch(`http://127.0.0.1:${channelPort}/message`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Sink-Token': 'e2e-token' },
+              body: JSON.stringify({ text: 'Reply with exactly the word PONG.', turn_id: '1:1' }),
+            })
+            expect(r.status).toBe(200)
+            for (let i = 0; i < 60 && reply === undefined; i++) await Bun.sleep(500)
+            expect(reply).toBeDefined()
+            expect(reply).toContain('PONG')
+            // NO FAIL-OPEN WARNING. `beginOutput()` was called, so the gate was released by
+            // the caller and never by the 5 s timer — the timely path, which is the one
+            // production takes. Asserted at the END so the whole run is covered, not just
+            // the moment after spawn.
+            expect(hostErr.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
+          })
+        },
+        // Tee: a 90 s live proof a human is watching must still print as it runs.
+        { tee: true },
+      )
     } finally {
-      child?.kill('SIGTERM')
       sink.stop(true)
     }
   }, 90_000)

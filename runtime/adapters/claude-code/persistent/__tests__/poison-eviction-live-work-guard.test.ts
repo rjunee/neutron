@@ -33,6 +33,7 @@
  * which separates *spared* from *reused*.
  */
 
+import { withCapturedStderr } from './capture-stderr.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
@@ -105,7 +106,7 @@ function makeWedgeOnceHost(): {
   const alive = new Map<number, () => boolean>()
   const argvs = new Map<number, string[]>()
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const incarnation = spawns
       argvs.set(incarnation, [...argv])
@@ -249,20 +250,21 @@ async function waitUntil(pred: () => boolean, budgetMs = 2000): Promise<void> {
   throw new Error('waitUntil: condition not met within budget')
 }
 
-/** Capture `[repl] …` stderr lines for the duration of `fn`. */
+/**
+ * Capture `[repl] …` stderr lines for the duration of `fn`.
+ *
+ * DELEGATES rather than hand-rolls. This used to install the override itself and
+ * "restore" `original.bind(process.stderr)` — a different function object from the one
+ * it replaced, so the process never came back to where it started. Five suites had that
+ * bug; `capture-stderr.ts` is now the only place the assignment lives, and a guard
+ * fails any test that makes it again.
+ */
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
-  const lines: string[] = []
-  const original = process.stderr.write.bind(process.stderr)
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
-    return true
-  }) as typeof process.stderr.write
-  try {
-    const result = await fn()
-    return { result, lines }
-  } finally {
-    process.stderr.write = original
-  }
+  let result!: T
+  const lines = await withCapturedStderr(async () => {
+    result = await fn()
+  })
+  return { result, lines }
 }
 
 /** Abandon turn 1 the way a budget-elapsed caller does, once the REPL has taken it. */
@@ -1454,8 +1456,14 @@ describe('a kill that throws never attributes a deploy (#518)', () => {
     const base = makeWedgeOnceHost()
     let killAttempted = false
     const host: PtyHost = {
-      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
-        const child = base.host.spawn(argv, spawnOpts)
+      // ASYNC, because `PtyHost.spawn` is (herdr step 2b, #538): creating a pane is a
+      // socket round trip, so a synchronous `spawn` would hand back a child whose `pid`
+      // reads 0 while supervision probes it. This fixture predates that and spread a
+      // PROMISE instead of a child, which produced an object with no real `kill` and a
+      // `hasExited` nothing consulted — so the case timed out rather than failing on its
+      // own subject.
+      async spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): Promise<PtyChild> {
+        const child = await base.host.spawn(argv, spawnOpts)
         return {
           ...child,
           kill() {
@@ -1554,8 +1562,8 @@ describe('a signal that failed does not become a deploy kill when the child dies
     const base = makeWedgeOnceHost()
     let diedOnItsOwn = false
     const host: PtyHost = {
-      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
-        const child = base.host.spawn(argv, spawnOpts)
+      async spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): Promise<PtyChild> {
+        const child = await base.host.spawn(argv, spawnOpts)
         return {
           ...child,
           // Our signal never lands...
@@ -1705,8 +1713,8 @@ describe('a liveness probe that throws does not abort the drain (#518)', () => {
     let spawns = 0
     let poisoned = false
     const host: PtyHost = {
-      spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): PtyChild {
-        const child = base.host.spawn(argv, spawnOpts)
+      async spawn(argv: string[], spawnOpts: Parameters<PtyHost['spawn']>[1]): Promise<PtyChild> {
+        const child = await base.host.spawn(argv, spawnOpts)
         const incarnation = (spawns += 1)
         return {
           ...child,

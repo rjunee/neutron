@@ -7628,7 +7628,8 @@ chased a non-bug. The string detector + its test were **removed**.
   itself returned, or an adapter-stamped `rate_limited`) still cools on either lane —
   the owner's next turn would meet that wall a second later regardless.
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
-  real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
+  real PTY — a `herdr` pane via `HerdrHost` since herdr step 2b (#538), where it
+  used to be `Bun.spawn({terminal})` — and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
   CI — needs a real claude binary + credentials).
 

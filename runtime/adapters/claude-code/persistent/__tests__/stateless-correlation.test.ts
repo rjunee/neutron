@@ -59,7 +59,7 @@ describe('S3 #107 — the FIFO is gone (structural)', () => {
  *  another sentinel emits a reply with NO turn_id at all. */
 function makeCorrelationHost(): { host: PtyHost } {
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string

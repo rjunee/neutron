@@ -28,6 +28,7 @@ import {
   DEFAULT_IDLE_MAX_MS,
   DEFAULT_IDLE_QUIET_MS,
   SESSION_KEY_SEP,
+  submitCommand,
 } from './signatures.ts'
 import { waitForReplIdle } from './spawn.ts'
 
@@ -76,7 +77,7 @@ export type ResetPooledContextOutcome =
  * one NUL total).
  *
  * Outcomes:
- *  - `{ ok: true, sessions_reset }`   — one `/clear\r` written per live session.
+ *  - `{ ok: true, sessions_reset }`   — one `/clear` + `enter` per live session.
  *  - `{ ok: false, reason: 'no_live_session' }` — nothing warm to clear.
  *  - `{ ok: false, reason: 'busy' }`  — a turn is still in flight; NOTHING written.
  *  - `{ ok: false, reason: 'reset_failed', detail }` — the actuation threw.
@@ -154,7 +155,7 @@ export async function resetPooledSessionContext(
 
 /**
  * Outcome of one per-session `/clear` actuation.
- *  - `{ status: 'reset' }`  — `/clear\r` written; model transcript cleared, process alive.
+ *  - `{ status: 'reset' }`  — `/clear` + `enter` sent; transcript cleared, process alive.
  *  - `{ status: 'busy' }`   — a turn is still in flight after `acquire_wait_ms`; NOTHING written.
  *  - `{ status: 'dead' }`   — the child exited before or under the mutex (nothing to clear).
  *  - `{ status: 'failed', detail }` — the actuation threw; `detail` carries the error message.
@@ -226,7 +227,14 @@ export async function actuateSessionContextReset(
     // beat so the idle wait can't short-circuit before the TUI reacts, settle idle
     // again so the REPL is clean + at rest for the next turn.
     await waitForReplIdle(session, opts.idle_quiet_ms, opts.idle_max_ms)
-    session.child.write(`${CONTEXT_RESET_COMMAND}\r`)
+    // TEXT, THEN AN `enter` KEY — herdr's `pane.send_text` does not submit. The
+    // submit is MANDATORY, and it is AWAITED: this function's whole output is a
+    // claim about whether the reset happened, so it may not be built on a
+    // fire-and-forget write. `submitCommand` resolves only once the backend has
+    // acknowledged both the text and the Enter, and rejects otherwise — the catch
+    // below turns either failure into `{status:'failed'}` rather than reporting a
+    // reset that never happened.
+    await submitCommand(session.child, CONTEXT_RESET_COMMAND)
     // Un-mark the scope's warm topics NOW — under the mutex, adjacent to the
     // `/clear` write, before any turn blocked on `acquireTurn` can resume. Best-
     // effort: a throwing listener must not abort a reset whose `/clear` already

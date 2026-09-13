@@ -12,12 +12,30 @@
  * path said `cc-adapter:`), and it never spawns a `claude -p` subprocess.
  */
 
-import { describe, expect, test, afterEach } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import { DEAD_HERDR_SOCKET, pinEnvSwitch } from '../../__tests__/env-switch.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClaudeCodeSubstrateAuto } from '../index.ts'
 import { shutdownAllPersistentRepls } from '../persistent/persistent-repl-substrate.ts'
+
+// HERMETIC: these tests assert substrate SELECTION and wiring, not spawning — but
+// `start()` reaches the real `HerdrHost`, which now works. Pointing the socket at a
+// path that does not exist makes the spawn fail immediately instead of creating REAL
+// PANES on the developer's herdr server and waiting out the pid timeout. Before the
+// transport was fixed these tests were fast by accident: the client could not get past
+// its own protocol ping, so nothing was ever spawned.
+//
+// PINNED THROUGH THE ONE SANCTIONED HELPER. `HERDR_SOCKET_PATH` is the switch that
+// decides whether the LIVE herdr proofs can reach a server at all, and those are the
+// only tests in this repo that can see the real one — a module-scope write with no
+// teardown turns "make my own case hermetic" into "silently disable the instrument for
+// everything that runs after me in this process". This was three identical copies of a
+// save/restore block; the obligation is assignment-scoped, so a guard that checked for
+// a restore ANYWHERE in the file would pass a second, unscoped write added later. One
+// writer, written once, is the structural form of the same rule.
+pinEnvSwitch('HERDR_SOCKET_PATH', DEAD_HERDR_SOCKET)
 
 const PRIOR_FLAG = process.env['NEUTRON_PERSISTENT_REPL']
 const PRIOR_SUP = process.env['NEUTRON_PERSISTENT_REPL_SUPERVISION']

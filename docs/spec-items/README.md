@@ -24,6 +24,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-deploy-must-not-kill-builds-in-flight`](a-deploy-must-not-kill-builds-in-flight.md) — Stop a deploy from killing the builds still in flight
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
+- [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) — HerdrHost implements PtyHost over the herdr socket API
 
 ## Not buildable yet
 
@@ -81,6 +82,7 @@ branch is cut (standard §3.1, §3.2).
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
 | [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
+| [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |

@@ -1,0 +1,703 @@
+## 2026-09-12 — A terminal cause on every terminal path, and two readers that report it
+
+`trident/inner-workflow.mjs` has twelve terminal exits. Four of them said why they
+ended. The other eight said nothing at all, so everything downstream had to deduce a
+cause — and deduction is how `orchestrator.ts` came to tell four different failures the
+same sentence on one night in August (`03242fe5`, `000cedc8`, `1daded20`, `36b95167`:
+three stopped at round 1 with `checkpoint: 'inner-error'` and all four reported
+"exhausted 10 round(s)"). This closes #520 by giving every one of the twelve an explicit,
+typed cause, and by making the orchestrator and the delivery read it instead of guessing.
+
+### The signal that was missing, and why the obvious one was not it
+
+`checkpoint` records the PHASE the run reached, not why the loop stopped.
+`argus-request-changes` is written for genuine budget exhaustion, for a fix round whose
+work never landed, for a fix round that left no diff, AND for an `infra-only` synthesis
+stop. Two Codex review rounds on PR #240 killed two attempts to deduce a cause from
+`(round, checkpoint)` for exactly that reason, and the second is the instructive one: it
+added "…and the checkpoint is not `inner-error`" and was still wrong, because the four
+exits above are indistinguishable at that pair.
+
+So the fix is not a cleverer deduction. It is a second field.
+
+`terminalCauseKind` is a CLOSED vocabulary of sixteen members owned by
+`trident/terminal-cause.ts`. It answers "which of the known exits was this". The existing
+`terminalCause` — the probe's, lane's or thrown error's own words, redacted and capped —
+stays exactly as it was and answers "what did the thing that stopped us actually say".
+They are not two spellings of one fact: one is routable and says nothing the vocabulary
+does not already define; the other is quotable and must never be routed on. A kind with
+no prose is still an answer, and prose with no kind is still worth quoting.
+
+### The review loop's kind is MEASURED, and here is what makes that word honest
+
+`reviewLoopTerminalCause` (inner-workflow.mjs) is called at the exit and reads the guard
+variables the loop exited on — `finalVerdict`, `round >= maxRounds`,
+`synthesis.blockKind`, `roundLostItsWork`, `roundLostItsDiff`. Those are not a
+reconstruction of the exit; they ARE the `while (...)` condition at the top of the fix
+loop and the two `break`s inside it, read at the moment it stopped. The arms are ordered
+to mirror the terminal result's own `blockKind` expression, so a lost round outranks the
+budget — at the ceiling as well as below it, which is where the two can be confused.
+
+`'round-budget-exhausted'` is the only member licensed to say the rounds ran out, and it
+is emitted only where `round >= maxRounds` actually held.
+
+### `'unknown'` is a member, and `null` is not the same thing
+
+A vocabulary that cannot say "I could not establish which of these it was" forces a
+determinate answer, and then "nothing happened" and "I could not find out" arrive at the
+reader as one value. So `'unknown'` is a member; `reviewLoopTerminalCause`'s last arm
+returns it rather than the nearest plausible member; and every composer downstream answers
+it by saying LESS, never more.
+
+`null` is a different fact and decodes separately. It means the field did not arrive — a
+legacy row, a truncated result, a value from a future writer — and every reader answers it
+by keeping the behaviour it had before this change, byte for byte. `parseTerminalCause`
+therefore refuses to map garbage to `'unknown'`: that would manufacture an assertion
+nobody made, and a reader could then no longer tell a run that answered from a run that
+was never asked.
+
+### The twelve paths, enumerated rather than sampled
+
+"Every terminal path emits a cause" is an absence claim about the paths that do not, and
+the honest way to make one is to enumerate. `inner-workflow.mjs` is a detached script with
+a top-level `return` and no exports, so its exits cannot be reached one at a time from a
+test process. What CAN be enumerated is every `writeTerminalResult(...)` call site, which
+is the definition of a terminal path in that file.
+
+| # | Exit | Kind | Emitted before? |
+|---|---|---|---|
+| 1 | resume: head of the recorded branch unreadable | `resume-head-unreadable` | yes (prose only) |
+| 2 | resume: prior run recorded `pr-merged` | `pr-already-merged` | no |
+| 3 | resume: prior `argus-approved`, head unmoved | `resume-approved-unchanged` | no |
+| 4 | build completion: head unreadable or disputed | `built-head-unverified` | yes (prose only) |
+| 5 | wave member finished its pinned build | `wave-member-built` | no |
+| 6 | round-1 publish handoff (`forge-done`) | `handoff-publish` | no |
+| 7 | PR already merged when the build returned | `pr-already-merged` | no |
+| 8 | Ralph re-fire after one task | `ralph-task-built` | no |
+| 9 | fix-round publish handoff | `handoff-publish` | no |
+| 10 | PR merged during a fix round | `pr-already-merged` | no |
+| 11 | the review loop's own exit | measured (eight members) | only `infra-only` |
+| 12 | the workflow threw | `workflow-threw` | yes (prose only) |
+
+Exits 2, 7 and 10 share one composer (`mergedTerminalResult`), and share one kind because
+they are one event: which of the three noticed the merge is a fact about this process's
+timing, not about why the run stopped.
+
+The narrowing note on the spec item undercounted this. It named the three review-verdict
+block kinds; the real gap was eight paths, not three.
+
+### Two mechanisms so a thirteenth cannot be added silently
+
+The spec item's own HOW IT GOT THIS WAY paragraph is the reason a prose rule would not
+do: the catch-all sentence was TRUE when it was written, and every early exit added since
+landed in it without anyone adding a terminal branch — one plausible commit at a time.
+
+1. **A source-level refusal.** `inner-workflow-terminal-cause.test.ts` parses the shipped
+   `.mjs` with the TypeScript compiler API (the file's top-level `return` is a *semantic*
+   error, so the parser yields a complete tree), finds every call whose callee is
+   `writeTerminalResult` — **matched on the callee alone, whatever the argument** — then
+   CLASSIFIES the argument. Three shapes resolve to an object literal: an inline literal,
+   an identifier bound to one, and an identifier bound to a composer whose body returns
+   one. Anything else is `'unresolved'`, which **fails exactly as loudly as a missing
+   property**: the scanner saying it could not tell is a finding about this guard's
+   coverage, not a pass. Presence is an actual `terminalCauseKind` property — a
+   `PropertyAssignment` or shorthand — never a substring of the object's source, and a
+   conditional spread deliberately does not count, because a property that arrives only
+   sometimes is the silence this guard refuses.
+2. **A runtime answer.** `stampTerminalCause` stamps `'unknown'` on a bare result and
+   writes the gap to the run log. It does NOT throw: throwing would trade a missing
+   sentence for a lost terminal write, and the run would then sit `running` until the
+   stall guard — strictly worse than an honest non-answer. Recording the gap out loud
+   rather than papering over it is the convention `gateway-shutdown-kill.ts:774` set on
+   #642 and this follows it rather than reinventing one.
+
+Every scan in that file carries a POSITIVE CONTROL: the identical scan is re-run over a
+doctored copy of the same source with the defect reintroduced, and must find it. A
+scanner that silently stopped matching would otherwise read as a clean bill of health,
+which is how eight paths went years without a cause.
+
+**And the controls test the RECOGNISER, not only the resolver — which the first cut did
+not, and that was a blocker.** Its recogniser was a regex that matched only an *identifier*
+argument: `writeTerminalResult({ checkpoint: 'new-exit' })` never became a site at all, the
+count still read 12, and every per-site assertion was silent about it. A thirteenth path
+added the most obvious way anyone would add one was invisible to the whole file. Its
+controls deleted a known property line, which exercises the resolver on sites the
+recogniser had already found; nothing exercised the recogniser. **The sweep had inherited
+its own domain's blind spot** — this file's stated rule is that a site it cannot parse is
+reported and never skipped, and that rule had been applied one level in (at the resolver)
+and not at the entry.
+
+So eight controls now append a real thirteenth call in each named argument shape and
+require the guard to go red on every one, asserting BOTH halves: the site is **seen** (the
+enumeration grows to 13) and it is **refused**. A shape that is seen but silently passes is
+the same defect in a different coat. The shapes are: an inline object literal; an
+identifier bound to a literal; an identifier bound to a composer; an object whose interior
+*comment* mentions the field but which has no such property; an inline conditional spread
+that carries it only sometimes; a shape the scanner does not handle (a conditional
+expression); no argument at all; and a call reached through a property access. The two
+refusals — `'absent'` and `'unresolved'` — both fail the guard but are reported apart, so
+the next author knows whether to add a stamp or to teach the scanner a shape.
+
+### What the orchestrator does with it
+
+`innerTerminalFailureReason` gained ONE branch, placed BELOW every existing branch and
+above only the generic catch-all. That placement is the whole design: every sentence main
+already composes is untouched and still wins, because each of those branches is already
+holding a measured prose cause and a second owner for one fact is how reasons drift. What
+reaches the new branch is precisely what the R1/R2 notes describe — the exits that emitted
+nothing, which the catch-all spoke for all at once.
+
+`terminalCauseReason` is total over the vocabulary and returns `null` for twelve of the
+sixteen members. Four speak:
+
+| Kind | Reason |
+|---|---|
+| `round-budget-exhausted` | the fix loop used its whole round budget at round N of M and never reached an approved review |
+| `review-advisory-only` | the review panel ran at round N of M and raised nothing actionable, so the loop stopped with no approval to land |
+| `round-lost-work` | a fix round's work never reached the branch at round N of M, so the code was not re-judged |
+| `round-lost-no-diff` | a fix round left the reviewed code unchanged at round N of M, so there was nothing new to re-judge |
+
+The other twelve say nothing on purpose. The infra-only, resume-stop, built-head and
+thrown exits already have a specific sentence UPSTREAM, composed from the prose they
+carry. The six success and handoff exits are not failures: a FAILED row carrying one of
+them failed downstream of that exit, at the merge or the publish, of something this
+function did not measure — and naming the exit as the failure would be the inference the
+module exists to refuse. `'unknown'` buys silence by definition.
+
+**Word choice is load-bearing, and it is tested as a property.** A row can carry one of
+these sentences and still be unreadable structurally (unharvested, force-terminated,
+result did not parse). Such a row reaches `interpretFailure`'s keyword branches with the
+sentence and nothing else, and those branches are bare `includes()` over tokens like
+`exhausted`, `stalled`, `git ` and `conflict`. So the test asserts that every sentence,
+with no structured cause available, degrades to the honest verbatim fallback — in each of
+the three dispositions where the prose is what decides, `not-terminal` included, because
+that is the shape a crashed build leaves behind and the one where the `exhausted` token is
+live. A single terminal-row fixture missed that: mutation M14 (the budget sentence gaining
+the word "exhausted") survived until the test was widened. The fallback also enforces a
+200-character clamp, so one assertion covers length and vocabulary at once. This is the
+same rule `deploy-kill-reason.ts` states for its own markers.
+
+### What the delivery does with it
+
+`trident/delivery.ts` had ZERO reads of the terminal cause — the spec item names the
+search that proves it. So one sentence, "The build ended without an approved review, so I
+did not merge it.", served a fix round whose work vanished, a fix round that changed
+nothing, a panel that raised only advisory findings, and a genuine exhaustion. Four
+different next actions behind one line of copy: the orchestrator's defect, one layer out.
+
+The cause is read STRUCTURALLY, through a new `deriveTerminalCause` in `infra-block.ts`
+that shares `deriveInfraBlock`'s three-condition gate via an extracted
+`harvestedTerminalResult`. Two copies of a staleness gate are two chances to widen one of
+them, and the hazard is real: a force-terminated row keeps a parseable `inner_result` from
+an earlier iteration, and `harvested_at` is the only proof the outer loop decided on THIS
+one.
+
+The branch sits below the infra-block, launch-guard, undetermined-launcher-death and
+deploy-restart branches and above every string branch. Below, because each of those
+describes something that happened OUTSIDE the inner workflow, which the workflow's own
+cause cannot know about and must not overrule — a build whose launcher a deploy killed
+mid-flight never wrote a terminal result for that ending at all. Above the string
+branches, because a measured kind beats a keyword match over prose.
+
+One new `FailureClass`, `'round-lost'`. It sits exactly between the two classes it would
+otherwise be forced into and is neither: nothing about the machine broke (`infra`), and no
+reviewer rejected anything (`review-unresolved`) — the round simply produced nothing to
+review. The two members keep distinct ADVICE, because the recoveries differ: one needs the
+round rebuilt, the other needs a diff regenerated against work already safely on the
+branch.
+
+**Two arms turn on `disposition`, and they turn opposite ways.** The rule is that a
+measured cause outranks prose when it CONTRADICTS it, and stands aside when it does not:
+
+- `'review-advisory-only'` contradicts. `recordedTerminalVerdict` records an advisory-only
+  exit as a real `REQUEST_CHANGES` (a panel ran and spoke), so the row reaches the review
+  branch and is told the reviewer "still had blocking findings" — the one thing an
+  advisory-only exit establishes did NOT happen. The cause wins. The test asserts the row
+  really does take the review branch without the cause, so this is a contradiction and not
+  a preference.
+- `'round-budget-exhausted'` does not contradict. The budget running out and the reviewer
+  holding blocking findings are both true of a genuine ten-round exhaustion, and the review
+  branch tells the richer story. The cause stands aside — the same deferral the two
+  existing `disposition !== 'reviewed-rejected'` branches already make.
+
+A cause branch that won unconditionally would have deleted the second story; mutation M5
+is that branch, and it goes red.
+
+**The two halves move together, asserted as equalities rather than maintained in
+parallel.** The structured budget route must return what the `reached max_rounds` string
+route returns — the whole object, advice included, because a summary that matches beside
+advice that does not is still two stories and the advice is the half the owner acts on.
+The infra-death copy was extracted to one composer, `infraDeathInterpretation()`, so the
+two routes cannot be reworded apart. It is a FUNCTION rather than a shared constant:
+`interpretFailure` returns by reference and every other arm hands back a fresh literal, so
+a module-level object returned from two arms would be one field assignment away from
+rewriting the copy every future call receives.
+
+### Why this is a new field and not a widened `blockKind`
+
+`blockKind` is already a closed set on the same result, and the answer is that it answers
+a narrower question and only sometimes. Four of the twelve paths are not review verdicts
+and emit no `blockKind` at all. More importantly it is load-bearing exactly where it is
+narrow: `'infra-only'` is the ONLY value licensed to say no seat judged the code, and both
+`recordedTerminalVerdict` and `isInfraDeath` key on it. A second meaning in that field is
+how a value that licenses a claim starts licensing it for rows that never earned it.
+
+### Mutation table
+
+Every guard was reverted and the specific test proven red. `T` = both new test files
+(`trident/terminal-cause.test.ts`, `trident/inner-workflow-terminal-cause.test.ts`).
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `parseTerminalCause` maps garbage to `'unknown'` instead of `null` | 3 fail |
+| M2 | `deriveTerminalCause` drops the `harvested_at` staleness gate | 2 fail |
+| M3 | `innerTerminalFailureReason`'s measured-kind branch deleted | 5 fail |
+| M4 | `interpretFailure`'s cause branch deleted | 6 fail |
+| M5 | cause branch wins unconditionally (budget stops deferring) | 1 fail |
+| M6 | advisory-only defers instead of contradicting | 1 fail |
+| M7 | `round-lost-no-diff` reuses `round-lost-work`'s delivery copy | 2 fail |
+| M8 | `reviewLoopTerminalCause` falls through to a determinate member, not `'unknown'` | 3 fail |
+| M9 | `terminalCauseKind` dropped from the main terminal result | 3 fail |
+| M10 | the round-lost arms moved BELOW the budget arm | 1 fail |
+| M11 | `stampTerminalCause` stops stamping | 2 fail |
+| M12 | `stampTerminalCause` stamps silently (no report) | 1 fail |
+| M13 | `round-lost-no-diff`'s reason duplicates `round-lost-work`'s | 4 fail |
+| M14 | the budget sentence gains the word "exhausted" | 1 fail |
+| M15 | the round-lost sentence gains a bare `git ` | 2 fail |
+| M16 | `parseInnerResult` decodes the kind raw, with no fail-closed parse | 1 fail |
+| M17 | the delivery cause branch moved ABOVE the launcher-death markers | 2 fail |
+
+Every row above was re-run against the FINAL source rather than trusted from the revision
+it was first written against, and that re-run is what found the third of the three defects
+this table caught — none of which reading the diff had.
+
+**M11 survived.** The runtime backstop was inlined in `writeTerminalResult`, which cannot
+be lifted out of the `.mjs` and run, so nothing could exercise it. Extracted to
+`stampTerminalCause` so it could be.
+
+**M14 survived.** The routing-token property was tested only on a terminal row, where the
+`exhausted` branch is gated off by disposition — so the classifier was never going to look
+at the sentence and the test could not have failed whatever the wording was. It now covers
+every disposition in which the prose is what decides.
+
+**M2 could not be applied at all**, and that was the finding. `deriveInfraBlock` had kept
+its own copy of the `harvested_at` check beside its call to the newly extracted
+`harvestedTerminalResult`, so the module carried exactly the two staleness gates its new
+docblock claimed it did not have. Widening one would have left the other as the only thing
+between a stale `inner_result` and a confident sentence about an ending that is not this
+run's. The duplicate is gone; M2 now applies in one place and goes red.
+
+The general lesson is the reason the table is re-run rather than transcribed: a mutation
+that fails to APPLY is not a passing row, it is a report that the code no longer looks the
+way the mutation assumed — and that is worth reading every time.
+
+### The guard's own mutation table
+
+The scanner is the instrument every "every terminal path" claim in this record rests on, so
+it is mutated too — reintroducing each defect it is written against, including the two the
+first cut actually shipped.
+
+| # | Mutation of the guard | Result |
+|---|---|---|
+| N1 | the recogniser accepts only an identifier argument (**the shipped defect**) | 6 fail |
+| N2 | presence is a substring of the object's source again | 2 fail |
+| N3 | an `'unresolved'` site stops failing — dropped rather than reported | 3 fail |
+| N4 | a conditional spread counts as the property being present | 1 fail |
+| N5 | composer following removed | 13 fail |
+| N6 | a shorthand property no longer counts | 13 fail |
+| N7 | a call reached through a property access stops being recognised | 1 fail |
+| N8 | the scope walk reverted to the scope-blind nearest-declaration rule | 4 fail |
+| N9 | the scope walk refuses EVERYTHING (resolves nothing) | 18 fail |
+| N10 | parameters stop counting as bindings | 3 fail |
+| N11 | the parse is truncated — a tree that never contained the code | 19 fail |
+| N12 | the composer's `return` search crosses nested function boundaries (**the blocker**) | 2 fail |
+| N13 | `bindsInPattern` descends into default-value functions | 1 fail |
+| N14 | the composer NAME is looked up file-wide, keeping the LAST match | 2 fail |
+| N15 | `walkOwnScope` stops respecting the boundary at all | 3 fail |
+| N16 | as N14, but keeping the FIRST match | 2 fail |
+| N17 | a fifth traversal added without the audit | 1 fail |
+| N18 | a literal element-access callee stops being recognised | 2 fail |
+| N19 | the recogniser silently widens PAST the stated boundary | 24 fail |
+| N20 | the diagnostic's coercion can throw again (bare `String()`) | 2 fail |
+| N21 | the diagnostic is no longer redacted | 2 fail |
+| N22 | the diagnostic is no longer capped | 1 fail |
+| N23 | the report happens BEFORE the stamp, unguarded | 1 fail |
+| N24 | the read-and-stamp guard removed — the Proxy blocker restored | 5 fail |
+| N25 | diagnostics composed BEFORE the stamp again | 2 fail |
+| N26 | the two refusal facts share one branch | 1 fail |
+| N27 | the extraction harness reverts to sloppy mode | 1 fail |
+| N28 | the composer takes only its FIRST own-scope return | 4 fail |
+| N29 | ANY stamped return is accepted instead of ALL | 3 fail |
+| N30 | an unreadable return is ignored rather than refusing the composer | 2 fail |
+| N31 | a duplicated key reads FIRST instead of last | 1 fail |
+| N32 | a scope binding one name twice takes the first declaration | 1 fail |
+| N33 | scope-blind resolution reinstated (search the file by name) | 5 fail |
+| N34 | a symbol with several declarations takes the first | 1 fail |
+
+**N8–N10 are the third instance of the same defect, and the one that was a live false
+pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
+`VariableDeclaration` matching by name text and position, consulting no scope — and a
+function PARAMETER is not a `VariableDeclaration`, so it was invisible rather than
+out-ranked. A terminal path inside a function whose parameter shadowed an outer stamped
+`const` was *seen*, counted, and then classified as stamped **from the wrong binding**:
+`failingSites()` came back empty for a silent path. The fix is lexical, not a type checker
+— walk up from the use site, and the first scope that binds the name decides; a parameter,
+a catch variable, a destructured binding or an uninitialised declaration all END the walk
+and produce `'unresolved'`, which already fails loudly.
+
+Four controls, not one. The three shadowing shapes must be refused, **and** an ordinary
+top-level `const` → literal must still resolve — because "a shadowed name is unresolved" is
+satisfied by a resolver that resolves nothing, and being caught by N5/N6's collateral
+damage is not the same as being asserted.
+
+**N2 and N4 survived their first run, and the fix was to the CONTROLS, not the scanner.**
+The comment-trap case put its comment *outside* the object literal, where a raw-source
+presence check would never have seen it — so it could not reproduce the defect it existed
+to reproduce. The spread case bound its object to a name first, so the field never appeared
+in the spread's own text. Both are now spelled the way this file really writes them:
+comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
+is not a control, and the only way to find out is to break the thing it guards.
+
+### The backstop's diagnostic could take down the backstop
+
+`stampTerminalCause`'s UNRECOGNISED branch interpolated the offending value into the run
+log with a bare `String()`: **no cap, no redaction, and a coercion that runs
+user-reachable code.** `terminalCauseKind` arrives from a JSON payload the workflow did not
+author, so a 10,000-character value landed whole, a credential-shaped value landed
+verbatim, and — the serious one — a value whose `toString` throws made `stampTerminalCause`
+itself throw, which prevented the `writeTerminalResult` this backstop exists to protect.
+**The exact failure it was built to stop, arriving through the backstop.**
+
+`terminalCauseDiagnostic` now redacts through the same helper every persisted cause uses,
+caps at 120 characters with a marker saying it truncated, and cannot throw. And the ORDER
+changed: the stamp happens first, then the report, inside a `try`. Reporting is a courtesy;
+recording the honest non-answer is the guarantee, and a courtesy may never take the
+guarantee down with it. The same treatment covers the MISSING branch's `checkpoint`
+interpolation, asserted separately because a fix to one branch is not a fix to the other.
+
+N20–N23 pin the four properties independently.
+
+**And a repo guard caught a side effect I would not have predicted.**
+`trident/__tests__/ci-gate.test.ts` lifts `classifyCi` and its closure by slicing
+`inner-workflow.mjs` from `const CI_FAILED_STATES` to the next JSDoc opener — and
+`probeCause`/`redactProbeText` live inside that slice. The new function's JSDoc block
+truncated it, reddening **44 unrelated cases** with a bare ReferenceError. That guard
+documents the hazard in its own comment and names it in the failure, which is what made a
+confusing cross-module break a thirty-second fix.
+
+It then caught the same change a SECOND time: the replacement line comment *spelled* the
+JSDoc opener while explaining why not to use one, and the slice is a substring search that
+does not care whether the occurrence is inside a comment. Worth recording as a small
+lesson about guards that match text: a comment about a pattern is an instance of it.
+
+### Round two on the same eight lines: the comment named the class, the code fixed the case
+
+The hardening above closed the COERCION — `toString`, `Symbol.toPrimitive` — and its own
+comment listed **a Proxy trap** among the hazards. Meanwhile the first thing
+`stampTerminalCause` did after its type check was an unprotected `result.terminalCauseKind`
+read. So `stampTerminalCause(new Proxy({}, { get() { throw } }), …)` threw *before anything
+was stamped* — the exact failure the block underneath it claims the ordering prevents. The
+guarantee started one line after the throw.
+
+**The contract is now closed rather than widened.** A Proxy can throw from `get`, `set`,
+`getPrototypeOf` and `ownKeys`, so there is no probe that makes a later read safe and no
+copy that can be taken without touching the value — every formulation that tries to read a
+hostile object defensively is one trap away from the same failure. So the accepted value is
+stated to be **a plain record this file built**, the whole read-and-stamp runs inside one
+guard, and a value that resists is named on the log and left alone. For a plain record the
+stamp always happens; for anything else no implementation could have stamped it, because
+the write is precisely what it refuses.
+
+The two refusal outcomes stay apart — *no cause could be recorded* and *a cause was recorded
+but could not be described* are different facts, and this file does not put different facts
+on one branch (N26).
+
+**And reading those eight lines against their own comment found a second false sentence.**
+`terminalCauseDiagnostic`'s docblock said "the stamp happens BEFORE this is called" — but
+the shipped code composed BOTH diagnostics and only then stamped. That sentence had been
+written one round before it was true. The stamp now genuinely comes first, with only an
+`undefined` test between the decisive read and the write, and N25 reds if it drifts back.
+
+**A third finding came free: the test harness was kinder than production.** `new Function`
+bodies are SLOPPY mode; the shipped `.mjs` is a module and therefore strict. A write to a
+frozen object silently no-ops in the first and throws in the second — so the frozen-result
+case *passed* while the real code would have thrown. Every extraction in this file had been
+running sloppy since the first one. The preamble now opts into strict, and N27 reds if it
+reverts. A harness quietly kinder than production is a test that cannot see the bug it is
+pointed at.
+
+### Does each walk STOP at the right boundary — or does it CONSIDER everything inside it?
+
+The traversal audit asked the first question. This is the second, one level up, and three
+resolvers answered for **the first instance they found** rather than for all of the
+construct they claim to resolve.
+
+**The composer, which was the live false pass.** `composerReturnLiterals` took the first
+own-scope object-literal return, so:
+
+```js
+function newExitResult(stamped) {
+  if (stamped) return { terminalCauseKind: 'workflow-threw' }
+  return { ok: false, checkpoint: 'new-exit' }      // ← the unstamped one
+}
+```
+
+resolved to the stamped branch and the site read as stamped. **A branching composer is an
+ordinary thing to write** — which places it squarely inside the claim this guard narrowed
+to, unlike `obj['writeTerminalResult'](…)`, which nobody writes and is correctly a
+documented non-goal. Every own-scope return is collected now and `readCause` requires ALL of
+them to carry the field; a return the scanner cannot read (`return someVariable`, a bare
+`return`) refuses the whole composer as `'unresolved'` rather than yielding a verdict drawn
+from the returns that happen to be literals.
+
+Both directions are asserted, because *"multi-return is handled"* is satisfied by a resolver
+that refuses **every** composer — and that resolver would red the three real sites which
+reach their cause through `mergedTerminalResult`. A two-return composer where both are
+stamped must pass; one where either is not must fail; and the unstamped branch is placed
+first in one control and mid-list in another, because neither end of the list is a safe
+place to look.
+
+**`readCauseOf` read the FIRST matching property.** `{ terminalCauseKind: 'a',
+terminalCauseKind: 'b' }` is legal and evaluates to `'b'`, so first-wins reported a value no
+runtime would produce. Last wins now.
+
+**`bindingIn` took the first matching declaration in a scope.** A scope can legally bind one
+name twice (`var`, or a `var` beside a function declaration), and picking whichever came
+first is a guess about which one the use site means. Two declarations is an ambiguity this
+scanner will not resolve, so it refuses.
+
+Two of the three were **correct already** and are recorded as such: `bindsInPattern` asks an
+existence question and considers every binding element, and `terminalSites` collects every
+call rather than stopping at one. `lookup` walking outward and stopping at the nearest scope
+that binds is correct scoping semantics, not a first-instance error.
+
+**N31 and N32 survived their first mutation run.** Both were fixed in the same change as the
+composer and neither had a control — a fix without a control is a fix nothing is holding,
+and the mutation table is the only thing that says so out loud.
+
+### Stop enumerating cases: the compiler already resolves names
+
+The sixth construct the hand-rolled resolver did not model was a **loop binding**.
+`introducesScope` listed `SourceFile`, `Block`, `CatchClause` and `FunctionLike`; a `for`
+head is none of those, and `bindingIn` read statements only from a `SourceFile` or a
+`Block`. So
+
+```js
+const result = { terminalCauseKind: 'workflow-threw' }
+async function newExitPath() {
+  for (const result of [{ checkpoint: 'new-exit' }]) {
+    await writeTerminalResult(result)   // resolved outward, reported clean
+  }
+}
+```
+
+was invisible in exactly the way a shadowing parameter had been two rounds earlier.
+
+**Counting what the resolver had needed made the shape obvious.** Lexical scope, nested
+returns, duplicate declarations, duplicate object keys, loop bindings — that is not five
+accidents, it is **reimplementing JavaScript scope resolution**. After loops come `class`
+bodies, block-scoped function declarations, parameter-scope-vs-body-scope for defaults, and
+`import` bindings; each is real, each is rarer than the last, and the list does not end.
+This is the *spelling* regress in the resolution dimension, and it ends the same way: not by
+adding the reported case, but by replacing enumeration with something correct by
+construction.
+
+**So `checker.getSymbolAtLocation` answers instead.** A `ts.Program` over the one file
+(`allowJs`, `noLib`, `noResolve` — binding only, no type checking), and
+`symbol.declarations` gives the binding TypeScript itself resolves, which is the binding the
+runtime uses. That deleted `introducesScope`, `bindingIn`, `lookup` and `bindsInPattern`
+outright — **name resolution is no longer traversed at all**, and the traversal audit table
+lost two of its four rows. The shortest row in that table is the one that stopped needing a
+row.
+
+What remains this file's judgement is only which declarations it will READ THROUGH, and it
+stays deliberately narrow: a `const`/`let`/`var` **with** an initialiser, or a function
+declaration. A parameter, a catch variable, a binding element, a loop head, an import, a
+class — anything whose value is not a literal in the declaration — is `'opaque'` and becomes
+`'unresolved'`, which fails loudly. A symbol with several declarations refuses rather than
+picking one.
+
+**The cost, stated rather than hidden.** A Program is heavier than a `SourceFile`: ~180ms
+cold, ~100ms warm for this file. Results are memoised per source string because the controls
+re-scan the same doctored sources, and the whole guard file still runs in 2.5s.
+
+The control pair is both halves: a shadowing loop binding **refused** (`for…of` and
+`for…let`), and an unshadowed outer binding still **resolved** — because "loop bindings are
+handled" is satisfied by a resolver that resolves nothing.
+
+### A count is the most compressed possible claim of completeness
+
+**This happened three times on this one document, and the second time the document asserted
+its own correction.** Round one: "fifteen members" and "eleven of fifteen return null" —
+the vocabulary had grown to sixteen when `'review-escalated'` was added for #654's new
+loop-exit clause, and nothing in the record moved with it. Round two: those two were fixed
+and *five others were not* — "the other eleven say nothing", "six members" for the review
+loop classifier, "SEVEN MEMBERS RETURN null" in `delivery.ts`, and "7 of the 12 terminal
+paths are not review verdicts" in `terminal-cause.ts`, which was **wrong when it was
+written** rather than merely stale: the real figure is four, and nobody had ever derived it.
+
+Two of those numbers were load-bearing, not decorative. The "7 of 12" figure is one leg of
+the argument for why `terminalCauseKind` had to be a NEW field instead of a widened
+`blockKind`. The argument survives on the true number — four of twelve carry no
+`blockKind`, and `blockKind` is load-bearing precisely because it stays narrow — but it
+rested on a figure that was invented.
+
+That is #654's own rule — *a list that claims completeness is a claim, and it needs the
+same scrutiny as the code it describes* — in its most compressed form. A count is the one
+thing a reader trusts without checking, because checking it means going and counting. It is
+also the easiest thing to leave behind when the list grows, since nothing about adding a
+member forces a number in prose to move.
+
+**So the counts are now DERIVED AT TEST TIME, and the remembered ones are gone.** Three
+mechanisms, each the same shape as the traversal inventory:
+
+- `the blockKind claim is derived, not remembered` measures how many of the twelve terminal
+  results carry a `blockKind`, so the argument in `terminal-cause.ts` fails if it stops
+  being true.
+- `every member is on exactly one side of the delivery split, by name` pins the delivery
+  split as two SETS rather than a number. A set is strictly better: adding a member fails
+  the test because nobody has decided which side it belongs on, and the failure NAMES the
+  member instead of reporting that a number moved.
+- `delivery.ts` no longer states the count at all; it points at that test.
+
+**And the derivation immediately earned itself.** The expected set was written out by hand
+on the first attempt and `wave-member-built` was left out — the *same* omission the stale
+"SEVEN MEMBERS" docblock had made. The test caught it. That is the whole argument for
+deriving rather than remembering, demonstrated on the very change that removed the last
+remembered count.
+
+### The rule this guard kept re-learning, written down so the next author inherits it
+
+Three times the scanner was narrowed to **the shapes this file happens to contain today**,
+and three times that was wrong:
+
+1. the argument had to be an identifier — until someone could write an inline literal;
+2. the callee had to be an identifier — until someone could write a property access;
+3. a name resolved by matching text across the file — until a parameter shadowed one;
+4. a composer's `return` was searched across its whole subtree — until a NESTED function
+   returned a stamped literal and the real, unstamped result was never looked at.
+
+Three and four are literally the same bug — **a traversal that does not stop where the
+construct it is reasoning about stops** — in two different helpers, one fixed a round
+before the other was found. So the fourth was not fixed as an instance. Every traversal in
+the file was audited against that one question, and the file now carries the table:
+
+| site | scope it reasons about | traversal | was it right? |
+|---|---|---|---|
+| `terminalSites` | the whole file (every call) | `walk` | yes — its construct really is the file |
+| `lookup` | one scope at a time | reads `.statements` | yes — never descends |
+| `bindsInPattern` | one binding pattern | `walkOwnScope` | **no** — descended into default-value functions |
+| `composerReturnLiteral` | one function body | `walkOwnScope` | **no** — the reported blocker |
+
+**And the audit table is itself a claim of completeness, so it is counted rather than
+written.** A table nobody is forced to update goes stale exactly the way this record's
+member counts did. `the traversal inventory is pinned` parses the guard file's own source
+and pins the number of `walk` and `walkOwnScope` call sites, so a fifth traversal cannot be
+added without someone deciding in the diff which kind it is. Failing that test does not mean
+the new traversal is wrong — it means nobody has said which kind it is yet, and that is
+precisely the decision the last two rounds were lost to. N17 adds an unaudited traversal and
+reds it.
+
+`bindsInPattern` is the one the audit earned. Its bug fails SAFE — it answers "yes, bound"
+for a name belonging to a default value's own parameters, producing a false REFUSAL rather
+than a false pass — so no false-pass control could ever have found it, and it would have
+sat there until someone wrote `({ other = ({ picked }) => picked })` and lost a round to a
+guard refusing a site it should have read. It has its own over-strict control now.
+
+Each time the defence available beforehand was *"the other shape is unreachable in this
+file."* That is true, and it is true in exactly the way that stops being true the moment
+someone writes the code the guard exists to catch. **A recogniser narrowed to what a file
+currently contains is a recogniser that stops working the moment the file changes** — and
+because it fails by going *quiet*, nothing announces that it stopped.
+
+So the standing rule for anything added here: match the broad thing and then *classify*,
+with an explicit bucket for "I could not tell" that **fails**. Never filter at the entry.
+Filtering at the entry is how a site becomes invisible rather than refused, and an
+invisible site is indistinguishable from a clean one.
+
+### …but "the broad thing" needs an edge, and finding that took a fifth round
+
+The sentence above first read *"a call to this name, **in any spelling**"*. That is not a
+rule, it is an unbounded claim, and it is why this scanner was widened four times without
+ever being finished. The fifth report was a computed callee —
+`obj['writeTerminalResult'](…)` — and it made the pattern legible: after a computed key
+comes an alias, then a re-export, then `eval`. **Each is a genuine hole in a literal
+reading of "any spelling", each is less reachable than the last, and none of them is how
+anyone adds a terminal path.** Widening cannot terminate.
+
+**The claim was the wrong half.** The rule now has an edge that can be stated in one line:
+**the callee name must be written literally at the call site.** Three spellings satisfy it
+and all three are recognised — a bare identifier, a property access, and an element access
+with a literal key. A computed callee is a **documented non-goal** with a test asserting
+the current behaviour, so the boundary fails if it stops being true rather than sitting in
+a comment.
+
+**The residual has an owner, which is what makes the boundary safe to have.** A
+deliberately obscured call site still reaches `writeTerminalResult` at runtime, where
+`stampTerminalCause` stamps `'unknown'` and writes the gap to the run log. So an obscured
+path cannot travel carrying a cause it never earned — only the honest non-answer. A guard
+with a stated boundary plus a runtime backstop is stronger than a guard with an unbounded
+claim: the first tells a reader where to look, the second tells them not to.
+
+This is the correction worth carrying out of this card. Four rounds were spent growing an
+instrument to meet a claim, and the cheaper move — available from round one — was to ask
+whether the claim was defensible.
+
+N19 is the half that makes the boundary real rather than decorative: it widens the
+recogniser past the stated edge and 24 cases go red. The documented non-goal therefore
+fails in BOTH directions — if the scanner stops seeing a spelling it claims to see, and if
+it starts seeing one it claims not to. A boundary that only failed one way would be a floor,
+not an edge, and the next author could drift across it without ever restating what the
+guard covers.
+
+N7 closes the twin of the argument axis. The callee match required a bare identifier, and
+`PropertyAccessExpression` is unreachable in a flat script where every call is one —
+which is precisely the argument the first cut could have made for identifier-only
+arguments, the day before someone wrote an inline literal. A recogniser narrowed to what
+the file happens to contain is one that stops working the moment the file changes.
+
+### Verified by running, not by reading
+
+- `bun test trident/` — 4178 pass, 0 fail, 119 files (4122 before this change).
+- `scripts/ci/typecheck-all.sh` — 51 tsconfigs, ALL PASS, with `node_modules` installed in
+  the worktree.
+- `scripts/ci/lint.sh` — every gate 0 found.
+- `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
+  which is the file's documented shape and not a regression.
+- The seventeen mutations above, plus thirty-four against the guard itself, each applied to the
+  shipped source and reverted.
+- An end-to-end pass through the shipped modules (`parseInnerResult` →
+  `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct
+  reasons, four distinct summaries, and `'unknown'` reproducing the pre-change sentence
+  exactly.
+
+### What #654 changed under this card, found by checking the prose against the code
+
+Two things, and both are the same failure as the scanner's, one layer up — *a list that
+claims completeness is a claim.*
+
+**An escalation is a loop exit, and the classifier did not read it.** #654 added
+`escalation === null` as the FIRST clause of the fix loop's `while` head. The classifier's
+docblock said its arms mirrored that head; after #654 that sentence was false, and an
+escalated run reported `'unknown'` — this vocabulary's word for *could not be established*
+— about an exit sitting in a variable three lines above the call. **Saying "I cannot tell"
+when you can is the same defect as saying something determinate when you cannot**: both put
+a false value on the honest branch. The vocabulary gains `'review-escalated'`; it carries no
+sentence and no announce, because `escalationStopSentence` and `deriveEscalationBlock`
+already own that story and both run ahead of this field's readers. The member exists so the
+exit is NAMED, not told twice. The docblock now states the standing obligation: **when the
+loop head gains a clause, this function gains an arm.**
+
+**A number in a comment is not evidence.** The parse docblock carried "checked: 214
+statements" — true when written, silently false once `main` moved (229 now). A truncated
+parse is the one failure that makes every assertion in the guard vacuous while looking
+clean, so it is measured rather than asserted in prose: statement count against the file's
+real size, and the last statement's end line against the file's last line. N11 truncates the
+parse to a tenth and reds 19 cases.
+
+### What was checked against `main` and found to have moved
+
+The spec item's `file:line` evidence was written earlier. Verified at `3633ff62`: the two
+shipped emit sites are at `inner-workflow.mjs:7851` and `:7905`, not `:7470` and `:7524`.
+The substance held — both still emit, both still gate as described — and the spec item now
+records the drift rather than leaving the next reader to find it.
