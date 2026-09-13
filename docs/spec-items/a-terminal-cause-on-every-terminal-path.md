@@ -47,8 +47,28 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > **eight** emitted nothing: the two resume shortcuts, the wave-member build, both
 > publish handoffs, both mid-run merge exits, and the Ralph re-fire, on top of the
 > review-verdict exit itself. `.../inner-workflow-terminal-cause.test.ts` enumerates
-> them from source with a positive control, so a thirteenth cannot be added silently
-> — which is the drift this item's HOW IT GOT THIS WAY paragraph describes.
+> them from source with a positive control, so a thirteenth **written the way this
+> codebase writes them** cannot be added silently — which is the drift this item's HOW IT
+> GOT THIS WAY paragraph describes.
+>
+> **THAT QUALIFIER IS THE HONEST FORM AND IT REPLACED AN UNBOUNDED CLAIM.** This line used
+> to read "a thirteenth cannot be added silently", full stop. It is not true and no source
+> scanner can make it true: five review rounds each found another callee or argument
+> spelling the guard did not recognise, and the instrument was widened four times to meet
+> the claim before anyone asked whether the CLAIM was the wrong half. After a computed
+> callee comes an alias, then a re-export, then `eval` — each a real hole, each less
+> reachable than the last, and none of them how anyone adds a terminal path.
+>
+> What the guard enforces, and what this item now claims, is bounded and checkable: **every
+> call whose name is written literally at the call site** — a direct call, a property
+> access, or an element access with a literal key, taking an inline literal, an identifier
+> binding, or a composer — **is seen, and anything the scanner cannot resolve is reported
+> rather than skipped.** The residual is a deliberately obscured call site, and it has a
+> different owner: `stampTerminalCause` stamps `'unknown'` at RUNTIME and writes the gap to
+> the run log, so an obscured path can still only travel with the honest non-answer. A
+> guard with a stated boundary plus a runtime backstop is stronger than one with an
+> unbounded claim — the first tells a reader where to look, the second tells them not to.
+> The boundary is executable, not prose: `a COMPUTED callee is a documented NON-GOAL`.
 >
 > **`status` STAYS `open` UNTIL THE MERGE SHA EXISTS.** The standard says nothing is
 > closed without an as-built record AND a merge SHA (§5 step 3). The record ships in the

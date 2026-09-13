@@ -316,6 +316,8 @@ first cut actually shipped.
 | N15 | `walkOwnScope` stops respecting the boundary at all | 3 fail |
 | N16 | as N14, but keeping the FIRST match | 2 fail |
 | N17 | a fifth traversal added without the audit | 1 fail |
+| N18 | a literal element-access callee stops being recognised | 2 fail |
+| N19 | the recogniser silently widens PAST the stated boundary | 24 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -404,10 +406,45 @@ someone writes the code the guard exists to catch. **A recogniser narrowed to wh
 currently contains is a recogniser that stops working the moment the file changes** — and
 because it fails by going *quiet*, nothing announces that it stopped.
 
-So the standing rule for anything added here: match the broad thing (a call to this name,
-in any spelling) and then *classify*, with an explicit bucket for "I could not tell" that
-**fails**. Never filter at the entry. Filtering at the entry is how a site becomes
-invisible rather than refused, and an invisible site is indistinguishable from a clean one.
+So the standing rule for anything added here: match the broad thing and then *classify*,
+with an explicit bucket for "I could not tell" that **fails**. Never filter at the entry.
+Filtering at the entry is how a site becomes invisible rather than refused, and an
+invisible site is indistinguishable from a clean one.
+
+### …but "the broad thing" needs an edge, and finding that took a fifth round
+
+The sentence above first read *"a call to this name, **in any spelling**"*. That is not a
+rule, it is an unbounded claim, and it is why this scanner was widened four times without
+ever being finished. The fifth report was a computed callee —
+`obj['writeTerminalResult'](…)` — and it made the pattern legible: after a computed key
+comes an alias, then a re-export, then `eval`. **Each is a genuine hole in a literal
+reading of "any spelling", each is less reachable than the last, and none of them is how
+anyone adds a terminal path.** Widening cannot terminate.
+
+**The claim was the wrong half.** The rule now has an edge that can be stated in one line:
+**the callee name must be written literally at the call site.** Three spellings satisfy it
+and all three are recognised — a bare identifier, a property access, and an element access
+with a literal key. A computed callee is a **documented non-goal** with a test asserting
+the current behaviour, so the boundary fails if it stops being true rather than sitting in
+a comment.
+
+**The residual has an owner, which is what makes the boundary safe to have.** A
+deliberately obscured call site still reaches `writeTerminalResult` at runtime, where
+`stampTerminalCause` stamps `'unknown'` and writes the gap to the run log. So an obscured
+path cannot travel carrying a cause it never earned — only the honest non-answer. A guard
+with a stated boundary plus a runtime backstop is stronger than a guard with an unbounded
+claim: the first tells a reader where to look, the second tells them not to.
+
+This is the correction worth carrying out of this card. Four rounds were spent growing an
+instrument to meet a claim, and the cheaper move — available from round one — was to ask
+whether the claim was defensible.
+
+N19 is the half that makes the boundary real rather than decorative: it widens the
+recogniser past the stated edge and 24 cases go red. The documented non-goal therefore
+fails in BOTH directions — if the scanner stops seeing a spelling it claims to see, and if
+it starts seeing one it claims not to. A boundary that only failed one way would be a floor,
+not an edge, and the next author could drift across it without ever restating what the
+guard covers.
 
 N7 closes the twin of the argument axis. The callee match required a bare identifier, and
 `PropertyAccessExpression` is unreachable in a flat script where every call is one —
@@ -423,7 +460,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus seventeen against the guard itself, each applied to the
+- The seventeen mutations above, plus nineteen against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

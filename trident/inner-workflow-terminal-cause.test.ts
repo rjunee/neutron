@@ -22,7 +22,19 @@
  * THIS WAY: the catch-all sentence was TRUE when it was written, and every early exit
  * added afterwards landed in it without anyone adding a terminal branch. Not randomness
  * — one plausible commit at a time. So the guard is not "the twelve known paths are
- * fine"; it is "a thirteenth cannot be added silently."
+ * fine"; it is "a thirteenth WRITTEN THE WAY THIS CODEBASE WRITES THEM cannot be added
+ * silently."
+ *
+ * THAT QUALIFIER IS LOAD-BEARING AND IT WAS ADDED LATE. For four rounds this file claimed
+ * the unqualified version, and each round found another spelling it did not recognise —
+ * an inline literal argument, a property-access callee, a shadowed binding, a nested
+ * return, a computed callee. The instrument was widened four times to meet the claim
+ * before anyone checked whether the CLAIM was the wrong half. It was: no source scanner
+ * can promise that a call cannot be obscured, because obscuring it is always one more
+ * spelling away. What this guard promises instead is bounded and checkable — every call
+ * whose NAME IS WRITTEN LITERALLY at the site is seen, and anything it cannot resolve is
+ * reported rather than skipped. The residual is owned at runtime by `stampTerminalCause`,
+ * and `a COMPUTED callee is a documented NON-GOAL` makes the edge executable.
  */
 import { describe, expect, test } from 'bun:test'
 import ts from 'typescript'
@@ -215,17 +227,44 @@ function terminalSites(src: string): TerminalSite[] {
 /**
  * IS THIS A CALL TO `writeTerminalResult`? Asked of the CALLEE and of nothing else.
  *
- * BOTH SPELLINGS, because the axis the argument fix closed has a twin. Today the function
- * is a flat top-level declaration and every call is a bare identifier, so
- * `PropertyAccessExpression` is unreachable — and that is exactly the argument the first
- * cut could have made for identifier-only arguments the day before someone wrote an
- * inline literal. A recogniser narrowed to what the file happens to contain is a
- * recogniser that stops working the moment the file changes, which is the whole defect
- * class this file is about.
+ * THE RULE, STATED SO IT HAS AN EDGE: **the name must be written literally at the call
+ * site.** Three spellings satisfy that and all three are recognised — a bare identifier, a
+ * property access, and an element access with a literal key. Everything else is outside
+ * this instrument, and that is a decision rather than an oversight.
+ *
+ * WHY THE RULE IS BOUNDED, WHICH IS THE CORRECTION THIS FILE NEEDED MOST. Four times this
+ * scanner was narrowed and four times it was widened to match; the fifth report was a
+ * computed callee, and the honest answer is that widening cannot terminate. After element
+ * access comes a name computed from a variable, then an alias, then a re-export, then
+ * `eval`. Each is a real hole in a literal reading of "any spelling", each is less
+ * reachable than the last, and NONE of them is how anyone adds a terminal path. Chasing
+ * them buys nothing and costs the one thing a guard must have: a reader able to say what
+ * it does and does not cover.
+ *
+ * SO THE CLAIM IS THE PART THAT MOVED. This guard does not promise that a thirteenth
+ * terminal path cannot be added silently — no source scanner can promise that. It promises
+ * that a path written the way this codebase writes them is SEEN, and that anything it
+ * cannot resolve is REPORTED rather than skipped. The residual — a deliberately obscured
+ * call site — has a different owner: `stampTerminalCause` stamps `'unknown'` at RUNTIME and
+ * writes the gap to the run log, so an obscured path still cannot travel with a cause it
+ * never earned. A guard with a stated boundary plus a runtime backstop is stronger than a
+ * guard with an unbounded claim: the first tells a reader where to look, the second tells
+ * them not to.
+ *
+ * `the computed callee is a documented NON-GOAL` below makes that boundary executable
+ * rather than prose.
  */
 function callsTerminalWrite(n: ts.CallExpression): boolean {
-  if (ts.isIdentifier(n.expression)) return n.expression.text === 'writeTerminalResult'
-  if (ts.isPropertyAccessExpression(n.expression)) return n.expression.name.text === 'writeTerminalResult'
+  const callee = n.expression
+  if (ts.isIdentifier(callee)) return callee.text === 'writeTerminalResult'
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text === 'writeTerminalResult'
+  // An element access counts only when the key is a LITERAL — `obj['writeTerminalResult']`
+  // still writes the name in the source, which is where this rule draws its edge. A
+  // computed key does not, and is deliberately not chased.
+  if (ts.isElementAccessExpression(callee)) {
+    const key = callee.argumentExpression
+    return ts.isStringLiteralLike(key) && key.text === 'writeTerminalResult'
+  }
   return false
 }
 
@@ -454,6 +493,11 @@ async function newExitPath() {
 async function newExitPath() {
   await writeTerminalResult()
 }`,
+  'a call reached through a literal element access': `
+const terminal = { writeTerminalResult }
+async function newExitPath() {
+  await terminal['writeTerminalResult']({ ok: false, checkpoint: 'new-exit' })
+}`,
   'a call reached through a property access': `
 const terminal = { writeTerminalResult }
 async function newExitPath() {
@@ -530,6 +574,46 @@ describe('#520 — every terminal path of the inner workflow names its cause', (
    * Failing here does not mean the new traversal is wrong. It means nobody has yet said
    * which kind it is, and that is exactly the decision the last two rounds were lost to.
    */
+  /**
+   * THE BOUNDARY, ASSERTED RATHER THAN DESCRIBED.
+   *
+   * This scanner sees a call whose NAME IS WRITTEN LITERALLY at the call site — a bare
+   * identifier, a property access, or an element access with a literal key. A callee
+   * computed at runtime is NOT seen, and that is a deliberate non-goal.
+   *
+   * WHY IT IS A NON-GOAL AND NOT A BUG. Four rounds widened this instrument to meet an
+   * unbounded claim ("a thirteenth path cannot be added silently"), and the fifth report
+   * showed why that cannot terminate: after a computed key comes an alias, then a
+   * re-export, then `eval`. Each is a genuine hole in a literal reading of "any spelling",
+   * each less reachable than the last, and none is how anyone adds a terminal path. The
+   * claim was the wrong half — so it moved, and this test is where the new one is written
+   * down in a form that fails if it stops being true.
+   *
+   * THE RESIDUAL HAS AN OWNER. A deliberately obscured call site still reaches
+   * `writeTerminalResult` at runtime, where `stampTerminalCause` stamps `'unknown'` and
+   * writes the gap to the run log (see its own describe below). So an obscured path cannot
+   * travel carrying a cause it never earned; it can only travel carrying the honest
+   * non-answer. That is the backstop this boundary is safe to have.
+   */
+  test('a COMPUTED callee is a documented NON-GOAL, and the runtime backstop is why that is safe', () => {
+    const computed = `${SRC}
+const key = 'writeTerminalResult'
+const terminal = { writeTerminalResult }
+async function newExitPath() {
+  await terminal[key]({ ok: false, checkpoint: 'new-exit' })
+}
+`
+    // NOT seen — stated as an equality against the shipped count so the boundary is a
+    // measured fact rather than a sentence somebody believed.
+    expect(terminalSites(computed).length).toBe(12)
+    expect(failingSites(computed)).toEqual([])
+
+    // …whereas the LITERAL key is inside the boundary and is both seen and refused.
+    const literal = `${SRC}\n${THIRTEENTH['a call reached through a literal element access']}\n`
+    expect(terminalSites(literal).length).toBe(13)
+    expect(failingSites(literal).length).toBe(1)
+  })
+
   test('the traversal inventory is pinned — a new walk forces the audit', () => {
     const self = ts.createSourceFile(
       'guard.test.ts',
