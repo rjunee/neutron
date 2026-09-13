@@ -3504,13 +3504,25 @@ function validateEscalationClaim(raw, claimVerdict) {
   // affirmative verdict, and in the OVER-FIRING direction this file's own asymmetry
   // argument calls the costly one.
   //
-  // IT IS REFUSED RATHER THAN RESOLVED, deliberately. Taking the verdict and ignoring the
-  // claim would pick a winner between two halves of one response when nothing here can
-  // know which half the model meant: an approval carrying a design-gap declaration is not
-  // an approval with noise attached, and it is not a rejection. Refusing it keeps FALSE
-  // and UNKNOWN apart — the run proceeds on the verdict alone, and the contradiction is
-  // RECORDED through the same `refusedBecause` channel a bare complaint uses, so a
-  // reviewer that does this is visible instead of quietly half-honoured.
+  // NEITHER HALF IS USABLE, AND THE ANSWER IS NOT AN APPROVING ONE. The claim is refused
+  // HERE — a contradicted declaration cannot fire a trigger — and the ANSWER is separately
+  // refused the right to approve, by `contradictorySynthesis` at the seam where the verdict
+  // is read. Both halves, because both come from the same seat in the same reply: if the
+  // reply contradicts itself, nothing in it is evidence, and choosing one half is picking a
+  // winner between two statements with equal claim to being the mistake.
+  //
+  // AN EARLIER CUT REFUSED ONLY THE CLAIM AND LET THE RUN PROCEED ON THE VERDICT. That
+  // reasoning — "refuse it like a bare complaint, keep false and unknown apart" — holds
+  // ONLY WHERE THE FALL-THROUGH IS INERT. Refusing a bare complaint beside a
+  // REQUEST_CHANGES costs nothing, because the run stops anyway. Beside an APPROVE it
+  // AUTHORISES AN IRREVERSIBLE MERGE on the strength of a reply the line above has just
+  // called self-contradictory. A symmetric rule applied to an asymmetric situation.
+  //
+  // AND THE ASYMMETRY RUNS THE OTHER WAY FROM THIS FILE'S USUAL ONE. The over-fire /
+  // under-fire argument elsewhere weighs stopping a converging run against failing to
+  // prove a repeat — both recoverable, so the tie goes to the safe half. Here one side is
+  // a retry and the other is a bad merge. When one outcome is recoverable and the other is
+  // not, the tie does not go to the verdict.
   //
   // JUDGED ON THE SEAT'S OWN VERDICT, not the gated one. `enforceSeverityGate` can turn a
   // REQUEST_CHANGES into an APPROVE over all-non-blocking findings, and a seat that said
@@ -3518,7 +3530,7 @@ function validateEscalationClaim(raw, claimVerdict) {
   // the gated verdict here would refuse that seat's honest declaration, which is the very
   // case the previous rounds fixed.
   if (claimVerdict === 'APPROVE') {
-    return refuse('the reviewer returned APPROVE and an escalation in the same answer, which cannot both be true — the verdict is taken and the declaration is refused')
+    return refuse('the reviewer returned APPROVE and an escalation in the same answer, which cannot both be true — neither half is usable, so the declaration is refused AND the answer may not approve')
   }
   const kind = typeof raw.kind === 'string' ? raw.kind.trim() : ''
   if (!SELF_DECLARED_ESCALATION_KINDS.includes(kind)) {
@@ -3529,6 +3541,25 @@ function validateEscalationClaim(raw, claimVerdict) {
     return refuse(`a ${kind} escalation must state whatIsMissing, and this one stated nothing`)
   }
   return { ok: true, kind, whatIsMissing: redactProbeText(what).slice(0, WHAT_IS_MISSING_MAX), refusedBecause: '' }
+}
+
+/**
+ * IS THIS REPLY SELF-CONTRADICTORY? A seat that returns APPROVE and an `escalate` payload
+ * in one answer has said two things that cannot both be true.
+ *
+ * READ OFF THE SEAT'S OWN REPLY, for the same reason the claim is: `enforceSeverityGate`
+ * can turn a REQUEST_CHANGES into an APPROVE over all-non-blocking findings, and a seat
+ * that said REQUEST_CHANGES + escalate was CONSISTENT — the gate downgraded it afterwards.
+ * Judging the gated verdict would call that honest seat a liar.
+ *
+ * `escalate` is tested for PRESENCE, not validity. A malformed payload is still the seat
+ * having tried to escalate while approving, and "the declaration was badly formed" is not
+ * a reason to trust the approval that contradicts it.
+ */
+function contradictorySynthesis(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false
+  if (normalizeVerdict(raw.verdict) !== 'APPROVE') return false
+  return raw.escalate !== undefined && raw.escalate !== null
 }
 
 /**
@@ -7148,12 +7179,28 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
     synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
       ? normalizeVerdict(synthesisRaw.verdict)
       : null
+  // A SELF-CONTRADICTORY REPLY MAY NOT APPROVE. Forced HERE, at the one seam every reader
+  // of the verdict goes through, rather than at each `finalVerdict = …` assignment: the
+  // gated object IS the round's answer, and an answer that contradicts itself is not an
+  // approving one. Downgrading to REQUEST_CHANGES makes the fix loop take another round
+  // when the budget allows — which re-Forges, re-reviews and re-synthesises, so the retry
+  // is the loop's own — and when the cap leaves no round, the run ends NOT-APPROVED, which
+  // is the fail-closed direction. Nothing here invents a finding or an escalation kind it
+  // did not measure; it withholds the one authorisation that cannot be taken back.
+  const contradictory = contradictorySynthesis(synthesisRaw)
+  if (contradictory) {
+    log('trident-v2 escalation: synthesis returned APPROVE AND an escalation — the answer contradicts itself, so it may not approve')
+  }
+  const answered = contradictory ? { ...gated, verdict: 'REQUEST_CHANGES' } : gated
   return {
-    ...gated,
-    blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason),
+    ...answered,
+    blockKind: classifyBlock(answered, peers, noReviewRan, panelRejectedWithoutReason),
     reviewRecord,
     escalationClaim,
     escalationClaimVerdict,
+    /** The round's reply said two things that cannot both be true. Carried so the terminal
+     *  result can REPORT it rather than leaving a downgraded verdict unexplained. */
+    contradictorySynthesis: contradictory,
   }
 }
 
@@ -8161,7 +8208,17 @@ ${task}${reflectionGuidance}`,
     // rounds reported as not converging on the round they converged. The ledger measures
     // whether REJECTIONS are getting smaller; an approval is the successful terminus and
     // has no place in that series.
-    const judgedCode = s.blockKind === 'code' && normalizeVerdict(s.verdict) === 'REQUEST_CHANGES'
+    // …AND A ROUND WHOSE REPLY CONTRADICTED ITSELF JUDGED NOTHING. Its verdict was
+    // withheld rather than earned, so folding it into the convergence series would let a
+    // seat that keeps answering incoherently be reported as fix rounds that "stopped
+    // converging" — a cause nobody measured, which is the exact failure this card exists
+    // to remove. Measured: without this, two contradictory rounds produce
+    // `not-converging` with counts [0,0], blaming the fixes for a panel that never
+    // delivered a usable verdict.
+    const judgedCode =
+      s.blockKind === 'code' &&
+      normalizeVerdict(s.verdict) === 'REQUEST_CHANGES' &&
+      s.contradictorySynthesis !== true
     if (judgedCode) {
       eligibleHistory.push(eligibleFixFindings(s.findings))
       blockingCounts.push(blockingFindingCount(s.findings))

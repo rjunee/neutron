@@ -286,8 +286,21 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
     // rebuilding the object by hand) and derives `blockKind` from it. The single-`return`
     // check below is what guarantees there is no other exit handing back a bare null.
     const ret = grabFn('reviewAndSynthesize').slice(grabFn('reviewAndSynthesize').lastIndexOf('  return {'))
-    expect(ret).toContain('...gated,')
-    expect(ret).toContain('blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason),')
+    // ASSERTED AS THE PROPERTY, NOT AS A VARIABLE NAME. This pinned the literal
+    // `...gated,` and broke when the spread source was renamed to `answered` — a
+    // self-contradictory reply may not approve, so the object returned is `gated` with its
+    // verdict withheld. The claim here was never about the identifier: it is that the
+    // return SPREADS its source rather than rebuilding it field by field (which would
+    // silently drop anything the gated verdict carries), and that `blockKind` is derived
+    // from THAT SAME object rather than from a different one.
+    const spread = /return \{\s*\n\s*\.\.\.(\w+),/.exec(ret)
+    expect(spread).not.toBeNull()
+    const spreadName = spread?.[1] ?? ''
+    expect(ret).toContain(`blockKind: classifyBlock(${spreadName}, peers, noReviewRan, panelRejectedWithoutReason),`)
+    // …and whatever it is called, it is `gated` — either directly or as `gated` with a
+    // field overridden, never a fresh object literal.
+    const fn = grabFn('reviewAndSynthesize')
+    expect(spreadName === 'gated' || fn.includes(`${spreadName} = `) && fn.includes('...gated,')).toBe(true)
     // One `return`, so there is no other exit that could hand back a bare null.
     const body = grabFn('reviewAndSynthesize')
     expect(body.split('\n').filter((l) => /^ {2}return /.test(l))).toHaveLength(1)

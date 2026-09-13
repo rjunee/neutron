@@ -510,8 +510,8 @@ describe('the routing the re-plan performs, executed rather than grepped', () =>
   // tag leaves every assertion here green, because there is nothing to see.)
 })
 
-describe('an APPROVE that also escalates is an INCONSISTENT answer, not a stop', () => {
-  test('HEADLINE: the build is NOT stopped, and the contradiction is recorded', async () => {
+describe('an APPROVE that also escalates is an INCONSISTENT answer — and MUST NOT MERGE', () => {
+  test('HEADLINE: no merge-authorising APPROVE escapes, and the contradiction is recorded', async () => {
     // `VERDICT_SCHEMA` permits `escalate` independently of `verdict`, so a seat can
     // return an approval and a declaration in one answer. Honouring the claim stopped a
     // build the reviewer had APPROVED — the self-declared escape hatch overriding an
@@ -540,13 +540,74 @@ describe('an APPROVE that also escalates is an INCONSISTENT answer, not a stop',
     // nothing else.
     expect(logs.some((l) => l.includes('declaration REFUSED') && l.includes('cannot both be true'))).toBe(true)
 
-    // THE VERDICT IS TAKEN. The run approves and merges as the reviewer said.
+    // NEITHER HALF IS USABLE, SO THE ANSWER MAY NOT APPROVE. An earlier cut refused the
+    // claim and let the run "proceed on the verdict" — which reads as conservative and is
+    // the opposite: proceeding on an APPROVE AUTHORISES AN IRREVERSIBLE MERGE on a reply
+    // the code has just called self-contradictory. Refusing a bare complaint beside a
+    // REQUEST_CHANGES costs nothing because the run stops anyway; beside an APPROVE it
+    // costs the one thing that cannot be taken back.
+    //
+    // The asymmetry runs the other way from this file's usual one, too: elsewhere it
+    // weighs stopping a converging run against failing to prove a repeat, both
+    // recoverable. Here one side is a retry and the other is a bad merge.
+    expect(result.verdict).not.toBe('APPROVE')
+    expect(result.checkpoint).not.toBe('argus-approved')
+    expect(result.blockKind).not.toBe('none')
+
+    // NO TRIGGER FIRED EITHER — the refused claim buys no planner, and the run does not
+    // report an escalation kind it never measured. The contradiction is not a design gap.
+    expect(labels(captured, 'plan:fable')).toEqual([])
+    expect(result.escalation).toBeUndefined()
+  })
+
+  test('it RETRIES while the cap allows, and never reports a cause it did not measure', async () => {
+    // The contradictory round is downgraded, so the fix loop takes another one — the retry
+    // is the loop's own (re-Forge, re-review, re-synthesise) rather than a new mechanism.
+    // With a seat that keeps contradicting itself, the run exhausts its budget and ends
+    // NOT-APPROVED, which is the fail-closed half.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 3,
+      rounds: [
+        { findings: [], verdict: 'APPROVE', escalate: { kind: 'design-gap', whatIsMissing: 'x' } },
+        { findings: [], verdict: 'APPROVE', escalate: { kind: 'design-gap', whatIsMissing: 'x' } },
+        { findings: [], verdict: 'APPROVE', escalate: { kind: 'design-gap', whatIsMissing: 'x' } },
+      ],
+    })
+    expect(result.verdict).not.toBe('APPROVE')
+    expect(labels(captured, 'forge:fix-round-')).toEqual(['forge:fix-round-2', 'forge:fix-round-3'])
+
+    // AND NOT `not-converging`. A contradictory round judged nothing, so it stays OUT of
+    // the convergence ledger — otherwise a seat answering incoherently is reported as fix
+    // rounds that stopped converging, blaming the fixes for a panel that never delivered a
+    // usable verdict. Measured before the exclusion: `not-converging` with counts [0,0].
+    expect(result.blockKind).not.toBe('not-converging')
+    expect(result.escalation).toBeUndefined()
+  })
+
+  test('CONTROL: a seat that REJECTED is not called contradictory, even after the severity gate approves it', async () => {
+    // THE CASE THAT PINS "the seat's OWN verdict, not the gated one". This seat is
+    // CONSISTENT — it said REQUEST_CHANGES and attached a declaration — and
+    // `enforceSeverityGate` then downgraded it to APPROVE over all-non-blocking findings.
+    // Judging the contradiction on the GATED verdict would call that honest seat
+    // incoherent, withhold the approval it earned, and spend the round budget re-Forging
+    // code nobody objected to.
+    //
+    // The declaration here is MALFORMED (an unknown kind), so it is refused and fires no
+    // trigger — which is what leaves the approval as the only thing on the table and makes
+    // this test discriminating rather than a second copy of the stop cases above.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 3,
+      rounds: [
+        {
+          findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')],
+          escalate: { kind: 'not-a-real-kind', whatIsMissing: 'x' },
+        },
+      ],
+    })
     expect(result.verdict).toBe('APPROVE')
     expect(result.blockKind).toBe('none')
-    expect(result.escalation).toBeUndefined()
-    // …and no fix round or planner was bought off a refused claim.
     expect(labels(captured, 'forge:fix-round-')).toEqual([])
-    expect(labels(captured, 'plan:fable')).toEqual([])
+    expect(result.escalation).toBeUndefined()
   })
 
   test('CONTROL: the SAME declaration on a REQUEST_CHANGES answer still stops the run', async () => {
@@ -557,13 +618,23 @@ describe('an APPROVE that also escalates is an INCONSISTENT answer, not a stop',
       maxRounds: 6,
       rounds: [
         {
-          findings: [finding('a:b:c', 'minor')],
+          // A BLOCKER, so the severity gate leaves the REQUEST_CHANGES standing and the
+          // round is genuinely recorded — which is what makes the ledger assertion below
+          // discriminating. An all-minor round is downgraded to APPROVE by the gate and
+          // legitimately never enters the series at all.
+          findings: [finding('a:b:c')],
           escalate: { kind: 'missing-dependency', whatIsMissing: 'card X must land first' },
         },
       ],
     })
     expect(result.blockKind).toBe('missing-dependency')
-    expect((result.escalation as Record<string, unknown>).triggers).toContain('missing-dependency')
+    const esc = result.escalation as Record<string, unknown>
+    expect(esc.triggers).toContain('missing-dependency')
+    // AND THE ROUND WAS STILL COUNTED. A reply that REJECTED and declared is consistent, so
+    // it belongs in the convergence ledger — only a CONTRADICTORY reply is excluded.
+    // Without this the exclusion could widen to every declaration-bearing round and the
+    // arithmetic would quietly stop seeing them: the evidence would read `counts []`.
+    expect(String(esc.evidence)).toContain('counts [1]')
   })
 })
 

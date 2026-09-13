@@ -333,7 +333,11 @@ describe('the gate is WIRED, not merely written', () => {
   test('classifyBlock reads the peers INCLUDING the CI one', () => {
     // Otherwise a CI deferral would not classify as infra-only and the loop would
     // re-Forge against a pending check.
-    expect(code.includes('classifyBlock(gated, peers')).toBe(true)
+    // Matched on the SPREAD SOURCE rather than the literal name `gated`: the returned
+    // object is now `gated` with its verdict withheld when the reply contradicts itself,
+    // and this test's claim is that `classifyBlock` reads THAT object together with the
+    // peers — not that the variable is spelled a particular way.
+    expect(/classifyBlock\(\w+, peers/.test(code)).toBe(true)
   })
 
   test('LOCAL mode never spends an agent on a PR that does not exist', () => {
@@ -3158,6 +3162,12 @@ describe('a fully excused CI red still holds the merge', () => {
         grab('isNonBlockingFinding'),
         grab('isCodeWorkFinding'),
         grab('normalizeVerdict'),
+        // A self-contradictory reply (APPROVE + escalate) may not approve, and the tail
+        // below asks this before it builds the returned object. Registered here for the
+        // same reason every other name on this list is: the tail is ASSEMBLED from named
+        // pieces rather than imported, so a helper it calls and this list omits throws
+        // `ReferenceError` instead of silently testing a stale assembly.
+        grab('contradictorySynthesis'),
         grab('classifyBlock'),
         SRC.slice(at, end),
       ].join('\n'),

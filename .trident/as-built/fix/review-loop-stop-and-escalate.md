@@ -604,13 +604,37 @@ build the reviewer had approved — the self-declared escape hatch overriding an
 verdict, in the OVER-FIRING direction this file's own asymmetry argument calls the costly
 one.
 
-IT IS REFUSED, NOT RESOLVED. Taking the verdict and dropping the claim would pick a winner
-between two halves of one response when nothing here can know which half the model meant: an
-approval carrying a design-gap declaration is not an approval with noise attached, and it is
-not a rejection. It goes through the same `refusedBecause` channel a bare complaint uses —
-the run proceeds on the verdict alone and the contradiction is RECORDED, so a reviewer that
-does this is visible rather than quietly half-honoured. That is the same false-vs-unknown
-separation the rest of this gate is built on.
+NEITHER HALF IS USABLE. The claim is refused — a contradicted declaration fires no trigger —
+and the ANSWER is separately refused the right to APPROVE. Both, because both came from the
+same seat in the same reply: if the reply contradicts itself, nothing in it is evidence.
+
+AN EARLIER CUT REFUSED ONLY THE CLAIM AND LET THE RUN "PROCEED ON THE VERDICT", and that is
+worth recording because it reads as the conservative option and is the opposite. The
+reasoning was "refuse it like a bare complaint, keep false and unknown apart" — which holds
+ONLY WHERE THE FALL-THROUGH IS INERT. Refusing a bare complaint beside a REQUEST_CHANGES
+costs nothing, because the run stops anyway. Beside an APPROVE it AUTHORISES AN IRREVERSIBLE
+MERGE on the strength of a reply the line above has just called self-contradictory. A
+symmetric rule applied to an asymmetric situation.
+
+AND THE ASYMMETRY RUNS THE OTHER WAY FROM THIS CARD'S USUAL ONE. The over-fire/under-fire
+argument weighs stopping a converging run against failing to prove a repeat — both
+recoverable, so the tie goes to the safe half. Here one side is a retry and the other is a
+bad merge. WHEN ONE OUTCOME IS RECOVERABLE AND THE OTHER IS NOT, THE TIE DOES NOT GO TO THE
+VERDICT. Taking the verdict was itself picking a winner, in the direction nobody noticed
+they were picking.
+
+SO THE ANSWER IS DOWNGRADED, NOT REINTERPRETED. `contradictorySynthesis` withholds the
+approval at the one seam every reader of the verdict passes through; the fix loop then takes
+another round if the budget allows — the retry is the loop's own re-Forge/re-review/
+re-synthesise — and when the cap leaves no round the run ends NOT-APPROVED. Nothing invents
+a finding or an escalation kind it did not measure; it withholds the one authorisation that
+cannot be taken back.
+
+AND A CONTRADICTORY ROUND JUDGED NOTHING, so it stays out of the convergence ledger.
+Without that, a seat answering incoherently twice is reported as fix rounds that "stopped
+converging" — measured: `not-converging` with counts `[0,0]`, blaming the fixes for a panel
+that never delivered a usable verdict. That is the same invented-cause failure this card
+exists to remove, reproduced by the card's own remedy.
 
 JUDGED ON THE SEAT'S OWN VERDICT, not the gated one, and the distinction is load-bearing:
 `enforceSeverityGate` turns a REQUEST_CHANGES into an APPROVE over all-non-blocking
@@ -656,6 +680,15 @@ reporting success".
 caller the opposite of what happened. Refusing loudly, or reporting the suppression in the
 result, are the only two honest options — and which one is right depends on who calls it,
 not on what the neighbouring guard does.
+
+**SIX SOURCE-TEXT ASSERTIONS BROKEN BY CORRECT CHANGES**, the last three by renaming one
+spread source from `gated` to `answered` — a rename forced by the fix above, since the
+returned object is now the gated verdict with its approval withheld. Each pinned a
+VARIABLE NAME while meaning a PROPERTY: that the return spreads its source rather than
+rebuilding it field by field, and that `blockKind` is derived from that same object. They
+now assert exactly that, with the name read out of the match. The count is the argument:
+a source assertion fails on correct work often enough that it should be the exception,
+reserved for claims with no behaviour to execute.
 
 **FIVE ONE-ARM INSTANCES ON THIS BRANCH.** A rule reasoned about carefully for one case and
 inherited unexamined by its neighbour: the `./` strip applied to every segment instead of
