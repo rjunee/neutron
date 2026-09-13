@@ -137,9 +137,9 @@ and reverted mechanically, with the tree verified clean afterwards.
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number
 written once and then never re-derived, in the one section whose whole purpose is
-auditability. The last full harness run covered **M1–M29 in one pass: 29/29 reddened
-their target**, and M30–M31 were verified individually as they were added. Re-derive it
-from the rows below rather than trusting this sentence.
+auditability. The last full harness run covered **every row in one pass against this head: 31/31
+reddened their target**, with the worktree verified clean afterwards. Re-derive the
+count from the rows below rather than trusting this sentence.
 
 | # | Mutation | Reddens |
 |---|---|---|
