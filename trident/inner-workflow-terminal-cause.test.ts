@@ -211,7 +211,7 @@ function terminalSites(src: string): TerminalSite[] {
       return
     }
     const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
-    const resolved = resolveToObjectLiteral(arg)
+    const resolved = resolveToObjectLiterals(arg)
     if (resolved === null) {
       sites.push({
         label,
@@ -225,7 +225,10 @@ function terminalSites(src: string): TerminalSite[] {
       })
       return
     }
-    sites.push({ label, line, ...readCause(resolved), props: ownPropertyNames(resolved) })
+    // `props` describes the FIRST resolved object; it exists only so claims about the
+    // results (how many carry a `blockKind`) can be derived rather than remembered, and
+    // every real site resolves to exactly one object.
+    sites.push({ label, line, ...readCause(resolved), props: ownPropertyNames(resolved[0]!) })
   })
   return sites
 }
@@ -274,18 +277,37 @@ function callsTerminalWrite(n: ts.CallExpression): boolean {
   return false
 }
 
-/** The object literal an argument ultimately names, or `null` when it names none. */
-function resolveToObjectLiteral(arg: ts.Expression): ts.ObjectLiteralExpression | null {
-  if (ts.isObjectLiteralExpression(arg)) return arg
+/**
+ * EVERY OBJECT LITERAL THIS ARGUMENT CAN BE, or `null` when it names none.
+ *
+ * A LIST, NOT ONE. A composer may return from more than one place, and taking the first
+ * return was a real false pass: a branching composer is an ORDINARY thing to write —
+ *
+ *     function newExitResult(stamped) {
+ *       if (stamped) return { terminalCauseKind: 'workflow-threw' }
+ *       return { ok: false, checkpoint: 'new-exit' }      // ← the unstamped one
+ *     }
+ *
+ * — and the scanner resolved the first, called the site stamped, and reported nothing. That
+ * is inside the claim this guard makes, not outside it: nobody writes
+ * `obj['writeTerminalResult'](…)`, but anyone might add that composer on a Tuesday.
+ *
+ * THE QUESTION THAT FOUND IT is one level up from the traversal audit. That audit asked
+ * whether each walk STOPS at the right boundary; this asks whether each walk CONSIDERS
+ * EVERYTHING inside it. Three resolvers answered for the first instance they found; see
+ * `readCause` and `bindingIn` for the other two.
+ */
+function resolveToObjectLiterals(arg: ts.Expression): ts.ObjectLiteralExpression[] | null {
+  if (ts.isObjectLiteralExpression(arg)) return [arg]
   if (!ts.isIdentifier(arg)) return null
   const bound = lookup(arg.text, arg)
   // A FUNCTION DECLARATION IS NOT AN OBJECT, and neither is an opaque binding. Both refuse.
   if (bound === null || bound.kind !== 'value') return null
-  if (ts.isObjectLiteralExpression(bound.init)) return bound.init
-  // A composer call — follow it into that function's OWN `return`, resolving the composer
+  if (ts.isObjectLiteralExpression(bound.init)) return [bound.init]
+  // A composer call — follow it into that function's OWN returns, resolving the composer
   // name from the CALL's position so a shadowed composer refuses like any other name.
   if (ts.isCallExpression(bound.init) && ts.isIdentifier(bound.init.expression)) {
-    return composerReturnLiteral(bound.init.expression.text, bound.init.expression)
+    return composerReturnLiterals(bound.init.expression.text, bound.init.expression)
   }
   return null
 }
@@ -354,19 +376,26 @@ function bindingIn(scope: ts.Node, name: string): Binding | null {
   }
   const statements = ts.isSourceFile(scope) || ts.isBlock(scope) ? scope.statements : undefined
   if (statements === undefined) return null
+  // EVERY DECLARATION IN THIS SCOPE, NOT THE FIRST — the third "first instance" answer the
+  // audit found. A scope can legally bind one name twice (`var`, or a `var` beside a
+  // function declaration), and taking whichever came first is a guess about which one the
+  // use site means. Two declarations is an ambiguity this scanner will not resolve, so it
+  // refuses, which fails loudly instead of answering from one of them.
+  const found: Binding[] = []
   for (const st of statements) {
-    if (ts.isFunctionDeclaration(st) && st.name?.text === name) return { kind: 'function', decl: st }
+    if (ts.isFunctionDeclaration(st) && st.name?.text === name) found.push({ kind: 'function', decl: st })
     if (!ts.isVariableStatement(st)) continue
     for (const d of st.declarationList.declarations) {
       if (!ts.isIdentifier(d.name)) {
-        if (bindsInPattern(d.name, name)) return { kind: 'opaque' }
+        if (bindsInPattern(d.name, name)) found.push({ kind: 'opaque' })
         continue
       }
       if (d.name.text !== name) continue
-      return d.initializer === undefined ? { kind: 'opaque' } : { kind: 'value', init: d.initializer }
+      found.push(d.initializer === undefined ? { kind: 'opaque' } : { kind: 'value', init: d.initializer })
     }
   }
-  return null
+  if (found.length === 0) return null
+  return found.length === 1 ? found[0]! : { kind: 'opaque' }
 }
 
 /**
@@ -388,37 +417,43 @@ function bindsInPattern(pattern: ts.BindingName, name: string): boolean {
 }
 
 /**
- * THE OBJECT LITERAL A NAMED FUNCTION RETURNS, or `null`.
+ * EVERY OBJECT LITERAL A NAMED FUNCTION RETURNS FROM ITS OWN BODY, or `null`.
  *
- * TWO BOUNDARIES, AND BOTH WERE CROSSED. The function was looked up by walking the WHOLE
- * file for a declaration with a matching name, and its `return` was found by walking its
- * ENTIRE subtree — so a literal inside a NESTED function was returned as if it were the
- * composer's own result:
+ * TWO BOUNDARIES, AND BOTH WERE CROSSED ONCE. The function was looked up by walking the
+ * WHOLE file for a matching name, and its `return` was found by walking its ENTIRE subtree
+ * — so a literal inside a NESTED function was returned as the composer's own result. Both
+ * are closed now: the name resolves through the shared scope chain, and the returns are
+ * gathered with `walkOwnScope`.
  *
- *     function newExitResult() {
- *       function decoy() {
- *         return { terminalCauseKind: 'workflow-threw' }   // ← this was believed
- *       }
- *       return { ok: false, checkpoint: 'new-exit' }        // ← this is the result
- *     }
+ * AND THEN THE COUNT WAS WRONG TOO. It took the FIRST own-scope return and ignored later
+ * ones, so a composer that returns a stamped object on one branch and an unstamped one on
+ * another read as stamped. Every own-scope return is collected now, and `readCause`
+ * requires ALL of them to carry the field — a composer whose branches are all stamped is
+ * genuinely fine, and one where any branch is not must fail.
  *
- * Seen, counted, and classified as stamped while the real result carried no cause. Same
- * defect as the scope-blind resolver above, in a different traversal — which is why the
- * fix is the shared `lookup` plus `walkOwnScope`, not a patch to this one function.
- *
- * The FIRST own-scope `return` of an object literal wins; a composer whose result is
- * assembled some other way resolves to `null`, which refuses loudly.
+ * A RETURN THIS SCANNER CANNOT READ REFUSES THE WHOLE COMPOSER. `return someVariable` or
+ * `return cond ? a : b` is a result object it cannot see, and a composer with one of those
+ * is one whose stamping cannot be established — `'unresolved'`, which fails loudly, rather
+ * than a verdict drawn from the returns that happen to be literals. Same for a composer
+ * with no object-literal return at all.
  */
-function composerReturnLiteral(name: string, use: ts.Node): ts.ObjectLiteralExpression | null {
+function composerReturnLiterals(name: string, use: ts.Node): ts.ObjectLiteralExpression[] | null {
   const bound = lookup(name, use)
   if (bound === null || bound.kind !== 'function') return null
-  let out: ts.ObjectLiteralExpression | null = null
+  const literals: ts.ObjectLiteralExpression[] = []
+  let unreadable = false
   walkOwnScope(bound.decl, (n) => {
-    if (out === null && ts.isReturnStatement(n) && n.expression !== undefined && ts.isObjectLiteralExpression(n.expression)) {
-      out = n.expression
+    if (!ts.isReturnStatement(n)) return
+    // A bare `return` yields undefined, which is not a terminal result this scanner can
+    // judge; treat it like any other unreadable return rather than ignoring it.
+    if (n.expression === undefined || !ts.isObjectLiteralExpression(n.expression)) {
+      unreadable = true
+      return
     }
+    literals.push(n.expression)
   })
-  return out
+  if (unreadable || literals.length === 0) return null
+  return literals
 }
 
 /**
@@ -444,19 +479,56 @@ function ownPropertyNames(obj: ts.ObjectLiteralExpression): string[] {
   return names
 }
 
-function readCause(obj: ts.ObjectLiteralExpression): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
+function readCauseOf(obj: ts.ObjectLiteralExpression): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
+  // LAST WINS, NOT FIRST — the other "first instance it finds" answer the audit turned up.
+  // `{ terminalCauseKind: 'a', terminalCauseKind: 'b' }` is legal and evaluates to 'b', so
+  // reading the first match reported a value no runtime would produce. Rare in hand-written
+  // code and free to get right, which is the whole argument for getting it right.
+  let found: Pick<TerminalSite, 'stamped' | 'kind' | 'why'> | null = null
   for (const prop of obj.properties) {
     if (ts.isShorthandPropertyAssignment(prop) && prop.name.text === 'terminalCauseKind') {
-      return { stamped: 'computed', kind: null, why: '' }
+      found = { stamped: 'computed', kind: null, why: '' }
+      continue
     }
     if (!ts.isPropertyAssignment(prop)) continue
     const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null
     if (key !== 'terminalCauseKind') continue
-    return ts.isStringLiteralLike(prop.initializer)
+    found = ts.isStringLiteralLike(prop.initializer)
       ? { stamped: 'literal', kind: prop.initializer.text, why: '' }
       : { stamped: 'computed', kind: null, why: '' }
   }
-  return { stamped: 'absent', kind: null, why: 'the result object has no terminalCauseKind property' }
+  return found ?? { stamped: 'absent', kind: null, why: 'the result object has no terminalCauseKind property' }
+}
+
+/**
+ * THE VERDICT FOR A SITE, OVER EVERY OBJECT ITS ARGUMENT CAN BE.
+ *
+ * ALL, NOT ANY. A composer with several returns is stamped only when EVERY one of them
+ * carries the field; one unstamped branch is an unstamped path, and it is reported with
+ * the count so the failure says how many of how many were missing it. A guard that
+ * accepted "some return was stamped" would pass the branching composer this was written
+ * for.
+ */
+function readCause(objs: readonly ts.ObjectLiteralExpression[]): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
+  const read = objs.map(readCauseOf)
+  const bare = read.filter((r) => r.stamped === 'absent')
+  if (bare.length > 0) {
+    return {
+      stamped: 'absent',
+      kind: null,
+      why:
+        objs.length === 1
+          ? 'the result object has no terminalCauseKind property'
+          : `${bare.length} of ${objs.length} returned objects have no terminalCauseKind property`,
+    }
+  }
+  const kinds = new Set(read.map((r) => r.kind))
+  // Every branch stamps, but not all with the same literal — present, and not a single
+  // value this scanner can name. `'computed'` is the honest label for that.
+  if (read.some((r) => r.stamped === 'computed') || kinds.size > 1) {
+    return { stamped: 'computed', kind: null, why: '' }
+  }
+  return { stamped: 'literal', kind: read[0]!.kind, why: '' }
 }
 
 /** The sites this guard refuses: a silent path, and a path it could not read. */
@@ -555,6 +627,42 @@ function newExitResult() {
 }
 async function newExitPath() {
   const newExit = newExitResult()
+  await writeTerminalResult(newExit)
+}`,
+  // A BRANCHING COMPOSER WITH ONE UNSTAMPED RETURN. An ordinary thing to write, which is
+  // what puts it inside this guard's claim rather than outside it. The stamped branch is
+  // FIRST so that a scanner reading only the first return calls the site stamped.
+  'a composer that returns a stamped object on one branch and an unstamped one on another': `
+function newExitResult(stamped) {
+  if (stamped) return { terminalCauseKind: 'workflow-threw' }
+  return { ok: false, checkpoint: 'new-exit' }
+}
+async function newExitPath() {
+  const newExit = newExitResult(false)
+  await writeTerminalResult(newExit)
+}`,
+  // …and the unstamped branch LAST-but-one, so a scanner reading only the last return is
+  // caught too. Neither end of the list is a safe place to look.
+  'a composer whose unstamped return is not the last one': `
+function newExitResult(mode) {
+  if (mode === 'a') return { terminalCauseKind: 'workflow-threw' }
+  if (mode === 'b') return { ok: false, checkpoint: 'new-exit' }
+  return { terminalCauseKind: 'workflow-threw' }
+}
+async function newExitPath() {
+  const newExit = newExitResult('b')
+  await writeTerminalResult(newExit)
+}`,
+  // A RETURN THIS SCANNER CANNOT READ refuses the whole composer rather than judging it
+  // from the returns that happen to be literals.
+  'a composer with a return the scanner cannot read': `
+const elsewhere = { ok: false, checkpoint: 'new-exit' }
+function newExitResult(stamped) {
+  if (stamped) return { terminalCauseKind: 'workflow-threw' }
+  return elsewhere
+}
+async function newExitPath() {
+  const newExit = newExitResult(false)
   await writeTerminalResult(newExit)
 }`,
   // …AND THE COMPOSER NAME RESOLVED FROM THE WRONG SCOPE. The real composer is the one
@@ -840,6 +948,108 @@ async function newExitPath({ other = ({ picked }) => picked }) {
     // boundary-blind traversal turns into a spurious failure.
     expect({ stamped: added.stamped, kind: added.kind }).toEqual({ stamped: 'literal', kind: 'workflow-threw' })
     expect(failingSites(doctored)).toEqual([])
+  })
+
+  /**
+   * A COMPOSER IS JUDGED ON ALL OF ITS RETURNS, AND BOTH DIRECTIONS ARE ASSERTED.
+   *
+   * "Multi-return is handled" is satisfied by a resolver that refuses EVERY composer — and
+   * that resolver would red the three real sites which reach their cause through
+   * `mergedTerminalResult`. So the pair is the test: a two-return composer where BOTH are
+   * stamped must pass, and one where EITHER is not must fail. Neither half is the property
+   * on its own.
+   */
+  test('a composer whose returns are ALL stamped is fine', () => {
+    const ok = `${SRC}
+function newExitResult(mode) {
+  if (mode === 'a') return { ok: false, terminalCauseKind: 'workflow-threw' }
+  return { ok: false, terminalCauseKind: 'workflow-threw' }
+}
+async function newExitPath() {
+  const newExit = newExitResult('b')
+  await writeTerminalResult(newExit)
+}
+`
+    const added = terminalSites(ok).find((s) => s.line > SRC_LINES)!
+    expect({ stamped: added.stamped, kind: added.kind }).toEqual({ stamped: 'literal', kind: 'workflow-threw' })
+    expect(failingSites(ok)).toEqual([])
+  })
+
+  test('…and all-stamped-but-DIFFERENT is present without being a single value', () => {
+    const differing = `${SRC}
+function newExitResult(mode) {
+  if (mode === 'a') return { ok: false, terminalCauseKind: 'workflow-threw' }
+  return { ok: false, terminalCauseKind: 'ralph-task-built' }
+}
+async function newExitPath() {
+  const newExit = newExitResult('b')
+  await writeTerminalResult(newExit)
+}
+`
+    const added = terminalSites(differing).find((s) => s.line > SRC_LINES)!
+    // Stamped on every branch, so the guard is silent — but the scanner will not name a
+    // single literal it cannot know, which is what `'computed'` is for.
+    expect({ stamped: added.stamped, kind: added.kind }).toEqual({ stamped: 'computed', kind: null })
+    expect(failingSites(differing)).toEqual([])
+  })
+
+  test('ONE unstamped return fails the site, wherever in the list it sits', () => {
+    for (const shape of [
+      'a composer that returns a stamped object on one branch and an unstamped one on another',
+      'a composer whose unstamped return is not the last one',
+    ]) {
+      const doctored = `${SRC}\n${THIRTEENTH[shape]}\n`
+      const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+      expect({ shape, stamped: added.stamped }).toEqual({ shape, stamped: 'absent' })
+      // The failure says how many of how many, so the reader knows it is a branch rather
+      // than the whole composer.
+      expect(failingSites(doctored)[0]).toContain('of')
+      expect(failingSites(doctored).length).toBe(1)
+    }
+  })
+
+  /**
+   * THE OTHER TWO "FIRST INSTANCE" ANSWERS THE AUDIT FOUND, each with its own control —
+   * both were fixed in the same change as the composer and both SURVIVED their first
+   * mutation run, because a fix without a control is a fix nothing is holding.
+   */
+  test('a duplicated key reads LAST, which is what the runtime does', () => {
+    // `{ a: 1, a: 2 }` is legal and evaluates to 2. Reading the first match reported a
+    // value no runtime would ever produce.
+    const dup = `${SRC}
+async function newExitPath() {
+  await writeTerminalResult({
+    ok: false,
+    checkpoint: 'new-exit',
+    terminalCauseKind: 'workflow-threw',
+    terminalCauseKind: 'ralph-task-built',
+  })
+}
+`
+    const added = terminalSites(dup).find((s) => s.line > SRC_LINES)!
+    expect(added.kind).toBe('ralph-task-built')
+  })
+
+  test('a scope that binds one name TWICE is an ambiguity, not a first-one-wins', () => {
+    // Legal with `var`. Taking whichever came first is a guess about which declaration the
+    // use site means, and this scanner does not guess — it refuses, which fails loudly.
+    const twice = `${SRC}
+async function newExitPath() {
+  var newExit = { ok: false, terminalCauseKind: 'workflow-threw' }
+  var newExit = { ok: false, checkpoint: 'new-exit' }
+  await writeTerminalResult(newExit)
+}
+`
+    const added = terminalSites(twice).find((s) => s.line > SRC_LINES)!
+    expect(added.stamped).toBe('unresolved')
+    expect(failingSites(twice).length).toBe(1)
+  })
+
+  test('a return the scanner cannot read refuses the composer rather than judging it', () => {
+    const doctored = `${SRC}\n${THIRTEENTH['a composer with a return the scanner cannot read']}\n`
+    const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+    expect(added.stamped).toBe('unresolved')
+    expect(failingSites(doctored).length).toBe(1)
   })
 
   test('a composer resolved from the wrong scope is not this call\'s composer', () => {

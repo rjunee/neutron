@@ -326,6 +326,11 @@ first cut actually shipped.
 | N25 | diagnostics composed BEFORE the stamp again | 2 fail |
 | N26 | the two refusal facts share one branch | 1 fail |
 | N27 | the extraction harness reverts to sloppy mode | 1 fail |
+| N28 | the composer takes only its FIRST own-scope return | 4 fail |
+| N29 | ANY stamped return is accepted instead of ALL | 3 fail |
+| N30 | an unreadable return is ignored rather than refusing the composer | 2 fail |
+| N31 | a duplicated key reads FIRST instead of last | 1 fail |
+| N32 | a scope binding one name twice takes the first declaration | 1 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -418,6 +423,55 @@ case *passed* while the real code would have thrown. Every extraction in this fi
 running sloppy since the first one. The preamble now opts into strict, and N27 reds if it
 reverts. A harness quietly kinder than production is a test that cannot see the bug it is
 pointed at.
+
+### Does each walk STOP at the right boundary — or does it CONSIDER everything inside it?
+
+The traversal audit asked the first question. This is the second, one level up, and three
+resolvers answered for **the first instance they found** rather than for all of the
+construct they claim to resolve.
+
+**The composer, which was the live false pass.** `composerReturnLiterals` took the first
+own-scope object-literal return, so:
+
+```js
+function newExitResult(stamped) {
+  if (stamped) return { terminalCauseKind: 'workflow-threw' }
+  return { ok: false, checkpoint: 'new-exit' }      // ← the unstamped one
+}
+```
+
+resolved to the stamped branch and the site read as stamped. **A branching composer is an
+ordinary thing to write** — which places it squarely inside the claim this guard narrowed
+to, unlike `obj['writeTerminalResult'](…)`, which nobody writes and is correctly a
+documented non-goal. Every own-scope return is collected now and `readCause` requires ALL of
+them to carry the field; a return the scanner cannot read (`return someVariable`, a bare
+`return`) refuses the whole composer as `'unresolved'` rather than yielding a verdict drawn
+from the returns that happen to be literals.
+
+Both directions are asserted, because *"multi-return is handled"* is satisfied by a resolver
+that refuses **every** composer — and that resolver would red the three real sites which
+reach their cause through `mergedTerminalResult`. A two-return composer where both are
+stamped must pass; one where either is not must fail; and the unstamped branch is placed
+first in one control and mid-list in another, because neither end of the list is a safe
+place to look.
+
+**`readCauseOf` read the FIRST matching property.** `{ terminalCauseKind: 'a',
+terminalCauseKind: 'b' }` is legal and evaluates to `'b'`, so first-wins reported a value no
+runtime would produce. Last wins now.
+
+**`bindingIn` took the first matching declaration in a scope.** A scope can legally bind one
+name twice (`var`, or a `var` beside a function declaration), and picking whichever came
+first is a guess about which one the use site means. Two declarations is an ambiguity this
+scanner will not resolve, so it refuses.
+
+Two of the three were **correct already** and are recorded as such: `bindsInPattern` asks an
+existence question and considers every binding element, and `terminalSites` collects every
+call rather than stopping at one. `lookup` walking outward and stopping at the nearest scope
+that binds is correct scoping semantics, not a first-instance error.
+
+**N31 and N32 survived their first mutation run.** Both were fixed in the same change as the
+composer and neither had a control — a fix without a control is a fix nothing is holding,
+and the mutation table is the only thing that says so out loud.
 
 ### A count is the most compressed possible claim of completeness
 
@@ -558,7 +612,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus twenty-seven against the guard itself, each applied to the
+- The seventeen mutations above, plus thirty-two against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct
