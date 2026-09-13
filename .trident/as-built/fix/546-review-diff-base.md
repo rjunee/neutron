@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:6043` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:6080` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -237,7 +237,7 @@ conclusion.
 Catching up to `main` (six PRs, `c4a292f0`) brought a NEW re-plan prompt that composes
 `git diff ${baseBranch}..${forgeBranch}` — a bare local branch name, no `--end-of-options`,
 in a command an agent is told to run. **The gate this PR ships failed the merged tree on it**,
-at `inner-workflow.mjs:2485`, before any of it could reach a reviewer's diff. Repointed at
+at `inner-workflow.mjs:2522`, before any of it could reach a reviewer's diff. Repointed at
 `diffBase`, which is what the neighbouring resume hint fifty lines above already uses.
 
 Three things worth keeping from that:
@@ -263,6 +263,56 @@ green, `lint.sh` green, leak gate clean but for the worktree's own `.git` pointe
 builds that fail reading files with the disk at 98%. Neither area is touched by this branch
 (0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
 is to name what I ran and what it did not cover, not to call the suite green.
+
+### Round thirty-three: the sentinel was SHA-1-specific, and so was the recogniser
+
+**Same defect shape as round thirty-two, one qualifier over.** The all-zero word is
+unresolvable because git ignores a ref whose name is exactly the hash width in hex — and "the
+hash width" is 40 only under SHA-1. Measured on git 2.43.0 (`--object-format=sha256`, supported
+since 2.29):
+
+    sha256 repo, branch 0{40} created   → git diff 0{40}..HEAD   EXIT 0, a diff   ← the hole
+    sha256 repo, branch 0{64} created   → git diff 0{64}..HEAD   fatal 128, none
+    sha1   repo, branch 0{64} created   → git diff 0{64}..HEAD   EXIT 0, a diff   ← the mirror
+
+So neither fixed width is safe in both formats. The arm now derives the width where the word is
+evaluated: `case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;;
+*) printf '%040d' 0;; esac`. **Round thirty-two's missing qualifier was "while nobody has
+created that ref"; this round's was "in a SHA-1 repository".** Both times a property measured
+against one repository's CONFIGURATION was written down as a property of the VALUE — which is
+the same failure as the fixture-supplies-the-claim lesson, one level up: the fixture that could
+not contradict it was the default `git init`.
+
+**The more consequential half was not the sentinel.** `^[0-9a-f]{40}$` appeared in four
+recognisers on the base path — `diffBaseRef`'s pin test, `refResolves`'s probe-output test, the
+wrapper's KIND-1 classifier and its shape assertion — and in a SHA-256 repository each of them
+refuses a LEGITIMATE full object name: a valid pinned base is rejected outright, and a valid
+probe answer reads as `'unknown'`, which after round thirty-one means a refusal. That is a live
+over-refusal independent of the sentinel, and it is the third time this branch has shipped one
+(the remote-only checkout, the uppercase object name, now the hash width). All three were found
+by asking what the guard turns away, not what it lets through.
+
+**And the fixture axis is the finding underneath the finding.** Every fixture in both test files
+was a default `git init`, so a hash-width assumption could not fail a test — exactly as the
+lowercase-only fixture hid the uppercase over-refusal two rounds earlier. `seedWorld` now takes
+the object format in both files, and the SHA-256 rows assert the emitted word refuses AFTER a
+branch and a tag exist at BOTH widths, plus the complement that **the other width resolves at
+exit 0 with a file list**, which is what makes the derivation necessary rather than decorative.
+Mutations: sentinel pinned to 40 zeros reds the sha256 case; either recogniser narrowed reds the
+pin parity case; the wrapper narrowed reds the wrapper case.
+
+**One claim I falsified myself, mid-round, and kept the corrected form.** My first draft of the
+new comment said the fallback width "cannot be reached inside a working repository" — and the
+next measurement (`.git/objects` unreadable: probe 128, format read 128, `git diff` 129) reached
+it inside a repository. What actually holds is weaker and is what the comment now says: in every
+failure mode measured, the probe, the format read and the range all fail TOGETHER, so where the
+fallback is reached git refuses the range on its own account. I have not found a state where the
+probe fails, the format read fails, and the range still works.
+
+**Left open, deliberately and named**: `FULL_OID` in `merge.ts` and `inner-workflow.mjs`, and the
+`outer-published:<40hex>:…` checkpoint vocabulary, still assume SHA-1. Those are about run heads
+and persisted checkpoint text rather than a rev-range base, and a persisted format is not
+something to widen in passing — filed as #667 rather than done here.
 
 ### The pattern, stated as a prediction rather than a catalogue
 
@@ -389,8 +439,8 @@ default) and it produces a NAME that still goes through this binding.
 **One thing this round measured and deliberately did NOT fix.** Thirty-two rounds of edits plus the catch-up merge have
 moved `inner-workflow.mjs` by roughly eight hundred lines (the CI-rollup anchor alone by 794), and citations into it from files this
 branch does not touch have drifted with it — the CI-rollup pair cited in `GLOSSARY.md:176` as
-`:4708-4712` is now at `:5502`/`:5506`, and `run-evidence-probes.ts:201`'s `:1796` is at
-`:2070`. They were approximately right when written. Repointing them would widen a PR under
+`:4708-4712` is now at `:5539`/`:5543`, and `run-evidence-probes.ts:201`'s `:1796` is at
+`:2107`. They were approximately right when written. Repointing them would widen a PR under
 review with changes unrelated to its subject, and the drift is not this branch's defect but a
 property of citing a 7,000-line file by line number at all: **every merge that edits it does
 this to every citation into it.** Recorded here with measured values rather than silently left,
@@ -1659,7 +1709,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5876`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5913`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

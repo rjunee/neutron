@@ -66,7 +66,8 @@ BASE_REF="${1:-main}"
 # in a lucky order, but because they are unreachable from the wrong kind.**
 #
 # THE KINDS, and they do not overlap:
-#   1. ALREADY SHAPED — a 40-hex object name (either case: git accepts both) or a `refs/…`
+#   1. ALREADY SHAPED — a full object name (40 hex, or 64 under `--object-format=sha256`;
+#      either case, since git accepts both) or a `refs/…`
 #      path. Kept VERBATIM. This is the contract the rest of the script asserts.
 #   2. HEAD-ROOTED — `HEAD`, `HEAD~n`, `HEAD^…`. Unambiguous (no namespace lookup), so it is
 #      RESOLVED to an object name here rather than refused.
@@ -86,15 +87,18 @@ case "$BASE_REF" in
     fi
     ;;
   *)
-    if [[ "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    if [[ "$BASE_REF" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
       # KIND 1b — an object name. Verbatim; its resolvability is checked at the point of use.
+      # 40 hex OR 64: `git init --object-format=sha256` (supported since 2.29) names objects in
+      # 64 hex, and the 40-only form refused a legitimate base outright — a claim about the
+      # repository's hash function written as a claim about the value.
       :
     elif [[ "$BASE_REF" == origin/?* ]]; then
       # KIND 3 — exactly one promotion for this kind, and no bare-name probe can reach it.
       if git rev-parse --verify --quiet "refs/remotes/${BASE_REF}^{commit}" >/dev/null 2>&1; then
         BASE_REF="refs/remotes/${BASE_REF}"
       else
-        BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND with no refs/remotes/${BASE_REF} behind it — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a 40-hex commit. DEFERRED — do NOT treat as an approval."
+        BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND with no refs/remotes/${BASE_REF} behind it — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval."
       fi
     elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
       && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
@@ -384,8 +388,8 @@ else
       # legitimate full object name with exit 3, which is the OVER-refusal direction again —
       # the same one round twenty-six hit in the chain, now in the guard. `diffBaseRef`
       # already lowercases before matching; this matches its acceptance.
-      if [[ ! "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a 40-hex commit. DEFERRED — do NOT treat as an approval." >&2
+      if [[ ! "$BASE_REF" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval." >&2
         exit 3
       fi
       ;;

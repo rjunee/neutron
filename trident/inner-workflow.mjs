@@ -1409,7 +1409,11 @@ const NO_PATTERN_KILL_RULE =
 //     contract, telling the fix agent to `git switch -c` an already-created
 //     branch + `gh pr create` a duplicate — conflicting instructions that broke
 //     every REQUEST_CHANGES run.
-const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.trim().toLowerCase())
+// A FULL OBJECT NAME — 40 hex (SHA-1) or 64 (SHA-256). The narrow form was a claim about the
+// repository's hash function stated as a claim about the value; `diffBaseRef` matches this
+// exactly, and the parity table holds the two to the same answers on a 64-hex pin.
+const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+const pinnedBase = typeof baseSha === 'string' && OBJECT_NAME_RE.test(baseSha.trim().toLowerCase())
   ? baseSha.trim().toLowerCase()
   : null
 
@@ -1507,17 +1511,50 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  * holds both to the same answers.
  */
 /**
- * THE WORD THIS COMPOSER EMITS WHEN THE PROBE CANNOT ANSWER — the all-zero object id.
+ * THE WORD THIS COMPOSER EMITS WHEN THE PROBE CANNOT ANSWER — the all-zero object id, AT THE
+ * REPOSITORY'S OWN HASH WIDTH. This is a shell fragment, not a string: the width is decided
+ * where the word is evaluated, because it is a property of that repository and not of this
+ * process.
  *
- * Chosen because it is INTRINSICALLY unresolvable rather than merely unused: git treats a
- * 40-hex spelling as an object name and ignores any ref of that name, so no `update-ref`,
- * tag or branch can make it resolve. Measured on git 2.43.0, with a tag AND a branch named
- * 40 zeros present: `rev-parse --verify -q 0{40}^{commit}` exits 1 and
- * `git diff --end-of-options 0{40}..HEAD` is `fatal: Invalid revision range`, exit 128, no
- * output. Its predecessor `refs/trident-probe-failed/<base>` was refused only because nobody
- * had created it, which is a fact about the environment and not about the word.
+ * WHY NOT A FIXED 40 ZEROS, which is what round thirty-two shipped. Git ignores a ref whose
+ * name is exactly the hash width in hex — that is what makes an all-zero object name
+ * unresolvable — but "the hash width" is 40 only under SHA-1. Measured on git 2.43.0 in a
+ * repository created with `git init --object-format=sha256` (supported since 2.29):
+ *
+ *   git branch 0{40} HEAD                             → created
+ *   git diff --end-of-options 0{40}..HEAD             → EXIT 0, a diff        ← the hole
+ *   git branch 0{64} HEAD                             → created
+ *   git diff --end-of-options 0{64}..HEAD             → fatal, 128, no output
+ *
+ * and the mirror in a SHA-1 repository: a branch named 0{64} makes `0{64}..HEAD` resolve at
+ * exit 0, while 0{40} stays fatal. So NEITHER fixed width is safe in both formats, and the
+ * only value that is unresolvable-by-construction is the one that matches the repository
+ * asking the question. **That is the second time this sentinel's guarantee was stated more
+ * strongly than it held, with the same shape: a property measured against one repository's
+ * configuration, claimed as a property of the value.** Last round the missing qualifier was
+ * "while nobody has created that ref"; this round it was "in a SHA-1 repository".
+ *
+ * THE QUALIFIER THAT REMAINS, stated rather than argued away: if `rev-parse
+ * --show-object-format` cannot answer, this falls back to 40 zeros, which is the wrong width
+ * in a SHA-256 repository. What makes that survivable is not that the fallback is unreachable
+ * — my first draft of this comment said "cannot be reached inside a working repository" and
+ * the very next measurement falsified it — but that **every failure mode measured takes both
+ * questions down together**:
+ *
+ *   outside a repository:        probe 128, format 128, `git diff <x>..HEAD` 129
+ *   `.git/objects` unreadable:   probe 128, format 128, `git diff <x>..HEAD` 129
+ *                                (and the same range succeeds, exit 0, once it is readable)
+ *
+ * So in the states that reach this arm, git refuses the range on its own account and the
+ * operand is not what decides the outcome. I have not found a state where the probe fails,
+ * the format read fails, and the range still works — that combination is what the remaining
+ * hole would need, and it is named here rather than claimed away. A future object format of a
+ * third width degrades this to "a ref name that must not exist", the weaker guarantee round
+ * thirty-two removed; the test asserts the emitted word against the format its fixture was
+ * created with, so it fails rather than drifts.
  */
-const UNRESOLVABLE_BASE_OID = '0'.repeat(40)
+const UNRESOLVABLE_BASE_OID =
+  "case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac"
 
 function unpinnedDiffBase() {
   // AN EMPTY BASE IS REFUSED TOO, matching `diffBaseRef` — `..<head>` is a well-formed
@@ -1618,7 +1655,7 @@ function unpinnedDiffBase() {
   // refuse — it can only emit a word the other process will refuse. Both halves are asserted
   // in `diff-base-option-shaped.test.ts`, including that this word is one git rejects EVEN
   // AFTER an adversary creates every ref that could plausibly shadow it.
-  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; printf %s ${shSingleQuote(UNRESOLVABLE_BASE_OID)};; esac)"`
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; ${UNRESOLVABLE_BASE_OID};; esac)"`
 }
 
 const diffBase =

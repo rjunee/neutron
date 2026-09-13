@@ -339,7 +339,7 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // RESOLVES TO and the files it produces.
     for (const pr of [true, false]) {
       const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
-      expect({ pr, resolves: cmd.includes("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; printf %s '0000000000000000000000000000000000000000';; esac") }).toEqual({ pr, resolves: true })
+      expect({ pr, resolves: cmd.includes("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac") }).toEqual({ pr, resolves: true })
       // …and never the bare local name as a literal operand.
       expect(cmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
     }

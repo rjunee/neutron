@@ -202,6 +202,24 @@ export async function detectBaseBranch(
 }
 
 /**
+ * A FULL OBJECT NAME — 40 hex for SHA-1, 64 for SHA-256, lowercased before testing.
+ *
+ * It was `/^[0-9a-f]{40}$/` until round thirty-three, which is a claim about the REPOSITORY'S
+ * HASH FUNCTION wearing the clothes of a claim about the value. `git init
+ * --object-format=sha256` has been supported since 2.29 and produces 64-hex object names, so
+ * the narrow form refused a legitimate pinned base outright and read a legitimate probe answer
+ * as `'unknown'` — the second failure in the over-refusal direction on this branch, and this
+ * time in the value's own definition.
+ *
+ * BOTH WIDTHS, not the repository's width, because this side has no repository handle at the
+ * point of the test — `diffBaseRef` is given a value, not a path. The cost is precise and
+ * stated: a 64-hex value in a SHA-1 repository is accepted here and refused by git at the point
+ * of use, which is the direction that fails loudly. Anything that is NOT one of these two
+ * widths is still not an object name.
+ */
+const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+/**
  * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
  * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
  *
@@ -291,7 +309,7 @@ export async function diffBaseRef(
   base_sha: string | null | undefined,
   ref_resolves: (ref: string) => Promise<RefProbe>,
 ): Promise<string> {
-  if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
+  if (typeof base_sha === 'string' && OBJECT_NAME_RE.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
   }
   // AN EMPTY NAME IS REFUSED HERE, and the sentence this replaces is why.
@@ -596,7 +614,7 @@ export async function refResolves(
     // The command could not be run at all. Nothing was established.
     return 'unknown'
   }
-  if (res.ok && /^[0-9a-f]{40}$/.test(res.stdout.trim().toLowerCase())) return 'resolved'
+  if (res.ok && OBJECT_NAME_RE.test(res.stdout.trim().toLowerCase())) return 'resolved'
   // EXIT 1 IS THE ANSWER "NO SUCH REF", and it is the only thing that means absent. Measured
   // on git 2.43: an existing ref exits 0, a missing one exits 1, and `-C <not-a-repo>` exits
   // 128. Reading 128 — or a spawn failure, or garbage on stdout — as "absent" is what put

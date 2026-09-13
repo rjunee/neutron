@@ -108,11 +108,15 @@ interface World {
  * FOR), and a TAG whose name also exists as a remote-tracking branch (the case it must
  * not touch).
  */
-async function seedWorld(): Promise<World> {
+async function seedWorld(objectFormat: 'sha1' | 'sha256' = 'sha1'): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), 'codex-review-base-ref-'))
   created.push(root)
   const repo = join(root, 'repo')
-  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  // THE HASH FUNCTION IS A FIXTURE AXIS (round thirty-three): every world here was SHA-1, so
+  // the shape assertion's `{40}` could refuse a legitimate 64-hex object name for a whole
+  // branch without a red test. A fixture that only ever supplies one width cannot fail on a
+  // width assumption — the same argument as the lowercase fixture two rounds earlier.
+  await spawnCapture(['git', 'init', '-q', `--object-format=${objectFormat}`, '--initial-branch=main', repo], root)
   await spawnCapture(['bash', '-c', `cd ${JSON.stringify(repo)} && echo a > a.txt`], root)
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'A')
@@ -371,6 +375,25 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
       const res = await runBlock(w.repo, bad)
       expect({ bad, ok: res.ok }).toEqual({ bad, ok: false })
     }
+  })
+
+  test('A SHA-256 OBJECT NAME IS A VALID ONE TOO — 64 hex, kept verbatim, in a sha256 repository', async () => {
+    // THE SAME OVER-REFUSAL, one axis over. `^[0-9a-fA-F]{40}$` is a claim about the
+    // REPOSITORY'S HASH FUNCTION written as a claim about the value: under
+    // `git init --object-format=sha256` (supported since 2.29) every object name is 64 hex, so
+    // the wrapper refused a legitimate pinned base with exit 3 — no review, DEFERRED — and the
+    // composer's own 40-hex pin test would never have produced one to begin with.
+    const w = await seedWorld('sha256')
+    expect(await git(w.repo, 'rev-parse', '--show-object-format')).toBe('sha256')
+    expect((w.remote as string).length).toBe(64)
+    // KIND 1: an object name, kept verbatim — not probed as a name, not refused for its shape.
+    expect(await promote(w.repo, w.remote)).toBe(w.remote)
+    expect(await promote(w.repo, (w.remote as string).toUpperCase())).toBe((w.remote as string).toUpperCase())
+    // …and the SHA-1 width is not silently accepted as an object name HERE: in this repository
+    // 40 hex is not an object-name spelling, so it falls through to the bare-name arms and is
+    // refused — which is the complement that stops this being "accept any hex".
+    const res = await runBlock(w.repo, '0'.repeat(40))
+    expect({ ok: res.ok, stdout: res.stdout }).toEqual({ ok: false, stdout: '' })
   })
 
   test('THE OTHER FAILURE DIRECTION, audited: what each arm turns away, and its remedy', async () => {

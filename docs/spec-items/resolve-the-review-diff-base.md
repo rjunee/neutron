@@ -208,15 +208,31 @@ The resolution order is evidence-first, and is the same at every site:
    The two implementations differ here and only here, stated rather than papered over: a shell
    substitution is composed in one process and evaluated in another, so it cannot refuse — it
    can only emit a word the other process will reject. For state (a) that word is
-   `refs/heads/<base>`; for state (b) it is the ALL-ZERO OBJECT ID, which is intrinsically
-   unresolvable — measured on git 2.43.0 as `fatal: Invalid revision range`, exit 128, no
-   output, and it stays that way with a tag AND a branch named 40 zeros present, because git
-   ignores a ref whose name is 40 hex characters when the spelling is 40 hex characters. It was
-   `refs/trident-probe-failed/<base>` for one round; **that namespace is ordinary and writable,
-   so `git update-ref` on it makes the range resolve and return a wrong diff at exit 0** — the
-   guarantee was a fact about the environment, not about the word. Both halves are asserted,
-   including that the emitted word is one git rejects AFTER every ref that could shadow it has
-   been created.
+   `refs/heads/<base>`; for state (b) it is the ALL-ZERO OBJECT ID **at the repository's own
+   hash width** — 40 zeros under SHA-1, 64 under `--object-format=sha256` — which is why that
+   arm is a shell expression rather than a literal: the width is a property of the repository
+   asking the question, not of this process. Measured on git 2.43.0: `fatal: Invalid revision
+   range`, exit 128, no output, and it stays that way with a tag AND a branch of that name
+   present, because git ignores a ref whose name is exactly the hash width in hex — **and
+   nothing else**.
+
+   **This sentinel's guarantee has been overstated twice, the same way both times.** It was
+   `refs/trident-probe-failed/<base>` for one round: that namespace is ordinary and writable,
+   so `git update-ref` on it makes the range resolve and return a wrong diff at exit 0. It was
+   then a fixed 40 zeros for one round: in a SHA-256 repository that is an ordinary ref NAME,
+   and a branch of that name makes the range resolve at exit 0 — with the mirror hole in SHA-1,
+   where a branch named 64 zeros does the same. Each time the qualifier left out was the one
+   that made the measurement true — "while nobody has created that ref", then "in a SHA-1
+   repository" — so the property was stated of the VALUE when it had been measured of one
+   repository's CONFIGURATION.
+
+   The qualifier that remains is named rather than argued away: if `git rev-parse
+   --show-object-format` cannot answer, the arm falls back to 40 zeros. In every failure mode
+   measured — outside a repository, and `.git/objects` unreadable — the probe, the format read
+   and `git diff <x>..HEAD` all fail together (128, 128, 129), so where the fallback is reached
+   git refuses the range on its own account. Both halves are asserted, including that the
+   emitted word is one git rejects AFTER every ref that could shadow it has been created, in
+   BOTH object formats.
 
    Arm 3 is what a repository with no remote gets, what a worktree whose `origin` is configured
    but whose base ref is missing, deleted or unfetched gets, and what a fresh clone gets: the
@@ -546,5 +562,30 @@ The resolution order is evidence-first, and is the same at every site:
       tag AND a branch named 40 zeros and asserts the emitted word still fails both as a range
       operand and as a `rev-parse --verify` probe. A rejection asserted without first trying to
       make the word resolve is a claim about the test's environment, not about the word.
+- [ ] **The rule does not assume SHA-1, and the tests would fail if it did.** `git init
+      --object-format=sha256` names objects in 64 hex. The 40-only recognisers refused a
+      legitimate pinned base outright (`diffBaseRef`, the `.mjs` twin, the wrapper's KIND-1 test
+      and its shape assertion) and read a legitimate probe answer as `'unknown'`; the refusing
+      word, a fixed 40 zeros, was an ordinary ref NAME there, so a branch of that name made the
+      range resolve at exit 0. All four recognisers now accept 40 OR 64 hex, and the refusing
+      word is derived from `git rev-parse --show-object-format` where it is evaluated. Verified
+      by "THE HASH FUNCTION IS NOT A PROPERTY OF THE VALUE — SHA-1 and SHA-256" in
+      `trident/diff-base-option-shaped.test.ts`, which runs the fixture in BOTH formats and, in
+      each, creates a branch AND a tag at both widths before asserting the emitted word still
+      refuses — **and asserts that the OTHER width RESOLVES, exit 0, with a file list**, which
+      is what makes the derivation necessary rather than tidy; and by "A SHA-256 OBJECT NAME IS
+      A VALID ONE TOO" in `trident/codex-review-base-ref.test.ts`, whose complement is that 40
+      hex in a SHA-256 repository is NOT accepted as an object name, so this is not "accept any
+      hex". Mutations: pinning the sentinel to 40 zeros reds the sha256 case; narrowing either
+      implementation's recogniser reds the pin parity case; narrowing the wrapper's reds the
+      wrapper case. The fixture axis is the point — **a fixture that only ever supplies one hash
+      width cannot fail on a hash-width assumption**, which is why this survived thirty-two
+      rounds of review.
+      **What is NOT closed, named rather than implied**: `FULL_OID` in `trident/merge.ts` and
+      `trident/inner-workflow.mjs`, and the `outer-published:<40hex>:…` checkpoint vocabulary,
+      still assume SHA-1. They are outside this item's rule (they are about run heads and
+      persisted checkpoint text, not about a rev-range base), and a persisted format is not
+      something to widen in passing — filed as #667, with the exposure stated: every repository
+      trident builds today is SHA-1, so it is latent rather than live.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.

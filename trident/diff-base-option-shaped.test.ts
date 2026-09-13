@@ -50,6 +50,19 @@ import { gitRangeArgv, type GitRangeArgv } from './git-range.ts'
 const WORKFLOW_SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
 /**
+ * The production sentinel fragment, READ OUT OF THE SOURCE rather than retyped.
+ *
+ * Retyping it would make the hash-width tests below assert against a copy — the
+ * fixture-supplies-the-claim shape this branch has now hit three times. Extracted, a change to
+ * the fragment changes what these tests evaluate.
+ */
+const SENTINEL_FRAGMENT: string = (() => {
+  const m = WORKFLOW_SRC.match(/const UNRESOLVABLE_BASE_OID =\s*"([^"]+)"/)
+  if (m === null) throw new Error('UNRESOLVABLE_BASE_OID is not a double-quoted literal in inner-workflow.mjs')
+  return m[1] ?? ''
+})()
+
+/**
  * `inner-workflow.mjs`'s `diffBase`, evaluated for one set of launch args.
  *
  * THE RULE IS IMPLEMENTED TWICE — here and in `diffBaseRef` — because the workflow script
@@ -171,12 +184,16 @@ interface World {
   head: string
 }
 
-async function seedWorld(label: string): Promise<World> {
+async function seedWorld(label: string, objectFormat: 'sha1' | 'sha256' = 'sha1'): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), `diff-base-option-${label}-`))
   created.push(root)
   const repo = join(root, 'repo')
   const target = join(root, 'target')
-  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  // THE HASH FUNCTION IS A FIXTURE AXIS, since round thirty-three. Every earlier fixture was
+  // SHA-1 by default, and the sentinel's "cannot be made to resolve" was measured only there:
+  // under `--object-format=sha256` an object name is 64 hex, so a 40-zero word is an ordinary
+  // ref NAME and a branch of that name makes the range resolve at exit 0.
+  await spawnCapture(['git', 'init', '-q', `--object-format=${objectFormat}`, '--initial-branch=main', repo], root)
   await spawnCapture(['mkdir', '-p', target, join(repo, 'src')], root)
   writeFileSync(join(repo, 'src', 'a.txt'), 'a\n')
   await git(repo, 'add', '-A')
@@ -558,6 +575,93 @@ describe('FALSE AND UNKNOWN DO NOT SHARE A BRANCH — the probe answers three wa
   })
 })
 
+describe('THE HASH FUNCTION IS NOT A PROPERTY OF THE VALUE — SHA-1 and SHA-256', () => {
+  /**
+   * ROUND THIRTY-THREE, and it is the SECOND time this sentinel's guarantee was stated more
+   * strongly than it held. Round thirty-two's missing qualifier was "while nobody has created
+   * that ref"; this one is "in a SHA-1 repository". The shape is identical: a property
+   * measured against one repository's CONFIGURATION, written down as a property of the value.
+   *
+   * Measured on git 2.43.0 (`git init --object-format=sha256`, supported since 2.29):
+   *
+   *   sha256 repo, no such ref:   `0{40}..HEAD` → fatal 128   `0{64}..HEAD` → fatal 128
+   *   sha256 repo, branch 0{40}:  `0{40}..HEAD` → EXIT 0, a diff        ← the hole
+   *   sha256 repo, branch 0{64}:  `0{64}..HEAD` → fatal 128, no output
+   *   sha1 repo,   branch 0{64}:  `0{64}..HEAD` → EXIT 0, a diff        ← the mirror
+   *
+   * Git ignores a ref whose name is exactly the hash width in hex, and NOTHING ELSE. So no
+   * fixed width is safe in both formats: the word has to be the zeros of the width the
+   * repository asking the question uses.
+   */
+  const Z40 = '0'.repeat(40)
+  const Z64 = '0'.repeat(64)
+
+  for (const format of ['sha1', 'sha256'] as const) {
+    const width = format === 'sha256' ? 64 : 40
+    const wrong = format === 'sha256' ? Z40 : Z64
+
+    test(`${format}: the emitted word is the zeros of THIS repository's width, and the other width is a live hole`, async () => {
+      const w = await seedWorld(`hash-${format}`, format)
+      expect(await git(w.repo, 'rev-parse', '--show-object-format')).toBe(format)
+      expect(w.head.length).toBe(width)
+
+      // THE SENTINEL FRAGMENT, evaluated where it will be evaluated in production. It is a
+      // shell expression rather than a literal precisely so the width is decided there.
+      const word = (await spawnCapture(['bash', '-c', SENTINEL_FRAGMENT], w.repo)).stdout
+      expect(word).toBe('0'.repeat(width))
+
+      // THE ADVERSARY GETS TO GO FIRST, in both spellings, as a branch AND as a tag — the only
+      // names that could shadow an object-name spelling.
+      for (const name of [Z40, Z64]) {
+        await git(w.repo, 'branch', name, w.base)
+        await git(w.repo, 'tag', name, w.base)
+      }
+      const ranged = await spawnCapture(
+        ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${word}..${w.head}`],
+        w.repo,
+      )
+      expect({ format, ok: ranged.ok, out: ranged.stdout.trim() }).toEqual({ format, ok: false, out: '' })
+
+      // AND THE WRONG WIDTH IS NOT MERELY SUBOPTIMAL — it RESOLVES, exit 0, with a file list.
+      // This is the assertion that makes the width derivation necessary rather than tidy: it
+      // is what the shipped word did in a SHA-256 repository one round ago.
+      const other = await spawnCapture(
+        ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${wrong}..${w.head}`],
+        w.repo,
+      )
+      expect({ format, ok: other.ok, files: other.stdout.trim().length > 0 }).toEqual({
+        format,
+        ok: true,
+        files: true,
+      })
+    })
+
+    test(`${format}: a full object name of THIS repository's width is honoured as a pin by both implementations`, async () => {
+      // THE OVER-REFUSAL DIRECTION, which is the live defect independent of the sentinel:
+      // `/^[0-9a-f]{40}$/` refused a legitimate 64-hex pinned base outright and read a
+      // legitimate 64-hex probe answer as 'unknown'. Both implementations are asserted,
+      // because a widening applied to one of them is the divergence this branch has had three
+      // times already.
+      const w = await seedWorld(`pin-${format}`, format)
+      const pin = w.base
+      expect(pin.length).toBe(width)
+      expect(await diffBaseRef('main', pin, probe(false))).toBe(pin)
+      const composed = await workflowDiffBase({ baseBranch: 'main', repoPath: w.repo, baseSha: pin })
+      const mjs = (await spawnCapture(['bash', '-c', `printf %s ${composed}`], w.repo)).stdout.trim()
+      expect({ format, mjs }).toEqual({ format, mjs: pin })
+
+      // …and the probe recognises an answer of that width as RESOLVED rather than 'unknown',
+      // which is what routes a legitimate remote-tracking ref to the fallback arm.
+      await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
+      const host = async (argv: string[]): Promise<HostCommandResult> => {
+        const res = await spawnCapture(argv, w.repo)
+        return { ok: res.ok, stdout: res.stdout, stderr: res.stderr, exit_code: res.ok ? 0 : 1 }
+      }
+      expect(await refResolves(host, w.repo, 'refs/remotes/origin/main')).toBe('resolved')
+    })
+  }
+})
+
 describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
   /**
    * `diffBaseRef` (TS) and `diffBase` (.mjs) encode the same rule and cannot share a
@@ -831,13 +935,13 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1700, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2434, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2485, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
-    { file: 'inner-workflow.mjs', line: 2590, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5876, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1737, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2471, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2522, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
+    { file: 'inner-workflow.mjs', line: 2627, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5913, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 413, why: 'shell: the standalone reviewer builds its own diff' },
+    { file: 'codex-review.sh', line: 417, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {
