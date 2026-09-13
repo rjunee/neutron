@@ -297,6 +297,84 @@ describe('write() and the fact that send_text never submits', () => {
     expect(server.callsTo('pane.send_keys')).toEqual([])
   })
 
+  // ...AND THE CLAIM THE DROP LEAVES BEHIND, which the case above cannot see. It asserts
+  // that nothing was DELIVERED — necessary, and not sufficient. `kill('SIGINT')` LATCHES
+  // `wasInterruptedByUs` and then enqueues the keystroke, and a queued actuation that is
+  // skipped RESOLVES SUCCESSFULLY, so the rollback wired to the failure path never ran.
+  // The latch outlived an act that never happened, and it did so through SUCCESS — which
+  // is why the liveness guard inside the rollback could not catch it: the path never
+  // reached the guard. A no-op and a delivery were indistinguishable to every caller.
+  //
+  // The fourth latch-outlives-the-act on this branch, and the first to arrive this way.
+  it('a SIGINT SKIPPED by the exit clears the latch — a no-op is not a delivery', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server, 10)
+    const release = server.holdMethod('pane.send_text')
+    child.write('hello') // occupies the queue, so the ctrl+c must wait behind it
+    const errs = await withCapturedStderr(async () => {
+      child.kill('SIGINT')
+      // THE LATCH IS REAL BEFORE THE EXIT. Without this the case could pass against a
+      // host that never latched at all, which is a different bug wearing this one's
+      // assertions.
+      expect(child.wasInterruptedByUs?.()).toBe(true)
+      server.exitPane()
+      await until(() => child.hasExited(), 'the exit, discovered by polling')
+      release()
+      await Bun.sleep(30)
+    })
+    // The keystroke never ran...
+    expect(server.callsTo('pane.send_keys')).toEqual([])
+    expect(server.deliveredTo('pane.send_keys')).toEqual([])
+    // ...so the claim that we interrupted this child is false, and must not survive it.
+    expect(child.wasInterruptedByUs?.()).toBe(false)
+    expect(errs.filter((e) => e.includes('NEVER SENT')).length).toBe(1)
+  })
+
+  // THE OTHER HALF OF THE SAME DISTINCTION, and the reason the rollback is not simply
+  // unconditional. A call that was ATTEMPTED and then rejected because the pane vanished
+  // may have vanished BECAUSE the interrupt landed — herdr reports no exit codes, so
+  // there is nothing to tell those apart. Clearing the latch there would deny a real
+  // interrupt. Skipped is unambiguous; refused-after-exit is not, and false must not
+  // share a branch with unknown.
+  it('a ctrl+c IN FLIGHT when the pane dies KEEPS the latch — refused is not skipped', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server, 10)
+    // HELD, SO IT IS GENUINELY IN FLIGHT: the call is recorded and then waits. This is
+    // the only arrangement that reaches the ambiguous case at all — a `send_keys` issued
+    // AFTER the exit is always SKIPPED, never refused, so the refusal branch can only be
+    // produced by a request that had already started when the pane went.
+    const release = server.holdMethod('pane.send_keys')
+    child.kill('SIGINT')
+    await until(() => server.callsTo('pane.send_keys').length >= 1, 'the attempt to START')
+    expect(child.wasInterruptedByUs?.()).toBe(true)
+    server.exitPane()
+    await until(() => child.hasExited(), 'the exit, discovered by polling')
+    // Now let the in-flight request fail, the way a connection dying under it would.
+    server.failMethod('pane.send_keys', new Error('the pane went while we asked'))
+    release()
+    await Bun.sleep(30)
+    // It was ATTEMPTED — which is the entire difference from the skipped case above —
+    // and it may have failed BECAUSE the interrupt landed and killed the pane. herdr
+    // reports no exit code, so nothing can tell those apart. The latch stands.
+    expect(server.callsTo('pane.send_keys').length).toBe(1)
+    expect(server.deliveredTo('pane.send_keys')).toEqual([])
+    expect(child.wasInterruptedByUs?.()).toBe(true)
+  })
+
+  // CONTROL. A ctrl+c that DID land keeps its latch across the exit that follows, or the
+  // rollback is over-broad and the flag is worthless in the case it exists for.
+  it('CONTROL — a DELIVERED ctrl+c keeps the latch when the pane exits afterwards', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server, 10)
+    child.kill('SIGINT')
+    await until(() => server.deliveredTo('pane.send_keys').length >= 1, 'the ctrl+c')
+    expect(child.wasInterruptedByUs?.()).toBe(true)
+    server.exitPane()
+    await until(() => child.hasExited(), 'the exit, discovered by polling')
+    await Bun.sleep(30)
+    expect(child.wasInterruptedByUs?.()).toBe(true)
+  })
+
   // A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK. The
   // fire-and-forget path re-checks `exited` when the queued call actually starts; the
   // ACKNOWLEDGED one did not, so a `submitLine` queued behind a held actuation ran its

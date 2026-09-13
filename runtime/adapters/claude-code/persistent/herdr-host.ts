@@ -130,6 +130,17 @@ export interface HerdrHostDeps {
 }
 
 /**
+ * WHY AN ACTUATION DID NOT REACH THE PANE — two outcomes, never one.
+ *
+ * `refused` means the call was ATTEMPTED and the server rejected it. `skipped` means it
+ * never ran: the pane was already gone when the queued keystroke came up. The two are
+ * not interchangeable for anyone latching intent, because a refusal that arrives after
+ * the pane vanished is AMBIGUOUS — the pane may have vanished because the interrupt
+ * landed — while a skip delivered nothing under any reading.
+ */
+type NotDelivered = 'refused' | 'skipped'
+
+/**
  * A `PtyHost` whose terminal is a herdr pane.
  *
  * ONE CONNECTION PER REQUEST, not per spawn: the server answers exactly one request on a
@@ -377,7 +388,7 @@ export class HerdrHost implements PtyHost {
     // teardown preempts, it does not wait — the escalation ladder in `repl-session.ts`
     // depends on the close being prompt).
     let actuations: Promise<unknown> = Promise.resolve()
-    const enqueue = (run: () => Promise<unknown>): Promise<unknown> => {
+    const enqueue = <T>(run: () => Promise<T>): Promise<T> => {
       const started = actuations.then(run)
       actuations = started.then(
         () => undefined,
@@ -394,19 +405,45 @@ export class HerdrHost implements PtyHost {
       method: string,
       params: Record<string, unknown>,
       /**
-       * Called if the actuation FAILED. Optional, and deliberately not a change of shape
-       * for anyone else: fire-and-forget is right for keystrokes, and making every
-       * caller await a keypress would be a worse contract than the one being fixed.
-       * What is wrong is LATCHING A CLAIM on top of a fire-and-forget act — so the one
-       * caller that latches gets a way to unlatch, and the rest are untouched.
+       * Called when the actuation DID NOT REACH THE PANE, with which of the two ways it
+       * did not. Optional, and deliberately not a change of shape for anyone else:
+       * fire-and-forget is right for keystrokes, and making every caller await a
+       * keypress would be a worse contract than the one being fixed. What is wrong is
+       * LATCHING A CLAIM on top of a fire-and-forget act — so the one caller that
+       * latches gets a way to unlatch, and the rest are untouched.
+       *
+       * THE REASON IS PART OF THE SIGNAL. This took no argument and was wired only to
+       * `fireAndForget`'s rejection handler, so it could report a REFUSAL and nothing
+       * else — and the queued body answered a skip with `undefined`, which is a
+       * SUCCESSFUL resolution. A no-op and a delivery were therefore indistinguishable
+       * to every caller: the interrupt latch stayed true although no keys were ever
+       * sent. That is the fourth latch-outlives-the-act on this branch and the first to
+       * arrive through success rather than failure, which is exactly why the existing
+       * liveness guard could not catch it — the path never reached the guard.
        */
-      onFailed?: () => void,
+      onNotDelivered?: (why: NotDelivered) => void,
     ): void => {
-      if (exited) return
+      if (exited) {
+        // ALREADY OVER, SYNCHRONOUSLY. Still a skip, and still has to be reported: a
+        // caller that latched before calling `send` must hear about it either way.
+        onNotDelivered?.('skipped')
+        return
+      }
+      const started = enqueue(async (): Promise<boolean> => {
+        // RE-CHECKED AT EXECUTION TIME, because a queue moves the moment of execution
+        // away from the moment of the check. Returning FALSE rather than `undefined` is
+        // the whole fix: the outcome now says whether the call ran, instead of leaving
+        // "skipped" wearing the shape of "succeeded".
+        if (exited) return false
+        await client.call(method, params)
+        return true
+      })
       fireAndForget(
         label,
-        enqueue(async () => (exited ? undefined : await client.call(method, params))),
-        onFailed === undefined ? undefined : () => onFailed(),
+        started.then((delivered) => {
+          if (!delivered) onNotDelivered?.('skipped')
+        }),
+        onNotDelivered === undefined ? undefined : () => onNotDelivered('refused'),
       )
     }
 
@@ -543,14 +580,23 @@ export class HerdrHost implements PtyHost {
             'herdr-host.kill.sigint',
             'pane.send_keys',
             { pane_id: paneId, keys: ['ctrl+c'] },
-            () => {
-              if (exited) return
+            (why) => {
+              // A SKIP IS UNAMBIGUOUS; A REFUSAL AFTER THE EXIT IS NOT — and collapsing
+              // them onto one liveness test is what hid this. A call that was ATTEMPTED
+              // and then rejected because the pane vanished may well have vanished
+              // BECAUSE the interrupt landed, so clearing the latch there would deny a
+              // real interrupt; that is what the guard was protecting and it stays. A
+              // call that NEVER RAN delivered nothing, whatever the pane did afterwards,
+              // so the latch is false and must come down. False and unknown must not
+              // share a branch, one level up from where that rule usually bites.
+              if (why === 'refused' && exited) return
               interruptedByUs = false
               process.stderr.write(
-                `[herdr-host] pane ${paneId}: the SIGINT actuation was REFUSED — no interrupt ` +
-                  `was delivered. Clearing wasInterruptedByUs: claiming an interrupt that did ` +
-                  `not happen would let a caller record a turn as abandoned when the child ` +
-                  `never saw it.\n`,
+                `[herdr-host] pane ${paneId}: the SIGINT actuation was ` +
+                  `${why === 'refused' ? 'REFUSED' : 'NEVER SENT (the pane was gone before the queued keystroke ran)'}` +
+                  ` — no interrupt was delivered. Clearing wasInterruptedByUs: claiming an ` +
+                  `interrupt that did not happen would let a caller record a turn as ` +
+                  `abandoned when the child never saw it.\n`,
               )
             },
           )

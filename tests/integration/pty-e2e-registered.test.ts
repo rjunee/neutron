@@ -109,6 +109,72 @@ export function matchesEnvWrite(key: string, src: string): boolean {
 export function matchesEnvDelete(key: string, src: string): boolean {
   return new RegExp(String.raw`delete\s+${envRef(key)}`).test(src)
 }
+/** A bulk copy INTO the environment object (the static-method form of `assign`, applied
+ *  to `process.env`) — key-blind by construction, so
+ *  any such call is treated as touching every switch. Zero occurrences in the tree today;
+ *  admitted because it is the named form a literal-key matcher cannot see. */
+export function matchesEnvBulkAssign(src: string): boolean {
+  return /Object\s*\.\s*assign\s*\(\s*process(?:\.env|\[\s*['"`]env['"`]\s*\])/.test(src)
+}
+
+/**
+ * FIXTURE TEXT IS ASSEMBLED, NEVER SPELLED. Every positive fixture in this file is an
+ * exact instance of what the guards here hunt, and they scan every `.ts` in the tree —
+ * including this one. Written literally, this file becomes its own top offender. It did,
+ * twice: once when the per-form matcher cases were added, and again when the switch
+ * guard's own fixture was written out longhand. Both times the guard caught it, which is
+ * the instrument working rather than a nuisance.
+ *
+ * The alternative — exempting the file that DEFINES the rule — is the one fix that must
+ * not be used: it puts the hole in the place nobody would look. Joined at runtime, the
+ * string the matcher sees is byte-identical to the literal form.
+ */
+const asm = (...parts: string[]): string => parts.join('')
+const PROC = 'process'
+const KEY = 'HERDR_SOCKET_PATH'
+
+/**
+ * The switches this guard polices, and the ONE module permitted to write them.
+ *
+ * THE LIST LIVES HERE, with the rule, rather than being imported from the helper. The
+ * helper takes the key as a parameter and needs no list of its own, and importing one
+ * across a workspace boundary is exactly what the L5 lint gate refuses — so the policer
+ * owns the policy and names the exempt path as a string.
+ */
+const ENV_SWITCHES = ['HERDR_SOCKET_PATH', 'NEUTRON_PTY_E2E'] as const
+export const ENV_SWITCH_HELPER = 'runtime/adapters/__tests__/env-switch.ts'
+
+/**
+ * Files that mutate a live-proof switch OUTSIDE the sanctioned helper.
+ *
+ * TAKES ITS INPUTS, so it can be driven against a fixture as well as against the tree.
+ * The previous version was inline over `readFileSync`, which left it with exactly one
+ * observable — an empty list — and no way to show it could ever produce a non-empty one
+ * from real file content. An instrument that cannot be made to fire is not a gate.
+ */
+export function findSwitchOffenders(
+  files: readonly string[],
+  read: (f: string) => string,
+  switches: readonly string[],
+): string[] {
+  const offenders: string[] = []
+  for (const rel of files) {
+    if (rel === ENV_SWITCH_HELPER) continue
+    let src: string
+    try {
+      src = read(rel)
+    } catch {
+      continue
+    }
+    if (matchesEnvBulkAssign(src)) offenders.push(`${rel} bulk-assigns into process.env`)
+    for (const k of switches) {
+      if (matchesEnvWrite(k, src)) offenders.push(`${rel} writes ${k} outside the helper`)
+      if (matchesEnvDelete(k, src)) offenders.push(`${rel} deletes ${k} outside the helper`)
+    }
+  }
+  return offenders
+}
+
 /** An assignment to the process's stderr writer, in any admitted spelling. */
 export function matchesStderrWrite(src: string): boolean {
   return /process(?:\.stderr|\[\s*['"`]stderr['"`]\s*\])\.write\s*=(?!=)/.test(src)
@@ -166,41 +232,79 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // THE SAME INCIDENT FROM A THIRD DIRECTION. The two above are about the flag not
   // ARRIVING; this one is about a switch being turned OFF by an unrelated suite in the
   // same process. A test that sets `HERDR_SOCKET_PATH` to a dead path to keep itself
-  // hermetic — three do, and they are right to — disables the only tests in this repo
+  // hermetic — three did, and they were right to — disables the only tests in this repo
   // that can see a real herdr server if it never puts the value back. That is a
   // coverage hole no coverage measurement can show: the instrument reports "skipped",
   // which reads as a decision rather than as damage. It is also not hypothetical — the
   // transport defect this branch fixed was exactly the class only a live proof could
   // have caught.
-  test('no suite can silently switch a live proof off — every writer restores', () => {
-    const SWITCHES = ['HERDR_SOCKET_PATH', 'NEUTRON_PTY_E2E']
-    const writers: string[] = []
-    const offenders: string[] = []
-    // EVERY `.ts`, not a directory whitelist — see `allSourceFiles`.
-    for (const f of allSourceFiles(REPO_ROOT)) {
-      let src: string
-      try {
-        src = readFileSync(f, 'utf8')
-      } catch {
-        continue
-      }
-      for (const k of SWITCHES) {
-        // THE OPERATION, IN ANY SPELLING — see `matchesEnvWrite`. This matched
-        // `process.env['KEY'] =` alone, so the dot and double-quoted forms walked past.
-        if (!matchesEnvWrite(k, src)) continue
-        writers.push(`${relative(REPO_ROOT, f)}:${k}`)
-        // Restoring means BOTH halves: a teardown hook, and the branch that puts an
-        // absent value back by deleting rather than by writing 'undefined'. The delete
-        // side admits exactly what the write side does, or one passes for a spelling the
-        // other catches.
-        const restores = /\b(afterAll|afterEach)\(/.test(src) && matchesEnvDelete(k, src)
-        if (!restores) offenders.push(`${relative(REPO_ROOT, f)} writes ${k} and never restores it`)
-      }
-    }
-    // POSITIVE CONTROL. An empty `offenders` means nothing only if the detector can
-    // see a real write at all — a mistyped pattern would report a clean tree forever.
-    expect(writers.length).toBeGreaterThanOrEqual(3)
+  //
+  // NOW STRUCTURAL, BECAUSE THE PAIRING CHECK WAS UNSOUND. This accepted any file that
+  // contained a teardown hook AND a matching `delete` anywhere in it. The obligation is
+  // ASSIGNMENT-scoped and that test is FILE-scoped, so a file with two writes and one
+  // unrelated restore passed, and so would a second, unscoped write added later to a
+  // file that already had a correct one. There is now one sanctioned writer
+  // (`tests/support/env-switch.ts`) and every other write is an offender outright —
+  // no pairing to verify, because there is only one writer and it is written once.
+  test('no suite can silently switch a live proof off — the helper is the only writer', () => {
+    const rels = allSourceFiles(REPO_ROOT).map((f) => relative(REPO_ROOT, f))
+    const offenders = findSwitchOffenders(
+      rels,
+      (rel) => readFileSync(join(REPO_ROOT, rel), 'utf8'),
+      ENV_SWITCHES,
+    )
     expect(offenders).toEqual([])
+  })
+
+  // AND THE GUARD ABOVE CAN ACTUALLY FIRE. Its only observable against the tree is an
+  // empty list, and after the conversion there is no real literal write left anywhere to
+  // prove the recogniser still works — the old `writers.length >= 3` control died with
+  // the thing it was counting. Driving the same function over a FIXTURE restores a
+  // failing direction, which is the half an absence claim cannot supply for itself.
+  test('the switch guard FIRES on a real write, and exempts exactly one path', () => {
+    const fixture: Record<string, string> = {
+      'some/suite.test.ts': asm(PROC, ".env['", KEY, "'] = '/dead'"),
+      'some/other.test.ts': asm('delete ', PROC, '.env.NEUTRON_PTY_E2E'),
+      'some/bulk.test.ts': asm('Object.', 'assign(', PROC, '.env, { X: 1 })'),
+      // A READ is not a write, and the refinement has to survive being driven here too.
+      'some/innocent.test.ts': `if (process.env.NEUTRON_PTY_E2E === '1') run()`,
+      // THE CASE THE OLD PAIRING CHECK ACCEPTED, and the reason this is structural now.
+      // A teardown hook and a matching delete EXIST in this file, so "any afterAll plus
+      // any delete" called it restored — while the second, unscoped write at the top is
+      // never put back by anything. The obligation is assignment-scoped; the old test
+      // was file-scoped, and a file only has to satisfy a file-scoped test once.
+      'some/two-writes.test.ts': asm(
+        PROC, ".env['", KEY, "'] = '/dead'\n",
+        'afterAll(() => { delete ', PROC, ".env['", KEY, "'] })\n",
+        PROC, ".env['", KEY, "'] = '/also-dead'\n",
+      ),
+      // The helper does the same thing and is the ONE path allowed to.
+      [ENV_SWITCH_HELPER]: asm(PROC, ".env['", KEY, "'] = v; delete ", PROC, '.env.NEUTRON_PTY_E2E'),
+    }
+    const offenders = findSwitchOffenders(Object.keys(fixture), (f) => fixture[f]!, ENV_SWITCHES)
+    expect(offenders).toEqual([
+      'some/suite.test.ts writes HERDR_SOCKET_PATH outside the helper',
+      'some/other.test.ts deletes NEUTRON_PTY_E2E outside the helper',
+      'some/bulk.test.ts bulk-assigns into process.env',
+      'some/two-writes.test.ts writes HERDR_SOCKET_PATH outside the helper',
+      'some/two-writes.test.ts deletes HERDR_SOCKET_PATH outside the helper',
+    ])
+  })
+
+  // THE HELPER REALLY IS WHAT THE SUITES USE, so the exemption above is not simply an
+  // unused escape hatch that lets the guard report clean over a tree nobody pins.
+  test('the sanctioned helper is imported by every suite that needs a switch', () => {
+    const users = allSourceFiles(REPO_ROOT)
+      .map((f) => relative(REPO_ROOT, f))
+      .filter((rel) => rel !== ENV_SWITCH_HELPER)
+      .filter((rel) => {
+        try {
+          return readFileSync(join(REPO_ROOT, rel), 'utf8').includes('pinEnvSwitch(')
+        } catch {
+          return false
+        }
+      })
+    expect(users.length).toBeGreaterThanOrEqual(3)
   })
 
   // NO LIVE PROOF MAY SPAWN A HERDR PANE OUTSIDE THE SCOPED HELPER — and this is the
@@ -299,20 +403,6 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // pattern matched a literal `s` and nothing else. The `writers` positive control caught
   // it on the first run.
   //
-  // THE FIXTURES ARE ASSEMBLED, NOT SPELLED. Every positive below is an exact instance of
-  // what those guards hunt, and they now scan EVERY `.ts` in the tree — including this
-  // one. Written literally, this file becomes its own top offender. The alternative is
-  // worse: exempting the file that DEFINES the rule is a hole in the one place nobody
-  // would think to look. So the text is joined at runtime and the string the matcher sees
-  // is byte-identical to the literal form. The negatives below ARE spelled literally, and
-  // that is itself the demonstration — they survive the scan because they are not
-  // matches. (A source-text scanner still cannot see a write whose key is computed; that
-  // was already true — `matchesEnvWrite` takes a literal key — and is the standing limit
-  // of the instrument, not something this assembly introduces.)
-  const asm = (...parts: string[]): string => parts.join('')
-  const PROC = 'process'
-  const KEY = 'HERDR_SOCKET_PATH'
-
   describe('the env-switch matcher admits the OPERATION, not one spelling', () => {
     for (const [form, src] of [
       ['single-quoted brackets', asm(PROC, ".env['", KEY, "'] = '/x'")],

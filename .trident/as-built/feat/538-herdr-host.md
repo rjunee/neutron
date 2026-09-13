@@ -2735,6 +2735,111 @@ connection per spawn two rounds ago: the code changed, the prose beside it kept 
 the old behaviour, and prose next to a call is read as current. Swept: this was the only
 occurrence.
 
+### A latch that survived through SUCCESS, which is why the guard could not catch it
+
+`kill('SIGINT')` sets `interruptedByUs` and then enqueues the keystroke. The queued body
+was `exited ? undefined : await client.call(...)` — so once the pane was gone, the
+actuation **resolved successfully without executing**. `fireAndForget` saw a fulfilled
+promise, the rollback wired to its rejection handler never ran, and the flag stayed true
+although no `ctrl+c` was ever sent. `wasKilledByUs` is the entire crash-versus-recycle
+discriminator here because herdr has no exit codes, and `wasInterruptedByUs` is the claim
+that a turn was abandoned on purpose.
+
+**The fourth latch-outlives-the-act on this branch, and the first to arrive through
+success rather than failure.** Every earlier one was a failing act leaving a true flag,
+and the fix each time was a rollback on the failure path. That is exactly why this one
+walked past: the liveness guard inside the rollback (`if (exited) return`) is correct for
+its own case and was never reached, because a no-op and a delivery were indistinguishable
+at the point that decides.
+
+The fix is not another guard, it is a distinction the type system carries: the queued body
+returns `boolean`, and `send` reports `NotDelivered = 'refused' | 'skipped'`.
+
+- **skipped** — the call never ran. Nothing was delivered under any reading, so the latch
+  comes down whatever the pane did afterwards.
+- **refused** — the call was ATTEMPTED and rejected. If the pane is already gone, that is
+  AMBIGUOUS: it may have gone *because* the interrupt landed, and herdr reports no exit
+  code to tell those apart. The latch stands, which is what the original guard was
+  protecting.
+
+False and unknown must not share a branch — one level up from where that rule usually
+bites, since here the two things being conflated were two ways of *not* succeeding.
+
+Reaching the ambiguous case at all took the right arrangement, and finding that is half
+the work: a `send_keys` issued after the exit is always SKIPPED, never refused, so the
+refusal branch can only be produced by a request already in flight when the pane died.
+The case holds `pane.send_keys`, kills the pane, then fails the held call.
+
+**M-S5 SURVIVED and is recorded rather than papered.** `send`'s synchronous door also
+reports a skip, and no test reds when it is removed — `kill()` returns early when the
+child has exited, so no caller that latches can reach that branch today. It stays because
+the rule attaches to the OPERATION, not to the callers that happen to exist: a future
+caller that latches before `send` would otherwise re-acquire this exact defect. The limit
+is that its reachability depends on a caller that does not exist yet.
+
+### The restoration check was file-scoped; the obligation is assignment-scoped
+
+The switch guard accepted any file containing a teardown hook AND a matching `delete`
+anywhere in it. A file only has to satisfy a file-scoped test once — so a file with two
+writes and one unrelated restore passed, and so would a second, unscoped write added later
+to a file that already had a correct one. The matcher also recognised only direct
+literal-key assignment, so a bulk copy into `process.env` walked past.
+
+**Turned from a recogniser problem into a structural one**, which is the cheaper half of
+the two options and the one that removes the unsound check entirely. There is now one
+sanctioned writer — `runtime/adapters/__tests__/env-switch.ts` — and every other write or
+delete of a switch key is an offender outright. No pairing to verify, because there is
+only one writer and it is written once. The three suites that had identical seven-line
+save/restore blocks now call `pinEnvSwitch`.
+
+Four things that came out of doing it:
+
+- **The old positive control died with the thing it counted.** `writers.length >= 3`
+  proved the matcher worked against real file content; after the conversion there is no
+  real literal write left in the tree, so the guard's only observable against the tree is
+  an empty list again. `findSwitchOffenders` now takes its file list and its reader, so
+  the same function is driven over a FIXTURE — including the exact case the old check
+  accepted: a write, an unrelated `afterAll` delete, and a second unscoped write.
+- **The bulk-copy form is admitted although the tree has ZERO of them.** Measured before
+  adding it. It is the named form a literal-key matcher cannot see, and admitting it costs
+  nothing while the count is zero.
+- **The instrument's residual limit is stated rather than implied.** A source-text scanner
+  cannot see a write whose key is computed, and the tree has 91 such sites across 67 files
+  — overwhelmingly one shared isolation helper. Requiring an allowlist of 67 paths would
+  make the guard a snapshot of the tree rather than a rule, so those are not flagged and
+  the reason is written down. A runtime check in the test preload — snapshot the switches,
+  compare at process exit — would be form-blind and catch all of them; it is the obvious
+  next step and it changes a file every test in the repo loads, so it is not being folded
+  into this round.
+- **The helper needed its own tests, and did not have them.** Two mutations of its restore
+  — writing the STRING `'undefined'` for an absent prior value, and not restoring at all —
+  both survived the entire guard suite. `restoreEnv` is now exported and driven directly,
+  because inside `afterAll` it runs after the last test in the file and nothing there can
+  observe it. `'undefined'` is the mutation that matters: it is truthy, and every reader
+  of these switches treats a non-empty value as a real path, so restoring one invents a
+  third state that was never set. An empty prior value is a value, not an absence.
+
+**And the file caught me twice.** Both times I wrote fixture text longhand, and both times
+the guard reported this file as its own top offender — once for the per-form matcher
+cases, once for the switch guard's own fixture. The prose in a docblock counted too. The
+fixtures are assembled at runtime; the negatives stay literal, which is the demonstration
+that they are not matches.
+
+### Where the sanctioned helper lives, and why it is not under `tests/support/`
+
+It started at `tests/support/env-switch.ts`, beside the other shared test helpers. The L5
+lint gate refuses a relative import that crosses a workspace boundary, and all three
+consumers are `runtime` adapter tests — while the specifier the rule suggests instead
+(`neutron/tests/support/env-switch.ts`) does not resolve at all, because the root package
+has no self-referencing entry. Both halves measured: `lint` red on the relative form,
+`typecheck` red plus a runtime resolution failure on the suggested one.
+
+Worth recording because the rule's own suggestion is unusable here, and because a probe
+showed the asymmetry is not about the file: an exact copy of an existing, passing helper,
+imported the same way from the same file, is flagged. The helper therefore lives in the
+workspace its consumers live in, and the guard NAMES the exempt path as a string instead
+of importing from it — the policer owns the policy.
+
 ### Mutation table
 
 Every guard was mutated. **Not every mutation reddened**, and the survivors are in the
@@ -3016,6 +3121,21 @@ Run against the named suites.
 | M75c | accept ONLY an array `data` | RED 1 (its own case) |
 | M75d | accept ONLY a string `data` | RED 1 (its own case) |
 | M75e | accept ONLY a number `data` | RED 1 (its own case) |
+| M-S1 | the queued skip resolves successfully again (the original defect) | RED 1 |
+| M-S2 | the chained skip report is dropped | RED 1 |
+| M-S3 | the rollback becomes UNCONDITIONAL — refused-after-exit clears too | RED 1 (the in-flight case) |
+| M-S4 | the rollback fires ONLY for a refusal | RED 1 |
+| M-S5 | the synchronous door-skip report is removed | SURVIVED — `kill()` returns early when exited, so no latching caller can reach that branch today; kept because the rule attaches to the operation, not to today's callers |
+| M-S6 | every actuation reports SKIPPED, delivered or not | RED 3 (the delivered control, and two unrelated latch cases) |
+| M-E1 | the helper exemption is removed | RED 1 (the fixture case) |
+| M-E2 | the bulk-copy form is no longer recognised | RED 1 |
+| M-E3 | the delete side is no longer recognised | RED 1 |
+| M-E4 | the write side is no longer recognised | RED 1 |
+| M-E5 | the OLD file-scoped pairing check is restored | RED 1 — the two-writes-one-restore fixture, which is the defect itself |
+| M-E6 | the helper restores an absent value as the STRING `'undefined'` | RED 1 |
+| M-E7 | the helper never restores at all | RED 3 |
+| M-E8 | a falsy prior value is treated as absent — an empty value is lost | RED 1 |
+| M-E9 | the restore always deletes | RED 2 |
 | M-A1 | the `trimToBytes` range check is removed entirely | RED 2 |
 | M-A2 | an out-of-range trim target is silently CLAMPED instead of refused | RED 2 — the choice of reject-over-clamp is itself pinned |
 | M-A3 | over-strict: `trimToBytes === maxBytes` rejected | RED 2 |

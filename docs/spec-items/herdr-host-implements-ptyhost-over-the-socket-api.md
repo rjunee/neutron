@@ -549,6 +549,51 @@ not-new. That is accepted and recorded here rather than hidden.
       trace naming the helper, discarding the one thing this suite exists to say: which
       participant broke which promise.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
+- [ ] **A LATCH MAY NOT SURVIVE AN ACT THAT NEVER HAPPENED — including when the act
+      reports SUCCESS.** `kill('SIGINT')` latches `wasInterruptedByUs` and then ENQUEUES
+      the keystroke; the queued body answered a post-exit skip with a resolved promise, so
+      the rollback wired to the failure path never ran and the flag stayed true although
+      no `ctrl+c` was ever sent. Every earlier instance on this item was a FAILING act
+      leaving a true flag, which is exactly why this one walked past: the liveness guard
+      inside the rollback is correct for its own case and was never reached, because a
+      no-op and a delivery were indistinguishable at the point that decides.
+      TWO WAYS OF NOT SUCCEEDING, NEVER ONE. `skipped` means the call never ran — nothing
+      was delivered under any reading, so the latch comes down whatever the pane did
+      afterwards. `refused` means it was ATTEMPTED and rejected, which after the pane is
+      gone is AMBIGUOUS: it may have failed because the interrupt landed and killed the
+      pane, and herdr reports no exit code to tell those apart, so the latch stands.
+      AND THE AMBIGUOUS CASE TAKES AN ARRANGEMENT TO REACH: a `send_keys` issued after the
+      exit is always skipped, never refused, so the refusal branch can only be produced by
+      a request already IN FLIGHT when the pane died — held, then failed.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-keys.test.ts`
+- [ ] **A RESTORATION RULE IS ASSIGNMENT-SCOPED, so a FILE-scoped check cannot enforce
+      it.** The switch guard accepted any file containing a teardown hook AND a matching
+      `delete` anywhere in it — and a file only has to satisfy a file-scoped test once, so
+      a file with two writes and one unrelated restore passed, as would a second unscoped
+      write added later to a file that already had a correct one.
+      MADE STRUCTURAL RATHER THAN SHARPER: one sanctioned writer, and every other write or
+      delete of a switch key is an offender outright. There is no pairing to verify
+      because there is only one writer and it is written once. The bulk-copy form into
+      `process.env` is admitted too — zero occurrences in the tree today, measured before
+      adding it, and it is the named form a literal-key matcher cannot see.
+      THE OLD POSITIVE CONTROL DIES WITH THE CONVERSION and must be replaced, not dropped:
+      with no real literal write left anywhere, the guard's only observable against the
+      tree is an empty list. The guard therefore takes its file list and its reader, so
+      the same function is driven over a FIXTURE — including the exact case the old check
+      accepted.
+      THE SANCTIONED HELPER IS HELD TO THE RULE IT ENFORCES. Two mutations of its restore
+      — writing the STRING `'undefined'` for an absent prior value, and not restoring at
+      all — survived the whole guard suite when it was first written, because inside
+      `afterAll` it runs after the last test in the file and nothing there can observe it.
+      The restore is exported and driven directly. `'undefined'` is the mutation that
+      matters: it is truthy, so every reader of a path-shaped switch treats it as a real
+      path — restoring one invents a third state that was never set. An EMPTY prior value
+      is a value, not an absence.
+      AND THE RESIDUAL LIMIT IS STATED, NOT IMPLIED: a source-text scanner cannot see a
+      write whose key is computed, and the tree has 91 such sites across 67 files,
+      overwhelmingly one shared isolation helper. Flagging them would require an allowlist
+      that makes the guard a snapshot of the tree rather than a rule.
+      verify: `bun test tests/integration/pty-e2e-registered.test.ts runtime/adapters/__tests__/env-switch.test.ts`
 - [ ] **THE OBLIGATION STARTS WHEN THE TIMER IS ARMED, so the connector is called INSIDE
       the guard.** Invoking it above the surrounding `try` let a SYNCHRONOUS throw escape
       past the failure path, leaving the RPC deadline armed and the handlers registered.
