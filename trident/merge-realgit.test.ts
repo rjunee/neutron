@@ -1015,6 +1015,60 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 
+  test('REAL GIT: the history render produces EXACTLY ONE record per requested commit id', async () => {
+    // THE PLATFORM FACT THE PRODUCTION CHECK RESTS ON (#541 round 36). `sideHistory` now refuses
+    // a render that does not return one record per oid it resolved and weighed. That equality is
+    // only correct if git's framing really is one record per id, and the framing is NOT obvious:
+    //
+    //   raw:  'h1 subject\nbody\n\x00\nh2 subject\nbody\n\x00\n'
+    //
+    // git writes a newline BETWEEN entries, so `%x00` is NOT the last byte and a naive split
+    // yields N+1 elements whose last is '\n'. It is `spawnCapture`'s trim of the trailing
+    // newline that turns the final element into '' — the delimiter artifact the parser pops.
+    // Reasoning about `--format` alone gets this wrong, which is why it is measured here rather
+    // than asserted in a comment, and why `sideHistory` says so at the check.
+    const repo = await makeBaseRepo()
+    for (const n of [1, 2, 3]) {
+      writeFileSync(join(repo, `f${n}.txt`), `${n}\n`)
+      await git(repo, 'add', '.')
+      await git(repo, ...GIT_ID, 'commit', '-q', '-m', `commit ${n}\n\nbody line for ${n}`)
+    }
+    // A commit with NO body and one whose subject could be mistaken for framing, because both
+    // are shapes a real repository produces.
+    await git(repo, ...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'subject only')
+    await git(repo, ...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'a subject with\n\nblank lines\n\n\nin the body')
+
+    const ids = await gitOut(repo, 'log', '--format=%H')
+    const oids = ids.split('\n').map((x) => x.trim()).filter((x) => x.length > 0)
+    expect(oids.length, 'the fixture really has this many commits').toBe(6)
+
+    const res = await spawnCapture(
+      ['git', '-C', repo, '-c', 'core.quotePath=false', 'log', '--no-color', '--no-decorate', '-s',
+       '--format=%h %s%n%b%x00', '--no-walk=unsorted', ...oids],
+      repo,
+    )
+    expect(res.ok).toBe(true)
+    // THE EXACT PARSE `sideHistory` PERFORMS — copied in shape deliberately, because what is
+    // under test is that this parse yields N for N.
+    const framed = res.stdout.split('\u0000')
+    while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
+    expect(framed.length, 'one record per requested oid').toBe(oids.length)
+    // NOT VACUOUS: each record carries its own abbreviated sha, so these are six DISTINCT
+    // commits and not one record counted six times.
+    const shas = framed.map((r) => /([0-9a-f]{7,})/.exec(r)?.[1] ?? '')
+    expect(new Set(shas).size, 'six distinct commits').toBe(6)
+    // AND THE CONTROL ON THE PARSE ITSELF: asking for fewer ids yields fewer records, so the
+    // equality tracks the request rather than being a property of any output.
+    const two = await spawnCapture(
+      ['git', '-C', repo, 'log', '--no-color', '--no-decorate', '-s', '--format=%h %s%n%b%x00',
+       '--no-walk=unsorted', ...oids.slice(0, 2)],
+      repo,
+    )
+    const framedTwo = two.stdout.split('\u0000')
+    while (framedTwo.length > 0 && framedTwo[framedTwo.length - 1] === '') framedTwo.pop()
+    expect(framedTwo.length, 'two ids in, two records out').toBe(2)
+  }, 30_000)
+
   test('a REAL modify/delete conflict is complete evidence, and names which side exists', async () => {
     // THE FIXTURE THIS REPLACES NEVER MODELLED WHAT IT WAS NAMED FOR: it asked for
     // `never-existed.ts` in a repo with no conflict at all, so it exercised "a path the index

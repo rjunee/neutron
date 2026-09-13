@@ -1239,10 +1239,14 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const wt = wtOf('/shared', run)
     let reported = 0
     const host: RunHostCommand = async (cmd) => {
-      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(2))
+      // THREE RECORDS MEANS THREE OIDS — the middle one empty. Resolving two and rendering
+      // three was the fixture disagreeing with itself, and production now refuses that.
+      if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(3))
       if (cmd.includes('log')) {
         const forBranch = cmd.some((a) => a.startsWith('00'.repeat(20)))
-        return forBranch ? ok('aaa1 one\u0000\u0000aaa2 two\u0000') : ok('bbb1 other\u0000')
+        return forBranch
+          ? ok('aaa1 one\u0000\u0000aaa2 two\u0000')
+          : ok('bbb1 other\u0000bbb2 more\u0000bbb3 third\u0000')
       }
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
@@ -2856,9 +2860,17 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
    * the branches — so it is attacker-influenceable. Shipping the tool change without
    * bounding and defanging this would trade a write vector for an injection surface.
    */
+  /**
+   * `oidsPerSide` EXISTS BECAUSE THE TWO READS MUST AGREE (#541 round 36). Production now
+   * refuses a history render that does not produce one record per oid it resolved and weighed,
+   * and every fixture here used to resolve ONE oid and hand back as many records as it felt
+   * like — so the byte budget was charged for one commit while the evidence showed two, and no
+   * test could see it. A host that cannot express the relation cannot test that it holds.
+   */
   function historyHost(
     wt: string,
     log: (range: string) => HostCommandResult,
+    oidsPerSide = 1,
   ): { host: RunHostCommand; ranges: string[]; counts: number[] } {
     const ranges: string[] = []
     // The VALUE git was actually given, so the prompt's stated limit can be pinned to it
@@ -2874,10 +2886,15 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
         const range = cmd[cmd.length - 1] ?? ''
         ranges.push(range)
         counts.push(Number(cmd.find((a) => a.startsWith('--max-count'))?.split('=')[1] ?? '-1'))
-        return ok([`${range.startsWith('main..') ? '11' : '22'}`.repeat(20)].join('\n'))
+        const stem = range.startsWith('main..') ? '11' : '22'
+        return ok(
+          Array.from({ length: oidsPerSide }, (_, k) =>
+            (stem.repeat(20).slice(0, 38) + k.toString(16).padStart(2, '0')).slice(0, 40),
+          ).join('\n'),
+        )
       }
       if (cmd.includes('log') && cmd.includes('--no-walk=unsorted')) {
-        const forBranch = cmd.some((a) => a.startsWith('11'))
+        const forBranch = cmd.some((a) => /^(?:11)+/.test(a) && a.startsWith('1111'))
         return log(forBranch ? 'main..x' : 'x..main')
       }
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
@@ -2962,10 +2979,15 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // delimiter the quoted content cannot forge.
     const run = localRun('feat-lines')
     const wt = wtOf('/shared', run)
-    const { host } = historyHost(wt, (range) =>
-      range.startsWith('main..')
-        ? ok('aaa1 first subject\nbody line\n\u0000aaa2 second subject\n\u0000')
-        : ok('bbb1 other side\n\u0000'),
+    // TWO RECORDS ON THE BRANCH SIDE MEANS TWO OIDS RESOLVED. The base side renders one, so
+    // this also exercises the sides being different lengths.
+    const { host } = historyHost(
+      wt,
+      (range) =>
+        range.startsWith('main..')
+          ? ok('aaa1 first subject\nbody line\n\u0000aaa2 second subject\n\u0000')
+          : ok('bbb1 other side\n\u0000bbb2 second\n\u0000'),
+      2,
     )
     const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
     const deps = buildMergeCleanupDeps(host, {
@@ -3063,14 +3085,147 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
   })
 
+  test('A RESOLUTION THAT FOUND COMMITS AND A RENDER THAT SHOWS NONE IS UNKNOWN, never "no commits"', async () => {
+    // THE TWO READS DISAGREEING, AND THE SECOND ONE BELIEVED (#541 round 36). Round 28 made the
+    // deciding read and the acting read one read, by resolving the range once and rendering the
+    // immutable oids it produced. This is the same pair disagreeing in the OTHER direction: the
+    // resolution found a commit, weighed it, and then `--no-walk=unsorted` exited 0 with empty
+    // output — and the code rendered `(no commits in range)`, a sentence git never said.
+    //
+    // Below that point `oids.length > 0` always, because the genuine empty side returns before
+    // anything is weighed. So this string was reachable ONLY when the two reads disagreed, and
+    // one sentence stood for both "git says none" and "git was asked for one and showed none".
+    const run = localRun('feat-hist-vanished')
+    const wt = wtOf('/shared', run)
+    const { host } = historyHost(wt, () => ok(''), 1)
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      // THE OWNER PATH IS PRESERVED — the resolver's own question, not a git error.
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // The stub would have GRANTED the retry, so zero calls is the property rather than an
+    // accident of an arbiter that refuses everything.
+    expect(seen.length, 'the judge must not be asked on a history that vanished').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=evidence-unreadable',
+    )
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
+  })
+
+  test('A PARTIAL RENDER IS UNKNOWN TOO — three of twenty commits is a silent omission', async () => {
+    // AN EMPTINESS CHECK WOULD MISS THIS, and it is the more dangerous half. A render that
+    // returns SOME of the commits that were resolved and weighed is non-empty, reads as an
+    // ordinary history, and arrives under a completeness claim saying nothing was left out —
+    // which is precisely the state `EvidencePart` exists to make unrepresentable. "Not empty"
+    // is a weaker claim than "all of it", and this branch has confused the two before.
+    const run = localRun('feat-hist-partial')
+    const wt = wtOf('/shared', run)
+    // FOUR commits resolved and weighed per side; TWO records rendered.
+    const { host } = historyHost(wt, () => ok('aaa1 one\u0000aaa2 two\u0000'), 4)
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    expect(seen.length, 'a partial history is not a history').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=evidence-unreadable',
+    )
+    // AND THE CONTROL: the same fixture with the records it promised IS judged, so the refusal
+    // is about the disagreement and not about the shape of the fixture.
+    const okRun = localRun('feat-hist-whole')
+    const { host: okHost } = historyHost(
+      wtOf('/shared', okRun),
+      () => ok('aaa1 one\u0000aaa2 two\u0000aaa3 three\u0000aaa4 four\u0000'),
+      4,
+    )
+    const { arbitrate: okArb, seen: okSeen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+    await cleanupAfterMerge(
+      okRun,
+      buildMergeCleanupDeps(okHost, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate: okArb,
+      }),
+    ).catch(() => {})
+    expect(okSeen.length, 'a complete history is still judged').toBe(1)
+    expect(okSeen[0]?.evidence ?? '').toContain('aaa4 four')
+  })
+
+  test('A RENDER THAT SHOWS MORE THAN WAS WEIGHED IS UNKNOWN — the other direction of the same equality', async () => {
+    // M158 SURVIVED AS `records.length < oids.length`, and the survivor is the point: a render
+    // returning MORE records than were resolved means the evidence contains commits this code
+    // never asked for, never weighed against the ceiling, and cannot attribute to either side.
+    // It is the "right quantity of the WRONG THINGS" axis — the one round 28 named — pointing
+    // outward instead of inward, and an inequality would have let it through while reading as
+    // if it were a bound.
+    //
+    // Cheap to state and cheap to hold: the two reads agree or the evidence is unknown, and
+    // AGREE MEANS EQUAL.
+    const run = localRun('feat-hist-extra')
+    const wt = wtOf('/shared', run)
+    // ONE commit resolved and weighed per side; THREE records rendered.
+    const { host } = historyHost(wt, () => ok('aaa1 one\u0000aaa2 two\u0000aaa3 three\u0000'), 1)
+    const { arbitrate, seen } = stubArbiter({
+      kind: 'decision',
+      option_id: CONFLICT_ARBITER_RETRY_OPTION,
+      reasoning: 'would have granted the retry',
+    })
+    const lines = await captureLogs(async () => {
+      await expect(
+        cleanupAfterMerge(
+          run,
+          buildMergeCleanupDeps(host, {
+            base_branch: 'main',
+            resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+            arbitrate,
+          }),
+        ),
+      ).rejects.toMatchObject({ name: 'TridentMergeConflictEscalation', question: RESOLVER_QUESTION })
+    })
+    expect(seen.length, 'unweighed commits must not reach the judge').toBe(0)
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? '').toContain(
+      'why=evidence-unreadable',
+    )
+  })
+
   test('A SIDE WITH NO COMMITS IS STILL EVIDENCE — established emptiness is not absence', async () => {
     // THE COMPLEMENT, and the distinction the placeholder destroyed. git answering "this side
     // adds nothing" is a definite fact and must still reach the judge; only a question we
     // could not ask is missing. Without this, refusing on an empty history would look
     // identical to refusing on a broken one.
+    //
+    // THE EMPTINESS HAS TO BE IN THE RESOLUTION (#541 round 36). This fixture used to resolve
+    // ONE commit id and then answer the message read with `ok('')`, which is not a side with no
+    // commits at all — it is the two reads DISAGREEING, and it now escalates. The test named the
+    // right property and pinned the wrong fixture to it, which is the sixth time on this branch
+    // that one of my own tests asserted the defect as correct.
     const run = localRun('feat-emptyhist')
     const wt = wtOf('/shared', run)
-    const { host } = historyHost(wt, () => ok(''))
+    const { host } = historyHost(wt, () => ok(''), 0)
     const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
@@ -4032,6 +4187,14 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
       }
       // `git log <review_base>..<head> -- shared.ts` → the one commit the
       // resolver was handed, so the path counts as fully covered.
+      if (cmd.includes('log') && cmd.includes('--no-walk=unsorted')) {
+        // A QUERY THIS HOST NEVER ANSWERED (#541 round 36). It fell through to `ok()`, so
+        // production resolved and weighed one commit and then rendered ZERO records — and
+        // the old code reported that to the judge as "(no commits in range)". Both of these
+        // drift tests were passing on a history the host had never supplied, which is the
+        // sixth time a stub's default branch has silently handed production the defect.
+        return ok('dddd the replayed commit\u0000')
+      }
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(`${REPLAYING}\n`)
       // Both "what the base added" and "what the branch changed" name shared.ts.
       if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
@@ -4110,6 +4273,14 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
         const ref = cmd[cmd.length - 1] ?? ''
         if (ref.includes('REBASE_HEAD')) return ok(REPLAYING)
         return ok(ref.includes('feat-') ? BRANCH_HEAD : BASE_TIP)
+      }
+      if (cmd.includes('log') && cmd.includes('--no-walk=unsorted')) {
+        // A QUERY THIS HOST NEVER ANSWERED (#541 round 36). It fell through to `ok()`, so
+        // production resolved and weighed one commit and then rendered ZERO records — and
+        // the old code reported that to the judge as "(no commits in range)". Both of these
+        // drift tests were passing on a history the host had never supplied, which is the
+        // sixth time a stub's default branch has silently handed production the defect.
+        return ok('dddd the replayed commit\u0000')
       }
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(`${REPLAYING}\n`)
       // The drift overlaps `shared.ts`…

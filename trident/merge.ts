@@ -2548,6 +2548,27 @@ async function sideHistory(
   const framed = res.stdout.split('\u0000')
   while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
   const records = framed.map((record) => quoteLine(record))
+  // THE TWO READS MUST AGREE, AND A DISAGREEMENT IS UNKNOWN (#541 round 36). Round 28 made the
+  // deciding read and the acting read ONE read by resolving the range once and rendering the
+  // immutable oids; this is the same pair disagreeing in the other direction — the resolution
+  // found N commits, the render produced fewer, and the code believed the render.
+  //
+  // Concretely: below this line `oids.length > 0` always, because the genuine "this side adds
+  // nothing" case returned `(no commits in range)` before anything was weighed. So an EMPTY
+  // render here cannot mean there are no commits — it means the read that was supposed to show
+  // us N commits showed us none, and rendering that as "(no commits in range)" states a fact
+  // git never reported. That is the ninth instance of this lane's one sentence: `ok` plus empty
+  // output standing in for an answer.
+  //
+  // ONE RECORD PER REQUESTED OID, not merely "not empty". An emptiness check passes a render
+  // that returned three of twenty commits, which is a SILENT OMISSION under a completeness
+  // claim — exactly what `EvidencePart` exists to make unrepresentable. Verified against real
+  // git: `--format=%h %s%n%b%x00` terminates every record with NUL and git writes a newline
+  // BETWEEN entries, so the raw stream ends `\x00\n`; `spawnCapture` trims that trailing
+  // newline, the split's final element is then `''`, it is popped as the delimiter artifact it
+  // is, and exactly N records remain for N oids. The real-git test below pins that relation so
+  // this equality rests on a measurement rather than on my reading of git's format.
+  if (records.length !== oids.length) return { kind: 'missing', why: 'evidence-unreadable' }
   let used = 0
   for (const record of records) {
     used += Buffer.byteLength(`${record}\n`, 'utf8')
@@ -2557,10 +2578,13 @@ async function sideHistory(
     if (used > ARBITER_PROMPT_BYTES_MAX) return { kind: 'missing', why: 'over-budget' }
   }
   const folded = records.join('\n')
-  // A DEFINITE FACT, so it is PRESENT: git answered, and the answer is that this side adds
-  // nothing. That is the same distinction as the one-sided conflict two rounds ago — an
-  // established emptiness is evidence; an unasked question is not.
-  if (folded.length === 0) return { kind: 'present', text: '(no commits in range)' }
+  // `(no commits in range)` IS EMITTED IN EXACTLY ONE PLACE — where the resolution itself came
+  // back empty, above, before a single object was weighed. A DEFINITE FACT is evidence: git
+  // answered, and the answer is that this side adds nothing, which is the same distinction the
+  // one-sided conflict draws. It used to be emitted here as well, where it could only ever mean
+  // the two reads disagreed, so one string stood for both "git says none" and "git was asked
+  // for twenty and showed none" — an established emptiness and a failed read wearing the same
+  // sentence.
   return moreExist
     ? {
         kind: 'present',

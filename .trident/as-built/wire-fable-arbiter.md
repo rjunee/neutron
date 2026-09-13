@@ -1910,6 +1910,69 @@ lane's empty-output-on-a-full-disk incident. What I will record is that **my own
 discarded the failure detail**, so a signal I had exactly one chance to read went in the bin —
 the same category of mistake as the assertions above, made about my own tooling.
 
+### ROUND 36 — the same two reads, disagreeing in the other direction, and the second one believed
+
+Round 28 made the deciding read and the acting read ONE read: the ref range is resolved once to
+commit ids, those ids are weighed, and `--no-walk=unsorted` renders exactly them. **This is that
+same pair disagreeing the other way.** The resolution found N commits and weighed them; the
+render exited 0 with empty stdout; and the code returned `(no commits in range)` — *a sentence
+git never said.*
+
+**The tell is that the string had two homes.** It is legitimate where the RESOLUTION itself came
+back empty, before a single object is weighed — an established emptiness, which this branch has
+insisted is evidence. It was emitted a second time after the render, where `oids.length > 0`
+always holds, so there it could only ever mean the two reads disagreed. One sentence stood for
+both *"git says none"* and *"git was asked for twenty and showed none"*. Ninth instance of this
+lane's one sentence: `ok` plus empty output standing in for an answer.
+
+**ONE RECORD PER REQUESTED OID, not "not empty".** An emptiness check passes a render that
+returns three of twenty commits — non-empty, ordinary-looking, and arriving under a completeness
+claim saying nothing was left out, which is exactly the state `EvidencePart` exists to make
+unrepresentable. "Not empty" is a weaker claim than "all of it" and this lane has confused those
+two before. The mutation table below is the argument: `records.length === 0` is red on the empty
+case and **green on the partial one**.
+
+**The equality rests on a platform fact that is NOT obvious, so it is measured.** git writes a
+newline BETWEEN log entries, so with `--format=%h %s%n%b%x00` the raw stream ends `\x00\n` and a
+naive split yields **N+1** elements whose last is `'\n'` — not `''`, so the parser's pop would
+not remove it. It is `spawnCapture`'s trim of the trailing newline that makes the final element
+`''`, the delimiter artifact the pop is for, leaving exactly N. I got this wrong on the first
+reading and only a scratch repo corrected me. A real-git test now pins one-record-per-oid across
+commits with bodies, without bodies, and with blank lines inside bodies, plus a control that two
+ids in yields two records out — the lane's standing lesson applied for the third time: **test the
+platform's behaviour before reasoning about the code that wraps it.**
+
+**AND THE FIXTURES HAD BEEN SUPPLYING THE DEFECT, SIXTH INSTANCE.** `historyHost` resolved ONE
+oid and handed back as many records as each test felt like — so the budget was charged for one
+commit while the evidence showed two, and no test could see it, because a host that cannot
+express the relation cannot test that it holds. It now takes an oid count. Two drift tests never
+answered the `--no-walk=unsorted` query at all: it fell through to `ok()`, production rendered
+zero records for one weighed commit, and both tests were passing on a history the host had never
+supplied. Same discovery as the `ls-files` round and the `cat-file -s` round — **a stub that
+omits a query does not under-test it, it supplies whatever the default branch returns.**
+
+**And one of my own tests asserted the defect as correct — the sixth time.**
+`A SIDE WITH NO COMMITS IS STILL EVIDENCE` resolved one commit id and answered the message read
+with `ok('')`, then asserted the judge was asked and shown `(no commits in range)`. That is not a
+side with no commits; it is the disagreement, pinned as correct under the name of the right
+property. The property is real and the test keeps it — with an empty RESOLUTION, which is what
+the name always meant.
+
+| # | mutation | result |
+|---|---|---|
+| M156 | the agreement check removed | **red, 2 tests** |
+| M157 | weakened to `records.length === 0` | **red on the partial render** — the emptiness check is not enough |
+| M158 | weakened to `records.length < oids.length` | **SURVIVED**, then closed — see below |
+| M159 | `(no commits in range)` restored at the post-render site | **red, 2 tests** |
+
+**M158 survived, and the survivor was worth having.** An inequality permits a render with MORE
+records than were resolved — evidence containing commits this code never asked for, never
+weighed against the ceiling, and cannot attribute to either side. That is the *right quantity of
+the wrong things* axis, the one round 28 named, pointing outward instead of inward; and written
+as `<` it still reads like a bound, which is how it would survive review. The two reads agree or
+the evidence is unknown, and **agree means equal**. A test now drives one weighed oid against
+three rendered records.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
