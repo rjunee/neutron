@@ -16,9 +16,19 @@
  * apart from "it quietly started a second one".
  *
  * BIDIRECTIONAL, because a gate that refuses everything would pass all four refusals
- * and break the product: the last two cases prove a spawn still happens when the
+ * and break the product: the later cases prove a spawn still happens when the
  * reconciliation ends in a POSITIVE statement (the pane is gone; the survivor was
- * verified and killed).
+ * closed; the recorded pid is provably dead; the row never had a handle).
+ *
+ * WHERE THE SEAM IS, stated so the coverage is not overclaimed. `getOrSpawnSession`
+ * takes no injection point for the process table, so the INCONCLUSIVE shapes driven
+ * end-to-end here are the ones a registry row can express on its own — chiefly "there
+ * is no pid to ask about". The other inconclusive producer, "the pid is alive and its
+ * command line could not be read", is pinned at the unit layer
+ * (`boot-adoption.test.ts`), where the probe IS injectable. Both produce the same
+ * `undecided` verdict through the same function, and M21 (making `undecided` permit a
+ * spawn) reddens five cases here — so the verdict→refusal half is what this file
+ * proves, and the producer→verdict half is proved next door.
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
