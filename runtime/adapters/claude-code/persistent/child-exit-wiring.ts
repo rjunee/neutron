@@ -17,7 +17,7 @@
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
-import { disownPane, withRegistry } from './repl-registry.ts'
+import { disownPane, withOwnedRegistry } from './repl-registry.ts'
 import type { PtyChild } from './pty-host.ts'
 import { ReplSession, unlinkSessionConfigs } from './repl-session.ts'
 
@@ -137,18 +137,27 @@ function disownPaneOnExit(
 ): void {
   if (registryPath === undefined) return
   try {
-    withRegistry(registryPath, (registry) => {
-      const prev = registry[sessionKey]
-      if (prev === undefined) return { registry, result: undefined, skipSave: true as const }
-      const stillOurChild = prev.child_generation === session.childGeneration
-      const claim = prev.adoption_claim_by
-      const notSomebodyElses = claim === undefined || claim === session.paneClaimBy
-      if (!stillOurChild || !notSomebodyElses) {
-        return { registry, result: undefined, skipSave: true as const }
-      }
-      registry[sessionKey] = disownPane(prev)
-      return { registry, result: undefined }
-    })
+    withOwnedRegistry(
+      registryPath,
+      (registry) => {
+        const prev = registry[sessionKey]
+        if (prev === undefined) return { registry, result: undefined, skipSave: true as const }
+        const stillOurChild = prev.child_generation === session.childGeneration
+        const claim = prev.adoption_claim_by
+        const notSomebodyElses = claim === undefined || claim === session.paneClaimBy
+        if (!stillOurChild || !notSomebodyElses) {
+          return { registry, result: undefined, skipSave: true as const }
+        }
+        registry[sessionKey] = disownPane(prev)
+        return { registry, result: undefined }
+      },
+      // THE DISPOSITION FOR AN UNACQUIRED LOCK: DO NOT DISOWN. Writing an unlocked
+      // whole-registry snapshot would drop a concurrent gateway's rows, and refusing costs
+      // only a row that still names a child which has exited — which the next boot's probe
+      // answers as `pane_not_found`, a POSITIVE absence and a recoverable one. The
+      // recoverable direction, chosen deliberately over the destructive one.
+      () => undefined,
+    )
   } catch {
     /* the next boot reconciles it */
   }

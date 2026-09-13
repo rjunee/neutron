@@ -30,6 +30,8 @@ import {
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import { reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
+import { registerSupervisedSubstrate, runReplWatchdogTick } from '../supervision.ts'
+import { setFlockImplForTests } from '../registry-lock.ts'
 import { childByKey, pool } from '../pool-state.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
 
@@ -45,6 +47,10 @@ function scratch(): string {
 /** A fake `claude` + dev-channel that answers one turn. `paneHandle` is what this
  *  host claims about durability — present for a herdr-like host, absent for an
  *  in-process one. */
+/** Kills observed on children this host handed out — the observable for "the spawn
+ *  refused AND cleaned up after itself" rather than "the spawn refused". */
+const killsByHandle: string[] = []
+
 function echoHost(paneHandle?: string): PtyHost {
   return {
     async spawn(argv: string[]): Promise<PtyChild> {
@@ -86,6 +92,7 @@ function echoHost(paneHandle?: string): PtyHost {
         write() {},
         kill() {
           if (exited) return
+          if (paneHandle !== undefined) killsByHandle.push(paneHandle)
           exited = true
           try {
             server.stop(true)
@@ -131,6 +138,8 @@ function readRow(path: string, key: string): ReplRegistryRecord | undefined {
 }
 
 afterEach(async () => {
+  setFlockImplForTests(undefined)
+  killsByHandle.length = 0
   await shutdownAllPersistentRepls()
   for (const s of servers.splice(0)) {
     try {
@@ -204,6 +213,11 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
     const registryPath = join(scratch(), 'repl-registry.json')
     const options = optionsFor(echoHost('w9:p77'), registryPath)
     const key = poolKeyFor(options)
+    // AS THE REAL SELECTOR DOES (`adapters/claude-code/index.ts`): the substrate registers
+    // itself as the owner of its key before any tick runs. The tick actuates through that
+    // registration, so a harness that skips it has no supervision at all — and the renewal
+    // assertion below would pass vacuously in the one direction that matters.
+    registerSupervisedSubstrate(options)
     await drain(createPersistentReplSubstrate(options).start(spec('hi')))
 
     // THE ROW IS OWNED AND CLAIMED, in one write. Field-for-field, because "adoption
@@ -217,6 +231,21 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
 
     const served = await pool.get(key)
     expect(served).toBeDefined()
+
+    // AND THE SPAWNED SESSION RENEWS, which is the half that keeps the claim meaningful
+    // for longer than one takeover window. Without it a spawner's claim would simply
+    // expire under it and the adopter below would win ninety seconds later — the same
+    // defect, arriving slowly. Driven through the real supervision tick, because a
+    // renewal nothing invokes is indistinguishable from no renewal at all.
+    const claimedAt = readRow(registryPath, key)?.adoption_claim_at as number
+    await runReplWatchdogTick(options, {
+      now: () => claimedAt + 60_000,
+      healthProbe: async () => true,
+      isPidAlive: () => true,
+    })
+    expect(readRow(registryPath, key)?.adoption_claim_at).toBe(claimedAt + 60_000)
+    // Still the same owner — a renewal is not a re-claim.
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBe(row?.adoption_claim_by)
 
     // A SECOND GATEWAY TRIES TO ADOPT THE PANE THIS ONE IS SERVING. Its host can see the
     // pane and the argv matches the row, so everything except the claim says "adopt me".
@@ -357,5 +386,110 @@ describe('a pane is OWNED by whoever serves it, however that session came to exi
     expect(after?.pane_handle).toBeUndefined()
     expect(after?.adoption_claim_by).toBeUndefined()
     expect(after?.adoption_claim_pid).toBeUndefined()
+  })
+})
+
+
+describe('an ownership transition that could not hold the lock writes NOTHING', () => {
+  /**
+   * ARGUS r41, and the finding is sharper than "two sites missed a rule". `withFlockSync`
+   * runs its callback even when `flock` FAILS, and `withRegistry` saves whatever that
+   * callback returns — so an unguarded write here does not fail loudly, it silently
+   * rewrites the whole registry from a snapshot nobody had the right to read, dropping a
+   * concurrent gateway's rows.
+   *
+   * Four sites had already needed this rule (rounds fifteen, eighteen, twenty-one), and
+   * the two that round forty ADDED shipped without it — written after the rule existed, by
+   * someone who knew it. The audit table records what was checked; it cannot make the next
+   * write obey anything. So the disposition is now a required parameter of
+   * `withOwnedRegistry` and these cases pin what each site DOES about it, because "nothing
+   * was written" is only half of a correct answer.
+   */
+  it('a spawn that cannot RECORD its pane refuses and ends the child it made', async () => {
+    // THE DISPOSITION, stated rather than implied. A durable pane whose ownership was
+    // never recorded is a REPL nothing can find again AND one any other gateway may claim
+    // while this one serves it. Degrading — the policy for every other field on this row —
+    // would produce exactly the unrecorded live child four rounds of this branch have
+    // called the unrecoverable direction. So it refuses, and it kills the child it just
+    // made, because refusing without killing leaves the same thing behind.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-lock'), registryPath)
+    const key = poolKeyFor(options)
+    writeFileSync(registryPath, JSON.stringify({}, null, 2))
+    const before = readFileSync(registryPath, 'utf8')
+
+    setFlockImplForTests(() => 1)
+    let message = ''
+    try {
+      await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e)
+    }
+
+    // THE DISPOSITION: refused, and said why.
+    expect(message).toMatch(/could not be RECORDED as owned/i)
+    // AND CLEANED UP: the child it made is ended, not left running unrecorded.
+    expect(killsByHandle).toContain('w9:p-lock')
+    // AND NOTHING WAS WRITTEN. The whole file, because what an unguarded save costs is
+    // every OTHER key in it, not this one.
+    expect(readFileSync(registryPath, 'utf8')).toBe(before)
+    expect(readRow(registryPath, key)).toBeUndefined()
+  })
+
+  it('...and with the lock held the same spawn serves normally', async () => {
+    // The positive control, and it is not decoration: a refusal that fired unconditionally
+    // would pass the case above and stop every REPL starting.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-ok'), registryPath)
+    const key = poolKeyFor(options)
+    const text = await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(text).toContain('echo')
+    expect(killsByHandle).not.toContain('w9:p-ok')
+    expect(readRow(registryPath, key)?.pane_handle).toBe('w9:p-ok')
+    expect(typeof readRow(registryPath, key)?.adoption_claim_by).toBe('string')
+  })
+
+  it('a child exit that cannot hold the lock leaves the row exactly alone', async () => {
+    // THE OTHER DISPOSITION, and it goes the other way on purpose: do NOT disown. The cost
+    // is a row that still names a child which has exited, and the next boot's probe answers
+    // `pane_not_found` — a positive absence, and recoverable. The cost of writing would be
+    // another gateway's rows.
+    // NOT REGISTERED as a supervised substrate, deliberately: with a registration and a
+    // matching row the shutdown LEAVES the child alive (that is the feature), and then
+    // there is no exit and nothing for this case to observe. Unregistered, the shutdown
+    // kills — which is the path whose teardown writes the row.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-exit'), registryPath)
+    const key = poolKeyFor(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(readRow(registryPath, key)?.pane_handle).toBe('w9:p-exit')
+    const claimBefore = readRow(registryPath, key)?.adoption_claim_by
+
+    // The lock stops working, and THEN the child dies.
+    setFlockImplForTests(() => 1)
+    await shutdownAllPersistentRepls()
+
+    // OWNERSHIP UNTOUCHED — asserted on the fields rather than the whole file, because the
+    // file legitimately gains the #518 shutdown-kill record: that write is one of the four
+    // LOCK-INDIFFERENT callers (losing it costs a mislabelled crash, not an invariant), so
+    // it still goes through plain `withRegistry`. Asserting whole-file bytes here would be
+    // asserting that a different caller's classification had not changed.
+    expect(readRow(registryPath, key)?.pane_handle).toBe('w9:p-exit')
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBe(claimBefore)
+  })
+
+  it('...and with the lock held that same exit disowns the row', async () => {
+    // The positive control for the disown, which is what makes the case above a statement
+    // about the LOCK rather than about the disown having quietly stopped working.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-exit-ok'), registryPath)
+    const key = poolKeyFor(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(readRow(registryPath, key)?.pane_handle).toBe('w9:p-exit-ok')
+
+    await shutdownAllPersistentRepls()
+
+    expect(readRow(registryPath, key)?.pane_handle).toBeUndefined()
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBeUndefined()
   })
 })

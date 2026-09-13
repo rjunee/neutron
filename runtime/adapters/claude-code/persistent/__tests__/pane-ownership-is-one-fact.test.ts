@@ -22,6 +22,18 @@
  * READS ARE FINE and deliberately not banned — deciding on a row means reading it. What
  * is banned is WRITING: an object-literal key, a property assignment, or a destructure
  * that strips one of them out of a row.
+ *
+ * WHAT IT DOES NOT COVER, stated rather than left to be discovered. The scan is this
+ * directory's non-test modules. Two exclusions are deliberate and one is a bound:
+ *
+ *   - TEST FILES write these fields constantly and must — a fixture builds rows by hand,
+ *     and banning that would leave the suite unable to construct the states it checks;
+ *   - the FUNNEL itself, obviously, which the second case pins;
+ *   - and code OUTSIDE this directory is not scanned. Nothing out there writes them today
+ *     (checked: a repo-wide grep for these keys returns only this directory and its
+ *     tests), and nothing outside can reasonably want to — a writer would have to import
+ *     `ReplRegistryRecord` and reach past four exported transitions to do it. If that ever
+ *     changes, the scan root is one constant.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -54,6 +66,67 @@ function writesOf(source: string): string[] {
   }
   return hits
 }
+
+/** The four named transitions. A call to any of them IS an ownership write. */
+const TRANSITIONS = ['ownPane', 'disownPane', 'handOverPane', 'refreshPaneClaim']
+
+/**
+ * Which registry entry point encloses each transition CALL — found by walking back to the
+ * nearest preceding `with…Registry(` in the file. Crude on purpose: a heuristic that can be
+ * read in one sitting and whose failures are visible as a named line, rather than a parser
+ * nobody will maintain.
+ */
+function transitionsNotUnderTheOwnedEntryPoint(source: string): string[] {
+  const lines = source.split('\n')
+  const bad: string[] = []
+  let enclosing: 'owned' | 'plain' | 'none' = 'none'
+  for (const [i, rawLine] of lines.entries()) {
+    const line = rawLine.trim()
+    if (line.startsWith('*') || line.startsWith('//')) continue
+    if (line.includes('withOwnedRegistry(')) enclosing = 'owned'
+    else if (line.includes('withRegistry(')) enclosing = 'plain'
+    for (const t of TRANSITIONS) {
+      // A CALL, not an import or a type reference.
+      if (!new RegExp(`\\b${t}\\(`).test(line)) continue
+      if (enclosing !== 'owned') bad.push(`${i + 1}: ${line.slice(0, 100)}`)
+    }
+  }
+  return bad
+}
+
+describe('an ownership write goes through the entry point that consumes the lock outcome', () => {
+  it('no transition is called under plain withRegistry', () => {
+    // ARGUS r41. `withFlockSync` runs its callback even when `flock` FAILS and
+    // `withRegistry` saves what it returns, so an ownership write that does not consume
+    // the acquisition outcome rewrites the whole registry from a snapshot nobody had the
+    // right to read — dropping a concurrent gateway's rows. Four sites had needed that
+    // rule already; the two round forty ADDED shipped without it, written after the rule
+    // existed by someone who knew it.
+    //
+    // `withOwnedRegistry` makes the failure disposition a REQUIRED parameter, and this
+    // case makes reaching for the wrong entry point visible at the call site instead of
+    // invisible by omission — which is the difference between a mechanism and a rule.
+    const offenders: Record<string, string[]> = {}
+    for (const name of readdirSync(SUBSYSTEM)) {
+      if (!name.endsWith('.ts') || name === FUNNEL) continue
+      const bad = transitionsNotUnderTheOwnedEntryPoint(readFileSync(join(SUBSYSTEM, name), 'utf8'))
+      if (bad.length > 0) offenders[name] = bad
+    }
+    expect(offenders).toEqual({})
+  })
+
+  it('...and transitions ARE called out there, so the check is not vacuous', () => {
+    // The positive control: if every transition call moved into the funnel, or a rename
+    // made the names stop matching, the case above would pass while checking nothing.
+    let found = 0
+    for (const name of readdirSync(SUBSYSTEM)) {
+      if (!name.endsWith('.ts') || name === FUNNEL) continue
+      const src = readFileSync(join(SUBSYSTEM, name), 'utf8')
+      for (const t of TRANSITIONS) if (new RegExp(`\\b${t}\\(`).test(src)) found += 1
+    }
+    expect(found).toBeGreaterThanOrEqual(4)
+  })
+})
 
 describe('pane ownership is written in exactly one place', () => {
   it('no module outside the funnel writes the handle or its claim', () => {

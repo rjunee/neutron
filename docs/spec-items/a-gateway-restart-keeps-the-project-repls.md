@@ -238,6 +238,20 @@ it must not swallow.
       process is gone losing it at once, and one we could not ask about NOT losing it; the
       renewal refusing to overwrite a legitimate takeover; and the hand-over that clears the
       marker so the next boot is not refused).
+- [ ] **AN OWNERSHIP WRITE THAT COULD NOT HOLD THE LOCK WRITES NOTHING, AND SAYS WHAT IT
+      DID INSTEAD.** `withFlockSync` runs its callback even when `flock` fails, and the
+      registry write saves whatever that callback returns — so an ownership transition that
+      ignores the acquisition outcome rewrites the whole registry from a snapshot nobody had
+      the right to read, dropping a concurrent gateway's rows. Every such write goes through
+      one entry point whose failure disposition is a REQUIRED parameter, and the two
+      dispositions differ on purpose: a child exit does NOT disown (the row keeps naming an
+      exited child, which the next boot's probe answers as a positive absence), while a fresh
+      spawn REFUSES and ends the child it just made — a durable pane whose ownership was
+      never recorded is a REPL nothing can find again and one any other gateway may claim.
+      *Verified by* `__tests__/pane-handle-persistence.test.ts` (the real flock forced to
+      fail at each transition, asserting what was written and what the caller did about it,
+      each with a lock-held positive control) and `__tests__/pane-ownership-is-one-fact.test.ts`
+      (no transition is called under the entry point that does not consume the outcome).
 - [ ] **EVERY SESSION THAT OWNS A PANE CLAIMS IT, HOWEVER IT CAME TO EXIST.** A fresh
       spawn takes a claim in the same write that records the pane handle; a child's exit
       releases the handle and the claim together; a replacement spawn inherits neither.

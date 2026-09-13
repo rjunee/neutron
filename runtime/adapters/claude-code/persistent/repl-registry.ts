@@ -1017,6 +1017,63 @@ export function withRegistry<T>(
   )
 }
 
+/**
+ * THE ENTRY POINT FOR A WRITE WHOSE CORRECTNESS RESTS ON THE LOCK (#539, Argus r41).
+ *
+ * WHY THIS EXISTS RATHER THAN A RULE. Six writes in this subsystem are only correct while
+ * the flock is held, and four of them had already been fixed one at a time — rounds
+ * fifteen, eighteen, twenty-one — each by adding `if (!acquired) return skipSave` inside
+ * the callback. Round forty's structural work then ADDED TWO NEW ownership writes, and
+ * both shipped without the check: written after the rule existed, by someone who knew it.
+ * **A rule that has to be remembered at every new call site is not a mechanism**, and the
+ * audit table that records what was checked cannot make the next write obey anything.
+ *
+ * So the disposition for a failed acquisition is a REQUIRED PARAMETER. `mutate` runs only
+ * when the lock was actually held; `onUnlocked` is what happens when it was not, and there
+ * is no way to call this without saying. A caller reaching for plain {@link withRegistry}
+ * for an ownership transition is now visible at the call site instead of invisible by
+ * omission.
+ *
+ * WHY NOT INVERT `withRegistry`'S OWN DEFAULT, which was the alternative on the table. Its
+ * callers were enumerated rather than guessed: ten production call sites, six lock-critical
+ * (the claim, the renewal, the give-back, the handle clear, the fresh-spawn ownership write
+ * and the child-exit disown) and four lock-INDIFFERENT — `upsertRecord`, `patchRecord`,
+ * `removeRecord` and `clearRespawnInFlight`, whose losses are bounded degradations rather
+ * than invariant breaks. Inverting the default would put the "unguarded is fine" opt-in on
+ * the three generic helpers, which between them carry ten transitive callers and are
+ * exactly the path a future ownership-ish field would travel through — the same failure
+ * mode, one level up and harder to see. And `withFlockSync` reports `acquired: false` when
+ * the FFI is simply UNAVAILABLE, not only when `flock` fails, so inverting the default
+ * would silently convert that fallback from "write unguarded" to "write nothing at all"
+ * for every registry write in such an environment. Six explicit sites beat a global
+ * behavioural change with a silent failure mode.
+ */
+export function withOwnedRegistry<T>(
+  path: string,
+  /** Runs ONLY with the lock held. Same shape as {@link withRegistry}'s mutator. */
+  mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T; skipSave?: true },
+  /** What this caller does when the lock was NOT acquired. Required, so the disposition
+   *  is a decision rather than an omission — nothing is written in this case. */
+  onUnlocked: () => T,
+): T {
+  let acquired = false
+  return withRegistry(
+    path,
+    (registry) => {
+      // BEFORE ANY READ OR WRITE. An unacquired lock means the snapshot below may already
+      // be stale, so even reading it to decide is unsound: `withRegistry` is a
+      // whole-registry read-modify-write, and saving a snapshot taken without the lock
+      // drops any row a concurrent gateway wrote in between.
+      if (!acquired) return { registry, result: onUnlocked(), skipSave: true as const }
+      return mutate(registry)
+    },
+    {},
+    (ok) => {
+      acquired = ok
+    },
+  )
+}
+
 /** Upsert one record (lock-guarded). Merges onto any existing row so a
  *  concurrent tick's fields survive. */
 export function upsertRecord(

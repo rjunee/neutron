@@ -95,6 +95,7 @@ import {
   ownPane,
   readRegistryState,
   refreshPaneClaim,
+  withOwnedRegistry,
   withRegistry,
   withRegistryRead,
   type ReplRegistryRecord,
@@ -1261,14 +1262,10 @@ export function renewAdoptionClaim(
   now: number = Date.now(),
   claimantPid: number = process.pid,
 ): ClaimRenewal {
-  let acquired = false
   try {
-    return withRegistry(
+    return withOwnedRegistry(
       registryPath,
       (registry) => {
-        if (!acquired) {
-          return { registry, result: 'unwritable' as ClaimRenewal, skipSave: true as const }
-        }
         const prev = registry[sessionKey]
         if (prev === undefined) {
           return { registry, result: 'no-row' as ClaimRenewal, skipSave: true as const }
@@ -1283,10 +1280,9 @@ export function renewAdoptionClaim(
         registry[sessionKey] = refreshed
         return { registry, result: 'renewed' as ClaimRenewal }
       },
-      {},
-      (ok) => {
-        acquired = ok
-      },
+      // Not renewed and nothing written: the claim ages toward its takeover threshold,
+      // which is exactly what the threshold is for.
+      () => 'unwritable' as ClaimRenewal,
     )
   } catch {
     return 'unwritable'
@@ -1441,9 +1437,8 @@ export function releaseAdoptionClaim(
   claimedBy: string | undefined,
 ): void {
   if (registryPath === undefined || claimedBy === undefined) return
-  let acquired = false
   try {
-    withRegistry(
+    withOwnedRegistry(
       registryPath,
       (registry) => {
         // AND A WRITE IS ONLY SAFE WHILE THE LOCK HOLDS — the same argument the claim
@@ -1458,7 +1453,6 @@ export function releaseAdoptionClaim(
         // Skipping costs one bounded refusal on THIS key (the marker stands until its TTL),
         // which is precisely what the TTL is for. Losing somebody else's row costs a live
         // REPL nothing can find. Not a close call.
-        if (!acquired) return { registry, result: undefined, skipSave: true as const }
         const prev = registry[sessionKey]
         // THE HANDLE STAYS. This is the hand-over, not a disown: the pane is still running
         // and the row must go on naming it, or the next construction has nothing to adopt.
@@ -1469,10 +1463,9 @@ export function releaseAdoptionClaim(
         registry[sessionKey] = handed
         return { registry, result: undefined }
       },
-      {},
-      (ok) => {
-        acquired = ok
-      },
+      // Not handed back: the claim stands until its takeover threshold, which costs one
+      // bounded refusal on this key rather than somebody else's dropped row.
+      () => undefined,
     )
   } catch {
     /* the TTL is the backstop */
@@ -1636,9 +1629,8 @@ async function claimRowOrUnwind(args: {
   // publish an attached owner — two owners of one live transcript, the single outcome
   // this module exists to prevent. Round eight gave the shutdown decision this treatment;
   // the claim is its neighbour and inherited nothing.
-  let acquired = false
   try {
-    claim = withRegistry<ClaimResult>(
+    claim = withOwnedRegistry<ClaimResult>(
       registryPath,
       (registry) => {
         // CHECKED INSIDE THE CALLBACK, BEFORE ANY WRITE (Argus r15). `onOutcome` fires
@@ -1655,11 +1647,6 @@ async function claimRowOrUnwind(args: {
         // back — so the comment was a false claim about the code three lines above the
         // correct implementation. Argus r21 hoisted that check too; the clear's early
         // returns were the last place this rule had not reached.
-        // NO WRITE AT ALL, not "write the same thing back". Without `skipSave` this
-        // returns the snapshot loaded before the callback ran and `withRegistry` saves
-        // it — dropping any row a concurrent incarnation wrote in between. A lost update
-        // performed by the branch that refuses to act because it did not get the lock.
-        if (!acquired) return { registry, result: 'lock-unacquired' as ClaimResult, skipSave: true }
         const prev = registry[args.sessionKey]
         if (
           prev === undefined ||
@@ -1726,10 +1713,11 @@ async function claimRowOrUnwind(args: {
         )
         return { registry, result: 'ours' as ClaimResult }
       },
-      {},
-      (ok) => {
-        acquired = ok
-      },
+      // NO WRITE AT ALL, not "write the same thing back" — the snapshot loaded before the
+      // callback ran would drop any row a concurrent incarnation wrote in between: a lost
+      // update performed by the branch that refuses to act because it did not get the
+      // lock. The verdict below neither publishes nor closes.
+      () => 'lock-unacquired' as ClaimResult,
     )
   } catch (e) {
     // THE REGISTRY COULD NOT BE READ OR WRITTEN, and that establishes nothing about who
@@ -1894,9 +1882,8 @@ function clearPaneHandleIfUnchanged(
   deps: BootAdoptionDeps,
 ): ClearOutcome {
   const log = deps.log ?? defaultLog
-  let acquired = false
   try {
-    const outcome = withRegistry(
+    const outcome = withOwnedRegistry(
       registryPath,
       (registry) => {
         // FIRST, BEFORE ANY READING OR WRITING (Argus r21). This check used to sit BELOW
@@ -1917,9 +1904,6 @@ function clearPaneHandleIfUnchanged(
         // unrecoverable direction. A stale row pointing at a pane we did close is the
         // recoverable one: the next boot probes the handle, gets a positive absence, and
         // clears it then.
-        if (!acquired) {
-          return { registry, result: 'lock-unacquired' as ClearOutcome, skipSave: true }
-        }
         const prev = registry[sessionKey]
         if (prev === undefined) return { registry, result: 'absent' as ClearOutcome }
         if (prev.pane_handle !== expected.handle || prev.child_generation !== expected.generation) {
@@ -1935,10 +1919,9 @@ function clearPaneHandleIfUnchanged(
       registry[sessionKey] = disownPane(prev)
       return { registry, result: 'cleared' as ClearOutcome }
       },
-      {},
-      (ok) => {
-        acquired = ok
-      },
+      // See the note above: `absent` and `row-moved` read off an unguarded snapshot are
+      // not findings, so every unlocked outcome collapses to this one.
+      () => 'lock-unacquired' as ClearOutcome,
     )
     if (outcome === 'lock-unacquired') {
       log(

@@ -30,6 +30,7 @@ import {
   getRecord,
   ownPane,
   patchRecord,
+  withOwnedRegistry,
   withRegistry,
 } from './repl-registry.ts'
 import {
@@ -611,7 +612,9 @@ async function spawnSession(
       // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
       // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
       // must not survive to block the next tick's recovery (Codex P2-3).
-      withRegistry(options.replRegistryPath, (registry) => {
+      const ownershipRecorded = withOwnedRegistry(
+        options.replRegistryPath,
+        (registry) => {
         const prev = registry[sessionKey]
         const {
           respawn_in_flight_at: _drop,
@@ -651,9 +654,47 @@ async function spawnSession(
                 pid: process.pid,
               })
             : disowned
-        return { registry, result: undefined }
-      })
-    } catch {
+          return { registry, result: true }
+        },
+        // THE DISPOSITION FOR AN UNACQUIRED LOCK, said rather than implied (Argus r41).
+        // Writing an unlocked whole-registry snapshot would drop a concurrent gateway's
+        // rows and would claim a pane on the strength of a row nobody had the right to
+        // read. So: nothing is written, and the caller below decides what that means.
+        () => false,
+      )
+      // A CHILD WITH A PANE NOBODY CAN FIND IS THE UNRECOVERABLE DIRECTION, and this
+      // branch is the one place that can still choose. The general policy here is that a
+      // registry write failure must not brick a live REPL — supervision degrades to "no
+      // auto-resume" and the next write repairs it — and that remains right for every
+      // other field, because losing them costs a bounded degradation.
+      //
+      // OWNERSHIP IS NOT ONE OF THOSE. A durable pane whose ownership was never recorded
+      // is a live REPL no gateway can find again AND one any other gateway may claim while
+      // this one serves it: the two-owner state, produced by the spawn that was supposed
+      // to prevent it. Four rounds of this branch have established which way to fail.
+      //
+      // So the child is KILLED and the spawn refused. It is seconds old and serving
+      // nobody; the turn fails retryably and the next one re-spawns against a registry
+      // whose lock may by then be available. Refusing without killing would leave exactly
+      // the unrecorded live child this branch is refusing to create.
+      if (!ownershipRecorded && child.paneHandle !== undefined) {
+        try {
+          child.kill()
+        } catch {
+          /* best-effort: the refusal below is what protects the invariant */
+        }
+        throw new Error(
+          `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — its pane ` +
+            `${child.paneHandle} could not be RECORDED as owned (the registry lock was not acquired, so a ` +
+            'write would have dropped a concurrent gateway\'s rows). A durable pane whose ownership is ' +
+            'unrecorded is a REPL nothing can find again and one any other gateway may claim, so the child ' +
+            'was ended and this turn fails instead. It retries on the next turn.',
+        )
+      }
+    } catch (e) {
+      // The ownership refusal above is NOT a write failure and must not be swallowed by
+      // the degrade policy that follows it.
+      if (e instanceof Error && e.message.includes('could not be RECORDED as owned')) throw e
       // A registry write failure must never brick a live REPL; supervision
       // degrades to "no auto-resume for this session" until the next write.
     }

@@ -1862,6 +1862,18 @@ either field, by object key, by assignment, or by a rest-destructure that strips
 **A table would not have saved the fifth path.** M108 reds that guard as well as the
 behaviour case, which is the evidence that it is load-bearing rather than decorative.
 
+**Why the funnel rather than a grouped field, since the ruling invited the argument.** The
+stronger version — one nested `ownership: { handle, generation, claim… }` object, so an
+owned-but-unclaimed row is unrepresentable in the type — changes the PERSISTED schema. Every
+row already on disk, `normaliseRecord`, `isMinimalRecord`, every reader of
+`record.pane_handle` across the subsystem, and the fixtures in eight test files would move
+with it, and a schema tightening on this branch has already cost sixty-eight fixture
+rewrites once (round thirteen). At round forty that is a migration risk out of proportion to
+the guarantee. The funnel plus a build-failing source check buys the same property **at the
+only place it can be violated — the write** — for none of that risk. The cost is honest and
+stated: the type still *permits* an owned-unclaimed row; what is enforced is that no code
+can produce one.
+
 **The invariant is DIRECTIONAL, and the symmetric version would be wrong.** A row whose
 pane is being served carries that session's claim; writing or clearing a handle carries its
 claim with it. But **a handle with no claim is a legitimate, load-bearing state** — it is
@@ -1870,6 +1882,15 @@ leaves behind and what the next boot adopts. `handOverPane` produces it delibera
 
 **And a rename, because the name was the bug.** `session.adoptionClaimBy` became
 `paneClaimBy`: while it was named for adoption, only the adoption path set it.
+
+**And the half a claim-write alone would not have bought.** A spawned session must also
+RENEW, or its claim expires under it and the adopter wins ninety seconds later — blocker one
+again, in slow motion. That needs the claim identity on the SESSION (`paneClaimBy`), not only
+in the row, and the case asserting it found the harness was not registering its substrate the
+way the real selector does (`adapters/claude-code/index.ts:535`) — so the tick had nothing to
+actuate through and the assertion would have passed vacuously. M111 isolates it: drop the
+session-side record and the row still gets a claim, but nothing renews it and nothing gives
+it back.
 
 **A defect in my own wiring, caught by a failing fixture rather than by reading.** The
 child-exit disown first resolved its registry path through `supervisedBySessionKey` — a map
@@ -1886,6 +1907,74 @@ The case that reaches it needs a replacement with NO handle (the supported #540 
 and only then does the disown carry the outcome. Two vacuous fixtures in one round, both
 found by the mutation refusing to red rather than by review.
 
+### Round forty-one: the rule was six rounds old and the two newest sites did not follow it
+
+`withFlockSync` runs its callback even when `flock` FAILS (`registry-lock.ts:170`) and
+`withRegistry` saves whatever that callback returns unless told `skipSave`
+(`repl-registry.ts:1001`). So a write that does not consume the acquisition outcome does not
+fail loudly — **it silently rewrites the whole registry from a snapshot nobody had the right
+to read**, dropping a concurrent gateway's rows. Round forty's two new ownership writes —
+the fresh-spawn claim and the child-exit disown — both ignored `onOutcome`.
+
+**What matters is not the fix.** Four sites had already needed this rule (rounds fifteen,
+eighteen, twenty-one), each patched individually with `if (!acquired) return skipSave`. The
+fourth and fifth were written *after* the rule existed, by someone who knew it. **An audit
+table records what was checked; it cannot make the next write obey anything** — the same
+limit enumeration hit at round forty with the handle and the claim, one level up.
+
+**So the disposition is now a required parameter.** `withOwnedRegistry(path, mutate,
+onUnlocked)` runs `mutate` only with the lock held, and there is no way to call it without
+saying what happens when the lock was not. Reaching for plain `withRegistry` for an ownership
+transition is visible at the call site instead of invisible by omission, and a second guard
+in `pane-ownership-is-one-fact.test.ts` walks each transition call back to its enclosing
+entry point and fails the build if it is the wrong one. M112 and M113 red that guard as well
+as their behaviour cases.
+
+**The enumeration the ruling asked for, because it decided the design.** Ten production
+`withRegistry` call sites:
+
+| Lock-critical (6) | Lock-indifferent (4) |
+|---|---|
+| the row claim's compare-and-set | `upsertRecord` |
+| `renewAdoptionClaim` | `patchRecord` |
+| `releaseAdoptionClaim` (the hand-over) | `removeRecord` |
+| `clearPaneHandleIfUnchanged` | `clearRespawnInFlight` |
+| the fresh-spawn ownership write (r40) | |
+| the child-exit disown (r40) | |
+
+**Recommendation taken: the distinct entry point, not inverting `withRegistry`'s default** —
+and the argument is the caller set rather than taste. Inverting would put the "unguarded is
+fine" opt-in on `upsertRecord` / `patchRecord` / `removeRecord`, which between them carry
+**ten transitive call sites** and are exactly the path a future ownership-ish field would
+travel through: the same failure mode, one level up and harder to see. And `withFlockSync`
+answers `acquired: false` when the FFI is merely UNAVAILABLE, not only when `flock` fails —
+its own comment says "run unguarded (single-process test environments)" — so inverting the
+default would silently convert that fallback from *write unguarded* to *write nothing at
+all*, for every registry write, in any environment without FFI. Six explicit sites beat a
+global behavioural change with a silent failure mode.
+
+**The two dispositions, stated rather than implied — and they go opposite ways.**
+
+  - **Child exit: do not disown.** The row keeps naming a child that has exited, and the next
+    boot's probe answers `pane_not_found` — a positive absence, and recoverable.
+  - **Fresh spawn: refuse, and END THE CHILD.** A durable pane whose ownership was never
+    recorded is a REPL nothing can find again AND one any other gateway may claim while this
+    one serves it. The general policy on this row is that a write failure must not brick a
+    live REPL; **ownership is not one of those fields**. Refusing without killing would leave
+    exactly the unrecorded live child the refusal exists to prevent, so the seconds-old child
+    is ended and the turn fails retryably.
+
+**Two fixture corrections, both mine.** The exit cases first registered their substrate,
+which makes the shutdown take the SURVIVAL path — so the child never exits and there is
+nothing to observe; and the whole-file byte assertion was wrong for that path because the
+#518 shutdown-kill record is one of the four lock-indifferent writers and legitimately still
+lands. Asserting bytes there would have been asserting that another caller's classification
+had not changed.
+
+> **The lesson, narrower than "you missed one": a structural fix that ADDS call sites
+> inherits every rule those call sites are subject to, and the enumeration that checks it
+> has to run over the new sites in the same push, not the next one.**
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1896,7 +1985,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine and M108–M110 in round forty, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty and M112–M114 in round forty-one, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2037,6 +2126,10 @@ count from the rows below rather than trusting this sentence.
 | M108 | the fresh spawn writes the handle but no claim | `pane-handle-persistence.test.ts` (2) + **`pane-ownership-is-one-fact.test.ts` (1)** — the funnel guard catches it too |
 | M109 | the replacement merge keeps the predecessor's claim | `pane-handle-persistence.test.ts` (1 — and only via a replacement with NO pane of its own; see above) |
 | M110 | the child-exit teardown releases the claim but keeps the handle | `pane-handle-persistence.test.ts` (1) |
+| M111 | the spawned session does not record its OWN claim identity | `pane-handle-persistence.test.ts` (2 — it renews nothing, and gives nothing back on exit) |
+| M112 | the child-exit disown drops the acquisition check | `pane-handle-persistence.test.ts` (1) + `pane-ownership-is-one-fact.test.ts` (1) |
+| M113 | the fresh-spawn ownership write drops the acquisition check | `pane-handle-persistence.test.ts` (1) + `pane-ownership-is-one-fact.test.ts` (1) |
+| M114 | the spawn proceeds silently when ownership was not recorded | `pane-handle-persistence.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
