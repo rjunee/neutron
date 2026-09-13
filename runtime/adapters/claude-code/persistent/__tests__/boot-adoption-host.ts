@@ -25,6 +25,10 @@ export interface FakePane {
 
 /** One attached child, with everything a test needs to see what was done to it. */
 export interface FakeAttachedChild extends PtyChild {
+  /** Set by `detach()`. Distinct from killed on purpose — detach is the non-destructive
+   *  hand-over, and a fixture that conflated the two could not tell a correct hand-over
+   *  from a REPL killer. */
+  detached: boolean
   /** Every key sequence any detector sent — THE assertion surface for the trap. */
   readonly keysSent: Key[][]
   /** Deliver another screen, as the poll loop would. */
@@ -164,10 +168,20 @@ export class FakeAdoptableHost implements AdoptableHost {
     const child: FakeAttachedChild = {
       pid: pane.pid,
       paneHandle: handle,
+      detached: false,
+      detach: () => {
+        child.detached = true
+      },
       keysSent,
       write: () => {},
-      writeKey: (key: Key) => keysSent.push([key]),
-      writeKeys: (keys: readonly Key[]) => keysSent.push([...keys]),
+      writeKey: (key: Key) => {
+        if (child.detached) return
+        keysSent.push([key])
+      },
+      writeKeys: (keys: readonly Key[]) => {
+        if (child.detached) return
+        keysSent.push([...keys])
+      },
       kill: () => {
         killed = true
         exited = true
@@ -180,7 +194,12 @@ export class FakeAdoptableHost implements AdoptableHost {
         if (this.beginOutputError !== undefined) throw this.beginOutputError
         for (const s of pane.screens) opts.onScreen?.(s)
       },
-      push: (screen: string) => opts.onScreen?.(screen),
+      // MIRRORS THE HOST: a detached wrapper delivers nothing, so a case can show that a
+      // retired gateway neither sees a screen nor answers it.
+      push: (screen: string) => {
+        if (child.detached) return
+        opts.onScreen?.(screen)
+      },
     }
     this.attached.push(child)
     return child

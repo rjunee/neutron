@@ -1117,11 +1117,32 @@ export async function shutdownAllPersistentRepls(
         childGeneration: session.childGeneration,
       })
       if (survival.kind === 'survive') {
-        // LEFT RUNNING, AND LEFT INTACT. No kill, no marker, no sink unregister that
-        // matters (this process is going away), and — load-bearing — NO
-        // `unlinkSessionConfigs`: those files are the live child's `--mcp-config` and
-        // `--settings`, and deleting them under a running REPL would leave it wired to
-        // nothing the next gateway could rebuild.
+        // LEFT RUNNING, AND HANDED OVER — which is not the same as left alone.
+        //
+        // No kill and no marker, and — load-bearing — NO `unlinkSessionConfigs`: those
+        // files are the live child's `--mcp-config` and `--settings`, and deleting them
+        // under a running REPL would leave it wired to nothing the next gateway could
+        // rebuild.
+        //
+        // BUT THIS WRAPPER MUST LET GO (Argus r25). An earlier revision of this comment
+        // said "no sink unregister that matters (this process is going away)", and the
+        // parenthetical was doing all the work — in a module whose own sibling
+        // (`gateway/index.ts`) names "tests, in-process restarts, overlapping boots" as
+        // supported. When this process does NOT go away, the retired `PtyChild` keeps its
+        // poll loop running against a pane it has given up, still wired to this session's
+        // detectors: the next adoption attaches a SECOND wrapper, and the retired one can
+        // fire a detector actuation into a screen it no longer owns. That is the
+        // stale-screen keystroke hazard, arriving from a gateway already told to stop.
+        //
+        // So: `detach` (stop reading, stop delivering, send nothing — and never close),
+        // stop the watchers, and unregister the sink, because a retired wrapper that
+        // stays registered can receive a reply meant for the incarnation that replaced
+        // it. The PANE and its process are untouched, which is the whole distinction
+        // between detach and close.
+        session.sizeWatchdog?.stop()
+        session.deadTurnWatcher?.stop()
+        session.child.detach?.()
+        sink.unregisterIf(session.sessionId, session)
         //
         // `return`, not `continue`: this is the per-child teardown closure, and the
         // walk that calls it is above.

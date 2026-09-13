@@ -282,6 +282,9 @@ export class HerdrHost implements AdoptableHost {
     }
 
     let exited = false
+    /** Set by {@link PtyChild.detach}. Ends the poll loop and silences delivery WITHOUT
+     *  settling an exit: the pane is still running and now belongs to somebody else. */
+    let detached = false
     /**
      * "WE ENDED THIS CHILD" — the entire crash-vs-recycle discriminator, since herdr
      * reports no exit codes anywhere (`spawn.ts`), so it is load-bearing rather than
@@ -389,9 +392,10 @@ export class HerdrHost implements AdoptableHost {
         opts,
         pollMs,
         sleep,
-        () => exited,
+        () => exited || detached,
         settleExit,
         outputGate,
+        () => detached,
       ).finally(() => {
         // OBSERVABLE COMPLETION, so "the poll operation settles" is assertable rather
         // than believed. Production never passes this; it exists because the defect
@@ -503,7 +507,21 @@ export class HerdrHost implements AdoptableHost {
       )
     }
 
+    /** See {@link PtyChild.detach}. Idempotent, and deliberately silent about the pane:
+     *  it issues no request of any kind, so there is nothing here that could end it. */
+    const detach = (): void => {
+      if (detached) return
+      detached = true
+      // The fail-open gate timer has no job once nothing will be delivered, and leaving
+      // it armed would print a warning about a caller that is no longer listening.
+      if (gateTimer !== undefined) clearTimeout(gateTimer)
+      // NO `settleExit`, NO close, NO kill. `exited` never resolves for a detached child
+      // because nothing about the process has been established — it is still running.
+      releaseOutput?.()
+    }
+
     const child: PtyChild = {
+      detach,
       pid,
       // THE DURABLE HANDLE. Its presence is what tells the shutdown path this child
       // is a child of the herdr SERVER rather than of this process, and it is what
@@ -975,6 +993,7 @@ export class HerdrHost implements AdoptableHost {
     hasExited: () => boolean,
     settleExit: (cause: PtyExitCause) => void,
     outputGate: Promise<void>,
+    isDetached: () => boolean,
   ): Promise<void> {
     // BEFORE THE FIRST READ, not before the first delivery: polling at all would set
     // `lastDataAt` and mutate the ring behind a consumer that cannot scan yet.
@@ -1093,7 +1112,10 @@ export class HerdrHost implements AdoptableHost {
       // fall.
       if (text !== undefined && text !== last) {
         last = text
-        if (opts.onScreen !== undefined) {
+        // DETACH SILENCES DELIVERY, not only the next read. The loop can be inside an
+        // await when `detach()` lands, and a screen delivered after that would reach
+        // detectors belonging to a session that has given this pane up.
+        if (opts.onScreen !== undefined && !isDetached()) {
           try {
             opts.onScreen(text)
           } catch {

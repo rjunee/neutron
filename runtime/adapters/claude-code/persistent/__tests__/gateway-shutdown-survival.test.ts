@@ -15,12 +15,13 @@
  * unlink (deleting a live child's `--mcp-config` would leave it wired to nothing).
  */
 
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { claimShutdownSurvival, shutdownSurvivalVerdict } from '../gateway-shutdown-survival.ts'
 import { pool, sink, supervisedBySessionKey } from '../pool-state.ts'
+import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
@@ -119,16 +120,42 @@ function registryWith(record: ReplRegistryRecord | undefined): string {
 
 interface FakeChild extends PtyChild {
   killed: boolean
+  /** Set by `detach()`. Distinct from `killed` on purpose: the whole point of detach is
+   *  that it is NOT a kill, so a fixture that conflated them could not tell a correct
+   *  hand-over from a REPL killer. */
+  detached: boolean
+  /** Keystrokes this wrapper sent — the actuation surface. */
+  readonly keys: string[]
+  /** Deliver a screen as the poll loop would, so a case can show that a detached wrapper
+   *  neither sees nor answers one. */
+  push(screen: string): void
 }
 
-function pooledSession(paneHandle: string | undefined, configPath: string): { session: ReplSession; child: FakeChild } {
+function pooledSession(
+  paneHandle: string | undefined,
+  configPath: string,
+  onScreen?: (screen: string) => void,
+): { session: ReplSession; child: FakeChild } {
   const session = new ReplSession(KEY, GENERATION, SESSION_ID, CHANNEL, '/tmp')
   session.configPaths = [configPath]
   const child = {
     pid: 4242,
     ...(paneHandle !== undefined ? { paneHandle } : {}),
     killed: false,
-    write() {},
+    detached: false,
+    keys: [] as string[],
+    push(screen: string) {
+      // MIRRORS THE HOST: delivery is gated on the detach flag, not merely on the loop
+      // having noticed it, because the loop can be mid-await when detach lands.
+      if ((child as FakeChild).detached) return
+      onScreen?.(screen)
+    },
+    detach() {
+      ;(child as FakeChild).detached = true
+    },
+    write(data: string) {
+      ;(child as FakeChild).keys.push(String(data))
+    },
     kill() {
       ;(child as FakeChild).killed = true
     },
@@ -138,6 +165,12 @@ function pooledSession(paneHandle: string | undefined, configPath: string): { se
   session.attachChild(child)
   return { session, child }
 }
+
+// The sink must be listening for the credential assertion below — the honest surface for
+// "this registration is gone" is a 401 on the child's own credential, not a map lookup.
+beforeAll(async () => {
+  await sink.ensureStarted({ tokenPath: join(mkdtempSync(join(tmpdir(), 'neutron-539-sink-')), 'sink-token') })
+})
 
 afterEach(() => {
   supervisedBySessionKey.clear()
@@ -410,5 +443,70 @@ describe('the survival decision FAILS CLOSED — a lock it cannot take is not a 
       childGeneration: GENERATION,
     })
     expect(verdict).toEqual({ kind: 'survive', handle: HANDLE })
+  })
+})
+
+
+describe('a surviving child is handed OVER, not merely left alone', () => {
+  /**
+   * ARGUS r25. The existing survival cases assert the pane is not killed and its config
+   * files survive — right about the PANE, silent about the WRAPPER. The retiring
+   * gateway's `PtyChild` owns a poll loop still wired to this session's detectors, and
+   * the survival branch deliberately kept its sink registration on the reasoning that
+   * "this process is going away". The module's own sibling names in-process restarts as
+   * supported, so that premise is false exactly when it matters: the next adoption
+   * attaches a SECOND wrapper while the retired one keeps scanning, and can fire a
+   * detector actuation into a pane it no longer owns.
+   */
+  it('the pane lives, and the retired wrapper can neither observe nor actuate it', async () => {
+    const registryPath = registryWith(row())
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const seen: string[] = []
+    const { session, child } = pooledSession(HANDLE, configPath, (s) => seen.push(s))
+    pool.set(KEY, Promise.resolve(session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+    sink.register(SESSION_ID, session)
+
+    await shutdownAllPersistentRepls()
+
+    // THE PANE IS ALIVE — unchanged from the existing cases, and the half detach must
+    // never break.
+    expect(child.killed).toBe(false)
+    expect(await Bun.file(configPath).exists()).toBe(true)
+    // AND THE WRAPPER HAS LET GO. It cannot observe...
+    expect(child.detached).toBe(true)
+    child.push('some new screen with a ❯ 1. Yes prompt on it')
+    expect(seen).toEqual([])
+    // ...and it cannot actuate: nothing reached the pane's stdin.
+    expect(child.keys).toEqual([])
+    // ...and its sink registration is gone, asserted at the surface that matters: a
+    // reply carrying this child's own credential is REFUSED, so one meant for the
+    // incarnation that replaces it cannot land on this retired session.
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
+    const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
+      body: JSON.stringify({ session_id: SESSION_ID, text: 'hello' }),
+    })
+    expect(resp.status).toBe(401)
+  })
+
+  it('THE CONTROL: an ordinary teardown still KILLS and still unregisters', async () => {
+    // Second job stated: without this, a `detach` that made everything inert would
+    // satisfy the case above, and so would a teardown that had stopped working entirely.
+    const registryPath = registryWith(undefined)
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const { session, child } = pooledSession(HANDLE, configPath)
+    pool.set(KEY, Promise.resolve(session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+    sink.register(SESSION_ID, session)
+
+    await shutdownAllPersistentRepls()
+
+    expect(child.killed).toBe(true)
+    expect(child.detached).toBe(false)
+    expect(await Bun.file(configPath).exists()).toBe(false)
   })
 })

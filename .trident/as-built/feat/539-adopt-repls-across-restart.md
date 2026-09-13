@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M74 less M31 and M38 = 72**.
+only dead row. The live count is therefore **M1–M78 less M31 and M38 = 76**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1072,6 +1072,55 @@ apart. M47 reds again, and now for the reason it claims.
 mutations of every guard downstream of it. A mutation that stops redding is not noise; it
 is the new guard having eaten the old one's coverage.
 
+### Round twenty-five: the pane was handed over and the wrapper was not
+
+The survival branch returned without killing **or detaching** the `PtyChild`. That child
+owns a poll loop still wired to this session's detectors and actuation queue, and the
+branch deliberately kept its sink registration on the reasoning that *"this process is
+going away"*. The parenthetical was doing all the work — in a module whose own sibling
+(`gateway/index.ts`) names "tests, in-process restarts, overlapping boots" as supported.
+When the process does not go away: the next adoption attaches a SECOND wrapper while the
+retired one keeps scanning the same pane and can fire a detector actuation into it. **The
+stale-screen keystroke hazard this feature documents, arriving from a gateway already told
+to stop** — and this one is the PR's own creation, not something inherited, which is why it
+was not deferrable the way #674 is.
+
+`PtyChild.detach?()` is the non-destructive counterpart of `kill`: stop reading, stop
+delivering, send nothing, and **never close**. The survival branch calls it, stops the
+watchers, and unregisters the sink — because a retired wrapper that stays registered can
+receive a reply meant for the incarnation that replaced it. The comment's false
+parenthetical is corrected in the same edit.
+
+**The assumption the whole design rests on is measured, not read.** "Stopping the loop is
+*issue no more requests*, not *tear down a session*" is exactly the claim whose failure
+turns a safe detach into a pane kill, so it is asserted against the real client and the
+fake server: after `detach`, at most one already-in-flight read completes, **no `close` /
+`kill` / `destroy` method is ever called**, and the server still reports the pane `live`.
+With a `kill` control beside it, so "detach is safe" cannot be passing because both are
+inert.
+
+**Three mutations refused to red for three different wrong reasons, and each was a defect
+in my method rather than in the code.**
+
+1. `settleExit('closed-by-us')` inside detach — that marks the child exited but **issues no
+   request**, so it was not the mutation I described. The real one calls `pane.close` the
+   way `kill` does.
+2. That corrected mutation *still* did not red, because my patch matched the **first**
+   occurrence of `clearTimeout(gateTimer)` in the file — inside `settleExit`, three hundred
+   lines above `detach`. The mutation was applied to code the test never reaches. **A
+   mutation patch that matches the wrong site is indistinguishable from a guard that works**,
+   and the only way I found it was checking the line number the patch landed on.
+3. The delivery-gate mutation did not red because, with the loop stopped, there is nothing
+   left to deliver: the gate covers only the read **already in flight** when detach lands.
+   That window needs `holdMethod('pane.read')` to construct, and the case that does it now
+   exists. My first attempt at it compared a read count against a screen count and hung —
+   my bug, in the test, found by running it.
+
+**Downstream re-check, third time the rule has earned its place.** Detach is a new act
+inside the survival branch, so the round-nine and round-twenty-four mutations were re-run
+through it: M45 (3), M46 (2), M47 (1) and M72 (1) all still red. No coverage was eaten this
+time — but the check is what makes that a statement rather than an assumption.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1082,7 +1131,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three and M72–M74 in round twenty-four, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four and M75–M78 in round twenty-five, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1187,6 +1236,10 @@ count from the rows below rather than trusting this sentence.
 | M72 | the shutdown latch is never set | `boot-adoption.test.ts` (1) |
 | M73 | the latch is never cleared — a silent kill switch (**system-breaking**) | `boot-adoption.test.ts` (7) |
 | M74 | the latch is set AFTER the settle snapshot instead of before | `boot-adoption.test.ts` (1) |
+| M75 | the survival branch skips the detach | `boot-adoption.test.ts` + `gateway-shutdown-survival.test.ts` (2) |
+| M76 | detach CLOSES the pane, as `kill` does (**silent REPL killer**) | `herdr-adoption.test.ts` (1) |
+| M77 | the survival branch skips the sink unregister | `gateway-shutdown-survival.test.ts` (1) |
+| M78 | detach stops the loop but keeps delivering an in-flight read | `herdr-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

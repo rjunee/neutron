@@ -1984,3 +1984,48 @@ describe('a pass that STARTS after shutdown has looked', () => {
     expect(await pool.get(KEY)).toBeDefined()
   })
 })
+
+
+describe('an in-process restart leaves ONE wrapper on the pane, not two', () => {
+  /**
+   * ARGUS r25, and this is the consequence the detach exists to prevent. `gateway/index.ts`
+   * names "tests, in-process restarts, overlapping boots" as supported, so the survival
+   * branch's old premise — "this process is going away" — is false exactly where it
+   * matters: the retiring wrapper keeps polling a pane it gave up, the next boot attaches
+   * a second wrapper, and the retired one can still fire a detector actuation into a
+   * screen it no longer owns.
+   */
+  it('the retired wrapper is detached before the new one attaches, and only the new one acts', async () => {
+    const f = fixture()
+    supervisedBySessionKey.set(KEY, {
+      replRegistryPath: f.registryPath,
+    } as unknown as PersistentReplSubstrateOptions)
+
+    // BOOT ONE: adopt the pane.
+    const first = await run(f)
+    expect(first.kind).toBe('adopted')
+    const firstChild = f.host.attached[0]
+    expect(firstChild).toBeDefined()
+
+    // The gateway stops, and the row names the pane, so the child survives.
+    await shutdownAllPersistentRepls()
+    // THE HAND-OVER: the first wrapper has let go of a pane that is still running.
+    expect(firstChild?.wasKilledByUs?.()).toBe(false)
+    expect(f.host.closed).toEqual([])
+    expect(firstChild?.detached).toBe(true)
+
+    // BOOT TWO, in the SAME process.
+    resetBootAdoptionForTests()
+    const second = await run(f)
+    expect(second.kind).toBe('adopted')
+    expect(f.host.attached).toHaveLength(2)
+
+    // ONE WRAPPER ACTS. A screen that would trigger a detector reaches only the live
+    // wrapper; the retired one neither sees it nor answers it.
+    const retired = f.host.attached[0]
+    const live = f.host.attached[1]
+    retired?.push('❯ 1. Yes, proceed')
+    expect(retired?.keysSent).toEqual([])
+    expect(live?.detached ?? false).toBe(false)
+  })
+})

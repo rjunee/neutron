@@ -198,3 +198,89 @@ describe('closeHandle', () => {
     await hostFor(server).closeHandle(server.paneId)
   })
 })
+
+
+describe('detach gives up the pane without ending it — MEASURED against the server', () => {
+  /**
+   * ARGUS r25. The survival branch hands a live pane to the next gateway, and the
+   * retiring wrapper must stop watching and typing without closing anything. The whole
+   * design rests on one assumption — that stopping the poll loop is "issue no more
+   * requests" rather than "tear down a session" — and that assumption is exactly the one
+   * whose failure turns a safe detach into a pane kill. So it is measured here against
+   * the real client and the fake server, not reasoned about from the client's source.
+   */
+  it('issues no further reads, delivers no further screens, and closes NOTHING', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:p50' })
+    const screens: string[] = []
+    const child = await hostFor(server).spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (t) => screens.push(t),
+    })
+    child.beginOutput?.()
+    // Let it poll a few times so "it stopped" is distinguishable from "it never started".
+    await until(() => server.calls.filter((c) => c.method === 'pane.read').length >= 3, 'polled')
+    const readsBefore = server.calls.filter((c) => c.method === 'pane.read').length
+    const screensBefore = screens.length
+
+    child.detach?.()
+    await Bun.sleep(60)
+
+    // NO FURTHER OBSERVATION. Allow the one read that may already have been in flight
+    // when detach landed — the loop can be inside an await — but no more than that.
+    const readsAfter = server.calls.filter((c) => c.method === 'pane.read').length
+    expect(readsAfter - readsBefore).toBeLessThanOrEqual(1)
+    // Deliveries stop outright, because delivery is gated on the flag rather than on the
+    // loop having noticed it.
+    expect(screens.length).toBe(screensBefore)
+
+    // AND NOTHING WAS CLOSED OR KILLED. This is the measurement the design rests on.
+    expect(server.calls.filter((c) => /close|kill|destroy/i.test(c.method))).toEqual([])
+    // The pane is still there, per the server itself.
+    const inspection = await hostFor(server).inspectHandle('w9:p50')
+    expect(inspection.kind).toBe('live')
+  })
+
+  it('a read already IN FLIGHT when detach lands delivers nothing', async () => {
+    // THE WINDOW THE DELIVERY GATE EXISTS FOR, and the only one it covers: stopping the
+    // loop prevents the NEXT read, and says nothing about the one already awaiting a
+    // reply. Without holding a read open this case cannot be constructed — the loop is
+    // simply stopped and there is nothing left to deliver — which is why an earlier
+    // version of the gate mutation would not red.
+    const server = new FakeHerdrServer({ paneId: 'w9:p52' })
+    const screens: string[] = []
+    const child = await hostFor(server).spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (t) => screens.push(t),
+    })
+    child.beginOutput?.()
+    await until(() => server.calls.some((c) => c.method === 'pane.read'), 'first read')
+    const before = screens.length
+    const readsBefore = server.calls.filter((c) => c.method === 'pane.read').length
+
+    // Hold the NEXT read open, wait until it is genuinely in flight, then detach under it.
+    const release = server.holdMethod('pane.read')
+    await until(
+      () => server.calls.filter((c) => c.method === 'pane.read').length > readsBefore,
+      'a read is in flight',
+    )
+    server.screen = 'a brand new screen the retired wrapper must never see'
+    child.detach?.()
+    release()
+    await Bun.sleep(40)
+
+    expect(screens.length).toBe(before)
+  })
+
+  it('THE CONTROL: kill DOES end it, so detach is not simply inert', async () => {
+    // Without this, a `detach` that did nothing at all — and a `kill` that did nothing at
+    // all — would satisfy the case above equally well.
+    const server = new FakeHerdrServer({ paneId: 'w9:p51' })
+    const child = await hostFor(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    child.kill()
+    await child.exited
+    expect(server.calls.some((c) => /close|kill/i.test(c.method))).toBe(true)
+  })
+})

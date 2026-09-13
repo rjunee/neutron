@@ -120,6 +120,31 @@ export interface PtyChild {
    * any caller that reports an outcome must use. Both backends implement it honestly
    * and differently — that is the contract to reason about, not this one.
    */
+  /**
+   * STOP OBSERVING AND ACTUATING THIS TERMINAL, WITHOUT ENDING IT (#539).
+   *
+   * The non-destructive counterpart of {@link PtyChild.kill}, and the distinction is the
+   * whole point: `kill` ends the process, `detach` gives up this wrapper's hold on a
+   * process that keeps running. After it returns, this child issues no further reads,
+   * delivers no further screens to its `onScreen` consumer, and sends no keystrokes — so
+   * a retired gateway can neither watch nor type into a pane it has handed on.
+   *
+   * WHY IT HAS TO EXIST. The gateway-shutdown survival branch leaves a herdr pane alive
+   * for the next gateway. Without a detach, the retiring gateway's wrapper keeps its poll
+   * loop running against that pane, still wired to the old session's detectors — so an
+   * in-process restart (supported: `gateway/index.ts` names "tests, in-process restarts,
+   * overlapping boots") ends up with TWO wrappers scanning one pane, and the retired one
+   * can still fire a detector actuation into a screen it no longer owns. That is the
+   * stale-screen keystroke hazard this feature documents, arriving from a gateway that
+   * has already been told to stop.
+   *
+   * MUST NOT CLOSE THE PANE OR SETTLE THE EXIT. A detached child's `exited` never
+   * resolves, because nothing about the process has been established — it is still
+   * running and belongs to somebody else now. Optional because a backend whose children
+   * die with this process has nothing to detach FROM; those implement it as a no-op and
+   * say so.
+   */
+  detach?(): void
   write(data: string | Uint8Array): void
   /** Send one structured key (F2): encodes the correct key for
    *  enter/escape/ctrl-c/up/down/left/right/digit. Lets recovery detectors
