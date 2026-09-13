@@ -185,15 +185,15 @@ export interface BootAdoptionDeps {
  *  {@link ROW_MOVED_REASON}: "someone else owns this row" is a finding, and "I could not
  *  find out who owns it" is the absence of one. */
 const LOCK_UNACQUIRED_REASON =
-  'the registry lock was NOT acquired for this adoption\'s row claim, so the compare-and-set was not atomic — the pane is left running and the row left alone, and the next boot reconciles it'
+  'the registry lock was NOT acquired for this adoption\'s row claim, so the compare-and-set was not atomic — the pane is left running and the row left alone, and the next construction of this substrate reconciles it'
 
 const shutdownAbandonReason = (
   at: 'before the attach' | 'with the attach in flight' | 'at the row claim',
   boundExpired = false,
 ): string =>
   boundExpired
-    ? `the evidence bound expired AND the gateway then shut down ${at} — the SHUTDOWN is the operative cause, so the pane is left running: the row still names it and the next boot reconciles it on fresh evidence`
-    : `the gateway shut down ${at} — the pane is still running and the row still names it, so the next boot reconciles it`
+    ? `the evidence bound expired AND the gateway then shut down ${at} — the SHUTDOWN is the operative cause, so the pane is left running: the row still names it and the next construction of this substrate reconciles it on fresh evidence`
+    : `the gateway shut down ${at} — the pane is still running and the row still names it, so the next construction of this substrate reconciles it`
 
 const defaultLog = (msg: string): void => {
   process.stderr.write(`[repl-adopt] ${msg}\n`)
@@ -207,7 +207,7 @@ const defaultLog = (msg: string): void => {
  *     established has stopped describing now. Closing needs no fresh evidence (the
  *     identity we proved is what licenses it), so a stale pass CLOSES.
  *   - `shutdown`: this gateway is going away while the pass is still running. The row
- *     names the pane and the next boot reconciles it, so the pane is LEFT ALONE — a
+ *     names the pane and the next construction of this substrate reconciles it, so the pane is LEFT ALONE — a
  *     close here would destroy a REPL the whole feature exists to preserve, and it
  *     would do it at the one moment nobody is watching.
  *
@@ -492,7 +492,7 @@ function abandonInFlightPasses(): string[] {
       // `unwind`'s argument for closing is that the child is verified as ours on our
       // transcript, so leaving it is how a COLD SPAWN becomes a second owner. That
       // argument does not hold here: there is no cold spawn coming, this process is
-      // going away, the row still names the pane, and the next boot visits that row and
+      // going away, the row still names the pane, and the next construction of this substrate visits it and
       // adopts-or-closes it on FRESH evidence. Leaving the pane is recoverable at the
       // next boot; closing it destroys the conversation the feature exists to keep. The
       // same asymmetry as the survival decision, reached from the other side.
@@ -543,7 +543,7 @@ export async function settleBootAdoptionsForShutdown(
     log(
       `shutdown waited ${graceMs}ms for ${abandoned.length} reconciliation pass(es) that did not settle ` +
         `(${abandoned.map((k) => k.slice(0, 32)).join(', ')}) — they are abandoned and will publish nothing. ` +
-        'Their panes are LEFT RUNNING: the rows name them and the next boot reconciles them.',
+        'Their panes are LEFT RUNNING: the rows name them and the next construction of each substrate reconciles it.',
     )
   }
 }

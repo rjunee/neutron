@@ -19,10 +19,19 @@
  * WHAT REPLACES THE KILL, stated as the thing a reviewer can check:
  *
  *   1. A child may survive ONLY if a persisted row names its pane AND its generation.
- *      The handle is therefore never lost: the next boot reads the row.
- *   2. The next boot VISITS that row (`boot-adoption.ts`) and either re-adopts the
- *      pane or CLOSES it. There is no third branch that leaves a verified pane
- *      running, so a survivor is a handle we hold, not a process we forgot.
+ *      The handle is therefore never lost: it is durable and the next reader finds it.
+ *   2. THE NEXT CONSTRUCTION OF THAT SUBSTRATE visits the row (`boot-adoption.ts`) and
+ *      either re-adopts the pane or CLOSES it. Of the rows a construction reaches there
+ *      is no third branch that leaves a verified pane running, so a survivor it reaches
+ *      is a handle we hold rather than a process we forgot.
+ *
+ *      SAID THIS WAY BECAUSE "the next boot visits that row" IS FALSE (Argus r32). A
+ *      boot reconciles the key whose substrate it constructs, and nothing else — see
+ *      `boot-adoption.ts`'s `passes` docblock for why per-key is a correctness
+ *      requirement rather than a granularity choice. A row whose substrate this process
+ *      never constructs is visited by NOTHING: its pane keeps running, its row stays,
+ *      and the next construction of that substrate is what reconciles it. That residual
+ *      is named in the spec item and it is a gap, not a covered case.
  *   3. Everything else still dies here, unchanged: the in-process host's children
  *      (which cannot survive anyway), ephemeral one-shots (never pooled, never in a
  *      row) and quarantined children (out of the pool by construction, and superseded

@@ -1164,7 +1164,7 @@ export async function shutdownAllPersistentRepls(
         // walk that calls it is above.
         process.stderr.write(
           `[repl] gateway shutdown LEAVING session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} ` +
-            `alive in pane ${survival.handle} — the registry row names it, so the next boot re-adopts or closes it\n`,
+            `alive in pane ${survival.handle} — the registry row names it, so the next construction of this substrate re-adopts or closes it\n`,
         )
         return
       }

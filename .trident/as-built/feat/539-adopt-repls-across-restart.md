@@ -271,7 +271,7 @@ The shutdown now waits for the in-flight passes, bounded at
 real `claimShutdownSurvival` decision — better than being invisible to it. One that does
 not is marked abandoned, and `AbandonSignal` carries the CAUSE rather than a second flag
 being invented: `evidence-bound` still closes the pane, `shutdown` leaves it exactly as
-it is, because the row names it and the next boot reconciles it. Closing there would
+it is, because the row names it and the next construction of that substrate reconciles it. Closing there would
 destroy the REPL the feature exists to preserve, at the one moment nobody is watching.
 The abandonment is checked at the attach AND at the publish: the attach window is the one
 a second pass can race, and a publish-only check leaves it open. `resetBootAdoption` now
@@ -475,7 +475,7 @@ guards, each correct alone, composing into the one outcome both exist to prevent
 **The ruling and its reasoning, kept with the code.** `unwind` closes because the child is
 verified as ours on our transcript, so leaving it is how a COLD SPAWN becomes a second
 owner. That argument does not hold during a shutdown: no cold spawn is coming, this
-process is going away, the row still names the pane, and the next boot visits that row and
+process is going away, the row still names the pane, and the next construction of that substrate visits it and
 adopts-or-closes it on FRESH evidence. Leaving the pane is recoverable at the next boot;
 closing it destroys the conversation the whole feature exists to keep. The same asymmetry
 as the survival decision, arrived at from the other side. So `shutdown` outranks
@@ -1425,6 +1425,53 @@ Stated precisely, because the boundary matters: I measured 3/3 locally on this h
 full shard, and identity of the code with main. I did not measure the failure rate on CI,
 which is where it happened and where my box cannot stand in.
 
+### Round thirty-two: grep the claim's SUBJECT, not its wording
+
+Two sites still promised eager reconciliation — `gateway-shutdown-survival.ts`'s numbered
+policy (*"The next boot VISITS that row … There is no third branch that leaves a verified
+pane running"*) and the same policy restated in this record's own voice. For a row whose
+substrate this process never constructs there is exactly such a third outcome: nothing
+visits it. `SPEC.md` and the spec item were already correct, so this is the twelfth
+instance of the sibling pattern — and the same claim family as "still covers" from round
+eleven, which I thought was closed.
+
+**Why eleven rounds of grepping missed it, which is the part worth keeping.** We have been
+grepping the **phrasing**: "still covers", "bounds the wait", "once per registry". This
+claim is paraphrased at every site — "still covers", "VISITS that row", "no third branch",
+"the next boot re-adopts". **A grep on any one wording is blind to the others**, which makes
+phrasing the wrong index for a claim that has been restated in different words.
+
+> **The rule, and the honest limit of the round-eleven one: grep the claim's SUBJECT, not
+> its wording. A claim that has been paraphrased is invisible to a search for the phrase
+> you last saw it in.**
+
+**The subject-indexed sweep, and how scope was decided rather than assumed.** Indexed on
+*what happens to a row whose substrate this process never constructs*, the union of
+subject-bearing terms returns **112 hits across 17 files** — far too many to edit, and most
+of them correct, because a row whose substrate IS constructed really is visited. So the
+sweep was narrowed a second time, to the only hits that can be false: those making a
+**universal** claim (`no third branch`, `every row`, `the next boot visits/reconciles`).
+That is 20 candidates, classified:
+
+- **2 false** — the numbered policy in the source and its copy here. Both corrected to *the
+  next construction of that substrate*, with the unvisited case named as the residual it is.
+  "No third branch" is kept and scoped to the rows a construction reaches, which is still
+  true of the visited path.
+- **8 correct-but-imprecise** — reason strings and log lines saying "the next boot
+  reconciles it" about a specific key. Cheap and truthful to make precise, so they were:
+  eight edits, not sixty-six.
+- **8 genuinely correct** — `pool.ts`'s "reachable from a row the next boot reads" (reading
+  is not visiting), `repl-registry.ts`'s "every row" statements (about parsing, a different
+  subject), and the spec item's "enumerating every row would be worse" (arguing against the
+  thing, not claiming it).
+- **2 quotations** of the false claim inside its own correction, which is the shape the
+  "still covers" corrections also left behind and is correct.
+
+**Consistency check, with counts, across all four artefacts.** Unqualified "the next
+boot visits/reconciles/re-adopts": `SPEC.md` 0, spec item 0, `boot-adoption.ts` 0,
+`pool.ts` 0 — and 1 each in the as-built and `gateway-shutdown-survival.ts`, both of which
+are the corrective prose quoting what was wrong. Precise statements: 3 / 5 / 5 / 2 / 4 / 1.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1803,9 +1850,12 @@ replaces it is auditable in three parts.
 
 1. A child may survive ONLY if a persisted row names its pane and its generation, so
    the handle is never lost — it is written before the process is left alive.
-2. The next boot VISITS that row and either re-adopts the pane or closes it. There is no
-   branch that leaves a verified pane running, so a survivor is a handle we hold rather
-   than a process we forgot.
+2. THE NEXT CONSTRUCTION OF THAT SUBSTRATE visits the row and either re-adopts the pane
+   or closes it. Of the rows a construction reaches there is no third branch that leaves
+   a verified pane running. **Not "the next boot visits that row"** — that was the
+   wording here and it is false: a boot reconciles the key whose substrate it constructs
+   and nothing else, so a row whose substrate this process never constructs is visited by
+   nothing until the next construction. Corrected at round thirty-two.
 3. Everything that cannot be re-found still dies at shutdown, unchanged.
 
 **The residual, stated rather than hidden.** If the registry file is lost between a
