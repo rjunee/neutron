@@ -1032,7 +1032,9 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     const sha = 'a'.repeat(40)
     const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
     expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
-    expect(prompt).toContain(`git diff ${sha}..HEAD`)
+    // `--end-of-options` so an operand beginning with `-` cannot be reparsed as a flag
+    // (#546 round 7); asserted here because this prompt is what the build copies.
+    expect(prompt).toContain(`git diff --end-of-options '${sha}'..HEAD`)
   })
 
   test('falls back to the unpinned create-or-re-enter branch and diff when baseSha is absent', async () => {
@@ -1046,7 +1048,20 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     // re-enter clause landed, while the behaviour it guards was still correct.
     expect(prompt).toContain('git switch -c trident/test-run 2>/dev/null || git switch trident/test-run')
     expect(prompt).not.toContain('as observed at launch')
-    expect(prompt).toContain('git diff main..HEAD')
+    // UNPINNED, IN EITHER MODE: the base is a shell substitution that asks the
+    // repository whether `refs/remotes/origin/<base>` exists, prefers it when it does,
+    // and falls back to the bare name only when it does not. This used to hand LOCAL
+    // mode the bare name outright — `merge_mode: 'local'` means the outer loop merges
+    // locally, not that the repository has no remote, and the review-diff fixture shows
+    // that mistake costing five files where the branch changed one.
+    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac")
+    expect(prompt).not.toContain('git diff main..HEAD')
+  })
+
+  test('PR MODE, unpinned: the same resolution — the preference is not git-mode dependent', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('', { mergeMode: 'pr' })).captured)
+    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac")
+    expect(prompt).not.toContain('git diff main..HEAD')
   })
 })
 

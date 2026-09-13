@@ -56,10 +56,31 @@
 #                                       would silently point the reviewer at the
 #                                       build's model (or the reverse).
 #   arg $1                              the branch the build is expected to land on.
-#   arg $2                              the BASE branch, used only to regenerate the
-#                                       branch diff when a build committed but never
-#                                       wrote one. Optional; omitted means "no
-#                                       last-resort diff", never a guessed base.
+#   arg $2                              the base DIFF REF — the left-hand side of the
+#                                       branch diff, used only to regenerate that diff
+#                                       when a build committed but never wrote one.
+#                                       WHATEVER `inner-workflow.mjs`'s `diffBase`
+#                                       RESOLVED: the launch-pinned base sha, else
+#                                       `refs/remotes/origin/<base>` when that ref resolves,
+#                                       else `refs/heads/<base>`. NEVER a bare name — that
+#                                       arm was removed in round nineteen of #546, because a
+#                                       bare word is not inert and a same-named tag answers
+#                                       to it. (Two earlier versions of this comment are
+#                                       worth keeping: it said "a RESOLVED REF, never a bare
+#                                       local branch name" while the bare fallback existed,
+#                                       and then said the bare name "IS what arrives here"
+#                                       after that was corrected. The first was wrong about
+#                                       the code, the second is now wrong about it again.)
+#                                       This script must therefore never IMPROVE the value
+#                                       and never guess one: a bare `main` chosen HERE would
+#                                       diff against whatever `refs/heads/main` holds in a
+#                                       shared checkout and silently present every commit
+#                                       merged into the base since as this branch's work
+#                                       (#546 measured 149 files where the branch changed
+#                                       30). The composing side is the only place that can
+#                                       tell a bare name it CHOSE from one it defaulted to.
+#                                       Optional; omitted means "no last-resort diff",
+#                                       never a guessed base.
 #   arg $3                              the run's MERGE MODE — `pr` or `local`.
 #                                       Defaults to `pr`, which is the strict side of
 #                                       every check that reads it, so a caller that
@@ -409,7 +430,7 @@
 set -uo pipefail
 
 BRANCH="${1:-}"
-BASE_BRANCH="${2:-}"
+BASE_DIFF_REF="${2:-}"
 # `pr` unless the caller explicitly said `local` — see THE MERGE MODE DECIDES WHAT MUST
 # BE TRUE. Anything else, including an empty or misspelled value, lands on `pr`, which
 # is the strict side of all three checks that read it: a caller that forgets this
@@ -790,11 +811,14 @@ emit_trailer() {
   # to diff, and an empty `NEUTRON_CODEX_BUILD_DIFF=` is exactly the signal the round-1
   # gate reads to stop an unbuilt branch reaching the panel.
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ ! -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ] \
-    && [ -n "$head" ] && [ -n "$BASE_BRANCH" ]; then
+    && [ -n "$head" ] && [ -n "$BASE_DIFF_REF" ]; then
     # `..`, not `...`, to match the diff the brief asks the build for — and because a
     # shallow clone's grafted base has no merge-base to resolve. Failure leaves the
     # file empty and the trailer says so.
-    git diff "${BASE_BRANCH}..HEAD" > "${NEUTRON_CODEX_BUILD_DIFF_FILE}" 2>/dev/null || true
+    # `--end-of-options` so an operand beginning with `-` cannot be reparsed as a flag:
+    # `git diff "--output=<path>..HEAD"` writes that file and exits 0 without it (measured,
+    # git 2.43). The composing side refuses such a base already; this is the shield.
+    git diff --end-of-options "${BASE_DIFF_REF}..HEAD" > "${NEUTRON_CODEX_BUILD_DIFF_FILE}" 2>/dev/null || true
   fi
   diff_path=''
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ]; then
@@ -1289,7 +1313,7 @@ fi
 # SOMEONE ELSE'S diff in it — the reviewers would then read a diff this build never
 # wrote (the #545 class: a review of a diff no one built). Removed rather than
 # truncated so a build that never writes it leaves nothing at all behind — and when
-# that build DID commit, `emit_trailer` regenerates the diff from `$BASE_BRANCH` rather
+# that build DID commit, `emit_trailer` regenerates the diff from `$BASE_DIFF_REF` rather
 # than reporting a path it just deleted.
 [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && rm -f "${NEUTRON_CODEX_BUILD_DIFF_FILE}"
 

@@ -64,6 +64,7 @@ import { join } from 'node:path'
 import { createLogger } from '@neutronai/logger'
 
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
+import { gitRangeArgv } from './git-range.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 // TYPE-ONLY, deliberately. `arbiter.ts` imports the shared prompt rules from
@@ -272,6 +273,445 @@ export async function detectBaseBranch(
     // fall through to the default
   }
   return 'main'
+}
+
+/**
+ * A FULL OBJECT NAME — 40 hex for SHA-1, 64 for SHA-256, lowercased before testing.
+ *
+ * It was `/^[0-9a-f]{40}$/` until round thirty-three, which is a claim about the REPOSITORY'S
+ * HASH FUNCTION wearing the clothes of a claim about the value. `git init
+ * --object-format=sha256` has been supported since 2.29 and produces 64-hex object names, so
+ * the narrow form refused a legitimate pinned base outright and read a legitimate probe answer
+ * as `'unknown'` — the second failure in the over-refusal direction on this branch, and this
+ * time in the value's own definition.
+ *
+ * BOTH WIDTHS HERE, THE REPOSITORY'S WIDTH IN THE WRAPPER — and the difference is which values
+ * each one sees. `diffBaseRef` is given a value, not a path, so it has no repository to ask;
+ * `codex-review.sh` has one, and it is where an OPERATOR-SUPPLIED base arrives, so it asks
+ * `git rev-parse --show-object-format` and accepts exactly that width. That matters because
+ * accepting both widths where a repository IS available opens a capture: in a SHA-256
+ * repository, 40 hex is not an object-name spelling, so a branch or tag of that name resolves
+ * and a "verbatim object name" reaches git as a ref nobody chose.
+ *
+ * WHAT REACHES THIS TEST, stated rather than assumed: `base_sha` is rev-parsed from the
+ * repository by the launch path (`orchestrator.ts`, the base fetch + `rev-parse` that pins it),
+ * so a pin arriving here is already this repository's canonical width. The residual is a caller
+ * that hands this binding a wrong-width hex string in a repository where a ref of that name
+ * exists — closed at the wrapper, named here rather than claimed away. A 64-hex value in a
+ * SHA-1 repository with no such ref is accepted here and refused by git at the point of use,
+ * which is the direction that fails loudly.
+ */
+const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+/**
+ * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
+ * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
+ *
+ * THE RULE IS STATED ONCE, in `docs/spec-items/resolve-the-review-diff-base.md` under THE
+ * INVARIANT — the arms, what they verify, and the one asymmetry between this binding and the
+ * workflow composer. What follows here is why THIS function is shaped the way it is; where the
+ * two touch, the spec item is the claim and this is the reason. That indirection is itself a
+ * finding: six rounds corrected six copies of one sentence, each locally right, each leaving a
+ * neighbour asserting the shape the code had left behind.
+ *
+ * WHY A BARE LOCAL BRANCH NAME IS NEVER THE ANSWER — and why saying so took nineteen
+ * rounds. **This heading said "ALWAYS" for twelve rounds while step 3 below, twenty lines
+ * away, returned the bare name**, and twenty lines is the informative distance: a comment is
+ * read as context FOR the code beneath it, not as a claim to be checked AGAINST it, so
+ * proximity hid the contradiction instead of exposing it. The heading was then narrowed to
+ * "wherever a better one exists" to match that fallback — and round nineteen removed the
+ * fallback instead, because a bare word is not inert. The absolute is true now; it was not
+ * true when it was first written, which is the whole lesson. `refs/heads/main` in a
+ * shared build checkout is only as fresh as the last time something on this box
+ * pulled it, and a range against a stale base silently presents every commit merged
+ * in between as this branch's own work. MEASURED twice: Argus r4 / run 25b2327d —
+ * local `main` was 8 merges behind `origin/main`, the review artifact was 15,154
+ * lines across ~100 files for a branch whose own work was 20 files / 1,738 lines,
+ * and a reviewer vetoed the branch over bugs in files it does not touch; and #546 —
+ * 149 files read instead of 30. The failure is silent in BOTH directions that matter:
+ * git exits 0, and the extra files are real code, so nothing downstream can tell the
+ * inflated diff from a genuinely large one.
+ *
+ * THE ORDER IS EVIDENCE-FIRST, and it is the same order `inner-workflow.mjs`'s
+ * `diffBase` and `probeCiBase`'s ref use:
+ *  1. `base_sha` — the sha `origin/<base>` held AT LAUNCH, which the launcher observed
+ *     and cut the build branch from. A sha cannot go stale and it IS the cut point.
+ *  2. `refs/remotes/origin/<base>` WHENEVER THAT REF RESOLVES — the remote-tracking ref, in
+ *     either merge mode. In pr mode the launch path fetches
+ *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build
+ *     when that fetch or its rev-parse fails, so there it exists and is as fresh as
+ *     launch; elsewhere the caller asks (`refResolves`).
+ *  3. `refs/heads/<base>` whenever the remote probe answers ABSENT — no remote at all, or an
+ *     `origin` configured but not fetched (or whose base ref was deleted). In those the local
+ *     branch is the best available base.
+ *     NOT "only when the repository has no remote": that is a wider condition than
+ *     `refResolves` establishes, and saying it was the sixth overclaim on #546. This step
+ *     said "the bare name" until round nineteen; the CONDITION was right, the ANSWER was not.
+ *     **And it said "or a probe that could not run" until round thirty-one**, which is the
+ *     opposite of what step 4b now does — a description of the mechanism left behind by a
+ *     change that updated the argument for it.
+ *  4. REFUSED, in two states: (a) both probes answered "no such ref" —
+ *     `TridentUnresolvableBaseError`; (b) the REMOTE probe could not answer at all —
+ *     `TridentUndeterminedBaseError`, thrown without asking the second question, because a
+ *     failed probe says nothing about whether the local branch is stale. See the throws below.
+ *
+ * THE THIRD PARAMETER WAS `merge_mode` AND THAT WAS A BUG, not just an imprecision.
+ * This doc used to justify it as "the bare name in local mode ONLY — a local-mode run
+ * has no origin to be behind". `merge_mode: 'local'` means the OUTER LOOP MERGES
+ * LOCALLY; it says nothing about whether the repository has a remote. Measured in
+ * `review-diff-base-realgit.test.ts` on the mjs twin of this function: local mode
+ * against a `main` four commits behind `origin/main` produced FIVE files where the
+ * branch changed ONE — the same inflation as pr mode. So the question is now "does the
+ * ref resolve", asked of the repository, and never inferred from the merge mode.
+ *
+ * THE PROBE ARRIVES AS A THUNK, AND THAT IS THE SIGNATURE DOING THE WORK.
+ *
+ * The third parameter used to be a `boolean`. Every caller therefore wrote
+ * `diffBaseRef(base, sha, await originBaseResolves(...))` — and JavaScript evaluates that
+ * argument BEFORE this function runs, so the probe fired on every dispatch INCLUDING the
+ * pinned ones, where the pin means the name is never read. The answer stayed correct,
+ * which is why it survived; what it cost is that a pinned run did work it did not need,
+ * and — the part that matters — A PINNED DISPATCH FAILED IF THE PROBE FAILED, having
+ * already held everything it required. The pin exists precisely so a run does not depend
+ * on ref resolution.
+ *
+ * This is the round-eight ordering defect one layer out: there the `.mjs` binding
+ * validated the name before consulting the pin; here the CALLER computed the probe before
+ * the pin could be consulted. A function cannot enforce an ordering over inputs it is
+ * handed already-computed — so the third parameter is now a THUNK. NOT "the ordering is a
+ * property of the signature", which is how this read and which the next four lines
+ * contradict: the type prevents one spelling, not the class. The thunk
+ * is invoked on exactly the arm that needs it, and the eager-boolean form no longer TYPE
+ * CHECKS — that is the mechanism, and it is worth stating its limit rather than calling the
+ * defect unconstructable. A caller determined to precompute can still write
+ * `const r = await originBaseResolves(...)` and pass `() => Promise.resolve(r)`; the type
+ * cannot see inside a thunk. What the signature buys is that the eager form is no longer
+ * the natural spelling, and the pinned-dispatch-issues-no-probe assertions in
+ * `diff-base-option-shaped.test.ts` and `orchestrator.test.ts` are what actually hold the
+ * behaviour. A claim that something cannot be built has to name what prevents it; here the
+ * compiler prevents one spelling, not the class.
+ *
+ * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base bypasses this AND
+ * whose spelling the gate enumerates — its own header lists what it cannot see. A gate is
+ * a regression alarm, not a proof of absence.
+ */
+export async function diffBaseRef(
+  base_branch: string,
+  base_sha: string | null | undefined,
+  ref_resolves: (ref: string) => Promise<RefProbe>,
+): Promise<string> {
+  if (typeof base_sha === 'string' && OBJECT_NAME_RE.test(base_sha.trim().toLowerCase())) {
+    return base_sha.trim().toLowerCase()
+  }
+  // AN EMPTY NAME IS REFUSED HERE, and the sentence this replaces is why.
+  //
+  // It used to return the value untouched and assert "let the caller's own diff fail
+  // loudly instead". THAT WAS NEVER MEASURED, AND IT IS FALSE. Measured on git 2.43:
+  //   git diff --name-only --no-renames --end-of-options '..HEAD'  → exit 0, NO OUTPUT
+  //   git rev-list --count --end-of-options '..HEAD'               → exit 0, prints "0"
+  // Nothing fails; every consumer gets a well-formed answer that is wrong.
+  //
+  // WHAT THAT COSTS, per consumer, stated from the code rather than assumed:
+  //   * the review-diff listing is the one place already guarded — an empty listing
+  //     throws "outer publisher refused to dispatch reviewers for an empty diff", so a
+  //     zero-file review cannot actually be dispatched from there;
+  //   * the stranded-run ahead count reads `0` as "this branch is not ahead of the base",
+  //     i.e. nothing worth salvaging — silently, with no exception;
+  //   * the mutation gate's blast radius comes back empty and reports "this branch changes
+  //     no file", which is fail-closed but for the wrong stated reason;
+  //   * the stage-1 test-strategy set comes back empty.
+  // So the worst case is contained by one guard at one site, and three consumers get a
+  // plausible wrong answer. That is still a range nobody asked for.
+  //
+  // "THE CALLER WILL FAIL" IS A CLAIM ABOUT THE CALLER, and it needs measuring like any
+  // other. This is the second mitigation on this branch that was asserted rather than
+  // tested — the first put a correct check in the wrong place (`originBaseResolves`
+  // declining to probe an option-shaped name, which routed it to the unguarded branch).
+  // An empty base has no legitimate meaning, so it is refused where the option-shaped one
+  // is, and for the same reason: it cannot be a rev-range operand THROUGH THIS BINDING.
+  // Not "at all" — which is what this said: a value that never passed through here can
+  // still reach a range, which is precisely why every consumer also carries
+  // `--end-of-options`. A refusal is a check on one path, never an impossibility.
+  if (base_branch.trim().length === 0) {
+    throw new TridentEmptyBaseError(base_branch)
+  }
+  // SURROUNDING WHITESPACE IS REFUSED, NOT TRIMMED — and the trim this replaces is why.
+  //
+  // This function used to open with `const name = base_branch.trim()` and use the trimmed
+  // value for the probe and for both returns. `inner-workflow.mjs` trimmed only for
+  // VALIDATION and composed its probe and its fallback from the value AS GIVEN. So the two
+  // implementations of one rule disagreed on `" main "`: this one answered `origin/main`,
+  // the workflow probed `refs/remotes/origin/ main ^{commit}` and fell back to `" main "`.
+  // Reachable from configuration, not only from a test: `resolveBase()` returns
+  // `opts.base_branch` verbatim and hands it to the workflow.
+  //
+  // THE FIX IS NOT A SECOND TRIM. Two implementations that both remember to trim are the
+  // shape that has now diverged three times on this branch — merge-mode fallback, then
+  // ORDER, then this — each time at a different step of the same function. With the padded
+  // value REFUSED in both, `trim()` is the identity on every value that survives, so the
+  // question of where it is applied cannot arise. That is the axis removed rather than
+  // agreed upon.
+  //
+  // Nothing legitimate is lost, measured on git 2.43:
+  //   git check-ref-format --branch ' main '            → fatal, exit 128
+  // so no branch can be named this way; and the padded name is not a usable operand either:
+  //   git diff --name-only --end-of-options ' main '..HEAD  → fatal, exit 128
+  //   git rev-list --count --end-of-options ' main '..HEAD  → fatal, exit 128
+  // Loud at git — but the two wrappers run their range under `2>/dev/null || true`, which
+  // turns that fatal into an EMPTY diff, i.e. the "unbuilt branch" signal. So the padded
+  // name is refused here for the same reason the empty one is: downstream it becomes a
+  // plausible wrong answer rather than a failure.
+  //
+  // AND THE ONLY SOURCE OF ONE IS CONFIGURATION. `detectBaseBranch` trims its own
+  // `symbolic-ref` output (`:191`-`:195`) and falls back to the literal `main`, so the
+  // detected path cannot produce a padded name; `opts.base_branch` can, and
+  // `resolveBase()` returns it verbatim. So this refusal narrows exactly one input and
+  // leaves the automatic path untouched.
+  if (base_branch !== base_branch.trim()) {
+    throw new TridentPaddedBaseError(base_branch)
+  }
+  // NO TRIM: the only values that reach here are already their own trimmed form.
+  const name = base_branch
+  // AN OPTION-SHAPED NAME IS REFUSED HERE, NOT ROUTED PAST HERE.
+  //
+  // `originBaseResolves` already declined to PROBE such a name, and for one round that
+  // read as the safety measure. It was the opposite: declining to probe returns false,
+  // false selects the bare-name branch, and the bare name is the one that reaches git
+  // unguarded. MEASURED on git 2.43 at all four consumers — a base of
+  // `--output=<path>` yields the operand `--output=<path>..<head>`, which git parses as
+  // the `--output` OPTION and writes the file. `git diff --name-only` and the grouped
+  // `--output` diff both exit 0 while doing it; `git rev-list --count` exits 129 and
+  // writes it anyway.
+  //
+  // REFUSING TO EXAMINE A DANGEROUS INPUT IS NOT REFUSING THE INPUT. The guard's intent
+  // was right and its placement inverted the outcome, which is a different failure from
+  // inferring "no remote" from "merges locally" or "branch" from "resolves" — there the
+  // signal was wrong, here the signal was fine and sat on the wrong side of the branch.
+  //
+  // So the refusal is at the BINDING, once, rather than at each consumer: a name git
+  // cannot read as a revision has no business becoming a rev-range operand at all, which
+  // is this branch's own principle — narrow the scope in which the value can exist.
+  // Nothing legitimate is lost: `git check-ref-format --branch` rejects a leading `-`,
+  // so no branch can be named this way. Callers that must not throw already catch
+  // (`reconcile_stranded` answers null; the launch path degrades to no test strategy).
+  if (name.startsWith('-')) {
+    throw new TridentOptionShapedBaseError(name)
+  }
+  // THE PROBE IS INVOKED HERE AND NOWHERE ELSE — after the pin, after both refusals, on
+  // the one arm whose answer depends on it.
+  // THE FULLY QUALIFIED REF AT BOTH ARMS, because that is what was verified — and because
+  // the FALLBACK deserves the same rigour as the primary path, not less. It is reached
+  // precisely when the environment is unusual (a fresh clone, no remote, a detached CI
+  // checkout), which is also when a stray tag is most likely to exist and least likely to be
+  // noticed: `refs/heads/main` and `refs/tags/main` can coexist, and `main..HEAD` then
+  // resolves to the TAG, exit 0, warning on a stderr the wrappers send to /dev/null.
+  //
+  // Round seventeen fixed the resolving arm and left this one — the degraded path is the one
+  // that runs when things are already wrong.
+  //
+  // This returned the shorthand `origin/<name>` for sixteen rounds while verifying
+  // `refs/remotes/origin/<name>^{commit}` — a value verified in one form and returned in
+  // another has not been verified, and the gap between the two forms is exactly where the
+  // ambiguity lives. Git permits a TAG named `origin/main`, and its disambiguation order
+  // prefers `refs/tags/` over `refs/remotes/`. MEASURED on git 2.43 with both refs present:
+  //
+  //   git diff --name-only origin/main..HEAD              → warning on stderr, EXIT 0, 2 files
+  //   git diff --name-only refs/remotes/origin/main..HEAD → exit 0, 1 file (the right answer)
+  //
+  // So the shorthand does not fail — it silently resolves to the TAG and inflates the diff,
+  // which is #546's own defect arriving through the RETURN FORM. The warning goes to stderr,
+  // which both wrappers send to /dev/null. Same shape as `fstat` on a path instead of on the
+  // descriptor you hold.
+  const remote = await ref_resolves(`refs/remotes/origin/${name}`)
+  if (remote === 'resolved') return `refs/remotes/origin/${name}`
+  // UNKNOWN IS NOT ABSENT, and the two want opposite behaviour. "No such remote-tracking ref"
+  // legitimately selects the local branch — a fresh clone is the ordinary case. "I could not
+  // ask" selects nothing: the REASON the remote ref is preferred is that the local one may be
+  // stale, and a failed probe says nothing about staleness. Falling through here on a
+  // transient failure is the Argus r4 shape — a review against a stale base, exit 0 — reached
+  // through the error path rather than through a naming mistake.
+  if (remote === 'unknown') throw new TridentUndeterminedBaseError(name)
+  // THE FALLBACK, QUALIFIED. `refs/heads/<name>` is the base of record when no
+  // remote-tracking ref resolves, and naming it in full is the difference between "the local
+  // branch" and "whatever git picks for that word".
+  if ((await ref_resolves(`refs/heads/${name}`)) === 'resolved') return `refs/heads/${name}`
+  // NO THIRD ARM. Neither ref resolves, and the bare name is REFUSED rather than returned.
+  //
+  // THIS REPOSITORY HOLDS A LIVE INSTANCE of why. `archive/agent-replies-prior-iter-3b35767`
+  // exists only as a TAG: both probes above answer no, and the bare name then resolves —
+  // happily, exit 0 — as that tag. A tag that happens to share a branch's name is the least
+  // likely thing an operator meant by "the base branch", and computing a review diff against
+  // it is how #546 started. Measured on git 2.43 in a repo with a tag and no such branch:
+  //
+  //   git diff --name-only --end-of-options 'archive/thing..HEAD'            → exit 0, a diff
+  //   git diff --name-only --end-of-options 'refs/heads/archive/thing..HEAD' → FATAL, exit 128
+  //
+  // So "the caller's diff will fail loudly" is true only of the QUALIFIED form — which is the
+  // same mistake this file already made once about an empty base, and the reason that one is
+  // refused here too.
+  //
+  // THE SEQUENCE THIS ENDS. Three rounds put this defect in three positions: the qualified
+  // path, the `refs/heads` fallback, then the no-ref fallback. Each fix was correct and each
+  // left the next-worse path holding the original behaviour — **a fallback inherits the defect
+  // the primary path was fixed for unless it is fixed in the same change**, and the sequence
+  // terminates only when the last fallback stops returning a value at all. Every `return`
+  // above is a 40-hex sha or a fully qualified ref; there is no path out of here carrying an
+  // unqualified name.
+  throw new TridentUnresolvableBaseError(name)
+}
+
+/**
+ * An EMPTY base name. Thrown by `diffBaseRef` rather than returned, because `..<head>`
+ * is a well-formed range git answers successfully and wrongly — see the measurement there.
+ */
+export class TridentEmptyBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing an empty base ref: ${JSON.stringify(base)}. The range \`..<head>\` is not an error — ` +
+        '`git diff --name-only` exits 0 with no output and `git rev-list --count` exits 0 printing 0 — ' +
+        'so an empty base yields a plausible wrong answer rather than a failure.',
+    )
+    this.name = 'TridentEmptyBaseError'
+  }
+}
+
+/**
+ * The REMOTE probe could not be answered — not "there is no such ref", which is a different
+ * thing with a different remedy. Thrown rather than falling through to the local branch,
+ * because the local branch may be stale and the probe that would have told us is the one that
+ * just failed. **False and unknown must not share a branch.**
+ */
+export class TridentUndeterminedBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base whose remote-tracking ref could not be probed: ${JSON.stringify(base)}. ` +
+        'refs/remotes/origin/' +
+        base +
+        ' neither resolved nor answered "no such ref" (git rev-parse exits 1 for absent, and ' +
+        'anything else means the question was not answered). Falling back to refs/heads/ here ' +
+        'would diff against a branch that may be stale — which is the defect #546 exists for.',
+    )
+    this.name = 'TridentUndeterminedBaseError'
+  }
+}
+
+/**
+ * A base name that resolves to NO REF — neither `refs/remotes/origin/<name>` nor
+ * `refs/heads/<name>`. Thrown rather than returned as a bare word, because a bare word is not
+ * inert: git resolves it against every namespace, and a same-named TAG answers to it (this
+ * repository has one). The binding's contract is that every value it hands back is a sha or a
+ * fully qualified ref, and this is the arm that makes that true.
+ */
+export class TridentUnresolvableBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base that names no ref: ${JSON.stringify(base)}. Neither refs/remotes/origin/${base} nor ` +
+        `refs/heads/${base} resolves to a commit, and the bare name is not inert — a tag of that name would ` +
+        'answer to it and the review would be computed against a base nobody chose.',
+    )
+    this.name = 'TridentUnresolvableBaseError'
+  }
+}
+
+/**
+ * A base name with SURROUNDING WHITESPACE. Refused rather than trimmed, because the trim is
+ * what diverged: `diffBaseRef` trimmed before probing and returning while
+ * `inner-workflow.mjs` trimmed only for validation, so one implementation answered
+ * `origin/main` for `" main "` and the other fell back to `" main "`. Refusing removes the
+ * axis instead of asking both sides to normalise identically forever.
+ */
+export class TridentPaddedBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base ref with surrounding whitespace: ${JSON.stringify(base)}. ` +
+        '`git check-ref-format --branch` rejects such a name (fatal, exit 128), so it is not a branch; ' +
+        'and as a range operand it is fatal too, which the wrappers swallow into an empty diff. ' +
+        'It is refused rather than trimmed so that this implementation and inner-workflow.mjs cannot ' +
+        'normalise it differently.',
+    )
+    this.name = 'TridentPaddedBaseError'
+  }
+}
+
+/**
+ * A base name git would read as an OPTION rather than a revision. Thrown by
+ * `diffBaseRef`, so such a value cannot reach a rev-range operand THROUGH THAT BINDING —
+ * not "cannot reach one", which is why the consumers carry `--end-of-options` too. See the
+ * argument there.
+ */
+export class TridentOptionShapedBaseError extends Error {
+  constructor(readonly base: string) {
+    // The name is FOLDED into the message by the caller where one is persisted; this
+    // text is for logs and exists to say which input was refused and why.
+    super(
+      `refusing a base ref that git would read as an option, not a revision: ${JSON.stringify(base)}. ` +
+        'A rev-range operand beginning with `-` is parsed as a flag (measured: `--output=<path>..<head>` ' +
+        'writes the file), and no branch can legitimately be named this way.',
+    )
+    this.name = 'TridentOptionShapedBaseError'
+  }
+}
+
+/**
+ * What a ref probe established — three outcomes, because two of them want OPPOSITE behaviour.
+ *
+ * `absent` legitimately means "fall back to the local branch": a fresh clone with no
+ * remote-tracking ref is the ordinary case. `unknown` means the probe could not run, and the
+ * safe answer there is a REFUSAL — the whole reason the remote ref is preferred is that the
+ * local one may be stale, and a failed probe says nothing about staleness. Collapsing them
+ * into `false` meant a transient probe failure silently selected a possibly-stale local
+ * branch, which is the Argus r4 shape this item exists to eliminate, reached through the
+ * error path instead of a naming mistake.
+ */
+export type RefProbe = 'resolved' | 'absent' | 'unknown'
+
+/**
+ * What `<ref>` is in this repository — resolved, definitively absent, or undetermined.
+ *
+ * The one input `diffBaseRef` cannot derive from what a caller already holds, split out so
+ * `diffBaseRef` holds only the ORDER and never the I/O — it invokes this through a thunk, on
+ * the arms that need an answer.
+ *
+ * THREE ANSWERS, NOT TWO, since round thirty-one. It returned a boolean, and `false` meant
+ * both "git says there is no such ref" and "I could not find out" — so a probe that could not
+ * run fell through to the next, less qualified arm, which is the shape of the original #546
+ * defect one level down. `'absent'` is now exactly exit 1 with empty stdout; everything else
+ * that is not a resolved object name is `'unknown'`, and `diffBaseRef` refuses on it.
+ *
+ * IT TAKES A WHOLE REF, not a base branch name, since round eighteen: `diffBaseRef` now asks
+ * it twice — `refs/remotes/origin/<base>` first, then `refs/heads/<base>` — because the
+ * FALLBACK had the same ambiguity the primary path had just been fixed for. It was
+ * `originBaseResolves(run_host, repo, base)` and composed the origin ref itself, which meant
+ * the second question could not be asked through it at all.
+ */
+export async function refResolves(
+  run_host: RunHostCommand,
+  repo_path: string,
+  ref: string,
+): Promise<RefProbe> {
+  const name = ref.trim()
+  // Declines to probe an option-shaped name — `git rev-parse ... "-x^{commit}"` is its own
+  // argv hazard — and answers UNKNOWN rather than 'absent', because declining to ask is not
+  // an answer. (`diffBaseRef` refuses such a name before it gets here; this is about not
+  // spending a subprocess on a doomed lookup, and about not lying when it doesn't.)
+  if (name.length === 0 || name.startsWith('-')) return 'unknown'
+  let res
+  try {
+    res = await run_host(
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`],
+      repo_path,
+    )
+  } catch {
+    // The command could not be run at all. Nothing was established.
+    return 'unknown'
+  }
+  if (res.ok && OBJECT_NAME_RE.test(res.stdout.trim().toLowerCase())) return 'resolved'
+  // EXIT 1 IS THE ANSWER "NO SUCH REF", and it is the only thing that means absent. Measured
+  // on git 2.43: an existing ref exits 0, a missing one exits 1, and `-C <not-a-repo>` exits
+  // 128. Reading 128 — or a spawn failure, or garbage on stdout — as "absent" is what put
+  // `false` and `unknown` on one branch.
+  if (res.exit_code === 1 && res.stdout.trim() === '') return 'absent'
+  return 'unknown'
 }
 
 // ---------------------------------------------------------------------------
@@ -743,7 +1183,17 @@ async function commitsTouching(
   path: string,
 ): Promise<string[] | null> {
   const res = await run_host(
-    ['git', '-C', repo, 'log', '--format=%H', `${base_sha}..${head_sha}`, '--', path],
+    // `--end-of-options` (#546), before the operand and before the `--` pathspec
+    // separator — measured on git 2.43: `git log --format=%H --end-of-options A..B -- <path>`
+    // parses exactly as it did without the marker.
+    gitRangeArgv({
+      repo_path: repo,
+      subcommand: 'log',
+      flags: ['--format=%H'],
+      base: base_sha,
+      head: head_sha,
+      pathspec: [path],
+    }),
     repo,
   )
   if (!res.ok) return null
@@ -2434,7 +2884,10 @@ export async function conflictEvidence(
 async function sideHistory(
   run_host: RunHostCommand,
   repo: string,
-  range: string,
+  /** The range's LEFT end, already resolved — a full object name or a `refs/…` ref (#546). */
+  base: string,
+  /** The range's RIGHT end. */
+  head: string,
   budget: CollectionBudget,
 ): Promise<EvidencePart> {
   // BOUND THE READ BEFORE IT HAPPENS (#541 round 26). `--max-count` limits HOW MANY commits,
@@ -2453,7 +2906,19 @@ async function sideHistory(
       // assumed (#541 round 25): receiving N+1 ids is positive evidence that older commits
       // exist. THIS IS THE ONLY PLACE THE MUTABLE RANGE IS RESOLVED; everything after it works
       // from the immutable ids this produced.
-      ['git', '-C', repo, 'log', `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H', range],
+      // THROUGH `gitRangeArgv` (#546): it welds `--end-of-options` between the last flag and
+      // the operand, so an operand that begins with `-` cannot be reparsed as one. This
+      // arrived on main as a hand-built argv whose left operand was the bare base branch name,
+      // with no marker — the gate this branch ships failed the merged tree on it. (The range is
+      // described rather than spelled: the gate reads text, so a comment that spells one is a
+      // hit like any other, which it proved on this very line.)
+      gitRangeArgv({
+        repo_path: repo,
+        subcommand: 'log',
+        flags: [`--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`, '--format=%H'],
+        base,
+        head,
+      }),
       repo,
     )
   } catch {
@@ -2854,8 +3319,26 @@ async function arbitrateConflict(
   // this tier can reach, and collapsing them would hide whichever one actually dominates.
   if (hunks.kind === 'binary') return { kind: 'not-asked', why: 'evidence-binary' }
   if (hunks.kind === 'over-budget') return { kind: 'not-asked', why: 'over-budget' }
-  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`, budget)
-  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`, budget)
+  // DIFF-BASE-OK: these two operands must denote the SAME revisions `git rebase <base>` was
+  // given, because the conflict being judged is the one THAT produced; a differently-resolved
+  // base would describe a comparison that never happened.
+  //
+  // THE DISTINCTION THIS TURNS ON, since getting it right matters more than applying the rule
+  // reflexively. Everywhere else in this tree a base branch name is the wrong left-hand side of
+  // a range because the range is a QUESTION ABOUT THE BRANCH ("what did this branch change"),
+  // and a stale local base answers it with other people's commits. Here the range is a question
+  // about a CONFLICT THAT ALREADY HAPPENED: `rebaseBranchOntoBase` ran `git rebase <base>` with
+  // this very value, so whatever it resolved to IS one side of the conflict. Substituting
+  // `refs/remotes/origin/<base>` would hand the judge history for a different comparison — the
+  // failure mode being fixed, inverted.
+  //
+  // What this arm therefore owes is the OTHER half of the rule, and it is paid: the argv is
+  // built by `gitRangeArgv`, so `--end-of-options` sits between the last flag and the operand
+  // and an option-shaped ref name cannot be reparsed as a flag. Enumerated in
+  // `diff-base-option-shaped.test.ts` with this argument attached, so it cannot grow a sibling
+  // silently.
+  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, ctx.base, ctx.branch, budget)
+  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, ctx.branch, ctx.base, budget)
   // ASSEMBLED THROUGH THE ONE OWNER (#541 round 19). Each component arrives as an
   // `EvidencePart`, and `assembleEvidence` refuses — returning `missing` — the moment any of
   // them is absent, which is what makes the completeness sentence it writes true by

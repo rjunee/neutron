@@ -1252,12 +1252,25 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // remote) hard-deferred at the baseline before codex launched, every round.
     const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
     expect(local).toContain(
-      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'local'`,
+      // arg $2 is the RESOLVED diff base (#546) — a shell substitution that prefers
+      // `refs/remotes/origin/<base>` and falls back to `refs/heads/<base>`, both FULLY
+      // QUALIFIED. Never a bare name: that arm was removed in round nineteen because a bare
+      // word is not inert and a same-named tag answers to it. The SAME in local mode as in pr
+      // mode: `local` means the outer loop merges locally, not that the repository has no
+      // remote.
+      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1; case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac)" 'local'`,
     )
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
+    // …and the identical substitution in pr mode, which is the half #546 was about: the
+    // wrapper's last-resort `git diff <base>..HEAD` ran against whatever `refs/heads/main`
+    // held. Neither arm is a bare name now, and neither is a FIXED operand chosen at compose
+    // time: which of the two qualified refs the command names is decided in the repository
+    // where the diff runs, at the moment it runs. (This comment said the bare name "appears
+    // only as the substitution's fallback, legitimately" — the arm round nineteen removed.)
+    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1; case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac)" 'pr'`)
+    expect(pr).not.toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.
     expect(local).not.toContain("'main' 'pr'")

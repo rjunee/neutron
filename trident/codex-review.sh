@@ -35,12 +35,121 @@
 # benign never-set-up path and degrades to Claude-only.
 #
 # Usage:  CODEX_HOME=/path/to/project/codex bash trident/codex-review.sh [base-ref]
-# Default base is `main`. Output/verdict streamed to stdout verbatim.
+# The base ref is the left-hand side of the fallback branch diff (the trident path supplies
+# a sha or a FULLY QUALIFIED ref — the launch-pinned base sha, `refs/remotes/origin/<base>`
+# or `refs/heads/<base>` — via `inner-workflow.mjs`'s `diffBase`, which has no arm that
+# produces a bare name). A bare argument from a HAND RUN is qualified below: to its
+# remote-tracking ref when one exists, else to `refs/heads/<x>`, because `refs/heads/main` in
+# a shared checkout is only as fresh as the last pull and a range against it presents every
+# commit merged into the base since as this branch's own work (#546) — and because a bare
+# word is not inert, so a same-named tag would answer to it.
+# Output/verdict streamed to stdout verbatim.
 # =============================================================================
 
 set -uo pipefail
 
 BASE_REF="${1:-main}"
+# ── THE BASE REF: CLASSIFY THE KIND ONCE, THEN APPLY THAT KIND'S ONE RULE ─────
+#
+# WHY A CLASSIFIER AND NOT A CHAIN OF ARMS. This was an `if/elif` chain ordered by the order
+# the cases were DISCOVERED, and three consecutive review rounds found the same defect in it:
+# an arm that probes a CONSTRUCTED ref name ran before the arm that would have recognised what
+# the input already was. Round twenty-six moved one (a local-branch precondition rejecting the
+# ordinary detached CI checkout); round twenty-eight moved the verbatim arm first (a pinned SHA
+# was being rewritten to `refs/remotes/origin/<sha>` where such a ref existed); and then the
+# generic remote arm still beat the `origin/*` arm — with `BASE_REF=origin/main` it probed
+# `refs/remotes/origin/origin/main`, a legal ref name that may sit at a different commit.
+#
+# Each fix moved one arm and exposed the one behind it. So the kinds are decided FIRST and
+# completely, and each kind has exactly one rule: **a bare name is never probed as
+# `origin/<x>`, and an `origin/<x>` is never probed as a bare name — not because the arms are
+# in a lucky order, but because they are unreachable from the wrong kind.**
+#
+# THE KINDS, and they do not overlap:
+#   1. ALREADY SHAPED — a full object name AT THIS REPOSITORY'S HASH WIDTH (40 hex, or 64
+#      under `--object-format=sha256`; either case, since git accepts both) or a `refs/…`
+#      path. Kept VERBATIM. This is the contract the rest of the script asserts.
+#   2. HEAD-ROOTED — `HEAD`, `HEAD~n`, `HEAD^…`. Unambiguous (no namespace lookup), so it is
+#      RESOLVED to an object name here rather than refused.
+#   3. `origin/`-PREFIXED — one rule: `refs/remotes/<it>`. A slash is not a namespace; the
+#      shorthand is a name git resolves across them, preferring TAGS.
+#   4. A BARE NAME — the branch/tag rules, and only those.
+#
+# REFUSALS ARE RECORDED, NOT EMITTED HERE. `BASE_REF_REFUSAL` is read at the point of use,
+# because exiting from this block would preempt the documented GRACEFUL exit 10/11 ("no codex
+# configured") — the round-twenty-two finding.
+BASE_REF_REFUSAL=""
+# THE OBJECT-NAME WIDTH IS THIS REPOSITORY'S, ASKED ONCE (#546, round thirty-four).
+#
+# Accepting BOTH widths — the round-thirty-three fix — closed the rejection and opened a
+# CAPTURE: in a SHA-256 repository a 40-hex string is not an object-name spelling at all, so a
+# branch or tag of that name resolves, the `rev-parse` at the point of use says "it resolves"
+# (which proves the NAME resolves, never that it is an object id), and the shorthand reaches
+# `git diff` as a ref nobody chose. Exactly one width is an object-name spelling in any given
+# repository, so the classifier asks which. A value of the other width falls to the bare-name
+# arms, where the branch/tag rules qualify it or refuse it — the correct treatment of a value
+# that is, in this repository, a NAME.
+#
+# Defaults to 40 when git cannot answer: in that state git cannot answer the probes below
+# either, so every arm refuses and the width is not what decides the outcome.
+if [ "$(git rev-parse --show-object-format 2>/dev/null)" = "sha256" ]; then
+  BASE_REF_OID_WIDTH=64
+else
+  BASE_REF_OID_WIDTH=40
+fi
+case "$BASE_REF" in
+  refs/*) : ;;
+  HEAD | HEAD[~^]*)
+    if ! BASE_REF=$(git rev-parse --verify --quiet "${BASE_REF}^{commit}"); then
+      BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' does not resolve, so the diff would be EMPTY — nothing to review. DEFERRED — do NOT treat as an approval."
+    fi
+    ;;
+  *)
+    if [[ "$BASE_REF" =~ ^[0-9a-fA-F]{$BASE_REF_OID_WIDTH}$ ]]; then
+      # KIND 1b — an object name AT THIS REPOSITORY'S WIDTH. Verbatim; its resolvability is
+      # checked at the point of use. A hard-wired 40 refused a legitimate SHA-256 base outright;
+      # accepting both widths let a wrong-width REF capture the base. The width is asked once,
+      # above.
+      :
+    elif [[ "$BASE_REF" == origin/?* ]]; then
+      # KIND 3 — exactly one promotion for this kind, and no bare-name probe can reach it.
+      if git rev-parse --verify --quiet "refs/remotes/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+        BASE_REF="refs/remotes/${BASE_REF}"
+      else
+        BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND with no refs/remotes/${BASE_REF} behind it — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval."
+      fi
+    elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
+      && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
+      # KIND 4, AMBIGUOUS — REFUSED. Leaving it alone is also a guess: it is GIT's, and git
+      # prefers refs/tags/ over refs/heads/, so the review would run against the TAG with only
+      # a `warning: refname is ambiguous` on a stderr this script sends to /dev/null.
+      BASE_REF_REFUSAL="codex-review.sh: base ref '${BASE_REF}' is AMBIGUOUS — both refs/heads/${BASE_REF} and refs/tags/${BASE_REF} exist, and git would resolve the bare name to the TAG. Pass refs/heads/${BASE_REF} or refs/tags/${BASE_REF} explicitly."
+    elif ! git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1 \
+      && git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+      # KIND 4, REMOTE-TRACKING — and INDEPENDENTLY OF WHETHER A LOCAL BRANCH EXISTS, because
+      # the ORDINARY state of a CI checkout is detached or fresh: the remote-tracking ref and
+      # no local `main`. `refs/tags/<x>` must still not resolve, or a TAG would be promoted to
+      # a remote branch of the same name — the by-kind regression this block exists for.
+      BASE_REF="refs/remotes/origin/${BASE_REF}"
+    elif git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
+      # KIND 4, TAG-ONLY — REFUSED. A bare word that resolves only as a tag is not a base
+      # branch, and it is the least likely thing an operator meant by "the base". This
+      # repository holds a live instance: `archive/agent-replies-prior-iter-3b35767` exists as
+      # a tag and as no branch. An operator who means the tag says `refs/tags/<x>`, which is
+      # KIND 1 and kept verbatim — this refuses the AMBIGUITY, not the intent.
+      BASE_REF_REFUSAL="codex-review.sh: base ref '${BASE_REF}' names only refs/tags/${BASE_REF} — a tag is not a base branch. Pass refs/tags/${BASE_REF} if you meant it, or a branch that exists."
+    elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+      # KIND 4, LOCAL BRANCH — qualified. A branch with no remote counterpart was "kept
+      # verbatim" until round eighteen, which is the same unqualified name a tag would capture
+      # if one appeared later.
+      BASE_REF="refs/heads/${BASE_REF}"
+    else
+      # KIND 4 with nothing behind it. Left as-is; the shape assertion at the point of use
+      # refuses it, which is where every other refusal is emitted too.
+      :
+    fi
+    ;;
+esac
 : "${CODEX_HOME:=}"
 # How many lines of diff to hand codex — mirror Argus's oversized-diff guard so a
 # huge diff can't blow the arg length / codex context. Overridable for tests.
@@ -259,7 +368,80 @@ if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; t
   FULL_DIFF=$(<"$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
-  FULL_DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null)
+# WHATEVER THE BASE-REF BLOCK ENDED UP WITH MUST NAME A COMMIT — including the values it keeps
+  # VERBATIM. An unresolvable base (`no-such-branch`, a sha that is not in this repo, a
+  # `refs/tags/<x>` that does not exist) used to pass straight through, and the diff below
+  # then failed into an EMPTY `FULL_DIFF` with its stderr discarded — so codex was handed
+  # nothing to review and returned clean. **A REVIEW THAT CANNOT SEE APPROVES EVERYTHING**,
+  # and an empty diff is indistinguishable from a diff with no findings. That is the same
+  # shape as a gate whose disk filled up returning empty output with no error: a check that
+  # could not run reads exactly like a check that passed, and both fail in the safe-looking
+  # direction.
+  # THE CLASSIFIER'S REFUSAL, EMITTED HERE. Recorded up top and printed at the point of use,
+  # so it cannot preempt the documented GRACEFUL exit 10/11 for "no codex configured".
+  if [ -n "${BASE_REF_REFUSAL:-}" ]; then
+    printf '%s\n' "$BASE_REF_REFUSAL" >&2
+    exit 3
+  fi
+  # THE SHAPE ASSERTION — the one point where the value meets the command.
+  #
+  # THE BASE OPERAND THIS SCRIPT PASSES TO GIT IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.
+  # Nothing else — and the rule in full, with its arms and its one asymmetry, is stated in
+  # `docs/spec-items/resolve-the-review-diff-base.md` under THE INVARIANT. This comment says
+  # what THIS script guarantees and points there rather than restating it, because six rounds
+  # of review found six copies of that claim and each fix corrected only the copy that was read.
+  # "Contains a slash" is not "fully qualified": `origin/main` is a shorthand
+  # git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
+  # captures it. That was the fourth position of one defect on this branch — the qualified
+  # path, the `refs/heads` fallback, the no-ref fallback, and then the argument nobody
+  # qualified because it LOOKED qualified.
+  #
+  # Asserting the SHAPE here rather than trusting the classifier above is what ends the
+  # sequence: this is about what git RECEIVES, not about which arm produced it, so a
+  # classifier mistake can no longer reach the command. It asserts the PROPERTY, and the
+  # classifier above decides the KIND: a `HEAD`-rooted expression has already been resolved to
+  # an object name there, so this only has two forms left to admit.
+  case "$BASE_REF" in
+    refs/*) : ;;
+    *)
+      # UPPER OR LOWER. Git accepts an uppercase 40-hex object name — measured: with
+      # `U=$(git rev-parse HEAD | tr a-f A-F)`, `git rev-parse --verify "${U}^{commit}"`
+      # succeeds and `${U}..HEAD` is a valid range. A lowercase-only pattern refused a
+      # legitimate full object name with exit 3, which is the OVER-refusal direction again —
+      # the same one round twenty-six hit in the chain, now in the guard. `diffBaseRef`
+      # already lowercases before matching; this matches its acceptance.
+      if [[ ! "$BASE_REF" =~ ^[0-9a-fA-F]{$BASE_REF_OID_WIDTH}$ ]]; then
+        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval." >&2
+        exit 3
+      fi
+      ;;
+  esac
+  if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+    # CARRIES THE SAME MARKER the empty-diff refusal below emits, because this IS that case —
+    # caught earlier, where the cause can still be named. A consumer greps for the marker.
+    printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' does not name a commit in this repository, so the diff ${BASE_REF}..HEAD would be EMPTY — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+  fi
+  # PLACED HERE, not up beside the qualification block: there it ran before the CODEX_HOME /
+  # auth checks and turned a documented GRACEFUL exit 10/11 ("no codex configured") into a 3.
+  # This is the point of use, which is also where the value's resolvability starts to matter.
+  # `--end-of-options`: this wrapper takes an operator-supplied `[base-ref]`, so an
+  # option-shaped value can genuinely arrive here. Without the marker
+  # `git diff "--output=<path>..HEAD"` writes that file and exits 0 (measured, git 2.43).
+  #
+  # AND THE FAILURE IS THE SIGNAL, so it is no longer discarded. This read
+  # `2>/dev/null` with no status check, under `set -uo pipefail` — NOT `set -e` — so a
+  # failed diff left `FULL_DIFF` empty and execution continued into codex with nothing to
+  # review. `2>/dev/null` on a command whose failure is the signal is the specific mistake:
+  # git's stderr is the only thing that knows. stderr goes to a file rather than into
+  # `FULL_DIFF` so a warning can never be mistaken for diff text.
+  DIFF_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-review-diff-err.XXXXXX")
+  if ! FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD" 2>"$DIFF_ERR_FILE"); then
+    printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: could not read the diff '${BASE_REF}..HEAD' — $(tr '\n' ' ' < "$DIFF_ERR_FILE")— nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    rm -f "$DIFF_ERR_FILE"
+    exit 3
+  fi
+  rm -f "$DIFF_ERR_FILE"
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
 DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")

@@ -125,6 +125,9 @@ interface ResumeOpts {
   pr?: boolean
   /** What `gh pr checks` reports for the PR, in PR mode. Defaults to green. */
   ci?: 'red' | 'green'
+  /** The launcher's pinned base sha — the commit `origin/<base>` held at launch.
+   *  Omitted → the workflow resolves the base from the branch name instead. */
+  baseSha?: string
   /** What the SAME check reports AT THE BASE. 'red' → the PR's red is excused as
    *  pre-existing (advisory), which is the finding this branch's economy is about. */
   ciBase?: 'red' | 'green'
@@ -273,6 +276,7 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
     ...(opts.testStrategy !== undefined ? { testStrategy: opts.testStrategy } : {}),
+    ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
   }
 
   const body = SRC.replace('export const meta', 'const meta')
@@ -311,10 +315,43 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
   test('the regenerated diff is taken from the OID, never from the branch name', async () => {
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
     const cmd = promptFor(out, 'resume-diff')
-    expect(cmd).toContain(`git diff 'main'..'${RECORDED}'`)
+    // THE RIGHT-HAND SIDE is what this test is about: the recorded OID, never the
+    // branch name. The left-hand side is a shell substitution (the base is resolved
+    // against the repository at run time) and is covered by the test below and, for
+    // its OUTPUT, by `review-diff-base-realgit.test.ts`.
+    expect(cmd).toContain(`..'${RECORDED}'`)
     // A branch-name diff would silently swap the code under review if anything
     // pushed between the head comparison and this command.
-    expect(cmd).not.toContain("git diff 'main'..'trident/resume-run'")
+    expect(cmd).not.toContain("..'trident/resume-run'")
+  })
+
+  test('the regenerated diff resolves its BASE too — origin/<base> in pr mode (#546)', async () => {
+    // The LEFT-hand side, which had the mirror-image defect: `refs/heads/main` in the
+    // shared repo of record is only as fresh as the last pull, so the resume handed the
+    // reviewers every commit merged into the base since. Measured at 149 files where the
+    // branch changed 30. `trident/review-diff-base-realgit.test.ts` proves the effect
+    // against real git with a deliberately stale local ref; this pins the composed form.
+    // UNPINNED: the base is a shell substitution that prefers `refs/remotes/origin/<base>`
+    // and falls back to `refs/heads/<base>` — BOTH FULLY QUALIFIED, never a bare name, which
+    // is the arm round nineteen removed. The same in local mode as in pr mode, because
+    // `merge_mode: 'local'` means the outer loop merges locally, not that the repository has
+    // no remote. Pinned here as the composed text; the real-git suite asserts what it
+    // RESOLVES TO and the files it produces.
+    for (const pr of [true, false]) {
+      const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
+      expect({ pr, resolves: cmd.includes("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac;; esac") }).toEqual({ pr, resolves: true })
+      // …and never the bare local name as a literal operand.
+      expect(cmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
+    }
+
+    // And the LAUNCH-PINNED sha outranks even that: it is the commit the branch was
+    // actually cut from, and a sha cannot go stale.
+    const pinned = 'f'.repeat(40)
+    const pinnedCmd = promptFor(
+      await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true, baseSha: pinned }),
+      'resume-diff',
+    )
+    expect(pinnedCmd).toContain(`git diff --end-of-options '${pinned}'..'${RECORDED}'`)
   })
 
   test("'argus-approved' + unchanged head → NO build and NO review at all", async () => {

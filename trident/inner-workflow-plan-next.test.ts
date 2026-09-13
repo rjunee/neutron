@@ -1223,7 +1223,7 @@ describe('plan:next — the probe reads the ref the resume gate judged', () => {
     // The PLAN follows the local-mode authority, but the LOG BASE must still be
     // the remote-tracking ref refreshed independently by step 2. A stale local `main` would
     // otherwise be misreported as branch work and consume the bounded window.
-    expect(probe).toContain("'origin/main'..'trident/plan-next-run'")
+    expect(probe).toContain("'refs/remotes/origin/main'..'trident/plan-next-run'")
   })
 
   test('a missing local-only Forge branch cannot prevent the independent base fetch', async () => {

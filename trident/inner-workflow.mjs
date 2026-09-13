@@ -1409,9 +1409,274 @@ const NO_PATTERN_KILL_RULE =
 //     contract, telling the fix agent to `git switch -c` an already-created
 //     branch + `gh pr create` a duplicate — conflicting instructions that broke
 //     every REQUEST_CHANGES run.
-const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.trim().toLowerCase())
+// A FULL OBJECT NAME — 40 hex (SHA-1) or 64 (SHA-256). The narrow form was a claim about the
+// repository's hash function stated as a claim about the value; `diffBaseRef` matches this
+// exactly, and the parity table holds the two to the same answers on a 64-hex pin.
+const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+const pinnedBase = typeof baseSha === 'string' && OBJECT_NAME_RE.test(baseSha.trim().toLowerCase())
   ? baseSha.trim().toLowerCase()
   : null
+
+/**
+ * THE ONLY NAME THIS FILE GIVES A BASE BRANCH TO A DIFF. Every rev-range asking "what
+ * did this branch change relative to the base it will merge into" reads this — the forge
+ * contract's reviewer diff, the resume diff, the planner's inspection hint, and the
+ * base argv handed to both codex wrappers. (`branchLogBase` below is the one range
+ * that does NOT, and the comment there says why: it asks a different question.)
+ *
+ * WHY IT EXISTS AS ONE BINDING AND NOT AS N CORRECT CALL SITES. A bare LOCAL branch
+ * name is the wrong left-hand side, and the failure is silent: `git diff main..<head>`
+ * in the shared build checkout diffs against whatever `refs/heads/main` happens to
+ * hold, and that ref is only as fresh as the last time something on this box ran `git
+ * pull` on it. MEASURED (Argus r4, run 25b2327d, recorded at `orchestrator.ts`'s own
+ * review-diff site): local `main` was 8 merges behind `origin/main`, the published
+ * artifact was 15,154 lines across ~100 files against a branch whose own work was 20
+ * files / 1,738 lines, and a reviewer vetoed the branch over bugs in files it does not
+ * touch. #546 measured the same shape here: 149 files read instead of 30. The defect
+ * had already been fixed ONCE as a call site (the branch log below, and `probeCiBase`'s
+ * pinned ref) while two other sites in this same file still composed the bare name —
+ * which is what a boundary that depends on the next author remembering buys you.
+ *
+ * THE ORDER IS STATED ONCE, in `docs/spec-items/resolve-the-review-diff-base.md` under THE
+ * INVARIANT, and the arms below are this file's HALF of it — including the one asymmetry, which
+ * the spec item names rather than glosses: the local arm here is emitted UNVERIFIED and refused
+ * by git if absent, where `diffBaseRef` verifies and throws. A composer cannot refuse; it can
+ * only emit a word the other process rejects.
+ *
+ * THE ORDER, EVIDENCE-FIRST:
+ *  • `pinnedBase` — the sha `origin/<base>` held AT LAUNCH, observed by the outer
+ *    launcher (`orchestrator.ts`, base pinning) and the exact commit the build branch
+ *    was cut from. A sha cannot go stale, and it is the cut point, so this branch's own
+ *    work is exactly what the range names. `probeCiBase` already prefers it.
+ *  • `refs/remotes/origin/<base>` in pr mode — the remote-tracking ref, NAMED IN FULL (the
+ *    shorthand `origin/<base>` is a different thing: a tag of that name outranks it). The
+ *    launcher FETCHES
+ *    `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build if
+ *    that fetch or its rev-parse fails, so in pr mode this ref exists and is as fresh
+ *    as launch. The same choice `planProbeRef` makes for the branch side.
+ *  • `origin/<base>` in LOCAL mode TOO, when that ref resolves. This arm used to hand
+ *    local mode the bare name outright, on the theory that "a local-mode run has no
+ *    origin to be behind". That theory is false: `merge_mode: 'local'` means the OUTER
+ *    LOOP MERGES LOCALLY, not that the repository has no remote — and this file's own
+ *    `branchLogBase` has said since before #546 that "a plain local base branch may be
+ *    stale in NON-PR mode". The review-diff fixture makes it concrete: local `main`
+ *    four commits behind `origin/main` yields FIVE files where the branch changed ONE,
+ *    in local mode exactly as in pr mode. So local mode gets the same preference, and
+ *    the shell decides per-repository whether the ref exists.
+ *  • `refs/heads/<base>` whenever `refs/remotes/origin/<base>` does not resolve to a
+ *    commit — which is NOT the same as "there is no remote", and saying so was the sixth
+ *    overclaim on this branch. `origin` can be configured while that ref is missing, deleted
+ *    or never fetched: an ordinary state for a worktree that has not fetched. **It is the
+ *    ABSENT answer only** — exit 1 with empty stdout. Until round thirty-one the substitution
+ *    below also took this arm when git could not answer at all, which meant a broken probe
+ *    silently selected a branch that may be stale; that case now takes the refusing arm. No
+ *    fetch is
+ *    attempted — a build worktree should not reach the network to answer a diff-base
+ *    question — so the local branch is simply the best available answer there, and it is
+ *    named IN FULL: this arm read "the bare name" until round nineteen, and a bare word is
+ *    not inert — git resolves it against every namespace and a same-named tag answers to it.
+ *    The arm is unconditional ON THE ABSENT ANSWER, so an unresolvable `refs/heads/<base>` is
+ *    composed anyway and git rejects it out loud rather than resolving something nobody chose.
+ *
+ * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
+ * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
+ * here — in any spelling the gate ENUMERATES. It used to say "so the next site cannot
+ * re-introduce the class by forgetting": a textual matcher cannot enforce that, its own
+ * header lists the shapes it misses, and it has twice been green against a real bare-base
+ * range. It makes a regression loud; it does not make one impossible.
+ */
+/**
+ * The unpinned arm of `diffBase`, and the only place `diffBase` reads the base branch
+ * NAME. NOT the only place in this file: `probeCiBase` reads it as the unpinned fallback
+ * for its check-runs API path, `branchLogBase` qualifies it as `refs/remotes/origin/<base>`,
+ * and the
+ * prompts print it. Each is argued where it sits. The narrow claim is the one that holds.
+ *
+ * AN OPTION-SHAPED NAME IS REFUSED HERE — the same refusal `diffBaseRef` makes on the TS
+ * side, for the same measured reason: a rev-range operand beginning with `-` is parsed by
+ * git as a FLAG, and `--output=<path>..<head>` writes the file (git 2.43, exit 0 for
+ * `git diff --name-only`). No branch can be named this way — `git check-ref-format
+ * --branch` rejects a leading `-` — so nothing legitimate is lost.
+ *
+ * AND IT IS REFUSED HERE RATHER THAN AT MODULE SCOPE, which is where the first version of
+ * this guard sat. That version threw BEFORE `pinnedBase` was consulted, so a run with a
+ * valid 40-hex pin and an option-shaped base branch failed — even though the pin means
+ * the name is never read and never reaches git. `diffBaseRef` returns the pin before it
+ * validates the name; this now does the same, and the two implementations agree on
+ * ORDER as well as on value.
+ *
+ * That mistake is the mirror of the one it was fixing: there a `-` check refused to
+ * EXAMINE the value and let it through; here it refused the whole call over a value that
+ * had already been superseded. Validate on the path where the value is actually used.
+ *
+ * AND AN EMPTY OR WHITESPACE-PADDED NAME IS REFUSED, for the reason in each guard below.
+ * The padded case is the THIRD divergence between this and `diffBaseRef`: that one trimmed
+ * before probing and returning, this one trimmed only to validate. Neither trims now — the
+ * value is refused instead, so there is no normalisation step left for the two to disagree
+ * about. `diff-base-option-shaped.test.ts`'s parity table varies the whitespace axis and
+ * holds both to the same answers.
+ */
+/**
+ * THE WORD THIS COMPOSER EMITS WHEN THE PROBE CANNOT ANSWER — the all-zero object id, AT THE
+ * REPOSITORY'S OWN HASH WIDTH. This is a shell fragment, not a string: the width is decided
+ * where the word is evaluated, because it is a property of that repository and not of this
+ * process.
+ *
+ * WHY NOT A FIXED 40 ZEROS, which is what round thirty-two shipped. Git ignores a ref whose
+ * name is exactly the hash width in hex — that is what makes an all-zero object name
+ * unresolvable — but "the hash width" is 40 only under SHA-1. Measured on git 2.43.0 in a
+ * repository created with `git init --object-format=sha256` (supported since 2.29):
+ *
+ *   git branch 0{40} HEAD                             → created
+ *   git diff --end-of-options 0{40}..HEAD             → EXIT 0, a diff        ← the hole
+ *   git branch 0{64} HEAD                             → created
+ *   git diff --end-of-options 0{64}..HEAD             → fatal, 128, no output
+ *
+ * and the mirror in a SHA-1 repository: a branch named 0{64} makes `0{64}..HEAD` resolve at
+ * exit 0, while 0{40} stays fatal. So NEITHER fixed width is safe in both formats, and the
+ * only value that is unresolvable-by-construction is the one that matches the repository
+ * asking the question. **That is the second time this sentinel's guarantee was stated more
+ * strongly than it held, with the same shape: a property measured against one repository's
+ * configuration, claimed as a property of the value.** Last round the missing qualifier was
+ * "while nobody has created that ref"; this round it was "in a SHA-1 repository".
+ *
+ * THE QUALIFIER THAT REMAINS, stated rather than argued away: if `rev-parse
+ * --show-object-format` cannot answer, this falls back to 40 zeros, which is the wrong width
+ * in a SHA-256 repository. What makes that survivable is not that the fallback is unreachable
+ * — my first draft of this comment said "cannot be reached inside a working repository" and
+ * the very next measurement falsified it — but that **every failure mode measured takes both
+ * questions down together**:
+ *
+ *   outside a repository:        probe 128, format 128, `git diff <x>..HEAD` 129
+ *   `.git/objects` unreadable:   probe 128, format 128, `git diff <x>..HEAD` 129
+ *                                (and the same range succeeds, exit 0, once it is readable)
+ *
+ * So in the states that reach this arm, git refuses the range on its own account and the
+ * operand is not what decides the outcome. I have not found a state where the probe fails,
+ * the format read fails, and the range still works — that combination is what the remaining
+ * hole would need, and it is named here rather than claimed away. A future object format of a
+ * third width degrades this to "a ref name that must not exist", the weaker guarantee round
+ * thirty-two removed; the test asserts the emitted word against the format its fixture was
+ * created with, so it fails rather than drifts.
+ */
+const UNRESOLVABLE_BASE_OID =
+  "case $(git rev-parse --show-object-format 2>/dev/null) in sha256) printf '%064d' 0;; *) printf '%040d' 0;; esac"
+
+function unpinnedDiffBase() {
+  // AN EMPTY BASE IS REFUSED TOO, matching `diffBaseRef` — `..<head>` is a well-formed
+  // range git answers with exit 0 and no output, so it yields a plausible wrong answer
+  // rather than a failure. Measured; the comment that used to claim the caller would fail
+  // loudly was never tested.
+  if (typeof baseBranch !== 'string' || baseBranch.trim().length === 0) {
+    throw new Error(
+      `trident infra: refusing an empty base branch: ${JSON.stringify(baseBranch)}. The range '..<head>' is not an error — git diff exits 0 with no output — so an empty base produces a plausible wrong answer rather than a failure.`,
+    )
+  }
+  // SURROUNDING WHITESPACE IS REFUSED TOO — and this one is here because the whole POINT
+  // of the guard above used to be undone one line later.
+  //
+  // `diffBaseRef` (the TS twin) opened with `const name = base_branch.trim()` and used the
+  // TRIMMED value for its probe and both returns. This function trimmed only to VALIDATE and
+  // then composed its probe and its fallback from `baseBranch` AS GIVEN. So the same rule,
+  // implemented twice, answered differently for `" main "`: `origin/main` there, a probe of
+  // `refs/remotes/origin/ main ^{commit}` and a fallback of `" main "` here. Not hypothetical
+  // — `resolveBase()` returns `opts.base_branch` verbatim and the launcher hands that value
+  // straight to this script's args.
+  //
+  // Refused rather than trimmed on BOTH sides, deliberately: two implementations that each
+  // remember to normalise is the exact shape that has diverged three times on this branch
+  // (the merge-mode fallback, then pin/validate ORDER, now trimming), each time at a
+  // different step of the same function. With the padded value refused, `trim()` is the
+  // identity on everything that survives and there is no normalisation left to disagree
+  // about. Measured on git 2.43: `git check-ref-format --branch ' main '` is fatal (128), so
+  // no branch is named this way; and ` main ..HEAD` is a fatal operand — which the wrappers'
+  // `2>/dev/null || true` turns into an EMPTY diff, i.e. a plausible wrong answer, which is
+  // why git's own loudness is not enough.
+  if (baseBranch !== baseBranch.trim()) {
+    throw new Error(
+      `trident infra: refusing a base branch with surrounding whitespace: ${JSON.stringify(baseBranch)}. git check-ref-format rejects such a name and the range operand is fatal, which the wrappers swallow into an empty diff; it is refused rather than trimmed so this script and merge.ts's diffBaseRef cannot normalise it differently.`,
+    )
+  }
+  if (baseBranch.startsWith('-')) {
+    throw new Error(
+      `trident infra: refusing a base branch that git would read as an option, not a revision: ${JSON.stringify(baseBranch)}. A rev-range operand beginning with '-' is parsed as a flag; no branch can legitimately be named this way.`,
+    )
+  }
+  // THE SUBSTITUTION IS COMPOSED HERE, after the refusals, and nowhere else. It used to be a
+  // module-scope `const` above this function, which meant the one place the base branch NAME
+  // became shell text was evaluated BEFORE anything had looked at the value — harmless while
+  // the result went unused on the refusing paths, but it put the composition outside the only
+  // scope that has checked its input. Composing it here is the same principle as the rest of
+  // #546: narrow the scope in which an unvalidated base name can exist.
+  // The substitution PRINTS THE REF IT VERIFIED — `refs/remotes/origin/<base>`, not the
+  // shorthand `origin/<base>`. Both halves used to disagree: it rev-parsed the qualified ref
+  // and printed the short one. Git allows a tag named `origin/main` and prefers `refs/tags/`
+  // over `refs/remotes/` when disambiguating, so the shorthand silently resolves to the TAG —
+  // measured on git 2.43 as two files where the qualified form gives one, with only a stderr
+  // warning and exit 0, and this command's stderr goes to /dev/null.
+  // THREE ARMS, KEYED ON THE EXIT CODE, because `false` and `unknown` want opposite answers.
+  // Measured on git 2.43: `rev-parse --verify --quiet` exits 0 for a ref that resolves, 1 for
+  // "no such ref", and 128 when it could not ask at all (`-C <not-a-repo>`).
+  //   0 → `refs/remotes/origin/<base>`
+  //   1 → `refs/heads/<base>`   — ABSENT legitimately selects the local branch (a fresh clone)
+  //   * → the ALL-ZERO OBJECT ID — UNKNOWN selects NOTHING. `&& … || …` collapsed this into
+  //       the local branch, so a transient probe failure silently diffed against a branch that
+  //       may be stale: the Argus r4 shape reached through the error path. The REASON the
+  //       remote ref is preferred is that the local one may be stale, and a failed probe says
+  //       nothing about staleness.
+  //
+  // HOW A SUBSTITUTION REFUSES, and why this is an OBJECT ID rather than a ref. It cannot
+  // throw the way `diffBaseRef` does — it is composed in this process and evaluated in
+  // another — so it can only emit a word the other process will refuse. That word was
+  // `refs/trident-probe-failed/<base>` for one round, and **that guarantee was conditional on
+  // nobody having created it**: `refs/trident-probe-failed/` is an ordinary writable namespace,
+  // and `git update-ref refs/trident-probe-failed/main HEAD~1` SUCCEEDS — after which the
+  // range resolves and produces a wrong diff at exit 0, which is precisely the defect this
+  // item exists to remove, reintroduced by the mechanism meant to prevent it, and reachable by
+  // anyone who can write a ref in the build checkout. The all-zero object id cannot be made to
+  // resolve: measured on git 2.43.0, `0{40}..HEAD` is `fatal: Invalid revision range`, exit
+  // 128, no output — and it stays that way even with a TAG and a BRANCH named 40 zeros in the
+  // repository, because git ignores a ref whose name is 40 hex characters when the spelling is
+  // 40 hex characters (it says so, in `advice.objectNameWarning`). It still satisfies the shape
+  // property, on the other limb: a full object name, never a bare word.
+  //
+  // The stderr line is the diagnosability the poison ref had and an object id does not — git's
+  // own message names only `0000…`, which says nothing about WHY. It goes to stderr so it
+  // cannot reach the substitution's stdout and become part of the word.
+  //
+  // NEITHER ARM CAN PRINT A BARE NAME. The remote-tracking ref when it resolves;
+  //
+  // The bare word is not inert: git resolves it against every namespace, and a same-named TAG
+  // answers to it. This repository holds a live instance
+  // (`archive/agent-replies-prior-iter-3b35767` exists only as a tag), so "neither ref exists,
+  // so git will error loudly" was false — it errors loudly only for the QUALIFIED form.
+  // MEASURED on git 2.43 in a repo with such a tag and no such branch:
+  //   'archive/thing..HEAD'            → exit 0 and a diff, against the tag
+  //   'refs/heads/archive/thing..HEAD' → FATAL, exit 128
+  // So the unresolvable case now composes `refs/heads/<base>` and git refuses it out loud,
+  // which is what the spec item has always promised this path does.
+  //
+  // THE TS TWIN THROWS HERE INSTEAD, and that is the one place these two cannot agree: a
+  // shell substitution is composed in this process and evaluated in another, so it cannot
+  // refuse — it can only emit a word the other process will refuse. Both halves are asserted
+  // in `diff-base-option-shaped.test.ts`, including that this word is one git rejects EVEN
+  // AFTER an adversary creates every ref that could plausibly shadow it.
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; ${UNRESOLVABLE_BASE_OID};; esac)"`
+}
+
+const diffBase =
+  pinnedBase !== null
+    ? shSingleQuote(pinnedBase)
+    : // NO REMOTE IS A QUESTION ONLY THE REPOSITORY CAN ANSWER, so this arm is a SHELL
+      // EXPRESSION rather than a name chosen here. A 40-hex pin needs no probe and gets
+      // none; everything else asks git once, at the moment the range is built, in the
+      // repository the range is built against. That is what lets local mode have the
+      // same preference as pr mode without breaking a repository that has no origin.
+      //
+      // Every consumer of `diffBase` is a shell word — the two codex wrappers' argv and
+      // the commands in the prompts — so the substitution is evaluated exactly where the
+      // diff runs. It is pre-quoted for that reason, and consumers must NOT re-quote it.
+      unpinnedDiffBase()
 
 function forgeStep1(reenter) {
   return reenter
@@ -1475,7 +1740,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='deferred', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+5. Write the branch diff to a file (e.g. \`git diff --end-of-options ${diffBase}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed, mutationClaim (see MUTATION NOMINATION below)${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='deferred', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
@@ -1976,7 +2241,7 @@ ${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${diffBase} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -2209,7 +2474,7 @@ function planFablePrompt(resuming) {
   // redo/overwrite that work (Codex [P2]). Before this split the fused in-Forge
   // planner ran inside the re-entered worktree and saw branch state for free.
   const resumeNote = resuming
-    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
+    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff --end-of-options ${diffBase}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
   const stampCommand = workflowStageStampCommand('plan-start')
   const stampInstruction = stampCommand === null
@@ -2260,7 +2525,7 @@ WHAT THE REVIEWERS SAY IS MISSING OR WRONG:
 ${whatIsMissing}
 THE REVIEWERS' FINDINGS (round ${round}) — these are the input you were never given the first time:
 ${JSON.stringify(findings)}
-Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}). Inspect the branch as well as the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then \`git diff ${baseBranch}..${forgeBranch}\`.
+Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}). Inspect the branch as well as the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then \`git diff --end-of-options ${diffBase}..${forgeBranch}\`.
 1. Decide what the ORIGINAL plan got wrong. A finding that recurs every round is usually something the plan itself asked for — say so plainly rather than restating the task.
 2. Return the revised full plan body as \`implementationPlan\` (do NOT write it to disk) and the single task to build now as \`topTask\`.
 3. Emit a REVISED EXECUTION SPEC as \`executionSpec\`: the exact TARGET FILES, the ACCEPTANCE CRITERION, and the TEST PLAN — precise enough that a cheaper model carries it out WITHOUT re-reasoning the design. It MUST address every finding above, including by REMOVING or REPLACING work the old plan asked for. Do not re-issue the old spec.
@@ -2321,7 +2586,35 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 // A plain local base branch may be stale in non-PR mode and would then make base
 // history look like work from this branch, crowding the useful commits out of the
 // bounded window.
-const branchLogBase = `origin/${baseBranch}`
+//
+// DELIBERATELY NOT `diffBase` (#546), and this is the one site in the file that is not.
+// The difference is NOT the merge mode — an earlier draft of this comment said `diffBase`
+// "in LOCAL mode names the LOCAL ref", which stopped being true when the fallback stopped
+// being keyed on merge mode. `diffBase` prefers `refs/remotes/origin/<base>` in BOTH modes
+// whenever that ref resolves, and composes `refs/heads/<base>` when it does not — never a
+// bare name, an arm round nineteen removed. Saying otherwise
+// here was the worst possible placement for that stale claim: it sits beside the one
+// operand whose local/pr distinction is real, so a reader comparing the two was told the
+// difference is the merge mode when it is not.
+//
+// THE REAL DIFFERENCE IS THE QUESTION ASKED. `diffBase` answers "what did this branch
+// change relative to the base it will merge into", so it must be able to fall back to
+// whatever base actually exists. This asks "which commits are this branch's OWN, for a
+// BOUNDED synthesis window", and wants the widest exclusion available unconditionally —
+// the remote-tracking ref step 2 refreshes independently just above — because a base
+// commit wrongly counted as branch work crowds real commits out of a byte-capped window.
+// The command tolerates its own failure (`|| true`, and an empty `branchLog` is a
+// documented normal answer), so a repo with no origin degrades the log rather than
+// breaking it: that is why this one can be unconditional where `diffBase` cannot.
+// Pinned by `inner-workflow-plan-next.test.ts` — "local mode probes the local ref, which
+// is the authority there" asserts BOTH halves of this split.
+// FULLY QUALIFIED for the same reason `diffBase` is (round seventeen): a tag named
+// `origin/<base>` wins over the remote-tracking ref in git's disambiguation order, so the
+// shorthand silently excludes the wrong commits from this window. This one never verified
+// anything — it is unconditional by design, and an unresolvable `refs/remotes/origin/<base>`
+// degrades the log exactly as an unresolvable `origin/<base>` did (`|| true`) — so the change
+// costs nothing and removes the ambiguity.
+const branchLogBase = `refs/remotes/origin/${baseBranch}`
 
 function planProbePrompt() {
   const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
@@ -2337,7 +2630,7 @@ Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATI
 \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
 (\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
 4. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
-5. \`cd ${shSingleQuote(repoPath)} && git log --no-color --date=short --format='COMMIT %h %ad %s%n%b' --name-only ${shSingleQuote(branchLogBase)}..${shSingleQuote(planProbeRef)} | head -c ${BRANCH_LOG_MAX_BYTES} | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true\` — report EXACTLY what it prints, verbatim, as \`branchLog\`. It is byte-bounded, valid UTF-8, and newest commit first, so truncation drops the oldest history. If the command fails or prints nothing, report \`branchLog\` as \`""\` — that is a normal answer, not an error to retry. The branch log deliberately has no checksum: it is raw synthesis material, not a persisted relay, so a lossy copy can degrade brief quality but never correctness.
+5. \`cd ${shSingleQuote(repoPath)} && git log --no-color --date=short --format='COMMIT %h %ad %s%n%b' --name-only --end-of-options ${shSingleQuote(branchLogBase)}..${shSingleQuote(planProbeRef)} | head -c ${BRANCH_LOG_MAX_BYTES} | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true\` — report EXACTLY what it prints, verbatim, as \`branchLog\`. It is byte-bounded, valid UTF-8, and newest commit first, so truncation drops the oldest history. If the command fails or prints nothing, report \`branchLog\` as \`""\` — that is a normal answer, not an error to retry. The branch log deliberately has no checksum: it is raw synthesis material, not a persisted relay, so a lossy copy can degrade brief quality but never correctness.
 NEVER EXIT SILENTLY.`
 }
 
@@ -5841,7 +6134,11 @@ async function writeResumeDiff(headOid) {
   const fetchStep = isPr
     ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
     : ''
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${shSingleQuote(baseBranch)}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
+  // `--end-of-options` behind the refusal above, for the same reason the orchestrator's
+  // four consumers carry it: the binding THROWS on such a value, the marker makes the
+  // command safe for whatever reaches it anyway. The binding's refusal is a check on one
+  // path, not an impossibility, which is why both exist.
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff --end-of-options ${diffBase}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
   const res = await agent(
     `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.
 ${cmd}`,
@@ -6901,7 +7198,7 @@ function codexReviewerPrompt(diffFile) {
   // how GPT-5 worded its answer.
   return `You are the CODEX ${opts.adversarial === true ? 'ADVERSARIAL' : 'CROSS-MODEL'} REVIEW bridge for trident (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
+  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${diffBase} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.

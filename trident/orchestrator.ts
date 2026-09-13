@@ -77,6 +77,7 @@ import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
+import { gitRangeArgv } from './git-range.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { ralphCapFailureReason } from './ralph-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
@@ -104,6 +105,8 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  diffBaseRef,
+  refResolves,
   MAX_CONFLICT_ROUNDS,
   runWorktreePath,
   TridentBaseDriftHold,
@@ -809,16 +812,26 @@ export function isTridentHarvestTerminal(run: TridentRun): boolean {
  * exported helper (its the legacy harness-parity tests + revertibility) though the inner
  * workflow now does its own oversized-diff guard internally. Conservative on
  * failure: returns OVER the ceiling so an unmeasurable diff is treated as large.
+ *
+ * `base_ref`, NOT a base BRANCH: this is the left-hand side of a rev-range, so a bare
+ * local branch name here diffs against whatever `refs/heads/<base>` happens to hold and
+ * silently counts every commit merged into the base since as this branch's own (#546).
+ * Pass `diffBaseRef(...)`'s output. The parameter was named `base_branch` and there is
+ * no production caller left to mis-feed it, so the rename is the whole of the fix here.
  */
 export async function computeDiffLineCount(
   run_host: RunHostCommand,
   repo_path: string,
-  base_branch: string,
+  base_ref: string,
 ): Promise<number> {
   let res
   try {
     res = await run_host(
-      ['git', '-C', repo_path, 'diff', '--numstat', `${base_branch}..HEAD`],
+      // `--end-of-options` (#546). This consumer was UNSHIELDED until round fourteen and
+      // the coverage test could not see it: that test searched for `${baseRef}`, and this
+      // one spells the same value `base_ref`. Called with `--output=/tmp/pwn` this argv
+      // writes that file and exits 0, exactly as the shielded sites were measured doing.
+      gitRangeArgv({ repo_path, subcommand: 'diff', flags: ['--numstat'], base: base_ref, head: 'HEAD' }),
       repo_path,
     )
   } catch {
@@ -1714,7 +1727,17 @@ export async function rebaseOntoObservedBase(
     // `--output` hands the bytes to git, which writes them verbatim. No capture, no trim, no
     // reconstruction. Do not "simplify" this back to reading stdout.
     const written = await run_host(
-      ['git', '-C', repoPath, 'diff', `--output=${diffFile}`, `${await localForkPoint()}..refs/heads/${branch}`],
+      // `--end-of-options` after every option and before the operand: `localForkPoint()`
+      // answers a sha today, but a range operand is a range operand and the marker costs
+      // nothing. Uniform across every git range in this module (#546) so the claim is
+      // "all of them" rather than "the ones whose value I reasoned about".
+      gitRangeArgv({
+        repo_path: repoPath,
+        subcommand: 'diff',
+        flags: [`--output=${diffFile}`],
+        base: await localForkPoint(),
+        head: `refs/heads/${branch}`,
+      }),
       repoPath,
     )
     if (!written.ok) throw new Error(publishFailureReason('read the diff of', branch, written.stderr))
@@ -2453,6 +2476,23 @@ export function buildTridentOrchestrator(
     return detectBaseBranch(opts.run_host, run.repo_path)
   }
 
+  /**
+   * The LEFT-HAND SIDE of any rev-range this orchestrator builds (#546): the launch-pinned
+   * sha, else `refs/remotes/origin/<base>` when that ref resolves, else `refs/heads/<base>`;
+   * a base that resolves to neither is REFUSED. Never a bare name — see `diffBaseRef`.
+   *
+   * The remote question is asked of the REPOSITORY, never inferred from `merge_mode` —
+   * `local` means the outer loop merges locally, not that there is no remote, and keying
+   * the fallback on it was the last place this defect lived.
+   */
+  async function resolvedDiffBase(run: TridentRun): Promise<string> {
+    const base = await resolveBase(run)
+    // THE PROBE IS PASSED, NOT CALLED. `await refResolves(...)` in the argument
+    // position ran it before `diffBaseRef` could return the pin — correct answer, wasted
+    // work, and a pinned dispatch that failed whenever the probe did.
+    return diffBaseRef(base, run.base_sha, (ref) => refResolves(opts.run_host, run.repo_path, ref))
+  }
+
   /** Best-effort probe for an existing PR on the run's branch (idempotent resume
    *  — never open a duplicate). Only meaningful in `pr` mode; never throws. */
   async function detectExistingPr(run: TridentRun): Promise<number | null> {
@@ -2813,9 +2853,24 @@ export function buildTridentOrchestrator(
     // lease uses) and the head it returns is replayed directly onto it, so that sha is the exact
     // left-hand side of this branch's own diff. It is a local object on BOTH paths that return a
     // non-empty one: the replay fetches it, and the already-contains path could only have been
-    // answered by reading it. An empty one means there is no remote base at all (a brand-new
-    // origin), which is the one case the base NAME is still the best available answer.
-    const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
+    // answered by reading it.
+    //
+    // AN EMPTY ONE IS NOT A LICENCE FOR THE BARE LOCAL NAME (#546). This line used to fall
+    // straight back to `resolveBase(run)` — `detectBaseBranch`'s bare `main` — on the theory
+    // that "there is no remote base at all" is the one case where the name is the best
+    // available answer. Two of those three fallback worlds still have a better answer:
+    // `run.base_sha` is the launch-observed tip, and `origin/<base>` is a remote-tracking
+    // ref the launch path fetches (and, in pr mode, refuses to start without). `diffBaseRef`
+    // picks whichever exists and falls back to `refs/heads/<base>` whenever
+    // `refs/remotes/origin/<base>` does not resolve — NOT "only in local mode", which is the
+    // framing the fix that removed it left behind here, and NOT the bare name, which is what
+    // this comment said until round nineteen. The merge mode says nothing about whether a
+    // remote exists; keying the fallback on it was the defect, and a comment still asserting
+    // it is the same claim surviving its own correction.
+    const baseRef =
+      rebased.baseSha !== ''
+        ? rebased.baseSha
+        : await resolvedDiffBase(run)
     const changed = await opts.run_host(
       // `--no-renames` HERE, not only on the group diffs below (Argus r17). This
       // listing is what BUILDS the path universe the groups are restricted to, so
@@ -2825,7 +2880,22 @@ export function buildTridentOrchestrator(
       // not fix that: a path absent from this list is never handed to any group.
       // `core.quotePath=false` for the same reason one line down: a C-quoted token
       // fed back as a pathspec matches nothing and drops that file's hunks.
-      ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', `${base}..${headToPublish}`],
+      // `--end-of-options` — DEFENCE IN DEPTH behind `diffBaseRef`'s refusal. Measured on
+      // git 2.43: without it this exact argv with a base of `--output=<path>` EXITS 0 and
+      // writes the file; with it git refuses (128) and writes nothing, and a legitimate
+      // range is unaffected. The binding REFUSES such a value (it throws); this is what makes
+      // the command safe for any value that ever reaches it. "Refuses" rather than "makes
+      // unconstructable" on purpose — the mechanism is a throw on one code path, not a
+      // property of the type, and a value that never passed through the binding is exactly
+      // what this marker is here for.
+      gitRangeArgv({
+        repo_path: run.repo_path,
+        config: ['-c', 'core.quotePath=false'],
+        subcommand: 'diff',
+        flags: ['--name-only', '--no-renames'],
+        base: baseRef,
+        head: headToPublish,
+      }),
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
@@ -2930,7 +3000,17 @@ export function buildTridentOrchestrator(
     const padded = changedLines.some((l) => l !== l.trim())
     if (/^[0-9a-f]{40}$/.test(seenPin) && !quoted && !padded && changedFiles.length <= 500) {
       const unseenRes = await opts.run_host(
-        ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', `${seenPin}..${headToPublish}`],
+        // `--end-of-options` (#546): `seenPin` is 40-hex-checked one line above, so this is
+        // belt-and-braces — kept anyway so EVERY range in this module carries it and the
+        // coverage test needs no per-site exemption to reason about.
+        gitRangeArgv({
+          repo_path: run.repo_path,
+          config: ['-c', 'core.quotePath=false'],
+          subcommand: 'diff',
+          flags: ['--no-renames', '--name-only'],
+          base: seenPin,
+          head: headToPublish,
+        }),
         run.repo_path,
       )
       if (unseenRes.ok) {
@@ -2948,7 +3028,15 @@ export function buildTridentOrchestrator(
     }
     if (groups === null) {
       const diff = await opts.run_host(
-        ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${headToPublish}`],
+        // `--end-of-options`: without it a second `--output=` arrives from the operand and
+        // git honours BOTH (measured, exit 0, two files written).
+        gitRangeArgv({
+          repo_path: run.repo_path,
+          subcommand: 'diff',
+          flags: [`--output=${diffFile}`],
+          base: baseRef,
+          head: headToPublish,
+        }),
         run.repo_path,
       )
       if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
@@ -2965,10 +3053,14 @@ export function buildTridentOrchestrator(
         // reviewer reads the same hunks under two headings. Literal magic turns each
         // token back into the exact path `--name-only` printed.
         const partDiff = await opts.run_host(
-          [
-            'git', '-C', run.repo_path, 'diff', '--no-renames',
-            `--output=${part}`, `${base}..${headToPublish}`, '--', ...group.map((f) => `:(literal)${f}`),
-          ],
+          gitRangeArgv({
+            repo_path: run.repo_path,
+            subcommand: 'diff',
+            flags: ['--no-renames', `--output=${part}`],
+            base: baseRef,
+            head: headToPublish,
+            pathspec: group.map((f) => `:(literal)${f}`),
+          }),
           run.repo_path,
         )
         if (!partDiff.ok) throw new Error('outer publisher could not materialize the review diff')
@@ -3374,9 +3466,21 @@ export function buildTridentOrchestrator(
       const localHead = local.stdout.trim()
       if (!local.ok || !/^[0-9a-f]{40}$/.test(localHead)) return null
 
-      const base = await resolveBase(run)
+      // THE BASE `resolvedDiffBase` CHOSE (#546) — the launch pin, else
+      // `refs/remotes/origin/<base>` when that ref resolves, else `refs/heads/<base>`, which
+      // is the best answer there is without a fetch. Never a bare name, and a base that
+      // resolves to neither ref is refused. (This comment has been wrong twice: it said
+      // "never the bare local branch name" while the bare fallback existed, then described
+      // that fallback as legitimate after round nineteen removed it.) What must never happen
+      // is this call site naming a base of its own. A stale `refs/heads/main`
+      // makes `rev-list --count <base>..<localHead>` count the base's own unmerged history
+      // as this lane's commits, and this count is what decides whether a stranded run built
+      // anything worth salvaging.
+      const baseRef = await resolvedDiffBase(run)
       const ahead = await opts.run_host(
-        ['git', '-C', run.repo_path, 'rev-list', '--count', `${base}..${localHead}`],
+        // `--end-of-options`: `rev-list` exits 129 on an option-shaped operand and writes
+        // the file anyway (measured); the marker stops it reaching the option parser.
+        gitRangeArgv({ repo_path: run.repo_path, subcommand: 'rev-list', flags: ['--count'], base: baseRef, head: localHead }),
         run.repo_path,
       )
       const aheadText = ahead.stdout.trim()
@@ -4083,7 +4187,16 @@ export function buildTridentOrchestrator(
       }
       base_sha = oid
       const behind = await opts.run_host(
-        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        // `--end-of-options` (#546). The `refs/heads/` prefix already makes an option-shaped
+        // base non-option-shaped, so this is the least exposed range here; it carries the
+        // marker so the module's rule has no exceptions to remember.
+        gitRangeArgv({
+          repo_path: launchRun.repo_path,
+          subcommand: 'rev-list',
+          flags: ['--count'],
+          base: `refs/heads/${base}`,
+          head: remoteRef,
+        }),
         launchRun.repo_path,
       )
       const count = Number.parseInt(behind.stdout.trim(), 10)
@@ -4418,7 +4531,16 @@ export function buildTridentOrchestrator(
         }
         if (contained === 'no' && !ownCrashLeftover) {
           const ahead = await opts.run_host(
-            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
+            // `--end-of-options` (#546): `base_sha` is the launcher's own resolved oid, and
+            // `rev-list` is the family measured to write the smuggled file even while
+            // exiting 129, so the marker goes here too.
+            gitRangeArgv({
+              repo_path: launchRun.repo_path,
+              subcommand: 'rev-list',
+              flags: ['--count'],
+              base: base_sha,
+              head: branchTip,
+            }),
             launchRun.repo_path,
           )
           const rawAheadCount = ahead.stdout.trim()
@@ -4504,7 +4626,15 @@ export function buildTridentOrchestrator(
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
-        base_branch: base,
+        // THE BASE `diffBaseRef` CHOSE (#546) — the pin, `refs/remotes/origin/<base>` when it
+        // resolves, else `refs/heads/<base>` — never a shorthand, never a bare name, and never
+        // a base named here. The block this renders tells the build to run
+        // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
+        // test set; a stale `refs/heads/main` adds every file the base moved past to
+        // that set, which is the wasteful direction of the same defect.
+        base_branch: await diffBaseRef(base, base_sha, (ref) =>
+          refResolves(opts.run_host, pinnedRun.repo_path, ref),
+        ),
       })
       test_strategy = detail.block
       test_strategy_intermediate = detail.intermediate_block
@@ -5137,7 +5267,12 @@ export function buildTridentOrchestrator(
       // as null — which the gate already refuses — so the fallback can never
       // turn a missing nomination into a pass.
       const expectedHead = reviewedHeadOid(run)
-      const baseBranch = await resolveBase(run)
+      // THE BASE `resolvedDiffBase` CHOSE (#546), never one named here.
+      // `changedFilesOnBranch` takes it as `git diff --name-only
+      // <base>...<ref>`, and the three-dot form resolves the merge-base — so a stale
+      // `refs/heads/main` (which IS an ancestor of the branch) puts every file the base
+      // moved past into the blast radius the mutation nomination is scored against.
+      const baseBranch = await resolvedDiffBase(run)
       const committed =
         result.mutation_claim === null || result.mutation_claim === undefined
           ? await readCommittedMutationClaim(opts.run_host, run.repo_path, {

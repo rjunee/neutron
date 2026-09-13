@@ -5091,6 +5091,8 @@ describe('changedFilesOnBranch refuses a base git could read as an option', () =
         '-z',
         '--no-renames',
         '--name-status',
+        // `--end-of-options` (#546): pinned as a value, not asserted loosely.
+        '--end-of-options',
         'origin/main...feat-x',
       ],
     ])
