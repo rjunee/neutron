@@ -77,6 +77,7 @@ import {
   collectTokensToString,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import {
+  PROFILE_ARBITER,
   PROFILE_LEAK_FIXER,
   PROFILE_UNTRUSTED_IMPORT,
 } from '@neutronai/gateway/wiring/substrate-profiles.ts'
@@ -526,6 +527,7 @@ import {
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
+import { buildFableArbiter } from '@neutronai/trident/arbiter.ts'
 import { buildLeakPreflightFixer } from '@neutronai/trident/leak-fixer.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { buildTridentTerminalObserver } from './wiring/trident-nexus-observer.ts'
@@ -6070,6 +6072,37 @@ export function buildOpenGraphComposer(
           })
         : undefined
 
+    // #541 — THE ARBITER TIER, above the resolver. `buildFableArbiter` had been
+    // built, unit-tested and exported with ZERO production call sites since
+    // 2026-08-15; this is the construction that gives it one. A fresh ephemeral
+    // REPL with NO TOOLS AT ALL gets ONE bounded turn when the resolver escalates,
+    // and returns one bit: grant another resolver round, or let the escalation
+    // reach the owner. Nothing it writes is passed anywhere — the guidance channel
+    // was removed because it let an untrusted judge steer a credentialed agent —
+    // and `approve`/`merge`/`skip-review` cannot even enter the option set
+    // (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated on the SAME
+    // live-credential predicate as the resolver: an arbiter can only run where
+    // builds run. Absent → a resolver escalation posts its question to chat,
+    // exactly as before.
+    //
+    // CREDENTIAL-FREE BY PROFILE, not by prompt — the `PROFILE_LEAK_FIXER` rule
+    // fourteen lines below, and this turn needs it MORE than that one does. On the
+    // default `PROFILE_EPHEMERAL` the spawn carries `GH_TOKEN` plus a git
+    // credential helper, so the three actions `arbiter.ts` excludes from the
+    // OPTION SET — approve, merge, skip review — were all reachable from the
+    // PROCESS via `gh pr merge` / `git push` / `gh api`, leaving a prompt sentence
+    // as the only boundary. And the boundary has to hold against text this repo
+    // does not author: the arbiter's evidence embeds the conflict resolver's own
+    // escalation question, which another bounded agent wrote. `PROFILE_ARBITER`
+    // drops the grant, so the authority the option set excludes structurally is
+    // absent from the environment too.
+    const tridentArbiter =
+      tridentFireInnerWorkflow !== null
+        ? buildFableArbiter({
+            build_substrate: makeEphemeralSubstrate('cc-trident-arbiter', PROFILE_ARBITER),
+          })
+        : undefined
+
     // Purity-preflight fixer (2026-08-31): a fresh ephemeral REPL rooted in the
     // preflight's scratch worktree rewords gate-flagged prose so a finding is a
     // fixable defect in THIS round instead of a guaranteed-red PR. Same gating
@@ -6988,6 +7021,9 @@ export function buildOpenGraphComposer(
               ...(tridentConflictResolver !== undefined
                 ? { resolve_conflict: tridentConflictResolver }
                 : {}),
+              // #541 — the arbiter tier above that resolver: an escalated conflict
+              // gets one read-only second opinion before the run ends in chat.
+              ...(tridentArbiter !== undefined ? { arbitrate: tridentArbiter } : {}),
               // Purity preflight (2026-08-31) — the bounded reword turn behind
               // the orchestrator's fix_leak_findings seam.
               ...(tridentLeakFixer !== undefined ? { fix_leak_findings: tridentLeakFixer } : {}),

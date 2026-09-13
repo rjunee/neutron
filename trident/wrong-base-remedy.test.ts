@@ -6,6 +6,9 @@ import { join } from 'node:path'
 import {
   composeWrongBaseRefusal,
   foldEvidence,
+  foldEvidenceReporting,
+  foldPreservingBytes,
+  FORGERY_RANGES,
   probePidLiveness,
   probeTreeOccupancy,
   TOTAL_BUDGET_MS,
@@ -2775,5 +2778,82 @@ describe('composeWrongBaseRefusal: the invisible characters, the equals spelling
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('#541 round 21 — the fold reports what it dropped', () => {
+  test('BOTH ways it can shorten are reported, not just the obvious one', () => {
+    // The `max` cut is the one an audit finds. `EVIDENCE_SCAN_MAX` is the one it misses: an
+    // enormous input keeps only its last 64,000 characters before `defang` ever runs, and a
+    // caller promising completeness has to know that happened too.
+    expect(foldEvidenceReporting('short', 1000)).toEqual({ text: 'short', truncated: false })
+
+    const overMax = foldEvidenceReporting('a'.repeat(500), 100)
+    expect(overMax.truncated, 'the max cut is reported').toBe(true)
+    expect(overMax.text.startsWith('…')).toBe(true)
+
+    // Longer than the scan window but folded under a generous max: the ONLY signal that
+    // anything was lost is the flag.
+    const scanned = foldEvidenceReporting('b'.repeat(70_000), 1_000_000)
+    expect(scanned.truncated, 'the scan-window cut is reported').toBe(true)
+    expect(scanned.text.startsWith('…'), 'and it carries no marker of its own').toBe(false)
+  })
+})
+
+describe('#541 round 22 — the prompt sanitiser keeps the bytes a judge is ruling on', () => {
+  test('EVERY codepoint in EVERY intended range is removed — walked, not sampled', () => {
+    // A SANITISER TESTED BY SAMPLING IS TESTED AGAINST THE CHARACTERS SOMEONE THOUGHT OF. The
+    // previous version of this test named six representatives and passed while the entire C1
+    // block (32 codepoints) leaked, including `\u0085` NEL — the third member of the "not LF but
+    // treated as a line break" set whose other two were already covered. Two lists that each
+    // looked complete had a whole block in the gap between them.
+    //
+    // So the ranges are DATA, exported beside the class, and this walks all of them.
+    const leaks: string[] = []
+    for (const [lo, hi] of FORGERY_RANGES) {
+      for (let c = lo; c <= hi; c++) {
+        const ch = String.fromCodePoint(c)
+        if (foldPreservingBytes(`a${ch}b`, 1000).text.includes(ch)) {
+          leaks.push(`U+${c.toString(16).toUpperCase().padStart(4, '0')}`)
+        }
+      }
+    }
+    expect(leaks, 'codepoints the class intends to remove but does not').toEqual([])
+
+    // NOT VACUOUS: the ranges really do cover the characters this exists for.
+    const covered = (c: number): boolean => FORGERY_RANGES.some(([lo, hi]) => c >= lo && c <= hi)
+    for (const c of [0x0085, 0x2028, 0x2029, 0x202e, 0x000a, 0x001b, 0x200b, 0xfeff]) {
+      expect(covered(c), `U+${c.toString(16)} must be in the declared ranges`).toBe(true)
+    }
+    // AND TAB IS DELIBERATELY OUT — the fidelity fix from round 20, which must stay.
+    expect(covered(0x0009), 'tab must NOT be in the class').toBe(false)
+    expect(foldPreservingBytes('a\tb', 1000).text).toBe('a\tb')
+  })
+
+  test('it removes ONLY what can forge a line', () => {
+    // `defang` does two jobs under one name. This is the security half on its own: what can END
+    // or REORDER a line has to go, because the quoted-evidence boundary rests on it. Everything
+    // else a diff might legitimately contain stays.
+    const line = '-\tgcc -O2 "main.c"   '
+    expect(foldPreservingBytes(line, 1000).text).toBe(line)
+
+    // Line-forging codepoints are neutralised.
+    for (const forgery of ['\u2028', '\u2029', '\u202e', '\u0000', '\u001b', '\n']) {
+      expect(foldPreservingBytes(`a${forgery}b`, 1000).text).toBe('a b')
+    }
+  })
+
+  test('EACH forgery codepoint becomes one space — runs are not collapsed', () => {
+    // Found as a mutation survivor: the column-position test one layer up drives `merge.ts`'s
+    // own quoting, so this sanitiser's run behaviour had no detector of its own. Collapsing a
+    // run keeps the boundary intact and shifts every column after it, and in a diff columns are
+    // content.
+    expect(foldPreservingBytes('a\u0007\u0007\u0007b', 1000).text).toBe('a   b')
+  })
+
+  test('it reports both cuts, exactly as the prose fold does', () => {
+    expect(foldPreservingBytes('x'.repeat(50), 10).truncated).toBe(true)
+    expect(foldPreservingBytes('x'.repeat(70_000), 1_000_000).truncated).toBe(true)
+    expect(foldPreservingBytes('short', 1000).truncated).toBe(false)
   })
 })

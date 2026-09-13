@@ -36,6 +36,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # gated suite cannot be added and then quietly never run.
 PTY_E2E_SUITES=(
   "reminders/bundled-rituals.e2e.test.ts"
+  "trident/__tests__/arbiter-tool-gate.e2e.test.ts"
   "runtime/adapters/claude-code/persistent/__tests__/dev-channel-pty-bind.e2e.test.ts"
   "runtime/adapters/claude-code/persistent/__tests__/ritual-write-containment.e2e.test.ts"
 )
