@@ -405,8 +405,9 @@ const GENERATED_CHANNEL_NAME = /^neutron-[0-9a-f]{32}$/
  * as `unreadable` rather than reading as absence — so the malformed row becomes a REFUSAL
  * rather than a deletion. That is the two rounds composing: the shape check makes the bad
  * value visible and specific here, `readRegistryState` makes the consequence safe, and
- * `replSessionConfigPaths` enforces the containment property itself so no future caller
- * can bypass either.
+ * `replSessionConfigPaths` enforces LEXICAL containment so no future caller can bypass
+ * it, and `unlinkSessionConfigs` checks the filesystem at the moment it deletes — which is
+ * the only place a symlinked directory is visible at all.
  */
 function isMinimalRecord(raw: unknown): boolean {
   if (raw === null || typeof raw !== 'object') return false

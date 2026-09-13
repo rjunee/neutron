@@ -291,6 +291,17 @@ one — a crash between the marker and the close leaves a row marked closing ove
 pane — so the narrowing is what shipped and this paragraph is here so nobody reads it as
 the stronger claim.
 
+**A persisted channel name is a path input, and containment is enforced in three places —
+none of which alone is enough.** The registry's parse boundary requires the generated shape
+(`neutron-` + 32 hex), so a row that could not have come from this system is dropped;
+`replSessionConfigPaths` enforces LEXICAL containment when it builds the paths, which
+answers "could this string ever name something outside the temp dir" and nothing more; and
+`unlinkSessionConfigs` resolves the directory on the FILESYSTEM before deleting, because a
+perfectly-shaped name can still be a symlink and only the destructive site can see that. A
+residual remains and is deliberate: a TOCTOU window between the resolve and the unlink that
+would need a handle-relative unlink to close, and a refused delete leaves a plaintext
+credential file in place rather than removing it — the safer direction, and not free.
+
 **A REPL that was mid-spawn when the shutdown landed is killed rather than kept (#674).**
 The shutdown's late-spawn path terminates a session whose spawn settled after the pending
 grace expired, without consulting the survival gate — so a herdr-hosted child whose row

@@ -18,10 +18,11 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { replSessionConfigPaths } from '../session-config-paths.ts'
+import { ReplSession, unlinkSessionConfigs } from '../repl-session.ts'
 import { loadRegistry } from '../repl-registry.ts'
 
 /** The form `spawn.ts` emits: `neutron-` + randomBytes(16).toString('hex'). */
@@ -132,5 +133,85 @@ describe('the registry drops a row whose channel name is not the generated form'
   it('cleanup: temp dirs', () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
     expect(dirs).toEqual([])
+  })
+})
+
+
+describe('cleanup checks the FILESYSTEM, because the lexical check cannot see a symlink', () => {
+  /**
+   * ARGUS r28. `replSessionConfigPaths` resolves textually and checks the prefix — a real
+   * question ("could this string ever name something outside the temp dir") and only that
+   * one. `/tmp/neutron-repl-<32hex>` passes every lexical test while BEING A SYMLINK to
+   * somewhere else, and `unlinkSessionConfigs` is the site that follows it.
+   *
+   * The check belongs at the destructive site, not in the builder: the builder runs at
+   * SPAWN time, before the directory exists, so a `realpath` there would throw on a
+   * legitimate first spawn. Here the directory exists and the question is answerable.
+   */
+  const dirs: string[] = []
+  /** Directories deliberately created OUTSIDE `tmpdir()`, removed by the cleanup case. */
+  const outsideDirs: string[] = []
+  /** A session carrying exactly the paths cleanup would unlink. */
+  const sessionWith = (paths: string[]): ReplSession => {
+    const s = new ReplSession('k', 'gen', 'aaaaaaaa-1111-2222-3333-444444444444', GENERATED, '/tmp')
+    s.configPaths = paths
+    return s
+  }
+
+  it('REFUSES to unlink through a symlinked directory, and the target survives', () => {
+    // The victim: a directory GENUINELY OUTSIDE the temp tree, holding a file with the
+    // name cleanup deletes. Built for real — a mocked fs would prove only that a mock was
+    // called.
+    //
+    // UNDER THE HOME DIRECTORY, NOT A SCRATCH DIR. The first version of this case put the
+    // victim in `mkdtempSync(join(tmpdir(), …))` and the case failed: on this box the
+    // worktree itself lives under `/tmp`, so a "scratch" directory is INSIDE `tmpdir()`
+    // and the containment check correctly allowed the delete. A fixture meant to be
+    // outside a boundary has to be outside it on the machine the test runs on.
+    const victimRoot = mkdtempSync(join(homedir(), '.neutron-539-victim-'))
+    outsideDirs.push(victimRoot)
+    const victim = join(victimRoot, 'victim')
+    mkdirSync(victim, { recursive: true })
+    const victimFile = join(victim, 'session-mcp.json')
+    writeFileSync(victimFile, '{"credential":"do not delete me"}')
+
+    // The attack: a session directory inside tmpdir() whose name is perfectly conforming
+    // and which IS a symlink to the victim.
+    const linkDir = join(tmpdir(), `neutron-repl-${GENERATED}-r28`)
+    rmSync(linkDir, { recursive: true, force: true })
+    symlinkSync(victim, linkDir)
+    dirs.push(linkDir)
+
+    // The lexical layer is satisfied — this is exactly the gap.
+    const linked = join(linkDir, 'session-mcp.json')
+    expect(resolve(linked).startsWith(resolve(tmpdir()) + sep)).toBe(true)
+
+    unlinkSessionConfigs(sessionWith([linked]))
+
+    // THE ASSERTION THAT CARRIES IT: the stranger's file is still there.
+    expect(existsSync(victimFile)).toBe(true)
+  })
+
+  it('THE POSITIVE CONTROL: an ordinary real directory under tmpdir IS cleaned up', () => {
+    // Second job: without this, a check that refused everything would satisfy the case
+    // above while leaving every real child's plaintext credential file on disk forever.
+    const real = join(tmpdir(), `neutron-repl-${GENERATED}-r28-real`)
+    rmSync(real, { recursive: true, force: true })
+    mkdirSync(real, { recursive: true })
+    dirs.push(real)
+    const f = join(real, 'session-mcp.json')
+    writeFileSync(f, '{}')
+    expect(existsSync(f)).toBe(true)
+
+    unlinkSessionConfigs(sessionWith([f]))
+
+    expect(existsSync(f)).toBe(false)
+  })
+
+  it('cleanup: scratch dirs', () => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+    for (const d of outsideDirs.splice(0)) rmSync(d, { recursive: true, force: true })
+    expect(dirs).toEqual([])
+    expect(outsideDirs).toEqual([])
   })
 })

@@ -40,11 +40,18 @@ export interface ReplSessionConfigPaths {
  * written by anything else running as this user — and `join` is happy to resolve
  * `x/../../../some/dir` right out of the temp directory.
  *
- * Checked HERE rather than only at the registry boundary because a containment property
- * enforced at the point of construction holds for every caller, including ones that do
- * not exist yet. The boundary check in `repl-registry.ts` makes a bad value visible early
- * and specifically; this is what makes the property TRUE. Neither is sufficient alone,
- * and the two answer different questions.
+ * THIS CHECK IS LEXICAL, AND CLAIMS ONLY THAT (Argus r28). It answers "could this STRING
+ * ever name something outside the temp dir" — a real question, worth answering at
+ * construction, and holding for every caller including ones that do not exist yet. It
+ * cannot answer the other one: `/tmp/neutron-repl-<32hex>` passes every lexical test while
+ * BEING A SYMLINK elsewhere, and no amount of string resolution sees that.
+ *
+ * The filesystem question is answered where it is answerable — `unlinkSessionConfigs`, the
+ * destructive site, where the directory exists. It cannot be answered here: this builder
+ * runs at SPAWN time, before the directory exists, so a `realpath` would throw on a
+ * legitimate first spawn. Three layers, three questions: the registry's shape check asks
+ * whether the row could have come from this system, this asks whether the string can
+ * escape, and cleanup asks where the directory really is.
  *
  * Throws rather than sanitising: a name that escapes is not a name with a typo, and
  * silently rewriting it would hand back paths the caller did not ask for and then delete

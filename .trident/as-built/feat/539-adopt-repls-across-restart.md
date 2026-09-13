@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M84 less M31, M38 and M80 = 81**.
+only dead row. The live count is therefore **M1–M86 less M31, M38 and M80 = 83**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1187,8 +1187,9 @@ hand-edited, or written by anything else running as this user. The threat model 
 write to the registry — and it converts "the registry is garbage" into "files outside the
 temp directory get deleted", which is a much worse failure than the one it starts from.
 
-**Two layers, because they answer different questions.** The containment check lives in
-`replSessionConfigPaths`, so the property holds for **every caller including ones that do
+**Two layers, because they answer different questions** — and round twenty-eight found a
+third question neither of them answers; see below. The LEXICAL containment check lives in
+`replSessionConfigPaths`, so that property holds for **every caller including ones that do
 not exist yet** and cannot be bypassed by a new one. The shape check lives at the registry
 boundary — `^neutron-[0-9a-f]{32}$`, checked against what `spawn.ts` actually emits
 (`randomBytes(16).toString('hex')`) rather than against a guess — so a bad value is visible
@@ -1222,6 +1223,62 @@ reader meets first. Corrected, with the reason, and grepped for siblings with a 
 control; the one other hit (`gateway-shutdown-survival.ts`, "once per registry loss") is
 about registry LOSS, not adoption scope, and is correct as written.
 
+### Round twenty-eight: the containment check was lexical and the filesystem is not
+
+`replSessionConfigPaths` resolves textually and checks the prefix. It never consults the
+filesystem, so `/tmp/neutron-repl-<32hex>` passes every lexical test **while being a
+symlink** to somewhere else — and child-exit cleanup then follows it through `unlinkSync`.
+The `..` cases covered `..` well and none of them could have seen this.
+
+**The fix is not `realpath` in the builder.** That function is a pure path builder called
+at SPAWN time, before the directory exists: a `realpath` there throws on a legitimate first
+spawn. So the lexical check stays where it is and **stops claiming more than lexical**, and
+the filesystem check goes to the destructive site where the directory exists and the
+question is answerable. Three layers, three questions — the registry's shape check asks
+whether the row could have come from this system at all, the builder asks whether the
+string can escape, cleanup asks **where the directory really is**.
+
+`realpathSync` on the DIRECTORY, then the same beneath-`tmpdir()` test: the same shape as
+`registry-lock.ts`'s `O_NOFOLLOW` + `fstat` — ask where the thing LANDED, not what the name
+pointed at when you looked.
+
+**The TOCTOU window is not closed, and the comment says so.** Between `realpathSync` and
+`unlinkSync` the directory could be swapped. Closing it needs an `openat`-style
+handle-relative unlink Node does not expose. What this removes is the durable case — a
+symlink already in place when cleanup runs — leaving the racing case, which needs an
+attacker timing a swap into microseconds in a directory they must already be able to write.
+
+**Refusing is not free and is logged as the leak it is.** A refused path is a credential
+file we meant to delete and did not, so the residual is a RETAINED plaintext credential
+file rather than a deleted stranger's file. The right direction, with a cost, said out loud
+rather than swallowed by the existing best-effort catch.
+
+**My first symlink fixture failed, and the reason is a trap worth recording.** I put the
+"outside" victim in `mkdtempSync(join(tmpdir(), …))` — and on this box the worktree itself
+lives under `/tmp`, so a "scratch" directory is INSIDE `tmpdir()` and the containment check
+correctly allowed the delete. **A fixture meant to be outside a boundary has to be outside
+it on the machine the test runs on**, which is not a property you can read off the code.
+The victim now lives under `homedir()`.
+
+### What a schema tightened at the parse boundary costs
+
+The shape check has now demonstrated its blast radius twice: 67 fixtures in round
+twenty-seven, and a 68th found by a CI shard rather than by me —
+`open/__tests__/open-wiring-substrates.test.ts` seeding `channelName: 'dead-channel'`, in a
+directory my `runtime/` + `gateway/` run never touched.
+
+**The lesson is about the sweep's scope, not the rewrite.** A schema tightened at the parse
+boundary invalidates every fixture that ever hand-wrote that field, **repo-wide, and the
+compiler cannot see any of them** — they are string literals in valid TypeScript. So the
+enumeration has to be a grep over the whole tree, not a walk of the directories under
+change. Re-run repo-wide with a positive control, there are five non-conforming literals
+left and **four of them are correct as they stand**: `trident/leak-fixer.test.ts`,
+`trident/conflict-resolver.test.ts` and `build-repl-argv.test.ts` pass `channelName` to
+`buildReplArgv`, which is a command-line builder and not a registry row, and
+`launcher-liveness-probe.test.ts` now builds a conforming name per row from its index. Each
+`trident/` hit is named and classified rather than the directory being skipped wholesale —
+the judgement is per file.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1232,7 +1289,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six and M82–M84 in round twenty-seven, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven and M85–M86 in round twenty-eight, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1347,6 +1404,8 @@ count from the rows below rather than trusting this sentence.
 | M82 | the containment check is removed from `replSessionConfigPaths` | `session-config-containment.test.ts` (4) |
 | M83 | the registry accepts any string as `channelName` again | `session-config-containment.test.ts` (8) |
 | M84 | the pattern rejects a legitimate generated name (**over-strict — stops cleaning up credential files**) | `session-config-containment.test.ts` (2) |
+| M85 | the filesystem check is removed from cleanup | `session-config-containment.test.ts` (1) |
+| M86 | cleanup refuses real directories too (**over-strict — retains every credential file**) | `session-config-containment.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

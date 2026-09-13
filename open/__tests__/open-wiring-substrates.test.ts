@@ -607,7 +607,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
           sessionKey,
           sessionId: 'dead-session',
           cwd: '/repo/dead',
-          channelName: 'dead-channel',
+          channelName: 'neutron-beabc0f368652fe7b271ab97cba47925',
           has_session: true,
           pid: 999_999,
           child_generation: generationKey,
