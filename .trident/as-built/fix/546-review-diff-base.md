@@ -232,6 +232,48 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-nine: stop moving arms — classify the KIND once
+
+Three consecutive findings on the wrapper's chain were **one defect**: an arm that probes a
+CONSTRUCTED ref name ran before the arm that would have recognised what the input already was.
+Round twenty-six moved one (a local-branch precondition rejecting the ordinary detached CI
+checkout); round twenty-eight moved the verbatim arm first (a pinned SHA rewritten to
+`refs/remotes/origin/<sha>`); and the generic remote arm still beat the `origin/*` arm — with
+`BASE_REF=origin/main` it probed `refs/remotes/origin/origin/main`, a legal ref name that can
+sit at a different commit. **Each fix moved one arm and exposed the one behind it, because the
+chain was ordered by the order the cases were DISCOVERED rather than by specificity.**
+
+So the arms stopped moving. The input's KIND is decided once and completely — already shaped
+(40-hex either case, or `refs/…`), `HEAD`-rooted, `origin/`-prefixed, a bare name — and each
+kind has exactly one rule. **A bare name is never probed as `origin/<x>` and an `origin/<x>` is
+never probed as a bare name, because the rules are unreachable from the wrong kind.**
+
+Two structural details the restructure had to keep:
+
+* **Refusals are RECORDED, not emitted in the classifier.** `BASE_REF_REFUSAL` is printed at
+  the point of use, because exiting from the classifier would preempt the documented graceful
+  exit 10/11 for "no codex configured" — round twenty-two's finding, which a naive restructure
+  would have undone.
+* **The shape assertion stays** at the point of use. It asserts the PROPERTY while the
+  classifier decides the KIND, so a classifier mistake still cannot reach git.
+
+**And the precedence is pinned as a TABLE.** One fixture holds every competing ref at a
+DIFFERENT commit — `refs/heads/main`, `refs/remotes/origin/main`,
+`refs/remotes/origin/origin/main`, `refs/tags/origin/main` — and asserts which COMMIT each input
+form resolves to. A test per collision only fails on the collision someone thought of; **the
+table fails on any future reordering.**
+
+**The table needed a second run to work.** Its first version carried `refs/tags/origin/main`,
+and mutation showed that tag MASKS the defect: the discovery-ordered chain's generic arm tests
+`! refs/tags/<x>`, which that tag makes false, so it skipped to the right arm by luck and the
+mutation passed. Run twice — tag present and absent — and the mutation reds. **A fixture that
+carries an extra ref can mask the very precedence it is testing.**
+
+No kind genuinely overlaps: the four patterns are mutually exclusive by construction (a `refs/`
+path is not 40-hex, `HEAD`-rooted is neither, `origin/`-prefixed is neither and is checked
+before the bare-name rules can see it). **There was no precedence to choose, only one to
+derive** — which is the difference between this and the three rounds before it.
+
 ### Round twenty-eight: both failure directions, in one round
 
 **Accepting too much — the promotion arms ran BEFORE the input was classified.** They are

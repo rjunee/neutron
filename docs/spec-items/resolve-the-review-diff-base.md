@@ -71,9 +71,16 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   legitimate is lost — measured on git 2.43, `git check-ref-format --branch ' main '` is fatal
   (128), and ` main ..HEAD` is a fatal operand that the wrappers' `2>/dev/null || true` turns into
   an empty diff;
-- `codex-review.sh`'s **standalone** promotion additionally requires `refs/tags/<x>` NOT to
-  resolve, so what it promotes is a remote-tracking ref **that is not shadowed by a tag of the
-  same name**. That clause is load-bearing and unchanged: it is why a tag `release` sitting
+- `codex-review.sh`'s **standalone** handling CLASSIFIES THE INPUT'S KIND ONCE — already
+  shaped (40-hex either case, or `refs/…`), `HEAD`-rooted, `origin/`-prefixed, or a bare name —
+  and then applies that kind's single rule. A bare name is never probed as `origin/<x>` and an
+  `origin/<x>` is never probed as a bare name, **because the rules are unreachable from the
+  wrong kind, not because the arms are in a lucky order**. (It was an `if/elif` chain ordered by
+  the order the cases were discovered, and three consecutive rounds found the same defect in it:
+  an arm probing a CONSTRUCTED ref name running before the arm that would have recognised what
+  the input already was. Each fix moved one arm and exposed the one behind it.) Within the
+  bare-name kind, promotion additionally requires `refs/tags/<x>` NOT to resolve, so what it
+  promotes is a remote-tracking ref **that is not shadowed by a tag of the same name**. That clause is load-bearing and unchanged: it is why a tag `release` sitting
   beside `origin/release` is not rewritten to the remote branch — a different commit, silently.
 
   > **It also required `refs/heads/<x>` to resolve, and this bullet said so — "a proven,
@@ -349,6 +356,12 @@ The resolution order is evidence-first, and is the same at every site:
       name, as "kept verbatim" until rounds twenty-two and twenty-three.) The block under test
       is extracted from the shipped script rather than retyped; mutating it back to the
       string-shaped form reddens two tests.
+      **The PRECEDENCE is pinned as a table, not as one test per collision.** One fixture holds
+      every competing ref at a DIFFERENT commit — `refs/heads/main`,
+      `refs/remotes/origin/main`, `refs/remotes/origin/origin/main`, `refs/tags/origin/main` —
+      and asserts which COMMIT each input form resolves to, run twice (tag present and absent,
+      because the tag masks the arm order that the nested ref exposes). A test per collision
+      only fails on the collision someone thought of; the table fails on any future reordering.
 - [ ] **The fallback is reached whenever the REF does not resolve — not only when the repository
       has no remote.** Two fixtures, because they are different states and an earlier draft of
       this criterion named only the first: "NO REMOTE: the fallback is refs/heads/<base>" removes

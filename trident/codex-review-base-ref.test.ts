@@ -56,11 +56,13 @@ function promotionBlock(): string {
   expect(start).toBeGreaterThan(-1)
   const chainEnd = src.indexOf(': "${CODEX_HOME:=}"', start)
   expect(chainEnd).toBeGreaterThan(start)
-  // FROM THE SHAPE ASSERTION, not from the resolvability guard that follows it: the shape
-  // `case` is what makes "every value reaching a rev-range is an object name or refs/…" true,
-  // and an extraction that began after it would assert over a slice missing the property it
-  // is named for — the same mistake as stopping at the first `fi`.
-  const guardStart = src.indexOf('case "$BASE_REF" in', chainEnd)
+  // FROM THE CLASSIFIER'S REFUSAL EMITTER, not from the shape `case` that follows it. The
+  // classifier RECORDS its refusals in `BASE_REF_REFUSAL` (emitting them up there would
+  // preempt the graceful exit 10/11), so a slice that began at the shape assertion would drop
+  // every refusal the classifier decided — which is what this extraction did for one run, and
+  // the tests said so immediately. **An extraction boundary is a claim about what is under
+  // test**, and it has to move whenever the code it names does.
+  const guardStart = src.indexOf("if [ -n \"${BASE_REF_REFUSAL:-}\" ]", chainEnd)
   expect(guardStart).toBeGreaterThan(chainEnd)
   const guardEnd = src.indexOf('\n  fi\n', src.indexOf('does not name a commit in this repository', guardStart))
   expect(guardEnd).toBeGreaterThan(guardStart)
@@ -259,6 +261,69 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     const got = await promote(w.repo, 'origin/main')
     expect(got).toBe('refs/remotes/origin/main')
     expect(await git(w.repo, 'rev-parse', got)).toBe(w.remote)
+  })
+
+  test('THE PRECEDENCE TABLE: every competing ref present, at DIFFERENT commits', async () => {
+    // THE THING THAT MAKES A FOURTH ROUND UNNECESSARY. Three consecutive findings on this
+    // chain were the same defect — an arm probing a CONSTRUCTED ref name ran before the arm
+    // that would have recognised what the input already was — and each fix moved one arm and
+    // exposed the one behind it. A test per collision only fails on the collision someone
+    // thought of; **this table fails on any future reordering.**
+    //
+    // Every competing ref exists here, at a DIFFERENT commit, so no row can pass by accident:
+    // the input form alone decides which commit the review would run against.
+    const w = await seedWorld()
+    const c = {
+      heads: w.local, // refs/heads/main
+      remote: w.remote, // refs/remotes/origin/main
+      // `commit-tree` needs an identity like any other commit; GIT_ID is what the rest of
+      // this fixture uses.
+      nested: await git(w.repo, ...GIT_ID, 'commit-tree', `${w.remote}^{tree}`, '-p', w.remote, '-m', 'nested'),
+      tag: await git(w.repo, ...GIT_ID, 'commit-tree', `${w.local}^{tree}`, '-p', w.local, '-m', 'tagged'),
+    }
+    await git(w.repo, 'update-ref', 'refs/heads/main', c.heads)
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/main', c.remote)
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/origin/main', c.nested)
+    await git(w.repo, 'update-ref', 'refs/tags/origin/main', c.tag)
+    // The four are distinct, or a row could pass while naming the wrong ref.
+    expect(new Set(Object.values(c)).size).toBe(4)
+
+    // input form → the COMMIT the wrapper's answer resolves to, and WHY that kind wins.
+    const table: Array<{ input: string; ref: string; commit: string }> = [
+      // A BARE name is never probed as `origin/<x>`: it takes the remote-tracking ref for
+      // ITS OWN name, not one nested under it.
+      { input: 'main', ref: 'refs/remotes/origin/main', commit: c.remote },
+      // An `origin/`-prefixed name is never probed as a bare name: exactly one promotion,
+      // `refs/remotes/<it>`. The generic arm used to win here and select the NESTED ref.
+      { input: 'origin/main', ref: 'refs/remotes/origin/main', commit: c.remote },
+      // …and the nested ref is reachable only by asking for it.
+      { input: 'origin/origin/main', ref: 'refs/remotes/origin/origin/main', commit: c.nested },
+      // ALREADY SHAPED — kept verbatim, whatever else could have been constructed from it.
+      { input: 'refs/heads/main', ref: 'refs/heads/main', commit: c.heads },
+      { input: 'refs/tags/origin/main', ref: 'refs/tags/origin/main', commit: c.tag },
+      { input: 'refs/remotes/origin/origin/main', ref: 'refs/remotes/origin/origin/main', commit: c.nested },
+      { input: c.remote, ref: c.remote, commit: c.remote },
+    ]
+    // RUN TWICE — with the `refs/tags/origin/main` collision present and ABSENT. Found by
+    // mutation: reinstating the discovery-ordered chain (the generic remote arm ahead of the
+    // `origin/` kind) passed the first run, because that tag makes the generic arm's
+    // `! refs/tags/<x>` condition false and it skips to the right arm by luck. **A fixture
+    // that carries an extra ref can mask the very precedence it is testing**; without the tag,
+    // the generic arm probes `refs/remotes/origin/origin/main` and wins.
+    for (const withTag of [true, false]) {
+      if (!withTag) await git(w.repo, 'update-ref', '-d', 'refs/tags/origin/main')
+      for (const row of table) {
+        if (!withTag && row.input === 'refs/tags/origin/main') continue
+        const got = await promote(w.repo, row.input)
+        const resolved = await git(w.repo, 'rev-parse', got)
+        expect({ withTag, input: row.input, got, resolved }).toEqual({
+          withTag,
+          input: row.input,
+          got: row.ref,
+          resolved: row.commit,
+        })
+      }
+    }
   })
 
   test('A VALUE THAT IS ALREADY THE RIGHT SHAPE IS KEPT — even when a promotable ref shadows it', async () => {
