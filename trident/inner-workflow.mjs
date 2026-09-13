@@ -3493,10 +3493,33 @@ function progressVerdict(counts) {
  * model-supplied string, and a refusal is exactly the path where nobody is looking
  * closely; it says WHICH RULE failed, which is all a reader needs.
  */
-function validateEscalationClaim(raw) {
+function validateEscalationClaim(raw, claimVerdict) {
   const refuse = (why) => ({ ok: false, kind: '', whatIsMissing: '', refusedBecause: why })
   if (raw === null || raw === undefined) return refuse('')
   if (typeof raw !== 'object' || Array.isArray(raw)) return refuse('the declared escalation was not an object')
+  // AN APPROVAL THAT ALSO ESCALATES IS AN INCONSISTENT ANSWER, AND THAT IS A THIRD THING.
+  // `VERDICT_SCHEMA` permits `escalate` independently of `verdict`, so a seat can return
+  // `{verdict:'APPROVE', escalate:{kind:'missing-dependency', …}}`. Honouring the claim
+  // stopped a build a reviewer had APPROVED — the self-declared escape hatch overriding an
+  // affirmative verdict, and in the OVER-FIRING direction this file's own asymmetry
+  // argument calls the costly one.
+  //
+  // IT IS REFUSED RATHER THAN RESOLVED, deliberately. Taking the verdict and ignoring the
+  // claim would pick a winner between two halves of one response when nothing here can
+  // know which half the model meant: an approval carrying a design-gap declaration is not
+  // an approval with noise attached, and it is not a rejection. Refusing it keeps FALSE
+  // and UNKNOWN apart — the run proceeds on the verdict alone, and the contradiction is
+  // RECORDED through the same `refusedBecause` channel a bare complaint uses, so a
+  // reviewer that does this is visible instead of quietly half-honoured.
+  //
+  // JUDGED ON THE SEAT'S OWN VERDICT, not the gated one. `enforceSeverityGate` can turn a
+  // REQUEST_CHANGES into an APPROVE over all-non-blocking findings, and a seat that said
+  // REQUEST_CHANGES + escalate was CONSISTENT — the gate downgraded it afterwards. Reading
+  // the gated verdict here would refuse that seat's honest declaration, which is the very
+  // case the previous rounds fixed.
+  if (claimVerdict === 'APPROVE') {
+    return refuse('the reviewer returned APPROVE and an escalation in the same answer, which cannot both be true — the verdict is taken and the declaration is refused')
+  }
   const kind = typeof raw.kind === 'string' ? raw.kind.trim() : ''
   if (!SELF_DECLARED_ESCALATION_KINDS.includes(kind)) {
     return refuse(`the declared escalation kind is not one of ${SELF_DECLARED_ESCALATION_KINDS.join(', ')}`)
@@ -3536,7 +3559,7 @@ function validateEscalationClaim(raw) {
  */
 function decideEscalation(state) {
   const round = Number.isFinite(state && state.round) ? state.round : 0
-  const claim = validateEscalationClaim(state ? state.claim : null)
+  const claim = validateEscalationClaim(state ? state.claim : null, state ? state.claimVerdict : null)
   const repeat = repeatVerdict(
     state ? state.previousFindings : null,
     state ? state.currentFindings : null,
@@ -7116,11 +7139,21 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
     synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
       ? (synthesisRaw.escalate ?? null)
       : null
+  // THE SEAT'S OWN VERDICT, carried beside its own claim and for the same reason the claim
+  // is read off `synthesisRaw`: both halves of the contradiction have to come from the
+  // REVIEWER's answer. The gated verdict is this file's arithmetic about that answer, and
+  // comparing a reviewer's declaration against it would refuse consistent seats whose
+  // REQUEST_CHANGES the severity gate happened to downgrade.
+  const escalationClaimVerdict =
+    synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
+      ? normalizeVerdict(synthesisRaw.verdict)
+      : null
   return {
     ...gated,
     blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason),
     reviewRecord,
     escalationClaim,
+    escalationClaimVerdict,
   }
 }
 
@@ -8162,6 +8195,7 @@ ${task}${reflectionGuidance}`,
       currentFindings: judgedCode ? eligibleHistory[eligibleHistory.length - 1] : null,
       blockingCounts: judgedCode ? blockingCounts : [],
       claim,
+      claimVerdict: s.escalationClaimVerdict ?? null,
       replansUsed,
     })
     // A REFUSED DECLARATION IS REPORTED, NOT SWALLOWED. It is the one outcome an

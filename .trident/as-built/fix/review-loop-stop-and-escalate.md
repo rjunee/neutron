@@ -576,6 +576,62 @@ block-kind list was the visible edit; the conjunction it sits in was the one tha
 re-reading. Adding a value to a disjunction silently re-uses every other clause as a claim
 about the new value too.
 
+### AN APPROVAL THAT ALSO ESCALATES IS A THIRD THING, AND IS REFUSED
+
+`VERDICT_SCHEMA` permits `escalate` independently of `verdict`, so a seat can answer
+`{verdict:'APPROVE', escalate:{kind:'missing-dependency', …}}`. The claim was lifted with no
+reference to the verdict and pushed as a trigger unconditionally, so that answer STOPPED a
+build the reviewer had approved — the self-declared escape hatch overriding an affirmative
+verdict, in the OVER-FIRING direction this file's own asymmetry argument calls the costly
+one.
+
+IT IS REFUSED, NOT RESOLVED. Taking the verdict and dropping the claim would pick a winner
+between two halves of one response when nothing here can know which half the model meant: an
+approval carrying a design-gap declaration is not an approval with noise attached, and it is
+not a rejection. It goes through the same `refusedBecause` channel a bare complaint uses —
+the run proceeds on the verdict alone and the contradiction is RECORDED, so a reviewer that
+does this is visible rather than quietly half-honoured. That is the same false-vs-unknown
+separation the rest of this gate is built on.
+
+JUDGED ON THE SEAT'S OWN VERDICT, not the gated one, and the distinction is load-bearing:
+`enforceSeverityGate` turns a REQUEST_CHANGES into an APPROVE over all-non-blocking
+findings, and a seat that said REQUEST_CHANGES + escalate was CONSISTENT — the gate
+downgraded it afterwards. Reading the gated verdict would refuse that seat's honest
+declaration, which is precisely the case an earlier round fixed. Mutation-checked in that
+exact wrong direction, and in the direction that treats an ABSENT verdict as an approval
+(unknown must not collapse into false).
+
+### THE FIXTURE REMOVED THE FIELD UNDER TEST — FOR THE FOURTH TIME
+
+The e2e harness dropped `escalate` on two of its three reply branches, including the
+approval path. So no case written against it could produce the contradictory answer above:
+the fixture removed the exact field the suite existed to exercise. Same shape as the stub
+that answered both history calls from canned output, the archived fixture that was always
+empty, and the conformance suite that always wired `beginOutput()` first.
+
+A fixture that cannot express an input cannot fail on it, and every assertion written
+against it is silently scoped to the shapes the fixture happens to allow. The reply is now
+built ONCE with `escalate` riding every branch, and the check that matters was asked
+explicitly: with the harness made faithful, all 21 pre-existing assertions still pass, so
+none of them had been passing only because the field was being dropped.
+
+AND THE SAME BLINDNESS RECURRED ONE LEVEL UP, in the test written to catch it.
+"approved, not stopped" is ALSO what happens when the claim never reaches the gate — so the
+new test passed whether the contradiction was refused or simply never delivered, and the
+mutation that re-drops the field stayed GREEN against it. It now asserts the REFUSAL was
+recorded, which only happens if the claim arrived. Asserting an outcome that the broken
+fixture also produces is how a test about a fixture defect inherits the fixture defect.
+
+### A SEAM THAT FAILS LOUDLY WHEN EXTENDED
+
+`trident/testing/load-escalation-gate.ts` assembles the gate under test from NAMED pieces
+(`grabConst`/`grabFunction`) rather than importing the module, because the workflow body is
+not importable. That means a new helper must be registered there or the assembled gate
+throws `ReferenceError` — which is exactly what happened when `redactedRepeatedKeys` was
+added. Worth recording as a property rather than a chore: a seam that fails loudly when
+extended beats one that silently tests a stale assembly, which is the same preference as
+executing the workflow instead of grepping its source.
+
 ### MAKING A VALUE MORE TRUTHFUL MOVED IT INTO A CATEGORY IT WAS NOT IN
 
 The four identity fixes above all made finding keys more FAITHFUL — case preserved, numbers

@@ -146,13 +146,23 @@ async function runWorkflow(
     if (label === 'argus:synthesis') {
       synthCount += 1
       const r = roundFor(synthCount)
-      // An EXPLICIT approval. Without it the only way to reach APPROVE in this harness is
-      // the severity gate downgrading an all-non-blocking rejection, which cannot produce
-      // a round that REJECTED first and then approved — the shape the ledger got wrong.
-      if (r.verdict === 'APPROVE') return { verdict: 'APPROVE', findings: r.findings }
-      if (r.findings.length === 0) return { verdict: 'REQUEST_CHANGES', findings: [] }
+      // THE SEAT'S REPLY IS BUILT ONCE, AND `escalate` RIDES EVERY BRANCH. Two of the
+      // three branches used to drop it — the explicit-APPROVE path and the
+      // no-findings path — so the fixture removed the exact field under test and NO case
+      // written against this harness could produce a contradictory
+      // `{verdict:'APPROVE', escalate:{…}}` answer. `VERDICT_SCHEMA` permits it, a real
+      // seat can return it, and it stopped a build a reviewer had approved.
+      //
+      // The lesson is the harness's, not the test's: a fixture that cannot express the
+      // input cannot fail on it, and every assertion written against it is silently
+      // scoped to the shapes the fixture happens to allow.
+      //
+      // An EXPLICIT approval is still available (`verdict: 'APPROVE'`). Without it the
+      // only way to reach APPROVE here is the severity gate downgrading an
+      // all-non-blocking rejection, which cannot produce a round that REJECTED first and
+      // then approved — the shape the ledger got wrong.
       return {
-        verdict: 'REQUEST_CHANGES',
+        verdict: r.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES',
         findings: r.findings,
         ...(r.escalate === undefined ? {} : { escalate: r.escalate }),
       }
@@ -498,6 +508,63 @@ describe('the routing the re-plan performs, executed rather than grepped', () =>
   // behaviour the tag can change is the `mechanical` downgrade, and that is exactly what
   // the test above asserts. (Mutation-checked: a production change that never adopts the
   // tag leaves every assertion here green, because there is nothing to see.)
+})
+
+describe('an APPROVE that also escalates is an INCONSISTENT answer, not a stop', () => {
+  test('HEADLINE: the build is NOT stopped, and the contradiction is recorded', async () => {
+    // `VERDICT_SCHEMA` permits `escalate` independently of `verdict`, so a seat can
+    // return an approval and a declaration in one answer. Honouring the claim stopped a
+    // build the reviewer had APPROVED — the self-declared escape hatch overriding an
+    // affirmative verdict, and in the OVER-FIRING direction, which is the costly one.
+    //
+    // THE HARNESS COULD NOT EXPRESS THIS UNTIL NOW: two of its three reply branches
+    // dropped `escalate`, including the approval path, so the fixture removed the exact
+    // field under test. Fourth time on this branch that a fixture could not produce the
+    // input its suite claimed to cover.
+    const { captured, logs, result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        {
+          findings: [],
+          verdict: 'APPROVE',
+          escalate: { kind: 'missing-dependency', whatIsMissing: 'card X must land first' },
+        },
+      ],
+    })
+
+    // THE REFUSAL IS ASSERTED FIRST, and it is what makes the rest of this test mean
+    // anything. "Approved, not stopped" is ALSO what happens when the claim never reaches
+    // the gate at all — which is exactly what the old harness did — so without this the
+    // test passes whether the contradiction was REFUSED or simply never delivered.
+    // Mutation-checked: re-dropping `escalate` on the approval path reds this line and
+    // nothing else.
+    expect(logs.some((l) => l.includes('declaration REFUSED') && l.includes('cannot both be true'))).toBe(true)
+
+    // THE VERDICT IS TAKEN. The run approves and merges as the reviewer said.
+    expect(result.verdict).toBe('APPROVE')
+    expect(result.blockKind).toBe('none')
+    expect(result.escalation).toBeUndefined()
+    // …and no fix round or planner was bought off a refused claim.
+    expect(labels(captured, 'forge:fix-round-')).toEqual([])
+    expect(labels(captured, 'plan:fable')).toEqual([])
+  })
+
+  test('CONTROL: the SAME declaration on a REQUEST_CHANGES answer still stops the run', async () => {
+    // Without this, "an approval is not overridden" is satisfied by an implementation
+    // that stopped honouring declarations altogether — which is the trigger three rounds
+    // of this card exist to make work.
+    const { result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        {
+          findings: [finding('a:b:c', 'minor')],
+          escalate: { kind: 'missing-dependency', whatIsMissing: 'card X must land first' },
+        },
+      ],
+    })
+    expect(result.blockKind).toBe('missing-dependency')
+    expect((result.escalation as Record<string, unknown>).triggers).toContain('missing-dependency')
+  })
 })
 
 describe('a DECLARATION is heard even when the code is fine — the fast trigger', () => {

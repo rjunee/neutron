@@ -101,7 +101,11 @@ export interface EscalationGate {
   ) => { outcome: 'repeat' | 'none' | 'undecidable'; repeated: string[]; reason: string }
   blockingFindingCount: (findings: unknown) => number | null
   progressVerdict: (counts: unknown) => 'progress' | 'no-progress' | 'undecidable'
-  validateEscalationClaim: (raw: unknown) => {
+  /** `claimVerdict` is the SEAT'S OWN verdict, so the validator can refuse an answer that
+   *  approves and escalates at once. Optional here because most callers are testing the
+   *  claim's own shape, where the seat said nothing about a verdict — and UNKNOWN must not
+   *  read as APPROVE. */
+  validateEscalationClaim: (raw: unknown, claimVerdict?: string | null) => {
     ok: boolean
     kind: string
     whatIsMissing: string

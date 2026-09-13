@@ -112,6 +112,49 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(findingIdentity(f(':./a/b.ts:sym:rule'))).toBe('')
   })
 
+  test('HEADLINE: APPROVE + escalate is REFUSED with the contradiction named', () => {
+    const { validateEscalationClaim, decideEscalation } = loadEscalationGate()
+    const claim = { kind: 'missing-dependency', whatIsMissing: 'card X must land first' }
+
+    // Refused the way a bare complaint is refused — invalid claim, reason recorded — and
+    // NOT by taking the verdict and silently dropping the declaration. Picking a winner
+    // between two halves of one answer would assert which half the model meant, and
+    // nothing here can know that: an approval carrying a design-gap declaration is not an
+    // approval with noise attached, and it is not a rejection. It is a third thing.
+    const refused = validateEscalationClaim(claim, 'APPROVE')
+    expect(refused.ok).toBe(false)
+    expect(refused.refusedBecause).toContain('APPROVE')
+    expect(refused.refusedBecause).toContain('cannot both be true')
+
+    // At the gate: no trigger, so nothing stops — and the refusal is REPORTED, which is
+    // what makes a reviewer that does this visible rather than quietly half-honoured.
+    const d = decideEscalation({
+      round: 1,
+      previousFindings: null,
+      currentFindings: null,
+      blockingCounts: [],
+      claim,
+      claimVerdict: 'APPROVE',
+      replansUsed: 0,
+    })
+    expect(d.action).toBe('continue')
+    expect(d.triggers).not.toContain('missing-dependency')
+    expect(d.refusedClaim).toContain('cannot both be true')
+  })
+
+  test('CONTROL: the SAME claim on a REQUEST_CHANGES answer is accepted', () => {
+    const { validateEscalationClaim } = loadEscalationGate()
+    const claim = { kind: 'missing-dependency', whatIsMissing: 'card X must land first' }
+    // Without this, "a contradictory claim is refused" is satisfied by refusing every
+    // claim — which would switch off the one trigger that can fire at round 1.
+    const ok = validateEscalationClaim(claim, 'REQUEST_CHANGES')
+    expect(ok.ok).toBe(true)
+    expect(ok.kind).toBe('missing-dependency')
+    // …and an absent verdict is not a contradiction either: the seat said nothing about
+    // it, which is UNKNOWN, and unknown must not read as APPROVE.
+    expect(validateEscalationClaim(claim, null).ok).toBe(true)
+  })
+
   test('HEADLINE: a SECRET-SHAPED KEY is redacted before it reaches the owner', () => {
     const { decideEscalation } = loadEscalationGate()
     // THE DIRECT CONSEQUENCE OF MAKING KEYS FAITHFUL. Widening `findingIdentity` to
