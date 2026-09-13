@@ -137,8 +137,9 @@ and reverted mechanically, with the tree verified clean afterwards.
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number
 written once and then never re-derived, in the one section whose whole purpose is
-auditability. The last full harness run covered **every row in one pass against this head: 31/31
-reddened their target**, with the worktree verified clean afterwards. Re-derive the
+auditability. The last full harness run covered **M1–M31 in one pass against this head: 31/31
+reddened their target**, with the worktree verified clean afterwards; M32–M33 were
+verified individually as they were added. Re-derive the
 count from the rows below rather than trusting this sentence.
 
 | # | Mutation | Reddens |
@@ -174,6 +175,8 @@ count from the rows below rather than trusting this sentence.
 | M29 | no identity re-check immediately before the close | `boot-adoption.test.ts` (2) |
 | M30 | the handle clear does not compare the row it decided about | `boot-adoption.test.ts` (1) |
 | M31 | the adopted-pid write does not compare it either | `boot-adoption.test.ts` (1) |
+| M32 | the `row-moved` verdict is computed and discarded | `adoption-refuses…` (1) |
+| M33 | the close path ignores a moved row | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -317,6 +320,31 @@ is held open, the row is replaced inside that window, and the assertion is that 
 newer row is intact — handle, generation and pid. Without the hold there is no window
 and the case proves nothing, which is the third time on this branch that a fixture
 unable to produce the input under test would have made a guard look tested.
+
+### The habit this branch has, named because it happened twice
+
+**A classifier's answer computed and then ignored — and both times the ignored value
+was the one added LAST, after the call sites had already been written to call a `void`
+function.**
+
+1. `beginBootAdoption`'s outcome. The pass distinguished "the other owner is gone" from
+   "I could not establish that", and `getOrSpawnSession` awaited it for its ORDERING and
+   dropped the verdict — so `undecided` was followed by a cold `--resume`.
+2. The compare-and-clear's `row-moved`. It correctly refused to strip a row another
+   incarnation had replaced, and every call site then returned `handle-cleared` /
+   `closed-by-pid` regardless — verdicts that LICENSE A SPAWN on a transcript whose live
+   owner had just been written into that row. **The data corruption was fixed and the
+   two-owner outcome it existed to prevent was not**, which is the more expensive half
+   to lose because the fix looks like it worked.
+
+The second one also had a test that asserted the row was preserved and *expected* the
+unsafe verdict — so the case pinned the half that already worked.
+
+What changed is the shape, not the vigilance: `clearHandleThenVerdict` returns the
+CALLER'S VERDICT rather than a status, so a caller that fails to use it fails to return
+anything and the typecheck refuses it. Where a status is genuinely needed (`CloseOutcome`)
+it grew a `row-moved` member that the one mapping function must handle. A `void`
+function with an interesting return value is an invitation, and this module had two.
 
 ### The protocol gate covers the adoption surface, not just the spawn
 

@@ -563,7 +563,13 @@ describe('a clear only ever touches the row it decided about', () => {
     release()
 
     const outcome = await pass
-    expect(outcome.kind).toBe('handle-cleared')
+    // UNDECIDED, NOT `handle-cleared`. An earlier revision asserted the latter — and
+    // pinned the unsafe half: `handle-cleared` is a positive verdict that LICENSES A
+    // COLD SPAWN, so the row was preserved and a second owner was started on the
+    // transcript anyway. Nothing this pass established describes the row as it now
+    // stands, so it establishes nothing at all.
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/replaced by another incarnation/i)
     // THE NEWER ROW IS INTACT — handle and generation both.
     const row = readRow(f.registryPath)
     expect(row?.pane_handle).toBe('w9:p-NEWER')

@@ -127,9 +127,14 @@ it must not swallow.
       the pass inspected. A row another incarnation replaced mid-pass is left exactly as
       it is — stripping ITS handle would leave a live child unfindable, so the next boot
       could not adopt it and the shutdown gate would kill it.
-      *Verified by* `__tests__/boot-adoption.test.ts` ("does NOT strip the handle when
-      the row moved under it", its pid sibling, and the positive control), with the
-      inspection held open so the race is actually constructed.
+      A row that moved also makes the pass's verdict `undecided`, so the REFUSAL follows
+      the preservation: leaving the newer row intact and then reporting a verdict that
+      licenses a resume would start the second owner anyway.
+      *Verified by* `__tests__/adoption-refuses-a-second-owner.test.ts` ("starts NO
+      second process on a transcript another incarnation just claimed" — asserting zero
+      spawns end-to-end, with its positive control), and at the unit level by
+      `__tests__/boot-adoption.test.ts`, both with the inspection held open so the race
+      is actually constructed.
 - [ ] **AN UNVERIFIED PANE IS NEVER CLOSED.** A pane running something else, or one the
       host could not speak for and whose pid the process table does not confirm, is left
       alone and reported undecided — the recycled-identifier rule, applied to a pane id.

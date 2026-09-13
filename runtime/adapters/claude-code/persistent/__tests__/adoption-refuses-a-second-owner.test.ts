@@ -32,7 +32,7 @@
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -81,7 +81,24 @@ class CountingHost implements AdoptableHost {
     throw new Error('CountingHost: a spawn was attempted')
   }
 
+  /** Held until released, so a case can replace the registry row INSIDE the window
+   *  the pass decides in. Without it the race cannot be constructed and a test of it
+   *  proves nothing. */
+  private inspectHold: Promise<void> | undefined
+  private releaseInspect: (() => void) | undefined
+
+  holdInspect(): () => void {
+    this.inspectHold = new Promise<void>((res) => {
+      this.releaseInspect = res
+    })
+    return () => {
+      this.inspectHold = undefined
+      this.releaseInspect?.()
+    }
+  }
+
   async inspectHandle(): Promise<HandleInspection> {
+    if (this.inspectHold !== undefined) await this.inspectHold
     return this.inspection
   }
 
@@ -261,6 +278,51 @@ describe('a conclusive reconciliation lets the spawn through', () => {
     const result = await attemptSpawn(optionsFor(host, registryPath))
     expect(host.spawns).toBe(1)
     expect(result.message).not.toMatch(/refusing to resume/i)
+  })
+})
+
+describe('a row replaced mid-pass refuses the spawn', () => {
+  it('starts NO second process on a transcript another incarnation just claimed', async () => {
+    // END-TO-END, because row preservation alone was the half that already worked: an
+    // earlier revision correctly declined to strip the newer row and then reported a
+    // verdict that permits a cold spawn anyway, so the data was intact and the
+    // two-owner outcome it was protecting against happened regardless.
+    //
+    // A inspects (H1, G1); B finishes a spawn and writes (H2, G2) while that inspection
+    // is held; A's inspection answers `gone`, which is true of H1 and says nothing
+    // about B's live child.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    writeRow(registryPath)
+    const host = new CountingHost()
+    host.inspection = { kind: 'gone' }
+    const release = host.holdInspect()
+    const options = optionsFor(host, registryPath)
+    const attempt = attemptSpawn(options)
+
+    await Bun.sleep(20)
+    writeRow(registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 5150 })
+    release()
+
+    const result = await attempt
+    expect(result.threw).toBe(true)
+    expect(result.message).toMatch(/refusing to resume/i)
+    // THE ASSERTION THAT CARRIES IT.
+    expect(host.spawns).toBe(0)
+    // And B's row is untouched — both halves, in one case.
+    const row = JSON.parse(readFileSync(registryPath, 'utf8'))[KEY] as ReplRegistryRecord
+    expect(row.pane_handle).toBe('w9:p-NEWER')
+    expect(row.child_generation).toBe('gen-newer')
+  })
+
+  it('spawns when the row is still the one the pass decided about', async () => {
+    // The positive control: without it, refusing every gone-pane would pass the case
+    // above and stop the product recovering from a REPL that simply died.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    writeRow(registryPath)
+    const host = new CountingHost()
+    host.inspection = { kind: 'gone' }
+    await attemptSpawn(optionsFor(host, registryPath))
+    expect(host.spawns).toBe(1)
   })
 })
 

@@ -435,15 +435,13 @@ async function reconcileRow(
         // nothing later mistakes it for evidence that a pane exists. COMPARED, not
         // assumed: this decision came from a snapshot taken before the inspection, and
         // another incarnation can have written a new pane into this row since.
-        if (registryPath !== undefined) {
-          clearPaneHandleIfUnchanged(
-            registryPath,
-            sessionKey,
-            { handle, generation: record.child_generation },
-            deps,
-          )
-        }
-        return { kind: 'handle-cleared', sessionKey }
+        return clearHandleThenVerdict(
+          registryPath,
+          sessionKey,
+          { handle, generation: record.child_generation },
+          deps,
+          { kind: 'handle-cleared', sessionKey },
+        )
       }
       case 'leave-not-ours':
         return { kind: 'undecided', sessionKey, reason: verdict.reason }
@@ -568,15 +566,13 @@ async function pidFallback(
   switch (verdict) {
     case 'killed':
       // We ended it. Nothing of ours runs under that handle now.
-      if (registryPath !== undefined) {
-        clearPaneHandleIfUnchanged(
-          registryPath,
-          sessionKey,
-          { handle: decidedHandle, generation: record.child_generation },
-          deps,
-        )
-      }
-      return { kind: 'closed-by-pid', sessionKey }
+      return clearHandleThenVerdict(
+        registryPath,
+        sessionKey,
+        { handle: decidedHandle, generation: record.child_generation },
+        deps,
+        { kind: 'closed-by-pid', sessionKey },
+      )
     case 'dead':
     case 'not-ours': {
       // THE RECORDED CHILD IS GONE — AND THAT IS NOT THE QUESTION.
@@ -602,15 +598,13 @@ async function pidFallback(
           `key=${sessionKey.slice(0, 32)}: ${why}; the recorded pid is '${verdict}' AND no live process is a ` +
             `claude on session ${record.sessionId.slice(0, 8)}, so the transcript has no owner and the handle is stale`,
         )
-        if (registryPath !== undefined) {
-          clearPaneHandleIfUnchanged(
-            registryPath,
-            sessionKey,
-            { handle: decidedHandle, generation: record.child_generation },
-            deps,
-          )
-        }
-        return { kind: 'handle-cleared', sessionKey }
+        return clearHandleThenVerdict(
+          registryPath,
+          sessionKey,
+          { handle: decidedHandle, generation: record.child_generation },
+          deps,
+          { kind: 'handle-cleared', sessionKey },
+        )
       }
       if (scan.kind === 'owners') {
         return {
@@ -684,9 +678,17 @@ async function closeAndClear(
   }
   if (recheck.kind === 'gone') {
     // It closed itself between the two looks. The post-condition the caller wanted
-    // already holds, and the handle is stale.
-    if (registryPath !== undefined) clearPaneHandleIfUnchanged(registryPath, sessionKey, { handle, generation: record.child_generation }, deps)
-    return { kind: 'closed' }
+    // already holds, and the handle is stale — unless the ROW has moved, in which case
+    // the handle on disk is somebody else's and this pass has nothing to say.
+    if (registryPath === undefined) return { kind: 'closed' }
+    return clearPaneHandleIfUnchanged(
+      registryPath,
+      sessionKey,
+      { handle, generation: record.child_generation },
+      deps,
+    ) === 'row-moved'
+      ? { kind: 'row-moved' }
+      : { kind: 'closed' }
   }
   if (recheck.kind === 'unavailable') {
     log(`pane ${handle}: the pre-close re-check could not be made (${recheck.reason}) — not closing`)
@@ -716,8 +718,15 @@ async function closeAndClear(
     log(`pane ${handle} could NOT be closed (${errorText(e)}) — it is still running`)
     return { kind: 'failed', reason: 'the close FAILED' }
   }
-  if (registryPath !== undefined) clearPaneHandleIfUnchanged(registryPath, sessionKey, { handle, generation: record.child_generation }, deps)
-  return { kind: 'closed' }
+  if (registryPath === undefined) return { kind: 'closed' }
+  return clearPaneHandleIfUnchanged(
+    registryPath,
+    sessionKey,
+    { handle, generation: record.child_generation },
+    deps,
+  ) === 'row-moved'
+    ? { kind: 'row-moved' }
+    : { kind: 'closed' }
 }
 
 /**
@@ -734,6 +743,7 @@ function outcomeOfClose(
   reason: string,
 ): RowAdoptionOutcome {
   if (close.kind === 'closed') return { kind: closedKind, sessionKey, reason }
+  if (close.kind === 'row-moved') return { kind: 'undecided', sessionKey, reason: ROW_MOVED_REASON }
   return { kind: 'undecided', sessionKey, reason: `${reason}; and ${close.reason}` }
 }
 
@@ -744,6 +754,10 @@ type CloseOutcome =
   | { readonly kind: 'closed' }
   | { readonly kind: 'failed'; readonly reason: string }
   | { readonly kind: 'unverified'; readonly reason: string }
+  /** The pane was dealt with, but the ROW is no longer the one this pass decided about
+   *  — so the close licenses nothing: the key now describes another incarnation's
+   *  child, and a resume on the strength of our finding would make a second owner. */
+  | { readonly kind: 'row-moved' }
 
 /** One-line error text. */
 function errorText(e: unknown): string {
@@ -759,6 +773,59 @@ function errorText(e: unknown): string {
  * not go on believing it cleared something: a stale handle left on disk sends the NEXT
  * boot to a pane id that may by then name someone else's pane.
  */
+/**
+ * THE VERDICT WHEN THE ROW MOVED UNDER THIS PASS — and it is the same one everywhere,
+ * because nothing this pass established is about the row as it now stands.
+ *
+ * It exists because the compare-and-clear's own return value was, for one revision,
+ * computed and then discarded: the write correctly refused to touch a row it had not
+ * decided about, and the caller went on to report `handle-cleared` (or `closed-by-pid`)
+ * anyway — a positive statement that LICENSES A SPAWN, about a key another incarnation
+ * had just written a live child into. That is the same "compute the answer and ignore
+ * it" shape this module was already caught on once, arriving through the fix for it.
+ */
+/**
+ * Clear the handle and PRODUCE THE CALLER'S VERDICT — the shape that makes the result
+ * impossible to drop.
+ *
+ * TWICE ON THIS BRANCH A CLASSIFIER'S ANSWER WAS COMPUTED AND IGNORED, and both times
+ * the ignored value was the one added last, after the call sites had already been
+ * written to call a `void` function. First `beginBootAdoption`'s outcome, awaited by
+ * `getOrSpawnSession` for its ordering and discarded; then this clear's `row-moved`,
+ * which correctly refused to touch a row another incarnation had replaced — and was
+ * followed by `handle-cleared` / `closed-by-pid` anyway, verdicts that LICENSE A COLD
+ * SPAWN on a transcript whose live owner had just been written into that row. The data
+ * corruption was fixed and the two-owner outcome it existed to prevent was not.
+ *
+ * A `void` function with an interesting return value is an invitation to that mistake.
+ * This one returns the caller's own verdict instead of a status, so a caller that fails
+ * to use it fails to return anything and the typecheck refuses it. The safety is in the
+ * shape, not in remembering.
+ */
+function clearHandleThenVerdict(
+  registryPath: string | undefined,
+  sessionKey: string,
+  expected: { readonly handle: string; readonly generation: string | undefined },
+  deps: BootAdoptionDeps,
+  /** What this pass concluded, for the case where the row is still its own. */
+  whenCleared: RowAdoptionOutcome,
+): RowAdoptionOutcome {
+  // Unsupervised: there is no row to clear and nothing to disagree with.
+  if (registryPath === undefined) return whenCleared
+  const cleared = clearPaneHandleIfUnchanged(registryPath, sessionKey, expected, deps)
+  if (cleared === 'row-moved') {
+    return { kind: 'undecided', sessionKey, reason: ROW_MOVED_REASON }
+  }
+  // `cleared`, `absent` and `error` all leave the caller's finding standing: the pane
+  // this pass decided about is gone either way, and a registry that could not be
+  // written is a stale handle the NEXT boot re-inspects — not a live owner.
+  return whenCleared
+}
+
+const ROW_MOVED_REASON =
+  'the registry row for this key was replaced by another incarnation while this pass was deciding, so ' +
+  'nothing it established describes the child that row now names'
+
 /** What a compare-and-clear did. `row-moved` is the one that matters: the row is no
  *  longer the one the caller decided about, so nothing was touched. */
 type ClearOutcome = 'cleared' | 'row-moved' | 'absent' | 'error'
