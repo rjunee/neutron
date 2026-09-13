@@ -1330,7 +1330,11 @@ export function renewAdoptionClaim(
   claimantPid: number = process.pid,
 ): ClaimRenewal {
   try {
-    return withOwnedRegistry(
+    // ANY DECLINE IS `unwritable` (Argus r48), not just an unacquired lock: an unreadable
+    // registry and a thrown save are equally "this renewal did not land", and the self-fencing
+    // deadline is the mechanism that makes that safe — it only ever moves on a CONFIRMED
+    // renewal, so a decline simply lets the clock run.
+    const write = withOwnedRegistry(
       registryPath,
       (registry) => {
         const prev = registry[sessionKey]
@@ -1351,6 +1355,7 @@ export function renewAdoptionClaim(
       // which is exactly what the threshold is for.
       () => 'unwritable' as ClaimRenewal,
     )
+    return write.prevented ? 'unwritable' : write.result
   } catch {
     return 'unwritable'
   }
@@ -1798,7 +1803,7 @@ async function claimRowOrUnwind(args: {
   // this module exists to prevent. Round eight gave the shutdown decision this treatment;
   // the claim is its neighbour and inherited nothing.
   try {
-    claim = withOwnedRegistry<ClaimResult>(
+    const claimWrite = withOwnedRegistry<ClaimResult>(
       registryPath,
       (registry) => {
         // CHECKED INSIDE THE CALLBACK, BEFORE ANY WRITE (Argus r15). `onOutcome` fires
@@ -1886,6 +1891,22 @@ async function claimRowOrUnwind(args: {
       // lock. The verdict below neither publishes nor closes.
       () => 'lock-unacquired' as ClaimResult,
     )
+    // AND A CLAIM THAT DID NOT PERSIST IS NOT A CLAIM (Argus r48). `ours` means the mutator
+    // decided the row was ours; only `persisted` means the next claimant will READ that. An
+    // unreadable registry or a thrown save would otherwise publish a session whose ownership
+    // nothing durable records — the r41 hazard, reached through a different decline.
+    // THREE FACTS, THREE SENTENCES — still (r15, preserved through r48). `withOwnedRegistry`
+    // now REPORTS a throw instead of propagating it, which is what stops it being swallowed
+    // further out; but "I could not ask at all" is a different fact from "I could not get the
+    // lock", and collapsing them would undo the distinction this module was built on. So the
+    // throw keeps its own branch and its own sentence, with the error text the report carries.
+    if (claimWrite.why === 'threw') {
+      return args.release(
+        `the registry could NOT BE READ OR WRITTEN for this adoption's row claim (${claimWrite.error ?? 'unknown error'}) — ` +
+          'nothing establishes who owns this pane, so it is left running and the row left alone',
+      )
+    }
+    claim = claimWrite.prevented ? 'lock-unacquired' : claimWrite.result
   } catch (e) {
     // THE REGISTRY COULD NOT BE READ OR WRITTEN, and that establishes nothing about who
     // owns this pane (Argus r15). A thrown lockfile open, a read error, an EACCES — none
@@ -2050,7 +2071,7 @@ function clearPaneHandleIfUnchanged(
 ): ClearOutcome {
   const log = deps.log ?? defaultLog
   try {
-    const outcome = withOwnedRegistry(
+    const clearWrite = withOwnedRegistry(
       registryPath,
       (registry) => {
         // FIRST, BEFORE ANY READING OR WRITING (Argus r21). This check used to sit BELOW
@@ -2090,6 +2111,11 @@ function clearPaneHandleIfUnchanged(
       // not findings, so every unlocked outcome collapses to this one.
       () => 'lock-unacquired' as ClearOutcome,
     )
+    // A CLEAR THAT DID NOT PERSIST CLEARED NOTHING (r48). `cleared` on an unpersisted write
+    // would license a cold spawn on a row that still names a live pane, which is the
+    // unrecoverable direction this function's own docblock refuses. `absent`/`row-moved` are
+    // findings read off a snapshot nobody saved, so they collapse the same way.
+    const outcome: ClearOutcome = clearWrite.prevented ? 'lock-unacquired' : clearWrite.result
     if (outcome === 'lock-unacquired') {
       log(
         `row ${sessionKey.slice(0, 32)}: the registry LOCK WAS NOT ACQUIRED, so pane_handle ` +

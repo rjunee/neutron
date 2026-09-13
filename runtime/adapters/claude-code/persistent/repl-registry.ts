@@ -939,6 +939,21 @@ export interface WithRegistryOptions {
    *  `defaultDropRowHandler`'s loud log + best-effort sidecar. Same
    *  additive-only contract as `onCorrupt`. */
   onDropRow?: (key: string, raw: unknown, rawContents: string) => void
+  /**
+   * DID THE WRITE LAND — reported once per invocation, inside the flock (#539, Argus r48).
+   *
+   * `withRegistry` has THREE ways to decline to persist, and for most of its life only one of
+   * them was visible: the lock (through `onOutcome`, because round fifteen needed it). The
+   * other two were not surfaced at all — an unreadable registry makes
+   * `loadRegistryForMutation` set `skipSave` while this function still returns the mutator's
+   * result, and a thrown open or save leaves the caller to guess. **A caller whose correctness
+   * depends on the write LANDING could not distinguish any of them from success**, which is
+   * the false-and-unknown collapse this branch has paid for at five sites now.
+   *
+   * So they are enumerated here, in one place, and {@link withOwnedRegistry} folds the lock and
+   * the throw in beside them so an ownership write gets a single answer.
+   */
+  onPersist?: (outcome: { saved: boolean; why?: 'registry-unreadable' | 'caller-skipped' }) => void
 }
 
 /**
@@ -1056,10 +1071,19 @@ export function withRegistry<T>(
         onDropRow,
       )
       const { registry, result, skipSave: callerSkip } = mutate(current)
+      // REPORTED BEFORE THE SAVE IS ATTEMPTED, and separately from it: a throw from
+      // `saveRegistry` propagates, and `withOwnedRegistry` turns that into its own decline —
+      // so this hook says which of the two SKIPS applied, and silence past here means the save
+      // was attempted.
+      if (corruptSkip === true) options.onPersist?.({ saved: false, why: 'registry-unreadable' })
+      else if (callerSkip === true) options.onPersist?.({ saved: false, why: 'caller-skipped' })
       // EITHER skip suppresses the write, and they are different facts: the corrupt-path
       // skip protects a file this module could not parse, the caller's skip protects a
       // file another WRITER may have changed under a lock we did not hold.
-      if (corruptSkip !== true && callerSkip !== true) saveRegistry(path, registry)
+      if (corruptSkip !== true && callerSkip !== true) {
+        saveRegistry(path, registry)
+        options.onPersist?.({ saved: true })
+      }
       return result
     },
     onOutcome,
@@ -1099,30 +1123,90 @@ export function withRegistry<T>(
  * for every registry write in such an environment. Six explicit sites beat a global
  * behavioural change with a silent failure mode.
  */
+export type OwnedWriteDecline = 'lock-not-acquired' | 'registry-unreadable' | 'caller-skipped' | 'threw'
+
+/**
+ * WHAT AN OWNERSHIP WRITE ACTUALLY DID — the value a caller whose correctness depends on the
+ * write landing has to be able to ask for (#539, Argus r48).
+ *
+ * `persisted` is the whole point: before this existed, a caller could not tell a saved write
+ * from an unacquired lock, from an unreadable registry, from a throw. `result` is still the
+ * mutator's (or the decline disposition's) value, so existing call shapes are unchanged.
+ */
+export interface OwnedWrite<T> {
+  /** Bytes actually reached the file. */
+  readonly persisted: boolean
+  /**
+   * THE ENVIRONMENT STOPPED US — the lock, an unreadable registry, or a throw.
+   *
+   * DISTINCT FROM `!persisted`, and the distinction is the whole reason this is not a
+   * boolean: a mutator that returns `skipSave` DECIDED not to write (a refusing claim, a
+   * row that moved, a CAS that did not match), and its result is authoritative. Only these
+   * three mean "your decision could not be recorded, so do not act on it". Collapsing them
+   * turned every deliberate refusal into a lock failure the first time I wrote this.
+   */
+  readonly prevented: boolean
+  readonly why?: OwnedWriteDecline
+  /** The thrown error's text, when `why` is `'threw'` — so a caller that reports "I could not
+   *  ask at all" as its own distinct fact keeps the detail it used to get from its own catch. */
+  readonly error?: string
+  readonly result: T
+}
+
 export function withOwnedRegistry<T>(
   path: string,
   /** Runs ONLY with the lock held. Same shape as {@link withRegistry}'s mutator. */
   mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T; skipSave?: true },
-  /** What this caller does when the lock was NOT acquired. Required, so the disposition
-   *  is a decision rather than an omission — nothing is written in this case. */
-  onUnlocked: () => T,
-): T {
+  /** What this caller does when the write DID NOT LAND — for any of the four reasons in
+   *  {@link OwnedWriteDecline}. Required, so the disposition is a decision rather than an
+   *  omission; nothing is written in those cases. */
+  onNotPersisted: () => T,
+): OwnedWrite<T> {
   let acquired = false
-  return withRegistry(
-    path,
-    (registry) => {
-      // BEFORE ANY READ OR WRITE. An unacquired lock means the snapshot below may already
-      // be stale, so even reading it to decide is unsound: `withRegistry` is a
-      // whole-registry read-modify-write, and saving a snapshot taken without the lock
-      // drops any row a concurrent gateway wrote in between.
-      if (!acquired) return { registry, result: onUnlocked(), skipSave: true as const }
-      return mutate(registry)
-    },
-    {},
-    (ok) => {
-      acquired = ok
-    },
-  )
+  let persisted = false
+  let why: OwnedWriteDecline | undefined
+  try {
+    const result = withRegistry(
+      path,
+      (registry) => {
+        // BEFORE ANY READ OR WRITE. An unacquired lock means the snapshot below may already
+        // be stale, so even reading it to decide is unsound: `withRegistry` is a
+        // whole-registry read-modify-write, and saving a snapshot taken without the lock
+        // drops any row a concurrent gateway wrote in between.
+        if (!acquired) {
+          why = 'lock-not-acquired'
+          return { registry, result: onNotPersisted(), skipSave: true as const }
+        }
+        return mutate(registry)
+      },
+      {
+        onPersist: (outcome) => {
+          persisted = outcome.saved
+          // The lock decline is decided above and is the more specific fact, so it wins.
+          if (!outcome.saved && why === undefined) why = outcome.why
+        },
+      },
+      (ok) => {
+        acquired = ok
+      },
+    )
+    if (persisted) return { persisted: true, prevented: false, result }
+    const decline = why ?? 'caller-skipped'
+    return { persisted: false, prevented: decline !== 'caller-skipped', why: decline, result }
+  } catch (e) {
+    // A THROWN OPEN OR SAVE IS A DECLINE, NOT AN EXCEPTION for these callers. Every ownership
+    // write has a disposition for "the write did not land", and a throw is one more way for
+    // that to be true — routing it through the same arm is what stops it being caught and
+    // dropped somewhere further out, which is exactly what happened at the fresh-spawn site.
+    log.error('ownership write threw; treated as NOT PERSISTED', { error: String(e), path })
+    return {
+      persisted: false,
+      prevented: true,
+      why: 'threw',
+      error: e instanceof Error ? e.message : String(e),
+      result: onNotPersisted(),
+    }
+  }
 }
 
 /** Upsert one record (lock-guarded). Merges onto any existing row so a

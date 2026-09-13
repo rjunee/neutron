@@ -269,6 +269,14 @@ it must not swallow.
       exited child, which the next boot's probe answers as a positive absence), while a fresh
       spawn REFUSES and ends the child it just made — a durable pane whose ownership was
       never recorded is a REPL nothing can find again and one any other gateway may claim.
+      **ANY WAY OF NOT LANDING IS A REFUSAL.** The registry helper has three ways to decline to
+      persist — the lock was not acquired, the registry was unreadable (a non-ENOENT read
+      failure), or the open/save threw — and only the first used to be visible, so an
+      unreadable registry or a thrown save left the fresh spawn confirming its claim and
+      serving a pane whose ownership nothing durable records. Persistence is now part of what
+      the helper reports, and every ownership write treats a PREVENTED write the way it always
+      treated an unacquired lock (a mutator's own `skipSave` is not one of these: that is a
+      decision, and its result stands).
       **AND THE REFUSAL JOINS THE ERROR VOCABULARY**, carrying `repl_unreconciled` stamped on
       the thrown error rather than inferred from its prose: an unclassified retryable spawn
       error is mapped by the composer to a synthetic 429, so a local lock failure would cool
@@ -278,7 +286,9 @@ it must not swallow.
       trusted, since throwing there would replace the original failure with a `TypeError` and
       skip the `channel.close()` that ends the turn's stream.
       *Verified by* `__tests__/pane-handle-persistence.test.ts` (the real flock forced to
-      fail at each transition, asserting what was written, what the caller did about it and
+      fail at each transition, plus a non-ENOENT read failure and a thrown save — each
+      asserting the refusal, the child terminated, no ownership confirmed and the registry
+      bytes unchanged, asserting what was written, what the caller did about it and
       the class it emitted, each with a lock-held positive control),
       `__tests__/pane-ownership-is-one-fact.test.ts` (no transition is called under the entry
       point that does not consume the outcome), and

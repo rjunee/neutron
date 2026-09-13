@@ -663,7 +663,7 @@ async function spawnSession(
         // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
         // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
         // must not survive to block the next tick's recovery (Codex P2-3).
-        const ownershipRecorded = withOwnedRegistry(
+        const ownershipWrite = withOwnedRegistry(
           options.replRegistryPath,
           (registry) => {
           const prev = registry[sessionKey]
@@ -738,6 +738,21 @@ async function spawnSession(
           // read. So: nothing is written, and the caller below decides what that means.
           () => 'unwritable' as const,
         )
+        // ANY PREVENTED WRITE IS A REFUSAL (Argus r48), not only an unacquired lock.
+        // `withRegistry` has three ways to decline — the lock, an UNREADABLE registry
+        // (`loadRegistryForMutation` sets `skipSave` and the mutator's result still comes
+        // back), and a THROWN open or save — and this site treated the last two as success:
+        // it confirmed the claim and served a pane whose ownership nothing durable records,
+        // which is exactly the state the spec item and this record both say ends the child.
+        // A deliberate `skipSave` from the mutator is NOT one of these: that is how `lost`
+        // reports a contest it decided, and its result stands.
+        if (ownershipWrite.prevented) {
+          process.stderr.write(
+            `[repl-spawn] ownership write did NOT PERSIST for ${sessionKey.slice(0, 32)} ` +
+              `(${ownershipWrite.why ?? 'unknown'}) — refusing this turn and ending the child\n`,
+          )
+        }
+        const ownershipRecorded = ownershipWrite.prevented ? 'unwritable' : ownershipWrite.result
         // A CHILD WITH A PANE NOBODY CAN FIND IS THE UNRECOVERABLE DIRECTION, and this
         // branch is the one place that can still choose. The general policy here is that a
         // registry write failure must not brick a live REPL — supervision degrades to "no
@@ -1094,7 +1109,7 @@ function reserveSpawnForKey(
   const registryPath = options.replRegistryPath
   if (registryPath === undefined) return 'unsupervised'
   try {
-    return withOwnedRegistry<'reserved' | 'taken' | 'unwritable'>(
+    const write = withOwnedRegistry<'reserved' | 'taken' | 'unwritable'>(
       registryPath,
       (registry) => {
         const prev = registry[sessionKey]
@@ -1129,6 +1144,9 @@ function reserveSpawnForKey(
       },
       () => 'unwritable',
     )
+    // A RESERVATION THAT DID NOT PERSIST IS NOT A RESERVATION (r48): the next gateway reads the
+    // FILE, not our intention. Same fail-closed answer as an unacquired lock.
+    return write.prevented ? 'unwritable' : write.result
   } catch {
     return 'unwritable'
   }

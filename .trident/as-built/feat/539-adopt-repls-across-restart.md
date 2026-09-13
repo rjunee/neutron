@@ -2305,11 +2305,66 @@ about to write anyway (sessionId, cwd, channelName — the values the argv was b
 the row is valid from the first byte and the release leaves a readable row behind. Its own case
 drives a spawn that throws and then asserts the NEXT turn still serves.
 
+**What the reservation's provisional row says if the gateway dies before the real write**, since
+it is now durable state a later boot can read. It carries `sessionId`, `cwd`, `channelName` and
+`has_session = (resume !== undefined)` — and that last value is accurate where it matters and
+conservative where it does not: a resuming spawn genuinely has a session, and a cold spawn
+writes `false`, so a boot that finds this row never `--resume`s a transcript that was never
+created. No `pane_handle` and no claim, so the row reads as "a session with no pane", which is
+exactly what "this spawn did not finish" means. The reservation itself expires by TTL.
+
 **Where the r41 disposition went.** With no lock at all, the refusal now happens at the
 RESERVATION — before any process exists, which is strictly better than spawning one and killing
 it — so the round-forty-one case was rewritten to assert that nothing was started, and the
 "reserved but could not record ownership" disposition got its own case, reached by breaking the
 lock *inside* the spawn (the only seam between the two writes).
+
+### Round forty-eight: three ways to decline, one of them visible
+
+`withRegistry` has **three** ways to not persist, and only the first was ever surfaced:
+
+1. **the lock was not acquired** — reported through `onOutcome`, because round fifteen needed
+   it;
+2. **the registry was unreadable** — a non-ENOENT read failure makes `loadRegistryForMutation`
+   return an empty registry with `skipSave`, *and the mutator's result still comes back*;
+3. **the open or the save threw** — surfaced as an exception, and swallowed by the
+   fresh-spawn site's catch.
+
+Only (1) was made visible because only (1) was the round we were in. **A caller whose
+correctness depends on the write LANDING could not tell any of them from success** — the same
+false-and-unknown collapse this branch has now paid for at five sites. Concretely: replace the
+registry with a directory after the reservation succeeds and the fresh-spawn ownership write
+gets `EISDIR`, writes nothing, **confirms the claim and serves** — contradicting both the spec
+item and this record, which say an unrecorded fresh pane is ended.
+
+**Persistence is now part of what the helper reports.** `withRegistry` gains `onPersist`, and
+`withOwnedRegistry` folds the lock and the throw in beside it and returns an `OwnedWrite<T>`.
+
+**`prevented` is not `!persisted`, and the distinction cost me a round of red tests.** A
+mutator that returns `skipSave` DECIDED not to write — a refusing claim, a row that moved, a
+contest lost — and its result is authoritative. Only the three environmental declines mean
+"your decision could not be recorded, so do not act on it". My first version collapsed them and
+turned every deliberate refusal into a lock failure.
+
+#### What each ownership write does with each decline
+
+The enumeration the ruling asked for. **(2) and (3) now take the same path (1) always did**,
+with one deliberate exception.
+
+| Write | (1) lock not acquired | (2) registry unreadable | (3) threw |
+|---|---|---|---|
+| fresh-spawn ownership | refuse the turn, KILL the child (r41) | same — **fixed here** | same — **fixed here** |
+| spawn reservation (r47) | `unwritable` → refuse before any process exists | same | same |
+| adoption claim CAS | `lock-unacquired` → release, `undecided`, pane left alone | same | **its own sentence** — "the registry could NOT BE READ OR WRITTEN", r15's third fact, deliberately preserved |
+| renewal | `unwritable` → nothing confirmed, the self-fencing deadline runs | same | same |
+| handle clear | `lock-unacquired` → no clear, and no verdict that licenses a cold spawn | same | same |
+| give-back / hand-over | no release; the claim stands to its takeover window | same | same |
+| child-exit disown | do not disown; the next boot's probe answers `pane_not_found` | same | same |
+
+**The one exception is deliberate**: the claim distinguishes "I could not ask at all" from "I
+could not get the lock" because r15 built that distinction and three facts still get three
+sentences. Routing the throw through the report rather than through an exception is what stops
+it being swallowed further out; keeping its own branch is what stops it being flattened.
 
 ### Mutation table
 
@@ -2321,7 +2376,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six and M132–M136 in round forty-seven, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven and M137–M139 in round forty-eight, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2488,6 +2543,9 @@ count from the rows below rather than trusting this sentence.
 | M134 | no reservation — contend only after spawning (the r45 state) | `pane-handle-persistence.test.ts` (2) |
 | M135 | the reservation never expires | `pane-handle-persistence.test.ts` (1 — the dead reserver) |
 | M136 | the reservation is never released | `pane-handle-persistence.test.ts` (2) |
+| M137 | a `skipSave` decline counts as success again — the r48 defect | `pane-handle-persistence.test.ts` (1 — the EISDIR case) |
+| M138 | the throw propagates again, to be swallowed by the caller | `pane-handle-persistence.test.ts` (1 — the thrown-save case) |
+| M139 | a healthy write reports a PREVENTING decline | `pane-handle-persistence.test.ts` (4+ — the control and most of the file) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

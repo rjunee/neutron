@@ -14,7 +14,16 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -829,5 +838,94 @@ describe('a failed first spawn costs a turn, not the key', () => {
     expect(poolKeyFor(working)).toBe(key)
     const text = await drain(createPersistentReplSubstrate(working).start(spec('two')))
     expect(text).toContain('echo')
+  })
+})
+
+describe('an ownership write that did not LAND is a refusal, however it failed', () => {
+  /**
+   * ARGUS r48. `withRegistry` has three ways to decline to persist, and only the first was
+   * ever surfaced: the lock (round fifteen). An UNREADABLE registry makes
+   * `loadRegistryForMutation` set `skipSave` while the mutator's result still comes back, and
+   * a THROWN open or save was caught and dropped — so the fresh-spawn ownership write
+   * confirmed the claim and served a pane whose ownership nothing durable records, which is
+   * the state the spec item and the as-built both say ends the child.
+   *
+   * The lock case is covered above; these are the other two, and each asserts the same four
+   * things: the turn refuses, the child is terminated, ownership was not confirmed, and the
+   * registry bytes are unchanged.
+   */
+  it('a non-ENOENT READ failure (the registry path is a directory) refuses and ends the child', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    // The reservation must SUCCEED first — this case is about the ownership write, not the
+    // reservation — so the registry is a normal file until the spawn is under way, and becomes
+    // a DIRECTORY inside the host's spawn callback. Every later read gets EISDIR.
+    const options = optionsFor(
+      echoHost('w9:p-eisdir', () => {
+        rmSync(registryPath, { force: true })
+        mkdirSync(registryPath, { recursive: true })
+      }),
+      registryPath,
+    )
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/could not be RECORDED as owned/i)
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    // THE CHILD IS TERMINATED — an unrecorded durable pane is the unrecoverable direction.
+    expect(killsByHandle).toContain('w9:p-eisdir')
+    // AND NOTHING WAS WRITTEN: the path is still the directory this case made it.
+    expect(statSync(registryPath).isDirectory()).toBe(true)
+  })
+
+  it('a THROWN save refuses and ends the child too', async () => {
+    // A SAVE THAT THROWS while the READ still works — the third decline, and distinct from
+    // EISDIR above, which fails the read. The registry stays readable and its DIRECTORY becomes
+    // unwritable mid-spawn, so `saveRegistry`'s atomic temp file cannot be created (EACCES).
+    const dir = scratch()
+    const registryPath = join(dir, 'repl-registry.json')
+    writeFileSync(registryPath, JSON.stringify({}, null, 2))
+    // THE BASELINE IS TAKEN AT THE MOMENT THE WRITE IS BLOCKED, not before the turn: the r47
+    // spawn RESERVATION legitimately writes a row before the spawn, so a baseline captured
+    // earlier would be asserting that the reservation had not happened either.
+    let before = ''
+    const options = optionsFor(
+      echoHost('w9:p-throws', () => {
+        before = readFileSync(registryPath, 'utf8')
+        chmodSync(dir, 0o555)
+      }),
+      registryPath,
+    )
+    const events: Event[] = []
+    try {
+      for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+        .events as AsyncIterable<Event>) {
+        events.push(ev)
+      }
+    } finally {
+      // Restore before the shared cleanup runs, or the scratch dir cannot be removed.
+      chmodSync(dir, 0o755)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/could not be RECORDED as owned/i)
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    expect(killsByHandle).toContain('w9:p-throws')
+    // BYTES UNCHANGED: the write did not land, which is the whole premise of the refusal.
+    expect(readFileSync(registryPath, 'utf8')).toBe(before)
+  })
+
+  it('...and a healthy registry still records ownership and serves', async () => {
+    // THE POSITIVE CONTROL. Three refusals that fired unconditionally would pass every case
+    // above and stop every REPL starting.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-healthy'), registryPath)
+    const text = await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    expect(text).toContain('echo')
+    expect(killsByHandle).not.toContain('w9:p-healthy')
+    const row = readRow(registryPath, poolKeyFor(options))
+    expect(row?.pane_handle).toBe('w9:p-healthy')
+    expect(typeof row?.adoption_claim_by).toBe('string')
   })
 })
