@@ -246,6 +246,9 @@ describe('legacy wiring and atomic claim ownership', () => {
     await writeResult(run.id, infraResult())
     const before = store.get(run.id)!
     const expected = innerTerminalFailureReason(before, {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       ok: false,
       verdict: 'REQUEST_CHANGES' as const,
       round: 1,

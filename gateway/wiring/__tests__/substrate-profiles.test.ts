@@ -35,6 +35,7 @@ import {
   PROFILE_ISOLATED_COMPOSE,
   PROFILE_UNTRUSTED_IMPORT,
   PROFILE_EPHEMERAL,
+  PROFILE_ARBITER,
   PROFILE_LEAK_FIXER,
   PROFILE_WARM_FIRE,
   type SubstrateProfile,
@@ -133,6 +134,7 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_UNTRUSTED_IMPORT', profile: PROFILE_UNTRUSTED_IMPORT },
   { name: 'PROFILE_EPHEMERAL', profile: PROFILE_EPHEMERAL },
   { name: 'PROFILE_LEAK_FIXER', profile: PROFILE_LEAK_FIXER },
+  { name: 'PROFILE_ARBITER', profile: PROFILE_ARBITER },
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
 ]
 
@@ -160,6 +162,12 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
       // preflight does both — so it carries no credential. Flipping this to `true` must fail
       // here until someone states why a reword needs push access to the owner's repos.
       PROFILE_LEAK_FIXER: false,
+      // #541 — the arbiter JUDGES; the caller applies every decision. Its whole safety
+      // argument is that it cannot approve, merge or waive review, and on a credentialed
+      // profile all three were reachable from its Bash regardless of the option set.
+      // Flipping this to `true` must fail here until someone states why a read-only judge
+      // needs push access to the owner's repos.
+      PROFILE_ARBITER: false,
       PROFILE_WARM_FIRE: true,
     }
     // The frontier-model FLOOR is frozen for the same reason the GitHub grant is,
@@ -175,6 +183,7 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
       PROFILE_UNTRUSTED_IMPORT: false,
       PROFILE_EPHEMERAL: false,
       PROFILE_LEAK_FIXER: false,
+      PROFILE_ARBITER: false,
       PROFILE_WARM_FIRE: false,
     }
     const github_credential = GRANTS[name]
@@ -265,6 +274,17 @@ const SITES: ReadonlyArray<{
     profile: PROFILE_LEAK_FIXER,
     extra: {
       substrate_instance_id: 'cc-trident-leakfix-owner',
+      cwd: '/w',
+      user_id: 'u',
+      project_slug: 'owner',
+      ephemeral: true,
+    },
+  },
+  {
+    site: 'open/composer.ts makeEphemeralSubstrate (cc-trident-arbiter)',
+    profile: PROFILE_ARBITER,
+    extra: {
+      substrate_instance_id: 'cc-trident-arbiter-owner',
       cwd: '/w',
       user_id: 'u',
       project_slug: 'owner',

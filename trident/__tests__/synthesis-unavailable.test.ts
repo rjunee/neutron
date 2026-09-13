@@ -42,6 +42,9 @@ interface Synthesis {
   verdict?: unknown
   blockKind?: string
   findings?: Finding[]
+  /** The SELF-DECLARED escalation, read off the seat's own raw reply. `unknown` because
+   *  it is whatever the model returned — validation happens in the workflow, not here. */
+  escalationClaim?: unknown
 }
 interface Peer {
   name: string
@@ -207,7 +210,19 @@ function reviewAndSynthesizeTail(
   const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
   const panelRejectedWithoutReason =
     real.normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
-  return { ...gated, blockKind: real.classifyBlock(gated, peers, false, panelRejectedWithoutReason) }
+  // The SELF-DECLARED escalation, read off the seat's own raw reply — mirrored here for
+  // the same reason `panelRejectedWithoutReason` is: `gated` has this file's own findings
+  // merged in, so only the raw reply can still say what the REVIEWER declared. A dead seat
+  // (`synthesisRaw === null`) declares nothing, which is the shape every test below uses.
+  const escalationClaim =
+    synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
+      ? ((synthesisRaw as { escalate?: unknown }).escalate ?? null)
+      : null
+  return {
+    ...gated,
+    blockKind: real.classifyBlock(gated, peers, false, panelRejectedWithoutReason),
+    escalationClaim,
+  }
 }
 
 /**
@@ -223,9 +238,15 @@ const wouldReForge = (s: Synthesis): boolean =>
 
 /** The loop's own condition, so the helper above cannot drift from it. */
 test('the fix loop really does exit on both kinds', () => {
-  const loop = SRC.slice(SRC.indexOf('  while (\n    finalVerdict ==='))
-  expect(loop).toContain("synthesis.blockKind !== 'infra-only'")
-  expect(loop).toContain("synthesis.blockKind !== 'advisory-only'")
+  // Anchored on `round++` — the fix loop's first statement — rather than on the opening
+  // text of its condition, which is not this test's subject and does legitimately change
+  // (a pending re-plan is now its own reason to iterate, so the condition no longer
+  // begins with `finalVerdict`). The claim here is only that BOTH kinds still end the
+  // loop, so that is all this matches on.
+  const loop = /while \(([\s\S]{0,800}?)\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
+  expect(loop).not.toBeNull()
+  expect(loop?.[1]).toContain("synthesis.blockKind !== 'infra-only'")
+  expect(loop?.[1]).toContain("synthesis.blockKind !== 'advisory-only'")
 })
 
 const laneBlocker: Peer = { name: 'kimi', title: 'kimi deferred', evidence: 'timeout' }
@@ -240,7 +261,11 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
   })
 
   test('it carries NO verdict and NO findings, only `blockKind: code`', () => {
-    expect(reviewAndSynthesizeTail(null)).toEqual({ blockKind: 'code' })
+    // …and `escalationClaim: null`, which is the same statement one field further: a seat
+    // that produced nothing did not diagnose a design gap either, so the escalation
+    // channel is EMPTY rather than absent. A dead seat that arrived carrying a claim would
+    // be a claim this file wrote.
+    expect(reviewAndSynthesizeTail(null)).toEqual({ blockKind: 'code', escalationClaim: null })
   })
 
   test('UNGUARDED that re-Forges — against `JSON.stringify(undefined)`', () => {
@@ -256,7 +281,26 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
     // `reviewRecord` to the same return, which is why the old exact-string assertion
     // broke while everything it actually protected stayed true. The single-`return`
     // check below is what guarantees there is no other exit handing back a bare null.
-    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers')
+    // Stated as its halves, because the return is now a multi-line object literal: it
+    // SPREADS `gated` (so no field of the gated verdict can be silently dropped by
+    // rebuilding the object by hand) and derives `blockKind` from it. The single-`return`
+    // check below is what guarantees there is no other exit handing back a bare null.
+    const ret = grabFn('reviewAndSynthesize').slice(grabFn('reviewAndSynthesize').lastIndexOf('  return {'))
+    // ASSERTED AS THE PROPERTY, NOT AS A VARIABLE NAME. This pinned the literal
+    // `...gated,` and broke when the spread source was renamed to `answered` — a
+    // self-contradictory reply may not approve, so the object returned is `gated` with its
+    // verdict withheld. The claim here was never about the identifier: it is that the
+    // return SPREADS its source rather than rebuilding it field by field (which would
+    // silently drop anything the gated verdict carries), and that `blockKind` is derived
+    // from THAT SAME object rather than from a different one.
+    const spread = /return \{\s*\n\s*\.\.\.(\w+),/.exec(ret)
+    expect(spread).not.toBeNull()
+    const spreadName = spread?.[1] ?? ''
+    expect(ret).toContain(`blockKind: classifyBlock(${spreadName}, peers, noReviewRan, panelRejectedWithoutReason),`)
+    // …and whatever it is called, it is `gated` — either directly or as `gated` with a
+    // field overridden, never a fresh object literal.
+    const fn = grabFn('reviewAndSynthesize')
+    expect(spreadName === 'gated' || fn.includes(`${spreadName} = `) && fn.includes('...gated,')).toBe(true)
     // One `return`, so there is no other exit that could hand back a bare null.
     const body = grabFn('reviewAndSynthesize')
     expect(body.split('\n').filter((l) => /^ {2}return /.test(l))).toHaveLength(1)

@@ -114,7 +114,7 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
     const { usePlansPaneController } = await import('../PlansPane.tsx')
     const React = await import('react')
 
-    let summary: WorkBoardSummary = { running: 0, failed: 0, active: 0 }
+    let summary: WorkBoardSummary = { running: 0, failed: 0, active: 0, blocked: 0 }
     let rerender: () => void = () => {}
 
     function Harness(): React.JSX.Element {
@@ -167,18 +167,18 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
   it('starts closed, opens on a kickoff, stays open while running', async () => {
     const c = await mountController()
     expect(c.isOpen()).toBe(false)
-    await c.setSummary({ running: 1, failed: 0, active: 0 }) // kickoff
+    await c.setSummary({ running: 1, failed: 0, active: 0, blocked: 0 }) // kickoff
     expect(c.isOpen()).toBe(true)
-    await c.setSummary({ running: 2, failed: 0, active: 0 }) // another kickoff — still open
+    await c.setSummary({ running: 2, failed: 0, active: 0, blocked: 0 }) // another kickoff — still open
     expect(c.isOpen()).toBe(true)
     await c.unmount()
   })
 
   it('auto-closes after the settle once ALL runs are clear', async () => {
     const c = await mountController()
-    await c.setSummary({ running: 1, failed: 0, active: 0 })
+    await c.setSummary({ running: 1, failed: 0, active: 0, blocked: 0 })
     expect(c.isOpen()).toBe(true)
-    await c.setSummary({ running: 0, failed: 0, active: 0 }) // all clear → settle timer armed
+    await c.setSummary({ running: 0, failed: 0, active: 0, blocked: 0 }) // all clear → settle timer armed
     expect(c.isOpen()).toBe(true) // still open during the settle
     await c.advance(40)
     expect(c.isOpen()).toBe(false) // auto-closed
@@ -187,10 +187,27 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
 
   it('a FAILED run keeps the pane open (attention, no auto-close)', async () => {
     const c = await mountController()
-    await c.setSummary({ running: 1, failed: 0, active: 0 })
-    await c.setSummary({ running: 0, failed: 1, active: 0 }) // last run failed
+    await c.setSummary({ running: 1, failed: 0, active: 0, blocked: 0 })
+    await c.setSummary({ running: 0, failed: 1, active: 0, blocked: 0 }) // last run failed
     await c.advance(40)
     expect(c.isOpen()).toBe(true)
+    await c.unmount()
+  })
+
+  it('a BLOCKED card keeps the pane open too — and does not auto-close under it', async () => {
+    // A block demands attention more squarely than a failure does: a failure can be
+    // retried, and a block cannot until somebody decides something. Without this the
+    // pane settles closed over a card that is waiting on the owner.
+    const c = await mountController()
+    await c.setSummary({ running: 1, failed: 0, active: 0, blocked: 0 })
+    await c.setSummary({ running: 0, failed: 0, active: 0, blocked: 1 }) // the run stopped and escalated
+    await c.advance(40)
+    expect(c.isOpen()).toBe(true)
+    // CONTROL: clearing the block lets it settle closed, so the assertion above is the
+    // blocked count holding it open and not the pane having stopped closing at all.
+    await c.setSummary({ running: 0, failed: 0, active: 0, blocked: 0 })
+    await c.advance(40)
+    expect(c.isOpen()).toBe(false)
     await c.unmount()
   })
 
@@ -201,9 +218,9 @@ describe('usePlansPaneController (auto-open/close state machine)', () => {
   it('opens on a plain ACTIVE card (no run) and auto-closes when it goes terminal', async () => {
     const c = await mountController()
     expect(c.isOpen()).toBe(false)
-    await c.setSummary({ running: 0, failed: 0, active: 1 }) // a plain in_progress card
+    await c.setSummary({ running: 0, failed: 0, active: 1, blocked: 0 }) // a plain in_progress card
     expect(c.isOpen()).toBe(true) // #379 — a plain active card kicks the pane open
-    await c.setSummary({ running: 0, failed: 0, active: 0 }) // card done → all clear
+    await c.setSummary({ running: 0, failed: 0, active: 0, blocked: 0 }) // card done → all clear
     expect(c.isOpen()).toBe(true) // still open during the settle
     await c.advance(40)
     expect(c.isOpen()).toBe(false) // auto-closed once every card terminal

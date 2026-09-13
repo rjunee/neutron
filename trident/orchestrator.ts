@@ -83,6 +83,7 @@ import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
+import type { TridentArbiter } from './arbiter.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import { readCommittedMutationClaim } from './mutation-claim-artifact.ts'
 import {
@@ -92,8 +93,10 @@ import {
   type MutationGateOutcome,
 } from './mutation-prover.ts'
 import {
+  ESCALATION_KINDS,
   parseCheckpointFindings,
   parseInnerResult,
+  type EscalationKind,
   type FireOutcome,
   type InnerResult,
   type TridentWorkflowFirer,
@@ -108,6 +111,8 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import { escalationKindAgrees, escalationStopSentence } from './escalation-block.ts'
+import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { infraDeathSentence } from './infra-block.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
@@ -319,6 +324,24 @@ export interface BuildTridentOrchestratorOptions {
    * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
+  /**
+   * THE ARBITER TIER (#541) — `buildFableArbiter` (`arbiter.ts`), threaded into the
+   * default `buildMergeCleanupDeps` so a LOCAL-mode rebase conflict the bounded
+   * resolver ESCALATED gets one read-only second opinion before the run terminates
+   * in chat. Ignored when `merge_deps` is supplied (the override owns its own deps),
+   * exactly like `resolve_conflict`.
+   *
+   * WIRED AT ONE HOLD, DELIBERATELY. Not the base-drift holds and not the dirty-
+   * worktree refusal: the only alternative to stopping at those is waiving a review
+   * gate or force-removing uncommitted work, and `arbiter.ts` forbids the first
+   * structurally (`FORBIDDEN_OPTION_IDS`) and the second by being read-only. An
+   * arbiter asked to adjudicate something it cannot see, or cannot legally choose,
+   * is worse than one that is not asked.
+   *
+   * ABSENT → byte-identical to today: a resolver escalation aborts the rebase and
+   * posts its specific question. So does `{kind:'unavailable'}`.
+   */
+  arbitrate?: TridentArbiter
   /**
    * PURITY PREFLIGHT SEAM — run the public leak gate on the branch's own tree
    * between the rebase replay and the lease push. DEFAULTS TO THE REAL RUNNER,
@@ -1039,13 +1062,53 @@ export function classifyInnerFailure(
  * changes, because the verdict is the part that was untrue.
  */
 export function recordedTerminalVerdict(
-  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint'>,
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint' | 'escalation'>,
   rowFindings: string | null,
 ): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
+  if (result.verdict !== 'REQUEST_CHANGES') return 'REVIEW_NOT_RUN'
+  // ARGUS PROVENANCE IS REQUIRED OF EVERY KIND, and it is the condition the paragraphs
+  // above are about. Nothing below weakens it.
+  if (!hasArgusProvenance(result.checkpoint)) return 'REVIEW_NOT_RUN'
+
+  // AN ESCALATION IS A REVIEWED VERDICT, AND ITS FINDINGS LIST MAY BE EMPTY. That second
+  // half was missing, and it discarded the CLEANEST possible escalation: a panel that
+  // concludes the PLAN is wrong often has no individual code finding to write, because the
+  // code is a faithful implementation of a bad plan. `VERDICT_SCHEMA` has no `minItems` on
+  // `findings`, so `{verdict:'REQUEST_CHANGES', block_kind:'design-gap', findings:[]}` is
+  // schema-valid — and it was being recorded as REVIEW_NOT_RUN, which is how a resume
+  // re-Forges a whole round against the same wrong plan with no finding to answer. That is
+  // the precise behaviour this card exists to stop, reproduced by the card's own remedy.
+  //
+  // WHY DROPPING THE FINDINGS CHECK IS SAFE HERE, AND ONLY HERE. The argument above — that
+  // findings do not prove a reviewer ran — is an argument about FINDINGS: the suite gate
+  // writes its own `blocker` on a build that never reached a reviewer, and that build
+  // carries `block_kind: 'code'`. It does not transfer to an escalation, because the suite
+  // gate cannot produce one. An escalation requires `kind` AND `whatIsMissing`, only a
+  // reviewer's own reply can carry it (`synthesisRaw.escalate`, never the merged findings),
+  // and `hasArgusProvenance` is still required above. So for these kinds the declaration
+  // IS the proof, and findings are evidence of a different question.
+  //
+  // NOT "≥1 finding whenever an escalation is present", which was the other available fix:
+  // that would make a reviewer invent a code finding to be allowed to say the plan is
+  // wrong, and a schema that forces a model to fabricate an artifact it does not have is
+  // worse than the bug.
+  //
+  // VALIDATED STRUCTURALLY, not by the kind alone: `escalationKindAgrees` is the SAME
+  // function the reader and the writer of the block already share, so a row whose routing
+  // kind and payload disagree is a half-written escalation here too, and falls through to
+  // the findings requirement below rather than being taken on the strength of its label.
   if (
-    result.verdict === 'REQUEST_CHANGES' &&
+    ESCALATION_KINDS.includes(result.block_kind as EscalationKind) &&
+    escalationKindAgrees(result)
+  ) {
+    return 'REQUEST_CHANGES'
+  }
+
+  // `code` and `advisory-only` KEEP the findings requirement, unchanged. Nothing above
+  // touches them, and the measurement that motivated it (18 of 160 terminal rows carrying
+  // an Argus checkpoint) is about exactly these.
+  if (
     (result.block_kind === 'code' || result.block_kind === 'advisory-only') &&
-    hasArgusProvenance(result.checkpoint) &&
     parseCheckpointFindings(rowFindings).length > 0
   ) {
     return 'REQUEST_CHANGES'
@@ -1809,7 +1872,17 @@ export async function rebaseOntoObservedBase(
           ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
         ]
         // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
-        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // each one is USUALLY a different commit that `git rebase --continue` advanced onto —
+        // #541 made that "usually" rather than "always": an arbiter-directed retry there
+        // re-runs the resolver on the SAME commit, deliberately — and the reason is weaker
+        // than it looks, so state it honestly: the resolver is NONDETERMINISTIC, so a second
+        // attempt may succeed where the first failed. It carries NO new information. The
+        // arbiter's reasoning is deliberately not threaded into that turn (passing an
+        // untrusted judge's prose into a credentialed, write-capable agent was a
+        // privilege-escalation path — `SPEC.md` Decisions Log 2026-09-12 names its absence as
+        // the trap), so what a retry buys is another draw, not a better brief. Writing that
+        // down is what stops someone restoring the channel to make this comment true. It
+        // still spends a round and never resets the counter, so the cap remains the bound. No such tier exists here; there is
         // exactly one apply, so a round that leaves the same work undone will leave it undone
         // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
         // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
@@ -2094,7 +2167,14 @@ export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<
     InnerResult,
-    'ok' | 'verdict' | 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause' | 'findings_present'
+    | 'ok'
+    | 'verdict'
+    | 'round'
+    | 'checkpoint'
+    | 'block_kind'
+    | 'terminal_cause'
+    | 'findings_present'
+    | 'escalation'
   >,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
@@ -2163,6 +2243,27 @@ export function innerTerminalFailureReason(
   // The kind also decides WHICH sentence, because it is the only thing that licenses the
   // claim "review never ran". Without it the reason states the failure and quotes the
   // measurement, and says nothing at all about the review panel.
+  // 2026-09-12 — AND A SECOND MEASURED PATH: a run that STOPPED AND ESCALATED. Like the
+  // infra-only cause below, this is a sentence composed where the fact was KNOWN (the fix
+  // loop, which is the only place that can see two rounds of findings at once) rather than
+  // deduced here from (round, checkpoint) — which is precisely what the paragraphs above
+  // refuse to do. Without it an escalation falls through to the generic catch-all and the
+  // owner is told the build "ended without Argus APPROVE" about a run that stopped
+  // DELIBERATELY and said exactly why.
+  //
+  // GATED THROUGH `escalationKindAgrees` — the SAME function `deriveEscalationBlock` uses,
+  // not a second copy of its rule. A result carrying half an escalation keeps the generic
+  // sentence instead of quoting a claim whose routing kind says something else.
+  //
+  // ONLY that condition is shared, and the reason is a boundary rather than an oversight:
+  // the deriver also requires `phase === 'failed'` and `harvested_at !== null`, both of
+  // which are facts about a STORED, harvested row. This function runs at the moment the
+  // terminal row is COMPOSED — it is what makes those two true — so the full gate would
+  // return `null` on every real escalation here and the sentence would never fire. The one
+  // rule both sides must agree on is exported; the two that only a reader can ask are not.
+  if (escalationKindAgrees(result) && result.escalation !== null) {
+    return escalationStopSentence(result.escalation, ceiling)
+  }
   if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
     const cause = redactPushError(result.terminal_cause).trim()
     if (cause !== '') {
@@ -2228,10 +2329,10 @@ export function buildTridentOrchestrator(
   const db_path = opts.db_path
   const merge_deps =
     opts.merge_deps ??
-    buildMergeCleanupDeps(
-      opts.run_host,
-      opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
-    )
+    buildMergeCleanupDeps(opts.run_host, {
+      ...(opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {}),
+      ...(opts.arbitrate !== undefined ? { arbitrate: opts.arbitrate } : {}),
+    })
   const foldAsBuilt =
     opts.fold_as_built ??
     ((run: TridentRun, base: string) =>
@@ -2870,12 +2971,22 @@ export function buildTridentOrchestrator(
       // findings-non-empty test recorded 113 never-reviewed runs — 68 stopped at
       // `forge-done`, 45 at `inner-error` — as reviewed rejections. That is what
       // makes an un-reviewed queue read as reviewed-and-rejected.
+      // …AND AN ESCALATION KEEPS ITS REJECTION HERE TOO. This is the FOURTH copy of the
+      // findings rule, found by enumerating the readers of `inner_verdict` rather than the
+      // sites that name escalation kinds. It is not reachable with a live escalation today
+      // — `recordedTerminalVerdict` at the terminal-result path is the ONLY production
+      // writer of a REQUEST_CHANGES verdict, and that path overrides this value — so this
+      // is closing a latent trap rather than fixing a live defect. It is closed anyway,
+      // because the next caller to reuse `failedRun` on a row that already carries one
+      // would silently downgrade a stop the owner is waiting on, and the cost of the line
+      // is a line.
       inner_verdict:
         run.inner_verdict === 'APPROVE'
           ? 'APPROVE'
           : run.inner_verdict === 'REQUEST_CHANGES' &&
               hasArgusProvenance(run.inner_checkpoint) &&
-              parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+              (parseCheckpointFindings(run.inner_checkpoint_findings).length > 0 ||
+                resultCarriesEscalation(run.inner_result))
             ? 'REQUEST_CHANGES'
             : 'REVIEW_NOT_RUN',
       failure_reason: reason,
@@ -3824,6 +3935,9 @@ export function buildTridentOrchestrator(
             round: launchRun.round,
             checkpoint: resume_checkpoint,
             block_kind: 'infra-only',
+            // An unreadable resume head is an INFRASTRUCTURE stop, not an escalation: no
+            // panel judged anything here, so there is no plan defect to report.
+            escalation: null,
             terminal_cause: cause,
             findings_present: false,
           }),

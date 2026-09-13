@@ -145,6 +145,8 @@ function buildHarness(opts: {
   /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
   begin_crash_recovery?: boolean
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
+  /** #541 — the arbiter tier above that resolver. */
+  arbitrate?: import('./arbiter.ts').TridentArbiter
   fix_leak_findings?: import('./leak-preflight.ts').LeakPreflightFixer
   fold_as_built?: (
     run: TridentRun,
@@ -286,6 +288,7 @@ function buildHarness(opts: {
   if (opts.list_stage_events !== undefined) o.list_stage_events = opts.list_stage_events
   if (opts.begin_crash_recovery === true) o.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
+  if (opts.arbitrate !== undefined) o.arbitrate = opts.arbitrate
   if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
   // Keep unrelated orchestrator tests hermetic: production defaults to the real
   // appender, while the focused wiring tests below inject their own observable seam.
@@ -3773,6 +3776,22 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) {
         return { ok: true, stdout: 'shared.ts', stderr: '', exit_code: 0 }
       }
+      // THE OBJECT SIZE, which bounds the read before it happens (#541 round 33). An
+      // unanswered `cat-file -s` used to fall through to empty output and be read as a size
+      // of ZERO — so this stub was exercising that defect and passing.
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      // THE INDEX VIEW, which the arbiter's evidence layer reads to tell a genuinely
+      // one-sided conflict from a read it could not perform (#541 round 15). A stub that
+      // omits it does not under-test that path — it supplies "no unmerged stages", which is
+      // the one-sided branch, so the conflict here would look like a file neither side has.
+      if (cmd.includes('ls-files') && cmd.includes('--unmerged')) {
+        return {
+          ok: true,
+          stdout: [1, 2, 3].map((stage) => `100644 ${'a'.repeat(40)} ${stage}\tshared.ts`).join('\u0000') + '\u0000',
+          stderr: '',
+          exit_code: 0,
+        }
+      }
       return ok()
     }
   }
@@ -3804,6 +3823,62 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
     expect(final.failure_reason).toBe(question)
     expect(final.failure_reason).not.toContain('merge failed')
     expect(final.inner_verdict).toBe('APPROVE')
+  })
+
+  // #541 — THE ARBITER TIER, end to end through the orchestrator's OWN merge deps.
+  // `buildFableArbiter` had no production call site at all; these two pin the
+  // orchestrator link, which is the one that silently drops a seam (see
+  // `resolve_phase_models`): the arbiter option must actually reach the default
+  // `buildMergeCleanupDeps`, or the whole chain is inert with every part green.
+
+  test('#541 the arbiter tier turns an escalated conflict into a landed build (retry-resolution is acted on)', async () => {
+    const question = 'shared.ts: which flush() behaviour do you want?'
+    let attempts = 0
+    let arbiterCalls = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: conflictingHost(),
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question } : { resolved: true }
+      },
+      arbitrate: async () => {
+        arbiterCalls++
+        return {
+          kind: 'decision',
+          option_id: 'retry-resolution',
+          reasoning: 'Both sides add an independent guard; keeping both is correct.',
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    // Without the arbiter this run is `failed` with `question` (the test above).
+    expect(final.phase).toBe('done')
+    expect(arbiterCalls).toBe(1)
+    expect(attempts).toBe(2)
+  })
+
+  test('#541 an UNAVAILABLE arbiter leaves the run on the owner path — failed with the SPECIFIC question, not blocked, not landed', async () => {
+    const question = 'shared.ts: which flush() behaviour do you want?'
+    let attempts = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: conflictingHost(),
+      resolve_conflict: async () => {
+        attempts++
+        return { resolved: false, question }
+      },
+      arbitrate: async () => ({ kind: 'unavailable', reason: 'the arbiter timed out' }),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    // BYTE-IDENTICAL to the no-arbiter case above: this is the property that
+    // makes wiring the arbiter safe. Not `done` (never silently resolved) and
+    // terminal (never blocked mid-flight).
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toBe(question)
+    expect(attempts).toBe(1)
   })
 })
 

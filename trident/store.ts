@@ -19,6 +19,7 @@
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
@@ -195,7 +196,7 @@ export class TridentInvalidRalphRoundError extends Error {
 
 export class TridentEmptyFindingsRejectionError extends Error {
   constructor(id: string, source: 'update' | 'save' | 'saveIfActive') {
-    super(`refusing to record inner_verdict='REQUEST_CHANGES' with no findings for trident run ${id} (via ${source}): an empty finding set is either an approval or an infrastructure failure, never a rejection — record REVIEW_NOT_RUN instead`)
+    super(`refusing to record inner_verdict='REQUEST_CHANGES' with no findings and no escalation for trident run ${id} (via ${source}): a rejection needs evidence — either findings, or a valid escalation in inner_result (a declaration whose kind agrees with blockKind), which is how a run reports that the PLAN is wrong and has no code finding to show for it. Without either, this row is an approval or an infrastructure failure rather than a rejection`)
     this.name = 'TridentEmptyFindingsRejectionError'
   }
 }
@@ -1573,8 +1574,11 @@ export class TridentRunStore {
     if (patch.inner_verdict !== undefined || patch.inner_checkpoint_findings !== undefined) {
       await this.db.transaction((tx) => {
         const row = tx
-          .prepare<Pick<TridentRunDbRow, 'inner_verdict' | 'inner_checkpoint_findings'>, [string]>(
-            `SELECT inner_verdict, inner_checkpoint_findings FROM code_trident_runs WHERE id = ?`,
+          .prepare<
+            Pick<TridentRunDbRow, 'inner_verdict' | 'inner_checkpoint_findings' | 'inner_result'>,
+            [string]
+          >(
+            `SELECT inner_verdict, inner_checkpoint_findings, inner_result FROM code_trident_runs WHERE id = ?`,
           )
           .get(id)
         if (row !== null) {
@@ -1592,9 +1596,16 @@ export class TridentRunStore {
           // when that copy was written). Its copy is an atomic SQL CASE inside the
           // same UPDATE, and it REFUSES rather than throws: the findings-free
           // rejection is recorded REVIEW_NOT_RUN and the rest of the write lands.
+          // …OR A VALID ESCALATION, which is a rejection whose evidence is the
+          // DECLARATION rather than a finding list. Patch-wins on `inner_result` for the
+          // same reason the two columns above are: the write about to happen is what the
+          // row will hold.
+          const effectiveResult =
+            patch.inner_result !== undefined ? patch.inner_result : row.inner_result
           if (
             effectiveVerdict === 'REQUEST_CHANGES' &&
-            parseCheckpointFindings(effectiveFindings).length === 0
+            parseCheckpointFindings(effectiveFindings).length === 0 &&
+            !resultCarriesEscalation(effectiveResult)
           ) {
             throw new TridentEmptyFindingsRejectionError(id, 'update')
           }
@@ -1773,12 +1784,21 @@ export class TridentRunStore {
       // clear the guard and then land the exact `REQUEST_CHANGES` + `[]` row this whole
       // card exists to make unwritable.
       if (parseCheckpointFindings(run.inner_checkpoint_findings).length === 0) {
-        if (run.inner_checkpoint_findings !== null) {
-          throw new TridentEmptyFindingsRejectionError(run.id, 'save')
-        }
+        // AN ESCALATION IS EVIDENCE TOO — the same third case `saveIfActive` documents
+        // at length. Found by enumerating the READERS of `inner_verdict` rather than the
+        // sites that mention escalation kinds: this copy of the rule and `update()`'s
+        // carried the identical blind spot, and only the consumer sweep names them.
         const row = this.get(run.id)
-        if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
-          throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+        const escalated =
+          resultCarriesEscalation(run.inner_result) ||
+          (run.inner_result === null && row !== null && resultCarriesEscalation(row.inner_result))
+        if (!escalated) {
+          if (run.inner_checkpoint_findings !== null) {
+            throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+          }
+          if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
+            throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+          }
         }
       }
     }
@@ -1892,9 +1912,31 @@ export class TridentRunStore {
         //
         // The incoming value wins when it carries findings; otherwise fall back to the
         // stored row, so a save that legitimately leaves the column alone is still judged
-        // against the evidence already on record. Both empty is still a refusal — that is
-        // the thesis and it is intact: an empty finding set is an approval or an
-        // infrastructure failure, never a rejection.
+        // against the evidence already on record.
+        //
+        // …AND AN ESCALATION IS THE THIRD THING THIS THESIS DID NOT KNOW ABOUT. "An empty
+        // finding set is an approval or an infrastructure failure, never a rejection" was
+        // EXHAUSTIVE while a rejection could only come from findings. The escalation
+        // channel is a rejection whose evidence is the DECLARATION rather than a finding
+        // list: a panel that concludes the PLAN is wrong often has no individual code
+        // finding to write, because the code is a faithful implementation of a bad plan.
+        // `VERDICT_SCHEMA` puts no `minItems` on `findings`, so that row is legitimate and
+        // was being refused — and a refused terminal save does not settle, it RETRIES, so
+        // the card never reached `blocked` at all. That is worse than the mislabel it
+        // replaced, because a mislabelled row at least stops.
+        //
+        // READ FROM THE ROW, NOT TAKEN FROM THE CALLER. `inner_result` is the workflow's
+        // own typed output; a boolean passed in beside the verdict would make this guard
+        // trust the very caller it exists to check. Same patch-wins order as the findings
+        // above — the incoming column first, the stored row only when it is absent —
+        // because `saveIfActive` deliberately never WRITES `inner_result`, so on the
+        // terminal save the evidence is already on the row and the incoming object is
+        // carrying the same value forward.
+        //
+        // A HALF-WRITTEN ESCALATION IS NOT ONE: `resultCarriesEscalation` requires the
+        // routing kind and the payload to agree, exactly as every other reader of this
+        // distinction does, so a row that merely LABELS itself falls through to the
+        // findings requirement rather than being believed.
         //
         // PATCH-WINS, exactly as `update()` does (Argus r1, blocker). The stored row is
         // consulted ONLY when the incoming column is NULL — the one value the COALESCE
@@ -1904,16 +1946,21 @@ export class TridentRunStore {
         // exact `REQUEST_CHANGES` + `[]` row this card exists to make unwritable.
         const incoming = parseCheckpointFindings(run.inner_checkpoint_findings)
         if (incoming.length === 0) {
-          if (run.inner_checkpoint_findings !== null) {
-            throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
-          }
-          const row = tx
-            .prepare<{ inner_checkpoint_findings: string | null }, [string]>(
-              'SELECT inner_checkpoint_findings FROM code_trident_runs WHERE id = ?',
+          const stored = tx
+            .prepare<{ inner_checkpoint_findings: string | null; inner_result: string | null }, [string]>(
+              'SELECT inner_checkpoint_findings, inner_result FROM code_trident_runs WHERE id = ?',
             )
             .get(run.id)
-          if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
-            throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+          const escalated =
+            resultCarriesEscalation(run.inner_result) ||
+            (run.inner_result === null && stored !== null && resultCarriesEscalation(stored.inner_result))
+          if (!escalated) {
+            if (run.inner_checkpoint_findings !== null) {
+              throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+            }
+            if (stored !== null && parseCheckpointFindings(stored.inner_checkpoint_findings).length === 0) {
+              throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+            }
           }
         }
       }

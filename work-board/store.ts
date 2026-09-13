@@ -43,7 +43,16 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
  *  Shelved section. Unlike `failed` it IS client-writable — it exists precisely
  *  so an agent asked to take a card off the board no longer has to misreport it
  *  as done (2026-08-14). */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
+/** `blocked` (migration 0140) is the SIXTH lane and the second RUN-DRIVEN one: a build
+ *  that STOPPED ON PURPOSE — a reviewer proved the plan was wrong, the card needs work
+ *  that lives outside it, or the same finding survived a fix round — rather than one
+ *  that broke. FAILED and BLOCKED are two different words because they earn opposite
+ *  responses: retry the one, decide or sequence something for the other. Like `failed`
+ *  and unlike `archived` it is NOT client-writable (the run reports; the orchestrator
+ *  decides), and unlike both terminal lanes it is ACTIVE: the card keeps its
+ *  `sort_order`, stays in `listActive`, and never stamps `completed_at` — it is
+ *  unfinished work that is waiting, not work that ended. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived' | 'blocked'
 
 /**
  * The kind of work a card represents — the ▶/play routing discriminator (#379,
@@ -122,8 +131,12 @@ export interface WorkBoardItemUpdate {
   declared_surfaces?: string[] | null
 }
 
-/** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
-export type RunReconcileOutcome = 'done' | 'failed'
+/** Outcome of a bound run reaching a terminal phase (drives the reconcile).
+ *  'blocked' is NOT a third flavour of failure: it is the run reporting that it stopped
+ *  and escalated, which is what keeps the card off the 'failed' lane and out of
+ *  'upcoming', where it would sit looking startable and be dispatched again to re-learn
+ *  the same block. */
+export type RunReconcileOutcome = 'done' | 'failed' | 'blocked'
 
 /**
  * The terminal run's PR provenance, handed to {@link WorkBoardStore.detachRun}
@@ -532,6 +545,72 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
  * WHICH run rather than a bare failure. `action` only selects the explanation;
  * both refusals are the same rule (a terminal claim about a live build).
  */
+/**
+ * A BLOCKED CARD CANNOT BE COMPLETED.
+ *
+ * The lane means a build STOPPED because the plan could not succeed and said why; letting
+ * the card go straight to `done` records that the work SHIPPED, which is the single most
+ * misleading thing this board can say about it — and it stamps `completed_at`, so the card
+ * leaves the active lane carrying a date that asserts delivery.
+ *
+ * Refused at the STORE because both public surfaces funnel through `update()`: the agent
+ * tool, the HTTP route, `complete()` (which delegates), and any generic
+ * `update(status:'done')`. An invariant that holds only in the caller that remembered it is
+ * not an invariant — the same reason the inline-active claim is refused here.
+ *
+ * IT THROWS RATHER THAN RETURNING NULL, exactly as the live-run refusal beside it does:
+ * `null` already means "no such item", and a refusal that looks like a miss is swallowed
+ * by every caller. The unblocking step is named, because it is the whole point — moving the
+ * card OUT of `blocked` is the decision, and it is the owner's to make and report.
+ */
+/**
+ * A BLOCKED CARD MAY NOT BE CLAIMED AS INLINE-ACTIVE.
+ *
+ * IT THROWS RATHER THAN SUPPRESSING, and that was a decision made on evidence rather than
+ * by symmetry with the completion guard. The flag looked like it had three independent
+ * writers, one of them a BULK reconcile — and a throw that turns a correct bulk write into
+ * a failed one would trade a quiet wrong answer for a loud wrong failure. So the writers
+ * were enumerated:
+ *
+ *   - `setInlineActive` — NO production callers at all.
+ *   - the TodoWrite reconcile (`work-board/todo-reconcile.ts`) — writes `{status}` only,
+ *     and never the flag.
+ *   - `open/composer.ts` — writes `inline_active: false`, a CLEAR, which is always allowed.
+ *   - the HTTP PATCH — accepts `title`, `status` and `design_doc_ref`, and cannot carry
+ *     the flag at all.
+ *
+ * So the ONLY production writer that can CLAIM the flag is the agent tool's
+ * `work_board_update` — precisely the caller that must be told, and no bulk caller exists
+ * to be broken. Suppressing it silently was worse than a miss: `update()` returned the
+ * unchanged card with success, the tool answered `ok: true`, and because its
+ * acknowledgement compares the REQUESTED patch against the previous value it could emit
+ * `inline_started` for a write that never happened — telling the agent the opposite of
+ * what occurred.
+ */
+export class WorkBoardBlockedInlineClaimError extends Error {
+  readonly item_id: string
+  constructor(item_id: string) {
+    super(
+      `refusing to mark item ${item_id} inline-active: it is BLOCKED — a build stopped on purpose and reported why, so nothing is moving on this card. ` +
+        'Read its reported reason, act on it, then move the card back to `upcoming` — that move is the decision. Clearing the flag is always allowed.',
+    )
+    this.name = 'WorkBoardBlockedInlineClaimError'
+    this.item_id = item_id
+  }
+}
+
+export class WorkBoardBlockedCompletionError extends Error {
+  readonly item_id: string
+  constructor(item_id: string) {
+    super(
+      `refusing to complete item ${item_id}: it is BLOCKED — a build stopped on purpose and reported why, so recording it as done would claim work shipped that nobody built. ` +
+        'Read its reported reason, act on it, then move the card back to `upcoming` — that move is the decision, and completion is reconciled from a run that actually finished.',
+    )
+    this.name = 'WorkBoardBlockedCompletionError'
+    this.item_id = item_id
+  }
+}
+
 export class WorkBoardRunStillLiveError extends Error {
   readonly item_id: string
   readonly run_id: string
@@ -839,6 +918,15 @@ export class WorkBoardStore {
       ) {
         throw new WorkBoardRunStillLiveError(id, current.linked_run_id)
       }
+      // …AND A BLOCKED CARD MAY NOT BE COMPLETED AT ALL, live run or not. The lane says a
+      // build STOPPED because the plan could not succeed; `done` says the work shipped.
+      // Checked on the CURRENT status rather than the patch, because the reachable call is
+      // `complete()` / `update({status:'done'})` on a card that is ALREADY blocked — the
+      // patch names only the destination. Unblocking first (`status:'upcoming'`) is the
+      // decision, and it is deliberately not something completion can skip past.
+      if (patch.status === 'done' && current.status === 'blocked') {
+        throw new WorkBoardBlockedCompletionError(id)
+      }
       const sets: string[] = []
       const params: (string | number | null)[] = []
       const push = (col: string, val: string | number | null): void => {
@@ -869,7 +957,39 @@ export class WorkBoardStore {
       const terminalTransition =
         patch.status !== undefined &&
         patch.status !== current.status &&
-        (patch.status === 'done' || patch.status === 'failed' || patch.status === 'archived')
+        (patch.status === 'done' ||
+          patch.status === 'failed' ||
+          patch.status === 'archived' ||
+          // …and INTO 'blocked', which is not terminal but is the lane that says work
+          // has STOPPED. `detachRun` already clears the flag on every outcome; this is
+          // the generic path saying the same thing, so the two writers cannot disagree.
+          patch.status === 'blocked')
+      // ...AND A BLOCKED CARD MAY NOT BE MARKED INLINE-ACTIVE AT ALL, whether it is
+      // becoming blocked or already is. A blocked card exists to STOP work on it: the
+      // dispatch chokepoint refuses a build against it and both UIs drop its ▶, so a
+      // flag that makes it pulse "something is moving here" contradicts every other
+      // signal on the row. It is enforced HERE, at the store, and not at the tool,
+      // because `inline_active` is writable by the agent tool, the HTTP surface and the
+      // TodoWrite reconcile independently — an invariant that holds only in the caller
+      // that remembered it is not an invariant. CLEARING is always allowed; only the
+      // claim is refused, which can only ever move the row toward consistency.
+      //
+      // KEYED ON THE EFFECTIVE STATUS, not on the patch: the reachable case is a patch
+      // that sets ONLY `inline_active` on a card that is ALREADY blocked, which
+      // `terminalTransition` cannot see because it looks at `patch.status`.
+      const effectiveStatus = patch.status ?? current.status
+      // THROWN, NOT SUPPRESSED. An earlier cut simply declined to push the column, so this
+      // returned the unchanged card with success and the tool reported `inline_started`
+      // for a write that never happened — a silent no-op that reports success tells the
+      // caller the OPPOSITE of what occurred, which is worse than a miss. See
+      // `WorkBoardBlockedInlineClaimError` for the writer enumeration that made throwing
+      // safe here: no bulk caller can claim this flag.
+      //
+      // CLEARING IS STILL ALWAYS ALLOWED — only the claim is refused, and a clear can only
+      // ever move the row toward consistency.
+      if (patch.inline_active === true && effectiveStatus === 'blocked') {
+        throw new WorkBoardBlockedInlineClaimError(id)
+      }
       if (patch.inline_active !== undefined && !terminalTransition) {
         push('inline_active', patch.inline_active ? 1 : 0)
       }
@@ -907,7 +1027,15 @@ export class WorkBoardStore {
           // `attachRun` clears these too, but a manual re-open never reaches it.
           push('pr', null)
           push('pr_url', null)
-        } else if (current.status === 'failed') {
+        } else if (current.status === 'failed' || current.status === 'blocked') {
+          // ...OR OFF BLOCKED, for the same reason and with the same consequence.
+          // `detachRun` keeps the link on a blocked card too, so the reported reason
+          // stays reachable while the card sits there — and that means a card advanced
+          // out of the blocked lane by hand would keep deriving its tag, its dot and
+          // its reason from the terminal escalated run until some LATER dispatch
+          // happened to replace the binding. Leaving the block is the decision that
+          // ends that run's claim on the card; the link goes with it.
+          //
           // Re-queue OFF failed (nextStatus('failed') → 'upcoming', or a dismiss):
           // DETACH the terminal failed run so the card stops deriving the red dot
           // + 'failed' step_label + failure_reason from it. detachRun keeps the
@@ -1010,7 +1138,14 @@ export class WorkBoardStore {
    * only ever move a row toward the consistent state.
    */
   async setInlineActive(project_slug: string, id: string, active: boolean): Promise<void> {
-    const terminalGuard = active ? " AND status NOT IN ('done', 'failed')" : ''
+    // 'blocked' joins the guard for a DIFFERENT reason than the two terminal lanes, and
+    // it is worth keeping straight: 'done'/'failed' are here because a FINISHED row that
+    // still claims live work pulses forever and cannot self-heal; 'blocked' is here
+    // because the lane exists to STOP work on the card — the dispatch chokepoint refuses
+    // a build against it and both UIs drop its ▶, so a flag that says "something is
+    // moving here" contradicts every other signal on the row. Unblocking is a status
+    // write, and the claim is welcome again the moment that happens.
+    const terminalGuard = active ? " AND status NOT IN ('done', 'failed', 'blocked')" : ''
     await this.db.run(
       `UPDATE work_board_items SET inline_active = ?, updated_at = ?
         WHERE project_slug = ? AND id = ?${terminalGuard}`,
@@ -1156,6 +1291,14 @@ export class WorkBoardStore {
           sets.push('completed_at = ?')
           params.push(this.now())
         }
+      } else if (outcome === 'blocked') {
+        // BLOCKED — the build stopped ON PURPOSE and said why. Same shape as the
+        // failed arm (keep the run link so the retry path can overwrite it, never
+        // stamp `completed_at` — nothing completed), and a DIFFERENT LANE, which is
+        // the entire point: the owner has to be able to tell "this needs a decision"
+        // from "this broke", and leaving it in `upcoming` would put it back at the
+        // top of the active lane looking startable.
+        sets.push("status = 'blocked'", 'completed_at = NULL')
       } else {
         // Failed — FAILED lane, KEEP the run link (see the header). The retry
         // path (`attachRun`) overwrites the link + flips back to in_progress.
