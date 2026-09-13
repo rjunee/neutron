@@ -85,21 +85,26 @@ import { registerReplDetectors } from './repl-detectors.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 
 /**
- * The bound on the gate a turn can wait behind.
+ * HOW OLD THE EVIDENCE FOR AN ADOPTION MAY BE. Not a bound on the wait.
  *
- * IT IS A WATCHDOG OVER A COMPOSITION OF BOUNDS, NOT THE BOUND ITSELF, and the
- * difference matters because presenting one as the other is how a number stops
- * describing anything. Each step already has its own deadline — the herdr client
- * refuses an unanswered RPC at 10 s, the pid wait at 5 s, the `/health` probe at 2 s —
- * so the real worst case is their SUM on a pathological server, which is longer than
- * this. This exists so that a composition that somehow exceeds its parts still
- * releases the gate, and it is deliberately generous: the thing it is trading against
- * is two `claude` processes on one transcript, which is worse than a slow first turn.
+ * SAYING WHICH QUANTITY IS BOUNDED IS THE POINT, because an earlier revision of this
+ * comment claimed this number "releases the spawn gate" and it does not: every caller
+ * awaits the pass to completion, deliberately. A gate that released early would let a
+ * cold `--resume` start while the old child was still alive — two processes on one
+ * transcript, which is the thing this whole module exists to prevent, and strictly
+ * worse than a slow first turn after a restart.
  *
- * ON EXPIRY THE PASS DOES NOT ADOPT. It is marked abandoned, and a verification still
- * in flight converts to a CLOSE rather than an adoption — because once the gate has
- * released, something else may already have cold-resumed that transcript, and the
- * surviving pane has become the second owner.
+ * WHAT THE WAIT IS ACTUALLY BOUNDED BY is the composition of the per-step deadlines:
+ * the herdr client refuses an unanswered RPC at 10 s, the pid wait is 5 s, the
+ * `/health` probe 2 s. A pathological server can therefore hold a first turn for tens
+ * of seconds, and that is the accepted cost.
+ *
+ * WHAT THIS BOUNDS is the freshness of what the decision rests on. An adoption is a
+ * conjunction of observations — the pane's argv, the dev-channel's answer — and past
+ * this many milliseconds those are no longer a description of now. A pass that slow
+ * means herdr is badly unwell, so the safe act is the one that needs no fresh evidence:
+ * the pane is CLOSED rather than adopted, and the transcript is resumed cleanly on the
+ * next turn. Generous on purpose — it is a pathology detector, not a latency budget.
  */
 export const BOOT_ADOPTION_BUDGET_MS = 45_000
 
@@ -210,14 +215,18 @@ export function beginBootAdoption(
   // THE BUDGET IS ARMED HERE, not inside the pass, so it bounds the WAIT rather than
   // the work: the pass runs to completion either way (and closes rather than adopts
   // once abandoned), while the gate stops blocking.
+  // THE EVIDENCE CLOCK. It does not interrupt anything and it does not release the
+  // gate — see {@link BOOT_ADOPTION_BUDGET_MS}. It marks the pass, so that a
+  // verification which is still in flight this long after it started ends in a CLOSE
+  // rather than in an adoption built on observations that are no longer current.
   const budgetMs = deps.budgetMs ?? BOOT_ADOPTION_BUDGET_MS
   const timer = setTimeout(() => {
     if (signal.abandoned) return
     signal.abandoned = true
     ;(deps.log ?? defaultLog)(
-      `boot adoption for key=${sessionKey.slice(0, 32)} exceeded ${budgetMs}ms — releasing the spawn gate. ` +
-        'A verification still in flight will CLOSE the pane rather than adopt it, because a cold spawn may ' +
-        'now own that transcript.',
+      `boot adoption for key=${sessionKey.slice(0, 32)} has been running ${budgetMs}ms — its evidence is too old ` +
+        'to adopt on. If the verification finishes now it will CLOSE the pane instead; the transcript is then ' +
+        'resumed cleanly on the next turn.',
     )
   }, budgetMs)
   ;(timer as unknown as { unref?: () => void }).unref?.()
@@ -519,13 +528,14 @@ async function adoptRow(
   // ── The child is established. Rebuild around it, in the same order `spawnSession`
   //    builds around a fresh one, and for the same reasons. ──────────────────────
 
-  // THE LAST POINT AT WHICH ADOPTING IS STILL THE RIGHT ACT. Past the gate's budget
-  // the spawn path has been released, so a cold `--resume` may already own this
-  // transcript; putting a second owner in the pool would be worse than losing the
-  // pane. Close instead — the verification above is exactly what licenses closing it.
+  // THE LAST POINT AT WHICH ADOPTING IS STILL THE RIGHT ACT. The checks above are
+  // observations, and past the evidence clock they have stopped describing now: the
+  // pane may have died, or been replaced, since we looked. Closing needs no fresh
+  // evidence — the identity we established is what licenses it — so that is what a
+  // stale pass does.
   if (signal.abandoned) {
     const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
-    const reason = 'the spawn gate was released before this verification finished, so adopting could produce a second owner'
+    const reason = `this verification took longer than the ${BOOT_ADOPTION_BUDGET_MS}ms evidence bound, so what it established is no longer current`
     return closed
       ? { kind: 'closed-unadoptable', sessionKey, reason }
       : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
@@ -660,7 +670,7 @@ async function adoptRow(
   // can expire inside it — the window between the check above and this line is the
   // one thing that check cannot cover.
   if (signal.abandoned) {
-    return await unwind('the spawn gate was released while the attach was in flight', child)
+    return await unwind('the evidence bound elapsed while the attach was in flight', child)
   }
   scanChild = child
   session.attachChild(child)

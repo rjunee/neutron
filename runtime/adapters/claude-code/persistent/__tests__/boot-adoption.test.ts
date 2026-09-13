@@ -22,7 +22,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { reconcileOwnRepl, resetBootAdoption } from '../boot-adoption.ts'
+import { beginBootAdoption, reconcileOwnRepl, resetBootAdoption } from '../boot-adoption.ts'
 import { childByKey, pool, sink } from '../pool-state.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { ReplSession } from '../repl-session.ts'
@@ -308,6 +308,68 @@ describe('the refuse directions — one owner per transcript, always', () => {
     expect(pool.get(KEY)).toBeUndefined()
     expect(childByKey.get(KEY)).toBeUndefined()
     expect(await postReply(credential)).toBe(401)
+  })
+})
+
+describe('evidence that has gone stale', () => {
+  it('CLOSES rather than adopting when the pass outruns the evidence bound', async () => {
+    // The verification is held open past the bound. What it established — the pane's
+    // argv, the dev-channel's answer — has stopped describing now, so the pass takes
+    // the act that needs no fresh evidence.
+    const f = fixture()
+    const release = f.host.holdAttach()
+    // Through the PRODUCTION entry point, because that is what arms the clock — a
+    // case that called the pass directly would supply an unarmed signal and pass
+    // whatever the code did.
+    const outcome = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      budgetMs: 20,
+    })
+    // The gate does NOT release here: `outcome` is still pending, which is the
+    // property this bound is deliberately not about.
+    await Bun.sleep(80)
+    release()
+    const settled = await outcome
+    expect(settled.kind).toBe('closed-unadoptable')
+    expect(f.host.closed).toEqual([HANDLE])
+    expect(pool.get(KEY)).toBeUndefined()
+  })
+
+  it('CLOSES without even attaching when the bound elapses BEFORE the attach', async () => {
+    // The other half of the same rule, and a distinct branch: the first check sits
+    // ahead of everything the adoption installs, so a pass that is already stale by
+    // then must not attach at all. Driven by a slow `/health`, which is where a sick
+    // box actually spends the time.
+    const f = fixture()
+    const settled = await beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => {
+        await Bun.sleep(60)
+        return true
+      },
+      log: () => {},
+      budgetMs: 20,
+    })
+    expect(settled.kind).toBe('closed-unadoptable')
+    expect(f.host.closed).toEqual([HANDLE])
+    // Nothing was attached, so there is nothing to unwind — which is the point of
+    // checking here rather than only after.
+    expect(f.host.attached).toHaveLength(0)
+    expect(pool.get(KEY)).toBeUndefined()
+  })
+
+  it('adopts normally when it finishes inside the bound — the positive control', async () => {
+    const f = fixture()
+    const settled = await beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      budgetMs: 10_000,
+    })
+    expect(settled.kind).toBe('adopted')
+    expect(f.host.closed).toEqual([])
   })
 })
 

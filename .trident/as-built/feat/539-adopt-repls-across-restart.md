@@ -152,9 +152,29 @@ every mutation was applied and reverted mechanically, and the tree was clean aft
 | M14 | shutdown verdict never survives (**over-strict**) | `gateway-shutdown-survival.test.ts` (2) |
 | M15 | the protocol gate removed from `inspectHandle` | `herdr-adoption.test.ts` (1) |
 | M16 | the protocol gate removed from `closeHandle` | `herdr-adoption.test.ts` (1) |
+| M17 | the PRE-attach stale-evidence check removed | `boot-adoption.test.ts` (1) |
+| M18 | the POST-attach stale-evidence check removed | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
+
+### One correction this record has to carry, because I wrote the wrong sentence first
+
+The evidence clock (`BOOT_ADOPTION_BUDGET_MS`) was first documented as "the bound on
+the gate a turn can wait behind", and it is not: every caller awaits the pass to
+completion, deliberately, because a gate that released early would let a cold
+`--resume` start while the old child was still alive — the two-owner outcome this
+module exists to prevent, and strictly worse than a slow first turn. The wait is
+bounded only by the composition of the per-step deadlines (10 s per RPC, 5 s pid wait,
+2 s health probe), and that is the accepted cost.
+
+What the clock actually bounds is **the age of the evidence an adoption rests on**. An
+adopt verdict is a conjunction of observations, and past this long they have stopped
+describing now — so a pass that slow takes the act that needs no fresh evidence and
+CLOSES the pane. Both of its branches (before the attach, and after it) are now driven
+by tests, because until they were, the mechanism was unreachable in the suite: a first
+attempt at the test called the pass directly, which supplies an unarmed clock and would
+have passed whatever the code did. M17/M18 are the proof that it is reachable.
 
 ### The protocol gate covers the adoption surface, not just the spawn
 
