@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path'
 import {
   adoptionPermitsSpawn,
   beginBootAdoption,
+  deleteOwnPoolEntry,
   reconcileOwnRepl,
   resetBootAdoption,
   resetBootAdoptionForTests,
@@ -2040,5 +2041,117 @@ describe('an in-process restart leaves ONE wrapper on the pane, not two', () => 
     retired?.push('❯ 1. Yes, proceed')
     expect(retired?.keysSent).toEqual([])
     expect(live?.detached ?? false).toBe(false)
+  })
+})
+
+
+describe("a cleanup path evicts only its OWN pool entry", () => {
+  /**
+   * ARGUS r30, and the tenth instance of this branch's sibling pattern — this time with
+   * the guarded and unguarded lines ADJACENT. `unwind` identity-guarded `childByKey` and
+   * the sink on the line above, and deleted `pool` unconditionally on the line below. So
+   * pass A pauses, something publishes a newer session under the same key, A finds the row
+   * moved and unwinds — evicting B's entry. B's child is alive, its row names it, and the
+   * map every turn resolves through no longer has it.
+   *
+   * The existing moved-row coverage replaces the row ON DISK and never installs a live
+   * pool session, which is exactly why it could not see this: the eviction is about the
+   * in-memory map and that fixture only moves the file.
+   */
+  const BEE_SESSION = 'ffffffff-1111-2222-3333-444444444444'
+  const BEE_GEN = 'gen-ffff-9999'
+
+  /** A genuinely distinct newer session under the same key — own session id, generation
+   *  and pane, the way the B-fixture was fixed at round twenty-four. A copy of A's would
+   *  make the identity comparison trivially true and the case worthless. */
+  function newerSession(): ReplSession {
+    const b = new ReplSession(KEY, BEE_GEN, BEE_SESSION, CHANNEL, '/tmp')
+    b.attachChild({
+      pid: 9999,
+      paneHandle: 'w9:p-B',
+      write: () => {},
+      kill: () => {},
+      exited: new Promise<number | null>(() => {}),
+      hasExited: () => false,
+    } as never)
+    return b
+  }
+
+  it("A's UNWIND leaves a newer session in the pool untouched", async () => {
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    // B publishes while A is still deciding, and the row moves with it.
+    const b = newerSession()
+    pool.set(KEY, Promise.resolve(b))
+    writeRegistry(f.registryPath, { pane_handle: 'w9:p-B', child_generation: BEE_GEN })
+    release()
+    await pass
+
+    // B SURVIVES. Without the guard, A's cleanup evicted the entry every turn resolves
+    // through while B's child was alive and its row named it.
+    expect(await pool.get(KEY)).toBe(b)
+  })
+
+  it("A's RELEASE leaves it untouched too — all three paths, not just the one", async () => {
+    const f = fixture()
+    supervisedBySessionKey.set(KEY, {
+      replRegistryPath: f.registryPath,
+    } as unknown as PersistentReplSubstrateOptions)
+    const { entered, release } = f.host.holdAttach()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
+    // B lands after the teardown, which is the window the release path runs in.
+    const b = newerSession()
+    pool.set(KEY, Promise.resolve(b))
+    release()
+    await pass
+
+    expect(await pool.get(KEY)).toBe(b)
+  })
+
+  it('THE UNIT CONTROLS: ours is deleted, a stranger is kept, rejected is deleted, pending is kept', () => {
+    // ALL FOUR ARMS, AT THE ONLY LEVEL THEY ARE OBSERVABLE — and finding that out was a
+    // result in itself. Driving the "ours" arm through the pass is impossible today:
+    // `adoptRow` publishes only after the claim succeeds and no cleanup follows a
+    // successful claim, so none of the three cleanup paths ever runs with its own session
+    // in the pool. Which means the unconditional delete they used to perform could ONLY
+    // ever have evicted somebody else's entry.
+    //
+    // Without these controls a guard that never deleted anything would satisfy the two
+    // behaviour cases above, so the arms are pinned here.
+    const mine = new ReplSession(KEY, GENERATION, SESSION_ID, CHANNEL, '/tmp')
+    const stranger = newerSession()
+
+    pool.set(KEY, Promise.resolve(mine))
+    deleteOwnPoolEntry(KEY, mine)
+    expect(pool.get(KEY)).toBeUndefined()
+
+    pool.set(KEY, Promise.resolve(stranger))
+    deleteOwnPoolEntry(KEY, mine)
+    expect(pool.get(KEY)).toBeDefined()
+
+    const rejected = Promise.reject(new Error('spawn failed'))
+    rejected.catch(() => undefined)
+    pool.set(KEY, rejected as unknown as Promise<ReplSession>)
+    deleteOwnPoolEntry(KEY, mine)
+    expect(pool.get(KEY)).toBeUndefined()
+
+    // PENDING is not ours: ours is installed already-fulfilled, so a pending entry belongs
+    // to a spawn somebody else started.
+    pool.set(KEY, new Promise<ReplSession>(() => {}))
+    deleteOwnPoolEntry(KEY, mine)
+    expect(pool.get(KEY)).toBeDefined()
+    pool.delete(KEY)
   })
 })

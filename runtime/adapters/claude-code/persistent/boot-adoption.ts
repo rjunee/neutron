@@ -1112,6 +1112,56 @@ function rowStillNames(
 }
 
 /**
+ * DELETE THIS KEY'S POOL ENTRY ONLY IF IT IS STILL OURS (#539, Argus r30).
+ *
+ * `pool.delete(sessionKey)` was unconditional in all three cleanup paths while the same
+ * functions identity-guarded `childByKey` and the sink — in `unwind` the guarded and
+ * unguarded lines sit adjacent. So: pass A pauses in inspection or attach, something else
+ * publishes a newer session under the same key, A finds the row moved and unwinds — and
+ * evicts **B's** entry. B's child is alive, its row names it, and the map every turn
+ * resolves through no longer has it.
+ *
+ * THE PATTERN IS `child-exit-wiring.ts`'s, INCLUDING THE REJECTION ARM: a pooled promise
+ * that REJECTED owns no child, so deleting it is right and dropping that arm would wedge a
+ * rejected entry under the key forever.
+ *
+ * SYNCHRONOUS, VIA `Bun.peek`, AND THAT IS A DELIBERATE DIFFERENCE FROM THE MODEL.
+ * `child-exit-wiring` awaits the pooled promise; two of this module's three cleanup paths
+ * (`release`, `releaseWithReason`) are synchronous by contract — `release` is called from
+ * `claimRowOrUnwind`'s `publish`, which is `() => RowAdoptionOutcome` — so awaiting there
+ * would ripple through the claim's signature. `Bun.peek` is the same synchronous-mirror
+ * read `pool.ts`'s shutdown partition already uses on this map, and using ONE form at all
+ * three sites is the point: a mixed approach would be this branch's sibling pattern again,
+ * with two sites guarded one way and the third another.
+ *
+ * A PENDING entry is not ours. Ours is installed as `Promise.resolve(session)` — already
+ * fulfilled — so anything still pending under this key belongs to a spawn somebody else
+ * started, and is left alone.
+ *
+ * WORTH KNOWING WHAT THE "OURS" ARM IS FOR. Measured while testing this: none of the
+ * three cleanup paths currently runs with this pass's OWN session in the pool —
+ * `adoptRow` publishes only after the claim succeeds, and no cleanup follows a successful
+ * claim. So the unconditional delete these paths used to perform could only ever have
+ * evicted somebody ELSE's entry. The arm is kept because the guard's contract is "delete
+ * iff ours", not "never delete": a future caller that publishes before it can fail must
+ * not have to rediscover this, and a guard whose safe branch is unreachable today is one
+ * bug-fix away from being reachable tomorrow. Exported for the unit cases, which is the
+ * only level where all four arms are observable.
+ */
+export function deleteOwnPoolEntry(sessionKey: string, session: ReplSession): void {
+  const pooled = pool.get(sessionKey)
+  if (pooled === undefined) return
+  const status = Bun.peek.status(pooled)
+  if (status === 'rejected') {
+    // Owns no child. Deleting it is the point — see the note above.
+    pool.delete(sessionKey)
+    return
+  }
+  if (status !== 'fulfilled') return
+  if ((Bun.peek(pooled) as ReplSession) === session) pool.delete(sessionKey)
+}
+
+/**
  * Turn the clear's outcome into the CLOSE's outcome — exhaustively, so a new
  * `ClearOutcome` fails the typecheck here instead of defaulting into `closed`.
  *
@@ -1705,7 +1755,7 @@ async function adoptRow(
   const unwind = async (reason: string, attached?: PtyChild): Promise<RowAdoptionOutcome> => {
     sink.unregisterIf(record.sessionId, session)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
-    pool.delete(sessionKey)
+    deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
     session.deadTurnWatcher?.stop()
     const close = await closeAndClear(
@@ -1747,9 +1797,20 @@ async function adoptRow(
     // optional: a backend whose children die with this process has no loop to stop.
     attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
-    pool.delete(sessionKey)
+    deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
     session.deadTurnWatcher?.stop()
+    // AND THE LIVE-PROCESS HANDLE (Argus r30, found by the per-structure audit rather than
+    // by a gate). It is registered at the adopt path's `registerLiveProcessSafe` and
+    // released by ONE thing: `child-exit-wiring`'s exit handler calling `unregister()`.
+    // `unwind` does not need to do it — that path CLOSES the pane, the child exits, and the
+    // handler fires. This path is the opposite: the pane is left running and the wrapper is
+    // detached, so `exited` never resolves and the handler never runs. On a real shutdown
+    // the process is going away and the registry is in-memory, so it costs nothing; on the
+    // in-process restart this detach exists for, the retired handle would stay registered
+    // and the next adoption would add a second entry for the same pid. An attribution
+    // defect rather than a corruption one, and there is no reason to leave it.
+    session.liveHandle?.unregister()
     log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
     return { kind: 'undecided', sessionKey, reason }
   }
@@ -1761,9 +1822,20 @@ async function adoptRow(
     // Same hand-over as {@link release} — see the note there.
     attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
-    pool.delete(sessionKey)
+    deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
     session.deadTurnWatcher?.stop()
+    // AND THE LIVE-PROCESS HANDLE (Argus r30, found by the per-structure audit rather than
+    // by a gate). It is registered at the adopt path's `registerLiveProcessSafe` and
+    // released by ONE thing: `child-exit-wiring`'s exit handler calling `unregister()`.
+    // `unwind` does not need to do it — that path CLOSES the pane, the child exits, and the
+    // handler fires. This path is the opposite: the pane is left running and the wrapper is
+    // detached, so `exited` never resolves and the handler never runs. On a real shutdown
+    // the process is going away and the registry is in-memory, so it costs nothing; on the
+    // in-process restart this detach exists for, the retired handle would stay registered
+    // and the next adoption would add a second entry for the same pid. An attribution
+    // defect rather than a corruption one, and there is no reason to leave it.
+    session.liveHandle?.unregister()
     log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
     return { kind: 'undecided', sessionKey, reason }
   }

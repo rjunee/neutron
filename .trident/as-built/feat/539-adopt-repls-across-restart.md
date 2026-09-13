@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M86 less M31, M38 and M80 = 83**.
+only dead row. The live count is therefore **M1–M89 less M31, M38 and M80 = 86**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1325,6 +1325,86 @@ is what classified the `install.sh` family as environment rather than regression
 it I would have been guessing, and the guess "these look unrelated" is exactly how a real
 failure gets waved through.
 
+### Round thirty: the guarded and unguarded lines were adjacent
+
+`pool.delete(sessionKey)` was unconditional in all three cleanup paths while the same
+functions identity-guarded `childByKey` and the sink — in `unwind` the guarded and
+unguarded lines sit next to each other. So pass A pauses, something publishes a newer
+session under the same key, A finds the row moved and unwinds, and **B's** pool entry is
+evicted: B's child alive, its row naming it, and the map every turn resolves through no
+longer holding it.
+
+**Tenth instance of the sibling pattern, and the first where the neighbours are lines
+rather than files.** Nine were a rule applied at one site and not another; this is a rule
+applied to two of three structures **inside one function**.
+
+`deleteOwnPoolEntry` copies `child-exit-wiring.ts`'s pattern **including the rejection
+arm** — a pooled promise that rejected owns no child, so deleting it is right and dropping
+that arm would wedge a rejected entry under the key forever.
+
+**It is synchronous via `Bun.peek`, and that is a deliberate departure from the model.**
+`child-exit-wiring` awaits the pooled promise; two of the three cleanup paths are
+synchronous by contract (`release` is called from `claimRowOrUnwind`'s `publish`, typed
+`() => RowAdoptionOutcome`), so awaiting there would ripple through the claim's signature.
+`Bun.peek` is the same synchronous-mirror read `pool.ts`'s shutdown partition already uses
+on this map, and using ONE form at all three sites is the point — a mixed approach would be
+this branch's own pattern again, two sites guarded one way and the third another.
+
+**Writing the positive control taught me what the "ours" arm is for.** Driving it through
+the pass is impossible today: `adoptRow` publishes only after the claim succeeds, and no
+cleanup follows a successful claim — so **none of the three paths ever runs with its own
+session in the pool**, which means the unconditional delete they used to perform could ONLY
+ever have evicted somebody else's entry. The arm is kept anyway, because the guard's
+contract is "delete iff ours" rather than "never delete", and a guard whose safe branch is
+unreachable today is one bug-fix away from being reachable tomorrow. All four arms are
+pinned at the unit level, which is the only place they are observable.
+
+### The per-structure column, and the fifth structure it found
+
+The audit table asks "every call site of the guarded thing". This round says the more
+useful question for a cleanup path is **"every structure this function mutates, and the
+identity guard on each"** — because the defect was two of three structures in one function.
+
+| Structure | `unwind` | `release` / `releaseWithReason` | Identity-guarded? |
+|---|---|---|---|
+| sink registration | `unregisterIf` | `unregisterIf` | **Yes** — `unregisterIf` compares the session before removing. |
+| `childByKey` | guarded compare | guarded compare | **Yes** — `childByKey.get(key) === attached`. |
+| `pool` | `deleteOwnPoolEntry` | `deleteOwnPoolEntry` | **Yes, as of this round.** Was unconditional; M87/M88/M89. |
+| `session.sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | **Not needed** — both live ON the session object this path owns, so there is no other owner's watcher to stop. |
+| the attached `PtyChild` | closed via `closeAndClear` | `detach?.()` | **Yes by construction** — the child is the one this path was handed, not one looked up by key. |
+| **live-process handle** | released by the exit handler | **was never released** | **Fixed this round.** `unwind` closes the pane, so the child exits and `child-exit-wiring` unregisters it. The release paths leave the pane running and detach the wrapper, so `exited` never resolves and the handler never fires — the retired handle stayed registered. On a real shutdown that costs nothing (the process is going away, the registry is in-memory); on the in-process restart this detach exists for, the next adoption adds a second entry for the same pid. An attribution defect rather than a corruption one, and no reason to leave it. |
+
+That last row is what the column was for: **a fifth structure nobody had looked at, found by
+enumerating what the function touches rather than by waiting for a gate to notice.**
+
+### Shard 3 on `96c38e3c`: a wall-clock flake, classified by differential
+
+`trident/__tests__/cross-model-dispatch.test.ts` — "the detached wrapper outlives the
+Bash-call bound that used to kill it". Nothing to do with `PtyChild.detach`; "detached"
+there means a detached process. Round twenty-nine was documentation only, which is what made
+it worth checking rather than assuming.
+
+Classified with the method from round twenty-eight, and the strongest evidence is the one
+that needs no timing at all: **`git diff --name-only origin/main HEAD` lists no `trident/`
+file**, and the test plus the code it exercises are byte-identical to main's. A logical
+break from this branch is therefore impossible; only contention could differ.
+
+So contention was measured rather than dismissed — the coordinator's hypothesis was that
+this branch's corrupt-registry cases write `.corrupt-<ts>-<pid>-<n>` sidecars in the same
+shard as a 451 ms timing bound. `PLAN_ONLY` confirms shard 3 does hold both
+`repl-registry.test.ts` and this case, so the hypothesis was live. **Shard 3 in full then
+passed 3/3 on this head**, with those neighbours present, and the file alone passes 62/62
+at this head and at its predecessor, 5/5 on repeat.
+
+What remains is the case's own margin: it backgrounds a `sleep 0.25` and then
+`await Bun.sleep(400)` — **150 ms of headroom on a shared runner**. That is a flake
+generator regardless of who trips it, and it wants an issue of its own. What is NOT on the
+table is relaxing the bound of a test this branch did not write, to get this branch green.
+
+Stated precisely, because the boundary matters: I measured 3/3 locally on this head with the
+full shard, and identity of the code with main. I did not measure the failure rate on CI,
+which is where it happened and where my box cannot stand in.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1335,7 +1415,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven and M85–M86 in round twenty-eight, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight and M87–M89 in round thirty, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1452,6 +1532,9 @@ count from the rows below rather than trusting this sentence.
 | M84 | the pattern rejects a legitimate generated name (**over-strict — stops cleaning up credential files**) | `session-config-containment.test.ts` (2) |
 | M85 | the filesystem check is removed from cleanup | `session-config-containment.test.ts` (1) |
 | M86 | cleanup refuses real directories too (**over-strict — retains every credential file**) | `session-config-containment.test.ts` (1) |
+| M87 | the unconditional `pool.delete` is restored | `boot-adoption.test.ts` (1) |
+| M88 | the identity comparison is inverted, so nothing is ever deleted | `boot-adoption.test.ts` (1) |
+| M89 | the rejected-promise arm is dropped | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
