@@ -104,6 +104,15 @@ function mergingHost(conflictRounds: number): { host: HostRunner; calls: string[
         [1, 2, 3].map((stage) => `100644 ${'a'.repeat(40)} ${stage}\tdocs/NOTES.md`).join('\u0000') + '\u0000',
       )
     }
+    // THE SIZE QUERY, for exactly the reason the `ls-files` arm above exists. `objectSize`
+    // weighs each stage blob before any content is read, and a stub that omits `cat-file -s`
+    // falls through to `ok()` — empty stdout. That used to parse as the NUMBER ZERO, so the
+    // budget weighed nothing, the pre-read guard passed, and this test went green against the
+    // defect it was not testing. Round 33 made an unparseable size UNKNOWN, which is correct
+    // and which turned every such stub red at once: they had all been exercising the bug.
+    // A stub that omits a query supplies whatever the default branch returns, and here the
+    // default WAS the bug.
+    if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
     // Every ref resolves to the same commit: fork point == tip == head, so the
     // base-drift gate measures no movement.
     if (cmd.includes('rev-parse') || cmd.includes('merge-base')) return ok(HEAD_SHA)
