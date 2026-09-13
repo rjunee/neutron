@@ -2256,6 +2256,64 @@ result proves nothing if either the pattern or the domain is wrong, and on this 
 both have been. The same widening was applied to the `HERDR_SOCKET_PATH` guard, which had
 the same too-narrow walk.
 
+### The FIFTH instrument: three guards, three branches, one identical gap
+
+The widening above fixed the domain and left the RECOGNISER narrow, which is the same
+mistake one level down. All three guards on this branch shared a single spelling:
+
+- `process\.env\['KEY'\]\s*=` — so `process.env.KEY = x` and `process.env["KEY"] = x` both
+  walked straight past, in the write branch *and* in the `delete` restore branch;
+- the stderr guard matched `process.stderr.write =` only, so `process['stderr'].write = `
+  was invisible;
+- and the collector was `*.test.ts` plus anything under `__tests__/`, so a helper at
+  `tests/support/scrub-instance-env.ts` — imported by the **test preload**, and therefore
+  running in every single test process — could have done any of it unseen.
+
+Three guards, three independent branches, the same gap in each, every one of them
+reporting a clean tree. **An empty offender list is an ABSENCE, and an absence is evidence
+only if the recogniser admits everything the rule names.** Each guard's own comment
+claimed the operation ("no test monkey-patches stderr by hand"); each guard's regex
+claimed one way of writing it. The comment is the claim and the regex is the instrument,
+and they had drifted apart in three places at once.
+
+Measured before changing anything: **no offender exists in any spelling anywhere in the
+tree** (2507 `.ts` files, 35 MB, against 1402 in the old domain). So this closes a hole,
+it does not fix a live defect — which is exactly why it had survived. A guard that is
+narrower than its claim is indistinguishable from a guard that works, right up until the
+day something walks through it.
+
+The fix is one matcher per operation (`matchesEnvWrite`, `matchesEnvDelete`,
+`matchesStderrWrite`), exported and asserted DIRECTLY, one spelling per test case, plus
+one collector (`allSourceFiles`) over every `.ts` minus a named `SKIP_DIRS`. The domain
+now includes production deliberately: a hit there is a finding, not a false positive.
+
+Two things fell out of doing it this way, and both are the point:
+
+1. **The extraction introduced a bug in the same breath.** `envRef` was written as a plain
+   template literal, so `\s` collapsed to a literal `s` and the pattern matched almost
+   nothing. The `writers.length >= 3` positive control caught it on the first run — the
+   guard reported a clean tree, and the control said the detector was blind. `String.raw`
+   fixed it. A positive control is not ceremony; it is the only thing standing between
+   "nothing is wrong" and "nothing can be seen".
+
+2. **The fixtures had to be assembled, not spelled.** Every positive case is an exact
+   instance of what these guards hunt, and the guards now scan every `.ts` including the
+   file that defines them — so written literally, this file becomes its own top offender
+   (it did, immediately: 2 fail). The tempting fix is to exempt the guard's own file, and
+   that is strictly the worst option available, because it punches the hole in the one
+   place nobody would think to look for it. The fixture text is joined at runtime instead;
+   the string the matcher sees is byte-identical. The NEGATIVE cases stay spelled
+   literally, and that is itself the demonstration — they survive the scan because they
+   genuinely are not matches. (A source-text scanner still cannot see a write whose key is
+   computed. That was already true, since `matchesEnvWrite` takes a literal key, and it is
+   the standing limit of this instrument rather than something the assembly introduced.)
+
+The per-form cases are separate tests on purpose. One mutation that reddens all of them
+would mean they are testing the COLLECTOR, not the matcher. M234-M248 show the opposite:
+no two mutations share a red set, every assertion in the block is reddened by at least one
+of them, and M248 — the collector narrowed back to `__tests__/` — reddens the DOMAIN
+control while leaving every matcher case green.
+
 ### SCOPE REVERSAL: the in-process backend is kept as an option, not deleted
 
 This item began as a hard delete — "`bun-terminal-host.ts` is deleted, not left beside
@@ -2890,6 +2948,22 @@ Run against the named suites.
 | M75c | accept ONLY an array `data` | RED 1 (its own case) |
 | M75d | accept ONLY a string `data` | RED 1 (its own case) |
 | M75e | accept ONLY a number `data` | RED 1 (its own case) |
+| M234 | `envRef` drops the dot form | RED 2 (the dot write, the dot delete) |
+| M235 | `envRef` drops the bracket forms | RED 7 (4 writes, 2 deletes, and the tree guard) |
+| M236 | `envRef`'s quote class loses `"` | RED 2 (the double-quoted write and delete) |
+| M237 | `envRef` loses `\s*` inside the brackets | RED 1 (`[ 'KEY' ]`) |
+| M238 | the write tail loses `\s*` before `=` | RED 5 (every spaced write, and the tree guard) |
+| M239 | the write tail loses `(?!=)` | RED 3 (both `===` cases, and the tree guard — the gated suites READ their flag) |
+| M240 | the write matcher ignores the key (`process\.env\S*`) | RED 3 (the different-key control, `[ 'KEY' ]`, and the tree guard) |
+| M241 | `matchesEnvDelete` drops the bracket forms | RED 3 (2 deletes, and the tree guard: a writer stops counting as restored) |
+| M242 | the write tail becomes `.*=` | RED 4 (all three comparison cases, and the tree guard) |
+| M242b | PAIR: the write tail becomes `[^=]*=` | SURVIVED — and correctly: `[^=]*` cannot cross the `!` into `!==`, so the property still holds. An equivalent mutant, kept in the table because M242 is only meaningful next to it |
+| M243 | the stderr matcher drops the bracketed member | RED 2 (both quoted-member forms) |
+| M244 | the stderr matcher drops the dot member | RED 3 (dot, tight, and the helper's own positive control) |
+| M245 | the stderr matcher loses `(?!=)` | RED 2 (the `===` case, and the tree guard) |
+| M246 | the stderr matcher drops `=` entirely (a call counts as an assignment) | RED 3 (the call case, the `===` case, and the tree guard) |
+| M247 | the stderr matcher requires a space before `=` | RED 1 (`\.write=fake`) |
+| M248 | `allSourceFiles` narrowed back to `*.test.ts` + `__tests__/` | RED 1 — the DOMAIN control (`tests/support/scrub-instance-env.ts` unreached) and **no matcher case**, which is the separation being claimed |
 
 M132 and M133 both SURVIVED, and the reason is the answer rather than a gap: the two
 settlement guards are redundant, so each absorbs the other, and a single mutation of

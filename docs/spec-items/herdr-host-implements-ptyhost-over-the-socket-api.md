@@ -693,6 +693,39 @@ not-new. That is accepted and recorded here rather than hidden.
       nothing if either the pattern or the domain is wrong, and on this branch both have
       been.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts tests/integration/pty-e2e-registered.test.ts`
+- [ ] **Each of these guards recognises the OPERATION, not one spelling of it, and says so
+      in a test that can fail on its own.** Widening the domain above fixed the collector
+      and left the RECOGNISER narrow, which is the identical mistake one level down. All
+      three guards on this branch shared a single spelling — `process\.env\['KEY'\]\s*=`
+      on the write branch AND on the `delete` restore branch, and `process.stderr.write =`
+      on the stderr branch — so `process.env.KEY = x`, `process.env["KEY"] = x` and
+      `process['stderr'].write = x` all walked past three guards that each reported a
+      clean tree. Three guards, three independent branches, one gap. An empty offender
+      list is an ABSENCE, and an absence is evidence only if the recogniser admits
+      everything the rule names; each guard's comment claimed the operation while its
+      regex claimed one way of writing it.
+      THE COLLECTOR IS THE TREE, NOT A DIRECTORY WHITELIST: every `.ts` minus a named
+      `SKIP_DIRS`, production included, because a hit in production is a finding rather
+      than a false positive — and because the previous domain missed
+      `tests/support/scrub-instance-env.ts`, a helper the test PRELOAD imports into every
+      test process.
+      EACH ADMITTED FORM IS ITS OWN CASE, asserting the exported matcher directly: dot,
+      single-quoted, double-quoted, whitespace inside the brackets, and no space around
+      the `=`, on the write side and on the `delete` side, plus the refinements that must
+      survive the widening — a comparison is not a write (every gated suite reads its own
+      flag with `===`), a call is not an assignment, and the key is load-bearing. One
+      mutation that reddens all of them would mean they test the collector rather than the
+      matcher, so no two may share a red set.
+      THE POSITIVE CONTROLS ARE NOT CEREMONY: extracting these matchers introduced a
+      pattern bug in the same breath (a plain template literal ate `\s`), and the
+      `writers.length >= 3` control was the only thing that distinguished "the tree is
+      clean" from "the detector is blind".
+      AND THE FIXTURES ARE ASSEMBLED AT RUNTIME RATHER THAN SPELLED, because the guards
+      scan the file that defines them and a literal fixture makes that file its own top
+      offender. Exempting the guard's own file is the one fix that must not be used: it
+      puts the hole in the place nobody would look. The negative cases stay literal, which
+      is itself the demonstration that they are not matches.
+      verify: `bun test tests/integration/pty-e2e-registered.test.ts`
 - [ ] **A live proof leaves the owner's herdr exactly as it found it.** This item's
       subject is making herdr the REPL container, and its own live suites leaked REPL
       containers into the owner's session: four orphaned tabs, each a real `claude`

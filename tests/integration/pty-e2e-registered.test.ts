@@ -51,14 +51,25 @@ function walkTests(dir: string, out: string[] = []): string[] {
 }
 
 /**
- * Every `.ts` a test run can load: every `*.test.ts`, plus every module under a
- * `__tests__/` directory (fakes, fixtures, capture helpers).
+ * Every `.ts` in the repository, minus the vendored and build trees named in
+ * {@link SKIP_DIRS}.
  *
- * WIDER THAN `walkTests` ON PURPOSE. A rule about what tests may do to process state
- * has to cover the files tests IMPORT, or the next hand-rolled copy simply moves into a
- * helper and the guard reports clean.
+ * THE DOMAIN IS THE RULE'S DOMAIN, NOT A DIRECTORY WHITELIST. This was
+ * `*.test.ts` plus anything under a `__tests__/` directory, with a docblock claiming it
+ * "has to cover the files tests IMPORT, or the next hand-rolled copy simply moves into a
+ * helper and the guard reports clean". That sentence described a bypass the
+ * implementation left open: `__tests__/` is ONE PLACE helpers live, not the definition
+ * of a helper, and `tests/support/*.ts` — imported by the test preload — was invisible.
+ * A guard whose recogniser is narrower than the claim in its own comment; the third of
+ * that shape across three branches.
+ *
+ * So the domain is everything, and the exclusions are NAMED rather than implied. The
+ * cost is reading ~2,500 files instead of ~1,400, which is under a second. Scanning
+ * production too is deliberate and not collateral: production has no business assigning
+ * the live-proof switches or `process.stderr.write` either, so a hit there is a finding
+ * rather than a false positive.
  */
-function allTestSources(dir: string, out: string[] = []): string[] {
+function allSourceFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue
     const full = join(dir, entry)
@@ -68,11 +79,39 @@ function allTestSources(dir: string, out: string[] = []): string[] {
     } catch {
       continue
     }
-    if (st.isDirectory()) allTestSources(full, out)
-    else if (entry.endsWith('.test.ts')) out.push(full)
-    else if (entry.endsWith('.ts') && full.includes(`${sep}__tests__${sep}`)) out.push(full)
+    if (st.isDirectory()) allSourceFiles(full, out)
+    else if (entry.endsWith('.ts')) out.push(full)
   }
   return out
+}
+
+/**
+ * MATCH THE OPERATION, NOT ONE SPELLING OF IT.
+ *
+ * These were inline regexes matching `process.env['KEY'] =` and nothing else, so
+ * `process.env.KEY = …` and `process.env["KEY"] = …` walked straight past. Extracted so
+ * each admitted form can be asserted on its own — a single mutation that reds every
+ * control would mean the controls test the collector rather than the matcher.
+ *
+ * The `(?!=)` stays: it is why `===` in a gated suite reading its own flag is not a
+ * write, which was a real defect. What it did not do was widen beyond the one spelling
+ * it was written against.
+ */
+const envRef = (key: string): string =>
+  String.raw`process\.env(?:\.${key}|\[\s*['"\`]${key}['"\`]\s*\])`
+/** An ASSIGNMENT to `key`, in any admitted spelling. `=` only, never `==`/`===`. */
+export function matchesEnvWrite(key: string, src: string): boolean {
+  return new RegExp(String.raw`${envRef(key)}\s*=(?!=)`).test(src)
+}
+/** A `delete` of `key`, in any admitted spelling — the restore side of the same rule,
+ *  which has to admit exactly what the writer side does or one passes for a spelling
+ *  the other catches. */
+export function matchesEnvDelete(key: string, src: string): boolean {
+  return new RegExp(String.raw`delete\s+${envRef(key)}`).test(src)
+}
+/** An assignment to the process's stderr writer, in any admitted spelling. */
+export function matchesStderrWrite(src: string): boolean {
+  return /process(?:\.stderr|\[\s*['"`]stderr['"`]\s*\])\.write\s*=(?!=)/.test(src)
 }
 
 /** The suites that gate themselves on the PTY opt-in. */
@@ -137,9 +176,8 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     const SWITCHES = ['HERDR_SOCKET_PATH', 'NEUTRON_PTY_E2E']
     const writers: string[] = []
     const offenders: string[] = []
-    // `allTestSources`, not `walkTests`: same domain lesson as the stderr guard below —
-    // a helper module under `__tests__/` is exactly where the next copy would hide.
-    for (const f of allTestSources(REPO_ROOT)) {
+    // EVERY `.ts`, not a directory whitelist — see `allSourceFiles`.
+    for (const f of allSourceFiles(REPO_ROOT)) {
       let src: string
       try {
         src = readFileSync(f, 'utf8')
@@ -147,17 +185,15 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
         continue
       }
       for (const k of SWITCHES) {
-        // ASSIGNMENT ONLY. `\s*=` alone also matches the `=` of `===`, which every
-        // gated suite uses to READ its own flag — the first version of this guard
-        // reported all three e2e suites as offenders for testing the variable they
-        // exist to be gated by.
-        if (!new RegExp(String.raw`process\.env\['${k}'\]\s*=(?!=)`).test(src)) continue
+        // THE OPERATION, IN ANY SPELLING — see `matchesEnvWrite`. This matched
+        // `process.env['KEY'] =` alone, so the dot and double-quoted forms walked past.
+        if (!matchesEnvWrite(k, src)) continue
         writers.push(`${relative(REPO_ROOT, f)}:${k}`)
         // Restoring means BOTH halves: a teardown hook, and the branch that puts an
-        // absent value back by deleting rather than by writing 'undefined'.
-        const restores =
-          /\b(afterAll|afterEach)\(/.test(src) &&
-          new RegExp(String.raw`delete process\.env\['${k}'\]`).test(src)
+        // absent value back by deleting rather than by writing 'undefined'. The delete
+        // side admits exactly what the write side does, or one passes for a spelling the
+        // other catches.
+        const restores = /\b(afterAll|afterEach)\(/.test(src) && matchesEnvDelete(k, src)
         if (!restores) offenders.push(`${relative(REPO_ROOT, f)} writes ${k} and never restores it`)
       }
     }
@@ -184,7 +220,7 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   test('no live proof spawns a herdr pane outside the scoped helper', () => {
     const SPAWNS = /new HerdrHost\s*\(/
     const HELPER = 'runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.ts'
-    const offenders = allTestSources(REPO_ROOT)
+    const offenders = allSourceFiles(REPO_ROOT)
       .filter((f) => f.endsWith('.e2e.test.ts'))
       .filter((f) => {
         try {
@@ -200,7 +236,7 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     // an empty offender list proves nothing if either is wrong, and on this branch both
     // have been.
     expect(SPAWNS.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
-    const e2e = allTestSources(REPO_ROOT).filter((f) => f.endsWith('.e2e.test.ts'))
+    const e2e = allSourceFiles(REPO_ROOT).filter((f) => f.endsWith('.e2e.test.ts'))
     expect(e2e.length).toBeGreaterThanOrEqual(3)
     // ...and each of them reaches the helper, so "no offenders" is not "no spawns".
     const usingHelper = e2e.filter((f) => readFileSync(f, 'utf8').includes('withLiveHerdrChild'))
@@ -223,12 +259,11 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // module under a `__tests__/` directory, because a helper is exactly where the next
   // hand-rolled copy would hide.
   test('no test monkey-patches stderr by hand — the helper is the only assignment', () => {
-    const PATCH = /process\.stderr\.write\s*=(?!=)/
     const HELPER = 'runtime/adapters/claude-code/persistent/__tests__/capture-stderr.ts'
-    const offenders = allTestSources(REPO_ROOT)
+    const offenders = allSourceFiles(REPO_ROOT)
       .filter((f) => {
         try {
-          return PATCH.test(readFileSync(f, 'utf8'))
+          return matchesStderrWrite(readFileSync(f, 'utf8'))
         } catch {
           return false
         }
@@ -240,8 +275,109 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     // legitimately lives, and the WALK reaches that file at all. An empty offender list
     // proves nothing if either the pattern or the domain is wrong, and both have been
     // wrong on this branch already.
-    expect(PATCH.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
-    expect(allTestSources(REPO_ROOT).map((f) => relative(REPO_ROOT, f))).toContain(HELPER)
+    expect(matchesStderrWrite(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
+    const reached = allSourceFiles(REPO_ROOT).map((f) => relative(REPO_ROOT, f))
+    expect(reached).toContain(HELPER)
+    // ...AND THE WALK REACHES A HELPER OUTSIDE `__tests__/`, which is the bypass the old
+    // domain left open. `tests/support/scrub-instance-env.ts` is imported by the test
+    // preload and is neither a `*.test.ts` nor under a `__tests__/` directory, so it was
+    // invisible to every version of this guard before now.
+    expect(reached).toContain('tests/support/scrub-instance-env.ts')
+    // And production is in scope too, deliberately: a hit there is a finding, not a
+    // false positive.
+    expect(reached).toContain('runtime/adapters/claude-code/persistent/herdr-host.ts')
+  })
+
+  // EACH ADMITTED FORM, ON ITS OWN. The three guards above scan the tree and report an
+  // empty offender list; that is an ABSENCE, and an absence is only evidence if the
+  // recogniser admits everything the rule names. These assert the matchers directly, one
+  // spelling per case, so narrowing any of them back to a single form reds exactly one —
+  // a mutation that reds them all would mean they test the collector, not the matcher.
+  //
+  // Not hypothetical hygiene: extracting these matchers introduced a bug in the same
+  // breath — a plain template literal instead of `String.raw`, so `\s` was eaten and the
+  // pattern matched a literal `s` and nothing else. The `writers` positive control caught
+  // it on the first run.
+  //
+  // THE FIXTURES ARE ASSEMBLED, NOT SPELLED. Every positive below is an exact instance of
+  // what those guards hunt, and they now scan EVERY `.ts` in the tree — including this
+  // one. Written literally, this file becomes its own top offender. The alternative is
+  // worse: exempting the file that DEFINES the rule is a hole in the one place nobody
+  // would think to look. So the text is joined at runtime and the string the matcher sees
+  // is byte-identical to the literal form. The negatives below ARE spelled literally, and
+  // that is itself the demonstration — they survive the scan because they are not
+  // matches. (A source-text scanner still cannot see a write whose key is computed; that
+  // was already true — `matchesEnvWrite` takes a literal key — and is the standing limit
+  // of the instrument, not something this assembly introduces.)
+  const asm = (...parts: string[]): string => parts.join('')
+  const PROC = 'process'
+  const KEY = 'HERDR_SOCKET_PATH'
+
+  describe('the env-switch matcher admits the OPERATION, not one spelling', () => {
+    for (const [form, src] of [
+      ['single-quoted brackets', asm(PROC, ".env['", KEY, "'] = '/x'")],
+      ['double-quoted brackets', asm(PROC, '.env["', KEY, '"] = "/x"')],
+      ['dot access', asm(PROC, '.env.', KEY, " = '/x'")],
+      ['whitespace inside the brackets', asm(PROC, ".env[ '", KEY, "' ] = '/x'")],
+      ['no space around the equals', asm(PROC, ".env['", KEY, "']='/x'")],
+    ] as const) {
+      test(`a write via ${form} is a write`, () => {
+        expect(matchesEnvWrite(KEY, src)).toBe(true)
+      })
+    }
+
+    for (const [form, src] of [
+      ['single-quoted brackets', asm('delete ', PROC, ".env['", KEY, "']")],
+      ['double-quoted brackets', asm('delete ', PROC, '.env["', KEY, '"]')],
+      ['dot access', asm('delete ', PROC, '.env.', KEY)],
+    ] as const) {
+      test(`a delete via ${form} is a restore`, () => {
+        expect(matchesEnvDelete(KEY, src)).toBe(true)
+      })
+    }
+
+    // THE REFINEMENT THAT HAS TO SURVIVE THE WIDENING. Every gated suite READS its own
+    // flag with `===`. Admitting more spellings must not start admitting comparisons, or
+    // all three e2e suites become offenders against a rule they do not break.
+    test('a comparison is not a write', () => {
+      expect(matchesEnvWrite('NEUTRON_PTY_E2E', "process.env['NEUTRON_PTY_E2E'] === '1'")).toBe(
+        false,
+      )
+    })
+    test('a dot-access comparison is not a write either', () => {
+      expect(matchesEnvWrite('NEUTRON_PTY_E2E', 'process.env.NEUTRON_PTY_E2E === "1"')).toBe(false)
+    })
+    test('an inequality is not a write', () => {
+      expect(matchesEnvWrite('NEUTRON_PTY_E2E', 'process.env.NEUTRON_PTY_E2E !== "1"')).toBe(false)
+    })
+    // THE KEY IS LOAD-BEARING. Without this, widening to `process\.env\S* =` would pass
+    // every case above while reporting every env write in the repo as a switch offender.
+    test('a write to a different key is not a match', () => {
+      expect(matchesEnvWrite(KEY, asm(PROC, '.env.SOMETHING_ELSE', ' = "/x"'))).toBe(false)
+    })
+  })
+
+  describe('the stderr matcher admits the OPERATION, not one spelling', () => {
+    for (const [form, src] of [
+      ['dot access', asm(PROC, '.stderr', '.write = fake')],
+      ['single-quoted member', asm(PROC, "['stderr']", '.write = fake')],
+      ['double-quoted member', asm(PROC, '["stderr"]', '.write = fake')],
+      ['no space around the equals', asm(PROC, '.stderr', '.write=fake')],
+    ] as const) {
+      test(`an assignment via ${form} is an assignment`, () => {
+        expect(matchesStderrWrite(src)).toBe(true)
+      })
+    }
+
+    // A CALL IS NOT AN ASSIGNMENT. The logger writes to stderr constantly; only REPLACING
+    // the writer is the rule, and a matcher that lost the `=` would name every logging
+    // site in the repo.
+    test('a call to stderr.write is not an assignment', () => {
+      expect(matchesStderrWrite("process.stderr.write('hello')")).toBe(false)
+    })
+    test('a comparison against stderr.write is not an assignment', () => {
+      expect(matchesStderrWrite('if (process.stderr.write === original) {}')).toBe(false)
+    })
   })
 
   test('the registry lists no suite that no longer exists', () => {
