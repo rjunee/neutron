@@ -530,6 +530,51 @@ describe('interpretFailure — a specific summary per measured cause (#520)', ()
     expect(interpretFailure(row('unknown'))).toEqual(before)
   })
 
+  /**
+   * THE DELIVERY-SIDE SPLIT, PINNED BY NAME RATHER THAN BY COUNT.
+   *
+   * `interpretTerminalCause` answers some members and defers on the rest, and its docblock
+   * used to state that split as a NUMBER — which went stale the moment `'review-escalated'`
+   * was added and stayed stale through two review rounds. This card has now had three
+   * rounds of stale counts, which is the evidence that a number nobody is forced to update
+   * does not survive contact with a growing list.
+   *
+   * So the split is asserted as two SETS, by member name. A set is strictly better than a
+   * count here: adding a member fails this test (nobody has decided which side it belongs
+   * on), and the failure NAMES the member instead of reporting that a number moved.
+   */
+  test('every member is on exactly one side of the delivery split, by name', () => {
+    const defers = new Set<TerminalCause>()
+    for (const c of TERMINAL_CAUSES) {
+      // A row whose only distinguishing feature is the cause. If the announce is the one
+      // the reason-string route would have produced, this member deferred.
+      const out = interpretFailure(
+        harvested(
+          { verdict: 'REQUEST_CHANGES', blockKind: 'code', terminalCauseKind: c },
+          { inner_verdict: 'REVIEW_NOT_RUN', failure_reason: 'inner workflow ended at round 10 of 10' },
+        ),
+      )
+      if (out.summary === 'The build ended without an approved review, so I did not merge it.') defers.add(c)
+    }
+    // EIGHT, AND THE LIST WAS WRITTEN WRONG BY HAND ON THE FIRST ATTEMPT — `wave-member-built`
+    // was left out, which is the same omission the stale "SEVEN MEMBERS" docblock made. The
+    // derivation above caught it. That is the whole argument for deriving rather than
+    // remembering, demonstrated on the very change that removed the last remembered count.
+    expect([...defers].sort()).toEqual(
+      (
+      [
+        'handoff-publish',
+        'pr-already-merged',
+        'ralph-task-built',
+        'resume-approved-unchanged',
+        'review-approved',
+        'review-escalated',
+        'unknown',
+        'wave-member-built',
+      ] as TerminalCause[]).sort(),
+    )
+  })
+
   test('a success or handoff exit on a failed row defers to the reason that death wrote', () => {
     // These are not failures. The row failed DOWNSTREAM of the exit — at the merge, at
     // the publish — of something this cause did not measure, and the branches that read

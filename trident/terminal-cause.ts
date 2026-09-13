@@ -29,9 +29,11 @@
  *
  * AND WHY NOT `blockKind`, WHICH IS ALREADY A CLOSED SET ON THE SAME RESULT. Because it
  * answers a narrower question and only sometimes. It describes what kind of BLOCK a
- * review verdict was — and 7 of the 12 terminal paths are not review verdicts and emit no
- * `blockKind` at all (the throw, both publish handoffs, both resume shortcuts, the
- * wave-member build, the Ralph re-fire). Widening it to carry "the workflow threw" or
+ * review verdict was — and 4 of the 12 terminal paths are not review verdicts and emit no
+ * `blockKind` at all (the throw, both publish handoffs and the Ralph re-fire) — DERIVED,
+ * not counted by hand: `inner-workflow-terminal-cause.test.ts` (`the blockKind claim is
+ * derived, not remembered`) measures it, because the figure in this sentence was wrong
+ * when it was written. Widening it to carry "the workflow threw" or
  * "the PR was already merged" would make one field mean two things, and `blockKind` is
  * load-bearing exactly where it is narrow: `'infra-only'` is the ONLY value licensed to
  * say no seat judged the code, and `recordedTerminalVerdict` and `isInfraDeath` both key

@@ -105,6 +105,11 @@ interface TerminalSite {
   kind: string | null
   /** Why it could not be resolved — empty unless `stamped` is `'unresolved'`. */
   why: string
+  /** The resolved object's own direct property names. Carried so that claims ABOUT the
+   *  terminal results — "N of the twelve carry a `blockKind`" — can be derived here
+   *  instead of counted by hand into prose, where three rounds of this card proved they
+   *  go stale. Empty for an unresolved site. */
+  props: readonly string[]
 }
 
 /**
@@ -202,7 +207,7 @@ function terminalSites(src: string): TerminalSite[] {
     const arg = n.arguments[0]
     const line = lineOf(n)
     if (arg === undefined) {
-      sites.push({ label: '(no argument)', line, stamped: 'unresolved', kind: null, why: 'called with no argument' })
+      sites.push({ label: '(no argument)', line, stamped: 'unresolved', kind: null, why: 'called with no argument', props: [] })
       return
     }
     const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
@@ -216,10 +221,11 @@ function terminalSites(src: string): TerminalSite[] {
         // The shape is NAMED, not just refused — a guard that says only "no" leaves the
         // next author guessing which of the handled forms they missed.
         why: `argument is a ${ts.SyntaxKind[arg.kind]} the scanner cannot resolve to an object literal`,
+        props: [],
       })
       return
     }
-    sites.push({ label, line, ...readCause(resolved) })
+    sites.push({ label, line, ...readCause(resolved), props: ownPropertyNames(resolved) })
   })
   return sites
 }
@@ -427,6 +433,17 @@ function composerReturnLiteral(name: string, use: ts.Node): ts.ObjectLiteralExpr
  * property that arrives only sometimes, which is exactly the silence this guard exists to
  * refuse; only a direct assignment or shorthand is a promise the field is always there.
  */
+function ownPropertyNames(obj: ts.ObjectLiteralExpression): string[] {
+  const names: string[] = []
+  for (const prop of obj.properties) {
+    if (ts.isShorthandPropertyAssignment(prop)) names.push(prop.name.text)
+    else if (ts.isPropertyAssignment(prop) && (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name))) {
+      names.push(prop.name.text)
+    }
+  }
+  return names
+}
+
 function readCause(obj: ts.ObjectLiteralExpression): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
   for (const prop of obj.properties) {
     if (ts.isShorthandPropertyAssignment(prop) && prop.name.text === 'terminalCauseKind') {
@@ -612,6 +629,27 @@ async function newExitPath() {
     const literal = `${SRC}\n${THIRTEENTH['a call reached through a literal element access']}\n`
     expect(terminalSites(literal).length).toBe(13)
     expect(failingSites(literal).length).toBe(1)
+  })
+
+  /**
+   * THE CLAIM THE VOCABULARY'S DESIGN RESTS ON, MADE EXECUTABLE.
+   *
+   * `terminal-cause.ts` argues that `terminalCauseKind` had to be a NEW field rather than a
+   * widening of `blockKind`, and one leg of that argument is that most terminal paths are
+   * not review verdicts and carry no `blockKind` at all. That leg was written as a number
+   * in a docblock — and the number was WRONG WHEN WRITTEN, not merely stale: it said seven
+   * of twelve, and the real figure is four. Nobody derived it, including me.
+   *
+   * So it is derived here. The argument survives (four of twelve carry nothing, and
+   * `blockKind` is load-bearing precisely because it is narrow) but it now rests on a
+   * measurement that fails if it stops being true.
+   */
+  test('the blockKind claim is derived, not remembered', () => {
+    const sites = terminalSites(SRC)
+    const withBlockKind = sites.filter((s) => s.props.includes('blockKind'))
+    expect({ total: sites.length, withBlockKind: withBlockKind.length }).toEqual({ total: 12, withBlockKind: 8 })
+    // …so four carry none, which is the figure `terminal-cause.ts` cites.
+    expect(sites.length - withBlockKind.length).toBe(4)
   })
 
   test('the traversal inventory is pinned — a new walk forces the audit', () => {
@@ -873,16 +911,23 @@ describe('#520 — stampTerminalCause: a bare terminal result is answered, and s
   interface Stamp {
     (result: Record<string, unknown> | null, report: (m: string) => void): unknown
   }
+  /** Everything `stampTerminalCause` closes over, lifted from the SHIPPED source. Shared
+   *  by the loader and the mutation below so the two cannot drift apart — the mutation
+   *  once carried its own preamble and stopped compiling when the function gained a
+   *  dependency, which reads as a failing guard rather than a stale test. */
+  const preamble = (body: string): string =>
+    [
+      /const TERMINAL_CAUSE_KINDS = \[[\s\S]*?\n\]/.exec(SRC)![0],
+      /const TERMINAL_CAUSE_DIAGNOSTIC_MAX = \d+/.exec(SRC)![0],
+      braceMatchFrom(SRC, SRC.indexOf('function redactProbeText(')),
+      braceMatchFrom(SRC, SRC.indexOf('function terminalCauseDiagnostic(')),
+      body,
+      'return stampTerminalCause',
+    ].join('\n')
   const load = (): Stamp => {
     const at = SRC.indexOf('function stampTerminalCause(')
     expect(at).toBeGreaterThan(-1)
-    return new Function(
-      [
-        /const TERMINAL_CAUSE_KINDS = \[[\s\S]*?\n\]/.exec(SRC)![0],
-        braceMatchFrom(SRC, at),
-        'return stampTerminalCause',
-      ].join('\n'),
-    )() as Stamp
+    return new Function(preamble(braceMatchFrom(SRC, at)))() as Stamp
   }
 
   test('a result that names a real kind is left alone, and nothing is reported', () => {
@@ -921,13 +966,8 @@ describe('#520 — stampTerminalCause: a bare terminal result is answered, and s
   test('MUTATION — with the stamp removed, a bare result travels bare and silently', () => {
     const at = SRC.indexOf('function stampTerminalCause(')
     const mutated = braceMatchFrom(SRC, at).replace("  result.terminalCauseKind = 'unknown'\n", '')
-    const f = new Function(
-      [
-        /const TERMINAL_CAUSE_KINDS = \[[\s\S]*?\n\]/.exec(SRC)![0],
-        mutated,
-        'return stampTerminalCause',
-      ].join('\n'),
-    )() as Stamp
+    expect(mutated).not.toBe(braceMatchFrom(SRC, at))
+    const f = new Function(preamble(mutated))() as Stamp
     const r: Record<string, unknown> = { checkpoint: 'forge-done' }
     f(r, () => {})
     expect(r.terminalCauseKind).toBeUndefined()
@@ -935,6 +975,99 @@ describe('#520 — stampTerminalCause: a bare terminal result is answered, and s
 
   test('a non-object is returned untouched rather than thrown over', () => {
     expect(() => load()(null, () => {})).not.toThrow()
+  })
+
+  /**
+   * THE DIAGNOSTIC MAY NOT COST THE GUARANTEE IT IS DESCRIBING.
+   *
+   * `terminalCauseKind` arrives from a JSON payload the workflow did not author, so the
+   * UNRECOGNISED branch interpolates an untrusted value into the run log. It used to do
+   * that with a bare `String()`: no cap, no redaction, and — worse — a coercion that runs
+   * user-reachable code. A value whose `toString` throws made `stampTerminalCause` itself
+   * throw, which prevented the `writeTerminalResult` this backstop exists to protect. The
+   * failure it was built to stop, arriving through the backstop.
+   *
+   * So the property under test is not "the log looks nice". It is: WHATEVER ARRIVES, the
+   * stamp happens.
+   */
+  describe('the UNRECOGNISED diagnostic is capped, redacted, and cannot throw', () => {
+    const stampOf = (kind: unknown): { stamped: unknown; said: string[] } => {
+      const said: string[] = []
+      const r: Record<string, unknown> = { checkpoint: 'forge-done', terminalCauseKind: kind }
+      load()(r, (m) => said.push(m))
+      return { stamped: r.terminalCauseKind, said }
+    }
+
+    test('a 10,000-character value is truncated, and says that it was', () => {
+      const { stamped, said } = stampOf('x'.repeat(10_000))
+      expect(stamped).toBe('unknown')
+      expect(said[0]!.length).toBeLessThan(300)
+      expect(said[0]).toContain('truncated')
+      expect(said[0]).toContain('10000 chars')
+    })
+
+    test('a secret-shaped value is redacted before it reaches the log', () => {
+      const { stamped, said } = stampOf('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789')
+      expect(stamped).toBe('unknown')
+      expect(said[0]).not.toContain('AbCdEfGhIjKlMnOpQrStUvWxYz0123456789')
+      expect(said[0]).toContain('ghp_***')
+    })
+
+    test('a credential embedded in a URL is redacted too', () => {
+      const { said } = stampOf('https://user:s3cr3t@example.invalid/x')
+      expect(said[0]).not.toContain('s3cr3t')
+      expect(said[0]).toContain('***@')
+    })
+
+    test('a value whose coercion THROWS does not stop the stamp', () => {
+      // The failure mode the bare `String()` had. The stamp is the guarantee; the
+      // diagnostic is a courtesy, and a courtesy may not take the guarantee down with it.
+      const hostile = {
+        toString() {
+          throw new Error('boom')
+        },
+      }
+      let out: { stamped: unknown; said: string[] } | null = null
+      expect(() => {
+        out = stampOf(hostile)
+      }).not.toThrow()
+      expect(out!.stamped).toBe('unknown')
+      expect(out!.said[0]).toContain('conversion to text threw')
+    })
+
+    test('a symbol does not throw either — a template literal would have', () => {
+      const { stamped, said } = stampOf(Symbol('nope'))
+      expect(stamped).toBe('unknown')
+      expect(said[0]).toContain('Symbol(nope)')
+    })
+
+    test('a logger that throws does not cost the field its value', () => {
+      // Reporting is best-effort. `report` raising — an EPIPE on a closed stdout is the
+      // realistic one — must not unwind through the stamp.
+      const r: Record<string, unknown> = { checkpoint: 'forge-done', terminalCauseKind: 'made-up' }
+      expect(() => {
+        load()(r, () => {
+          throw new Error('EPIPE')
+        })
+      }).not.toThrow()
+      expect(r.terminalCauseKind).toBe('unknown')
+    })
+
+    test('a hostile CHECKPOINT is handled the same way on the MISSING branch', () => {
+      // The other interpolation. Same value class, same treatment — asserted separately
+      // because it is a different branch and a fix to one is not a fix to the other.
+      const r: Record<string, unknown> = {
+        checkpoint: {
+          toString() {
+            throw new Error('boom')
+          },
+        },
+      }
+      const said: string[] = []
+      expect(() => load()(r, (m: string) => said.push(m))).not.toThrow()
+      expect(r.terminalCauseKind).toBe('unknown')
+      expect(said[0]).toContain('TERMINAL CAUSE MISSING')
+    })
   })
 })
 

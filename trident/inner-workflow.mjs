@@ -4587,15 +4587,79 @@ const TERMINAL_CAUSE_KINDS = [
 // MUTATES IN PLACE, deliberately: every call site RETURNS the same object it hands to
 // `writeTerminalResult`, so a dry run with no database threaded must see the same value
 // the harvest would.
+// HOW MUCH OF AN UNRECOGNISED VALUE THE RUN LOG IS WILLING TO QUOTE. A legitimate kind is
+// a short lowercase-hyphen token, so 120 characters identifies any real mistake several
+// times over — and a value that needs more than that is itself the finding, which the
+// truncation marker preserves. Deliberately far below TERMINAL_CAUSE_MAX: that cap governs
+// a cause being PERSISTED for an operator to read, this one governs an unexpected value
+// being quoted into a log, and the second has no reason to be generous.
+const TERMINAL_CAUSE_DIAGNOSTIC_MAX = 120
+// LINE COMMENTS ONLY BETWEEN HERE AND `probeCause`, AND THE REASON IS MECHANICAL.
+// `trident/__tests__/ci-gate.test.ts` lifts `classifyCi` and everything it closes over by
+// slicing from `const CI_FAILED_STATES` to the next JSDoc opener, and `probeCause` and
+// `redactProbeText` live inside that slice. Opening a JSDoc block anywhere in this stretch
+// truncates it and takes those two functions out, which reds 44 unrelated cases with a
+// bare ReferenceError. That guard documents the hazard in its own words and it caught this
+// change twice: once for the block comment, and again for a comment that merely SPELLED
+// the opener, because the slice is found by substring search and does not care that the
+// occurrence is inside a comment. Hence the circumlocution here.
+// TEXT FOR A VALUE THAT ARRIVED WHEN SOMETHING ELSE WAS EXPECTED — redacted, capped, and
+// INCAPABLE OF THROWING.
+//
+// All three properties are load-bearing and none was there when this was a bare `String()`:
+//
+//  - INCAPABLE OF THROWING is the important one. `String(v)` runs user-reachable code —
+//    `toString`, `Symbol.toPrimitive`, a Proxy trap — and a value whose coercion throws
+//    made `stampTerminalCause` throw, which prevented the `writeTerminalResult` the
+//    backstop exists to protect. The stamp is the thing that must survive; the diagnostic
+//    is a courtesy. A courtesy may never take the guarantee down with it.
+//  - REDACTED, through the same helper every persisted cause goes through. This text is
+//    written to the run log verbatim, and a value shaped like a credential had nothing
+//    between it and that log.
+//  - CAPPED, because the value is unexpected BY DEFINITION and nothing bounds its length.
+//
+// The stamp happens BEFORE this is called at the one site that uses it, so even a
+// catastrophic logger cannot cost the field its value.
+function terminalCauseDiagnostic(value) {
+  let text
+  try {
+    // `String()` rather than a template literal: a template throws outright on a symbol,
+    // which is a real value someone can put in a JSON-shaped object by mistake.
+    text = String(value)
+  } catch {
+    // The coercion itself was hostile or broken. Saying so is more useful than saying
+    // nothing, and it is the one description that cannot fail to be produced.
+    return '(a value whose conversion to text threw)'
+  }
+  if (typeof text !== 'string') return '(a value that did not convert to text)'
+  const redacted = redactProbeText(text)
+  return redacted.length > TERMINAL_CAUSE_DIAGNOSTIC_MAX
+    ? `${redacted.slice(0, TERMINAL_CAUSE_DIAGNOSTIC_MAX)}… (${redacted.length} chars, truncated)`
+    : redacted
+}
 function stampTerminalCause(result, report) {
   if (typeof result !== 'object' || result === null) return result
   if (TERMINAL_CAUSE_KINDS.includes(result.terminalCauseKind)) return result
-  if (result.terminalCauseKind === undefined) {
-    report(`trident-v2 TERMINAL CAUSE MISSING at checkpoint ${String(result.checkpoint)} — recording 'unknown'`)
-  } else {
-    report(`trident-v2 TERMINAL CAUSE UNRECOGNISED: ${String(result.terminalCauseKind)} — recording 'unknown'`)
-  }
+  // THE STAMP COMES FIRST, AND THAT ORDERING IS THE GUARANTEE. Reporting is best-effort;
+  // recording the honest non-answer is not. An earlier cut reported and then stamped, so
+  // anything that made the report fail — a hostile coercion, a logger raising EPIPE — cost
+  // the result its field and, through the throw, cost the run its terminal write entirely.
+  // That is the exact failure this backstop was built to prevent, arriving through the
+  // backstop itself.
+  const missing = result.terminalCauseKind === undefined
+  const quoted = missing ? undefined : terminalCauseDiagnostic(result.terminalCauseKind)
+  const at = terminalCauseDiagnostic(result.checkpoint)
   result.terminalCauseKind = 'unknown'
+  try {
+    report(
+      missing
+        ? `trident-v2 TERMINAL CAUSE MISSING at checkpoint ${at} — recording 'unknown'`
+        : `trident-v2 TERMINAL CAUSE UNRECOGNISED: ${quoted} — recording 'unknown'`,
+    )
+  } catch {
+    // Nothing to do and nothing to say: the channel for saying it is what failed. The
+    // stamp above already happened, which is the part that had to.
+  }
   return result
 }
 function reviewLoopTerminalCause(exit) {

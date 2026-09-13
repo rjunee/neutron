@@ -704,7 +704,10 @@ function infraDeathInterpretation(): FailureInterpretation {
  *    blocking findings" — which is the one thing an advisory-only exit means did NOT
  *    happen. A measured cause outranks prose whenever it contradicts it.
  *
- * AND SEVEN MEMBERS RETURN `null` ON PURPOSE. `'unknown'` buys silence by definition.
+ * AND THE REMAINING MEMBERS RETURN `null` ON PURPOSE — the set is pinned BY NAME in
+ * `terminal-cause.test.ts` (`every member is on exactly one side of the delivery split`)
+ * rather than counted here, because the count in this sentence said SEVEN and went stale
+ * the moment `'review-escalated'` was added, then survived two review rounds saying it. `'unknown'` buys silence by definition.
  * The success and handoff exits (`review-approved`, `pr-already-merged`,
  * `resume-approved-unchanged`, `wave-member-built`, `handoff-publish`,
  * `ralph-task-built`) are not failures at all: a FAILED row carrying one of them failed

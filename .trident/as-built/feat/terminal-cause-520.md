@@ -76,7 +76,7 @@ is the definition of a terminal path in that file.
 | 8 | Ralph re-fire after one task | `ralph-task-built` | no |
 | 9 | fix-round publish handoff | `handoff-publish` | no |
 | 10 | PR merged during a fix round | `pr-already-merged` | no |
-| 11 | the review loop's own exit | measured (six members) | only `infra-only` |
+| 11 | the review loop's own exit | measured (eight members) | only `infra-only` |
 | 12 | the workflow threw | `workflow-threw` | yes (prose only) |
 
 Exits 2, 7 and 10 share one composer (`mergedTerminalResult`), and share one kind because
@@ -157,7 +157,7 @@ sixteen members. Four speak:
 | `round-lost-work` | a fix round's work never reached the branch at round N of M, so the code was not re-judged |
 | `round-lost-no-diff` | a fix round left the reviewed code unchanged at round N of M, so there was nothing new to re-judge |
 
-The other eleven say nothing on purpose. The infra-only, resume-stop, built-head and
+The other twelve say nothing on purpose. The infra-only, resume-stop, built-head and
 thrown exits already have a specific sentence UPSTREAM, composed from the prose they
 carry. The six success and handoff exits are not failures: a FAILED row carrying one of
 them failed downstream of that exit, at the merge or the publish, of something this
@@ -236,7 +236,7 @@ rewriting the copy every future call receives.
 ### Why this is a new field and not a widened `blockKind`
 
 `blockKind` is already a closed set on the same result, and the answer is that it answers
-a narrower question and only sometimes. Seven of the twelve paths are not review verdicts
+a narrower question and only sometimes. Four of the twelve paths are not review verdicts
 and emit no `blockKind` at all. More importantly it is load-bearing exactly where it is
 narrow: `'infra-only'` is the ONLY value licensed to say no seat judged the code, and both
 `recordedTerminalVerdict` and `isInfraDeath` key on it. A second meaning in that field is
@@ -318,6 +318,10 @@ first cut actually shipped.
 | N17 | a fifth traversal added without the audit | 1 fail |
 | N18 | a literal element-access callee stops being recognised | 2 fail |
 | N19 | the recogniser silently widens PAST the stated boundary | 24 fail |
+| N20 | the diagnostic's coercion can throw again (bare `String()`) | 2 fail |
+| N21 | the diagnostic is no longer redacted | 2 fail |
+| N22 | the diagnostic is no longer capped | 1 fail |
+| N23 | the report happens BEFORE the stamp, unguarded | 1 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -343,12 +347,54 @@ in the spread's own text. Both are now spelled the way this file really writes t
 comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
 is not a control, and the only way to find out is to break the thing it guards.
 
+### The backstop's diagnostic could take down the backstop
+
+`stampTerminalCause`'s UNRECOGNISED branch interpolated the offending value into the run
+log with a bare `String()`: **no cap, no redaction, and a coercion that runs
+user-reachable code.** `terminalCauseKind` arrives from a JSON payload the workflow did not
+author, so a 10,000-character value landed whole, a credential-shaped value landed
+verbatim, and — the serious one — a value whose `toString` throws made `stampTerminalCause`
+itself throw, which prevented the `writeTerminalResult` this backstop exists to protect.
+**The exact failure it was built to stop, arriving through the backstop.**
+
+`terminalCauseDiagnostic` now redacts through the same helper every persisted cause uses,
+caps at 120 characters with a marker saying it truncated, and cannot throw. And the ORDER
+changed: the stamp happens first, then the report, inside a `try`. Reporting is a courtesy;
+recording the honest non-answer is the guarantee, and a courtesy may never take the
+guarantee down with it. The same treatment covers the MISSING branch's `checkpoint`
+interpolation, asserted separately because a fix to one branch is not a fix to the other.
+
+N20–N23 pin the four properties independently.
+
+**And a repo guard caught a side effect I would not have predicted.**
+`trident/__tests__/ci-gate.test.ts` lifts `classifyCi` and its closure by slicing
+`inner-workflow.mjs` from `const CI_FAILED_STATES` to the next JSDoc opener — and
+`probeCause`/`redactProbeText` live inside that slice. The new function's JSDoc block
+truncated it, reddening **44 unrelated cases** with a bare ReferenceError. That guard
+documents the hazard in its own comment and names it in the failure, which is what made a
+confusing cross-module break a thirty-second fix.
+
+It then caught the same change a SECOND time: the replacement line comment *spelled* the
+JSDoc opener while explaining why not to use one, and the slice is a substring search that
+does not care whether the occurrence is inside a comment. Worth recording as a small
+lesson about guards that match text: a comment about a pattern is an instance of it.
+
 ### A count is the most compressed possible claim of completeness
 
-Two numbers in this record were stale by the time it was read: "fifteen members" and
-"eleven of fifteen return null". The vocabulary had grown to sixteen when
-`'review-escalated'` was added for #654's new loop-exit clause, and nothing in the record
-moved with it.
+**This happened three times on this one document, and the second time the document asserted
+its own correction.** Round one: "fifteen members" and "eleven of fifteen return null" —
+the vocabulary had grown to sixteen when `'review-escalated'` was added for #654's new
+loop-exit clause, and nothing in the record moved with it. Round two: those two were fixed
+and *five others were not* — "the other eleven say nothing", "six members" for the review
+loop classifier, "SEVEN MEMBERS RETURN null" in `delivery.ts`, and "7 of the 12 terminal
+paths are not review verdicts" in `terminal-cause.ts`, which was **wrong when it was
+written** rather than merely stale: the real figure is four, and nobody had ever derived it.
+
+Two of those numbers were load-bearing, not decorative. The "7 of 12" figure is one leg of
+the argument for why `terminalCauseKind` had to be a NEW field instead of a widened
+`blockKind`. The argument survives on the true number — four of twelve carry no
+`blockKind`, and `blockKind` is load-bearing precisely because it stays narrow — but it
+rested on a figure that was invented.
 
 That is #654's own rule — *a list that claims completeness is a claim, and it needs the
 same scrutiny as the code it describes* — in its most compressed form. A count is the one
@@ -356,11 +402,23 @@ thing a reader trusts without checking, because checking it means going and coun
 also the easiest thing to leave behind when the list grows, since nothing about adding a
 member forces a number in prose to move.
 
-Both numbers were re-derived from the shipped module rather than recounted by eye
-(`TERMINAL_CAUSES.length`, and the members for which `terminalCauseReason` returns
-non-null), which is the only way the answer is evidence rather than a second guess. The
-same treatment the parse-completeness claim got when it was found stale: a number that
-matters is measured, not written down.
+**So the counts are now DERIVED AT TEST TIME, and the remembered ones are gone.** Three
+mechanisms, each the same shape as the traversal inventory:
+
+- `the blockKind claim is derived, not remembered` measures how many of the twelve terminal
+  results carry a `blockKind`, so the argument in `terminal-cause.ts` fails if it stops
+  being true.
+- `every member is on exactly one side of the delivery split, by name` pins the delivery
+  split as two SETS rather than a number. A set is strictly better: adding a member fails
+  the test because nobody has decided which side it belongs on, and the failure NAMES the
+  member instead of reporting that a number moved.
+- `delivery.ts` no longer states the count at all; it points at that test.
+
+**And the derivation immediately earned itself.** The expected set was written out by hand
+on the first attempt and `wave-member-built` was left out — the *same* omission the stale
+"SEVEN MEMBERS" docblock had made. The test caught it. That is the whole argument for
+deriving rather than remembering, demonstrated on the very change that removed the last
+remembered count.
 
 ### The rule this guard kept re-learning, written down so the next author inherits it
 
@@ -460,7 +518,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus nineteen against the guard itself, each applied to the
+- The seventeen mutations above, plus twenty-three against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct
