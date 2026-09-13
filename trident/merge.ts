@@ -2078,8 +2078,23 @@ async function objectSize(run_host: RunHostCommand, repo: string, sha: string): 
     return null
   }
   if (!res.ok) return null
-  const size = Number(res.stdout.trim())
-  return Number.isInteger(size) && size >= 0 ? size : null
+  // A STRICT DECIMAL, OR UNKNOWN (#541 round 33). `Number('')` is `0`, and a zero size passes
+  // `Number.isInteger(size) && size >= 0` — so a `cat-file -s` that exited 0 with empty or
+  // whitespace-only output became a MEASUREMENT OF NOTHING. The budget then weighed nothing, the
+  // pre-read guard passed, and the content-bearing read proceeded unbounded: the
+  // resource-exhaustion class closed two rounds ago, reached through the one input that
+  // establishes the bound.
+  //
+  // `Number` is lax in the other direction too — `'1e9'` and `'0x10'` both convert to integers,
+  // and `'007'` to 7. None is a size git prints, which is exactly the point: they are shapes
+  // that mean "this is not the answer I asked for", and this function's whole job is to tell
+  // that from an answer. `conflictStages`, eight lines below, already states the rule — every
+  // route to `null` is a route the caller must refuse on, and a parse failure matters as much
+  // as a non-zero exit — and this one converted an unparseable answer into a valid one.
+  const raw = res.stdout.trim()
+  if (!/^(0|[1-9]\d*)$/.test(raw)) return null
+  const size = Number(raw)
+  return Number.isSafeInteger(size) ? size : null
 }
 
 /**

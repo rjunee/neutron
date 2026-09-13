@@ -3776,6 +3776,10 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) {
         return { ok: true, stdout: 'shared.ts', stderr: '', exit_code: 0 }
       }
+      // THE OBJECT SIZE, which bounds the read before it happens (#541 round 33). An
+      // unanswered `cat-file -s` used to fall through to empty output and be read as a size
+      // of ZERO — so this stub was exercising that defect and passing.
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       // THE INDEX VIEW, which the arbiter's evidence layer reads to tell a genuinely
       // one-sided conflict from a read it could not perform (#541 round 15). A stub that
       // omits it does not under-test that path — it supplies "no unmerged stages", which is

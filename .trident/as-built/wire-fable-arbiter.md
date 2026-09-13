@@ -1718,6 +1718,46 @@ the claim returning to an absolute byte promise; and the base stage falling back
 which only alters an index state no real conflict produces and so needed a synthetic one to
 drive.
 
+### ROUND 33 — the bound's own input turned an unparseable answer into a measurement
+
+`objectSize` had a throwing path and a non-zero-exit path that both returned `null` correctly,
+and then did this:
+
+```js
+const size = Number(res.stdout.trim())
+return Number.isInteger(size) && size >= 0 ? size : null
+```
+
+`Number('')` is `0`, and zero passes. So a `cat-file -s` that exited 0 with **empty** output
+became a measurement of nothing: the budget weighed nothing, the pre-read guard passed, and the
+content-bearing read proceeded **unbounded** — the resource-exhaustion class closed two rounds
+earlier, reached through the one input that establishes the bound. `Number` is lax the other way
+too: `1e9`, `0x10` and `007` all convert, and none is a size git prints.
+
+**The rule was already written eight lines below**, on the adjacent function: *every route to
+`null` is a route the caller must refuse on, and a parse failure matters as much as the others.*
+Stated correctly for `conflictStages`, and violated by its neighbour. That is the same shape as
+round 30's docblock — the branch's own rule present in the file and not applied to the code
+beside it.
+
+Now a strict decimal (`/^(0|[1-9]\d*)$/`), so empty, whitespace-only, exponent, hexadecimal,
+negative and leading-zero all take the unknown path.
+
+**The test asserts the read never happens, not merely that the result is `missing`** — because
+an implementation that reads the blob and then discards it satisfies the weaker assertion while
+leaving the bound defeated. With a control that an ordinary size still permits the read, since
+"reject bad sizes" is otherwise satisfied by rejecting all of them.
+
+**And the fix immediately showed thirty-five stub hosts had never answered the size query at
+all.** Their unanswered `cat-file -s` fell through to `ok('')` and was read as zero — so every
+one of them had been exercising the defect and passing. That is the same discovery as the
+`ls-files` round: **a stub that omits a query does not under-test it, it supplies whatever the
+default branch returns**, and here the default was the bug.
+
+**Three mutations, one needing a new fixture first:** the lax conversion restored; leading zeros
+accepted; and an unknown size treated as zero on the ONE-SIDED path, which my two-sided fixture
+could not reach.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1981,7 +2021,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and forty-two mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and forty-five mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

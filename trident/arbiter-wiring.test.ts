@@ -144,6 +144,7 @@ function conflictingHost(
       reported++
       return fail('CONFLICT (content): Merge conflict in flush.ts')
     }
+    if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
     if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
     if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
     return ok()
@@ -812,6 +813,7 @@ describe('#541 — a HOSTILE REF NAME cannot forge the prompt either', () => {
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -956,6 +958,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       // The two-stage blob diff: `:2:<path>` vs `:3:<path>`.
@@ -1144,6 +1147,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok('1\t1\tf.ts\n')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1208,6 +1212,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         const forBranch = cmd.some((a) => a.startsWith('00'.repeat(20)))
         return forBranch ? ok('aaa1 one\u0000\u0000aaa2 two\u0000') : ok('bbb1 other\u0000')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1239,6 +1244,92 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(quoted[2]).toContain('aaa2 two')
   })
 
+  test('AN UNPARSEABLE SIZE IS UNKNOWN, AND THE CONTENT IS NEVER READ', async () => {
+    // `Number('')` is 0, and a zero size satisfied `Number.isInteger(size) && size >= 0` — so a
+    // `cat-file -s` that exited 0 with empty output became a MEASUREMENT OF NOTHING. The budget
+    // weighed nothing, the pre-read guard passed, and the content-bearing read went ahead
+    // unbounded: the resource-exhaustion class closed two rounds ago, reached through the one
+    // input that establishes the bound. `Number` is lax the other way too — `1e9`, `0x10` and
+    // `007` all convert — and none of those is a size git prints.
+    //
+    // THE ASSERTION THAT MATTERS IS THAT THE READ NEVER HAPPENS. Asserting only that the result
+    // is `missing` would pass against an implementation that reads the blob and then discards
+    // it, which leaves the bound defeated while the test goes green.
+    const drive = async (
+      slug: string,
+      sizeOut: string,
+      stages: readonly number[] = [1, 2, 3],
+    ): Promise<{ asked: number; reads: number }> => {
+      const run = localRun(slug)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      let reads = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+        if (cmd.includes('log')) return ok('aaa1 x\u0000')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok(sizeOut)
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts', stages)
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+        // The content-bearing reads — the two-sided stage diff and the one-sided
+        // base-vs-survivor pair. Reaching either at all is the defect.
+        if (cmd.some((a) => a.startsWith(':2:'))) {
+          reads++
+          return ok('@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n')
+        }
+        if (cmd.includes('diff') && cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2) {
+          if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+          reads++
+          return ok('@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n')
+        }
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      await cleanupAfterMerge(run, deps).catch(() => {})
+      return { asked: seen.length, reads }
+    }
+
+    // Every shape that is not a size git would print takes the unknown path, and nothing is read.
+    const shapes: [string, string][] = [
+      ['empty', ''],
+      ['whitespace only', '   '],
+      ['exponent', '1e9'],
+      ['hexadecimal', '0x10'],
+      ['negative', '-5'],
+      ['leading zero', '007'],
+      ['prose', 'fatal: bad object'],
+    ]
+    for (const [name, out] of shapes) {
+      const r = await drive(`feat-size-${name.replace(/\W+/g, '')}`, out)
+      expect(r.asked, `${name}: the judge must not be asked`).toBe(0)
+      expect(r.reads, `${name}: the content must never be read`).toBe(0)
+    }
+
+    // THE ONE-SIDED PATH WEIGHS TWO OBJECTS OF ITS OWN (base and survivor) and must refuse on
+    // the same terms — without this, the guard there had no detector at all.
+    for (const [name, out] of shapes) {
+      const r = await drive(`feat-size1-${name.replace(/\W+/g, '')}`, out, [1, 3])
+      expect(r.asked, `${name} (one-sided): the judge must not be asked`).toBe(0)
+      expect(r.reads, `${name} (one-sided): the content must never be read`).toBe(0)
+    }
+
+    // THE CONTROL, or "reject bad sizes" is satisfied by rejecting all of them.
+    const good = await drive('feat-size-ok', '64')
+    expect(good.asked, 'an ordinary integer size still permits the read').toBe(1)
+    expect(good.reads).toBeGreaterThan(0)
+  })
+
   test('THE SAME RULE COVERS THE ONE-SIDED PATH, which is a diff too', async () => {
     // The surviving side of a modify/delete is now shown as a diff against the merge base, so
     // it carries the identical exposure and must carry the identical rule. Without this the
@@ -1253,6 +1344,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         if (cmd.includes('log')) return ok('aaa1 x\u0000')
         if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         // Stages 1 and 3: the modify/delete shape. Stage 1 is the merge base.
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (isUnmergedQuery(cmd)) return unmergedIndex('gone.ts', stages)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('gone.ts')
         if (cmd.includes('diff') && cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2) {
@@ -1304,6 +1396,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       const host: RunHostCommand = async (cmd) => {
         if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
         if (cmd.includes('log')) return ok('aaa1 x\u0000')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1376,6 +1469,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok(`aaa1 ${MARK.commit}\u0000`)
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex(MARK.path)
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}${MARK.path}\n`)
@@ -1451,6 +1545,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\u0000')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1494,6 +1589,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1544,6 +1640,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1603,8 +1700,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
-      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
@@ -1673,6 +1770,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (cmd.includes('cat-file') && cmd.includes('-s')) {
         return ok(cmd.some((a) => a === COMMIT_SHA || a === 'd'.repeat(40)) ? String(9 * 1024 * 1024) : '64')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1721,6 +1819,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(`${shaList(1)}\nfatal: bad revision`)
       if (cmd.includes('log')) return ok('aaa1 subject\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
@@ -1786,6 +1885,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         // B is enormous; only A was ever weighed.
         return ok(sha === B ? String(9 * 1024 * 1024) : '64')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1840,6 +1940,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
           const sha = cmd[cmd.length - 1] ?? ''
           return ok(sha === 'e'.repeat(40) ? (opts.commitBytes ?? '64') : (opts.blobBytes ?? '64'))
         }
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
@@ -1924,6 +2025,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
           const size = sizeFor(sha)
           return size === null ? fail('fatal: bad object') : ok(size)
         }
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -1985,8 +2087,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         // regardless masks an over-read: asking for N+1 and being handed N looks identical to
         // asking for N (#541 round 28, mutation survivor).
         if (cmd.includes('log')) return ok(histories(cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length))
-        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
         if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
@@ -2046,6 +2148,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       // A subject whose body line ends in meaningful trailing whitespace.
       if (cmd.includes('log')) return ok(`c0ffee KEEP-MY-TRAILING${TAB}  \n\u0000`)
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${TAB}1${TAB}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
@@ -2091,6 +2194,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('build.mk')
       if (cmd.includes('--numstat')) return ok('1\t1\tbuild.mk\n')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('build.mk')
@@ -2444,6 +2548,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('gone.ts', [1, 3])
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('gone.ts')
       // Exactly what real git does when stage 2 is absent.
@@ -2510,6 +2615,7 @@ describe('#541 — a HOSTILE CONFLICT FILENAME cannot forge the prompt', () => {
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -2655,6 +2761,7 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
         const forBranch = cmd.some((a) => a.startsWith('11'))
         return log(forBranch ? 'main..x' : 'x..main')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -2919,6 +3026,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts\u0000b.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('a.ts\u0000b.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n ctx\n`)
@@ -3046,6 +3154,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
@@ -3086,6 +3195,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
@@ -3158,6 +3268,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log')) {
         return ok(Array.from({ length: 20 }, (_, k) => `c${k} ${'H'.repeat(600)}`).join('\u0000') + '\u0000')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('small.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('small.ts')
       // A modest diff: the hunk section alone is comfortably inside the budget.
@@ -3207,6 +3318,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('long.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('long.ts')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok(`@@ -1,3 +1,3 @@\n-${line}\n+short\n ctx\n`)
@@ -3242,6 +3354,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     // shift every column after it — and in a diff, columns are content. Found as a mutation
     // survivor: nothing distinguished per-character replacement from run-collapsing.
     const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts')
       if (cmd.includes('--numstat')) return ok('1\t1\ta.ts\n')
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\u0007\u0007\u0007y\n ctx\n')
@@ -3362,6 +3475,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('big.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('big.ts')
       // One file whose two-sided diff is far past the whole evidence budget.
@@ -3601,8 +3715,8 @@ describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge
         )
       }
       if (cmd.includes('status') && cmd.includes('--porcelain')) return ok('UU flush.ts\u0000')
-      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (isConflictDiff) {
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}flush.ts\n`)
         return ok('@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n')
@@ -3804,6 +3918,7 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
       if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
         return ok('shared.ts')
       }
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('shared.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('shared.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -3883,6 +3998,7 @@ describe('#541 — a RETRIED conflict that resolves also discharges its #542 dri
         return ok('shared.ts')
       }
       // …but the conflict the resolver saw was in `other.ts`.
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (isUnmergedQuery(cmd)) return unmergedIndex('other.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('other.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
