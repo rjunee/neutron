@@ -1177,6 +1177,9 @@ export async function shutdownAllPersistentRepls(
         // where leaving the claim behind would be worst: the next construction is exactly
         // what this branch keeps the pane alive FOR, and a claim left set would refuse it
         // until the TTL elapsed.
+        // AND THE SELF-FENCE TIMER (r49) — the fourth non-destructive release, same rule.
+        session.selfFenceTimer?.cancel()
+        session.selfFenceTimer = undefined
         releaseAdoptionClaim(registryPath, key, session.paneClaimBy)
         //
         // `return`, not `continue`: this is the per-child teardown closure, and the

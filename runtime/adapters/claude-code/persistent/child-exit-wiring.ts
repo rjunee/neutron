@@ -103,6 +103,9 @@ export function wireChildExit(args: ChildExitWiring): void {
       //   - the CLAIM, because a takeover keeps the SAME generation — it is the same
       //     child — so the generation cannot tell "still ours" from "somebody else owns
       //     this now". A row claimed by another gateway is left exactly alone.
+      // The child is gone, so the self-fence has nothing left to protect (r49).
+      session.selfFenceTimer?.cancel()
+      session.selfFenceTimer = undefined
       disownPaneOnExit(args.registryPath, sessionKey, session)
       // Reclaim the temp config files now the child is gone (covers pool eviction,
       // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

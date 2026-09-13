@@ -1374,6 +1374,7 @@ across two files, and five the next time someone adds one.
 | `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key |
 | `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped |
 | the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live |
+| **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind |
 | **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses |
 | **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released |
 

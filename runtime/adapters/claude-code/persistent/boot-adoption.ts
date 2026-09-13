@@ -2401,6 +2401,11 @@ async function adoptRow(
    */
   const unwind = async (reason: string, attached?: PtyChild): Promise<RowAdoptionOutcome> => {
     sink.unregisterIf(record.sessionId, session)
+    // AND THE SELF-FENCE TIMER (r49). A path that stops owning leaves no timer behind: it
+    // would fire later against a session already released, and until then it holds a
+    // reference to it. The round-thirty-one table is one row wider.
+    session.selfFenceTimer?.cancel()
+    session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     deleteOwnPoolEntry(sessionKey, session)
@@ -2437,6 +2442,11 @@ async function adoptRow(
   ): RowAdoptionOutcome => {
     const reason = shutdownAbandonReason(at, signal.boundExpired)
     sink.unregisterIf(record.sessionId, session)
+    // AND THE SELF-FENCE TIMER (r49). A path that stops owning leaves no timer behind: it
+    // would fire later against a session already released, and until then it holds a
+    // reference to it. The round-thirty-one table is one row wider.
+    session.selfFenceTimer?.cancel()
+    session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     // THE WRAPPER LETS GO OF THE PANE IT KEEPS ALIVE (Argus r26). `HerdrHost.open` starts
     // the poll loop before it returns the child, so a pass abandoned AFTER a completed
@@ -2468,6 +2478,11 @@ async function adoptRow(
    *  give-back is the same, and only the reason differs. */
   const releaseWithReason = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
     sink.unregisterIf(record.sessionId, session)
+    // AND THE SELF-FENCE TIMER (r49). A path that stops owning leaves no timer behind: it
+    // would fire later against a session already released, and until then it holds a
+    // reference to it. The round-thirty-one table is one row wider.
+    session.selfFenceTimer?.cancel()
+    session.selfFenceTimer = undefined
     releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     // Same hand-over as {@link release} — see the note there.
     attached?.detach?.()
