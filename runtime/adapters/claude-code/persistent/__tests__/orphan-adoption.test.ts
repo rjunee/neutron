@@ -235,9 +235,13 @@ describe('adoptOrKillOrphan — verdicts', () => {
     expect(await adoptOrKillOrphan(-1, SESSION, d)).toBe('no-pid')
   })
 
-  it('cmdline unreadable (ps failure) → NOT-OURS (safe direction, no kill)', async () => {
+  it('cmdline unreadable (ps failure) → UNREADABLE, distinct from not-ours, still no kill', async () => {
+    // The kill decision is unchanged — neither answer licenses a SIGTERM. What changed
+    // with #539 is that a SECOND question is now asked of this verdict ("may something
+    // else resume that transcript?"), and there `not-ours` is a positive statement
+    // about a stranger while this is the absence of any statement at all.
     const { deps: d, killed } = deps({ readCmdline: () => undefined })
-    expect(await adoptOrKillOrphan(4242, SESSION, d)).toBe('not-ours')
+    expect(await adoptOrKillOrphan(4242, SESSION, d)).toBe('unreadable')
     expect(killed).toEqual([])
   })
 })

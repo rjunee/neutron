@@ -235,6 +235,14 @@ export function beginBootAdoption(
   // converts every failure into a verdict, and every caller awaits this.
   const gated = started.then((outcome) => {
     clearTimeout(timer)
+    // AN `undecided` PASS IS NOT REMEMBERED. Every other outcome is a settled fact
+    // about a pane — adopted, gone, closed — and re-running the pass would at best
+    // repeat itself. `undecided` is the opposite: it says the facts could not be
+    // established THEN, and the caller's response is to refuse the spawn and let the
+    // next turn try again. Caching it would freeze one bad moment (a herdr blip, a
+    // close that failed) into a permanent refusal for the life of the process, with
+    // nothing ever re-probing.
+    if (outcome.kind === 'undecided') passes.get(registryPath)?.delete(sessionKey)
     return outcome
   })
   forRegistry.set(sessionKey, gated)
@@ -262,6 +270,45 @@ export async function awaitBootAdoption(
     return
   }
   await Promise.allSettled([...forRegistry.values()])
+}
+
+/**
+ * MAY A COLD SPAWN PROCEED ON THIS KEY, given how the reconciliation ended?
+ *
+ * THE VERDICTS DISTINGUISH FALSE FROM UNKNOWN, AND THIS IS WHERE THAT WORK IS FINALLY
+ * SPENT. An earlier revision computed the whole taxonomy and then discarded it:
+ * `getOrSpawnSession` awaited the pass purely for its ORDERING and spawned regardless,
+ * so `undecided` — a pane we could not prove is gone, or one whose close we KNOW
+ * failed — was followed by a fresh `claude --resume` on the same transcript. Two
+ * owners, produced by the module built to prevent them, because nothing read the
+ * answer.
+ *
+ * THE RULE: a spawn is licensed only by a POSITIVE statement about the other owner —
+ * it was adopted (and is therefore in the pool, so no spawn happens at all), it was
+ * proven gone, or it was closed and the close was confirmed. `undecided` licenses
+ * nothing, and neither does anything this function has not been taught about: the
+ * switch is exhaustive on purpose, so a new outcome kind fails the typecheck here
+ * rather than defaulting into permission.
+ */
+export function adoptionPermitsSpawn(
+  outcome: RowAdoptionOutcome,
+): { readonly ok: true } | { readonly ok: false; readonly reason: string } {
+  switch (outcome.kind) {
+    // Adopted: the session is in `pool`, so the caller finds it and never reaches a
+    // spawn. `ok` here is a statement about the KEY, not a recommendation to spawn.
+    case 'adopted':
+      return { ok: true }
+    // Positive absence, or a confirmed close. Nothing owns the transcript.
+    case 'handle-cleared':
+    case 'closed-foreign-owner':
+    case 'closed-unadoptable':
+    case 'closed-by-pid':
+    case 'no-handle':
+      return { ok: true }
+    // Nothing was established. The pane MAY be alive and holding this transcript.
+    case 'undecided':
+      return { ok: false, reason: outcome.reason }
+  }
 }
 
 /**
@@ -298,17 +345,36 @@ export async function reconcileOwnRepl(
 
   const hostCandidate = deps.host ?? options.ptyHost ?? herdrHost
   if (!hostSupportsAdoption(hostCandidate as never)) {
-    // The configured host's children die with this process, so nothing survived to be
-    // adopted and any handle on this row is stale. Not an error — the in-process host
-    // is a supported option — but it IS worth saying, because a row that still carries
-    // a handle here means the instance changed hosts, and the pane that handle names
-    // may genuinely still be running under a herdr server this process is not talking
-    // to.
+    // THE HOST CHANGED UNDER A LIVE PANE, and this is a SUPPORTED configuration change
+    // rather than a corner case: the in-process PTY host is a selectable backend
+    // (SPEC.md Decisions Log 2026-09-12), so "herdr → Bun with REPLs running" is
+    // something an operator can do on purpose. The configured host cannot reach that
+    // pane — but the pane may very well still be running under a herdr server this
+    // process is not talking to, and its `claude` still owns this row's transcript.
+    //
+    // SO THIS IS NOT `no-handle`, AND THE DIFFERENCE IS THE WHOLE POINT. `no-handle`
+    // means "nothing survived, spawning is safe"; this means "something may have
+    // survived and I cannot see it". An earlier revision returned the former and
+    // logged the latter — the log line was true and the verdict licensed a second
+    // `claude` on a live transcript.
+    //
+    // The process table can still settle it, though, and that is what the pid
+    // fallback is: `adoptOrKillOrphan` terminates the recorded pid ONLY if it is
+    // verifiably our claude for this session, which kills the pane's process and
+    // takes the pane with it. Where it can confirm, the spawn is safe again; where it
+    // cannot, the row stays `undecided` and the spawn path refuses.
     log(
       `key=${sessionKey.slice(0, 32)} carries pane handle ${record.pane_handle} but the configured PTY host ` +
-        'cannot adopt — that pane, if it exists, is not reachable from this process',
+        'cannot adopt — falling back to the process table to establish whether that pane is still running ours',
     )
-    return { kind: 'no-handle', sessionKey }
+    return await pidFallback(
+      sessionKey,
+      record,
+      claudeBasenameFor(options),
+      `the configured PTY host cannot reach pane ${record.pane_handle} (the instance changed hosts)`,
+      registryPath,
+      deps,
+    )
   }
   const outcome = await reconcileRow(
     sessionKey,
@@ -320,6 +386,12 @@ export async function reconcileOwnRepl(
   )
   log(`${outcome.kind}: key=${sessionKey.slice(0, 32)}${'reason' in outcome ? ` — ${outcome.reason}` : ''}`)
   return outcome
+}
+
+/** The CONFIGURED binary basename, resolved the way `build-repl-argv.ts` resolves it,
+ *  so the identity gate recognises our own child under a `CLAUDE_BIN` override. */
+function claudeBasenameFor(options: PersistentReplSubstrateOptions): string {
+  return basenameOf(options.claude_bin ?? process.env['CLAUDE_BIN'] ?? 'claude')
 }
 
 /** One row. NEVER throws: a row that cannot be decided is `undecided`, which is a
@@ -336,7 +408,7 @@ async function reconcileRow(
   const handle = record.pane_handle
   if (handle === undefined) return { kind: 'no-handle', sessionKey }
   const registryPath = options.replRegistryPath
-  const claudeBasename = basenameOf(options.claude_bin ?? process.env['CLAUDE_BIN'] ?? 'claude')
+  const claudeBasename = claudeBasenameFor(options)
   try {
     const inspection = await host.inspectHandle(handle)
     const verdict = classifyPaneForAdoption(
@@ -409,14 +481,53 @@ async function pidFallback(
         ),
     } satisfies OrphanAdoptionDeps)
   const verdict = await adoptOrKillOrphan(record.pid, record.sessionId, orphanDeps, claudeBasename)
-  if (verdict === 'killed') {
-    if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
-    return { kind: 'closed-by-pid', sessionKey }
-  }
-  return {
-    kind: 'undecided',
-    sessionKey,
-    reason: `${why}; the pid fallback answered '${verdict}', which establishes neither ownership nor absence`,
+  const log = deps.log ?? defaultLog
+  // FOUR VERDICTS, THREE MEANINGS, and getting that mapping right is the whole value of
+  // the fallback. An earlier revision folded everything that was not `killed` into
+  // `undecided`, which reads "I could not tell" onto two answers that are positive
+  // statements — and then refuses a spawn that is perfectly safe, forever, because
+  // nothing about a dead pid is going to change.
+  switch (verdict) {
+    case 'killed':
+      // We ended it. Nothing of ours runs under that handle now.
+      if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+      return { kind: 'closed-by-pid', sessionKey }
+    case 'dead':
+    case 'not-ours':
+      // BOTH ARE POSITIVE ABSENCES OF *OUR CHILD*, and the pair is stale together: the
+      // pid and the pane handle are written by the same spawn, in the same record, so a
+      // pid that is gone (`dead`) or that the kernel says belongs to a stranger
+      // (`not-ours`, i.e. our child released it and the number was reissued) means the
+      // child that wrote this row is no longer running — and the handle it wrote in the
+      // same breath names nothing of ours either. The transcript has no owner, so a
+      // resume is safe, and the stale handle is cleared so the next boot does not chase
+      // it. This is the same inference the pre-existing `#105` respawn path already
+      // makes when it leaves an unverified pid alone and spawns the replacement.
+      log(
+        `key=${sessionKey.slice(0, 32)}: ${why}; the process table says the recorded pid is ` +
+          `'${verdict}', so the child that wrote this row is gone and its handle is stale`,
+      )
+      if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+      return { kind: 'handle-cleared', sessionKey }
+    case 'unreadable':
+      // ALIVE AND UNREADABLE. The pid exists and the kernel would not tell us whose it
+      // is, which is the absence of a finding rather than a finding of absence — the
+      // one distinction `orphan-adoption.ts` grew a verdict for. Our child may be that
+      // process, holding this transcript.
+      return {
+        kind: 'undecided',
+        sessionKey,
+        reason: `${why}; and the recorded pid is alive but its command line could not be read, so whether it is ours is unknown`,
+      }
+    case 'no-pid':
+      // NOTHING TO ASK. No pid on the row, and a host that cannot speak for the handle:
+      // there is no instrument left, so nothing is established and nothing may be done
+      // on the strength of it.
+      return {
+        kind: 'undecided',
+        sessionKey,
+        reason: `${why}; and the row carries no pid, so the process table cannot be asked either`,
+      }
   }
 }
 

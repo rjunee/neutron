@@ -77,6 +77,19 @@ it must not swallow.
       is left running that no handle reaches.
       *Verified by* `__tests__/boot-adoption.test.ts` (`closed-unadoptable`,
       `closed-foreign-owner`).
+- [ ] **AN INCONCLUSIVE RECONCILIATION REFUSES THE SPAWN.** Where nothing established
+      what happened to the previous REPL — the host could not be asked, the pane's
+      contents could not be identified, a close is known to have FAILED, or the
+      configured host cannot reach the pane at all — the turn FAILS, loudly and
+      retryably, instead of starting a second `claude` on that transcript. The refusal
+      is not remembered: the next turn re-probes.
+      *Verified by* `runtime/adapters/claude-code/persistent/__tests__/adoption-refuses-a-second-owner.test.ts`,
+      which drives the real `getOrSpawnSession` and asserts on the HOST's spawn counter.
+- [ ] **AND A CONCLUSIVE ONE LETS IT THROUGH.** A pane positively gone, a survivor
+      closed, a recorded pid the kernel says is dead or belongs to a stranger, or a row
+      with no durable handle: the spawn proceeds. Without this half, a gate that refuses
+      everything would satisfy the criterion above and stop the product working.
+      *Verified by* the same file's second and third groups.
 - [ ] **AN UNVERIFIED PANE IS NEVER CLOSED.** A pane running something else, or one the
       host could not speak for and whose pid the process table does not confirm, is left
       alone and reported undecided — the recycled-identifier rule, applied to a pane id.
@@ -102,6 +115,17 @@ it must not swallow.
       no handle leaves no handle on the row, even when the row carried one a moment
       before.
       *Verified by* `__tests__/pane-handle-persistence.test.ts`.
+
+## The host switch is a supported configuration change, not a corner case
+
+#540 keeps the in-process PTY host selectable, so "herdr → Bun with REPLs still
+running" is something an operator can do on purpose. The configured host then cannot
+see the pane the row names — but that pane may still be running this row's `claude`
+under a herdr server this process is not talking to. The pass therefore falls back to
+the **process table**: a recorded pid verified as ours is terminated (which takes the
+pane with it), a pid that is dead or provably a stranger says the previous child is
+gone, and anything else refuses the spawn. An honest log line is not a substitute for
+refusing.
 
 ## Residual, named rather than hidden
 

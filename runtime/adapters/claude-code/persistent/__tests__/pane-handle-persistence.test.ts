@@ -166,6 +166,11 @@ describe('the registry row records the current child terminal', () => {
         channelName: 'neutron-stale',
         has_session: false,
         pane_handle: 'w9:p-from-a-previous-life',
+        // A pid the kernel will not know (above `pid_max`), so the boot pass can
+        // establish POSITIVELY that the previous child is gone and let this spawn
+        // proceed. Without it the pass would refuse — correctly — because a host that
+        // cannot reach the pane and a row with no pid establish nothing between them.
+        pid: 2_147_483_647,
       },
     }
     writeFileSync(registryPath, JSON.stringify(stale, null, 2))

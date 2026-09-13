@@ -154,6 +154,10 @@ every mutation was applied and reverted mechanically, and the tree was clean aft
 | M16 | the protocol gate removed from `closeHandle` | `herdr-adoption.test.ts` (1) |
 | M17 | the PRE-attach stale-evidence check removed | `boot-adoption.test.ts` (1) |
 | M18 | the POST-attach stale-evidence check removed | `boot-adoption.test.ts` (1) |
+| M19 | `getOrSpawnSession` ignores the adoption verdict again | `adoption-refuses-a-second-owner.test.ts` (5) |
+| M20 | the host switch returns `no-handle` instead of the pid fallback | `adoption-refuses…` + `boot-adoption` (3) |
+| M21 | `undecided` permits a spawn | `adoption-refuses-a-second-owner.test.ts` (5) |
+| M22 | an `undecided` pass is cached | `adoption-refuses-a-second-owner.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -175,6 +179,37 @@ CLOSES the pane. Both of its branches (before the attach, and after it) are now 
 by tests, because until they were, the mechanism was unreachable in the suite: a first
 attempt at the test called the pass directly, which supplies an unarmed clock and would
 have passed whatever the code did. M17/M18 are the proof that it is reachable.
+
+### The two findings a cross-model gate caught, and what they cost
+
+Both were the same shape: the taxonomy was right and nothing read it.
+
+**1 — an `undecided` verdict still permitted a cold spawn.** The pass refuses to claim
+what it cannot establish, and `getOrSpawnSession` awaited it purely for the ORDERING and
+threw the verdict away. So a pane we could not inspect, or one whose close we KNEW had
+failed, was followed by a fresh `claude --resume` on the same transcript — two owners,
+produced by the module built to prevent them. `adoptionPermitsSpawn` is now the single
+place that decides, its switch is exhaustive so a new outcome kind cannot default into
+permission, and a refusal fails the turn loudly and retryably rather than starting a
+second process. An `undecided` pass is deliberately NOT cached, so the next turn
+re-probes instead of inheriting one bad moment forever.
+
+**2 — switching to a non-adoptable host left the pane alive and then spawned over it.**
+The old branch logged the hazard accurately ("that pane may genuinely still be running
+under a herdr server this process is not talking to") and returned `no-handle`, which
+means "nothing survived, spawning is safe". The log was true and the verdict was not.
+It now falls back to the process table — the one authority still available — and refuses
+where that too is inconclusive. This matters more than it looks: #540 keeps the
+in-process host selectable, so the first operator to flip that setting with live REPLs
+was the person who would have hit it.
+
+**The fix surfaced a third, smaller one.** Leaning on `adoptOrKillOrphan` for a SPAWN
+decision exposed a false/unknown collapse in its own verdict set: `not-ours` was
+returned both for "the kernel showed us a command line and it is somebody else's" and
+for "the command line could not be read at all". Identical for the KILL decision it was
+written for — neither licenses a SIGTERM — and opposite for this one, where the first
+says our child is gone and the second says nothing. `unreadable` is now its own verdict;
+the kill path treats it exactly as before.
 
 ### The protocol gate covers the adoption surface, not just the spawn
 

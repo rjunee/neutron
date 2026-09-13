@@ -49,9 +49,28 @@ import type { HandleInspection } from './pty-host.ts'
 /** Verdict for one orphan-adoption attempt. */
 export type OrphanAdoptionVerdict =
   | 'killed' // pid was verified-ours → terminated before the resume spawns
-  | 'not-ours' // pid alive but cmdline does not match → recycled/unrelated → untouched
+  | 'not-ours' // pid alive AND its cmdline was read AND it is somebody else's → untouched
+  | 'unreadable' // pid alive but its cmdline could NOT be read → nothing established
   | 'dead' // pid not alive → nothing to adopt
   | 'no-pid' // record carried no usable pid → nothing to do
+
+/**
+ * WHY `unreadable` IS SEPARATE FROM `not-ours`, added with #539's adopt arm.
+ *
+ * For the KILL decision the two are identical and always were: neither licenses a
+ * SIGTERM, which is why one value served both for as long as killing was the only
+ * thing this module decided. They are opposite answers to a DIFFERENT question, and
+ * #539 asks it — "may something else now resume this transcript?".
+ *
+ *   - `not-ours` is a POSITIVE statement: the kernel showed us a command line and it
+ *     belongs to somebody else, so our child released that pid and is gone.
+ *   - `unreadable` is the ABSENCE of a statement: `ps` failed, or the process is not
+ *     ours to look at. Our child may be alive and holding the transcript.
+ *
+ * Collapsed, the second silently inherits the first's licence and a second `claude`
+ * starts on a live transcript — the exact false/unknown conflation this tree keeps
+ * paying for. The kill path is unchanged: it treats both as "do not touch".
+ */
 // ───────────────────────────────────────────────────────────────────────────
 // #539 — THE ADOPT ARM.
 //
@@ -336,8 +355,11 @@ export function defaultReadCmdline(pid: number): string | undefined {
  *
  *   - `no-pid`   — `pid` is undefined / not a positive integer.
  *   - `dead`     — `pid` is not alive (the common crash path); nothing to kill.
- *   - `not-ours` — `pid` is alive but its cmdline does NOT match the session
- *                  (recycled / unrelated) → LEFT UNTOUCHED (the safety invariant).
+ *   - `not-ours` — `pid` is alive, its cmdline WAS read, and it does not match the
+ *                  session (recycled / unrelated) → LEFT UNTOUCHED (the safety
+ *                  invariant).
+ *   - `unreadable` — `pid` is alive and its cmdline could not be read at all → LEFT
+ *                  UNTOUCHED, and nothing is established either way.
  *   - `killed`   — `pid` is alive AND verified-ours → `terminatePid` awaited.
  *
  * The caller (`makeReplRespawnDeps.killChild`) registers the returned promise so
@@ -365,6 +387,15 @@ export async function adoptOrKillOrphan(
   }
 
   const cmdline = deps.readCmdline(pid)
+  if (cmdline === undefined) {
+    // ALIVE, AND WE COULD NOT LOOK. Not a finding about the process — a failure to
+    // make one. Never killed (unchanged), and never reported as absence.
+    log(
+      `orphan-adoption: pid ${pid} is alive but its cmdline could not be read — nothing is ` +
+        `established about it (session ${sessionId.slice(0, 8)})`,
+    )
+    return 'unreadable'
+  }
   if (!cmdlineMatchesSession(cmdline, sessionId, claudeBasename)) {
     // Recycled or unrelated process — DO NOT kill. The whole point of #105.
     log(

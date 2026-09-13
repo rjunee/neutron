@@ -395,7 +395,7 @@ describe('when the host cannot answer', () => {
     expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
   })
 
-  it('leaves an UNVERIFIED process alone and says so', async () => {
+  it('a pid that is alive and UNREADABLE establishes nothing → undecided, nothing touched', async () => {
     const f = fixture()
     f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
     const terminated: number[] = []
@@ -405,8 +405,9 @@ describe('when the host cannot answer', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => true,
-        // A recycled pid running something else entirely.
-        readCmdline: () => '/usr/sbin/cupsd -l -f',
+        // `ps` failed, or the process is not ours to inspect. The ABSENCE of a
+        // finding, which must not be read as a finding of absence.
+        readCmdline: () => undefined,
         terminatePid: async (pid) => {
           terminated.push(pid)
         },
@@ -419,21 +420,37 @@ describe('when the host cannot answer', () => {
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 
-  it('a LIVE pane with no argv is unverifiable, and takes the same fallback', async () => {
-    const f = fixture()
+  it('a LIVE pane with no argv takes the same fallback; with no pid on the row it ends undecided', async () => {
+    const f = fixture({ record: { pid: undefined } })
     f.host.inspectOverride = { kind: 'live', argv: [] }
     const outcome = await reconcileOwnRepl(f.options, KEY, {
       host: f.host,
       health: async () => true,
       log: () => {},
-      orphanDeps: () => ({
-        isPidAlive: () => false,
-        readCmdline: () => undefined,
-        terminatePid: async () => {},
-      }),
     })
     expect(outcome.kind).toBe('undecided')
     expect(f.host.closed).toEqual([])
+  })
+
+  it('a pid the kernel says is a STRANGER, or is not alive, is a POSITIVE absence', async () => {
+    // The half that keeps the cases above from being "it always refuses": our child
+    // released that pid (or never had it), so nothing of ours is running under the
+    // handle, and the handle written in the same breath is stale with it.
+    for (const probe of [
+      { isPidAlive: () => true, readCmdline: () => '/usr/sbin/cupsd -l -f' },
+      { isPidAlive: () => false, readCmdline: () => undefined },
+    ]) {
+      const f = fixture()
+      f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
+      const outcome = await reconcileOwnRepl(f.options, KEY, {
+        host: f.host,
+        health: async () => true,
+        log: () => {},
+        orphanDeps: () => ({ ...probe, terminatePid: async () => {} }),
+      })
+      expect(outcome.kind).toBe('handle-cleared')
+      expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+    }
   })
 })
 
@@ -444,8 +461,13 @@ describe('rows that cannot be reconciled at all', () => {
     expect(f.host.attached).toHaveLength(0)
   })
 
-  it('a host that cannot adopt reports no-handle and touches nothing', async () => {
+  it('a host that cannot adopt falls back to the PROCESS TABLE and kills a verified survivor', async () => {
+    // The supported host switch (herdr → the in-process PTY host) with a live pane.
+    // The configured host cannot see that pane, but the kernel can still say whether
+    // the recorded pid is our claude — and if it is, killing it takes the pane with
+    // it and the transcript has one owner again.
     const f = fixture()
+    const terminated: number[] = []
     const outcome = await reconcileOwnRepl(f.options, KEY, {
       // A plain PtyHost: spawn only, no adoption surface.
       host: {
@@ -455,9 +477,61 @@ describe('rows that cannot be reconciled at all', () => {
       },
       health: async () => true,
       log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => true,
+        readCmdline: () => oursArgv().join(' '),
+        terminatePid: async (pid) => {
+          terminated.push(pid)
+        },
+      }),
+    })
+    expect(outcome.kind).toBe('closed-by-pid')
+    expect(terminated).toEqual([4242])
+    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+
+  it('a host that cannot adopt and a pid it cannot verify is UNDECIDED, not no-handle', async () => {
+    // The dangerous shape, and the one an earlier revision got wrong: the pane may
+    // still be running our claude under a herdr server this process is not talking
+    // to. `no-handle` would have told the spawn path "nothing survived".
+    const f = fixture()
+    const terminated: number[] = []
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: {
+        spawn: async () => {
+          throw new Error('never')
+        },
+      },
+      health: async () => true,
+      log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => true,
+        // Alive and unreadable: the one answer that establishes nothing.
+        readCmdline: () => undefined,
+        terminatePid: async (pid) => {
+          terminated.push(pid)
+        },
+      }),
+    })
+    expect(outcome.kind).toBe('undecided')
+    expect(terminated).toEqual([])
+    expect(f.host.closed).toEqual([])
+    // The handle stays on the row: nothing was established, so nothing is forgotten.
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+  })
+
+  it('a row with NO handle on a non-adopting host is genuinely nothing to do', async () => {
+    // The positive control that keeps the case above from being "it always refuses".
+    const f = fixture({ record: { pane_handle: undefined } })
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: {
+        spawn: async () => {
+          throw new Error('never')
+        },
+      },
+      health: async () => true,
+      log: () => {},
     })
     expect(outcome.kind).toBe('no-handle')
-    expect(f.host.closed).toEqual([])
-    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 })

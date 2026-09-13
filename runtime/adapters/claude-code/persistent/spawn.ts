@@ -44,7 +44,7 @@ import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, 
 import { wireChildExit } from './child-exit-wiring.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import { registerReplDetectors } from './repl-detectors.ts'
-import { beginBootAdoption } from './boot-adoption.ts'
+import { adoptionPermitsSpawn, beginBootAdoption } from './boot-adoption.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 async function spawnSession(
@@ -911,15 +911,35 @@ export async function getOrSpawnSession(
   // either re-adopts that pane (and it is in `pool` by the time this line completes)
   // or closes it; either way the key then has one owner or none.
   //
-  // `begin`, NOT `await`: THE TRIGGER AND THE GATE ARE THE SAME CALL, deliberately.
-  // The boot wiring also starts this (`adapters/claude-code/index.ts`, before the
-  // watchdog is armed) and that is the ordering the issue asks for — but a gate that
-  // only waits for a pass somebody else remembered to start is a gate that silently
-  // does nothing the day a new call path reaches the pool. It is idempotent per key,
-  // so the second caller joins the first pass rather than racing it, and it is a
-  // no-op returning `no-handle` when there is no registry or no durable handle —
+  // `begin`, NOT `await` alone: THE TRIGGER AND THE GATE ARE THE SAME CALL,
+  // deliberately. The boot wiring also starts this (`adapters/claude-code/index.ts`,
+  // before the watchdog is armed) and that is the ordering the issue asks for — but a
+  // gate that only waits for a pass somebody else remembered to start is a gate that
+  // silently does nothing the day a new call path reaches the pool. It is idempotent
+  // per key, so the second caller joins the first pass rather than racing it, and it
+  // is a no-op returning `no-handle` when there is no registry or no durable handle —
   // which is every test and every unsupervised substrate.
-  await beginBootAdoption(options, sessionKey)
+  //
+  // AND THE VERDICT IS READ. Awaiting it only for the ORDERING was the defect a gate
+  // review caught: the pass distinguishes "the other owner is gone" from "I could not
+  // establish that", and then this function spawned on either. Everything below
+  // resumes a transcript, so an unestablished owner means a SECOND process on it.
+  const reconciled = await beginBootAdoption(options, sessionKey)
+  const permitted = adoptionPermitsSpawn(reconciled)
+  if (!permitted.ok) {
+    // REFUSE, LOUDLY AND RETRYABLY. Not a cold spawn with a fresh session id either:
+    // that silently starts an empty conversation where the user expects theirs, which
+    // is the same class of harm as the stale-resume picker this tree already refuses
+    // to paper over. The next turn re-runs the pass — an `undecided` outcome is
+    // deliberately not cached — so a transient failure to see herdr costs one turn,
+    // and a real unreaped owner keeps costing turns until an operator or the process
+    // table settles it.
+    throw new Error(
+      `persistent-repl: refusing to resume session ${sessionKey.slice(0, 32)} — a previous REPL for it may ` +
+        `still be running and could not be accounted for (${permitted.reason}). Starting a second process on ` +
+        'one transcript corrupts it, so this turn fails instead. It retries on the next turn.',
+    )
+  }
   // Heartbeat for the quarantine reaper. Dispatch is the substrate's only regular
   // tick, and a quarantined child must not outlive its hosted work. FIRED, not
   // awaited: adding an await here would reorder the synchronous prefix two
