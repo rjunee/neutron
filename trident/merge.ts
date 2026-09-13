@@ -2172,11 +2172,21 @@ async function unmergedStages(
  * something it needs, ADD THE FIELD TO THE FOLDED EVIDENCE. Restoring a tool would hand
  * back the disclosure channel that removing `Read` closed.
  *
- * `git diff :2:<path> :3:<path>` — the two CONFLICT STAGES as blobs. Verified against real
- * git mid-rebase: stage 2 is "ours" (the base being replayed onto) and stage 3 is "theirs"
- * (the branch commit being replayed), so `-` lines are the BASE's version and `+` lines the
- * BRANCH's. That is the exact question the arbiter is answering — do these two intents
- * conflict irreconcilably — in unified-diff form.
+ * THE TWO CONFLICT STAGES AS BLOBS, addressed BY OBJECT ID. `ls-files --unmerged` gives the
+ * stage-2 and stage-3 shas, `cat-file -s` weighs those exact objects, and `git diff <oid>
+ * <oid>` reads the ones that were weighed — never `:2:<path>`/`:3:<path>`, which re-resolve a
+ * mutable index at read time and would let the ceiling be spent against one set of objects
+ * and the content fetched from another (#541 round 34). Verified against real git mid-rebase:
+ * stage 2 is "ours" (the base being replayed onto) and stage 3 is "theirs" (the branch commit
+ * being replayed), so `-` lines are the BASE's version and `+` lines the BRANCH's. That is the
+ * exact question the arbiter is answering — do these two intents conflict irreconcilably — in
+ * unified-diff form.
+ *
+ * THE COST OF ADDRESSING OBJECTS is that the diff header reads `a/<oid> b/<oid>` instead of
+ * the filename, and `--src-prefix`/`--dst-prefix` concatenate rather than replace, so they
+ * cannot restore it. The section label names the path and the section HEADING says once that
+ * those `a/`/`b/` names are object ids — once, because per-file it cost enough bytes to push a
+ * forty-file conflict over the prompt budget.
  *
  * EVERY FAILURE HERE IS A REFUSAL TO ARBITRATE, never a thinner prompt. The judge is asked
  * only about a conflict this function actually established.

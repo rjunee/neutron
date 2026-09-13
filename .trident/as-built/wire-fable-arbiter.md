@@ -80,8 +80,9 @@ description would have been a coin flip with a model attached, and the instrumen
 eventually have measured that.
 
 Fixed the way this class is supposed to be fixed — **add the field, never restore the
-tool.** `conflictHunks` sends `git diff :2:<path> :3:<path>`, the two conflict stages as
-blobs, so `-` lines are the base's version and `+` lines the branch's: exactly the question
+tool.** `conflictHunks` diffs the two conflict stages as blobs — by
+`:2:<path>`/`:3:<path>` pathspec when this was written, and by OBJECT ID since round 34 below
+— so `-` lines are the base's version and `+` lines the branch's: exactly the question
 being adjudicated, in unified-diff form, so only the differing region plus context travels.
 Verified against real git rather than assumed, because that assumption is what failed last
 round.
@@ -1829,6 +1830,86 @@ fits on its own and the history is what overruns. A bare `0` would have passed f
 reason in two of those three, and a fixture that never diffs anything would have passed all
 three — so there is a control that an in-budget conflict *is* read.
 
+### ROUND 35 — the fix updated the entry that argued for it and left the entry that described the mechanism
+
+**A FIFTH INSTANCE, AND IT IS TIME TO STATE IT AS A CLASS RATHER THAN AS ANOTHER INCIDENT.**
+Round 34 changed how the conflict is addressed, amended the SPEC rule that *argues* for the
+change, and left three documents still describing the old mechanism in the present tense: this
+record at line 83, `SPEC.md:274`, and `conflictEvidence`'s own docblock. `SPEC.md` then stated
+both — line 274 said pathspecs, line 295 said object ids. **One document, two mechanisms, both
+in the present tense.**
+
+**The shape, named:** *a fix updates the entry that argues for it and leaves the entry that
+describes the old mechanism, because only the first is in the author's head at the time.* The
+argument is what I am editing; the description is somewhere I am not looking. It has now
+happened five times in this lane — the guidance channel three times, `sideHistory`'s contract,
+and this — and every occurrence produced a document that was internally contradictory rather
+than merely out of date, which is worse: an out-of-date document can be spotted, and a
+self-contradicting one hands the reader a coin flip.
+
+**The standing correction is not "remember to grep".** It is that a mechanism description is a
+CURRENT-STATE CLAIM subject to the same rule as every other claim on this branch: *every claim
+carries a file:line read this session.* Where that can be made structural it has been — the
+round-34 test that ties `SPEC.md`'s metric names to the emitted ones is exactly this rule
+applied to one class of claim. Prose describing a git invocation has no such anchor, so the
+honest mitigation is to grep the old spelling on every mechanism change and to say, as here,
+which occurrences are HISTORY (past tense, and left alone) and which were stale present tense.
+Three were stale and are fixed; `merge.ts:1981` and this record's own round-34 section describe
+what the code *used to* do and are correct as written.
+
+### ROUND 35, SECOND FINDING — an absence assertion that could never fire, in a test written to keep a fixture honest
+
+Both modify/delete fixtures asserted their own premise with:
+
+```js
+expect(stages).not.toContain('\t2\t')
+```
+
+`git ls-files --unmerged` emits `<mode> <sha> <stage>\t<path>` — **the stage digit is preceded
+by a SPACE**, so that string cannot occur for any index whatsoever. Measured directly rather
+than reasoned about, in a scratch repo with one modify/delete and one two-sided conflict:
+
+```
+100644 df967b96… 1\tREADME.md      <- one-sided: base and branch only
+100644 10f0759f… 3\tREADME.md
+100644 587be6b4… 1\tkeep.txt       <- two-sided: all three stages
+100644 b6802534… 2\tkeep.txt
+100644 975fbec8… 3\tkeep.txt
+```
+
+The comment above the assertion read *"The premise, asserted rather than assumed."* **The
+premise was assumed, in a sentence claiming it was not** — the same defect class as everything
+else on this branch, committed in a comment about that class.
+
+**And the two sites were not equally harmless, which only mutation could show.** Breaking the
+TEXT fixture's premise (main modifies `README.md` instead of deleting it) does fail the test —
+but at `expect(body).toContain('no two-sided diff')`, forty lines downstream, by luck of a
+content assertion that happens to be sensitive. Breaking the BINARY fixture's premise the same
+way **passes**: its only other assertion is `evidence.kind === 'binary'`, and a two-sided binary
+conflict is `binary` too. So the test named *"a ONE-SIDED binary conflict is not laundered into
+pseudo-text either"* was, under that mutation, exercising a TWO-SIDED conflict and reporting
+success — and nothing anywhere in the suite could tell.
+
+Both now parse the stage field and assert the stage set that must SURVIVE (`[1, 3]`) rather than
+the one that must be absent. A set is falsifiable in both directions: a fixture that stopped
+conflicting yields `[]` and a fixture that became two-sided yields `[1, 2, 3]`, and the old
+assertion could not distinguish either from success.
+
+| # | mutation | result |
+|---|---|---|
+| M152 | text fixture made two-sided, NEW assertion | **red at the premise line** |
+| M153 | text fixture made two-sided, OLD assertion | red — but at `toContain('no two-sided diff')`, downstream and by luck |
+| M154 | binary fixture made two-sided, OLD assertion | **PASSED** — the blind spot, proved rather than argued |
+| M155 | binary fixture made two-sided, NEW assertion | **red at the premise line** |
+
+**A note on my own instrument.** The first run after this edit reported two failures — in two
+tests I had not touched — and eleven consecutive runs since, plus the full 4238-test suite, have
+been green. I could not reproduce it and I am not going to pretend I diagnosed it: the machine
+was at 98% disk with four other agents running, which is the same condition that produced this
+lane's empty-output-on-a-full-disk incident. What I will record is that **my own grep filter
+discarded the failure detail**, so a signal I had exactly one chance to read went in the bin —
+the same category of mistake as the assertions above, made about my own tooling.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1843,7 +1924,7 @@ because they make the wrong behaviour *unrepresentable* rather than merely unass
 `EvidencePart` for presence, the single `assembleEvidence` constructor for the claim, and the
 reporting fold for loss. Each one turns "I remembered to check" into "there is no way to say it".
 
-### THE PATTERN, named because it recurred four times
+### THE PATTERN, named because it recurred four times (and a second pattern, below it)
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
 the dimension that mattered**. The fingerprint was correct about state and blind to time.
@@ -1855,7 +1936,19 @@ result change — which is also what caught the e2e arms passing by accident of 
 the oversized-filename test passing because the huge path happened to come last, and the
 frozen-ceiling gap where a relation to a constant could not detect the constant moving.
 Ten instances of a test passing for the wrong reason were found in this lane in one
-session, and mutation — not reading — found every one of them.
+session, and mutation — not reading — found every one of them. By round 35 the count is twelve,
+the last two being modify/delete premises asserted with a string git never emits — and one of
+those was the ONLY premise check its test had, so the mutation that broke the fixture passed.
+
+**THE SECOND PATTERN, and it is about documents rather than tests: a fix updates the entry that
+ARGUES for it and leaves the entry that DESCRIBES the old mechanism.** Five occurrences here —
+the guidance channel three times, `sideHistory`'s contract, and round 34's addressing change,
+which left `SPEC.md` stating both mechanisms in the present tense one paragraph apart. The cause
+is the same every time: the argument is what the author is editing and the description is
+somewhere they are not looking. A mechanism description is a current-state claim and carries the
+same burden as any other; where it can be anchored to the code it should be, and where it cannot
+the change is not finished until the old spelling has been grepped and each hit classified as
+history or as stale.
 
 **THE LANE'S STANDING LESSON: test the platform's behaviour before reasoning about the code
 that wraps it.** `--tools` was a real, enforced gate that survives

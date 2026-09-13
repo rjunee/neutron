@@ -53,6 +53,34 @@ async function gitOut(repo: string, ...args: string[]): Promise<string> {
   return res.stdout
 }
 
+/**
+ * WHICH STAGES THE INDEX ACTUALLY HOLDS for one path, ascending.
+ *
+ * #541 round 35. Both modify/delete fixtures asserted their own premise with
+ * `expect(stages).not.toContain('\t2\t')` — AND THAT STRING CANNOT OCCUR. Real git emits
+ * `<mode> <sha> <stage>\t<path>`, so the stage digit is preceded by a SPACE and followed by the
+ * tab; measured directly against a modify/delete conflict in a scratch repo:
+ *
+ *   100644 df967b96… 1\tREADME.md
+ *   100644 10f0759f… 3\tREADME.md
+ *
+ * The assertion passed for every index, including an index with a stage 2 in it, so the comment
+ * above it — "the premise, asserted rather than assumed" — described something the code did not
+ * do. AN ABSENCE ASSERTION THAT CAN NEVER FIRE IS INDISTINGUISHABLE FROM A PASSING ONE, which is
+ * the subject of this entire branch, here in a test written to keep a fixture honest.
+ *
+ * So the field is PARSED, and callers assert the stages they expect to SURVIVE rather than only
+ * the one they expect absent: `[1, 3]` is a claim a broken fixture fails, `not.toContain` was a
+ * claim nothing could fail.
+ */
+function unmergedStages(out: string): number[] {
+  return out
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => Number(/^[0-7]{6} [0-9a-f]{40} ([123])\t/.exec(line)?.[1] ?? NaN))
+    .sort((a, b) => a - b)
+}
+
 /** A fresh base repo on `main` with one committed file. */
 async function makeBaseRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'trident-base-'))
@@ -943,8 +971,11 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
    * caller already supplied everything it needed. That was asserted rather than checked, and
    * it was false — the caller sent filenames and histories, not the conflict. A scripted-host
    * test cannot catch that class: it would happily confirm that whatever I chose to script
-   * arrives. Only real git can say whether `git diff :2:<path> :3:<path>` yields the two
-   * sides at all, which is the assumption the whole design now rests on.
+   * arrives. Only real git can say whether a diff of the two conflict stages yields the two
+   * sides at all, which is the assumption the whole design rests on. (The stages were
+   * addressed as `:2:<path>`/`:3:<path>` when this was written and by object id since round
+   * 34; the assumption under test is the same either way, which is why this comment now
+   * names the stages rather than the spelling.)
    */
   test('both sides of a real conflicted file reach the evidence, labelled and quoted', async () => {
     const repo = await makeBaseRepo()
@@ -1017,10 +1048,13 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
     const conflicted = await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')
     expect(conflicted).toContain('README.md')
-    // The premise, asserted rather than assumed: stage 2 really is absent, which is what
-    // makes this the one-sided case and not an ordinary content conflict.
+    // THE PREMISE, NOW ACTUALLY ASSERTED: the index holds the merge base and the branch and
+    // NOTHING FROM `main`, which is what makes this the one-sided case rather than an ordinary
+    // content conflict. Stated as the whole stage set, so a fixture that stopped conflicting
+    // (`[]`), or one that produced a two-sided conflict instead (`[1, 2, 3]`), fails here —
+    // neither of which the old `not.toContain` could distinguish from success.
     const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'README.md')
-    expect(stages).not.toContain('\t2\t')
+    expect(unmergedStages(stages), 'base and branch only — main deleted the file').toEqual([1, 3])
 
     const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     // ESTABLISHED, so the judge is asked — refusing here would make the tier inert for every
@@ -1112,8 +1146,10 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main deletes art')
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    // THE SAME PREMISE, THE SAME WAY: a binary modify/delete, so stage 2 is absent and the
+    // other two are present. `toEqual` on the set is what makes that a falsifiable claim.
     const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'art.png')
-    expect(stages).not.toContain('\t2\t')
+    expect(unmergedStages(stages), 'base and branch only — main deleted the file').toEqual([1, 3])
 
     const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['art.png'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('binary')
