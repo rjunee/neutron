@@ -232,6 +232,35 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round thirty: a gate that runs in CI has to be right in BOTH directions
+
+**A false positive in a required check blocks correct code, and the author cannot argue with
+it.** The exemption tested the text immediately left of the identifier, so a qualified ref
+assembled by CONCATENATION —
+
+    const cmd = 'git diff refs/heads/' + baseBranch + '..HEAD'
+
+— was reported as an offence: `line.slice(0, m.index)` ends in `' + `, and the anchored pattern
+never matched. Fixed by classifying the ASSEMBLED OPERAND (drop the closing quote and the `+`
+before testing), which is the same principle as the classifier one layer up: **decide what the
+value IS before deciding what to do about it.** Mutation: reverting to the raw prefix reds it.
+
+**And the control that should have caught it was vacuous.** The near-miss list carried
+`"const cmd = 'git diff refs/tags/' + baseBranch"` — no `..`, so `RANGE_CONCAT` never matched
+and it passed because NOTHING WAS EXAMINED, in a list whose three siblings do exercise the
+matcher. **A control that passes for the wrong reason is worse than a missing one, because it
+occupies the slot.** Every member of both silent lists now carries the variant that must be
+REPORTED — the name de-qualified, or for the ellipsis case the range operator restored — which
+is the only way silence proves the exemption rather than the matcher's absence.
+
+**The third finding is this PR's own subject, in the gate built to end it.** `runControls()`
+asserts six offences at specific lines; the gate's header said five, its fixture doc said five
+at different positions, and the spec item said five. The lesson is not carelessness: **a
+hand-written count beside a machine-checked list is a second copy of a fact.** The comments now
+say `wantPositive` is the list, and the spec criterion says the control is the gate's own
+`runControls()` and deliberately restates neither the count nor the positions. Neither can drift
+because neither is a copy.
+
 ### Round twenty-nine: stop moving arms — classify the KIND once
 
 Three consecutive findings on the wrapper's chain were **one defect**: an arm that probes a

@@ -300,36 +300,76 @@ describe('the matcher stays silent on every near-miss', () => {
       expect({ src, hits: findBareBaseRanges(src).length }).toEqual({ src, hits: 1 })
     }
     // THE COMPLEMENT, so the anchor is not just "report everything": a real `refs/` operand is
-    // still silent at every boundary it can legally start at.
-    for (const src of [
-      'const cmd = `git diff refs/heads/${baseBranch}..${head}`',
-      'git diff "refs/remotes/origin/${BASE_BRANCH}..HEAD"',
-      "const cmd = 'git diff refs/tags/' + baseBranch",
-      'const cmd = `git diff refs/heads/${baseBranch}..${head}`\nconst x = 1',
-    ]) {
-      expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
+    // still silent at every boundary it can legally start at — INCLUDING assembled by
+    // concatenation, where the operand's left half is the string literal before the `+` and the
+    // text immediately left of the identifier ends in `' + `. That case was a FALSE POSITIVE in
+    // a required check until this round: the gate reported an offence against a line where git
+    // receives a fully qualified ref.
+    //
+    // EACH MEMBER IS PROVED TO REACH THE MATCHER. The version of this list that shipped carried
+    // `"const cmd = 'git diff refs/tags/' + baseBranch"` — no `..`, so `RANGE_CONCAT` never
+    // matched it and it passed because NOTHING WAS EXAMINED. **A control that passes for the
+    // wrong reason is worse than a missing one, because it occupies the slot.** So every entry
+    // below carries the de-qualified variant that must be REPORTED, which is the only way to
+    // show the matcher saw the qualified one at all.
+    for (const [silent, reported] of [
+      [
+        'const cmd = `git diff refs/heads/${baseBranch}..${head}`',
+        'const cmd = `git diff ${baseBranch}..${head}`',
+      ],
+      [
+        'git diff "refs/remotes/origin/${BASE_BRANCH}..HEAD"',
+        'git diff "${BASE_BRANCH}..HEAD"',
+      ],
+      [
+        "const cmd = 'git diff refs/tags/' + baseBranch + '..HEAD'",
+        "const cmd = 'git diff ' + baseBranch + '..HEAD'",
+      ],
+      [
+        "const cmd = 'git diff refs/heads/' + baseBranch + '...HEAD'",
+        "const cmd = 'git diff ' + baseBranch + '...HEAD'",
+      ],
+      [
+        'const cmd = `git diff refs/heads/${baseBranch}..${head}`\nconst x = 1',
+        'const cmd = `git diff ${baseBranch}..${head}`\nconst x = 1',
+      ],
+    ] as const) {
+      expect({ silent, hits: findBareBaseRanges(silent) }).toEqual({ silent, hits: [] })
+      // …and the SAME shape with the qualification removed IS reported, so the silence above
+      // is the exemption working rather than the matcher never arriving.
+      expect({ reported, hits: findBareBaseRanges(reported).length }).toEqual({ reported, hits: 1 })
     }
   })
 
   test('THE COMPLEMENT of the quote/concat/line-break widening: a RESOLVED base in each of those exact positions is silent', () => {
     // Without this, the fix for the review-gate finding could have been "loosen the
     // regex until it matches", which would trade a blind spot for a muted gate.
-    for (const src of [
-      'git diff "${BASE_DIFF_REF}"..HEAD',
-      'git diff "refs/remotes/origin/${baseBranch}"..HEAD',
-      "const cmd = 'git diff ' + baseRef + '..HEAD'",
-      "const cmd = 'git diff ' + base_sha + '..HEAD'",
-      'const r = `git diff ${diffBase}` +\n  `..${head}`',
+    //
+    // EVERY MEMBER CARRIES THE VARIANT THAT MUST BE REPORTED, for the same reason as the list
+    // above: silence proves the near-miss works only if the matcher reached it. Each pair
+    // changes exactly the one thing the member is about — the NAME for the first seven, the
+    // range OPERATOR for the last, whose whole point is that an ellipsis is not a range.
+    for (const [silent, reported] of [
+      ['git diff "${BASE_DIFF_REF}"..HEAD', 'git diff "${BASE_BRANCH}"..HEAD'],
+      ['git diff "refs/remotes/origin/${baseBranch}"..HEAD', 'git diff "${baseBranch}"..HEAD'],
+      ["const cmd = 'git diff ' + baseRef + '..HEAD'", "const cmd = 'git diff ' + baseBranch + '..HEAD'"],
+      ["const cmd = 'git diff ' + base_sha + '..HEAD'", "const cmd = 'git diff ' + base_branch + '..HEAD'"],
+      ['const r = `git diff ${diffBase}` +\n  `..${head}`', 'const r = `git diff ${baseBranch}` +\n  `..${head}`'],
       // A non-base operand on the left of a concat — `head..HEAD` is a different
       // question and none of this gate's business.
-      "const cmd = 'git log ' + head + '..HEAD'",
+      ["const cmd = 'git log ' + head + '..HEAD'", "const cmd = 'git log ' + baseBranch + '..HEAD'"],
       // An alias of a RESOLVED value is not tainted, so the fixpoint above cannot
       // spread taint to everything a file assigns.
-      'const b = diffBase\nconst r = `git diff ${b}..${head}`',
-      // Ordinary prose that happens to name the variable and use an ellipsis.
-      '// the base branch ${baseBranch} … and more prose',
-    ]) {
-      expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
+      [
+        'const b = diffBase\nconst r = `git diff ${b}..${head}`',
+        'const b = baseBranch\nconst r = `git diff ${b}..${head}`',
+      ],
+      // Ordinary prose that happens to name the variable and use an ellipsis: the ELLIPSIS is
+      // what makes it silent, so the variant swaps `…` for a real range operator.
+      ['// the base branch ${baseBranch} … and more prose', 'const r = `git diff ${baseBranch}..${head}` // prose'],
+    ] as const) {
+      expect({ silent, hits: findBareBaseRanges(silent) }).toEqual({ silent, hits: [] })
+      expect({ reported, hits: findBareBaseRanges(reported).length }).toEqual({ reported, hits: 1 })
     }
   })
 

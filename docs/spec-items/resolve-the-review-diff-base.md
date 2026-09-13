@@ -473,8 +473,16 @@ The resolution order is evidence-first, and is the same at every site:
       the fix for a blind spot trades it for a muted gate.
 - [ ] **The gate has a positive control and refuses an empty scan.** A grep that finds nothing
       proves nothing until the same grep has been shown finding something. Verified by the
-      gate's own `runControls()` (5 pinned offenses at pinned lines, plus a negative control
-      whose only hit is an un-argued exemption), which runs before the tree is touched, and by
-      "an empty scan set is a FAILURE, not a pass" and by the planted-offender mutation test.
+      gate's own `runControls()` — **its `wantPositive` list is the count and the positions,
+      and this criterion deliberately does not restate them**: a number retyped here is a
+      second copy of a fact, and the copy in this item had already drifted from the list (it
+      said five, at positions the control does not use). Plus a negative control whose only hit
+      is an un-argued exemption. Both run before the tree is touched, and the same property is
+      asserted by "an empty scan set is a FAILURE, not a pass" and by the planted-offender
+      mutation test.
+      **Every near-miss in the silent lists carries the variant that must be REPORTED**, because
+      a control that passes for the wrong reason occupies the slot: one of them was
+      `'git diff refs/tags/' + baseBranch` with no `..` at all, so the matcher never examined
+      it and its silence proved nothing.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.

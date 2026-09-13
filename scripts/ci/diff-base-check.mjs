@@ -174,8 +174,9 @@
 // ── WHY THE CONTROLS AND THE TRIPWIRE ─────────────────────────────────
 // This repo has been bitten by a check that matched nothing and reported success.
 // So before it looks at the tree at all, every invocation runs a POSITIVE control
-// (a fixture whose 5 offenses the matcher must reproduce exactly — it grew from 3 as new
-// shapes were found) and a NEGATIVE
+// (a fixture whose offenses the matcher must reproduce EXACTLY — the list is `wantPositive`
+// in `runControls()`, and it is the only copy: a count retyped in prose is a second copy of a
+// fact, and this file has already shipped one that drifted) and a NEGATIVE
 // control (a fixture of near-misses in which exactly the un-argued exemption must
 // be the only hit). A scan that reaches ZERO files also exits 1: an absence
 // proves nothing until the same matcher has been shown finding something.
@@ -508,7 +509,18 @@ export function findBareBaseRanges(source) {
         const mentioned = m[1].match(IDENTIFIER) ?? []
         const name = mentioned.find((n) => BRANCH_NAME.test(n) || tainted.has(n))
         if (name === undefined) continue
-        const before = line.slice(0, m.index)
+        // THE ASSEMBLED OPERAND, not the text immediately left of the identifier. In a
+        // CONCATENATION the operand's left half is the string literal before the `+`:
+        //
+        //   const cmd = 'git diff refs/heads/' + baseBranch + '..HEAD'
+        //
+        // and `line.slice(0, m.index)` ends in `' + `, so the anchored pattern never matched
+        // and the gate reported an offence against a line where git receives a FULLY QUALIFIED
+        // ref. A false positive in a required check blocks correct code, and the author has no
+        // way to argue with it. Dropping the closing quote and the `+` reconstructs enough of
+        // the operand to classify it — the same principle as the classifier one layer up:
+        // decide what the value IS before deciding what to do about it.
+        const before = line.slice(0, m.index).replace(/['"`]\s*\+\s*$/, '')
         if (QUALIFIED_PREFIX.test(before)) continue
         if (isExempt(lines, lineNo - 1)) continue
         // One report per (line, name): a joined continuation is scanned as part of the
@@ -527,18 +539,22 @@ export function findBareBaseRanges(source) {
 // Hard-coded, checked on every invocation, BEFORE the tree is touched.
 
 /**
- * 5 offenses, at lines 4, 6, 11, 14 and 16 — the two shapes #546 itself was composed in
- * plus the three this gate was later caught missing, rather than the one that is easiest
- * to match. NOT an enumeration of every possible shape; the header's scope note lists
- * what stays invisible:
- *   * the bare name in a template (line 4);
- *   * THE NAME WRAPPED IN A CALL (line 6) — `git diff ${shSingleQuote(baseBranch)}..`
- *     is the exact text `writeResumeDiff` shipped, and the first draft of this gate
- *     could not see it;
- *   * a ternary that falls back to the name (line 11) — the forge contract's
+ * The shapes #546 was composed in, plus the ones this gate was later caught missing — rather
+ * than the one that is easiest to match. **`wantPositive` in `runControls()` is the list**:
+ * the count and the line numbers live there and nowhere else, because a hand-written count
+ * beside a machine-checked list is a second copy of a fact, and the version of this comment
+ * that named "5 offenses, at lines 4, 6, 11, 14 and 16" had drifted from the six the control
+ * actually asserts. NOT an enumeration of every possible shape; the header's scope note lists
+ * what stays invisible. What the fixture carries, in the order it carries it:
+ *   * the bare name in a template;
+ *   * THE NAME WRAPPED IN A CALL — `git diff ${shSingleQuote(baseBranch)}..` is the exact text
+ *     `writeResumeDiff` shipped, and the first draft of this gate could not see it;
+ *   * a ternary that falls back to the name — the forge contract's
  *     `${pinnedBase ?? baseBranch}..HEAD`, wrong only on its fallback arm;
- *   * a `.ts` site where the name arrived from `resolveBase()` (line 14);
- *   * the shell form (line 16).
+ *   * a `.ts` site where the name arrived from `resolveBase()`;
+ *   * the shell form;
+ *   * the SHORTHAND `origin/${baseBranch}..`, which this gate exempted until round
+ *     twenty-four.
  */
 export const POSITIVE_CONTROL = [
   '// a .mjs workflow prompt: the spelling the defect shipped in',
