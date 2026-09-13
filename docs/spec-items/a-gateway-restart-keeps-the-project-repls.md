@@ -217,10 +217,23 @@ it must not swallow.
       *Verified by* `__tests__/adopted-pane-latches.test.ts` (both directions).
 - [ ] **THE SHUTDOWN KILL IS NARROWED, NOT REMOVED.** A child survives only when a
       persisted row names its exact pane and its exact generation; every other child —
-      in-process hosts, quarantined children, ephemeral one-shots, and any pane no row
-      names — is still killed.
+      in-process hosts, quarantined children, ephemeral one-shots, any pane no row names,
+      and a child whose spawn had not settled when shutdown reached the pool, which is
+      killed when it later resolves regardless of the row it went on to write (#674) —
+      is still killed.
       *Verified by* `__tests__/gateway-shutdown-survival.test.ts` (the verdict table and
       the teardown cases).
+
+      The last entry is a case the shipped narrowing does NOT cover, and it is in the
+      enumeration rather than only in the as-built because the second clause claims to
+      partition every child. "Survives only when…" is a necessary condition and remains
+      exactly true; a still-spawning child whose row DOES name its pane and generation
+      satisfies neither half of the partition as it was first written, so the list
+      claimed a completeness it did not have — which is a defect shape this item's own
+      record names, and it is not one to commit while cataloguing it. #674 tracks the
+      gap; it fails conservatively (one `--resume`, nothing orphaned and no second owner)
+      and the fix has to take the registry lock from a callback that runs after the
+      module state is torn down.
 - [ ] **A HANDLE DESCRIBES THE CURRENT CHILD OR IS ABSENT.** A spawn whose host issues
       no handle leaves no handle on the row, even when the row carried one a moment
       before.
@@ -243,6 +256,15 @@ refusing.
 above under *Why reconciliation is per key*; repeated here because it is a residual and a
 reader should not have to infer it. Nothing is reconciled for a project this gateway has
 not been asked to serve yet.
+
+**A REPL that was mid-spawn when the shutdown landed is killed rather than kept (#674).**
+The shutdown's late-spawn path terminates a session whose spawn settled after the pending
+grace expired, without consulting the survival gate — so a herdr-hosted child whose row
+names its pane is ended anyway. This fails in the conservative direction: the cost is one
+`--resume` on the next turn, and nothing is orphaned and nothing becomes a second owner of
+a transcript. It is a residual of this feature rather than a defect introduced by it, and
+it is tracked separately because the fix has to take the registry lock from a callback
+that runs after the module state has been torn down.
 
 If the registry file is **lost** between a shutdown and the next boot, the pane it
 named becomes unreferenced: nothing will reap it automatically. It is still a labelled,
