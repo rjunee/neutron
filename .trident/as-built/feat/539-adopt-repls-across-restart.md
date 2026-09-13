@@ -550,6 +550,15 @@ exhaustive `switch` in `closeOutcomeOfClear`, so a future `ClearOutcome` fails t
 typecheck rather than defaulting into permission. That is the type-level remedy this
 branch keeps reaching for, applied one function further out.
 
+**And round twenty-three showed the limit of that remedy, so this note does not stand
+alone.** The exhaustive switch did its job — when `lock-unacquired` was added it could not
+be silently defaulted, and the compiler made me name it. It could not make me name it
+*correctly*: I put it in the same `case` list as `cleared` and `absent`, and the reasoning
+that is sound for a read that happened was inherited by a refusal that says the opposite.
+**An exhaustive switch guarantees every case is considered, never that each was answered
+right — and a `case` list is exactly where two different facts get the same answer while
+looking fully enumerated.**
+
 **Every case forces the REAL failure.** `setFlockImplForTests(() => 1)` fakes the flock
 syscall and nothing else: `withFlockSync`, `withRegistry` and
 `clearPaneHandleIfUnchanged` are all the real ones, so the cases distinguish "claimed
@@ -878,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M69 less M31 and M38 = 67**.
+only dead row. The live count is therefore **M1–M71 less M31 and M38 = 69**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -961,6 +970,49 @@ drifting apart on one claim is exactly how the "still covers" defect happened, s
 is now explicit: **both boundaries appear in all three documents**, verified by grep with a
 positive control on the line just edited.
 
+### Round twenty-three: the verdict was right and both consumers threw it away
+
+`clearPaneHandleIfUnchanged` answers `lock-unacquired` when the compare-and-set could not
+be established. Both consumers discarded it:
+
+- `clearHandleThenVerdict` branched only on `row-moved` and let everything else return the
+  caller's spawn-permitting finding;
+- `closeOutcomeOfClear` put `lock-unacquired` and `error` in the same `case` as `cleared`
+  and `absent`, returning `closed`.
+
+Both are spawn-permitting, so the interleaving is real: A establishes H1 gone and closes
+it; B replaces the row with a live H2/G2; A fails to acquire the clear's lock **and
+therefore cannot see B at all**; A reports `handle-cleared` and a cold spawn starts a third
+owner. A path that had already decided it did not know enough to act, licensing the act.
+
+**The comment was the defect, not merely the code.** It argued that "a registry that could
+not be written is a stale handle the NEXT boot re-inspects — not a live owner", which is
+exactly right for `absent`: we read the row and found nothing. Without the lock we did not
+read it, which is the whole reason `lock-unacquired` exists. **The sound reasoning was
+inherited by the wrong outcome because the two shared a `case` list** — the eighth instance
+of this branch's sibling pattern, and the first where the vector was a comment's scope
+rather than a missing call.
+
+`lock-unacquired` and `error` now answer `undecided` with `ROW_UNESTABLISHED_REASON`,
+distinct from `ROW_MOVED_REASON` because "the row moved" and "I could not establish what
+the row says" are different facts. The close path gets a new `CloseOutcome` kind,
+`closed-row-unestablished`: the close really did happen and the code does not pretend
+otherwise, but the row's state is unknown so it licenses nothing. `cleared` and `absent`
+are untouched — those are reads that happened.
+
+**Why the existing cases could not see it, which is the transferable part.** The failed-lock
+cases asserted the registry file's **bytes** were unchanged, and stopped there. Bytes were
+the right instrument for the WRITE and say nothing about the VERDICT the pass then reports.
+A correct assertion, measuring the wrong half of the behaviour, for five rounds. Those
+cases now assert `adoptionPermitsSpawn(...).ok === false` as well, and there is a new case
+that constructs the interleaving itself — B's live H2/G2 arriving unseen — and asserts no
+spawn is licensed and B's row is untouched.
+
+**A third test on this branch pinned a claim the code should not make**, and like the
+bystander case in round seventeen it was inverted rather than deleted, with the reasoning
+written into the case: it required `closed-foreign-owner` — a spawn-permitting outcome —
+after a lock failure, on precisely the argument the comment made.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -971,7 +1023,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty and M68–M69 in round twenty-one, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one and M70–M71 in round twenty-three, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1071,6 +1123,8 @@ count from the rows below rather than trusting this sentence.
 | M67 | ANY dropped row refuses, not just this key's (**over-strict**) | `boot-adoption.test.ts` (2) |
 | M68 | the clear's ABSENT early return goes back above the acquisition check | `boot-adoption.test.ts` (1) |
 | M69 | the clear's MOVED early return goes back above the acquisition check | `boot-adoption.test.ts` (1) |
+| M70 | `lock-unacquired` maps back into the spawn-permitting case | `boot-adoption.test.ts` (4) |
+| M71 | `absent` refuses too, so a cold boot never spawns (**system-breaking**) | `boot-adoption.test.ts` (5) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

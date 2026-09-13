@@ -1072,13 +1072,18 @@ function closeOutcomeOfClear(cleared: ClearOutcome): CloseOutcome {
     case 'row-moved':
       // The key now describes another incarnation's child, so our close licenses nothing.
       return { kind: 'row-moved' }
-    case 'cleared':
-    case 'absent':
     case 'error':
     case 'lock-unacquired':
-      // The pane IS closed — that is what this outcome reports, and it is what licenses a
-      // resume. Whether the row was tidied afterwards is a separate, recoverable fact and
-      // `clearPaneHandleIfUnchanged` has already logged which happened.
+      // THE CLOSE REALLY HAPPENED — do not claim otherwise — but the row's state is
+      // unestablished, so it must not license a resume. An earlier revision put these in
+      // the same `case` list as the reads below, which is how the reasoning that is sound
+      // for `absent` came to cover a refusal that says the opposite (Argus r23).
+      return { kind: 'closed-row-unestablished' }
+    case 'cleared':
+    case 'absent':
+      // READS THAT HAPPENED, and the pane IS closed — which together are what license a
+      // resume. A row that still carries a handle after a successful read is recoverable:
+      // the next boot probes it and gets a positive absence.
       return { kind: 'closed' }
   }
 }
@@ -1098,6 +1103,9 @@ function outcomeOfClose(
 ): RowAdoptionOutcome {
   if (close.kind === 'closed') return { kind: closedKind, sessionKey, reason }
   if (close.kind === 'row-moved') return { kind: 'undecided', sessionKey, reason: ROW_MOVED_REASON }
+  if (close.kind === 'closed-row-unestablished') {
+    return { kind: 'undecided', sessionKey, reason: ROW_UNESTABLISHED_REASON }
+  }
   return { kind: 'undecided', sessionKey, reason: `${reason}; and ${close.reason}` }
 }
 
@@ -1108,6 +1116,10 @@ type CloseOutcome =
   | { readonly kind: 'closed' }
   | { readonly kind: 'failed'; readonly reason: string }
   | { readonly kind: 'unverified'; readonly reason: string }
+  /** The pane IS closed, and what the row says could not be established — the clear's
+   *  compare-and-set had no lock, or the registry could not be written. Distinct from
+   *  `closed`, which additionally means a read happened and agreed. */
+  | { readonly kind: 'closed-row-unestablished' }
   /** The pane was dealt with, but the ROW is no longer the one this pass decided about
    *  — so the close licenses nothing: the key now describes another incarnation's
    *  child, and a resume on the strength of our finding would make a second owner. */
@@ -1314,14 +1326,34 @@ function clearHandleThenVerdict(
   // Unsupervised: there is no row to clear and nothing to disagree with.
   if (registryPath === undefined) return whenCleared
   const cleared = clearPaneHandleIfUnchanged(registryPath, sessionKey, expected, deps)
-  if (cleared === 'row-moved') {
-    return { kind: 'undecided', sessionKey, reason: ROW_MOVED_REASON }
+  switch (cleared) {
+    case 'row-moved':
+      return { kind: 'undecided', sessionKey, reason: ROW_MOVED_REASON }
+    case 'lock-unacquired':
+    case 'error':
+      // THE COMMENT THAT USED TO SIT HERE WAS THE DEFECT (Argus r23). It said a registry
+      // that could not be written is "a stale handle the NEXT boot re-inspects — not a
+      // live owner", and that argument is sound for `absent`: we READ the row and found
+      // nothing. Without the lock we did not read it, which is the entire reason
+      // `lock-unacquired` exists — and the sound reasoning was inherited by it because
+      // the two shared a `case` list.
+      //
+      // The interleaving is real: A establishes H1 gone and closes it; B replaces the row
+      // with a live H2/G2; A fails to acquire the clear's lock and therefore cannot see B
+      // at all; A reports the caller's spawn-permitting finding and a cold spawn starts a
+      // third owner. Refusing costs one turn, and the next turn retries with a fresh lock
+      // attempt. Permitting costs a second `claude` on a live transcript.
+      return { kind: 'undecided', sessionKey, reason: ROW_UNESTABLISHED_REASON }
+    case 'cleared':
+    case 'absent':
+      // READS THAT HAPPENED. The row is ours and now carries no handle, or there was no
+      // row — either way the caller's finding stands.
+      return whenCleared
   }
-  // `cleared`, `absent` and `error` all leave the caller's finding standing: the pane
-  // this pass decided about is gone either way, and a registry that could not be
-  // written is a stale handle the NEXT boot re-inspects — not a live owner.
-  return whenCleared
 }
+
+const ROW_UNESTABLISHED_REASON =
+  "the registry row's state could NOT BE ESTABLISHED for this key (the clear's compare-and-set had no lock, or the registry could not be written) — the pane this pass decided about is dealt with, but nothing here rules out another incarnation having claimed this key in the meantime, so no spawn is licensed on the strength of it"
 
 const ROW_MOVED_REASON =
   'the registry row for this key was replaced by another incarnation while this pass was deciding, so ' +

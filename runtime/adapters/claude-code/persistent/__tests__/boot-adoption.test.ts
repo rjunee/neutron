@@ -1279,32 +1279,61 @@ describe('the row claim rests on a lock, and says so when it does not get one', 
     expect(readRow(f.registryPath)).toEqual(before)
   })
 
-  it('REFUSES to clear the handle on a non-atomic write, and the pane is still closed', async () => {
-    // A close whose clear could not be atomic must not erase the row: the row it would
-    // erase may be one another incarnation just wrote for a LIVE pane, which strands it.
-    // A stale row pointing at a pane we DID close is the recoverable direction — the next
-    // boot probes that handle and gets a positive absence.
+  it('REFUSES to clear the handle on a non-atomic write — the pane is closed AND no spawn is licensed', async () => {
+    // INVERTED, NOT DELETED (Argus r23). An earlier version of this case required
+    // `closed-foreign-owner` after the lock failure — a spawn-PERMITTING outcome — on the
+    // reasoning that "the pane this pass decided about is gone either way, and a registry
+    // that could not be written is a stale handle the next boot re-inspects".
     //
-    // THE LOCK FAILS ONLY FOR THE CLEAR, which is what this case is about. Since r18 the
-    // pre-close gate ALSO reads the row under the lock, so failing the flock for the
-    // whole pass would refuse the close itself and this case would never reach the clear
-    // at all — it would silently become a different test. The fake's `onClose` hook runs
-    // inside `closeHandle`, which is exactly between the two.
+    // That reasoning is sound for a row we READ and found absent. It is false for a row
+    // we could not read: without the lock we cannot see that another incarnation has put
+    // a live H2/G2 in this key, so reporting a spawn-permitting finding starts a third
+    // owner on a live transcript. The case now pins the refusal instead, and the
+    // `no spawn is licensed` assertion is the one that carries it — the byte assertions
+    // below were the right instrument for the WRITE and say nothing about the VERDICT,
+    // which is why this was invisible for five rounds.
+    //
+    // The lock fails only for the clear: since r18 the pre-close gate reads the row under
+    // the lock too, so failing the flock for the whole pass would refuse the CLOSE and
+    // never reach the clear at all.
     //
     // The row deliberately MATCHES, so the refusal is the only thing that can stop the
-    // clear; a fixture whose row already failed the comparison would make this case
-    // vacuous, which is the shape that has bitten this branch four times.
+    // clear.
     const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
     f.host.onClose = () => setFlockImplForTests(() => 1)
     const outcome = await run(f)
 
-    // The pane was a claude on our transcript without our channel, so it is closed —
-    // that half is unchanged and is what licenses a later resume.
-    expect(outcome.kind).toBe('closed-foreign-owner')
+    // The pane WAS closed — that half really happened and is not denied.
     expect(f.host.closed).toEqual([HANDLE])
+    // ...but the row's state is unestablished, so nothing may resume this transcript.
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    expect(reason).toMatch(/could NOT BE ESTABLISHED/)
+    expect(reason).not.toMatch(/replaced by another incarnation/i)
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(false)
     // ON DISK, not on the return value: the handle is LEFT rather than erased.
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+  })
+
+  it('THE INTERLEAVING ITSELF: a live H2/G2 arrives unseen, and no spawn is licensed', async () => {
+    // The consequence rather than the mechanism. A establishes H1 gone and closes it; B
+    // replaces the row with a LIVE pane under a new generation; A cannot acquire the
+    // clear's lock and so cannot see B at all. Reporting the caller's finding here is what
+    // starts a third owner.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    f.host.onClose = () => {
+      writeRegistry(f.registryPath, { pane_handle: 'w9:p-H2', child_generation: 'gen-G2' })
+      setFlockImplForTests(() => 1)
+    }
+    const outcome = await run(f)
+
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(false)
+    // And B's row is untouched — A could not see it, and therefore did not write over it.
+    expect(readRow(f.registryPath)?.pane_handle).toBe('w9:p-H2')
+    expect(readRow(f.registryPath)?.child_generation).toBe('gen-G2')
+    // Nothing of A's is in the pool.
+    expect(pool.get(KEY)).toBeUndefined()
   })
 
   it('THE POSITIVE CONTROL: with the lock granted, the same fixture is adopted and published', async () => {
@@ -1701,7 +1730,11 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
    *  path does not: with the flock failing, that gate refuses the close and the clear is
    *  never reached at all. The first version of the absent case drove the close path and
    *  passed for exactly that reason. */
-  function pidFallbackPass(f: Fixture): { entered: Promise<void>; release: () => void; pass: Promise<unknown> } {
+  function pidFallbackPass(f: Fixture): {
+    entered: Promise<void>
+    release: () => void
+    pass: Promise<Awaited<ReturnType<typeof reconcileOwnRepl>>>
+  } {
     f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
     const { entered, release } = f.host.holdInspect()
     const pass = reconcileOwnRepl(f.options, KEY, {
@@ -1729,9 +1762,13 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
     expect(before).not.toContain('\n')
     setFlockImplForTests(() => 1)
     release()
-    await pass
+    const outcome = await pass
 
     expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+    // AND THE VERDICT, not only the bytes. The byte assertion is the right instrument for
+    // the WRITE and says nothing about what the pass then reports — which is how a
+    // spawn-permitting outcome survived five rounds of these cases (Argus r23).
+    expect(adoptionPermitsSpawn(outcome as never).ok).toBe(false)
   })
 
   it('a MOVED row with the lock refused writes nothing', async () => {
@@ -1752,9 +1789,24 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
     const before = readFileSync(f.registryPath, 'utf8')
     setFlockImplForTests(() => 1)
     release()
-    await pass
+    const outcome = await pass
 
     expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+    expect(adoptionPermitsSpawn(outcome as never).ok).toBe(false)
+  })
+
+  it('THE POSITIVE CONTROL: lock GRANTED and the row genuinely absent still permits the spawn', async () => {
+    // Without this, refusing on every clear outcome would satisfy both cases above — and
+    // the over-strict direction here stops the gateway spawning at all on a healthy cold
+    // boot, which is the system-breaking way to be wrong.
+    const f = fixture()
+    const { entered, release, pass } = pidFallbackPass(f)
+    await entered
+    writeFileSync(f.registryPath, JSON.stringify({}))
+    release()
+    const outcome = await pass
+    expect(outcome.kind).toBe('handle-cleared')
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(true)
   })
 
   it('THE CONTROLS: with the lock granted, both paths DO change the file', async () => {
