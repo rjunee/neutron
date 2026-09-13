@@ -20,7 +20,7 @@ exits above are indistinguishable at that pair.
 
 So the fix is not a cleverer deduction. It is a second field.
 
-`terminalCauseKind` is a CLOSED vocabulary of fifteen members owned by
+`terminalCauseKind` is a CLOSED vocabulary of sixteen members owned by
 `trident/terminal-cause.ts`. It answers "which of the known exits was this". The existing
 `terminalCause` — the probe's, lane's or thrown error's own words, redacted and capped —
 stays exactly as it was and answers "what did the thing that stopped us actually say".
@@ -147,8 +147,8 @@ holding a measured prose cause and a second owner for one fact is how reasons dr
 reaches the new branch is precisely what the R1/R2 notes describe — the exits that emitted
 nothing, which the catch-all spoke for all at once.
 
-`terminalCauseReason` is total over the vocabulary and returns `null` for eleven of the
-fifteen members. Four now speak:
+`terminalCauseReason` is total over the vocabulary and returns `null` for twelve of the
+sixteen members. Four speak:
 
 | Kind | Reason |
 |---|---|
@@ -310,6 +310,11 @@ first cut actually shipped.
 | N9 | the scope walk refuses EVERYTHING (resolves nothing) | 18 fail |
 | N10 | parameters stop counting as bindings | 3 fail |
 | N11 | the parse is truncated — a tree that never contained the code | 19 fail |
+| N12 | the composer's `return` search crosses nested function boundaries (**the blocker**) | 2 fail |
+| N13 | `bindsInPattern` descends into default-value functions | 1 fail |
+| N14 | the composer NAME is looked up file-wide, keeping the LAST match | 2 fail |
+| N15 | `walkOwnScope` stops respecting the boundary at all | 3 fail |
+| N16 | as N14, but keeping the FIRST match | 2 fail |
 
 **N8–N10 are the third instance of the same defect, and the one that was a live false
 pass rather than a latent one.** `nearestDeclarationBefore` walked the whole source for a
@@ -335,6 +340,25 @@ in the spread's own text. Both are now spelled the way this file really writes t
 comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
 is not a control, and the only way to find out is to break the thing it guards.
 
+### A count is the most compressed possible claim of completeness
+
+Two numbers in this record were stale by the time it was read: "fifteen members" and
+"eleven of fifteen return null". The vocabulary had grown to sixteen when
+`'review-escalated'` was added for #654's new loop-exit clause, and nothing in the record
+moved with it.
+
+That is #654's own rule — *a list that claims completeness is a claim, and it needs the
+same scrutiny as the code it describes* — in its most compressed form. A count is the one
+thing a reader trusts without checking, because checking it means going and counting. It is
+also the easiest thing to leave behind when the list grows, since nothing about adding a
+member forces a number in prose to move.
+
+Both numbers were re-derived from the shipped module rather than recounted by eye
+(`TERMINAL_CAUSES.length`, and the members for which `terminalCauseReason` returns
+non-null), which is the only way the answer is evidence rather than a second guess. The
+same treatment the parse-completeness claim got when it was found stale: a number that
+matters is measured, not written down.
+
 ### The rule this guard kept re-learning, written down so the next author inherits it
 
 Three times the scanner was narrowed to **the shapes this file happens to contain today**,
@@ -342,7 +366,27 @@ and three times that was wrong:
 
 1. the argument had to be an identifier — until someone could write an inline literal;
 2. the callee had to be an identifier — until someone could write a property access;
-3. a name resolved by matching text across the file — until a parameter shadowed one.
+3. a name resolved by matching text across the file — until a parameter shadowed one;
+4. a composer's `return` was searched across its whole subtree — until a NESTED function
+   returned a stamped literal and the real, unstamped result was never looked at.
+
+Three and four are literally the same bug — **a traversal that does not stop where the
+construct it is reasoning about stops** — in two different helpers, one fixed a round
+before the other was found. So the fourth was not fixed as an instance. Every traversal in
+the file was audited against that one question, and the file now carries the table:
+
+| site | scope it reasons about | traversal | was it right? |
+|---|---|---|---|
+| `terminalSites` | the whole file (every call) | `walk` | yes — its construct really is the file |
+| `lookup` | one scope at a time | reads `.statements` | yes — never descends |
+| `bindsInPattern` | one binding pattern | `walkOwnScope` | **no** — descended into default-value functions |
+| `composerReturnLiteral` | one function body | `walkOwnScope` | **no** — the reported blocker |
+
+`bindsInPattern` is the one the audit earned. Its bug fails SAFE — it answers "yes, bound"
+for a name belonging to a default value's own parameters, producing a false REFUSAL rather
+than a false pass — so no false-pass control could ever have found it, and it would have
+sat there until someone wrote `({ other = ({ picked }) => picked })` and lost a round to a
+guard refusing a site it should have read. It has its own over-strict control now.
 
 Each time the defence available beforehand was *"the other shape is unreachable in this
 file."* That is true, and it is true in exactly the way that stops being true the moment
@@ -369,7 +413,7 @@ the file happens to contain is one that stops working the moment the file change
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus eleven against the guard itself, each applied to the
+- The seventeen mutations above, plus sixteen against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

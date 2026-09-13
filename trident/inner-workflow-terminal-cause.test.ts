@@ -109,9 +109,54 @@ function parse(src: string): ts.SourceFile {
   return ts.createSourceFile('inner-workflow.mjs', src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
 }
 
+/**
+ * THE TWO TRAVERSALS, AND WHY THERE HAVE TO BE TWO.
+ *
+ * `walk` descends into everything. `walkOwnScope` stops at any nested function-like
+ * boundary, so it sees only what belongs to the construct it was handed.
+ *
+ * THE AUDIT THAT PRODUCED THIS SPLIT. This scanner has been narrowed four times, and the
+ * last two were the SAME bug in two different helpers: a traversal that did not stop where
+ * the construct it was reasoning about stops. `nearestDeclarationBefore` ignored lexical
+ * scope; `composerReturnLiteral` ignored function boundaries and returned a literal from a
+ * NESTED function, classifying a site as stamped while the real result carried no cause.
+ * Fixing one instance and not the class is how a fifth round happens.
+ *
+ * So every traversal in this file is accounted for, and each one states which it is:
+ *
+ *  | site                        | scope it reasons about        | traversal      |
+ *  |-----------------------------|-------------------------------|----------------|
+ *  | `terminalSites`             | the whole file (every call)   | `walk`         |
+ *  | `lookup` (scope chain)      | one scope at a time           | neither — it   |
+ *  |                             |                               | reads          |
+ *  |                             |                               | `.statements`  |
+ *  | `bindsInPattern`            | one binding pattern           | `walkOwnScope` |
+ *  | `composerReturnLiteral`     | one function body             | `walkOwnScope` |
+ *
+ * The first is the only one whose construct genuinely IS the whole file, which is why it
+ * is the only remaining use of the unrestricted walk.
+ */
 function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
   visit(node)
   ts.forEachChild(node, (c) => walk(c, visit))
+}
+
+/**
+ * Walk `root`'s subtree, but STOP at every nested function-like node — those belong to a
+ * different scope and nothing inside them is evidence about `root`.
+ *
+ * `root` itself may be function-like (that is the point for `composerReturnLiteral`); the
+ * boundary applies to its descendants.
+ */
+function walkOwnScope(root: ts.Node, visit: (n: ts.Node) => void): void {
+  const step = (n: ts.Node): void => {
+    visit(n)
+    ts.forEachChild(n, (c) => {
+      if (ts.isFunctionLike(c)) return
+      step(c)
+    })
+  }
+  step(root)
 }
 
 /**
@@ -140,7 +185,7 @@ function terminalSites(src: string): TerminalSite[] {
       return
     }
     const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
-    const resolved = resolveToObjectLiteral(sf, arg)
+    const resolved = resolveToObjectLiteral(arg)
     if (resolved === null) {
       sites.push({
         label,
@@ -176,28 +221,30 @@ function callsTerminalWrite(n: ts.CallExpression): boolean {
 }
 
 /** The object literal an argument ultimately names, or `null` when it names none. */
-function resolveToObjectLiteral(sf: ts.SourceFile, arg: ts.Expression): ts.ObjectLiteralExpression | null {
+function resolveToObjectLiteral(arg: ts.Expression): ts.ObjectLiteralExpression | null {
   if (ts.isObjectLiteralExpression(arg)) return arg
   if (!ts.isIdentifier(arg)) return null
-  const bound = resolveName(sf, arg)
-  if (bound === null) return null
-  if (ts.isObjectLiteralExpression(bound)) return bound
-  // A composer call — follow it into the function's own `return`.
-  if (ts.isCallExpression(bound) && ts.isIdentifier(bound.expression)) {
-    return composerReturnLiteral(sf, bound.expression.text)
+  const bound = lookup(arg.text, arg)
+  // A FUNCTION DECLARATION IS NOT AN OBJECT, and neither is an opaque binding. Both refuse.
+  if (bound === null || bound.kind !== 'value') return null
+  if (ts.isObjectLiteralExpression(bound.init)) return bound.init
+  // A composer call — follow it into that function's OWN `return`, resolving the composer
+  // name from the CALL's position so a shadowed composer refuses like any other name.
+  if (ts.isCallExpression(bound.init) && ts.isIdentifier(bound.init.expression)) {
+    return composerReturnLiteral(bound.init.expression.text, bound.init.expression)
   }
   return null
 }
 
 /**
- * WHAT DOES THIS IDENTIFIER NAME, AT THIS USE SITE? — the initialiser of the binding that
- * is actually in scope, or `null`, which the caller turns into a loud `'unresolved'`.
+ * WHAT DOES THIS NAME MEAN, AT THIS USE SITE? — the ONE scope-chain lookup, shared by the
+ * argument resolver and the composer resolver so the two cannot drift apart.
  *
- * THE DEFECT THIS REPLACES, AND IT IS THIS FILE'S OWN DEFECT FOR THE THIRD TIME. The
- * previous resolver walked the WHOLE source for any `VariableDeclaration` whose name text
- * matched and whose position was earlier, and took the nearest. It consulted no scope at
- * all — and a function PARAMETER is not a `VariableDeclaration`, so it did not merely lose
- * the ranking, it was INVISIBLE:
+ * THE DEFECT THIS REPLACED, AND IT IS THIS FILE'S OWN DEFECT MORE THAN ONCE. The first
+ * resolver walked the WHOLE source for any `VariableDeclaration` whose name text matched
+ * and whose position was earlier, taking the nearest. It consulted no scope — and a
+ * function PARAMETER is not a `VariableDeclaration`, so it did not merely lose the
+ * ranking, it was INVISIBLE:
  *
  *     const result = { terminalCauseKind: 'workflow-threw' }
  *     function newExitPath(result) {
@@ -206,35 +253,30 @@ function resolveToObjectLiteral(sf: ts.SourceFile, arg: ts.Expression): ts.Objec
  *
  * The callee matches, so the site is SEEN and the count grows to 13 — and then the
  * argument resolves to the OUTER literal, the site is classified as stamped, and
- * `failingSites()` comes back empty. Seen, counted, and silently passing: exactly what
- * the control below calls a defect, and it defeats the whole "a thirteenth path cannot be
- * added silently" claim.
+ * `failingSites()` comes back empty. Seen, counted, and silently passing.
  *
- * THE RULE, WHICH IS CHEAP AND SOUND IN THE DIRECTION THAT MATTERS. Walk UP from the use
- * site through the enclosing scopes. The FIRST scope that binds the name decides, and
- * only a `const`/`let`/`var` with an initialiser resolves — a parameter, a catch-clause
- * variable, a destructured binding and a declaration with no initialiser all return
- * `null`. So a shadowing binding stops the walk instead of being stepped over, and the
- * answer is "I cannot tell" rather than an answer taken from the wrong binding.
+ * THE RULE, WHICH IS LEXICAL AND CHEAP. Walk UP from the use site through the enclosing
+ * scopes. The FIRST scope that binds the name decides, whatever it turns out to be — a
+ * shadowing binding STOPS the walk instead of being stepped over. `'opaque'` covers every
+ * binding this scanner will not read through (a parameter, a catch variable, a
+ * destructured name, a declaration with no initialiser), and the callers turn it into
+ * `'unresolved'`, which already fails the guard loudly.
  *
- * IT ERRS TOWARD REFUSAL, WHICH IS THE ONLY DIRECTION THIS GUARD MAY FAIL IN. Anything it
- * cannot follow becomes `'unresolved'`, which fails the guard as loudly as a missing
- * property. A scanner that guesses is worse than one that stops, because the guess is
- * indistinguishable from a clean result.
- *
- * NOT A TYPE CHECKER, and deliberately not. It answers a lexical question from the tree,
- * which is what naming a binding is.
+ * IT ERRS TOWARD REFUSAL, WHICH IS THE ONLY DIRECTION THIS GUARD MAY FAIL IN. A scanner
+ * that guesses is worse than one that stops, because the guess is indistinguishable from a
+ * clean result. NOT A TYPE CHECKER, deliberately: it answers a lexical question from the
+ * tree, which is what naming a binding is.
  */
-function resolveName(sf: ts.SourceFile, use: ts.Identifier): ts.Expression | null {
-  const name = use.text
+type Binding =
+  | { kind: 'value'; init: ts.Expression }
+  | { kind: 'function'; decl: ts.FunctionDeclaration }
+  | { kind: 'opaque' }
+
+function lookup(name: string, use: ts.Node): Binding | null {
   for (let scope: ts.Node | undefined = use.parent; scope !== undefined; scope = scope.parent) {
     if (!introducesScope(scope)) continue
     const found = bindingIn(scope, name)
-    if (found === 'not-here') continue
-    // The nearest binding decides, whatever it turns out to be. `'opaque'` — a parameter,
-    // a catch variable, a destructured name, an uninitialised declaration — ENDS the walk
-    // rather than being skipped, which is the whole fix.
-    return found === 'opaque' ? null : found
+    if (found !== null) return found
   }
   return null
 }
@@ -243,62 +285,81 @@ function introducesScope(n: ts.Node): boolean {
   return ts.isSourceFile(n) || ts.isBlock(n) || ts.isCatchClause(n) || ts.isFunctionLike(n)
 }
 
-/**
- * Does this one scope bind `name`, and if so with what?
- *
- * `'not-here'` means keep walking outward; `'opaque'` means it IS bound here by something
- * this scanner will not read through; an expression means it is bound to that initialiser.
- */
-function bindingIn(scope: ts.Node, name: string): ts.Expression | 'opaque' | 'not-here' {
+/** Does this ONE scope bind `name`? `null` means keep walking outward. */
+function bindingIn(scope: ts.Node, name: string): Binding | null {
   if (ts.isFunctionLike(scope)) {
     for (const param of scope.parameters) {
-      // A plain parameter, and a destructured one that binds the name anywhere inside it.
       if (ts.isIdentifier(param.name) ? param.name.text === name : bindsInPattern(param.name, name)) {
-        return 'opaque'
+        return { kind: 'opaque' }
       }
     }
   }
   if (ts.isCatchClause(scope) && scope.variableDeclaration !== undefined) {
     const v = scope.variableDeclaration.name
-    if (ts.isIdentifier(v) ? v.text === name : bindsInPattern(v, name)) return 'opaque'
+    if (ts.isIdentifier(v) ? v.text === name : bindsInPattern(v, name)) return { kind: 'opaque' }
   }
   const statements = ts.isSourceFile(scope) || ts.isBlock(scope) ? scope.statements : undefined
-  if (statements !== undefined) {
-    for (const st of statements) {
-      if (ts.isFunctionDeclaration(st) && st.name?.text === name) return 'opaque'
-      if (!ts.isVariableStatement(st)) continue
-      for (const d of st.declarationList.declarations) {
-        if (!ts.isIdentifier(d.name)) {
-          if (bindsInPattern(d.name, name)) return 'opaque'
-          continue
-        }
-        if (d.name.text !== name) continue
-        return d.initializer ?? 'opaque'
+  if (statements === undefined) return null
+  for (const st of statements) {
+    if (ts.isFunctionDeclaration(st) && st.name?.text === name) return { kind: 'function', decl: st }
+    if (!ts.isVariableStatement(st)) continue
+    for (const d of st.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name)) {
+        if (bindsInPattern(d.name, name)) return { kind: 'opaque' }
+        continue
       }
+      if (d.name.text !== name) continue
+      return d.initializer === undefined ? { kind: 'opaque' } : { kind: 'value', init: d.initializer }
     }
   }
-  return 'not-here'
+  return null
 }
 
-/** Does a destructuring pattern bind `name` anywhere inside it? */
+/**
+ * Does a destructuring pattern bind `name` anywhere inside it?
+ *
+ * `walkOwnScope`, because a default value may itself be a function — `({ a = ({ x }) => x })`
+ * binds `a`, and the `x` inside that arrow is the ARROW's parameter, not this pattern's.
+ * The unrestricted walk answered yes for `x` and refused a site over a binding that was
+ * never in scope. That direction is the safe one, so it was never going to be caught by a
+ * false pass — which is exactly why it needed the audit rather than a failure to find it.
+ */
 function bindsInPattern(pattern: ts.BindingName, name: string): boolean {
   if (ts.isIdentifier(pattern)) return pattern.text === name
   let hit = false
-  walk(pattern, (n) => {
+  walkOwnScope(pattern, (n) => {
     if (ts.isBindingElement(n) && ts.isIdentifier(n.name) && n.name.text === name) hit = true
   })
   return hit
 }
 
-/** The object literal a named function returns, or `null`. */
-function composerReturnLiteral(sf: ts.SourceFile, name: string): ts.ObjectLiteralExpression | null {
-  let fn: ts.FunctionDeclaration | null = null
-  walk(sf, (n) => {
-    if (ts.isFunctionDeclaration(n) && n.name?.text === name) fn = n
-  })
-  if (fn === null) return null
+/**
+ * THE OBJECT LITERAL A NAMED FUNCTION RETURNS, or `null`.
+ *
+ * TWO BOUNDARIES, AND BOTH WERE CROSSED. The function was looked up by walking the WHOLE
+ * file for a declaration with a matching name, and its `return` was found by walking its
+ * ENTIRE subtree — so a literal inside a NESTED function was returned as if it were the
+ * composer's own result:
+ *
+ *     function newExitResult() {
+ *       function decoy() {
+ *         return { terminalCauseKind: 'workflow-threw' }   // ← this was believed
+ *       }
+ *       return { ok: false, checkpoint: 'new-exit' }        // ← this is the result
+ *     }
+ *
+ * Seen, counted, and classified as stamped while the real result carried no cause. Same
+ * defect as the scope-blind resolver above, in a different traversal — which is why the
+ * fix is the shared `lookup` plus `walkOwnScope`, not a patch to this one function.
+ *
+ * The FIRST own-scope `return` of an object literal wins; a composer whose result is
+ * assembled some other way resolves to `null`, which refuses loudly.
+ */
+function composerReturnLiteral(name: string, use: ts.Node): ts.ObjectLiteralExpression | null {
+  const bound = lookup(name, use)
+  if (bound === null || bound.kind !== 'function') return null
   let out: ts.ObjectLiteralExpression | null = null
-  walk(fn, (n) => {
+  walkOwnScope(bound.decl, (n) => {
     if (out === null && ts.isReturnStatement(n) && n.expression !== undefined && ts.isObjectLiteralExpression(n.expression)) {
       out = n.expression
     }
@@ -411,6 +472,42 @@ async function newExitPath() {
 const picked = { ok: false, terminalCauseKind: 'workflow-threw' }
 async function newExitPath({ picked }) {
   await writeTerminalResult(picked)
+}`,
+  // THE DECOY. The composer's OWN result carries no cause; a NESTED function returns one.
+  // A traversal that walks the whole subtree finds the decoy first and reports the site as
+  // stamped — the same boundary-blindness as the shadowing cases above, one helper over.
+  'a composer whose NESTED function returns the only stamped literal': `
+function newExitResult() {
+  function decoy() {
+    return { terminalCauseKind: 'workflow-threw' }
+  }
+  return { ok: false, checkpoint: 'new-exit' }
+}
+async function newExitPath() {
+  const newExit = newExitResult()
+  await writeTerminalResult(newExit)
+}`,
+  // …AND THE COMPOSER NAME RESOLVED FROM THE WRONG SCOPE. The real composer is the one
+  // declared beside the call; the two decoys are same-named declarations in unrelated
+  // scopes, and they sit on BOTH sides of it in source order deliberately. A file-wide
+  // search picks a decoy whether it keeps the first match or the last, so this control
+  // cannot be satisfied by a traversal that merely happens to visit in a lucky order.
+  'a composer name shadowed by same-named declarations on both sides': `
+function newExitResult() {
+  return { terminalCauseKind: 'workflow-threw' }
+}
+async function newExitPath() {
+  function newExitResult() {
+    return { ok: false, checkpoint: 'new-exit' }
+  }
+  const newExit = newExitResult()
+  await writeTerminalResult(newExit)
+}
+function decoyHolder() {
+  function newExitResult() {
+    return { terminalCauseKind: 'workflow-threw' }
+  }
+  return newExitResult()
 }`,
 }
 
@@ -545,6 +642,61 @@ async function newExitPath() {
     const added = terminalSites(shadowed).find((s) => s.line > SRC_LINES)!
     expect(added.stamped).toBe('unresolved')
     expect(added.why).toContain('cannot resolve to an object literal')
+  })
+
+  /**
+   * THE COMPOSER'S BODY IS A SCOPE, AND THE SCAN MUST STOP AT ITS EDGE.
+   *
+   * Asserted as a pair with the "sees through the shared composer" control below, because
+   * the two pull in opposite directions and a fix for either one alone is wrong: the
+   * scanner must follow a composer into its OWN return, and must not follow it into a
+   * nested function's. A traversal that stops too early fails the second; one that does
+   * not stop at all fails this.
+   */
+  /**
+   * THE OVER-STRICT DIRECTION, which no false-pass control can reach.
+   *
+   * `bindsInPattern` asks whether a destructuring pattern binds a name. A default value
+   * may itself be a function, and the names in THAT function's parameters belong to it,
+   * not to the pattern — so a traversal that walks the whole subtree answers yes for a
+   * binding that was never in scope and refuses a site it should have read.
+   *
+   * That direction fails SAFE: it produces a false refusal, never a false pass, so it was
+   * never going to be caught by the controls above. It is here because the audit found it,
+   * which is the argument for auditing every traversal rather than fixing the one that was
+   * reported.
+   */
+  test('a name bound only inside a default-value function does not shadow the outer const', () => {
+    const doctored = `${SRC}
+const picked = { ok: false, checkpoint: 'new-exit', terminalCauseKind: 'workflow-threw' }
+async function newExitPath({ other = ({ picked }) => picked }) {
+  await writeTerminalResult(picked)
+}
+`
+    const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+    // The parameter pattern binds `other`, not `picked`. So the walk continues outward,
+    // finds the outer const, reads it, and the guard stays SILENT — the half a
+    // boundary-blind traversal turns into a spurious failure.
+    expect({ stamped: added.stamped, kind: added.kind }).toEqual({ stamped: 'literal', kind: 'workflow-threw' })
+    expect(failingSites(doctored)).toEqual([])
+  })
+
+  test('a composer resolved from the wrong scope is not this call\'s composer', () => {
+    // Order-independent by construction: same-named declarations sit on both sides of the
+    // real one, so a file-wide search is wrong whichever match it keeps.
+    const doctored = `${SRC}\n${THIRTEENTH['a composer name shadowed by same-named declarations on both sides']}\n`
+    const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+    expect(added.stamped).toBe('absent')
+    expect(failingSites(doctored).length).toBe(1)
+  })
+
+  test('a literal returned by a NESTED function is not the composer\'s result', () => {
+    const doctored = `${SRC}\n${THIRTEENTH['a composer whose NESTED function returns the only stamped literal']}\n`
+    const added = terminalSites(doctored).find((s) => s.line > SRC_LINES)!
+    // The composer IS followed — so this is `absent` (its own return has no cause), not
+    // `unresolved`. Reading the decoy would have made it `literal` and the guard silent.
+    expect(added.stamped).toBe('absent')
+    expect(failingSites(doctored).length).toBe(1)
   })
 
   test('POSITIVE CONTROL — the scan sees through the shared composer', () => {
