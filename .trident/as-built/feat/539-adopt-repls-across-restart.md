@@ -256,6 +256,70 @@ docblock on `argvMatchesSession` already says the whitespace rule is vacuous for
 string form, so nothing written here overclaims — but the residual is real and belongs to
 that issue, not this PR.
 
+### Round nine: a pass in the gap, and a word in the criterion
+
+**Shutdown could see a reconciliation pass in neither of the places it looks.** A pass
+between `host.attach` and its publish is not a `pool` entry yet, so the drain cannot find
+it, and nothing waited for it. It would publish into a pool already torn down — having
+reinstalled `childByKey`, the sink and the watchers on the way — and `resetBootAdoption`
+would meanwhile free its key, so a later boot in this process could start a SECOND pass
+against the same unchanged row and attach the same pane. Two owners of one transcript,
+produced by the reset whose job was to make the next boot safe.
+
+The shutdown now waits for the in-flight passes, bounded at
+`SHUTDOWN_ADOPTION_GRACE_MS`. A pass that settles inside the grace publishes and gets a
+real `claimShutdownSurvival` decision — better than being invisible to it. One that does
+not is marked abandoned, and `AbandonSignal` carries the CAUSE rather than a second flag
+being invented: `evidence-bound` still closes the pane, `shutdown` leaves it exactly as
+it is, because the row names it and the next boot reconciles it. Closing there would
+destroy the REPL the feature exists to preserve, at the one moment nobody is watching.
+The abandonment is checked at the attach AND at the publish: the attach window is the one
+a second pass can race, and a publish-only check leaves it open. `resetBootAdoption` now
+keeps in-flight entries and drops only settled ones — the retained entry is already
+abandoned, so it resolves `undecided`, refuses the spawn, and frees its own key when it
+ends.
+
+**The placement the ruling asked for reordered something else, and it is reported rather
+than worked around.** Awaiting BEFORE the pool partition broke three #518 cases. The
+cause is not the await's contents: a bare `await Promise.resolve()` in that position
+reproduces it exactly, measured. Draining `pool` is the only part of
+`shutdownAllPersistentRepls` that is synchronous with its caller, and any yield in front
+of it lets a queued child-exit handler run first and empty the entry the walk was about
+to report. So the drain was factored into a function and called TWICE: the first keeps
+its synchronous position, the passes are awaited after it, and the second drain takes
+exactly the sessions those passes published. The property the await exists for is
+unchanged — a pass that settles inside the grace still lands in `pool` and still gets a
+real survival decision — and the coordinator was told what moved and why.
+
+**And the word "every" in the criterion.** The owner's verbatim criterion says *every
+project REPL*; production starts a pass only for the key whose substrate has been
+constructed. The mechanism is right and the text was not. One registry holds a row per
+pool key; a pool key folds instance, user, PROJECT and credential; a pass runs with the
+options of the substrate that started it. Reconciling another row under those options
+would put a REPL in the pool scoped to the wrong project, with every tool call attributed
+there and its child authorised on a credential belonging to another key — so enumeration
+with the wrong options is a WORSE defect than deferral, and worse in the direction this
+item exists to protect. The spec item now states the per-key design, restates the
+criterion as *every project REPL whose substrate this gateway constructs is reconciled
+before that substrate's first turn, and no row is ever reconciled under another row's
+options*, and names the residual plainly: a row whose substrate this process never
+constructs keeps its pane, keeps its row, and is reconciled by the next construction. A
+new Decisions Log entry records the narrowing; the 2026-09-12 entry is untouched and the
+owner's quote is unchanged.
+
+**The boundary is now enforced instead of described.** It had lived only in a source
+comment. Two cases put two rows from different projects in one registry and assert the
+pass inspects one pane, attaches one pane, authorises one session id, and leaves the
+other row byte-intact.
+
+**M48 did not red on its first run, and the FIXTURE was at fault — the second time this
+branch has been caught by that shape.** The mutation makes the pass reconcile whichever
+row it finds first; with A's row written first, "whichever it finds" IS A, so the
+mutation was a no-op and the cases passed against broken code. The fixture now writes
+B's row first, which makes the wrong answer wrong by construction, and M48 reds. This is
+the M41 lesson one level up: a mutation has to be able to change the observed behaviour
+of the fixture the case actually runs.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -266,7 +330,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven and M42–M44 in round eight, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight and M45–M48 in round nine, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -341,6 +405,10 @@ count from the rows below rather than trusting this sentence.
 | M42 | the registry read is called bare again, with no catch | `gateway-shutdown-survival.test.ts` (2) |
 | M43 | the lock outcome is never asked for (`acquired` forced true) | `gateway-shutdown-survival.test.ts` (1) |
 | M44 | both failure branches return `survive` (**over-permissive**) | `gateway-shutdown-survival.test.ts` (3) |
+| M45 | the attach-side shutdown check is dropped (publish-only) | `boot-adoption.test.ts` (2) |
+| M46 | the shutdown grace is zero, so the await never waits | `boot-adoption.test.ts` (1) |
+| M47 | `resetBootAdoption` clears in-flight passes again | `boot-adoption.test.ts` (1) |
+| M48 | the pass reconciles whichever row it finds first | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

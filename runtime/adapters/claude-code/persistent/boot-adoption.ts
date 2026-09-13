@@ -154,13 +154,34 @@ export interface BootAdoptionDeps {
   budgetMs?: number
 }
 
+/** One sentence for every shutdown abandonment, so a reader can grep the disposition
+ *  rather than matching three near-identical phrasings. */
+const SHUTDOWN_ABANDON_REASON =
+  'the gateway shut down while this reconciliation was in flight — the pane is still running and the row still names it, so the next boot reconciles it'
+
 const defaultLog = (msg: string): void => {
   process.stderr.write(`[repl-adopt] ${msg}\n`)
 }
 
-/** Set once the gate has stopped waiting for a pass. See {@link BOOT_ADOPTION_BUDGET_MS}. */
+/**
+ * Set once something has stopped waiting for a pass — and WHY, because the two causes
+ * call for opposite acts on the pane.
+ *
+ *   - `evidence-bound`: the pass outran {@link BOOT_ADOPTION_BUDGET_MS}, so what it
+ *     established has stopped describing now. Closing needs no fresh evidence (the
+ *     identity we proved is what licenses it), so a stale pass CLOSES.
+ *   - `shutdown`: this gateway is going away while the pass is still running. The row
+ *     names the pane and the next boot reconciles it, so the pane is LEFT ALONE — a
+ *     close here would destroy a REPL the whole feature exists to preserve, and it
+ *     would do it at the one moment nobody is watching.
+ *
+ * One mechanism with two causes rather than two mechanisms: every site that must not
+ * act past the point of no return already asks this object, and a second flag would
+ * mean a site could be taught about one and not the other.
+ */
 interface AbandonSignal {
   abandoned: boolean
+  cause: 'evidence-bound' | 'shutdown' | null
 }
 
 /**
@@ -177,7 +198,16 @@ interface AbandonSignal {
  * running, and the pre-existing `#105` orphan path in the watchdog still covers them
  * if one of them turns out to be wedged.
  */
-const passes = new Map<string, Map<string, Promise<RowAdoptionOutcome>>>()
+interface PassHandle {
+  readonly promise: Promise<RowAdoptionOutcome>
+  readonly signal: AbandonSignal
+  /** Mirrored synchronously so {@link resetBootAdoption} can tell a finished pass from
+   *  one still in flight WITHOUT awaiting anything — it runs on a shutdown path that
+   *  must not block. */
+  settled: boolean
+}
+
+const passes = new Map<string, Map<string, PassHandle>>()
 
 /**
  * Start this substrate's own boot reconciliation, ONCE per (registry, session key).
@@ -204,8 +234,8 @@ export function beginBootAdoption(
     passes.set(registryPath, forRegistry)
   }
   const live = forRegistry.get(sessionKey)
-  if (live !== undefined) return live
-  const signal: AbandonSignal = { abandoned: false }
+  if (live !== undefined) return live.promise
+  const signal: AbandonSignal = { abandoned: false, cause: null }
   const started = reconcileOwnRepl(options, sessionKey, deps, signal).catch((e: unknown) => {
     // A pass that THREW decided nothing, and must not be mistaken for one that found
     // nothing: `reconcileRow` converts every expected failure into a verdict, so
@@ -232,6 +262,7 @@ export function beginBootAdoption(
   const timer = setTimeout(() => {
     if (signal.abandoned) return
     signal.abandoned = true
+    signal.cause = 'evidence-bound'
     ;(deps.log ?? defaultLog)(
       `boot adoption for key=${sessionKey.slice(0, 32)} has been running ${budgetMs}ms — its evidence is too old ` +
         'to adopt on. If the verification finishes now it will CLOSE the pane instead; the transcript is then ' +
@@ -242,8 +273,10 @@ export function beginBootAdoption(
   // THE STORED PROMISE IS THE ONE THAT CLEARS THE TIMER, so there is no second,
   // unobserved promise to leak or to swallow a rejection: `started` already
   // converts every failure into a verdict, and every caller awaits this.
+  const handle: PassHandle = { promise: undefined as unknown as Promise<RowAdoptionOutcome>, signal, settled: false }
   const gated = started.then((outcome) => {
     clearTimeout(timer)
+    handle.settled = true
     // AN `undecided` PASS IS NOT REMEMBERED. Every other outcome is a settled fact
     // about a pane — adopted, gone, closed — and re-running the pass would at best
     // repeat itself. `undecided` is the opposite: it says the facts could not be
@@ -254,7 +287,8 @@ export function beginBootAdoption(
     if (outcome.kind === 'undecided') passes.get(registryPath)?.delete(sessionKey)
     return outcome
   })
-  forRegistry.set(sessionKey, gated)
+  Object.assign(handle, { promise: gated })
+  forRegistry.set(sessionKey, handle)
   return gated
 }
 
@@ -275,10 +309,10 @@ export async function awaitBootAdoption(
   if (forRegistry === undefined) return
   if (sessionKey !== undefined) {
     const one = forRegistry.get(sessionKey)
-    if (one !== undefined) await one
+    if (one !== undefined) await one.promise
     return
   }
-  await Promise.allSettled([...forRegistry.values()])
+  await Promise.allSettled([...forRegistry.values()].map((h) => h.promise))
 }
 
 /**
@@ -320,16 +354,108 @@ export function adoptionPermitsSpawn(
   }
 }
 
+/** How long a shutdown waits for reconciliation passes that are still running before it
+ *  gives up on them. Short on purpose: this sits in front of the whole teardown, and a
+ *  pass that is wedged on a socket must not hold the kill loop behind it. */
+export const SHUTDOWN_ADOPTION_GRACE_MS = 2_000
+
 /**
- * Forget every pass.
+ * Stop waiting for the passes still in flight, and tell each of them WHY (#539).
+ *
+ * Marked `shutdown`, not `evidence-bound`: the pane is left exactly as it is. The row
+ * names it, and reconciling it is the next boot's job — closing it here would destroy
+ * the REPL this feature exists to preserve.
+ *
+ * Returns the keys it abandoned, so the caller can say which ones in its log rather
+ * than reporting a count nobody can act on.
+ */
+function abandonInFlightPasses(): string[] {
+  const abandoned: string[] = []
+  for (const forRegistry of passes.values()) {
+    for (const [key, handle] of forRegistry) {
+      if (handle.settled || handle.signal.abandoned) continue
+      handle.signal.abandoned = true
+      handle.signal.cause = 'shutdown'
+      abandoned.push(key)
+    }
+  }
+  return abandoned
+}
+
+/**
+ * WAIT FOR THE RECONCILIATION PASSES BEFORE TEARING ANYTHING DOWN (#539, Argus r9).
+ *
+ * A pass that is between `host.attach` and its publish is in NEITHER of the places
+ * shutdown looks: it is not a `pool` entry yet, so the partition cannot see it, and
+ * nothing else waited for it. It would then publish into a pool that had already been
+ * torn down, having reinstalled `childByKey`, the sink and the watchers on the way.
+ *
+ * AWAITING IS STRICTLY BETTER THAN IGNORING. A pass that settles inside the grace lands
+ * in `pool` like any other session and gets a real survival decision from
+ * `claimShutdownSurvival` — which is the decision that keeps its pane alive across the
+ * restart. A pass that does not settle is abandoned, and abandonment here means LEFT
+ * ALONE, not closed.
+ *
+ * BOUNDED, because this runs in front of the entire teardown. `TimeoutStopSec` does not
+ * wait for us, and a pass wedged on a socket must not cost every other child its marker
+ * and its kill.
+ */
+export async function settleBootAdoptionsForShutdown(
+  graceMs: number = SHUTDOWN_ADOPTION_GRACE_MS,
+  log: (msg: string) => void = defaultLog,
+): Promise<void> {
+  const inFlight = [...passes.values()].flatMap((m) => [...m.values()]).filter((h) => !h.settled)
+  if (inFlight.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, graceMs)
+    ;(timer as unknown as { unref?: () => void }).unref?.()
+  })
+  await Promise.race([Promise.allSettled(inFlight.map((h) => h.promise)).then(() => undefined), expired])
+  if (timer !== undefined) clearTimeout(timer)
+  const abandoned = abandonInFlightPasses()
+  if (abandoned.length > 0) {
+    log(
+      `shutdown waited ${graceMs}ms for ${abandoned.length} reconciliation pass(es) that did not settle ` +
+        `(${abandoned.map((k) => k.slice(0, 32)).join(', ')}) — they are abandoned and will publish nothing. ` +
+        'Their panes are LEFT RUNNING: the rows name them and the next boot reconciles them.',
+    )
+  }
+}
+
+/**
+ * Forget every SETTLED pass, and keep the ones still running.
  *
  * Called by `shutdownAllPersistentRepls`, which tears the module state down so a
  * later boot in the SAME process (tests, an in-process restart) reconciles again
  * instead of reading a resolved promise from the incarnation before it. A stale
  * resolved gate is the dangerous shape here: it releases instantly and says a pane
  * was dealt with by a gateway that no longer exists.
+ *
+ * AN IN-FLIGHT PASS IS KEPT, and that is the opposite hazard (Argus r9). Deleting its
+ * entry frees its key, so a later boot in this process starts a SECOND pass against the
+ * same unchanged row and attaches the same pane concurrently — two owners of one
+ * transcript, produced by the reset whose job was to make the next boot safe. The
+ * retained entry is already marked `shutdown`-abandoned by
+ * {@link settleBootAdoptionsForShutdown}, so it publishes nothing and resolves
+ * `undecided`; `undecided` refuses the spawn and is not cached, so the key frees itself
+ * the moment the pass actually ends. Keeping it errs toward refusing a spawn, which is
+ * the direction this module always takes.
  */
 export function resetBootAdoption(): void {
+  for (const [registryPath, forRegistry] of passes) {
+    for (const [key, handle] of forRegistry) {
+      if (handle.settled) forRegistry.delete(key)
+    }
+    if (forRegistry.size === 0) passes.delete(registryPath)
+  }
+}
+
+/** Drop every pass, in flight or not. For test isolation ONLY — production uses
+ *  {@link resetBootAdoption}, which keeps in-flight passes for the reason its docblock
+ *  gives. A suite that leaks a pending pass into the next file would otherwise see a
+ *  key it never created. */
+export function resetBootAdoptionForTests(): void {
   passes.clear()
 }
 
@@ -342,7 +468,7 @@ export async function reconcileOwnRepl(
   options: PersistentReplSubstrateOptions,
   sessionKey: string,
   deps: BootAdoptionDeps = {},
-  signal: AbandonSignal = { abandoned: false },
+  signal: AbandonSignal = { abandoned: false, cause: null },
 ): Promise<RowAdoptionOutcome> {
   const log = deps.log ?? defaultLog
   const registryPath = options.replRegistryPath
@@ -1059,6 +1185,15 @@ async function adoptRow(
   // evidence — the identity we established is what licenses it — so that is what a
   // stale pass does.
   if (signal.abandoned) {
+    // THE TWO CAUSES WANT OPPOSITE ACTS, and nothing here has registered anything yet,
+    // so both are a plain return.
+    if (signal.cause === 'shutdown') {
+      log(
+        `pane ${handle}: this gateway is shutting down mid-verification — LEAVING the pane and the row ` +
+          'exactly as they are for the next boot to reconcile',
+      )
+      return { kind: 'undecided', sessionKey, reason: SHUTDOWN_ABANDON_REASON }
+    }
     const close = await closeAndClear(
       host,
       handle,
@@ -1170,6 +1305,29 @@ async function adoptRow(
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
 
+  /**
+   * GIVE EVERYTHING BACK WITHOUT TOUCHING THE PANE — the shutdown counterpart of
+   * {@link unwind}.
+   *
+   * Same de-registration, deliberately NOT the close. `unwind` ends the pane because
+   * its callers have established that nothing may own this transcript; a shutdown has
+   * established the opposite — the row names the pane, and the next boot is the thing
+   * that reconciles it. Closing here would destroy the REPL the feature exists to
+   * preserve, at the one moment nobody is watching.
+   *
+   * `undecided`, so nothing reads this as permission to resume the transcript, and so
+   * the key is not cached against a later pass.
+   */
+  const release = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
+    sink.unregisterIf(record.sessionId, session)
+    if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
+    pool.delete(sessionKey)
+    session.sizeWatchdog?.stop()
+    session.deadTurnWatcher?.stop()
+    log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
+    return { kind: 'undecided', sessionKey, reason: SHUTDOWN_ABANDON_REASON }
+  }
+
   let primed = false
   let child: PtyChild
   try {
@@ -1213,6 +1371,12 @@ async function adoptRow(
   // can expire inside it — the window between the check above and this line is the
   // one thing that check cannot cover.
   if (signal.abandoned) {
+    // THE ATTACH-SIDE CHECK, and it is not redundant with the publish-side one. This is
+    // the window a second pass can race: the pane is attached and nothing has claimed
+    // the row yet, so a publish-only check would leave exactly this gap open.
+    if (signal.cause === 'shutdown') {
+      return release('this gateway shut down while the attach was in flight', child)
+    }
     return await unwind('the evidence bound elapsed while the attach was in flight', child)
   }
   scanChild = child
@@ -1286,6 +1450,12 @@ async function adoptRow(
     recordedPid: record.pid,
     deps,
     publish: () => {
+      // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive
+      // inside it; publishing into a pool that has already been drained would reinstall
+      // this key behind the teardown's back.
+      if (signal.abandoned && signal.cause === 'shutdown') {
+        return release('this gateway shut down before the row claim completed', child)
+      }
       pool.set(sessionKey, Promise.resolve(session))
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
     },

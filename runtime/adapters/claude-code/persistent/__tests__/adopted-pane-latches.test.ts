@@ -27,7 +27,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { reconcileOwnRepl, resetBootAdoption } from '../boot-adoption.ts'
+import { reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { childByKey, pool, sink } from '../pool-state.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
@@ -114,7 +114,7 @@ beforeAll(async () => {
 })
 
 afterEach(() => {
-  resetBootAdoption()
+  resetBootAdoptionForTests()
   pool.clear()
   childByKey.clear()
   sink.unregister(SESSION_ID)

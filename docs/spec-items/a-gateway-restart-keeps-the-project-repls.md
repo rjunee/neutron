@@ -10,6 +10,16 @@ legacy_ref: "GitHub issue #539 (herdr step 2c)"
 The owner's acceptance criterion, verbatim: *a gateway restart brings every project
 REPL back with its conversation intact.*
 
+**What "every" means here, stated so it is checkable.** The criterion this item is built
+to answer, without weakening what it asks for:
+
+> Every project REPL whose substrate this gateway constructs is reconciled before that
+> substrate's first turn, and **no row is ever reconciled under another row's options**.
+
+The second clause is not a caveat on the first — it is the reason the first is phrased
+by substrate rather than by registry. See *Why reconciliation is per key* below; the
+verbatim criterion above is unchanged and is what this item is answering.
+
 **Say which process restarted, always.** A REPL is a pane of the **herdr server**, so:
 
 - a **gateway** restart does not end it — the pane is in neither the gateway's process
@@ -49,6 +59,38 @@ and two owners of one transcript is the failure the one-owner invariant exists t
 prevent. The configuration makes that collision RARE; the `close-foreign-owner` verdict
 below is what makes it SAFE, because a rule that lives only in a config file is not a
 mechanism.
+
+## Why reconciliation is per key, and why enumerating every row would be worse
+
+One registry file holds **a row per pool key**, and a pool key folds the substrate
+instance, the user, the **project** and the credential identity (`poolKeyFor`,
+`pool.ts`). Two rows in one file therefore belong to substrates with different options —
+a different `project_id` above all.
+
+A pass runs with the options of the substrate that started it. Rebuilding a *different*
+row's session from those options would put a REPL in the pool scoped to the wrong
+project, with every tool call it made attributed there, and its child authorised on a
+credential that belongs to another key. **Enumeration with the wrong options is a worse
+defect than deferral**, and it is worse in the direction this whole item exists to avoid:
+a REPL serving turns under an identity that is not its own.
+
+So each substrate reconciles **its own key, with its own options**, and the boundary is
+enforced rather than described: a pass inspects exactly one pane, attaches exactly one
+pane, authorises exactly one session id, and leaves every other row byte-intact.
+*Verified by* `runtime/adapters/claude-code/persistent/__tests__/boot-adoption.test.ts`
+("one registry, two projects" — two rows in one registry belonging to different projects;
+A is adopted, B's pane is never inspected, B's row is unchanged field for field, and B's
+credential still gets a 401). The fixture deliberately writes **B's row first**, so a
+pass that reconciled whichever row it found would land on the wrong one and the cases
+red rather than passing against broken code.
+
+**A row whose substrate this process never constructs.** Its pane keeps running, its row
+stays exactly as it is, and the next construction of that substrate reconciles it — which
+is the same pass, at the moment there are options to run it under. Until then the pane is
+not lost and not leaked: it is labelled and visible in herdr, the row names it, and the
+pre-existing `#105` orphan path in the watchdog still covers it if it turns out to be
+wedged. What it is **not** is reconciled in advance of anything needing it, and that is a
+deliberate narrowing rather than an omission.
 
 ## Acceptance
 
@@ -182,6 +224,11 @@ gone, and anything else refuses the spawn. An honest log line is not a substitut
 refusing.
 
 ## Residual, named rather than hidden
+
+**A row is reconciled when its substrate is constructed, not at process boot.** Stated
+above under *Why reconciliation is per key*; repeated here because it is a residual and a
+reader should not have to infer it. Nothing is reconciled for a project this gateway has
+not been asked to serve yet.
 
 If the registry file is **lost** between a shutdown and the next boot, the pane it
 named becomes unreferenced: nothing will reap it automatically. It is still a labelled,

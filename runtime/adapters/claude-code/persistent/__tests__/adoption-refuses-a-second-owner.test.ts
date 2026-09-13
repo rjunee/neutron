@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { getOrSpawnSession } from '../spawn.ts'
-import { resetBootAdoption } from '../boot-adoption.ts'
+import { resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { AdoptableHost, HandleInspection, PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
@@ -173,7 +173,7 @@ beforeAll(async () => {
 })
 
 afterEach(() => {
-  resetBootAdoption()
+  resetBootAdoptionForTests()
   pool.clear()
   childByKey.clear()
   supervisedBySessionKey.clear()

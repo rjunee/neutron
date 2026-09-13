@@ -22,8 +22,9 @@ import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beginBootAdoption, reconcileOwnRepl, resetBootAdoption } from '../boot-adoption.ts'
-import { childByKey, pool, sink } from '../pool-state.ts'
+import { beginBootAdoption, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
+import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
+import { shutdownAllPersistentRepls } from '../pool.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
@@ -136,7 +137,8 @@ beforeAll(async () => {
 })
 
 afterEach(() => {
-  resetBootAdoption()
+  resetBootAdoptionForTests()
+  supervisedBySessionKey.clear()
   pool.clear()
   childByKey.clear()
   sink.unregister(SESSION_ID)
@@ -775,5 +777,239 @@ describe('rows that cannot be reconciled at all', () => {
       log: () => {},
     })
     expect(outcome.kind).toBe('no-handle')
+  })
+})
+
+
+describe('a shutdown that arrives mid-pass', () => {
+  /**
+   * ARGUS r9 BLOCKER. A pass between `host.attach` and its publish is in NEITHER place
+   * `shutdownAllPersistentRepls` looks: it is not a `pool` entry yet, so the drain
+   * cannot see it, and nothing waited for it. It would publish into a pool already torn
+   * down — reinstalling `childByKey`, the sink and the watchers on the way — and
+   * `resetBootAdoption` would meanwhile free its key, so a later boot in this process
+   * could start a SECOND pass against the same unchanged row and attach the same pane.
+   * Two owners of one transcript, produced by the reset whose job was to make the next
+   * boot safe.
+   */
+  const supervise = (f: Fixture): void => {
+    supervisedBySessionKey.set(KEY, {
+      replRegistryPath: f.registryPath,
+    } as unknown as PersistentReplSubstrateOptions)
+  }
+
+  it('a pass still attaching when shutdown lands publishes NOTHING, and its pane is left alone', async () => {
+    const f = fixture()
+    supervise(f)
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
+    const release = f.host.holdAttach()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    // Let it get as far as the held attach before the gateway starts going away.
+    await Bun.sleep(20)
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
+    release()
+
+    const outcome = await pass
+    // Nothing was established, so nothing may resume this transcript on the strength
+    // of it. `undecided` is also not cached, so the key frees itself.
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/shut down/i)
+    // NOT IN THE POOL, and not mirrored — the teardown already ran, and an entry
+    // arriving behind it is one nothing will ever tear down.
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(childByKey.get(KEY)).toBeUndefined()
+    // Not authorised either: a live credential on a session nobody holds is #537's bug.
+    expect(await postReply(credential)).toBe(401)
+    // AND THE PANE IS STILL THERE. This is the half that separates a shutdown
+    // abandonment from an evidence-bound one: the row names it, so the next boot
+    // reconciles it. Closing here would destroy the REPL the feature exists to keep.
+    expect(f.host.closed).toEqual([])
+    const row = readRow(f.registryPath)
+    expect(row?.pane_handle).toBe(HANDLE)
+    expect(row?.child_generation).toBe(GENERATION)
+  })
+
+  it('THE POSITIVE CONTROL: a pass that settles inside the grace lands in the pool and gets a real survival verdict', async () => {
+    // Two jobs. It stops "abandon everything" from passing the case above, and it
+    // proves the await is REACHED rather than being a branch that never runs here: the
+    // pass publishes only because the shutdown waited for it.
+    const f = fixture()
+    supervise(f)
+    const release = f.host.holdAttach()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await Bun.sleep(20)
+    // Released while the shutdown is inside its grace, not before it starts.
+    setTimeout(release, 10)
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 2_000 })
+
+    expect((await pass).kind).toBe('adopted')
+    // It was drained by the SECOND drain — the teardown saw it rather than missing it.
+    expect(pool.get(KEY)).toBeUndefined()
+    // And the survival gate ruled on it: the row names this pane and this generation,
+    // so the child is left running rather than killed.
+    expect(f.host.attached).toHaveLength(1)
+    // STILL RUNNING. `hasExited` is the required half of the child contract, so this
+    // asserts the outcome rather than the fixture's bookkeeping about it.
+    expect(f.host.attached[0]?.hasExited()).toBe(false)
+    expect(f.host.closed).toEqual([])
+  })
+
+  it('after the reset, a second pass CANNOT attach the same pane concurrently', async () => {
+    // The dedup entry is what prevents the second attach, and `resetBootAdoption` used
+    // to delete it while the first pass was still running.
+    const f = fixture()
+    supervise(f)
+    const release = f.host.holdAttach()
+    const first = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await Bun.sleep(20)
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
+
+    // A later boot in the SAME process asks for this key again.
+    const second = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    release()
+    const [a, b] = await Promise.all([first, second])
+
+    // REFUSED, not merely deduplicated: the second call must not produce a second
+    // attach on this pane, and it must not report an adoption it did not perform.
+    expect(f.host.attached).toHaveLength(1)
+    expect(a.kind).toBe('undecided')
+    expect(b.kind).toBe('undecided')
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(f.host.closed).toEqual([])
+  })
+})
+
+
+describe('one registry, two projects: a substrate reconciles ITS OWN row and nothing else', () => {
+  /**
+   * ARGUS r9. The per-key design was asserted only in prose — a comment in
+   * `boot-adoption.ts` explaining that one registry holds a row per POOL KEY, that a
+   * pool key folds instance/user/project/credential, and that rebuilding one row's
+   * session from another row's options would put a REPL in the pool scoped to the wrong
+   * project with every tool call attributed there.
+   *
+   * That is a correctness argument, not a granularity preference, and until now nothing
+   * enforced it. These cases turn the comment into a guarantee: enumeration would be a
+   * WORSE defect than deferral, so the pass must touch exactly one row.
+   */
+  const KEY_B = 'inst user other-proj cred'
+  const SESSION_B = 'bbbbbbbb-9999-8888-7777-666666666666'
+  const CHANNEL_B = 'neutron-fedcba9876543210fedcba9876543210'
+  const GENERATION_B = 'gen-bbbb-cccc'
+  const HANDLE_B = 'w9:p77'
+
+  function twoProjectFixture(): Fixture & { rowB: () => ReplRegistryRecord | undefined } {
+    const dir = scratch()
+    const registryPath = join(dir, 'repl-registry.json')
+    const rowA = {
+      sessionKey: KEY,
+      sessionId: SESSION_ID,
+      cwd: '/tmp',
+      channelName: CHANNEL,
+      has_session: true,
+      pid: 4242,
+      devchannel_port: 45555,
+      child_generation: GENERATION,
+      pane_handle: HANDLE,
+      reuse: { tool_surface: 'Read,Bash', tool_bridge: false, auth_fingerprint: 'fp-abc' },
+    }
+    const rowB = {
+      sessionKey: KEY_B,
+      sessionId: SESSION_B,
+      cwd: '/srv/other',
+      channelName: CHANNEL_B,
+      has_session: true,
+      pid: 9191,
+      devchannel_port: 45666,
+      child_generation: GENERATION_B,
+      pane_handle: HANDLE_B,
+      reuse: { tool_surface: 'Read', tool_bridge: true, auth_fingerprint: 'fp-zzz' },
+    }
+    // B IS WRITTEN FIRST, AND THE ORDER IS LOAD-BEARING. The defect these cases exist
+    // to catch is a pass that reconciles whichever row it finds rather than its own. If
+    // A's row came first, that mutation would land on A anyway and the cases would pass
+    // against broken code — the same vacuity as a byte comparison whose bytes match
+    // either way. With B first, "whichever it finds" is the wrong answer by
+    // construction.
+    writeFileSync(
+      registryPath,
+      JSON.stringify({ [KEY_B]: rowB, [KEY]: rowA } as unknown as ReplRegistry, null, 2),
+    )
+    const host = new FakeAdoptableHost()
+    host.addPane(HANDLE, { argv: oursArgv(), screens: ['idle screen'], pid: 4242 })
+    host.addPane(HANDLE_B, { argv: oursArgv(SESSION_B, CHANNEL_B), screens: ['idle B'], pid: 9191 })
+    const options = {
+      substrate_instance_id: 'inst',
+      model_preference: ['claude-opus-5'],
+      replRegistryPath: registryPath,
+      project_id: 'proj',
+      cwd: '/tmp',
+      ptyHost: host,
+    } as unknown as PersistentReplSubstrateOptions
+    return {
+      options,
+      host,
+      registryPath,
+      rowB: () => (JSON.parse(readFileSync(registryPath, 'utf8')) as ReplRegistry)[KEY_B],
+    }
+  }
+
+  it("adopts A, never looks at B's pane, and leaves B's row byte-intact", async () => {
+    const f = twoProjectFixture()
+    const before = f.rowB()
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+
+    expect(outcome.kind).toBe('adopted')
+    expect((await pool.get(KEY))?.sessionId).toBe(SESSION_ID)
+    // B IS NOT IN THE POOL. If it were, it would be there under A's options — A's
+    // project, A's credential — and every tool call it made would be attributed there.
+    expect(pool.get(KEY_B)).toBeUndefined()
+    expect(childByKey.get(KEY_B)).toBeUndefined()
+    // B'S PANE WAS NEVER EVEN LOOKED AT. Inspection is the first thing the pass does to
+    // a pane, so this is the earliest possible evidence that the pass stayed on its key.
+    expect(f.host.inspections).toEqual([HANDLE])
+    expect(f.host.attached.map((c) => c.paneHandle)).toEqual([HANDLE])
+    expect(f.host.closed).toEqual([])
+    // And B's row is untouched, field for field.
+    expect(f.rowB()).toEqual(before)
+  })
+
+  it("and B's session is never authorised on A's pass", async () => {
+    // The sink is the surface where a cross-key rebuild would actually bite: a
+    // credential registered for B's session id by A's pass would let B's child reply
+    // into a session A owns.
+    const f = twoProjectFixture()
+    const credentialB = deriveChildSinkToken(sink.token, GENERATION_B)
+    await reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credentialB },
+      body: JSON.stringify({ session_id: SESSION_B, text: 'hello' }),
+    })
+    expect(resp.status).toBe(401)
   })
 })

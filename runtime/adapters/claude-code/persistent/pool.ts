@@ -23,7 +23,7 @@ import {
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
 import { claimShutdownSurvival } from './gateway-shutdown-survival.ts'
-import { resetBootAdoption } from './boot-adoption.ts'
+import { resetBootAdoption, settleBootAdoptionsForShutdown } from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
@@ -952,6 +952,8 @@ export async function shutdownAllPersistentRepls(
      *  default; a case that pins the traversal passes a small one so it does not spend
      *  the real budget proving a spawn never settles. */
     pendingSpawnGraceMs?: number
+    /** Test seam for {@link SHUTDOWN_ADOPTION_GRACE_MS}, same argument. */
+    adoptionGraceMs?: number
   } = {},
 ): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
@@ -959,6 +961,27 @@ export async function shutdownAllPersistentRepls(
   activeWatchdogs.clear()
   for (const w of activeModelWatchdogs.values()) w.stop()
   activeModelWatchdogs.clear()
+  // #539 — THE RECONCILIATION PASSES NEXT, AND STILL BEFORE THE POOL IS PARTITIONED.
+  //
+  // A pass between `host.attach` and its publish is in neither place this function
+  // looks: it is not a `pool` entry yet, so the partition below cannot see it, and
+  // nothing else waits for it. It would publish into a pool that had already been torn
+  // down, having reinstalled `childByKey`, the sink and the watchers on the way.
+  //
+  // Awaiting is strictly better than ignoring: a pass that settles inside the grace
+  // lands in `pool` and gets a REAL survival decision from `claimShutdownSurvival` —
+  // the decision that keeps its pane alive across this restart. One that does not
+  // settle is marked `shutdown`-abandoned, which means LEFT ALONE, not closed.
+  //
+  // AND IT HAPPENS BETWEEN TWO DRAINS OF `pool`, NOT BEFORE THE FIRST ONE. Draining is
+  // the only thing in this function that is synchronous with its caller, and it has to
+  // stay that way: ANY await in front of it — a bare `Promise.resolve()` is enough,
+  // measured — lets a queued child-exit handler run first and empty the entry the walk
+  // was about to report, which cost #518's already-dead-child cases their report. So
+  // the first drain keeps its synchronous position, the passes are awaited after it,
+  // and the second drain picks up exactly the sessions those passes published. The
+  // property the await exists for is unchanged: a pass that settles inside the grace
+  // still lands in `pool` and still gets a real `claimShutdownSurvival` decision.
   // ONE timestamp for the whole teardown: every child in this pool dies of the
   // same event, and a per-child `Date.now()` would invite a reader to treat the
   // spread as evidence of separate causes.
@@ -985,20 +1008,48 @@ export async function shutdownAllPersistentRepls(
   // be reported are reported first and nothing pending is in front of them.
   const settledNow: Array<[string, ReplSession]> = []
   const stillSpawning: Array<[string, Promise<ReplSession>]> = []
-  for (const [key, p] of pool.entries()) {
-    pool.delete(key)
-    const status = Bun.peek.status(p)
-    if (status === 'fulfilled') {
-      settledNow.push([key, Bun.peek(p) as ReplSession])
-      continue
+  const drainPool = (): number => {
+    let taken = 0
+    for (const [key, p] of pool.entries()) {
+      pool.delete(key)
+      taken += 1
+      const status = Bun.peek.status(p)
+      if (status === 'fulfilled') {
+        settledNow.push([key, Bun.peek(p) as ReplSession])
+        continue
+      }
+      if (status === 'rejected') {
+        // A spawn that failed owns no child. Attach a catch so an abandoned rejection
+        // cannot surface later as an unhandled one.
+        p.catch(() => undefined)
+        continue
+      }
+      stillSpawning.push([key, p])
     }
-    if (status === 'rejected') {
-      // A spawn that failed owns no child. Attach a catch so an abandoned rejection
-      // cannot surface later as an unhandled one.
-      p.catch(() => undefined)
-      continue
-    }
-    stillSpawning.push([key, p])
+    return taken
+  }
+  drainPool()
+
+  // #539 — NOW WAIT FOR THE RECONCILIATION PASSES, AND DRAIN AGAIN.
+  //
+  // A pass between `host.attach` and its publish is in neither place this function
+  // looks: it was not a `pool` entry when the drain above ran, and nothing else waits
+  // for it. Left alone it would publish into a pool already torn down, having
+  // reinstalled `childByKey`, the sink and the watchers on the way.
+  //
+  // Awaiting is strictly better than ignoring: a pass that settles inside the grace
+  // publishes, the second drain takes it, and it gets a REAL survival decision from
+  // `claimShutdownSurvival` — the decision that keeps its pane alive across this
+  // restart. A pass that does NOT settle is marked `shutdown`-abandoned, which means
+  // left alone rather than closed, and it checks that at its attach AND at its publish,
+  // so nothing lands in `pool` behind this second drain.
+  await settleBootAdoptionsForShutdown(opts.adoptionGraceMs)
+  const lateArrivals = drainPool()
+  if (lateArrivals > 0) {
+    process.stderr.write(
+      `[repl] gateway shutdown: ${lateArrivals} session(s) finished reconciling during the grace and are ` +
+        'included in this teardown\n',
+    )
   }
 
   const teardown = async (key: string, session: ReplSession): Promise<void> => {
