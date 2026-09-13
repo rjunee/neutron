@@ -32,8 +32,13 @@
  *     `passes` docblock below for the full argument. Started by the same block that arms
  *     the watchdog (`adapters/claude-code/index.ts`);
  *   - `awaitBootAdoption` gates the watchdog tick, the boot drain AND
- *     `getOrSpawnSession`. A turn that arrives during the pass waits for it; the pass
- *     is bounded so the wait is too.
+ *     `getOrSpawnSession`. A turn that arrives during the pass WAITS FOR THE PASS TO
+ *     FINISH — the evidence budget does NOT bound that wait, and an earlier revision of
+ *     this line said it did. What bounds the wait is the pass itself completing: every
+ *     probe it makes is bounded, and the budget only changes what the pass DECIDES once
+ *     it does (a close rather than an adoption). A gate that released early would let a
+ *     cold `--resume` start while the old child was still alive — two processes on one
+ *     transcript, which is the thing this module exists to prevent.
  *
  * EVERY ADOPTION IS A CONJUNCTION OF THREE PROBES THAT COULD HAVE SAID NO, and none
  * of them is this module's own bookkeeping:
@@ -328,13 +333,20 @@ export function beginBootAdoption(
       reason: `the pass threw: ${e instanceof Error ? e.message : String(e)}`,
     } satisfies RowAdoptionOutcome
   })
-  // THE BUDGET IS ARMED HERE, not inside the pass, so it bounds the WAIT rather than
-  // the work: the pass runs to completion either way (and closes rather than adopts
-  // once abandoned), while the gate stops blocking.
-  // THE EVIDENCE CLOCK. It does not interrupt anything and it does not release the
-  // gate — see {@link BOOT_ADOPTION_BUDGET_MS}. It marks the pass, so that a
-  // verification which is still in flight this long after it started ends in a CLOSE
-  // rather than in an adoption built on observations that are no longer current.
+  // THE EVIDENCE CLOCK, AND IT BOUNDS NEITHER THE WAIT NOR THE WORK.
+  //
+  // It does not interrupt anything and it does not release the gate — see
+  // {@link BOOT_ADOPTION_BUDGET_MS}. All it does is MARK the pass, so that a verification
+  // still in flight this long after it started ends in a CLOSE rather than in an adoption
+  // built on observations that are no longer current. The pass runs to completion either
+  // way, and every caller awaits that completion.
+  //
+  // The two sentences that used to sit here contradicted each other three lines apart on
+  // the same variable: one said the budget bounds the WAIT and the gate stops blocking,
+  // the other said it does not release the gate. The first was a survivor of the design
+  // this branch corrected, and it sat ABOVE the correction, so a reader met the false one
+  // first. Releasing the gate early is precisely the defect: a cold `--resume` would start
+  // while the old child was still alive.
   const budgetMs = deps.budgetMs ?? BOOT_ADOPTION_BUDGET_MS
   const timer = setTimeout(() => {
     // RECORDED UNCONDITIONALLY: the bound expired, and that stays true even when the

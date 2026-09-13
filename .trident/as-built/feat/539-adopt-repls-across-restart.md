@@ -1279,6 +1279,52 @@ left and **four of them are correct as they stand**: `trident/leak-fixer.test.ts
 `trident/` hit is named and classified rather than the directory being skipped wholesale —
 the judgement is per file.
 
+### Round twenty-nine: two survivors of a corrected design, one of them three lines from its own correction
+
+No code changed. Two comments still said the evidence clock bounds the wait — the module
+header (*"the pass is bounded so the wait is too"*) and the timer (*"it bounds the WAIT
+rather than the work … while the gate stops blocking"*). The timer only mutates `signal`;
+every caller awaits `gated`, which settles when the pass settles.
+
+**The sharp part is the timer's own block.** Its two sentences contradicted each other
+three lines apart on the same variable: one said the budget bounds the wait and the gate
+stops blocking, the next said *"it does not interrupt anything and it does not release the
+gate"*. The false one was a survivor of the design this branch corrected, and it sat ABOVE
+the correction — so a reader met it first. Both are gone, and the replacement says why
+releasing early is the defect: a cold `--resume` while the old child is still alive.
+
+**The grep found no third instance, and the await sites are why I checked.** `spawn.ts`,
+`supervision.ts` and `adapters/claude-code/index.ts` all await the gate, and all three
+describe it accurately ("after the pass has settled this resolves instantly"). The one
+place that states what DOES bound the wait — the composition of per-step deadlines: the
+herdr client's 10 s RPC refusal, the 5 s pid wait, the 2 s `/health` probe — was already
+correct, in `BOOT_ADOPTION_BUDGET_MS`'s own docblock, which is what made the two survivors
+visible as contradictions rather than as the design.
+
+**Consistency check, with counts.** `boot-adoption.ts`: 7 true statements, 0 live false
+ones (the single grep hit is the corrective prose quoting the old claim, the same shape as
+the "still covers" quotations). The spec item makes no budget claim at all and its one wait
+statement — *"a turn that arrives while the pass is in flight WAITS; it does not
+cold-resume past it"* — is true. The as-built's only hit is a mutation name (M26, "never
+release the gate"), which is accurate. Three artefacts, no disagreement.
+
+### Two instrument notes from round twenty-eight, because both outlive this feature
+
+**A fixture meant to be outside a boundary has to be outside it on the machine the test
+runs on.** My symlink victim was `mkdtempSync(join(tmpdir(), …))`, and the worktree here
+lives under `/tmp` — so the "outside" directory was inside `tmpdir()` and the containment
+check correctly permitted the delete. Nothing in the code shows that; only the environment
+does. Same family as the `JSON.stringify({}, null, 2)` fixture whose bytes could not
+distinguish a rewrite: **an instrument that is sound and aimed slightly off the claim.**
+
+**To decide whether a local failure is yours, run the same selection against the base and
+compare the sets.** Shard 4 failed locally after round twenty-seven with `wireSubstrates`
+AND a family of `install.sh` tests. Running the same shard against the pre-change tree
+showed both failing there too; after the fix only `install.sh` remained. That differential
+is what classified the `install.sh` family as environment rather than regression — without
+it I would have been guessing, and the guess "these look unrelated" is exactly how a real
+failure gets waved through.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
