@@ -25,6 +25,9 @@ export interface FakePane {
 
 /** One attached child, with everything a test needs to see what was done to it. */
 export interface FakeAttachedChild extends PtyChild {
+  /** Set when SOMETHING ended the pane this wrapper is attached to — its own `kill`, or
+   *  another wrapper's. The observable that separates "let go" from "destroyed". */
+  paneGone: boolean
   /** Set by `detach()`. Distinct from killed on purpose — detach is the non-destructive
    *  hand-over, and a fixture that conflated the two could not tell a correct hand-over
    *  from a REPL killer. */
@@ -173,6 +176,7 @@ export class FakeAdoptableHost implements AdoptableHost {
       pid: pane.pid,
       paneHandle: handle,
       detached: false,
+      paneGone: false,
       screensDelivered: [],
       detach: () => {
         child.detached = true
@@ -191,6 +195,16 @@ export class FakeAdoptableHost implements AdoptableHost {
         killed = true
         exited = true
         resolveExit(null)
+        // AND THE PANE DIES WITH IT (Argus r39). Two wrappers on one pane were independent
+        // objects here, so a fixture could not tell a NON-DESTRUCTIVE hand-over from a
+        // wrapper that ends the REPL — which is the single distinction the detach/close
+        // split exists for, and the one a fencing path is most likely to get wrong. The
+        // child IS the pane's process: killing it takes the pane away from every other
+        // wrapper attached to it, exactly as it would in herdr.
+        this.panes.delete(handle)
+        for (const other of this.attached) {
+          if (other.paneHandle === handle) other.paneGone = true
+        }
       },
       exited: exitedPromise,
       hasExited: () => exited,
@@ -202,7 +216,7 @@ export class FakeAdoptableHost implements AdoptableHost {
       // MIRRORS THE HOST: a detached wrapper delivers nothing, so a case can show that a
       // retired gateway neither sees a screen nor answers it.
       push: (screen: string) => {
-        if (child.detached) return
+        if (child.detached || child.paneGone) return
         child.screensDelivered.push(screen)
         opts.onScreen?.(screen)
       },

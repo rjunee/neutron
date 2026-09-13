@@ -47,9 +47,13 @@ import { join } from 'node:path'
 import {
   releaseAdoptionClaim,
   renewAdoptionClaim,
+  renewClaimForSession,
   reconcileOwnRepl,
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
+import { getOrSpawnSession } from '../spawn.ts'
+import type { ReplSession } from '../repl-session.ts'
+import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { ADOPTION_CLAIM_TAKEOVER_MS, DEFAULT_WATCHDOG_INTERVAL_MS } from '../signatures.ts'
@@ -511,5 +515,112 @@ describe('the give-back is still a write, and a write needs the lock', () => {
     // And the rest of the row is untouched — a give-back is not a reset.
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
     expect(readRow(f.registryPath)?.child_generation).toBe(GENERATION)
+  })
+})
+
+describe('the gateway that LOST the claim stops serving the pane', () => {
+  /**
+   * ARGUS r39, and the last question in the chain: verify, then claim, then keep the claim
+   * meaningful, then ACT when you lose it.
+   *
+   * The renewal detected `not-ours` and only logged. The session stayed attached, stayed in
+   * `pool`, stayed registered at the sink and went on answering turns — the two-owner state
+   * this item exists to prevent, reached by the LOSING party rather than the winning one,
+   * and reached through this branch's most repeated shape: a verdict computed correctly and
+   * dropped by its caller.
+   *
+   * FENCING IS NOT CLOSING. The winner's REPL is live and serving; a loser that closed on
+   * its way out would destroy the conversation the takeover just preserved. That is the
+   * distinction `detach` exists for, and the assertion below that `host.closed` stays empty
+   * is the one that would catch its loss.
+   */
+  const spec: AgentSpec = { prompt: 'hi', tools: [], model_preference: ['claude-opus-5'] }
+
+  it('detaches, evicts ITS OWN entry, and refuses turns — while the winner keeps serving', async () => {
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+
+    // A ADOPTS AND PUBLISHES.
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const aSession = await pool.get(KEY)
+    const aChild = f.host.attached[0]
+    expect(aSession).toBeDefined()
+    expect(aChild?.detached).toBe(false)
+
+    // A'S RENEWAL STOPS for longer than the takeover window — its ticks are gone, its
+    // request path is not. Nothing else about A changes.
+    const t1 = t0 + ADOPTION_CLAIM_TAKEOVER_MS + 1
+
+    // B TAKES THE CLAIM AND PUBLISHES, into the same process and the same pool.
+    resetBootAdoptionForTests()
+    expect(
+      (await pass(f, { now: () => t1, claimantLiveness: () => 'unknown' })).kind,
+    ).toBe('adopted')
+    const bSession = await pool.get(KEY)
+    const bChild = f.host.attached[1]
+    expect(bSession).not.toBe(aSession)
+    expect(bChild).toBeDefined()
+
+    // A'S RENEWAL RESUMES and meets the row B now owns. Driven from A's own session
+    // because the pool is B's now — which is precisely the state that makes this the
+    // loser's problem to solve.
+    renewClaimForSession(f.registryPath, KEY, aSession as ReplSession, t1 + 1_000, () => {})
+
+    // ── A, FENCED ────────────────────────────────────────────────────────────────
+    // Detached: no poll, nothing delivered, and nothing it could answer with.
+    expect(aChild?.detached).toBe(true)
+    aChild?.push('❯ 1. Yes, proceed')
+    expect(aChild?.screensDelivered).toEqual([])
+    expect(aChild?.keysSent).toEqual([])
+    // Its pool entry is gone — and what remains under the key is B's, not nothing.
+    expect(await pool.get(KEY)).toBe(bSession)
+    // And a turn on this key is REFUSED, through the spawn gate's existing vocabulary
+    // rather than a second one invented for this.
+    let threw = ''
+    try {
+      await getOrSpawnSession(KEY, f.options, spec)
+    } catch (e) {
+      threw = e instanceof Error ? e.message : String(e)
+    }
+    expect(threw).toMatch(/refusing to resume/i)
+    expect(threw).toMatch(/NO LONGER OURS/i)
+
+    // ── B, UNTOUCHED ─────────────────────────────────────────────────────────────
+    // THE PANE IS ALIVE. A fence that closed would destroy the REPL the takeover just
+    // preserved, and this is the assertion that catches it.
+    expect(f.host.closed).toEqual([])
+    // AND NOTHING ENDED THE PANE'S PROCESS EITHER — the distinction a fixture with
+    // independent wrappers could not see. `paneGone` is set on every wrapper of a handle
+    // whose child was killed, so a fence that destroyed instead of letting go reds here
+    // even though it never called `closeHandle`.
+    expect(bChild?.paneGone).toBe(false)
+    expect(f.host.panes.has(HANDLE)).toBe(true)
+    expect(bChild?.detached).toBe(false)
+    bChild?.push('a screen for the new owner')
+    expect(bChild?.screensDelivered).toEqual(['a screen for the new owner'])
+    // Its row still names it: the loser's tidy-up is CAS'd and took nothing back.
+    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(bSession?.adoptionClaimBy)
+  })
+
+  it('...and a renewal that SUCCEEDS leaves the owner serving normally', async () => {
+    // THE POSITIVE CONTROL. Fencing that fired on every renewal would pass the case above
+    // and stop every adopted REPL at the first supervision tick — the feature, switched
+    // off by its own safety mechanism.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = await pool.get(KEY)
+    const child = f.host.attached[0]
+
+    await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+
+    expect(child?.detached).toBe(false)
+    expect(await pool.get(KEY)).toBe(session)
+    child?.push('an ordinary screen')
+    expect(child?.screensDelivered).toEqual(['an ordinary screen'])
+    // And the turn path is open.
+    expect(f.host.closed).toEqual([])
   })
 })

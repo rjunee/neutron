@@ -84,7 +84,7 @@ import {
   type OrphanAdoptionVerdict,
   type ProcessListing,
 } from './orphan-adoption.ts'
-import { childByKey, pool, sink } from './pool-state.ts'
+import { childByKey, pool, sink, supervisedBySessionKey } from './pool-state.ts'
 import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
 import {
   getRecord,
@@ -338,6 +338,15 @@ export function beginBootAdoption(
     // also why the shutdown path refuses to let a child survive without a row: the
     // handle would have nowhere to be written and nobody to read it.
     return Promise.resolve({ kind: 'no-handle', sessionKey })
+  }
+  // FENCED: this gateway was taken off this key by another incarnation (see
+  // {@link fenceLostSession}). Answered BEFORE the pass map, because a fenced key must not
+  // start a fresh pass either — that pass would inspect a pane the winner is serving and
+  // could adopt it a second time. `undecided` routes it through the spawn gate's existing
+  // refusal, and the reason travels with it.
+  const fenced = fencedKeys.get(sessionKey)
+  if (fenced !== undefined) {
+    return Promise.resolve({ kind: 'undecided', sessionKey, reason: fenced })
   }
   let forRegistry = passes.get(registryPath)
   if (forRegistry === undefined) {
@@ -621,6 +630,14 @@ export function resetBootAdoption(): void {
     }
     if (forRegistry.size === 0) passes.delete(registryPath)
   }
+  // AND THE FENCES, deliberately. A fence says "this GATEWAY was taken off this key"; the
+  // next construction of the substrate is a new owner asking the question again, and it is
+  // not entitled to inherit the answer. Keeping them would disable the key for the life of
+  // the process even after a legitimate re-boot — and nothing is lost by clearing, because
+  // the claim's compare-and-set refuses the new pass by itself if the winner still holds
+  // the row. The fence covers the interval where this gateway would otherwise keep SERVING;
+  // it is not a durable verdict about the pane.
+  fencedKeys.clear()
 }
 
 /** Drop every pass, in flight or not. For test isolation ONLY — production uses
@@ -629,6 +646,7 @@ export function resetBootAdoption(): void {
  *  key it never created. */
 export function resetBootAdoptionForTests(): void {
   passes.clear()
+  fencedKeys.clear()
   // AND THE SHUTDOWN LATCH. Production never clears it — see its docblock — but a suite
   // runs many gateway lifetimes in one module, so without this the first case that shuts
   // down leaves every later case adopting nothing, silently and green.
@@ -1282,30 +1300,125 @@ export function renewAdoptionClaim(
  * An unsettled entry simply is not renewed this tick — it has no claim yet either, since the
  * claim is taken at the end of the adoption that publishes it.
  */
+/**
+ * KEYS THIS GATEWAY HAS BEEN TAKEN OFF, with the sentence explaining why (#539, r39).
+ *
+ * A fenced key answers `undecided` from {@link beginBootAdoption}, so the spawn gate
+ * refuses the turn through the SAME path it refuses every other unestablished owner. One
+ * disposition, not a second vocabulary every consumer would have to learn — the argument
+ * the shutdown latch already makes three lines further down.
+ *
+ * Flat rather than per-registry because `pool` is, and this mirrors `pool`'s granularity:
+ * a fenced key names a session this process must stop serving, and that is exactly the
+ * thing `pool` is keyed by.
+ */
+const fencedKeys = new Map<string, string>()
+
+/** Has this gateway been taken off the key — and if so, why. Exported for the one caller
+ *  that must answer before the pool is consulted. */
+export function fencedReasonFor(sessionKey: string): string | undefined {
+  return fencedKeys.get(sessionKey)
+}
+
+/**
+ * STOP SERVING A PANE THIS GATEWAY NO LONGER OWNS — and do not close it (#539, Argus r39).
+ *
+ * THE DEFECT: detecting `not-ours` and only logging. The renewal correctly discovered that
+ * another incarnation had taken the row over, said so, and returned with the session still
+ * attached, still in `pool`, still registered at the sink and still answering turns. That is
+ * the two-owner state this whole item exists to prevent, reached by the LOSING party — and
+ * it is this branch's most repeated shape once more: a verdict computed correctly and
+ * dropped by its caller.
+ *
+ * FENCING IS NOT CLOSING, and this is the one line in this function that must not be got
+ * wrong. B owns the pane and its REPL is live and serving; a loser that closed on its way
+ * out would destroy the conversation the takeover just preserved. `detach` exists as a
+ * separate verb for exactly this, and the survival branch proved it at round twenty-five.
+ *
+ * THE FIFTH PATH that stops owning a session without the child exiting, which the
+ * per-structure audit table predicted there would eventually be. Same columns, same
+ * identity guards: `deleteOwnPoolEntry` so it can only ever remove ITS OWN entry — the
+ * winner's entry may live in the same map, and evicting that would take the pane away from
+ * the gateway that legitimately holds it.
+ */
+export function fenceLostSession(
+  sessionKey: string,
+  session: ReplSession,
+  reason: string,
+  log: (msg: string) => void = defaultLog,
+): void {
+  // REFUSE FUTURE TURNS FIRST. Everything below is teardown; if any of it threw, a key left
+  // unfenced would keep serving a pane somebody else owns, which is the state being escaped.
+  fencedKeys.set(sessionKey, reason)
+  sink.unregisterIf(session.sessionId, session)
+  // NOT `close`. See the note above — the pane is the winner's and it is live.
+  session.child?.detach?.()
+  const child = childByKey.get(sessionKey)
+  if (child !== undefined && child === session.child) childByKey.delete(sessionKey)
+  deleteOwnPoolEntry(sessionKey, session)
+  session.sizeWatchdog?.stop()
+  session.deadTurnWatcher?.stop()
+  // The wrapper is detached, so `exited` never settles and `child-exit-wiring`'s handler
+  // never runs — the same reason the other two non-destructive paths do this themselves.
+  session.liveHandle?.unregister()
+  log(`row ${sessionKey.slice(0, 32)}: ${reason}`)
+}
+
 export function renewOwnAdoptionClaim(
   registryPath: string,
   sessionKey: string,
   now: number,
   log: (msg: string) => void = defaultLog,
-): ClaimRenewal | 'no-claim' {
+): void {
+  // SCOPED TO THIS REGISTRY, for the reason the tick's own key filter already gives: `pool`
+  // is module-global, so in a hosted single-process deployment this key may belong to
+  // ANOTHER instance's registry. Renewing there would ask a row that has never heard of this
+  // session, get `not-ours`, and print the takeover sentence — a loud, alarming, false
+  // report of a takeover that did not happen, on every tick.
+  if (supervisedBySessionKey.get(sessionKey)?.replRegistryPath !== registryPath) return
   const pooled = pool.get(sessionKey)
-  if (pooled === undefined) return 'no-claim'
+  if (pooled === undefined) return
   const session = Bun.peek(pooled) as ReplSession | undefined
-  const claimedBy = session?.adoptionClaimBy
-  if (session === undefined || claimedBy === undefined) return 'no-claim'
+  if (session === undefined) return
+  renewClaimForSession(registryPath, sessionKey, session, now, log)
+}
+
+/**
+ * The same renewal for a session named EXPLICITLY rather than found in the pool.
+ *
+ * Split out because the pool cannot identify "our" session once a takeover has happened
+ * inside one process — the winner's entry is under the same key — so the act of losing has
+ * to be driven from the session that lost. {@link renewOwnAdoptionClaim} is this function
+ * plus the pool lookup, which is the production path.
+ */
+export function renewClaimForSession(
+  registryPath: string,
+  sessionKey: string,
+  session: ReplSession,
+  now: number,
+  log: (msg: string) => void = defaultLog,
+): void {
+  const claimedBy = session.adoptionClaimBy
+  if (claimedBy === undefined) return
+  // THE RESULT IS CONSUMED WHERE IT IS PRODUCED. `renewAdoptionClaim`'s four answers exist
+  // so this branch can be taken; handing them further up to a tick that ignores them is how
+  // this branch has twice ended up computing a classification and dropping it.
   const outcome = renewAdoptionClaim(registryPath, sessionKey, claimedBy, now)
-  if (outcome === 'not-ours') {
-    // LOUD, AND NOTHING ELSE. Another incarnation now holds this row, which means this
-    // gateway missed enough ticks to be taken for dead while still running. Re-claiming
-    // would make it the second owner it was replaced for being unable to be; the operator
-    // gets the sentence and the session runs out its life unrenewed.
-    log(
-      `row ${sessionKey.slice(0, 32)}: the adoption claim is NO LONGER OURS — another incarnation took ` +
-        'this row over while this gateway was not renewing. Not re-claiming: that would make this the ' +
-        'second owner of a transcript somebody else is already serving.',
-    )
-  }
-  return outcome
+  if (outcome !== 'not-ours') return
+  // ANOTHER INCARNATION HOLDS THIS ROW, which means this gateway missed enough ticks to be
+  // taken for dead while it was still running. Logging alone was the r39 defect: the session
+  // stayed attached and kept answering turns on a pane it had lost. Re-claiming is not the
+  // answer either — that is the second owner it was replaced for being unable to be. It
+  // stops.
+  fenceLostSession(
+    sessionKey,
+    session,
+    'the adoption claim is NO LONGER OURS — another incarnation took this row over while this gateway ' +
+      'was not renewing, so this one has STOPPED serving that pane: the wrapper is detached (never closed — ' +
+      'the REPL is the new owner\'s and it is live), the registrations are released, and turns for this key ' +
+      'are refused until a construction of this substrate reconciles it again',
+    log,
+  )
 }
 
 /**

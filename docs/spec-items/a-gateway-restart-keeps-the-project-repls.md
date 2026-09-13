@@ -238,6 +238,24 @@ it must not swallow.
       process is gone losing it at once, and one we could not ask about NOT losing it; the
       renewal refusing to overwrite a legitimate takeover; and the hand-over that clears the
       marker so the next boot is not refused).
+- [ ] **THE GATEWAY THAT LOSES THE CLAIM STOPS SERVING THE PANE, AND DOES NOT CLOSE IT.**
+      A renewal that comes back `not-ours` means another incarnation took this row over while
+      this gateway was not refreshing. Logging that and carrying on IS the two-owner state,
+      reached by the losing party: the session would stay attached, stay in the pool, stay
+      registered at the sink and go on answering turns on a pane it no longer owns. So it
+      fences — detach the wrapper, release its OWN pool entry (the winner's may be under the
+      same key), unregister its sink registration and watchers, release the live-process
+      handle, and refuse turns for that key through the spawn gate's existing `undecided`
+      refusal rather than a second vocabulary.
+      **It must not close.** The winner's REPL is live and serving; a loser that closed would
+      destroy the conversation the takeover just preserved, which is the distinction `detach`
+      exists for.
+      *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` (A publishes, its
+      renewal lapses past the window, B takes the claim and publishes into the same pool, and
+      A's next renewal fences it — asserting of A that it delivers no screen, sends no key,
+      has no pool entry and is refused a turn, and of B that it is still attached, still
+      served by a live pane, and its row untouched), with a successful renewal beside it as
+      the control.
 - [ ] **A WRITE ONLY EVER TOUCHES THE ROW IT DECIDED ABOUT.** Clearing a handle, and
       correcting an adopted pid, are compare-and-set on the (handle, generation) pair
       the pass inspected. A row another incarnation replaced mid-pass is left exactly as

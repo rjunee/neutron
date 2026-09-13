@@ -1367,15 +1367,15 @@ could not find the fourth site because the boundary was drawn around one file. *
 unit is every path that stops owning a session WITHOUT the child exiting** — four of them
 across two files, and five the next time someone adds one.
 
-| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch |
-|---|---|---|---|
-| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` |
-| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs |
-| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above |
-| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped |
-| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` |
-| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse |
-| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it |
+| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch | `fenceLostSession` (r39) |
+|---|---|---|---|---|
+| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) |
+| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` |
+| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key |
+| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped |
+| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live |
+| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses |
+| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released |
 
 **What "deliberately retained" means, measured rather than assumed.** M91 adds a redundant
 `unregister()` to `unwind` and **nothing reds** — the handle is identity-scoped, so a second
@@ -1776,6 +1776,38 @@ Rewritten to place B **in the gap between two renewals** (two intervals, so a si
 tick is included), it reds — and now the case fails if the two constants are ever chosen
 independently.
 
+### Round thirty-nine: the loser kept serving
+
+`renewOwnAdoptionClaim` detected `not-ours` and **only logged**. The comment said "LOUD, AND
+NOTHING ELSE" and meant it: the session stayed attached, stayed in `pool`, stayed registered
+at the sink, and went on answering turns on a pane another gateway now owned. **The two-owner
+state, reached by the losing party** — and reached through this branch's single most repeated
+shape, a verdict computed correctly and dropped by its caller (`supervision.ts` ignored the
+returned outcome, which was the other half).
+
+**Once a claim can be lost, losing it has to mean something operationally.** That is the
+whole finding, and it is downstream of the lease working rather than of it failing.
+
+**FENCING IS NOT CLOSING, and that is the line most likely to be got wrong.** The winner's
+REPL is live and serving; a loser that closed on its way out would destroy the conversation
+the takeover just preserved. So the fence detaches, releases its own registrations, and
+refuses future turns — through the spawn gate's EXISTING refusal (`undecided` →
+`adoptionPermitsSpawn` → the loud retryable error), because a second vocabulary for "not ours
+any more" is a thing every consumer would have to learn. The shutdown latch makes exactly
+this argument four lines away.
+
+**THE FIXTURE COULD NOT SEE THE DISTINCTION, so the fixture was fixed first.** Two wrappers
+on one pane were independent objects in `FakeAdoptableHost`, so a fence that KILLED its child
+looked identical to one that let go — and the mutation the gate most wanted to see red could
+not have. The fake now models what herdr does: the child IS the pane's process, so killing it
+sets `paneGone` on every wrapper attached to that handle. M106 (fence with a kill instead of a
+detach) reds on the winner's assertions, without ever calling `closeHandle`.
+
+**What the fence must not take.** `deleteOwnPoolEntry`, not `pool.delete`: in one process the
+winner's session is under the SAME key, and an unconditional eviction removes the entry every
+turn resolves through — taking the pane away from the gateway that legitimately holds it,
+which is the defect inverted rather than fixed. M107 pins it.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1786,7 +1818,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read and M100–M104 in round thirty-eight, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight and M105–M107 in round thirty-nine, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1921,6 +1953,9 @@ count from the rows below rather than trusting this sentence.
 | M102 | the takeover threshold is set below the renewal interval | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the live owner, **after the case was rewritten to test in the gap between renewals; it did not red before**) |
 | M103 | the pid fast-path is removed, so a dead claimant waits out the threshold | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M104 | an `unknown` liveness answer is treated as `gone` | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M105 | the `not-ours` outcome is logged and dropped (the r39 defect restored) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M106 | the fence KILLS its child instead of detaching | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the winner's pane assertions) |
+| M107 | the fence evicts the pool entry unconditionally | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the winner's entry is under the same key) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
