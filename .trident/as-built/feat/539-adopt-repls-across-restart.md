@@ -131,8 +131,10 @@ mechanism, the mutation that removes it reddens the test.
 
 ### Mutation table
 
-Each row reverts one guard and names the file that goes red. Run from the worktree;
-every mutation was applied and reverted mechanically, and the tree was clean after.
+Each row reverts one guard and names the file that goes red. **All 24 were re-run
+against the FINAL head** (not against the state each was written at), applied and
+reverted mechanically, with the tree verified clean afterwards: 24/24 reddened their
+target.
 
 | # | Mutation | Reddens |
 |---|---|---|
