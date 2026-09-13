@@ -302,7 +302,10 @@ with the wrong options is a WORSE defect than deferral, and worse in the directi
 item exists to protect. The spec item now states the per-key design, restates the
 criterion as *every project REPL whose substrate this gateway constructs is reconciled
 before that substrate's first turn, and no row is ever reconciled under another row's
-options*, and names the residual plainly: a row whose substrate this process never
+options* — **and says outright that the restatement is NOT equivalent to the owner's
+sentence** (round twenty-two: narrower as a claim about boot-time mechanism, equivalent
+as a claim about what the owner experiences, with the window between restart and first use
+as the observable difference) — and names the residual plainly: a row whose substrate this process never
 constructs keeps its pane, keeps its row, and is reconciled by the next construction. A
 new Decisions Log entry records the narrowing; the 2026-09-12 entry is untouched and the
 owner's quote is unchanged.
@@ -919,6 +922,44 @@ it by mutating rather than by reading, and the mechanism was confirmed with a st
 probe — a direct `withRegistry` call on a compact file, showing a no-`skipSave` return does
 rewrite it — so the conclusion "the clear is never reached" rests on a measurement rather
 than on my reading of the control flow.
+
+### Round twenty-two: two documents claiming more than the code gives
+
+No code changed, so mutation is not the instrument here; the check is that three artefacts
+say the same thing about the same two boundaries.
+
+**"Without weakening what it asks for" was false, and it was mine to fix.** The spec item
+introduced the restated criterion as equivalent to the owner's. As quantified statements
+they are not: *every project REPL* and *every project REPL whose substrate this gateway
+constructs* are different sets, and the same file documents the gap two sections down.
+Asserting equivalence while documenting the difference is the overclaim shape this branch
+has now corrected seven times, and the correction is not to soften the restatement but to
+stop claiming the two sentences are one. The item now separates three statements: narrower
+as a claim about **boot-time mechanism**; equivalent as a claim about **what the owner
+experiences**, because reconciliation precedes that substrate's first turn so no turn is
+ever served by a fresh process where a survivor existed; and the observable difference is
+the **window between restart and first use**, cross-referenced to the residual so a reader
+meets the gap where they meet the claim.
+
+That last part is the reason this matters beyond tidiness: if the owner reads this item and
+decides the boot-time reading is what he meant, that is his call to make against a document
+that told him the truth — not one to pre-empt by pretending the difference does not exist.
+
+**The Decisions Log claimed a guarantee the code does not give.** *"left running when — and
+only when — a persisted registry row names its exact pane and its exact generation"*: the
+**only when** half is true and is the safety half; the **when** half is not, because a spawn
+still settling at shutdown is killed on resolution whatever row it wrote (#674). A filed
+issue does not make a present-tense claim accurate — the standard applied to me at round
+sixteen, now applied to a line I wrote. The entry is unmerged, so it is fixed in place:
+"ONLY when", with the converse explicitly disclaimed and #674 named.
+
+**The sweep found a third site the citation did not name.** `SPEC.md` §2.3's body carried
+the per-substrate boundary but not the late-settling kill — accurate as far as it went,
+since it only ever stated the "only when" direction, but a reader of the architecture
+section would not have learned the exception exists. It now carries both. Three artefacts
+drifting apart on one claim is exactly how the "still covers" defect happened, so the check
+is now explicit: **both boundaries appear in all three documents**, verified by grep with a
+positive control on the line just edited.
 
 ### Mutation table
 

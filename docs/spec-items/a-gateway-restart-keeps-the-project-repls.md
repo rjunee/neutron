@@ -10,15 +10,35 @@ legacy_ref: "GitHub issue #539 (herdr step 2c)"
 The owner's acceptance criterion, verbatim: *a gateway restart brings every project
 REPL back with its conversation intact.*
 
-**What "every" means here, stated so it is checkable.** The criterion this item is built
-to answer, without weakening what it asks for:
+**What "every" means here, stated so it is checkable:**
 
 > Every project REPL whose substrate this gateway constructs is reconciled before that
 > substrate's first turn, and **no row is ever reconciled under another row's options**.
 
-The second clause is not a caveat on the first — it is the reason the first is phrased
-by substrate rather than by registry. See *Why reconciliation is per key* below; the
-verbatim criterion above is unchanged and is what this item is answering.
+**That restatement is NOT equivalent to the criterion above, and saying so is the point.**
+An earlier revision of this paragraph introduced it as "without weakening what it asks
+for". As quantified statements they differ — "every project REPL" and "every project REPL
+whose substrate this gateway constructs" are not the same set — and this very file
+documents the gap two sections down. Asserting equivalence while documenting the
+difference is precisely the overclaim this item's own record catalogues, so the honest
+version is three separate statements:
+
+- **As a claim about boot-time mechanism it is narrower, explicitly.** Nothing is
+  reconciled at boot for a project this gateway has not been asked to serve yet. A REPL
+  exists, its row names it, and no pass has run.
+- **As a claim about what the owner experiences it is equivalent, and that is the
+  load-bearing half.** Reconciliation happens before that substrate's first turn, so no
+  turn is ever served by a fresh process where a survivor existed. The criterion asks that
+  a restart bring every project REPL back with its conversation intact; it does not say at
+  what point in the boot that has to happen.
+- **The observable difference is the window between the restart and first use**, in which
+  the pane is alive, unreconciled and unreaped. That is stated in full under *Residual,
+  named rather than hidden* below, and it is cross-referenced here so a reader meets the
+  gap in the same place they meet the claim.
+
+The second clause of the restatement is not a caveat on the first — it is the reason the
+first is phrased by substrate rather than by registry; see *Why reconciliation is per key*.
+The verbatim criterion above is unchanged and is what this item is answering.
 
 **Say which process restarted, always.** A REPL is a pane of the **herdr server**, so:
 
