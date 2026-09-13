@@ -1353,6 +1353,53 @@ describe('empty-findings rejection guard — an empty finding set is never a rej
       escalation: { kind, whatIsMissing: 'the plan is wrong', triggers: [kind], evidence: 'e', round: 2 },
     })
 
+  test('HEADLINE: the escalation exemption requires a COHERENT REJECTING escalation', async () => {
+    // THE GUARD MUST NOT TRUST THE PAYLOAD IT IS GUARDING AGAINST. `resultCarriesEscalation`
+    // checked the escalation shape and the routing kind but never the VERDICT, so a result
+    // that explicitly APPROVED bought the findings-free exemption — an approving row
+    // accepted as a rejection, at the last line of defence before persistence. Same rule
+    // that sent the `inline_active` refusal to the store: an invariant that holds only
+    // where someone remembered it is not one.
+    const store = new TridentRunStore(db)
+    const base = {
+      ok: true, prNumber: 12, branch: 'trident/x', round: 2, checkpoint: 'argus-request-changes',
+    }
+    const kind = 'design-gap'
+    const payload = { kind, whatIsMissing: 'the plan is wrong', triggers: [kind], evidence: 'e', round: 2 }
+
+    // EVERY REFUSAL CASE, each a different way of not being a coherent rejection.
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ['it APPROVED', { ...base, verdict: 'APPROVE', blockKind: kind, escalation: payload }],
+      ['no verdict at all', { ...base, blockKind: kind, escalation: payload }],
+      ['an unrecognised verdict', { ...base, verdict: 'COMMENT', blockKind: kind, escalation: payload }],
+      ['a case-variant verdict', { ...base, verdict: 'request_changes', blockKind: kind, escalation: payload }],
+      ['no payload', { ...base, verdict: 'REQUEST_CHANGES', blockKind: kind }],
+      ['a kind outside the three', { ...base, verdict: 'REQUEST_CHANGES', blockKind: 'nope', escalation: { ...payload, kind: 'nope' } }],
+      ['a blank whatIsMissing', { ...base, verdict: 'REQUEST_CHANGES', blockKind: kind, escalation: { ...payload, whatIsMissing: '   ' } }],
+      ['a routing kind that disagrees', { ...base, verdict: 'REQUEST_CHANGES', blockKind: 'missing-dependency', escalation: payload }],
+    ]
+    for (const [why, result] of refused) {
+      const run = await store.create({ slug: `refuse-${refused.findIndex(([w]) => w === why)}`, project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { inner_result: JSON.stringify(result) })
+      await expect(
+        store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' }),
+      ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    }
+  })
+
+  test('CONTROL: a COHERENT findings-free escalation still writes', async () => {
+    // Without this, "the predicate is stricter" is satisfied by a predicate that refuses
+    // EVERYTHING — which silently restores the `REVIEW_NOT_RUN` mislabel this whole card
+    // exists to remove, with every refusal assertion above still green.
+    const store = new TridentRunStore(db)
+    for (const kind of ['design-gap', 'missing-dependency', 'not-converging'] as const) {
+      const run = await store.create({ slug: `coherent-${kind}`, project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { inner_result: escalated(kind) })
+      await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' })
+      expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+
   test('HEADLINE: update() ACCEPTS a findings-free REQUEST_CHANGES when the row carries an escalation', async () => {
     // The guard's thesis — "an empty finding set is an approval or an infrastructure
     // failure, never a rejection" — was EXHAUSTIVE only while a rejection could come from

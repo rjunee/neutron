@@ -630,11 +630,24 @@ re-synthesise — and when the cap leaves no round the run ends NOT-APPROVED. No
 a finding or an escalation kind it did not measure; it withholds the one authorisation that
 cannot be taken back.
 
-AND A CONTRADICTORY ROUND JUDGED NOTHING, so it stays out of the convergence ledger.
-Without that, a seat answering incoherently twice is reported as fix rounds that "stopped
-converging" — measured: `not-converging` with counts `[0,0]`, blaming the fixes for a panel
-that never delivered a usable verdict. That is the same invented-cause failure this card
-exists to remove, reproduced by the card's own remedy.
+### THE REMEDY REPRODUCED THE DISEASE, AND ONLY AN ASSERTION ABOUT THE REPORT CAUGHT IT
+
+Downgrading a contradictory reply made the fix loop retry it — correct — and two such
+rounds then produced `not-converging` with blocker+major counts `[0,0]`. The run blamed the
+FIX ROUNDS for failing to converge, when what had actually happened is that the panel never
+delivered a usable verdict. A cause nobody measured, reported with full confidence: the
+exact failure this card exists to remove, reproduced by the card's own remedy.
+
+A contradictory round judged nothing, so it stays out of the convergence ledger — the same
+rule that already excludes infra-only and advisory-only rounds, extended to the case that
+created it.
+
+WHAT CAUGHT IT IS THE PART WORTH KEEPING. Every assertion about "did the run stop" was
+green: it stopped, it did not merge, no approval escaped. The defect was only in WHAT IT
+SAID ABOUT WHY. An assertion that a run reached a safe state cannot see a run that reached
+it for a fabricated reason, and a stop that misnames its cause sends the next reader after
+the wrong thing — which is how the nine-round run this card started from was read as a
+review problem for a week.
 
 JUDGED ON THE SEAT'S OWN VERDICT, not the gated one, and the distinction is load-bearing:
 `enforceSeverityGate` turns a REQUEST_CHANGES into an APPROVE over all-non-blocking
@@ -664,6 +677,28 @@ new test passed whether the contradiction was refused or simply never delivered,
 mutation that re-drops the field stayed GREEN against it. It now asserts the REFUSAL was
 recorded, which only happens if the claim arrived. Asserting an outcome that the broken
 fixture also produces is how a test about a fixture defect inherits the fixture defect.
+
+### A PERSISTENCE GUARD THAT TRUSTS THE PAYLOAD IS NOT A GUARD
+
+`resultCarriesEscalation` is the last line before an unwritable row becomes a written one:
+all three store write paths use it to grant the findings-free exemption. It checked the
+escalation's shape and the routing kind — and never the VERDICT. So
+`{verdict:'APPROVE', blockKind:'design-gap', escalation:{…}}` bought the exemption, and a
+row that explicitly APPROVED was accepted as a findings-free REJECTION.
+
+Its own docblock listed the fail-closed conditions and read as though the list were
+complete. It was not, and a list that claims completeness is worse than no list: the next
+reader checks the enumeration rather than the code.
+
+The rule is the one written two sections down for `inline_active` — an invariant that holds
+only where someone remembered it is not an invariant — which is exactly why this guard was
+put at the STORE in the first place. It is also why "unreachable from the in-process
+writers" was not a defence: `checkpoint.sh` is an out-of-process writer carrying its own
+copy of the findings rule, so who can reach this column was ALREADY known to be wider than
+the callers anyone had enumerated. The predicate now requires a coherent REJECTING
+escalation, and the verdict is matched EXACTLY rather than normalised — the workflow writes
+it through a schema enum, so anything else is a row this function does not understand, and
+not understanding it is a reason to apply the ordinary rule rather than to guess.
 
 ### TWO NAMED RULES ABOUT INSTRUMENTS, AND A COUNT
 

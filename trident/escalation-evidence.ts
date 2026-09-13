@@ -69,7 +69,7 @@ export function parseInnerEscalation(raw: unknown): InnerEscalation | null {
 }
 
 /**
- * IS THIS RAW `inner_result` COLUMN A RUN THAT STOPPED AND ESCALATED?
+ * IS THIS RAW `inner_result` COLUMN A RUN THAT STOPPED AND ESCALATED — A COHERENT ONE?
  *
  * The question the STORE has to answer before it can tell a legitimate findings-free
  * rejection from the illegitimate kind. An escalation is a REJECTION WHOSE EVIDENCE IS THE
@@ -77,15 +77,37 @@ export function parseInnerEscalation(raw: unknown): InnerEscalation | null {
  * has no individual code finding to write, because the code is a faithful implementation
  * of a bad plan.
  *
- * THE KIND AND THE PAYLOAD MUST AGREE, the same pairing every other reader of this
- * distinction requires. `blockKind` is what the outer loop routes on and the payload is
- * what it reports; a result carrying one without the other is a HALF-WRITTEN escalation,
- * and it falls through to the findings requirement rather than being believed on the
- * strength of its label.
+ * EVERY CONDITION IT CHECKS, and this list is the complete one:
  *
- * Fail-closed at every step: an unparseable column, a missing payload, a kind outside the
- * three, a blank `whatIsMissing`, or a routing kind that disagrees all return `false` —
- * and the caller then applies the ordinary rule.
+ *   1. the column parses to a JSON object at all;
+ *   2. `verdict` is EXACTLY 'REQUEST_CHANGES' — an escalation is a REJECTION, and a result
+ *      that approves is not one whatever else it carries;
+ *   3. `escalation` decodes: a kind among the three, and a non-blank `whatIsMissing`;
+ *   4. `blockKind` AGREES with the payload's kind — `blockKind` is what the outer loop
+ *      routes on and the payload is what it reports, so one without the other is a
+ *      HALF-WRITTEN escalation rather than an escalation.
+ *
+ * CONDITION 2 WAS MISSING, AND THE DOCBLOCK CLAIMED THE LIST WAS COMPLETE WITHOUT IT. So
+ * `{verdict:'APPROVE', blockKind:'design-gap', escalation:{…}}` returned `true`, and all
+ * three store write paths used that boolean to BYPASS the empty-findings rejection guard —
+ * a row with no findings and an explicitly APPROVING result accepted as a findings-free
+ * rejection. A persistence guard that trusts the payload it is guarding against is not a
+ * guard, which is the same rule that sent the `inline_active` refusal to the store rather
+ * than the tool: an invariant that holds only where someone remembered it is not one. The
+ * store is deliberately the last line — `checkpoint.sh` is an out-of-process writer with
+ * its own copy of the findings rule, so "in-process writers only" was already known to be
+ * an incomplete framing of who can reach this column.
+ *
+ * THE VERDICT IS MATCHED EXACTLY rather than normalised, and that is the fail-closed
+ * direction on purpose. The workflow writes this field through a schema enum, so an exact
+ * match accepts every value it actually produces; anything else — a case variant, padding,
+ * a future spelling — is a row this function does not understand, and the caller then
+ * applies the ORDINARY findings rule rather than granting an exemption off a value it had
+ * to guess at.
+ *
+ * Fail-closed at every step: an unparseable column, a verdict that is absent, approving or
+ * unrecognised, a missing payload, a kind outside the three, a blank `whatIsMissing`, or a
+ * routing kind that disagrees all return `false`.
  */
 export function resultCarriesEscalation(rawInnerResult: string | null | undefined): boolean {
   if (typeof rawInnerResult !== 'string' || rawInnerResult.trim() === '') return false
@@ -97,6 +119,9 @@ export function resultCarriesEscalation(rawInnerResult: string | null | undefine
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false
   const p = parsed as Record<string, unknown>
+  // AN ESCALATION IS A REJECTION. Checked FIRST, because it is the condition whose absence
+  // let an approving row buy a rejection's exemption.
+  if (p['verdict'] !== 'REQUEST_CHANGES') return false
   const escalation = parseInnerEscalation(p['escalation'])
   if (escalation === null) return false
   return p['blockKind'] === escalation.kind
