@@ -2807,10 +2807,18 @@ Four things that came out of doing it:
   cannot see a write whose key is computed, and the tree has 91 such sites across 67 files
   — overwhelmingly one shared isolation helper. Requiring an allowlist of 67 paths would
   make the guard a snapshot of the tree rather than a rule, so those are not flagged and
-  the reason is written down. A runtime check in the test preload — snapshot the switches,
-  compare at process exit — would be form-blind and catch all of them; it is the obvious
-  next step and it changes a file every test in the repo loads, so it is not being folded
-  into this round.
+  the reason is written down. **The form-blind alternative I named here does not
+  exist, and that is now measured rather than assumed.** Snapshotting the switches in the
+  test preload and comparing at process exit observes the VALUE rather than the text, so it
+  would see every spelling. Under `bun test` 1.3.13 it cannot: the preload module IS
+  imported — verified, it wrote a file at import time — but neither `process.on('exit')`
+  nor `process.on('beforeExit')` ever fires, and a `process.exitCode` set from such a hook
+  does not reach the runner. A deliberately leaking fixture ran with the guard installed
+  and the run exited 0 with nothing printed. An instrument that cannot fire is not a gate,
+  so this is recorded as UNAVAILABLE rather than as future work. The earlier revision of
+  this record called it "the obvious next step", which was a claim about a mechanism nobody
+  had run — and it was repeated in the spec item and in a comment in the guard itself
+  before any of the three was checked.
 - **The helper needed its own tests, and did not have them.** Two mutations of its restore
   — writing the STRING `'undefined'` for an absent prior value, and not restoring at all —
   both survived the entire guard suite. `restoreEnv` is now exported and driven directly,
@@ -2901,6 +2909,36 @@ binding and the defined property each pinned as CURRENT behaviour. A limit nobod
 execute is a limit nobody believes. Plus a measurement that the tree contains none of those
 forms on a switch key today, so the stated boundary is a boundary rather than a hole being
 walked through — and it reds the day one appears.
+
+### The function was proved and the WIRING was not
+
+`restoreEnv`'s own cases proved the function restores correctly. Nothing proved
+`pinEnvSwitch` ever CALLS it: delete its `afterAll` registration outright and every test in
+the file still passed, while the switch stayed pinned for every suite that ran afterwards —
+exactly the failure the helper exists to prevent. The static guard could not catch it
+either, because it exempts this helper by design. And the test file said so in plain
+words — that the restore "runs after the last test in this file and so cannot be observed
+from inside it" — which is an accurate description of a gap, written where a test should
+have been.
+
+**The observable was in the runner all along.** A later sibling `describe` runs after the
+earlier one's `afterAll`, so the value can be asserted DURING the pinned scope and again
+AFTER it, and the two cannot both pass unless the hook ran. The ordering is verified rather
+than assumed — a three-line probe against `bun test` before the case was written.
+
+Both restore branches get their own case (an absent prior must be gone, a present prior
+must be exact), plus a control that the pinned values are really gone: without it, a helper
+that never wrote anything at all would satisfy both, since "restored" and "never touched"
+are indistinguishable from after the fact.
+
+**M-W5 survived first, and the survivor was the interesting part.** Moving the prior-value
+capture from call time into `beforeAll` changed nothing — across files a suite's `afterAll`
+has already run before the next suite's `beforeAll`, so both readings see the original. The
+case that separates them is the same key pinned TWICE IN ONE SCOPE: the `beforeAll` hooks
+run in order, so a capture inside the second one records what the first just wrote, and the
+restores unwind to that intermediate value instead of the original. The docblock had
+asserted this property; nothing had tested it, and the mutation is what exposed that the
+justification was doing work no case supported.
 
 ### Two mutations that taught the same lesson from opposite ends
 
@@ -3240,6 +3278,11 @@ Run against the named suites.
 | M-P7b | the live domain is widened back to the filename suffix | RED 1 |
 | M-P8 | a live proof IMPORTS the pane constructor | RED 1 — the defect the whole guard exists for, now caught whatever it would have done with the import |
 | M-P9 | a live proof stops using the scoped helper | RED 1 |
+| M-W1 | `pinEnvSwitch`'s `afterAll` registration is DELETED — the finding itself | RED 3 |
+| M-W2 | the restore is registered but never calls `restoreEnv` | RED 3 |
+| M-W3 | the restore writes the PINNED value back instead of the prior | RED 3 |
+| M-W4 | the helper never writes at all | RED 1 — the control that separates "restored" from "never touched" |
+| M-W5 | the prior value is captured inside `beforeAll` instead of at call time | SURVIVED until the same key was pinned twice in one scope, which is the only arrangement that separates the two readings → RED 1 |
 | M-A1 | the `trimToBytes` range check is removed entirely | RED 2 |
 | M-A2 | an out-of-range trim target is silently CLAMPED instead of refused | RED 2 — the choice of reject-over-clamp is itself pinned |
 | M-A3 | over-strict: `trimToBytes === maxBytes` rejected | RED 2 |

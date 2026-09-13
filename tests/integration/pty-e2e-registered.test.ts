@@ -323,11 +323,13 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // WHY NOT STRUCTURAL, THE WAY THE PANE GUARD IS. Reachability works there because the
   // constructor lives behind a module specifier a file must name. `process.env` is a
   // global: every file in the repo can already reach it, so there is no import to
-  // withhold and nothing to make unreachable. The form-blind answer for this one is a
-  // RUNTIME check — snapshot the switches in the test preload, compare at process exit —
-  // which sees every spelling because it observes the value rather than the text. It
-  // changes a file every test in the repo loads, so it is named here as the next step
-  // rather than folded into this round.
+  // withhold and nothing to make unreachable. The form-blind answer would be a RUNTIME
+  // check — snapshot the switches in the preload, compare at process exit, which sees
+  // every spelling because it observes the value rather than the text — and it is NOT
+  // AVAILABLE here, measured rather than assumed: under `bun test` 1.3.13 the preload is
+  // imported but neither `exit` nor `beforeExit` ever fires, and an `exitCode` set from
+  // such a hook never reaches the runner. A deliberately leaking fixture exits 0 with
+  // nothing printed. An instrument that cannot fire is not a gate.
   describe('the switch guard does not claim what it cannot see', () => {
     const REFLECT = asm('Reflect.', 'set(', PROC, ".env, '", KEY, "', '/dead')")
     const ALIASED = asm('const e = ', PROC, '.env; e.', KEY, " = '/dead'")

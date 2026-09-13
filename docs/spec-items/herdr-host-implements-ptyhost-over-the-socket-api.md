@@ -593,6 +593,20 @@ not-new. That is accepted and recorded here rather than hidden.
       write whose key is computed, and the tree has 91 such sites across 67 files,
       overwhelmingly one shared isolation helper. Flagging them would require an allowlist
       that makes the guard a snapshot of the tree rather than a rule.
+      THE FORM-BLIND ALTERNATIVE DOES NOT EXIST IN THIS RUNNER, MEASURED: a preload that
+      snapshots the switches and compares at process exit would see every spelling, but
+      under `bun test` 1.3.13 the preload is imported and neither `exit` nor `beforeExit`
+      ever fires, and an `exitCode` set from such a hook does not reach the runner — a
+      leaking fixture exits 0 with nothing printed. Recorded as unavailable rather than as
+      future work; an instrument that cannot fire is not a gate.
+      AND THE HELPER'S WIRING IS PROVED, NOT ONLY ITS FUNCTION. Deleting `pinEnvSwitch`'s
+      `afterAll` left every test passing while the switch stayed pinned — the restore
+      function had cases, the registration had none, and the static guard exempts this
+      helper by design. A later sibling `describe` runs after the earlier one's `afterAll`
+      (verified against the runner, not assumed), so the value is asserted during the
+      pinned scope and again after it; both branches get a case, plus a control that the
+      pinned values are really gone, because "restored" and "never touched" are otherwise
+      indistinguishable.
       verify: `bun test tests/integration/pty-e2e-registered.test.ts runtime/adapters/__tests__/env-switch.test.ts`
 - [ ] **THE PANE GUARD MAKES THE CONSTRUCTOR UNREACHABLE RATHER THAN DETECTING ITS USE.**
       It searched `new HerdrHost\s*\(` — one spelling of one route. `herdrHost` is an

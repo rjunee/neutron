@@ -47,14 +47,79 @@ describe('restoreEnv puts back ABSENCE as well as a value', () => {
   })
 })
 
-describe('pinEnvSwitch actually pins', () => {
-  // Registers the hooks at module scope, the way every caller does. The RESTORE half
-  // runs after the last test in this file and so cannot be observed from inside it —
-  // that is what `restoreEnv`'s own cases above are for.
-  pinEnvSwitch(PROBE, '/pinned/by/the/helper.sock')
+// A PRIOR VALUE THAT EXISTS, set before `pinEnvSwitch` captures it. The module body runs
+// before any `describe` callback, so this is in place when the helper reads it.
+const PROBE_ABSENT = 'NEUTRON_ENV_SWITCH_PROBE_ABSENT'
+const PROBE_PRESENT = 'NEUTRON_ENV_SWITCH_PROBE_PRESENT'
+const ORIGINAL = '/the/original.sock'
+process.env[PROBE_PRESENT] = ORIGINAL
 
-  test('the value is in place by the time the tests run', () => {
-    expect(process.env[PROBE]).toBe('/pinned/by/the/helper.sock')
+describe('pinEnvSwitch pins', () => {
+  // Registered the way every caller registers it.
+  pinEnvSwitch(PROBE_ABSENT, '/pinned-over-nothing.sock')
+  pinEnvSwitch(PROBE_PRESENT, '/pinned-over-a-value.sock')
+
+  test('both values are in place by the time the tests run', () => {
+    expect(process.env[PROBE_ABSENT]).toBe('/pinned-over-nothing.sock')
+    expect(process.env[PROBE_PRESENT]).toBe('/pinned-over-a-value.sock')
+  })
+})
+
+// THE WIRING, NOT THE FUNCTION — and this is the half that was missing. `restoreEnv`'s
+// own cases prove the function does the right thing; nothing proved `pinEnvSwitch` ever
+// CALLS it. Its `afterAll` could be deleted outright and every test here still passed,
+// while the switch stayed pinned for every suite that ran afterwards — which is the exact
+// failure this helper exists to prevent. The static guard cannot catch it either, because
+// it exempts this helper by design.
+//
+// A LATER SIBLING `describe` IS THE OBSERVABLE. Its tests run after the previous
+// describe's `afterAll`, so by the time these execute the restore has either happened or
+// has not. That ordering is asserted rather than assumed — the case above pins the value
+// DURING, these pin it AFTER, and the two together cannot both pass unless the hook ran.
+describe('...and the restore RAN — not merely implemented', () => {
+  test('a prior that was ABSENT is absent again, not the string "undefined"', () => {
+    expect(PROBE_ABSENT in process.env).toBe(false)
+    expect(process.env[PROBE_ABSENT]).not.toBe('undefined')
+  })
+
+  test('a prior that was PRESENT is back to its exact value', () => {
+    expect(process.env[PROBE_PRESENT]).toBe(ORIGINAL)
+  })
+
+  test('CONTROL — the pinned values are really gone, so this is not a vacuous pass', () => {
+    // Without this, a helper that never wrote anything in the first place would satisfy
+    // both cases above: "restored" and "never touched" look identical from here.
+    expect(process.env[PROBE_ABSENT]).not.toBe('/pinned-over-nothing.sock')
+    expect(process.env[PROBE_PRESENT]).not.toBe('/pinned-over-a-value.sock')
+  })
+})
+
+// THE PRIOR VALUE IS CAPTURED WHEN `pinEnvSwitch` IS CALLED, NOT INSIDE `beforeAll`, and
+// this is the case that tells the two apart. Pin the same key twice in one scope: the
+// `beforeAll` hooks run in order, so a capture made inside the second one records what the
+// FIRST hook just wrote. The restores then unwind to that intermediate value instead of to
+// the original, and the key is left pinned for every suite that follows.
+//
+// Written because the mutation that moves the capture into `beforeAll` SURVIVED every
+// other case here — across files it makes no difference, since a file's `afterAll` has
+// already run before the next file's `beforeAll`. A survivor is only ever a weak test or a
+// property with no observable, and this one turned out to be the first.
+const PROBE_TWICE = 'NEUTRON_ENV_SWITCH_PROBE_TWICE'
+const TWICE_ORIGINAL = '/before/any/pin.sock'
+process.env[PROBE_TWICE] = TWICE_ORIGINAL
+
+describe('the same key pinned TWICE in one scope', () => {
+  pinEnvSwitch(PROBE_TWICE, '/first.sock')
+  pinEnvSwitch(PROBE_TWICE, '/second.sock')
+
+  test('the last pin wins while the scope runs', () => {
+    expect(process.env[PROBE_TWICE]).toBe('/second.sock')
+  })
+})
+
+describe('...and both restores unwind to the ORIGINAL, not to each other', () => {
+  test('the value is what it was before either pin', () => {
+    expect(process.env[PROBE_TWICE]).toBe(TWICE_ORIGINAL)
   })
 })
 
