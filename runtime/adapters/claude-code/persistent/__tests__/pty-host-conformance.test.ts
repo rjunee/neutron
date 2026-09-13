@@ -87,6 +87,19 @@ interface Backend {
    * really did settle the exit, so neither arm passes vacuously.
    */
   spawnAlreadyExiting(onScreen: (s: string) => void): Promise<Spawned>
+  /** Spawn with an `onExit` consumer, so the exit-path contract can be driven. */
+  spawnWithExit(onExit: (code: number | null) => void): Promise<Spawned>
+  /**
+   * What `exited` resolves to when `endChild()` ends this child NORMALLY.
+   *
+   * DECLARED PER HOST, not assumed equal — this is the sharpest of the three permanent
+   * divergences. herdr has no exit codes ANYWHERE in its API, so `null` is the only
+   * honest answer and crash-versus-recycle collapses onto `wasKilledByUs`; a pty
+   * reports the real kernel status. Asserting one value for both would be asserting
+   * something false about one of them, and asserting neither would be the conditional
+   * shape this table forbids.
+   */
+  readonly exitCodeWhenEnded: number | null
   /**
    * What THIS substrate must hand over at release, after dying as early as it can.
    *
@@ -113,6 +126,7 @@ const STARTUP = 'Do you trust the files in this folder?'
 const herdrBackend: Backend = {
   name: 'HerdrHost (out-of-process pane, polled)',
   startup: STARTUP,
+  exitCodeWhenEnded: null, // no exit codes exist anywhere in herdr
   alreadyGoneDelivers: {
     count: 0,
     why:
@@ -136,6 +150,19 @@ const herdrBackend: Backend = {
     // The pane vanishes; the host learns of it on the next poll.
     return { child, endChild: () => server.exitPane() }
   },
+  async spawnWithExit(onExit) {
+    const server = new FakeHerdrServer()
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onExit })
+    child.beginOutput?.()
+    return { child, endChild: () => server.exitPane() }
+  },
   async spawnAlreadyExiting(onScreen) {
     const server = new FakeHerdrServer()
     server.screen = STARTUP
@@ -157,6 +184,7 @@ const herdrBackend: Backend = {
 const bunBackend: Backend = {
   name: 'BunTerminalHost (in-process pty, streamed)',
   startup: STARTUP,
+  exitCodeWhenEnded: 0, // a real kernel status
   alreadyGoneDelivers: {
     count: 1,
     contains: STARTUP,
@@ -194,6 +222,20 @@ const bunBackend: Backend = {
     })
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
     // The process exits; the host is TOLD, rather than discovering it by polling.
+    return { child, endChild: () => endProcess(0) }
+  },
+  async spawnWithExit(onExit) {
+    let endProcess: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      endProcess = res
+    })
+    const host = new BunTerminalHost({
+      createTerminal: () => ({ write: () => 0, resize: () => undefined, close: () => undefined }),
+      spawn: () => ({ pid: 4244, exited: exitedPromise, exitCode: null, kill: () => undefined }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onExit })
+    child.beginOutput?.()
     return { child, endChild: () => endProcess(0) }
   },
   async spawnAlreadyExiting(onScreen) {
@@ -346,6 +388,40 @@ describe('PtyHost conformance — the readiness gate', () => {
         // ...and the host is still alive afterwards, not wedged by its consumer.
         expect(child.hasExited()).toBe(false)
         child.kill()
+      })
+    })
+  }
+
+  for (const backend of BACKENDS) {
+    describe(`${backend.name} — a throwing onExit consumer`, () => {
+      it('still SETTLES the exit, exactly once, and does not strand the waiter', async () => {
+        // The Bun host called `opts.onExit(code)` unguarded and then `exitResolve(code)`,
+        // so a consumer that threw rejected the surrounding promise into `fireAndForget`
+        // — logged and swallowed — and `exitResolve` never ran. `hasExited()` returned
+        // true while `child.exited` stayed pending forever, which is every awaiter of the
+        // exit (the escalation ladder, the pool's teardown) waiting on a child that is
+        // already gone. herdr had guarded this since its exit path was written.
+        //
+        // NOT VACUOUS FOR EITHER PARTICIPANT, which is why it belongs in the table and
+        // the kill-before-beginOutput case does not: both hosts take `onExit`, both must
+        // settle `exited`, and both can be handed a consumer that throws.
+        let calls = 0
+        const { child, endChild } = await backend.spawnWithExit(() => {
+          calls += 1
+          throw new Error('the exit consumer threw')
+        })
+        endChild()
+        // THE STRAND IS THE POINT: this `await` is what never returned.
+        const code = await child.exited
+        expect(`${backend.name} exit code: ${String(code)}`).toBe(
+          `${backend.name} exit code: ${String(backend.exitCodeWhenEnded)}`,
+        )
+        expect(child.hasExited()).toBe(true)
+        // EXACTLY ONCE. A promise cannot settle twice, so "it resolved" cannot catch a
+        // double-settle — the observable that can is the consumer's own call count, and
+        // a second exit path firing would show up here.
+        await settle()
+        expect(`${backend.name} onExit calls: ${calls}`).toBe(`${backend.name} onExit calls: 1`)
       })
     })
   }

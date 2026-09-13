@@ -17,10 +17,12 @@
  * Ported as-is so Nova's `pty-spawn.test.ts` split-chunk ESC-buffering cases port
  * verbatim (see `__tests__/pty-noise.test.ts`). That port was made against the
  * in-process Bun-native backend, which is no longer the WIRED one (herdr step 2b).
- * The strip discipline is unchanged and both backends use it, but what it strips
- * differs: a herdr pane's rendered screen under `herdr-host.ts`, and the raw byte
- * stream it was written against under `bun-terminal-host.ts`, which is kept as an
- * injectable option.
+ *
+ * ONE BACKEND USES THIS, NOT BOTH. `bun-terminal-host.ts` is its only importer: it has
+ * the raw byte stream this was written against. `HerdrHost` asks the server for
+ * `strip_ansi: true` and receives an already-rendered screen, so it has nothing to strip
+ * and does not import this file at all. The header claimed both until 2026-09-13 —
+ * checkable in one grep, and wrong.
  */
 
 /**

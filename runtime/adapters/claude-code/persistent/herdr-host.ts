@@ -128,9 +128,19 @@ export interface HerdrHostDeps {
 /**
  * A `PtyHost` whose terminal is a herdr pane.
  *
- * One herdr connection per `spawn`, so a REPL's poll loop and its `pane.exited`
- * subscription live and die with that REPL and cannot be starved by another
- * session's traffic.
+ * ONE CONNECTION PER REQUEST, not per spawn: the server answers exactly one request on a
+ * connection and then closes it (measured), so a `HerdrRpc` is a handle that opens, asks
+ * and closes for every call rather than a socket a REPL holds. And there is NO
+ * SUBSCRIPTION — exit is discovered by POLLING `pane.read` for a typed `pane_not_found`,
+ * because a subscription needs a connection that outlives a request and there is none.
+ * See the notes in `spawn` for both, and `pty-host.ts` for what that cost the interface.
+ *
+ * This docblock said the opposite until 2026-09-13 — "one herdr connection per `spawn`,
+ * so a REPL's poll loop and its `pane.exited` subscription live and die with that REPL"
+ * — which is the architecture this file exists to replace, stated in the first thing a
+ * reader of the class meets. **A present-tense architectural claim in a file that just
+ * changed its architecture is the highest-density place for this**, and it is the fourth
+ * on this branch.
  */
 export class HerdrHost implements PtyHost {
   constructor(private readonly deps: HerdrHostDeps = {}) {}
@@ -318,7 +328,14 @@ export class HerdrHost implements PtyHost {
         // outward sign: the child still settles, no read is issued either way, and the
         // warning is cancelled on both paths. The only difference is whether the task
         // is still pending, so that is what the seam reports.
-        this.deps.onPollExit?.()
+        // Guarded like every other consumer callback, for the same reason and even
+        // though this one is a test seam: a throw here would reject the promise
+        // `fireAndForget` holds and turn a failing assertion into a swallowed log.
+        try {
+          this.deps.onPollExit?.()
+        } catch {
+          // the observer's failure is the observer's
+        }
       }),
     )
 

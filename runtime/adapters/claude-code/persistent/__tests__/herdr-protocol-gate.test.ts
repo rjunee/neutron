@@ -548,3 +548,83 @@ describe('the version gate holds SPAWN, not just the ping function', () => {
     child.kill()
   })
 })
+
+/**
+ * MALFORMED UTF-8 IS A PROTOCOL ERROR, NOT A FRAME WITH ODD CHARACTERS IN IT.
+ *
+ * `Buffer.toString('utf8')` substitutes U+FFFD for every invalid sequence and returns
+ * happily, so `c3 28` becomes `"�("` and `JSON.parse` SUCCEEDS on the result. A
+ * corrupt frame is then accepted as a valid acknowledgement, and pane text that
+ * detectors scan is altered with nothing reporting it.
+ *
+ * The last case is the one that stops the fix being a different bug: a VALID multi-byte
+ * sequence split across deliveries must still decode. Without it, "reject malformed
+ * UTF-8" is satisfied by rejecting every fragmented multi-byte read — which is most of
+ * them, since the reader exists because frames arrive in pieces.
+ */
+describe('a frame that is not valid UTF-8 is refused, not substituted', () => {
+  const reader = (): ReturnType<typeof newFrameReader> => newFrameReader(4096)
+  /** `{"id":"r","result":{"t":"<bytes>"}}\n` with raw bytes spliced into the string. */
+  const frameWith = (bad: number[]): Uint8Array =>
+    new Uint8Array([
+      ...new TextEncoder().encode('{"id":"r","result":{"t":"'),
+      ...bad,
+      ...new TextEncoder().encode('"}}\n'),
+    ])
+
+  it('an invalid LEAD byte is refused', () => {
+    expect(reader().push(frameWith([0xff])).kind).toBe('undecodable')
+  })
+
+  it('an invalid CONTINUATION byte is refused — the case that parses as JSON once substituted', () => {
+    // `c3 28`: a 2-byte lead followed by '('. Substituted it is "�(" and the frame
+    // parses; rejected it is a protocol error.
+    expect(reader().push(frameWith([0xc3, 0x28])).kind).toBe('undecodable')
+  })
+
+  it('a sequence TRUNCATED before the newline is refused', () => {
+    // `e2 82` — the first two bytes of `€`, with the frame ending after them.
+    expect(reader().push(frameWith([0xe2, 0x82])).kind).toBe('undecodable')
+  })
+
+  it('a VALID multi-byte sequence SPLIT ACROSS CHUNKS still decodes', () => {
+    // The case that makes fatal decoding safe: bytes are reassembled before they are
+    // decoded, so fragmentation is not corruption. `€` is e2 82 ac.
+    const r = reader()
+    const whole = frameWith([0xe2, 0x82, 0xac])
+    for (let i = 0; i < whole.length - 1; i++) {
+      expect(r.push(whole.subarray(i, i + 1)).kind).toBe('pending')
+    }
+    const last = r.push(whole.subarray(whole.length - 1))
+    expect(last.kind).toBe('frame')
+    expect(last.kind === 'frame' ? JSON.parse(last.line) : undefined).toEqual({
+      id: 'r',
+      result: { t: '€' },
+    })
+  })
+
+  it('CONTROL — a plain ASCII frame still decodes, so the decoder is not rejecting everything', () => {
+    const r = reader().push(new TextEncoder().encode('{"id":"r","result":{"t":"ok"}}\n'))
+    expect(r.kind).toBe('frame')
+  })
+
+  it('through herdrCall, an undecodable reply FAILS the call and says why', async () => {
+    const bytes = frameWith([0xc3, 0x28])
+    const e = await herdrCall('pane.read', {}, {
+      socketPath: '/f',
+      connect: async (_p, h) => ({
+        // The full frame must be ACCEPTED, or the call fails as a short write before it
+        // ever reads a reply — the guard from an earlier round, firing first.
+        write: (frame: string) => {
+          queueMicrotask(() => h.onBytes(bytes))
+          return Buffer.byteLength(frame, 'utf8')
+        },
+        end: () => undefined,
+      }),
+    }).catch((x: unknown) => x as Error)
+    expect((e as Error).message).toContain('not valid UTF-8')
+    // NOT AN EMPTY REPLY. A decode failure is the absence of a usable answer, and
+    // resolving `{}` here would report an acknowledgement nobody sent.
+    expect((e as Error).message).toContain('acknowledgement')
+  })
+})

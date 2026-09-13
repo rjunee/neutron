@@ -44,6 +44,10 @@ import {
 } from './herdr-protocol.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
+/** Rejects invalid UTF-8 instead of substituting U+FFFD. Shared: a decoder is stateless
+ *  between `decode()` calls when `stream` is not set. */
+const FATAL_UTF8 = new TextDecoder('utf-8', { fatal: true })
+
 /** The frame delimiter, as a BYTE. 0x0A can never appear inside a multi-byte UTF-8
  *  sequence (continuation bytes are ≥ 0x80), so splitting the byte stream on it
  *  always lands on a character boundary. */
@@ -195,6 +199,10 @@ export type FrameRead =
   | { readonly kind: 'pending' }
   | { readonly kind: 'frame'; readonly line: string }
   | { readonly kind: 'oversized' }
+  /** The frame's bytes are not valid UTF-8. Its OWN outcome, because a decode failure
+   *  is a protocol error and not an empty reply — false and unknown must not share a
+   *  branch here either. */
+  | { readonly kind: 'undecodable' }
 
 /** Reassembles ONE newline-terminated frame out of however many chunks it arrives in. */
 export interface FrameReader {
@@ -262,7 +270,29 @@ export function newFrameReader(maxFrameBytes: number): FrameReader {
       // newline is dropped unread: this connection carries ONE reply and is about to be
       // closed, so there is no next frame to resynchronise to.
       append(chunk.subarray(0, nl))
-      return { kind: 'frame', line: buf.toString('utf8', 0, end) }
+      // FATAL, NOT SUBSTITUTING. `Buffer.toString('utf8')` replaces every invalid
+      // sequence with U+FFFD and returns happily, so `c3 28` decodes to "\uFFFD(" and
+      // `JSON.parse` then SUCCEEDS on it. Two consequences, and the second is this
+      // item's own subject: a corrupt frame can be accepted as a valid acknowledgement,
+      // and pane text that detectors scan can be altered with nothing reporting it.
+      //
+      // Same class as the reply-id check one round ago — the client trusting that the
+      // wire carries what the server meant. The argument there holds unchanged: the
+      // protocol moved 20 → 22 in nineteen days with no server-side version check of
+      // any kind, so the client's job is to verify rather than assume.
+      //
+      // Decoding here rather than per chunk is what makes this safe to make fatal: a
+      // valid multi-byte sequence SPLIT across deliveries is already reassembled by the
+      // time it is decoded, so rejecting invalid bytes does not also reject chunked
+      // reads. That case is asserted, because without it "reject malformed UTF-8" is
+      // satisfied by rejecting every multi-byte read that happens to be fragmented.
+      let line: string
+      try {
+        line = FATAL_UTF8.decode(buf.subarray(0, end))
+      } catch {
+        return { kind: 'undecodable' }
+      }
+      return { kind: 'frame', line }
     },
   }
 }
@@ -338,6 +368,16 @@ export async function herdrCall(
   const onBytes = (chunk: Uint8Array): void => {
     if (settled) return
     const read = reader.push(chunk)
+    if (read.kind === 'undecodable') {
+      fail(
+        new Error(
+          `herdr: reply to '${method}' is not valid UTF-8 — refusing to decode it with ` +
+            `replacement characters, because a substituted frame parses as JSON and would be ` +
+            `accepted as an acknowledgement of something that was never said.`,
+        ),
+      )
+      return
+    }
     if (read.kind === 'oversized') {
       fail(
         new Error(

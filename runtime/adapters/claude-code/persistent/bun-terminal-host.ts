@@ -403,7 +403,27 @@ export class BunTerminalHost implements PtyHost {
         } catch {
           // best-effort
         }
-        if (opts.onExit !== undefined) opts.onExit(code)
+        if (opts.onExit !== undefined) {
+          // A THROWING CONSUMER MUST NOT BREAK THE EXIT PATH — and here it did more than
+          // break it, it STRANDED it. The throw propagated out of this handler and
+          // rejected the promise `fireAndForget` holds, which logs and swallows, so
+          // `exitResolve` below never ran: `hasExited()` returned true while
+          // `child.exited` stayed pending forever. Every caller that awaits the exit —
+          // the escalation ladder, the pool's teardown — waits on a child that is
+          // already gone.
+          //
+          // `HerdrHost` has carried this guard since its own exit path was written. That
+          // is the THIRD asymmetry of this kind found on this backend (the kill latch,
+          // the `onScreen` dispatch, now this), so the fix came with an enumeration of
+          // every consumer callback either host invokes rather than a fix at the site
+          // that was reported.
+          try {
+            opts.onExit(code)
+          } catch {
+            // Logged nowhere on purpose: the consumer's own failure is the consumer's,
+            // and the exit must settle regardless.
+          }
+        }
         exitResolve(code)
       }),
     )

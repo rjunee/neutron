@@ -470,6 +470,48 @@ not-new. That is accepted and recorded here rather than hidden.
       its output: `cmd | tail -3; echo $?` reports `tail`'s code, so a matrix with seven
       errors above the window prints three `pass` lines and looks green. An instrument
       that cannot fail is not a gate.
+- [ ] **EVERY CONSUMER CALLBACK IS GUARDED, ON EVERY PATH, IN BOTH HOSTS — enumerated,
+      with the count.** A consumer belongs to the caller and may throw; a host that lets
+      that throw escape does not merely lose the callback, it abandons whatever came
+      after it. The instance: `BunTerminalHost` called `opts.onExit(code)` unguarded and
+      then `exitResolve(code)`, so a throwing consumer rejected the promise
+      `fireAndForget` holds — logged and swallowed — and the resolve never ran.
+      `hasExited()` returned true while `child.exited` stayed PENDING FOREVER, which is
+      every awaiter of the exit waiting on a child that is already gone.
+      THE COUNT IS THE CRITERION, because "fixed the site that was reported" is how the
+      second and third of these survived: **six invocation sites across the two hosts** —
+      herdr's `onExit`, `onScreen` and the `onPollExit` test seam; Bun's two `onScreen`
+      dispatches and its `onExit` — and all six are guarded. Two were unguarded when the
+      enumeration was run, and the asymmetry had a direction worth naming: three times
+      now the Bun host has lacked a guard the herdr host already had.
+      THE THROWING-`onExit` CASE BELONGS IN THE CONFORMANCE TABLE, unlike the
+      kill-before-`beginOutput` one: both hosts take `onExit`, both must settle `exited`,
+      and both can be handed a consumer that throws — nothing about it is vacuous for
+      either participant. Assert the settlement AND the count of consumer calls, because
+      a promise cannot settle twice and "it resolved" therefore cannot detect a second
+      exit path firing. The resolved VALUE is declared per host (`null` under herdr,
+      which has no exit codes; the real status under a pty) rather than assumed equal.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/pty-host-conformance.test.ts`
+- [ ] **A FRAME THAT IS NOT VALID UTF-8 IS A PROTOCOL ERROR, not a frame with odd
+      characters in it.** `Buffer.toString('utf8')` substitutes U+FFFD for every invalid
+      sequence and returns happily, so `c3 28` decodes to `"\uFFFD("` and `JSON.parse`
+      SUCCEEDS on it. Two consequences, and the second is this item's own subject: a
+      corrupt frame can be accepted as a valid ACKNOWLEDGEMENT, and pane text that
+      detectors scan can be altered with nothing reporting it. Same class as the reply-id
+      check — the client trusting that the wire carries what the server meant — and the
+      same argument applies: the protocol moved 20 → 22 in nineteen days with no
+      server-side version check, so the client's job is to verify.
+      Decode with a FATAL decoder and give the failure its OWN outcome: a decode failure
+      is the absence of a usable answer, not an empty reply, and false and unknown must
+      not share a branch here either.
+      FOUR CASES PLUS THE ONE THAT STOPS THE FIX BEING A DIFFERENT BUG: an invalid lead
+      byte, an invalid continuation byte (the one that parses as JSON once substituted), a
+      sequence truncated before the newline — and a VALID multi-byte sequence SPLIT ACROSS
+      DELIVERIES, which must still decode. Without that last one, "reject malformed UTF-8"
+      is satisfied by rejecting every fragmented multi-byte read, which is most of them.
+      Decoding at the COMPLETE FRAME rather than per chunk is what makes fatal decoding
+      safe: fragmentation is not corruption.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
 - [ ] **NO FLAG MAY OUTLIVE THE ACT IT CLAIMS — enumerated across both hosts, not fixed
       where reported.** An operation that failed must not leave behind a latch saying it
       succeeded. THE RULE ATTACHES TO EVERY OPERATION THAT LATCHES INTENT BEFORE AN ACT
@@ -989,6 +1031,19 @@ not-new. That is accepted and recorded here rather than hidden.
       is correct AS HISTORY and must survive; a docstring describing a mechanism its own
       body no longer uses is misleading and gets corrected. A blanket find-and-replace
       fails this criterion by destroying the second category.
+      AND THE SAME RULE APPLIES INSIDE THE CHANGED MODULES, where the density is highest:
+      a present-tense architectural claim in a file that just changed its architecture is
+      the likeliest place for a false one. The class docblock of `HerdrHost` — the first
+      thing a reader of the class meets — described "one herdr connection per `spawn`"
+      and "its `pane.exited` subscription", both of which this item replaced, and
+      `pty-noise.ts` claimed "both backends use it" when its only importer is
+      `bun-terminal-host.ts` (herdr asks the server for `strip_ansi` and receives an
+      already-rendered screen). Four such claims on this branch. The sweep is for the
+      PHRASES — subscription, per spawn, both backends, long-lived socket — across the
+      herdr and `pty-*` modules, and it must distinguish three outcomes: a live false
+      claim is a defect; an explicitly dated deletion record ("this used to…", the
+      `PtyExitCause` note) is correct AS HISTORY; and a measurement that explains a choice
+      (a fresh subscriber IS delivered recent exits) stays.
       RE-DERIVED AFTER THE SCOPE CHANGE, which is the point of stating it this way: the
       first pass corrected every document that still mandated the Bun host, and then the
       deletion was reversed — so `AGENTS.md` was left carrying "there is no second

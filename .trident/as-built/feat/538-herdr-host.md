@@ -1527,6 +1527,78 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### Three times the Bun host lacked a guard the herdr host had
+
+`BunTerminalHost` called `opts.onExit(code)` unguarded and then `exitResolve(code)`. A
+consumer that throws rejected the promise `fireAndForget` holds — logged and swallowed —
+so the resolve never ran: `hasExited()` returned true while `child.exited` stayed pending
+FOREVER. Every awaiter of the exit (the escalation ladder, the pool's teardown) waiting on
+a child that was already gone. `HerdrHost` has carried that guard since its exit path was
+written.
+
+Third asymmetry of this kind on that backend — the kill latch, the `onScreen` dispatch,
+now this — and two of the three were found by a reviewer rather than by my sweep. So the
+fix came with the enumeration rather than at the reported site. **Six consumer-callback
+invocation sites across the two hosts**, and here they are with what each was:
+
+| host | callback | site | guarded before |
+| --- | --- | --- | --- |
+| herdr | `onExit` | `settleExit` | yes |
+| herdr | `onScreen` | poll loop | yes |
+| herdr | `onPollExit` | the poll-completion seam | **no** |
+| Bun | `onScreen` | gate release | yes |
+| Bun | `onScreen` | stream dispatch | yes |
+| Bun | `onExit` | exit handler | **no** — the blocker |
+
+Both are guarded now. The seam is test-only and was guarded anyway, because "every
+consumer callback" has to mean every one or the count is not a claim.
+
+**And this one belongs in the conformance table**, unlike the kill-before-`beginOutput`
+case: both hosts take `onExit`, both must settle `exited`, and both can be handed a
+throwing consumer — nothing about it is vacuous for either participant, which is the test
+that table's rule actually applies. Writing it surfaced one more per-host declaration:
+`exited` resolves `null` under herdr, which has no exit codes anywhere, and the real
+kernel status under a pty, so the value is declared per backend rather than assumed
+equal. The count of consumer calls is asserted alongside the settlement, because a
+promise cannot settle twice and "it resolved" therefore cannot detect a second exit path.
+
+### The wire is not trusted to carry what the server meant
+
+`buf.toString('utf8')` substitutes U+FFFD for invalid sequences and returns happily, so
+`c3 28` decodes to `"\uFFFD("` and `JSON.parse` SUCCEEDS on it. A corrupt frame accepted
+as a valid acknowledgement, and pane text that detectors scan altered with nothing
+reporting it — the second being this item's own subject.
+
+Same class as the reply-id check one round ago, and the argument transfers unchanged: the
+protocol moved 20 → 22 in nineteen days with no server-side version check of any kind, so
+the client verifies rather than assumes. Decoding is now fatal, and a decode failure has
+its OWN outcome rather than becoming an empty reply — false and unknown must not share a
+branch here either (M228).
+
+**The case that stops the fix being a different bug is the valid sequence split across
+deliveries.** Decoding happens at the complete frame, not per chunk, so fragmentation is
+not corruption — M227 moves the decode per-chunk and reddens exactly that case plus the
+existing mid-character reassembly one. Without it, "reject malformed UTF-8" is satisfied
+by rejecting most multi-byte reads, since the reader exists because frames arrive in
+pieces.
+
+### A present-tense claim in a file that just changed its architecture
+
+The `HerdrHost` class docblock — the first thing a reader of the class meets — said "one
+herdr connection per `spawn`, so a REPL's poll loop and its `pane.exited` subscription
+live and die with that REPL". Both halves are the architecture this item replaced, and
+the corrections were sitting fifteen and a hundred lines below it. `pty-noise.ts` claimed
+"both backends use it" when its only importer is `bun-terminal-host.ts` — herdr asks the
+server for `strip_ansi: true` and receives an already-rendered screen — which is one grep
+to check and was wrong.
+
+Fourth on this branch, and the highest-density place for the class: **a file that just
+changed its architecture is where a present-tense architectural claim is most likely to be
+false.** The sweep is for the phrases, and it has to sort three outcomes rather than
+two — a live false claim is a defect, an explicitly dated deletion record is correct AS
+HISTORY, and a measurement that explains a choice stays. Of nine hits, two were defects
+and seven were one of the other kinds.
+
 ### The obligation was to the task; the timer was only its instrument
 
 `settleExit` cancelled the output gate's fail-open timer and did not release the gate.
@@ -2754,6 +2826,11 @@ Run against the named suites.
 | M221 | the gate's timer is cancelled but the gate is not released (the defect) | RED 1 |
 | M222 | PAIR: the gate is released at SPAWN — there is no gate | RED 6 |
 | M223 | the poll loop does not re-check `hasExited()` before its first read | RED 1 — the "no spurious call" half |
+| M224 | the Bun `onExit` is unguarded again — `exited` never settles | RED 1 (the SHARED table) |
+| M225 | PAIR: the guard is kept but `exitResolve` is dropped | RED 1 |
+| M226 | frame decoding substitutes U+FFFD again | RED 4 |
+| M227 | PAIR: decoding per CHUNK — a split multi-byte sequence is rejected | RED 2 |
+| M228 | an undecodable frame resolves EMPTY instead of failing | RED 1 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
