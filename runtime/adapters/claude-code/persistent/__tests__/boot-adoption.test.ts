@@ -892,6 +892,19 @@ describe('a shutdown that arrives mid-pass', () => {
     // abandonment from an evidence-bound one: the row names it, so the next boot
     // reconciles it. Closing here would destroy the REPL the feature exists to keep.
     expect(f.host.closed).toEqual([])
+    // AND THE WRAPPER LET GO OF IT (Argus r26). `HerdrHost.open` starts the poll loop
+    // before returning the child, so an abandonment after a completed attach used to
+    // leave a live wrapper on the pane and the next gateway would attach a second one.
+    // Asserted at the surface, not through a flag: the retired wrapper neither sees a
+    // screen nor sends a key.
+    const abandonedChild = f.host.attached[0]
+    expect(abandonedChild).toBeDefined()
+    abandonedChild?.push('❯ 1. Yes, proceed')
+    // DELIVERED NOTHING. `keysSent` alone was vacuous here — the pass has already torn
+    // down the detector wiring, so no keystroke would have been sent either way and the
+    // assertion passed against the defect. Delivery is the surface that still moves.
+    expect(abandonedChild?.screensDelivered).toEqual([])
+    expect(abandonedChild?.keysSent).toEqual([])
     const row = readRow(f.registryPath)
     expect(row?.pane_handle).toBe(HANDLE)
     expect(row?.child_generation).toBe(GENERATION)

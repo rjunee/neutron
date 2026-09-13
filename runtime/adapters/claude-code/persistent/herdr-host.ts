@@ -483,7 +483,14 @@ export class HerdrHost implements AdoptableHost {
        */
       onNotDelivered?: (why: NotDelivered) => void,
     ): void => {
-      if (exited) {
+      // `detached` SITS BESIDE `exited` HERE, NOT INSTEAD OF IT (Argus r26). They are
+      // different facts — the pane is gone, versus the pane is alive and no longer ours —
+      // and they call for the same act: send nothing, and SAY so. A detach that blinded
+      // the wrapper while leaving its keyboard connected would close the observation path
+      // and leave the actuation path open, which is the half with teeth: the hazard this
+      // detach exists to prevent is a retired gateway answering a detector prompt on the
+      // owner's live REPL.
+      if (exited || detached) {
         // ALREADY OVER, SYNCHRONOUSLY. Still a skip, and still has to be reported: a
         // caller that latched before calling `send` must hear about it either way.
         onNotDelivered?.('skipped')
@@ -494,7 +501,10 @@ export class HerdrHost implements AdoptableHost {
         // away from the moment of the check. Returning FALSE rather than `undefined` is
         // the whole fix: the outcome now says whether the call ran, instead of leaving
         // "skipped" wearing the shape of "succeeded".
-        if (exited) return false
+        // AND AT EXECUTION TIME, which is the check `detached` most needs to be in: a call
+        // QUEUED before the detach would otherwise run after it, typing into a pane this
+        // wrapper has already given up. That window is the reason this re-check exists.
+        if (exited || detached) return false
         await client.call(method, params)
         return true
       })
@@ -591,7 +601,19 @@ export class HerdrHost implements AdoptableHost {
               'the command was not submitted. Reporting success here would let a caller record a ' +
               'context reset that never happened.',
           )
+        /** DISTINCT FROM `goneAfterExit`, because the facts are opposite: there the pane
+         *  is gone, here the pane is alive and this wrapper has given it up. Both must
+         *  throw rather than resolve — `submitLine` is the acknowledged seam a caller
+         *  REPORTS an outcome from, and a silent no-op would record a context reset that
+         *  never happened. Typing into a pane we handed over is the worse of the two. */
+        const goneAfterDetach = (): Error =>
+          new Error(
+            `herdr-host: submitLine(${JSON.stringify(command)}) after DETACH — this wrapper has given ` +
+              'up the pane and must not type into it. The pane is still running and belongs to ' +
+              'whichever incarnation adopted it; nothing was submitted.',
+          )
         if (exited) throw goneAfterExit()
+        if (detached) throw goneAfterDetach()
         if (command.includes('\r') || command.includes('\n')) {
           throw new Error(
             'herdr-host: submitLine() refuses an embedded submit character (\\r or \\n) — ' +
@@ -619,6 +641,7 @@ export class HerdrHost implements AdoptableHost {
           // you were waiting" has to reach that caller. Resolving quietly would record a
           // context reset that never happened — the defect this whole method exists for.
           if (exited) throw goneAfterExit()
+          if (detached) throw goneAfterDetach()
           if (command !== '') {
             await client.call('pane.send_text', { pane_id: paneId, text: command })
           }

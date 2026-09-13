@@ -1723,6 +1723,13 @@ async function adoptRow(
   ): RowAdoptionOutcome => {
     const reason = shutdownAbandonReason(at, signal.boundExpired)
     sink.unregisterIf(record.sessionId, session)
+    // THE WRAPPER LETS GO OF THE PANE IT KEEPS ALIVE (Argus r26). `HerdrHost.open` starts
+    // the poll loop before it returns the child, so a pass abandoned AFTER a completed
+    // attach was leaving a live wrapper on a pane it had decided not to own — and the
+    // next gateway attaches a second one. The duplicate-wrapper hazard, reached through
+    // the deliberately NON-destructive path. `detach?.()` because the contract makes it
+    // optional: a backend whose children die with this process has no loop to stop.
+    attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     pool.delete(sessionKey)
     session.sizeWatchdog?.stop()
@@ -1735,6 +1742,8 @@ async function adoptRow(
    *  give-back is the same, and only the reason differs. */
   const releaseWithReason = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
     sink.unregisterIf(record.sessionId, session)
+    // Same hand-over as {@link release} — see the note there.
+    attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     pool.delete(sessionKey)
     session.sizeWatchdog?.stop()

@@ -29,6 +29,10 @@ export interface FakeAttachedChild extends PtyChild {
    *  hand-over, and a fixture that conflated the two could not tell a correct hand-over
    *  from a REPL killer. */
   detached: boolean
+  /** Screens this wrapper actually DELIVERED to its consumer. The observation surface: a
+   *  retired wrapper must deliver nothing, and asserting on this rather than on
+   *  `detached` tests the behaviour instead of the bookkeeping. */
+  readonly screensDelivered: string[]
   /** Every key sequence any detector sent — THE assertion surface for the trap. */
   readonly keysSent: Key[][]
   /** Deliver another screen, as the poll loop would. */
@@ -169,6 +173,7 @@ export class FakeAdoptableHost implements AdoptableHost {
       pid: pane.pid,
       paneHandle: handle,
       detached: false,
+      screensDelivered: [],
       detach: () => {
         child.detached = true
       },
@@ -198,6 +203,7 @@ export class FakeAdoptableHost implements AdoptableHost {
       // retired gateway neither sees a screen nor answers it.
       push: (screen: string) => {
         if (child.detached) return
+        child.screensDelivered.push(screen)
         opts.onScreen?.(screen)
       },
     }

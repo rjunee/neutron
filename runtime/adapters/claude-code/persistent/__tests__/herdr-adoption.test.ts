@@ -273,6 +273,87 @@ describe('detach gives up the pane without ending it — MEASURED against the se
     expect(screens.length).toBe(before)
   })
 
+  it('sends NOTHING after detach, and tells the caller it was not delivered', async () => {
+    // ARGUS r26. The detach cases above covered reads, screens and the absence of close
+    // calls, and never attempted an ACTUATION — so a detach that blinded the wrapper
+    // while leaving its keyboard connected satisfied all of them. Typing is the half with
+    // teeth: the hazard is a retired gateway answering a detector prompt on the owner's
+    // live REPL.
+    const server = new FakeHerdrServer({ paneId: 'w9:p53' })
+    const child = await hostFor(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+
+    // THE POSITIVE CONTROL FIRST, in the same case: actuation works before the detach, so
+    // the refusals below cannot be passing because typing is broken outright.
+    child.writeKey?.('enter')
+    await until(() => server.delivered.some((c) => c.method === 'pane.send_keys'), 'a key landed')
+    const keysBefore = server.delivered.filter((c) => c.method === 'pane.send_keys').length
+
+    child.detach?.()
+    child.writeKey?.('enter')
+    child.write?.('some text')
+    await Bun.sleep(40)
+
+    // NOTHING REACHED THE PANE. `delivered` rather than `calls`: it is pushed after the
+    // hold and the failure check, so it is what the pane would really have seen.
+    expect(server.delivered.filter((c) => c.method === 'pane.send_keys')).toHaveLength(keysBefore)
+    expect(server.delivered.filter((c) => c.method === 'pane.send_text')).toEqual([])
+  })
+
+  it('a call QUEUED BEFORE the detach does not run after it', async () => {
+    // The execution-time re-check is the one `detached` most needs to be in: a queue moves
+    // the moment of execution away from the moment of the check, so a call accepted before
+    // the detach would otherwise type into a pane this wrapper has already given up.
+    const server = new FakeHerdrServer({ paneId: 'w9:p54' })
+    const child = await hostFor(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    // Hold the actuation the queue is about to run, so the next one is stuck behind it.
+    const release = server.holdMethod('pane.send_keys')
+    child.writeKey?.('enter')
+    await until(() => server.calls.some((c) => c.method === 'pane.send_keys'), 'first key in flight')
+
+    child.writeKey?.('enter')
+    // Detach while the second call is still waiting its turn.
+    child.detach?.()
+    release()
+    await Bun.sleep(40)
+
+    // Exactly the one that was already in flight reached the pane; the queued one did not.
+    expect(server.delivered.filter((c) => c.method === 'pane.send_keys')).toHaveLength(1)
+  })
+
+  it('AND THE CALLER IS TOLD: an interrupt after detach reports not-delivered', async () => {
+    // The reported channel, at the one public surface that has it. A caller that latched
+    // before calling must hear that nothing was sent — the property `send`'s
+    // `onNotDelivered` already argues for, now reachable through detach as well as exit.
+    const server = new FakeHerdrServer({ paneId: 'w9:p56' })
+    const child = await hostFor(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    child.detach?.()
+    child.kill('SIGINT')
+    await Bun.sleep(40)
+    // THE LATCH IS THE REPORTED CHANNEL at this surface: `send`'s `onNotDelivered` fires
+    // `skipped`, which clears `interruptedByUs`. A caller that recorded the turn as
+    // abandoned on the strength of an interrupt that never left the process would be
+    // making exactly the claim this branch spent four rounds removing.
+    expect(child.wasInterruptedByUs?.()).toBe(false)
+    expect(server.delivered.filter((c) => c.method === 'pane.send_keys')).toEqual([])
+  })
+
+  it('submitLine after detach THROWS rather than reporting a submission that did not happen', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:p55' })
+    const child = await hostFor(server).spawn(['claude'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    // Control: it works before.
+    await child.submitLine?.('hello')
+    expect(server.delivered.some((c) => c.method === 'pane.send_text')).toBe(true)
+    const textsBefore = server.delivered.filter((c) => c.method === 'pane.send_text').length
+
+    child.detach?.()
+    await expect(child.submitLine?.('after')).rejects.toThrow(/after DETACH/)
+    expect(server.delivered.filter((c) => c.method === 'pane.send_text')).toHaveLength(textsBefore)
+  })
+
   it('THE CONTROL: kill DOES end it, so detach is not simply inert', async () => {
     // Without this, a `detach` that did nothing at all — and a `kill` that did nothing at
     // all — would satisfy the case above equally well.

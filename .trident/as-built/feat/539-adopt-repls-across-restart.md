@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M78 less M31 and M38 = 76**.
+only dead row. The live count is therefore **M1–M81 less M31, M38 and M80 = 78**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1086,7 +1086,16 @@ to stop** — and this one is the PR's own creation, not something inherited, wh
 was not deferrable the way #674 is.
 
 `PtyChild.detach?()` is the non-destructive counterpart of `kill`: stop reading, stop
-delivering, send nothing, and **never close**. The survival branch calls it, stops the
+delivering, send nothing, and **never close**.
+
+**That sentence was ahead of the code when round twenty-five wrote it, and round
+twenty-six made it true.** `detached` was consulted only by the poll loop's stop
+predicates. `send` — which `write`, `writeKey` and `writeKeys` all route through —
+checked only `exited`, at queue time and again at execution time, and so did `submitLine`;
+and `detach` deliberately never sets `exited`. So the detach blinded the wrapper and
+**left its keyboard connected**, including for a call already queued whose execution lands
+after the detach — the exact window the execution-time re-check exists for. The
+observation path was closed and the actuation path, which is the half with teeth, was not. The survival branch calls it, stops the
 watchers, and unregisters the sink — because a retired wrapper that stays registered can
 receive a reply meant for the incarnation that replaced it. The comment's false
 parenthetical is corrected in the same edit.
@@ -1121,6 +1130,47 @@ inside the survival branch, so the round-nine and round-twenty-four mutations we
 through it: M45 (3), M46 (2), M47 (1) and M72 (1) all still red. No coverage was eaten this
 time — but the check is what makes that a statement rather than an assumption.
 
+### Round twenty-six: the detach stopped the eyes and not the hands
+
+**`detach()` stopped observation, not actuation.** `detached` was read in exactly two
+places, both poll-loop stop predicates. `send` checked only `exited` — at queue time and
+again at execution time — and `write`, `writeKey` and `writeKeys` all route through it;
+`submitLine` likewise. Since `detach` deliberately never sets `exited`, a retired wrapper
+could no longer *look* at the pane and could still *type* into it, including a call queued
+before the detach whose execution lands after it. The contract claimed the stronger
+property, and so did the as-built — **both are corrected in this push**, the claim in the
+same change as the code.
+
+`detached` now sits beside `exited` at all four sites, reported through the channel that
+already exists rather than a new one: `send`'s `onNotDelivered` fires `skipped`, which is
+what clears the interrupt latch, so a caller that latched before calling still hears that
+nothing was sent. `submitLine` throws, with its own sentence — "after DETACH" is a
+different fact from "after exit": there the pane is gone, here the pane is alive and
+belongs to somebody else.
+
+**And `release()` left an attached wrapper attached.** `HerdrHost.open` starts the poll
+loop before returning the child, so a pass abandoned mid-shutdown *after* a completed
+attach left a live wrapper on the pane and the next gateway attached a second one — the
+duplicate-wrapper hazard, reached through the deliberately non-destructive path. Both
+release variants now `detach?.()` the child they hand back.
+
+**Two mutations did not red, for opposite reasons, and only one was a defect.**
+
+- **M80** (drop `detached` from `send`'s QUEUE-time check) does not red, and should not:
+  the execution-time check subsumes it. The two overlap by design — the queue-time check
+  avoids enqueuing work at all — so removing one leaves the other. Recorded as subsumed
+  rather than counted, because a mutation that cannot red is not evidence.
+- **M81** (drop the `detach()` from `release`) did not red because **my assertion was
+  vacuous**: I asserted `keysSent` stayed empty, and by that point the pass has already
+  torn down the detector wiring, so no keystroke would have been sent either way. The fake
+  child now records `screensDelivered`, which is a surface that still moves at that point,
+  and M81 reds. Fifth fixture-vacuity on this branch, and the same shape every time: an
+  assertion that both implementations satisfy.
+
+**Downstream re-check, fourth outing.** `release` gained a new act, which puts it in front
+of the round-nine and round-twenty-four cases. M45 (3), M46 (2), M47 (1) and M72 (1) all
+still red. Nothing eaten — and saying so is only worth anything because the check was run.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1131,7 +1181,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four and M75–M78 in round twenty-five, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five and M79–M81 in round twenty-six, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1240,6 +1290,9 @@ count from the rows below rather than trusting this sentence.
 | M76 | detach CLOSES the pane, as `kill` does (**silent REPL killer**) | `herdr-adoption.test.ts` (1) |
 | M77 | the survival branch skips the sink unregister | `gateway-shutdown-survival.test.ts` (1) |
 | M78 | detach stops the loop but keeps delivering an in-flight read | `herdr-adoption.test.ts` (1) |
+| M79 | `detached` dropped from `send`'s EXECUTION-time check | `herdr-adoption.test.ts` (1) |
+| M80 | ~~`detached` dropped from `send`'s QUEUE-time check~~ — **subsumed**: the execution-time check catches it, so this patch cannot red. The two overlap by design | subsumed |
+| M81 | `release` does not detach the attached child | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
