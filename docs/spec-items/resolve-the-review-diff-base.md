@@ -528,8 +528,9 @@ The resolution order is evidence-first, and is the same at every site:
       still selects `refs/heads/<base>`" pins the other side. Mutation-verified: returning
       `'absent'` from the catch reds two tests, dropping the `'unknown'` throw reds two, and
       widening it to `remote !== 'resolved'` reds seven. The `.mjs` cannot throw — it composes a
-      word for another process — so it names `refs/trident-probe-failed/<base>`, which satisfies
-      the shape property and which git rejects; verified by "THE .mjs SIDE", which drives all
+      word for another process — so it emits the ALL-ZERO OBJECT ID, which satisfies the shape
+      property on its other limb (a full object name) and which git cannot resolve; verified by
+      "THE .mjs SIDE", which drives all
       three arms with real git (ref present, ref absent, and outside a repository) and shows the
       refusing word producing exit non-zero and no output in a repository where
       `refs/heads/<base>` does exist, so the refusal is the word's doing and not the world's.

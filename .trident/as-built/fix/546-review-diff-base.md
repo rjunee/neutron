@@ -264,6 +264,28 @@ builds that fail reading files with the disk at 98%. Neither area is touched by 
 (0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
 is to name what I ran and what it did not cover, not to call the suite green.
 
+### The pattern, stated as a prediction rather than a catalogue
+
+Four rounds on this branch ended in the same finding: a live document still asserting behaviour
+the code had replaced — the headline invariant, the `:74` precondition, the exception-class
+names, and now three at once (the acceptance criterion's `.mjs` word, the gate's own
+"what it does not flag" list, and `diffBaseRef`'s resolution order).
+
+The shape is not "documents drift". It is sharper than that, and it predicts where to look:
+**a change updates the text that ARGUES for it and leaves the text that DESCRIBES the
+mechanism.** The argument is what you are holding in mind while making the change — the round's
+own rationale, the spec criterion you are writing to, the commit message. The description is the
+other half: the enumerated order two hundred lines up, the "what this does not flag" list beside
+the guard, the resolution chain in a doc comment. Those read as *context*, not as claims to be
+re-checked, which is exactly the blindness recorded at `merge.ts`'s own heading in round twelve.
+
+So the sweep after a behavioural change is not "grep the words I changed". It is: **find every
+place that ENUMERATES the mechanism — the ordered list, the exemption list, the state table, the
+exception the reader would grep for — and read each against the code rather than against the
+round's rationale.** Number 2 of this round is why it matters most for a guard: the gate's
+documentation said it exempted `origin/${base}` while the implementation deliberately flagged it,
+which is this PR's whole defect class sitting inside the tool built to end it.
+
 ### Round thirty-two: the refusal was refused only because nobody had created it
 
 **A guarantee that depends on a namespace being empty is a fact about the environment, not
@@ -337,10 +359,11 @@ repaired in round twenty-six, so the complement pins `'absent'` → `refs/heads/
 `catch { return 'absent' }` reds 2, dropping the `'unknown'` throw reds 2, widening it to
 `remote !== 'resolved'` reds 7.
 
-**The `.mjs` cannot throw, so it refuses by naming a ref that cannot exist.** The substitution is
-now three-armed on `$?` — `0)` the remote-tracking ref, `1)` `refs/heads/<base>`, `*)`
-`refs/trident-probe-failed/<base>`. The poison ref still satisfies the shape property (it begins
-with `refs/`), and git rejects it loudly. All three arms are driven by REAL git in the parity
+**The `.mjs` cannot throw, so it refuses by emitting a word the other process rejects.** The
+substitution is three-armed on `$?` — `0)` the remote-tracking ref, `1)` `refs/heads/<base>`,
+`*)` [round thirty-one wrote `refs/trident-probe-failed/<base>` here; round thirty-two replaced
+it with the all-zero object id, because that namespace is writable and the refusal held only
+while nobody had written it] a word that satisfies the shape property and that git rejects. All three arms are driven by REAL git in the parity
 suite, the third by evaluating the composed word outside any repository; the rejection is
 asserted in a repository where `refs/heads/<base>` DOES resolve, so it is the word's doing and
 not the fixture's.

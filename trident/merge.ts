@@ -232,13 +232,19 @@ export async function detectBaseBranch(
  *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build
  *     when that fetch or its rev-parse fails, so there it exists and is as fresh as
  *     launch; elsewhere the caller asks (`refResolves`).
- *  3. `refs/heads/<base>` whenever that ref does not resolve to a commit — no remote at all,
- *     an `origin` configured but not fetched (or whose base ref was deleted), or a probe that
- *     could not run. In every one of those the local branch is the best available base.
+ *  3. `refs/heads/<base>` whenever the remote probe answers ABSENT — no remote at all, or an
+ *     `origin` configured but not fetched (or whose base ref was deleted). In those the local
+ *     branch is the best available base.
  *     NOT "only when the repository has no remote": that is a wider condition than
  *     `refResolves` establishes, and saying it was the sixth overclaim on #546. This step
  *     said "the bare name" until round nineteen; the CONDITION was right, the ANSWER was not.
- *  4. REFUSED when neither ref resolves — see the throw below.
+ *     **And it said "or a probe that could not run" until round thirty-one**, which is the
+ *     opposite of what step 4b now does — a description of the mechanism left behind by a
+ *     change that updated the argument for it.
+ *  4. REFUSED, in two states: (a) both probes answered "no such ref" —
+ *     `TridentUnresolvableBaseError`; (b) the REMOTE probe could not answer at all —
+ *     `TridentUndeterminedBaseError`, thrown without asking the second question, because a
+ *     failed probe says nothing about whether the local branch is stale. See the throws below.
  *
  * THE THIRD PARAMETER WAS `merge_mode` AND THAT WAS A BUG, not just an imprecision.
  * This doc used to justify it as "the bare name in local mode ONLY — a local-mode run

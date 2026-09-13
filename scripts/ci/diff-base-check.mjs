@@ -149,12 +149,25 @@
 //      spelling, not the class.
 //
 // ── WHAT IT DOES NOT FLAG ─────────────────────────────────────────────
-//   * A QUALIFIED ref — `refs/heads/${base}..`, `refs/remotes/origin/${base}..`,
-//     `origin/${base}..`. The author has said which ref they mean, and one real
-//     site (the launch path's `base_behind` count,
+//   * A ref QUALIFIED FROM `refs/` — `refs/heads/${base}..`,
+//     `refs/remotes/origin/${base}..`. The author has said which ref they mean,
+//     and one real site (the launch path's `base_behind` count,
 //     `refs/heads/<base>..refs/remotes/origin/<base>`) exists precisely to
 //     MEASURE how stale the local ref is — flagging it would be flagging the
 //     measurement of the bug.
+//
+//     `origin/${base}..` IS FLAGGED, and this paragraph listed it among the
+//     exempt spellings for three rounds after it stopped being one. The shorthand
+//     is not the ref it looks like: git permits `refs/tags/origin/main`, prefers
+//     `refs/tags/` over `refs/remotes/` when disambiguating, and resolves the
+//     shorthand across every namespace — measured on git 2.43 as two files where
+//     `refs/remotes/origin/main` gives one, exit 0, stderr warning only, and both
+//     wrappers send that stderr to /dev/null. Verified by measurement, not by
+//     reading this comment: `findBareBaseRanges` reports `origin/${baseBranch}..`
+//     and is silent on both `refs/` forms. **A guard whose documentation describes
+//     different behaviour than the guard has is the failure mode this gate exists
+//     to end** — so the rule is one sentence: the operand is exempt when it begins
+//     with `refs/` or is a full object name, and NOTHING else is exempt by shape.
 //   * A RESOLVED ref — `diffBase`, `diffBaseRef(…)`, `base_ref`, `BASE_REF`,
 //     `base_sha`, a 40-hex literal. Naming a range operand `*_ref`/`*Ref` rather
 //     than `*_branch`/`*Branch` is the convention this gate keeps honest.

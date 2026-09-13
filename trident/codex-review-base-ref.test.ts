@@ -459,7 +459,12 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
       expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
       expect(res.stderr).toContain('a tag is not a base branch')
     }
-    for (const arg of ['a'.repeat(40), 'refs/tags/no-such-tag', 'refs/heads/no-such-branch']) {
+    // `'0'.repeat(40)` IS THE VALUE THE WORKFLOW EMITS when its base-ref probe cannot answer
+    // (round thirty-two), so this row is the seam between the two implementations: what the
+    // `.mjs` composes as a refusal has to arrive here as a NAMED refusal — exit 3, DEFERRED —
+    // and not as an empty diff that reads as "no findings". It classifies as KIND 1 (an object
+    // name, kept verbatim) and is stopped by the resolvability check at the point of use.
+    for (const arg of ['a'.repeat(40), '0'.repeat(40), 'refs/tags/no-such-tag', 'refs/heads/no-such-branch']) {
       const res = await runBlock(w.repo, arg)
       expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
       expect(res.stderr).toContain('does not name a commit')
