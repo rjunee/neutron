@@ -637,6 +637,13 @@ describe('THE HASH FUNCTION IS NOT A PROPERTY OF THE VALUE — SHA-1 and SHA-256
     })
 
     test(`${format}: a full object name of THIS repository's width is honoured as a pin by both implementations`, async () => {
+      // WHAT THIS ROW DOES NOT REACH, said here so nobody reads it as wider evidence than it is:
+      // it calls `diffBaseRef` and the composer DIRECTLY. The LAUNCH path — where `base_sha` is
+      // first rev-parsed and pinned — tests the result with its own 40-only recogniser
+      // (`orchestrator.ts`, the base-resolve and local-mode arms), so in a SHA-256 repository a
+      // valid tip still does not pin. That is a non-goal of this item and is tracked in #667
+      // with the rest of the SHA-1 assumptions; a test that proved this claim somewhere other
+      // than where the claim is made would be the shape this branch has spent rounds removing.
       // THE OVER-REFUSAL DIRECTION, which is the live defect independent of the sentinel:
       // `/^[0-9a-f]{40}$/` refused a legitimate 64-hex pinned base outright and read a
       // legitimate 64-hex probe answer as 'unknown'. Both implementations are asserted,

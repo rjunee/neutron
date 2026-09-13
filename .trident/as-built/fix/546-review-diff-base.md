@@ -264,6 +264,31 @@ builds that fail reading files with the disk at 98%. Neither area is touched by 
 (0 of 26 changed files), so those are environment, not diff — but the honest form of that claim
 is to name what I ran and what it did not cover, not to call the suite green.
 
+### Round thirty-five: a criterion written this round already outran the code
+
+**The criterion said "the rule does not assume SHA-1"; the LAUNCH path still does.**
+`orchestrator.ts:4143` fails the run when a rev-parsed base tip is not 40 hex, and `:4174`
+silently declines to pin on the same test — so in a SHA-256 repository a valid base tip either
+kills the run or is quietly dropped. **And the test could not see it**, because it calls
+`diffBaseRef` and the composer directly and never fires a launch: *a case that proves the claim
+somewhere other than where the claim is made.*
+
+**Narrowed rather than widened, deliberately.** Widening those two recognisers would have made
+the criterion true at the sentence and false at the system: `FULL_OID` gates run heads at 40 hex
+and the persisted `outer-published:<40hex>:…` checkpoint vocabulary is parsed and produced at
+that width, so a SHA-256 run would pin correctly and then fail at resume. **Support that looks
+like support is worse than a stated non-goal** — a reader trusts the first and checks the second.
+The criterion now says what ships (the binding and its twin accept either width; the wrapper
+accepts the repository's width), names the launch path as the boundary with both line numbers,
+and the test says in its own text that it does not fire a launch. #667 carries the remainder,
+with the two launch sites added to its inventory.
+
+**The pattern this makes explicit, and it is the fourth appearance:** the criterion was written
+in the same round as the fix, from the fix's own point of view, and inherited its scope. **A
+criterion is a claim about the SYSTEM, not about the change** — so the question that catches this
+is not "did I write the criterion accurately" but "what else would have to be true for this
+sentence to hold, and did I check THOSE".
+
 ### Round thirty-four: the width belongs to the repository, and the gate caught a second merged defect
 
 **My round-thirty-three fix closed the rejection and opened a capture.** Accepting BOTH widths

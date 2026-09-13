@@ -560,20 +560,35 @@ The resolution order is evidence-first, and is the same at every site:
       fixture: the namespace is ordinary and writable, `git update-ref` on it succeeds, and the
       range then returns a wrong diff at **exit 0** — the defect this item exists to remove,
       reintroduced by the mechanism meant to prevent it, reachable by anyone who can write a ref
-      in the build checkout. The word is now the all-zero object id, which git cannot resolve
-      because it ignores a ref whose name is 40 hex characters when the spelling is 40 hex
-      characters. Verified by "THE .mjs SIDE", which **creates the old poison ref and asserts
+      in the build checkout. The word is now the all-zero object id AT THE REPOSITORY'S OWN
+      HASH WIDTH, which git cannot resolve because it ignores a ref whose name is exactly the
+      hash width in hex — 40 under SHA-1, 64 under `--object-format=sha256`, which is why that
+      arm is a shell expression rather than a literal. Verified by "THE .mjs SIDE", which **creates the old poison ref and asserts
       the range against it SUCCEEDS** (so the change is necessary, not cosmetic), then creates a
       tag AND a branch named 40 zeros and asserts the emitted word still fails both as a range
       operand and as a `rev-parse --verify` probe. A rejection asserted without first trying to
       make the word resolve is a claim about the test's environment, not about the word.
-- [ ] **The rule does not assume SHA-1, and the tests would fail if it did.** `git init
-      --object-format=sha256` names objects in 64 hex. The 40-only recognisers refused a
-      legitimate pinned base outright (`diffBaseRef`, the `.mjs` twin, the wrapper's KIND-1 test
-      and its shape assertion) and read a legitimate probe answer as `'unknown'`; the refusing
-      word, a fixed 40 zeros, was an ordinary ref NAME there, so a branch of that name made the
-      range resolve at exit 0. All four recognisers now accept 40 OR 64 hex, and the refusing
-      word is derived from `git rev-parse --show-object-format` where it is evaluated. Verified
+- [ ] **THE RESOLUTION PATH does not assume SHA-1 — and the LAUNCH path still does, stated here
+      rather than implied.** `git init --object-format=sha256` names objects in 64 hex. The
+      40-only recognisers refused a legitimate pinned base outright (`diffBaseRef`, the `.mjs`
+      twin, the wrapper's KIND-1 test and its shape assertion) and read a legitimate probe answer
+      as `'unknown'`; the refusing word, a fixed 40 zeros, was an ordinary ref NAME there, so a
+      branch of that name made the range resolve at exit 0. `diffBaseRef` and its `.mjs` twin now
+      accept EITHER width, because each is handed a value and has no repository to ask;
+      `codex-review.sh` accepts exactly the width `git rev-parse --show-object-format` reports,
+      because it HAS one and accepting both there lets a wrong-width REF capture the base; and
+      the refusing word is derived from the same question where it is evaluated.
+      **WHAT THIS CRITERION DOES NOT CLAIM.** The launch path pins the base sha behind a 40-only
+      test (`orchestrator.ts:4143`, which fails the run, and `:4174`, which silently declines to
+      pin), so in a SHA-256 repository a valid base tip does not pin. That is a NON-GOAL here
+      rather than an oversight: `FULL_OID` and the persisted `outer-published:<40hex>:…`
+      checkpoint vocabulary assume SHA-1 as well, so widening the launch recognisers alone would
+      produce a configuration that pins correctly and then fails at resume — support that looks
+      like support. The whole chain is #667. This repository is SHA-1 (measured with
+      `git rev-parse --show-object-format`), so none of it is live either way. **And the test
+      proves what it claims and no more**: it exercises the binding, the `.mjs` twin and the
+      wrapper directly, and says in its own text that it does not fire a launch, so nobody reads
+      it as evidence about a path it never touches. Verified
       by "THE HASH FUNCTION IS NOT A PROPERTY OF THE VALUE — SHA-1 and SHA-256" in
       `trident/diff-base-option-shaped.test.ts`, which runs the fixture in BOTH formats and, in
       each, creates a branch AND a tag at both widths before asserting the emitted word still
