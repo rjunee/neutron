@@ -1143,6 +1143,22 @@ export async function shutdownAllPersistentRepls(
         session.deadTurnWatcher?.stop()
         session.child.detach?.()
         sink.unregisterIf(session.sessionId, session)
+        // AND THE LIVE-PROCESS HANDLE (Argus r31). This is the fourth non-destructive
+        // release and it was the one still missing it. The three in `boot-adoption.ts` do
+        // it — and `unwind` deliberately does NOT, because that path CLOSES the pane, so
+        // the child exits and `child-exit-wiring`'s handler unregisters for it.
+        //
+        // This path is the opposite and has exactly the property that makes the leak
+        // matter: the pane is left running and the wrapper is detached, so `exited` never
+        // settles and the exit handler never fires. Costless when the process really is
+        // going away; on the in-process handover this detach exists for, the retired
+        // incarnation stays in the ambient process registry and the watchdog attributes to
+        // a wrapper that has been retired.
+        //
+        // The scope that finds this is not "the cleanup paths in one file" but EVERY PATH
+        // THAT STOPS OWNING A SESSION WITHOUT THE CHILD EXITING — four of them across two
+        // files. The audit table is drawn that way now.
+        session.liveHandle?.unregister()
         //
         // `return`, not `continue`: this is the per-child teardown closure, and the
         // walk that calls it is above.

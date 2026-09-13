@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M89 less M31, M38 and M80 = 86**.
+only dead row. The live count is therefore **M1–M91 less M31, M38, M80 and M91 = 87**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1359,25 +1359,43 @@ contract is "delete iff ours" rather than "never delete", and a guard whose safe
 unreachable today is one bug-fix away from being reachable tomorrow. All four arms are
 pinned at the unit level, which is the only place they are observable.
 
-### The per-structure column, and the fifth structure it found
+### The per-structure table, scoped to every path that stops owning a session
 
-The audit table asks "every call site of the guarded thing". This round says the more
-useful question for a cleanup path is **"every structure this function mutates, and the
-identity guard on each"** — because the defect was two of three structures in one function.
+Round thirty's version of this table was scoped to *"the three cleanup paths"* — the three
+in `boot-adoption.ts`. It found `liveHandle`, which is the column earning its place, and it
+could not find the fourth site because the boundary was drawn around one file. **The right
+unit is every path that stops owning a session WITHOUT the child exiting** — four of them
+across two files, and five the next time someone adds one.
 
-| Structure | `unwind` | `release` / `releaseWithReason` | Identity-guarded? |
+| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch |
 |---|---|---|---|
-| sink registration | `unregisterIf` | `unregisterIf` | **Yes** — `unregisterIf` compares the session before removing. |
-| `childByKey` | guarded compare | guarded compare | **Yes** — `childByKey.get(key) === attached`. |
-| `pool` | `deleteOwnPoolEntry` | `deleteOwnPoolEntry` | **Yes, as of this round.** Was unconditional; M87/M88/M89. |
-| `session.sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | **Not needed** — both live ON the session object this path owns, so there is no other owner's watcher to stop. |
-| the attached `PtyChild` | closed via `closeAndClear` | `detach?.()` | **Yes by construction** — the child is the one this path was handed, not one looked up by key. |
-| **live-process handle** | released by the exit handler | **was never released** | **Fixed this round.** `unwind` closes the pane, so the child exits and `child-exit-wiring` unregisters it. The release paths leave the pane running and detach the wrapper, so `exited` never resolves and the handler never fires — the retired handle stayed registered. On a real shutdown that costs nothing (the process is going away, the registry is in-memory); on the in-process restart this detach exists for, the next adoption adds a second entry for the same pid. An attribution defect rather than a corruption one, and no reason to leave it. |
+| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` |
+| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs |
+| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above |
+| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped |
+| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` |
+| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it |
 
-That last row is what the column was for: **a fifth structure nobody had looked at, found by
-enumerating what the function touches rather than by waiting for a gate to notice.**
+**What "deliberately retained" means, measured rather than assumed.** M91 adds a redundant
+`unregister()` to `unwind` and **nothing reds** — the handle is identity-scoped, so a second
+call is a harmless no-op. So the cell is *"not needed here"* rather than *"must not be done
+here"*: the exit handler covers it, and an extra call would be noise rather than a bug.
+Writing that distinction down is the point of the cell — a reader who only saw "retained"
+might add one thinking it was missing, or remove the survival branch's thinking it was
+symmetric.
 
-### Shard 3 on `96c38e3c`: a wall-clock flake, classified by differential
+**Why the survival branch's release is not redundant**, which is the other half and is
+pinned by a case: that path leaves the pane running and detaches the wrapper, so `exited`
+never settles and **nothing else will ever unregister it**. The case asserts the surviving
+path clears its record with no exit at all, and that the killing path does not clear its own
+— the division of labour, in both directions.
+
+**My first version of that control asserted the opposite and failed, correctly.** I expected
+a killing teardown to clear the record too; it does not, by design, because it ends the child
+and the exit handler does the unregistering. The case is now written as the division it
+actually is.
+
+### Shard 3 on `96c38e3c`: a wall-clock flake, classified by differential — filed as #677
 
 `trident/__tests__/cross-model-dispatch.test.ts` — "the detached wrapper outlives the
 Bash-call bound that used to kill it". Nothing to do with `PtyChild.detach`; "detached"
@@ -1398,7 +1416,9 @@ at this head and at its predecessor, 5/5 on repeat.
 
 What remains is the case's own margin: it backgrounds a `sleep 0.25` and then
 `await Bun.sleep(400)` — **150 ms of headroom on a shared runner**. That is a flake
-generator regardless of who trips it, and it wants an issue of its own. What is NOT on the
+generator regardless of who trips it, and it is **filed as #677** — with the suggested fix
+being to wait on the marker file rather than the clock, which removes the margin instead of
+widening it. What is NOT on the
 table is relaxing the bound of a test this branch did not write, to get this branch green.
 
 Stated precisely, because the boundary matters: I measured 3/3 locally on this head with the
@@ -1415,7 +1435,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight and M87–M89 in round thirty, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty and M90–M91 in round thirty-one, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1535,6 +1555,8 @@ count from the rows below rather than trusting this sentence.
 | M87 | the unconditional `pool.delete` is restored | `boot-adoption.test.ts` (1) |
 | M88 | the identity comparison is inverted, so nothing is ever deleted | `boot-adoption.test.ts` (1) |
 | M89 | the rejected-promise arm is dropped | `boot-adoption.test.ts` (1) |
+| M90 | the survival branch does not unregister the live-process handle | `gateway-shutdown-survival.test.ts` (1) |
+| M91 | ~~`unwind` unregisters the live handle too~~ — **probe, not a guard**: nothing reds, because the handle is identity-scoped and a second `unregister()` is a no-op. Recorded because that is what makes the retained cell "not needed" rather than "must not" | no-op by design |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

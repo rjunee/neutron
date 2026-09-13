@@ -22,6 +22,11 @@ import { dirname, join } from 'node:path'
 import { claimShutdownSurvival, shutdownSurvivalVerdict } from '../gateway-shutdown-survival.ts'
 import { pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
+import {
+  ProcessRegistry,
+  pushAmbientProcessRegistry,
+  registerLiveProcessSafe,
+} from '@neutronai/tools/process-registry.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
@@ -508,5 +513,120 @@ describe('a surviving child is handed OVER, not merely left alone', () => {
     expect(child.killed).toBe(true)
     expect(child.detached).toBe(false)
     expect(await Bun.file(configPath).exists()).toBe(false)
+  })
+})
+
+
+describe('a surviving child leaves no live-process record behind', () => {
+  /**
+   * ARGUS r31, and the fourth non-destructive release — the one still missing this.
+   * `boot-adoption.ts`'s two `release` variants unregister the live-process handle;
+   * `unwind` deliberately does not, because it CLOSES the pane so the child exits and
+   * `child-exit-wiring` unregisters for it. This branch is the opposite and has exactly
+   * the property that makes the leak matter: the pane is left running and the wrapper is
+   * detached, so `exited` never settles and the exit handler never fires.
+   *
+   * Costless when the process really is going away. On the in-process handover the detach
+   * exists for, the retired incarnation stays in the ambient registry and the watchdog
+   * attributes to a wrapper that has been retired.
+   *
+   * The existing survival cases never installed an ambient registry, so none of them
+   * could see it.
+   */
+  let pop: (() => void) | undefined
+  let registry: ProcessRegistry | undefined
+
+  const withRegistry = (): ProcessRegistry => {
+    registry = new ProcessRegistry()
+    pop = pushAmbientProcessRegistry(registry)
+    return registry
+  }
+
+  afterEach(() => {
+    pop?.()
+    pop = undefined
+    registry = undefined
+  })
+
+  /** A pooled session that has registered itself in the ambient registry, the way the
+   *  adopt and spawn paths do. */
+  function registeredSession(
+    paneHandle: string,
+    configPath: string,
+  ): { session: ReplSession; child: FakeChild } {
+    const { session, child } = pooledSession(paneHandle, configPath)
+    session.liveHandle = registerLiveProcessSafe({
+      name: KEY,
+      pid: child.pid,
+      tool_name: 'cc-repl',
+      meta: { session_id: SESSION_ID },
+    })
+    return { session, child }
+  }
+
+  it('the record is GONE after a surviving shutdown', async () => {
+    const reg = withRegistry()
+    const registryPath = registryWith(row())
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const { session, child } = registeredSession(HANDLE, configPath)
+    pool.set(KEY, Promise.resolve(session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+    // THE PREMISE: the registry really does hold a record for this key, so "gone
+    // afterwards" is a change rather than an empty registry all along.
+    expect(reg.list().filter((r) => r.name === KEY)).toHaveLength(1)
+
+    await shutdownAllPersistentRepls()
+
+    // The pane survives — unchanged, and the half the release must never break.
+    expect(child.killed).toBe(false)
+    // AND THE AMBIENT RECORD IS GONE: nothing attributes work to a wrapper that let go.
+    expect(reg.list().filter((r) => r.name === KEY)).toEqual([])
+  })
+
+  it('THE HANDOVER: after shutdown and re-adoption there is ONE record, not two', async () => {
+    const reg = withRegistry()
+    const registryPath = registryWith(row())
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const first = registeredSession(HANDLE, configPath)
+    pool.set(KEY, Promise.resolve(first.session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+
+    await shutdownAllPersistentRepls()
+
+    // The next incarnation registers its own handle for the same pane.
+    const second = registeredSession(HANDLE, configPath)
+    void second
+    expect(reg.list().filter((r) => r.name === KEY)).toHaveLength(1)
+  })
+
+  it('THE DIVISION OF LABOUR: a KILLING teardown leaves the record to the exit handler', async () => {
+    // Written the other way round on the first attempt, asserting the killing path also
+    // clears the record — and it failed, correctly. A killing teardown does not unregister
+    // here BY DESIGN: it ends the child, and `child-exit-wiring`'s exit handler is what
+    // calls `unregister()`. That is the same division `unwind` relies on, and it is why
+    // the survival branch's own unregister is not redundant — that path is the one where
+    // the child never exits, so nothing else will ever do it.
+    //
+    // Pinning it means the next reader can neither add a redundant unregister here nor
+    // remove the needed one there.
+    const reg = withRegistry()
+    const registryPath = registryWith(undefined)
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const { session, child } = registeredSession(HANDLE, configPath)
+    pool.set(KEY, Promise.resolve(session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+    expect(reg.list().filter((r) => r.name === KEY)).toHaveLength(1)
+
+    await shutdownAllPersistentRepls()
+
+    // The child was KILLED — so in production its exit fires the wiring that unregisters.
+    expect(child.killed).toBe(true)
+    // This fixture's child never resolves `exited`, so nothing fired: the record is still
+    // here, which is the honest demonstration that the KILL path does not unregister
+    // itself. The surviving path above cleared its record with no exit at all.
+    expect(reg.list().filter((r) => r.name === KEY)).toHaveLength(1)
   })
 })
