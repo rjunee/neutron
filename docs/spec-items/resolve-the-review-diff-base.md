@@ -283,18 +283,27 @@ built, never inferred from the merge mode.
       not see the bug in the fixture it ran against. Mutating the fallback back to its
       MERGE-MODE-KEYED form reddens it.
       verify: `bun test trident/review-diff-base-realgit.test.ts` — "LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file".
-- [x] **The two implementations of the rule agree, row by row.** `diffBaseRef` (TS) and
-      `diffBase` (`.mjs`) cannot share a module — the workflow script takes no imports — and
-      have diverged twice, on the merge-mode fallback and on whether the pin is read before
-      the name. Verified by the parity table in `trident/diff-base-option-shaped.test.ts`,
-      which asserts BOTH over pinned/unpinned, origin-resolves/missing, both merge modes and
-      the refusal, evaluating the `.mjs` shell word in a real repository so the two are
-      comparable. Mutation: reintroducing either historical divergence reds a row. A
-      criterion naming only one implementation is how both divergences survived.
+- [x] **The two implementations produce the SAME SAFETY OUTCOME on every row — and on the one
+      row where their interfaces cannot agree, each fails closed in the way its interface
+      allows.** `diffBaseRef` (TS) and `diffBase` (`.mjs`) cannot share a module — the workflow
+      script takes no imports — and have diverged twice, on the merge-mode fallback and on
+      whether the pin is read before the name. On every row but one they return the same value.
+      On the tag-only row they cannot: **the TS binding THROWS; the `.mjs` composes a word in one
+      process for another to evaluate and therefore cannot refuse — it can only name a ref git
+      rejects.** Neither computes a diff against a base nobody chose, which is the property; a
+      headline saying they "agree row by row" overclaimed it while citing the row that says
+      otherwise. Verified by the parity table in `trident/diff-base-option-shaped.test.ts`, which
+      asserts BOTH over pinned/unpinned, origin-resolves/missing, both merge modes and the
+      refusal, evaluating the `.mjs` shell word in a real repository so the two are comparable —
+      and which names the asymmetric row in its own title rather than smoothing it. Mutation:
+      reintroducing either historical divergence reds a row, **and the asymmetric row has its own
+      cover** — sending the `.mjs` fallback back to the bare name reds it. A criterion naming
+      only one implementation is how both divergences survived.
       verify: `bun test trident/diff-base-option-shaped.test.ts` — the parity table: "pinned sha wins for every name…", "unpinned,
       origin/<base> RESOLVES…", "unpinned, origin/<base> MISSING…", "unpinned, NEITHER ref
       resolves: NOBODY returns a bare name — the ONE row where the two differ", plus the EMPTY,
-      WHITESPACE and option-shaped rows.
+      WHITESPACE and option-shaped rows. Mutation measured on this commit: composing the bare
+      name on the `.mjs` fallback arm reds 3 cases in that file, the tag-only row among them.
 - [x] **A valid pin wins before the name is examined, in both implementations.** The
       refusal belongs on the arm that reads the name; a module-scope check failed runs whose
       pin meant the name was never used. Verified by "ORDER: a valid PIN wins before the name
@@ -338,7 +347,7 @@ built, never inferred from the merge mode.
       asserting the throw, covers whitespace, asserts a pin still wins, and drives both
       implementations; plus an EMPTY row in the parity table — an axis the option-shaped
       rows held constant. Mutations: restoring the untouched return, or removing the `.mjs`
-      check, each reds two tests.
+      check, each reddens the file on its own.
       verify: `bun test trident/diff-base-option-shaped.test.ts` — "AN EMPTY BASE IS REFUSED — `..<head>` is a plausible wrong answer, not
       an error", and the parity row "unpinned, EMPTY: both REFUSE".
 - [x] **An option-shaped base is refused at the binding, and EVERY interpolated git rev-range
@@ -448,12 +457,14 @@ built, never inferred from the merge mode.
       WHITESPACE: both REFUSE" row, which drives five padded spellings through both
       implementations under both probe answers and both merge modes, and asserts the complement
       (the same name unpadded is answered `origin/main` by both, in the same fixture) and that a
-      pin still wins. Mutations: restoring `const name = base_branch.trim()` in `diffBaseRef`
-      reds it; deleting the `.mjs` guard reds it — 2 tests each, measured. **The table that
+      pin still wins. Mutations: restoring the trim in `diffBaseRef` reds it, and disabling the
+      `.mjs` guard reds it — each on its own, with counts in the `verify:` line rather than
+      here. **The table that
       exists to catch divergence held this axis constant for eleven rounds**, which is the same
       blind spot as the code it audits.
       verify: `bun test trident/diff-base-option-shaped.test.ts` — the parity row "unpinned, SURROUNDING WHITESPACE: both REFUSE — the axis
-      this table held constant".
+      this table held constant". Mutations measured on this commit: trimming instead of refusing
+      in `diffBaseRef` reds 3 cases; disabling the `.mjs` padded guard reds 2.
 - [x] **What each wrapper's range line does with the value it is handed is exercised, not just
       argued.** Trident no longer hands either wrapper a bare name — every `diffBase` arm is a
       sha or a qualified ref — but argv comes from anyone, and the wrapper's own behaviour is
@@ -473,12 +484,14 @@ built, never inferred from the merge mode.
       verify: `bun test trident/codex-wrapper-range-line.test.ts`, and `bun test trident/codex-review-base-ref.test.ts` — "AN
       UNRESOLVABLE BASE IS REFUSED — an empty diff reads as \"no findings\"".
 - [x] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
-      `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
-      **5 of 9** tests fail, and the agreement/complement tests stay green. (Written as
-      "4 of 7" and corrected here: the as-built's re-measurement last round did not reach
-      this document, so the normative acceptance described verification that no longer
-      existed. A count is a claim about the code, and correcting it in one artefact moves
-      the lag rather than closing it.)
+      `writeResumeDiff` turns `trident/review-diff-base-realgit.test.ts` red, and the
+      agreement/complement cases stay green. **This body carries no count, deliberately.** It
+      said "4 of 7", then "5 of 9", and neither matched the file's actual case count on the tree
+      that carried it — the denominator had moved twice while the sentence held still. A count
+      is a claim about the code: correcting it in one artefact
+      moves the lag rather than closing it, and a count in a normative body is also a
+      REQUIREMENT that a new test breaks. The property above is stable under adding a test; the
+      measurement belongs in the `verify:` line below, where it is a dated reading.
       verify: re-measured on the merge commit rather than carried forward — restoring
       `${shSingleQuote(baseBranch)}` at the resume-diff site reds **10 of the 12** cases in
       `trident/review-diff-base-realgit.test.ts` (22 across that file, the option-shaped file and
@@ -526,9 +539,13 @@ built, never inferred from the merge mode.
       exactly `main..HEAD`); a concatenation with no interpolation at all
       (`'git diff ' + base + '..HEAD'`); and a range split over two source lines. Verified
       by the four named tests in `scripts/ci/diff-base-check.test.ts`, and by mutation —
-      reverting `RANGE_TAIL`, dropping `RANGE_CONCAT`, or disabling the `logicalLines`
-      join each reddens the suite (3, 1 and 1 test respectively).
-      verify: `bun test scripts/ci/diff-base-check.test.ts` — "THE NAME INSIDE A CALL is caught", "A CLOSING QUOTE between the operand
+      reverting `RANGE_TAIL`, dropping `RANGE_CONCAT`, or disabling the `logicalLines` join each
+      reddens the suite ON ITS OWN, which is what "independently load-bearing" means; the counts
+      are in the `verify:` line.
+      verify (mutations measured on this commit — reverting `RANGE_TAIL` reds 4 cases, dropping
+      `RANGE_CONCAT` reds 3, disabling the `logicalLines` join reds 2; the earlier body said
+      "3, 1 and 1", which is how a count in a body ages):
+      `bun test scripts/ci/diff-base-check.test.ts` — "THE NAME INSIDE A CALL is caught", "A CLOSING QUOTE between the operand
       and its dots does not hide it", "a CONCATENATION with no interpolation at all is caught",
       "a range SPLIT OVER TWO LINES is caught, and reported at its first line", and the mutation
       row "MUTATION: reverting the quote-boundary handling reddens the suite".
@@ -596,16 +613,19 @@ built, never inferred from the merge mode.
       probe as absence passes any test that only asks for "handles probe failure", so the pair
       must be unequal; and refusing on EVERY non-resolution passes the pair while breaking the
       fresh-clone path repaired in round twenty-six, so "THE COMPLEMENT: an ABSENT remote probe
-      still selects `refs/heads/<base>`" pins the other side. Mutation-verified: returning
-      `'absent'` from the catch reds two tests, dropping the `'unknown'` throw reds two, and
-      widening it to `remote !== 'resolved'` reds seven. The `.mjs` cannot throw — it composes a
+      still selects `refs/heads/<base>`" pins the other side. Mutation-verified: returning `'absent'` from the catch,
+      dropping the `'unknown'` throw, and widening it to `remote !== 'resolved'` each redden the
+      file — the first two for reading a failed probe as absence, the third for refusing on every
+      non-resolution. Counts in the `verify:` line. The `.mjs` cannot throw — it composes a
       word for another process — so it emits the ALL-ZERO OBJECT ID, which satisfies the shape
       property on its other limb (a full object name) and which git cannot resolve; verified by
       "THE .mjs SIDE", which drives all
       three arms with real git (ref present, ref absent, and outside a repository) and shows the
       refusing word producing exit non-zero and no output in a repository where
       `refs/heads/<base>` does exist, so the refusal is the word's doing and not the world's.
-      verify: `bun test trident/diff-base-option-shaped.test.ts` — "THE PAIR: a REJECTING probe and an ABSENT probe reach different results,
+      verify (mutations measured on this commit: `'absent'` from the catch reds 2, dropping the
+      `'unknown'` throw reds 2, `remote !== 'resolved'` reds 7):
+      `bun test trident/diff-base-option-shaped.test.ts` — "THE PAIR: a REJECTING probe and an ABSENT probe reach different results,
       on the same base", "AT THE SOURCE: only exit 1 with empty stdout is ABSENT", "an
       UNDETERMINED remote probe refuses WITHOUT falling through" and "THE COMPLEMENT: an ABSENT
       remote probe still selects refs/heads/<base> — the fresh-clone path".
