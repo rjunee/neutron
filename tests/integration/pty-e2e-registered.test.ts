@@ -340,11 +340,23 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     // an empty offender list proves nothing if either is wrong, and on this branch both
     // have been.
     expect(SPAWNS.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
-    const e2e = allSourceFiles(REPO_ROOT).filter((f) => f.endsWith('.e2e.test.ts'))
-    expect(e2e.length).toBeGreaterThanOrEqual(3)
+    // THE DOMAIN IS THE PROOFS THAT TOUCH HERDR, NOT THE FILENAME SUFFIX. This read
+    // `endsWith('.e2e.test.ts')`, which was every e2e suite in the repo at the time and
+    // therefore a domain scoped to the SAMPLE — the same mistake as the guard that
+    // scanned only `*.e2e.test.ts` for stderr patching, one level along. It broke the
+    // first time someone else's lane added an e2e proof: #541's real-`claude` tool-gate
+    // test is an e2e suite with zero herdr references, and it has no business owning a
+    // herdr pane helper. A suffix says how a test is RUN; the rule is about what it
+    // SPAWNS, so the recogniser reads the content.
+    const live = allSourceFiles(REPO_ROOT)
+      .filter((f) => f.endsWith('.e2e.test.ts'))
+      .filter((f) => /herdr/i.test(readFileSync(f, 'utf8')))
+    // A FLOOR, so the domain cannot quietly empty: narrowing the filter until it matches
+    // nothing would otherwise make every assertion below vacuously true.
+    expect(live.length).toBeGreaterThanOrEqual(3)
     // ...and each of them reaches the helper, so "no offenders" is not "no spawns".
-    const usingHelper = e2e.filter((f) => readFileSync(f, 'utf8').includes('withLiveHerdrChild'))
-    expect(usingHelper.length).toBe(e2e.length)
+    const usingHelper = live.filter((f) => readFileSync(f, 'utf8').includes('withLiveHerdrChild'))
+    expect(usingHelper.length).toBe(live.length)
   })
 
   // NO TEST MAY MONKEY-PATCH PROCESS STATE BY HAND — not just the live ones. The

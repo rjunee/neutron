@@ -2840,6 +2840,27 @@ imported the same way from the same file, is flagged. The helper therefore lives
 workspace its consumers live in, and the guard NAMES the exempt path as a string instead
 of importing from it — the policer owns the policy.
 
+### A filename suffix is not a rule, and another lane proved it within days
+
+Merging `main` reddened the pane-leak guard. Its offender scan is content-based and was
+fine; its positive CONTROL read `endsWith('.e2e.test.ts')` and asserted that every such
+file uses the scoped helper. That was every e2e suite in the repo when it was written, so
+it was a domain scoped to the SAMPLE — the same mistake as the stderr guard that scanned
+only `*.e2e.test.ts`, one level along and in the file that fixed it.
+
+#541 landed an e2e suite that is a real-`claude` proof of a tool gate, with zero herdr
+references. It has no business owning a herdr pane helper, and the guard demanded it. **A
+suffix says how a test is RUN; the rule is about what it SPAWNS**, so the recogniser now
+reads content, with a floor so the domain cannot quietly empty.
+
+Worth recording for a second reason: I could not have found this by inspection, because
+the guard was correct against the tree it was written against. Another lane's merge was
+the instrument. And the first mutation I wrote for the fix SURVIVED for a reason that was
+mine rather than the code's — renaming `withLiveHerdrChild` to `withLiveHerdrChildXX`
+leaves the original as a substring, so the `includes` check still matched. The mutation
+has to break the property, not resemble it; that is twice in two rounds that the
+resemblance was in my own mutation.
+
 ### Mutation table
 
 Every guard was mutated. **Not every mutation reddened**, and the survivors are in the
@@ -3136,6 +3157,9 @@ Run against the named suites.
 | M-E7 | the helper never restores at all | RED 3 |
 | M-E8 | a falsy prior value is treated as absent — an empty value is lost | RED 1 |
 | M-E9 | the restore always deletes | RED 2 |
+| M-L1 | the live-proof domain goes back to the filename suffix | RED 1 |
+| M-L2 | the content filter is narrowed to match nothing | RED 1 — the floor, which exists so a narrowed domain cannot pass vacuously |
+| M-L3 | a live herdr proof stops using the scoped helper | RED 1 — after a first attempt SURVIVED because the rename left the original as a substring of itself |
 | M-A1 | the `trimToBytes` range check is removed entirely | RED 2 |
 | M-A2 | an out-of-range trim target is silently CLAMPED instead of refused | RED 2 — the choice of reject-over-clamp is itself pinned |
 | M-A3 | over-strict: `trimToBytes === maxBytes` rejected | RED 2 |
