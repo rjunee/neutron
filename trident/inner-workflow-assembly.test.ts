@@ -1054,13 +1054,13 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     // mode the bare name outright — `merge_mode: 'local'` means the outer loop merges
     // locally, not that the repository has no remote, and the review-diff fixture shows
     // that mistake costing five files where the branch changed one.
-    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf %s 'refs/trident-probe-failed/main';; esac")
+    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; printf %s '0000000000000000000000000000000000000000';; esac")
     expect(prompt).not.toContain('git diff main..HEAD')
   })
 
   test('PR MODE, unpinned: the same resolution — the preference is not git-mode dependent', async () => {
     const prompt = forgeBuildPrompt((await runWorkflow('', { mergeMode: 'pr' })).captured)
-    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf %s 'refs/trident-probe-failed/main';; esac")
+    expect(prompt).toContain("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; printf %s '0000000000000000000000000000000000000000';; esac")
     expect(prompt).not.toContain('git diff main..HEAD')
   })
 })

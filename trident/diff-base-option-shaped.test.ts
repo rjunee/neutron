@@ -482,11 +482,18 @@ describe('FALSE AND UNKNOWN DO NOT SHARE A BRANCH — the probe answers three wa
     expect(asked.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
   })
 
-  test('THE .mjs SIDE: a probe that cannot run composes a ref git REFUSES, not the local branch', async () => {
+  test('THE .mjs SIDE: a probe that cannot run composes a word git CANNOT BE MADE to resolve', async () => {
     // The distinction has to survive the language boundary, and the `.mjs` cannot throw: it
-    // composes a shell word in one process for another to evaluate. So it "refuses" by
-    // naming a ref that cannot exist — which still satisfies the shape property (it begins
-    // with `refs/`) and which git rejects loudly rather than resolving.
+    // composes a shell word in one process for another to evaluate. So it refuses by emitting
+    // a word the other process rejects — and the word is the ALL-ZERO OBJECT ID, not a ref.
+    //
+    // THE PREVIOUS WORD WAS `refs/trident-probe-failed/<base>`, AND ITS GUARANTEE WAS A FACT
+    // ABOUT THE FIXTURE. That namespace is ordinary and writable: `git update-ref` on it
+    // SUCCEEDS, after which the range resolves and produces a wrong diff at exit 0 — the exact
+    // defect this item exists to remove, reintroduced by the mechanism meant to prevent it,
+    // and reachable by anyone who can write a ref in the build checkout. A test that asserts
+    // rejection without first trying to make the word resolve is a statement about its own
+    // environment, so this one creates every ref that could plausibly shadow the word.
     //
     // THE THREE ARMS ARE EXERCISED BY REAL GIT, keyed on the same exit codes the TS probe
     // reads: 0 in a repository that has the remote ref, 1 in one that does not, and 128
@@ -507,16 +514,46 @@ describe('FALSE AND UNKNOWN DO NOT SHARE A BRANCH — the probe answers three wa
       w.target,
     )
     expect(outside.stdout.trim()).toBe('128')
-    const poisoned = await wordIn(w.target)
-    expect(poisoned).toBe('refs/trident-probe-failed/main')
-    // …and that word is one git REFUSES, loudly, with nothing written — the property the TS
-    // throw provides on its side. Asserted in the repository, where the local branch DOES
-    // exist, so the refusal is the word's doing and not the world's.
+    const refusing = await wordIn(w.target)
+    expect(refusing).toBe('0'.repeat(40))
+    // THE REASON REACHES A HUMAN, on stderr so it cannot become part of the word: git's own
+    // message for `0000…` says the range is invalid and nothing about why that value is there.
+    const withStderr = await spawnCapture(['bash', '-c', `printf %s ${composed}`], w.target)
+    expect(withStderr.stderr).toContain('the base-ref probe could not answer')
+    expect(withStderr.stdout.trim()).toBe('0'.repeat(40))
+
+    // THE ADVERSARIAL CASE. Everything that could make the word resolve is created first —
+    // the old poison ref (to show what it would have cost), then a TAG and a BRANCH named 40
+    // zeros, which is the only spelling that could shadow an object name. Measured on git
+    // 2.43.0: git ignores a ref whose name is 40 hex characters when the spelling is 40 hex
+    // characters, and says so.
+    await git(w.repo, 'update-ref', `refs/trident-probe-failed/main`, w.base)
+    const oldWord = await spawnCapture(
+      ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `refs/trident-probe-failed/main..${w.head}`],
+      w.repo,
+    )
+    // THE WORD THIS ROUND REPLACED, RESOLVING: exit 0 and a diff — not an error. This is the
+    // assertion that makes the change necessary rather than cosmetic.
+    expect({ ok: oldWord.ok, files: oldWord.stdout.trim().length > 0 }).toEqual({ ok: true, files: true })
+    await git(w.repo, 'tag', '0'.repeat(40), w.base)
+    await git(w.repo, 'branch', '0'.repeat(40), w.base)
+    expect(await git(w.repo, 'rev-parse', `refs/tags/${'0'.repeat(40)}`)).toBe(w.base)
+    expect(await git(w.repo, 'rev-parse', `refs/heads/${'0'.repeat(40)}`)).toBe(w.base)
+
+    // …and the word STILL refuses, loudly, with nothing written — the property the TS throw
+    // provides on its side. Asserted in the repository, where `refs/heads/main` DOES exist, so
+    // the refusal is the word's doing and not the world's.
     const ranged = await spawnCapture(
-      ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${poisoned}..${w.head}`],
+      ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${refusing}..${w.head}`],
       w.repo,
     )
     expect({ ok: ranged.ok, out: ranged.stdout.trim() }).toEqual({ ok: false, out: '' })
+    // The probe form refuses too, which is what every consumer's resolvability check asks.
+    const probed = await spawnCapture(
+      ['git', '-C', w.repo, 'rev-parse', '--verify', '--quiet', `${refusing}^{commit}`],
+      w.repo,
+    )
+    expect({ ok: probed.ok, out: probed.stdout.trim() }).toEqual({ ok: false, out: '' })
     expect((await git(w.repo, 'rev-parse', 'refs/heads/main')).length).toBe(40)
   })
 })
@@ -794,10 +831,10 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1617, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2351, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2464, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5301, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1648, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2382, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2495, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5332, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
     { file: 'codex-review.sh', line: 413, why: 'shell: the standalone reviewer builds its own diff' },
   ]

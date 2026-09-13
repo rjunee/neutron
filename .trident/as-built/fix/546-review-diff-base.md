@@ -232,6 +232,51 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round thirty-two: the refusal was refused only because nobody had created it
+
+**A guarantee that depends on a namespace being empty is a fact about the environment, not
+about the word.** Round thirty-one's third arm emitted `refs/trident-probe-failed/<base>` and
+the test asserted git rejects it — in a fixture where nothing had ever written that ref.
+`refs/trident-probe-failed/` is an ordinary writable namespace. Measured:
+
+    git update-ref refs/trident-probe-failed/main HEAD~1     → SUCCEEDS
+    git diff refs/trident-probe-failed/main..HEAD            → exit 0, a wrong diff, silently
+
+Not a loud failure — **exit 0 and an inflated diff**, which is the precise defect this item
+exists to remove, reintroduced by the mechanism built to prevent it, and reachable by anyone who
+can write a ref in the build checkout: on a shared runner, not a high bar.
+
+**The word is now the all-zero object id, which is unresolvable INTRINSICALLY rather than by
+convention.** Git treats a 40-hex spelling as an object name and ignores any ref of that name —
+it warns about exactly this (`advice.objectNameWarning`). Measured on git 2.43.0, with a tag AND
+a branch named 40 zeros present: `rev-parse --verify -q 0{40}^{commit}` exits 1, and
+`git diff --end-of-options 0{40}..HEAD` is `fatal: Invalid revision range`, exit 128, no output.
+It satisfies the shape property on its other limb — a full object name rather than a `refs/`
+prefix — and `codex-review.sh` classifies it as an object name and then refuses it at the
+resolvability check, which is a named refusal rather than a doomed diff.
+
+**What the object id loses is legibility, so the arm now says why on stderr** — git's own message
+names only `0000…`, which explains nothing. It goes to stderr precisely so it cannot reach the
+substitution's stdout and become part of the word.
+
+**And the test now tries to break it before asserting it holds.** It creates the OLD poison ref
+and asserts the range against it SUCCEEDS — that assertion is what makes this round necessary
+rather than cosmetic — then creates a tag and a branch named 40 zeros and asserts the emitted
+word still fails as a range operand and as a probe. **A rejection asserted without first
+attempting to make the word resolve measures the fixture, not the word.** That is the same class
+as the vacuous control in round thirty and the fixture-supplies-the-claim lesson from round
+eleven; the shape recurs because "assert the bad thing fails" reads as complete.
+
+**Findings three and four of the same kind, in the same document.** The spec item's promotion
+chain still described a failed probe falling through to `refs/heads/<base>` and named
+`TridentUnresolvableBaseError` for it, while the acceptance section eighty lines below already
+stated the new behaviour — the document contradicted itself, and the same superseded sentence
+sat beside production in `inner-workflow.mjs`'s header. Swept on the EXCEPTION CLASS NAMES as
+well as the prose, which is the spelling of this error that grep can find: every occurrence of
+`TridentUnresolvableBaseError` outside `merge.ts` and the tests was checked against the state it
+describes. **A round that changes behaviour has to sweep the documents that describe the
+behaviour's INPUTS and its OUTPUTS — including the exception a reader would grep for.**
+
 ### Round thirty-one: false and unknown were sharing a branch — in the probe this branch added
 
 **The defect this branch exists to remove, one level down, in its own fix.** `refResolves`
@@ -702,8 +747,11 @@ So it does. `diffBaseRef` now throws `TridentUnresolvableBaseError` instead of h
 word; every one of its returns is a 40-hex pin or a fully qualified ref. The `.mjs` composes
 `refs/heads/<base>` unconditionally on the second arm — **the one place the two implementations
 cannot agree**, because a shell substitution is composed in one process and evaluated in
-another, so it cannot refuse; it can only name a ref the other process rejects. Both halves are
-asserted, and the composed word is measured to be one git actually refuses. `codex-review.sh`
+another, so it cannot refuse; it can only emit a word the other process rejects. Both halves are
+asserted, and the composed word is measured to be one git actually refuses. [Round thirty-one
+added a THIRD arm — the probe that cannot answer — and round thirty-two changed what that arm
+emits from `refs/trident-probe-failed/<base>` to the all-zero object id, because the first was
+refused only while nobody had created it.] `codex-review.sh`
 refuses a bare tag-only argument (exit 3, its DEFERRED), while an explicit `refs/tags/<x>` is
 still accepted — the refusal is of the AMBIGUITY, not of the intent.
 

@@ -181,16 +181,24 @@ The resolution order is evidence-first, and is the same at every site:
    ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
    refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
    as launch; in local mode it is preferred too, whenever the repository has one;
-3. **`refs/heads/<base>` whenever `refs/remotes/origin/<base>` does not resolve but the local
-   branch does** — qualified for the same reason arm 2 is, and it matters MORE here, not less:
+3. **`refs/heads/<base>` whenever the remote probe answers ABSENT — git looked and there is no
+   such remote-tracking ref — and the local branch resolves.** Absent, not merely "did not
+   resolve": since round thirty-one a probe that could not ANSWER is a third outcome and takes
+   arm 4, because the reason the remote ref is preferred is that the local one may be stale and
+   a failed probe says nothing about staleness. Qualified for the same reason arm 2 is, and it matters MORE here, not less:
    the fallback runs when the environment is already unusual (a fresh clone, a missing remote,
    a detached CI checkout), which is where a stray `refs/tags/<base>` is likeliest and least
    noticed. `refs/heads/main` and `refs/tags/main` coexist happily and git prefers the tag, so
    the bare word named something nobody had checked. **A fallback deserves the same rigour as
    the primary path, not less, because it executes in worse conditions.**
-4. **REFUSED when NEITHER ref resolves** — no remote-tracking ref AND no local branch of that
-   name, or a probe that could not run at all. **`diffBaseRef` throws `TridentUnresolvableBaseError`
-   and the workflow composes `refs/heads/<base>` anyway, which git rejects (fatal, 128).** The
+4. **REFUSED, in two distinct states with two distinct exceptions.** (a) NEITHER ref resolves —
+   git answered "no such ref" for both — and `diffBaseRef` throws `TridentUnresolvableBaseError`
+   while the workflow composes `refs/heads/<base>` anyway, which git rejects (fatal, 128).
+   (b) The REMOTE probe could not answer at all: not exit 1 with empty stdout, but a rejected
+   spawn, exit 128, or output that is not an object name. `diffBaseRef` throws
+   `TridentUndeterminedBaseError` **without asking the second question**, and the workflow emits
+   the all-zero object id. Keeping (b) out of (a) is the round-thirty-one fix: they were one
+   value, and that value selected the local branch. The
    bare word is NOT inert, which is what "git errors loudly on an unknown revision" missed: git
    resolves it against every namespace, and a same-named TAG answers to it. **This repository
    holds a live instance** — `archive/agent-replies-prior-iter-3b35767` exists as a tag and as
@@ -199,8 +207,16 @@ The resolution order is evidence-first, and is the same at every site:
 
    The two implementations differ here and only here, stated rather than papered over: a shell
    substitution is composed in one process and evaluated in another, so it cannot refuse — it
-   can only name a ref the other process will refuse. Both halves are asserted, including that
-   the composed word is one git actually rejects.
+   can only emit a word the other process will reject. For state (a) that word is
+   `refs/heads/<base>`; for state (b) it is the ALL-ZERO OBJECT ID, which is intrinsically
+   unresolvable — measured on git 2.43.0 as `fatal: Invalid revision range`, exit 128, no
+   output, and it stays that way with a tag AND a branch named 40 zeros present, because git
+   ignores a ref whose name is 40 hex characters when the spelling is 40 hex characters. It was
+   `refs/trident-probe-failed/<base>` for one round; **that namespace is ordinary and writable,
+   so `git update-ref` on it makes the range resolve and return a wrong diff at exit 0** — the
+   guarantee was a fact about the environment, not about the word. Both halves are asserted,
+   including that the emitted word is one git rejects AFTER every ref that could shadow it has
+   been created.
 
    Arm 3 is what a repository with no remote gets, what a worktree whose `origin` is configured
    but whose base ref is missing, deleted or unfetched gets, and what a fresh clone gets: the
@@ -511,7 +527,19 @@ The resolution order is evidence-first, and is the same at every site:
       word for another process — so it names `refs/trident-probe-failed/<base>`, which satisfies
       the shape property and which git rejects; verified by "THE .mjs SIDE", which drives all
       three arms with real git (ref present, ref absent, and outside a repository) and shows the
-      poisoned word producing exit non-zero and no output in a repository where
+      refusing word producing exit non-zero and no output in a repository where
       `refs/heads/<base>` does exist, so the refusal is the word's doing and not the world's.
+- [ ] **The refusing word cannot be MADE to resolve, and the test tries.** For one round that
+      word was `refs/trident-probe-failed/<base>`, and its guarantee was a fact about the
+      fixture: the namespace is ordinary and writable, `git update-ref` on it succeeds, and the
+      range then returns a wrong diff at **exit 0** — the defect this item exists to remove,
+      reintroduced by the mechanism meant to prevent it, reachable by anyone who can write a ref
+      in the build checkout. The word is now the all-zero object id, which git cannot resolve
+      because it ignores a ref whose name is 40 hex characters when the spelling is 40 hex
+      characters. Verified by "THE .mjs SIDE", which **creates the old poison ref and asserts
+      the range against it SUCCEEDS** (so the change is necessary, not cosmetic), then creates a
+      tag AND a branch named 40 zeros and asserts the emitted word still fails both as a range
+      operand and as a `rev-parse --verify` probe. A rejection asserted without first trying to
+      make the word resolve is a claim about the test's environment, not about the word.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.

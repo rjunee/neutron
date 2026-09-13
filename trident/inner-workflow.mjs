@@ -1404,14 +1404,17 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *  • `refs/heads/<base>` whenever `refs/remotes/origin/<base>` does not resolve to a
  *    commit — which is NOT the same as "there is no remote", and saying so was the sixth
  *    overclaim on this branch. `origin` can be configured while that ref is missing, deleted
- *    or never fetched: an ordinary state for a worktree that has not fetched. The
- *    substitution below also takes this arm when git cannot run at all. No fetch is
+ *    or never fetched: an ordinary state for a worktree that has not fetched. **It is the
+ *    ABSENT answer only** — exit 1 with empty stdout. Until round thirty-one the substitution
+ *    below also took this arm when git could not answer at all, which meant a broken probe
+ *    silently selected a branch that may be stale; that case now takes the refusing arm. No
+ *    fetch is
  *    attempted — a build worktree should not reach the network to answer a diff-base
  *    question — so the local branch is simply the best available answer there, and it is
  *    named IN FULL: this arm read "the bare name" until round nineteen, and a bare word is
  *    not inert — git resolves it against every namespace and a same-named tag answers to it.
- *    The arm is unconditional, so an unresolvable `refs/heads/<base>` is composed anyway and
- *    git rejects it out loud rather than resolving something nobody chose.
+ *    The arm is unconditional ON THE ABSENT ANSWER, so an unresolvable `refs/heads/<base>` is
+ *    composed anyway and git rejects it out loud rather than resolving something nobody chose.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
@@ -1451,6 +1454,19 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  * about. `diff-base-option-shaped.test.ts`'s parity table varies the whitespace axis and
  * holds both to the same answers.
  */
+/**
+ * THE WORD THIS COMPOSER EMITS WHEN THE PROBE CANNOT ANSWER — the all-zero object id.
+ *
+ * Chosen because it is INTRINSICALLY unresolvable rather than merely unused: git treats a
+ * 40-hex spelling as an object name and ignores any ref of that name, so no `update-ref`,
+ * tag or branch can make it resolve. Measured on git 2.43.0, with a tag AND a branch named
+ * 40 zeros present: `rev-parse --verify -q 0{40}^{commit}` exits 1 and
+ * `git diff --end-of-options 0{40}..HEAD` is `fatal: Invalid revision range`, exit 128, no
+ * output. Its predecessor `refs/trident-probe-failed/<base>` was refused only because nobody
+ * had created it, which is a fact about the environment and not about the word.
+ */
+const UNRESOLVABLE_BASE_OID = '0'.repeat(40)
+
 function unpinnedDiffBase() {
   // AN EMPTY BASE IS REFUSED TOO, matching `diffBaseRef` — `..<head>` is a well-formed
   // range git answers with exit 0 and no output, so it yields a plausible wrong answer
@@ -1508,16 +1524,30 @@ function unpinnedDiffBase() {
   // "no such ref", and 128 when it could not ask at all (`-C <not-a-repo>`).
   //   0 → `refs/remotes/origin/<base>`
   //   1 → `refs/heads/<base>`   — ABSENT legitimately selects the local branch (a fresh clone)
-  //   * → `refs/trident-probe-failed/<base>` — UNKNOWN selects NOTHING. `&& … || …` collapsed
-  //       this into the local branch, so a transient probe failure silently diffed against a
-  //       branch that may be stale: the Argus r4 shape reached through the error path. The
-  //       REASON the remote ref is preferred is that the local one may be stale, and a failed
-  //       probe says nothing about staleness.
+  //   * → the ALL-ZERO OBJECT ID — UNKNOWN selects NOTHING. `&& … || …` collapsed this into
+  //       the local branch, so a transient probe failure silently diffed against a branch that
+  //       may be stale: the Argus r4 shape reached through the error path. The REASON the
+  //       remote ref is preferred is that the local one may be stale, and a failed probe says
+  //       nothing about staleness.
   //
-  // The poison ref is how a SUBSTITUTION refuses: it cannot throw the way `diffBaseRef` does
-  // (it is composed in this process and evaluated in another), so it names a ref git will
-  // reject — loudly, 128 — and the reason is legible in git's own error text. It still
-  // satisfies the shape property: every value that reaches a rev-range begins with `refs/`.
+  // HOW A SUBSTITUTION REFUSES, and why this is an OBJECT ID rather than a ref. It cannot
+  // throw the way `diffBaseRef` does — it is composed in this process and evaluated in
+  // another — so it can only emit a word the other process will refuse. That word was
+  // `refs/trident-probe-failed/<base>` for one round, and **that guarantee was conditional on
+  // nobody having created it**: `refs/trident-probe-failed/` is an ordinary writable namespace,
+  // and `git update-ref refs/trident-probe-failed/main HEAD~1` SUCCEEDS — after which the
+  // range resolves and produces a wrong diff at exit 0, which is precisely the defect this
+  // item exists to remove, reintroduced by the mechanism meant to prevent it, and reachable by
+  // anyone who can write a ref in the build checkout. The all-zero object id cannot be made to
+  // resolve: measured on git 2.43.0, `0{40}..HEAD` is `fatal: Invalid revision range`, exit
+  // 128, no output — and it stays that way even with a TAG and a BRANCH named 40 zeros in the
+  // repository, because git ignores a ref whose name is 40 hex characters when the spelling is
+  // 40 hex characters (it says so, in `advice.objectNameWarning`). It still satisfies the shape
+  // property, on the other limb: a full object name, never a bare word.
+  //
+  // The stderr line is the diagnosability the poison ref had and an object id does not — git's
+  // own message names only `0000…`, which says nothing about WHY. It goes to stderr so it
+  // cannot reach the substitution's stdout and become part of the word.
   //
   // NEITHER ARM CAN PRINT A BARE NAME. The remote-tracking ref when it resolves;
   //
@@ -1533,9 +1563,10 @@ function unpinnedDiffBase() {
   //
   // THE TS TWIN THROWS HERE INSTEAD, and that is the one place these two cannot agree: a
   // shell substitution is composed in this process and evaluated in another, so it cannot
-  // refuse — it can only name a ref the other process will refuse. Both halves are asserted
-  // in `diff-base-option-shaped.test.ts`, including that this word is one git rejects.
-  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf %s ${shSingleQuote(`refs/trident-probe-failed/${baseBranch}`)};; esac)"`
+  // refuse — it can only emit a word the other process will refuse. Both halves are asserted
+  // in `diff-base-option-shaped.test.ts`, including that this word is one git rejects EVEN
+  // AFTER an adversary creates every ref that could plausibly shadow it.
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf 'trident: the base-ref probe could not answer; refusing to guess a base\\n' >&2; printf %s ${shSingleQuote(UNRESOLVABLE_BASE_OID)};; esac)"`
 }
 
 const diffBase =
