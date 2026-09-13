@@ -89,6 +89,38 @@ describe('inspectHandle reports what the HOST sees', () => {
   })
 })
 
+describe('the protocol gate covers the adoption surface too', () => {
+  it('a server on another protocol is UNAVAILABLE — not gone, not live', async () => {
+    const server = new FakeHerdrServer()
+    server.foregroundArgv = ['claude', '--resume', 'abc']
+    server.malformMethod('ping', { type: 'pong', version: '0.9.9', protocol: 99 })
+    const v = await hostFor(server).inspectHandle(server.paneId)
+    // The pane may be perfectly alive; what we cannot do is READ this server's answers
+    // with the semantics this client was measured against. Declining is the safe
+    // direction, and `gone` would license a cold spawn over a live REPL.
+    expect(v.kind).toBe('unavailable')
+    expect(v.kind === 'unavailable' && v.reason).toContain('protocol')
+  })
+
+  it('and a close is REFUSED on that server, having closed nothing', async () => {
+    const server = new FakeHerdrServer()
+    server.malformMethod('ping', { type: 'pong', version: '0.9.9', protocol: 99 })
+    await expect(hostFor(server).closeHandle(server.paneId)).rejects.toThrow(/protocol/)
+    expect(server.paneClosed).toBe(false)
+    expect(server.callsTo('pane.close')).toHaveLength(0)
+  })
+
+  it('the SAME calls succeed against a server on the measured protocol', async () => {
+    // The positive control: the two refusals above are the gate firing, not the
+    // methods being broken.
+    const server = new FakeHerdrServer()
+    server.foregroundArgv = ['claude']
+    expect((await hostFor(server).inspectHandle(server.paneId)).kind).toBe('live')
+    await hostFor(server).closeHandle(server.paneId)
+    expect(server.paneClosed).toBe(true)
+  })
+})
+
 describe('attach re-attaches to a pane this process did not create', () => {
   it('delivers the pane\'s screens and creates NOTHING', async () => {
     const server = new FakeHerdrServer({ paneId: 'w9:p7' })

@@ -782,8 +782,19 @@ export class HerdrHost implements AdoptableHost {
     let client: HerdrRpc
     try {
       client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
+      // THE SAME VERSION GATE THE SPAWN PATH RUNS, for the same reason and with a
+      // different failure shape. Every answer below is read with `measured on
+      // protocol 20` semantics, and this one decides whether a live `claude` is
+      // adopted, closed or left alone — the most consequential reading this client
+      // does. A server that has moved on answers differently with no error anywhere.
+      //
+      // It becomes `unavailable`, NOT a throw and NOT `gone`: an unverifiable server
+      // establishes nothing about the pane, and the caller's rule for that is to
+      // decline adoption and fall back to the process table. Declining is the safe
+      // direction; treating an unreadable server as absence is the unsafe one.
+      await verifyHerdrProtocol(client)
     } catch (e) {
-      return { kind: 'unavailable', reason: `connect failed: ${errText(e)}` }
+      return { kind: 'unavailable', reason: `cannot drive this herdr server: ${errText(e)}` }
     }
     let info: HerdrPaneInfo | undefined
     try {
@@ -833,6 +844,11 @@ export class HerdrHost implements AdoptableHost {
    *  get, and a silent success there would let a live REPL be recorded as reaped. */
   async closeHandle(handle: string): Promise<void> {
     const client = await (this.deps.connect ?? (async () => createHerdrRpc()))()
+    // GATED LIKE EVERY OTHER ACT. A close DESTROYS a process, so driving it against a
+    // server whose protocol this client has not verified is the one call where being
+    // wrong is unrecoverable. A mismatch rejects, and the caller's rule for a rejected
+    // close is that nothing was closed — which is true, and safe.
+    await verifyHerdrProtocol(client)
     try {
       await client.call('pane.close', { pane_id: handle })
     } catch (e) {

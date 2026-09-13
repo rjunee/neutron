@@ -150,9 +150,22 @@ every mutation was applied and reverted mechanically, and the tree was clean aft
 | M12 | a failed attach keeps its sink registration | `boot-adoption.test.ts` (1) |
 | M13 | classifier refuses everything (**over-strict**) | 15 failures across three files |
 | M14 | shutdown verdict never survives (**over-strict**) | `gateway-shutdown-survival.test.ts` (2) |
+| M15 | the protocol gate removed from `inspectHandle` | `herdr-adoption.test.ts` (1) |
+| M16 | the protocol gate removed from `closeHandle` | `herdr-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
+
+### The protocol gate covers the adoption surface, not just the spawn
+
+`inspectHandle` and `closeHandle` verify the server's protocol on the same handle they
+then use. Every answer they read is read with "measured on protocol 20" semantics, and
+these two decide whether a live `claude` is adopted, closed or left alone — the most
+consequential reading this client does, and the one place (the close) where being wrong
+destroys a process. The failure shapes differ deliberately: an unverifiable server makes
+`inspectHandle` answer `unavailable` (decline and fall back to the process table, never
+`gone`, which would license a cold spawn over a live REPL), while `closeHandle` rejects,
+and the caller's rule for a rejected close is that nothing was closed — which is true.
 
 ### Measured against the live server, not read off a document
 
