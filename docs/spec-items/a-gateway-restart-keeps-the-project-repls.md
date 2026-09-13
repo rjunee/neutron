@@ -207,6 +207,24 @@ it must not swallow.
       replaced mid-attach GIVES THE CHILD BACK" — asserting the pool, `childByKey`, a
       401 on the child's own credential and the closed pane, not just the row), with an
       uncontended positive control beside it.
+- [ ] **TWO INCARNATIONS RACING FOR ONE UNCHANGED ROW: EXACTLY ONE PUBLISHES.** The row
+      claim is a COMPARE-AND-SET, not a comparison — it writes `adoption_claim_by` and
+      `adoption_claim_at` under the registry lock, so the second claimant reads a row that
+      CHANGED and refuses with a reason naming the claim. A verification alone could not do
+      this: both passes see the same restored `child_generation` and the same pane pid, so
+      nothing distinguishes two readers of an unmodified row, and each would publish an
+      attached wrapper onto the same pane.
+      The marker is bounded by `ADOPTION_CLAIM_TTL_MS`, and every path that stops owning a
+      session gives its own claim back — CAS'd on the identity that took it, and only while
+      the registry lock is confirmed held, since the give-back is a whole-registry write and
+      an unguarded one would drop a concurrent incarnation's row. A claimant
+      killed between marking and publishing therefore costs one TTL, not a pane that can
+      never be adopted again.
+      *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` (the
+      two-incarnation race, with the second pass run inside the real window between the
+      first's compare-and-set and its publish; the single-incarnation positive control; both
+      sides of the staleness boundary; and the hand-over that clears the marker so the next
+      boot is not refused).
 - [ ] **A WRITE ONLY EVER TOUCHES THE ROW IT DECIDED ABOUT.** Clearing a handle, and
       correcting an adopted pid, are compare-and-set on the (handle, generation) pair
       the pass inspected. A row another incarnation replaced mid-pass is left exactly as

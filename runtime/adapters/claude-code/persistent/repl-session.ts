@@ -187,6 +187,16 @@ export class ReplSession {
    *  nonce makes a turn-id from a prior (killed) incarnation un-matchable against
    *  this one, closing the cross-resume turnId collision (Argus r6). One
    *  `ReplSession` == one incarnation == one nonce. */
+  /**
+   * #539 — the adoption claim this session holds on its registry row, if it took one.
+   *
+   * Carried on the session because the paths that STOP OWNING it — `unwind`, both
+   * `release` variants and the shutdown survival branch — are the paths that must give the
+   * claim back, and only the session travels to all four. A claim left behind makes the
+   * row unadoptable until its TTL, which would break the very handover the survival branch
+   * exists for.
+   */
+  adoptionClaimBy?: string
   private readonly incarnation: string = randomBytes(4).toString('hex')
 
   /** Mint this incarnation's next turn-id as `<incarnation>:<seq>` — globally

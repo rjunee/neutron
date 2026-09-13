@@ -166,6 +166,18 @@ export const CONTEXT_RESET_COMMAND = '/clear'
 /** A respawn-in-flight stamp older than this is treated as stale (the prior
  *  respawn crashed before clearing it) and a new respawn may proceed. */
 export const RESPAWN_IN_FLIGHT_TTL_MS = 90_000
+/**
+ * #539 — how long a boot-adoption claim on a row holds off a second incarnation.
+ *
+ * The window it must cover is tiny — between the locked comparison and the publish a few
+ * statements later — so this is not sized for the work. It is sized for the FAILURE: a
+ * claimant that dies after marking leaves the row unadoptable until this elapses, and the
+ * asymmetry decides the value. Too generous costs one cold `--resume` on a key whose
+ * claimant died; too tight lets a second incarnation adopt a pane the first is already
+ * attached to, which is the two-owner invariant this module exists to hold. Matches
+ * {@link RESPAWN_IN_FLIGHT_TTL_MS} because it is the same problem with the same remedy.
+ */
+export const ADOPTION_CLAIM_TTL_MS = 90_000
 /** Rolling window for the respawn-rate cap. */
 export const RESPAWN_CAP_WINDOW_MS = 60 * 60 * 1000
 /** Max respawns per `RESPAWN_CAP_WINDOW_MS` before the hard cap trips (auto-

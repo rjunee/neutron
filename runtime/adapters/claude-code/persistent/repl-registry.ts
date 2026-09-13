@@ -302,6 +302,30 @@ export interface ReplRegistryRecord {
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
+  /**
+   * #539 — THE ADOPTION CLAIM: epoch ms an incarnation took this row for a boot
+   * adoption, with {@link ReplRegistryRecord.adoption_claim_by} naming which one.
+   *
+   * WHY A VERIFICATION IS NOT A CLAIM. `claimRowOrUnwind` compares `(pane_handle,
+   * child_generation)` under the flock and then releases it before publishing — and a
+   * comparison leaves no trace. So two incarnations could each take the lock in turn, each
+   * find the row UNCHANGED precisely because the other had only read it, and each publish
+   * an attached wrapper on the same pane: two owners of one live transcript. Neither the
+   * generation (restored from this row, so identical for both) nor the pid (the same
+   * pane's process) can tell them apart. Only a write can.
+   *
+   * SAME SHAPE AS `respawn_in_flight_at`, deliberately: that field solves the same
+   * problem — exactly one actor per key across processes — with a marker plus a TTL, and
+   * one idiom for one problem is worth more than a second mechanism.
+   *
+   * THE TTL IS WHAT STOPS A CRASH WEDGING THE KEY. A claimant that dies between marking
+   * and publishing would otherwise make this row unadoptable forever. It is generous on
+   * purpose: being generous costs a bounded refusal (one cold `--resume`), being tight
+   * costs a spurious double adoption, and only the second breaks an invariant.
+   */
+  adoption_claim_at?: number
+  /** The incarnation that holds the claim — see {@link ReplRegistryRecord.adoption_claim_at}. */
+  adoption_claim_by?: string
   /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
    *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
    *  or a deploy). Written just before each kill, read back so the death is reported as

@@ -1374,6 +1374,7 @@ across two files, and five the next time someone adds one.
 | `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above |
 | `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped |
 | the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` |
+| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse |
 | **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it |
 
 **What "deliberately retained" means, measured rather than assumed.** M91 adds a redundant
@@ -1641,6 +1642,82 @@ checked rather than assumed precise. A targeted grep for the biconditional *join
 survival/row/pane wording across `runtime/`, `gateway/`, `SPEC.md`, the spec item and this
 record now returns **zero**. **No fifteenth site**, inside those paths or outside them.
 
+### Round thirty-seven: the claim verified, and a verification is not a claim
+
+`claimRowOrUnwind` held the registry lock, compared the row's `pane_handle` and
+`child_generation` against what this pass had inspected, and **wrote nothing**. The lock
+released when the callback returned; `publish()` ran after it. So two incarnations could
+each take the lock in turn, each find the row exactly as expected **because the other had
+only looked at it**, and each publish an attached wrapper onto the same pane. Two owners of
+one live transcript — the invariant this item exists to hold — reachable through the
+function written to protect it.
+
+**Nothing already in the row could discriminate them, and I checked before accepting the
+ruling.** `child_generation` is *restored* from the row rather than minted (that is what
+makes the #537 reply credential resolve across a restart), so both claimants carry the same
+one; `pid` is the same pane's process; `incarnation` is minted per pass but never persisted.
+Only a write distinguishes two readers, so the claim became a **compare-and-set**:
+`adoption_claim_by` + `adoption_claim_at`, staleness-bounded by `ADOPTION_CLAIM_TTL_MS`
+(90 s) — the shape `supervision.ts` already uses for `respawn_in_flight_at` /
+`RESPAWN_IN_FLIGHT_TTL_MS`. I had no better mechanism to propose and said so.
+
+**The failure mode the design is actually against is the crash, not the race.** A claimant
+killed between its mark and its publish leaves a marker no release path will ever clear. A
+permanent marker would wedge that row so **nothing** could ever adopt the pane again — a
+REPL preserved across the restart and then unreachable forever, which is strictly worse than
+the defect being fixed. Two things bound it, and they are different mechanisms for different
+cases:
+
+1. **Every path that stops owning a session gives its own claim back** —
+   `releaseAdoptionClaim`, called from `unwind`, `release`, `releaseWithReason` and
+   `pool.ts`'s survival branch: the same four the round-thirty-one per-structure table
+   enumerates. CAS'd on `adoption_claim_by`, so a pass can only ever release **its own**
+   claim; releasing another's would hand the row to whoever asked third.
+2. **The TTL is the backstop for the one case (1) cannot reach** — the claimant that is no
+   longer running to release anything.
+
+**The wedge this nearly shipped, caught by an existing test rather than by reasoning.** With
+the CAS in and the give-back not yet written, the round-twenty-five in-process-restart case
+went red: boot → adopt → shutdown → boot again was refused, because the first pass's marker
+was still live. That is not a test artifact — it is the feature failing for ninety seconds
+after **every** restart, with every other case still green. The survival branch keeps the
+pane alive precisely so the next construction can adopt it, and a claim left behind refuses
+exactly that construction.
+
+**Why the test needed a seam, stated because it is a real cost.** In-process the CAS and the
+publish run in one synchronous stretch — no second pass can be scheduled between them, so
+the race cannot be constructed at all. The cheap fixture (hand-write a rival's marker and
+watch the pass refuse) exercises the **refusal** while leaving the marker **write**
+untested: delete the write and that case stays green, which is this suite's recurring
+vacuity shape in a new place. `deps.afterRowClaim` opens the real window instead, so the
+marker the losing pass refuses against is one the code under test actually wrote — and M94
+(drop the write) reddens four cases, which is the proof the seam bought.
+
+**And the give-back is a WRITE, which I only noticed by re-reading my own new code against
+the rule the claim path states three lines above it.** `releaseAdoptionClaim` went through
+`withRegistry` — a whole-registry read-modify-write — without consulting `onOutcome`, so with
+no FFI or a failing `flock` it would save a snapshot taken unguarded and **drop any row a
+concurrent incarnation wrote in between**. That is the lost update the claim's own comment
+warns about, arriving through the tidy-up instead of through the decision, and it damages
+keys this pass has nothing to do with. It now fails closed: skipping costs one bounded
+refusal on one key, which is exactly what the TTL is for; clobbering costs somebody else a
+live REPL nothing can find.
+
+**The case for it is written at the function, and the reason is a second finding.** The
+obvious route — adopt, break the lock, shut down — never reaches the release: with no lock
+the SURVIVAL decision fails closed, so that shutdown takes the kill branch and records
+`killed_by_gateway_shutdown` instead. Correct (round fourteen), and a *different branch from
+the one under test*. My first draft of the case did exactly that and failed for a reason
+unconnected to the guard it named — the round-thirty-five shape (an instrument pointed at
+something adjacent to the claim), caught this time by the assertion diff rather than by a
+reviewer.
+
+**Bidirectional by construction.** A claim that refused everything would pass the
+two-incarnation case and break the product outright, so `adoption-claim-is-a-compare-and-set.test.ts`
+carries the single-incarnation positive control, the expired-marker case, the
+inside-the-window case and the hand-over case. M96 (staleness window of zero) reds the race
+case and the inside-the-window case rather than only one; recorded as run, not as predicted.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1651,7 +1728,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four and M93 in round thirty-five, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1775,6 +1852,12 @@ count from the rows below rather than trusting this sentence.
 | M91 | ~~`unwind` unregisters the live handle too~~ — **probe, not a guard**: nothing reds, because the handle is identity-scoped and a second `unregister()` is a no-op. Recorded because that is what makes the retained cell "not needed" rather than "must not" | no-op by design |
 | M92 | the cleanup guard permits `real === root` again | `session-config-containment.test.ts` (1) |
 | M93 | ~~the snapshot seam fires before the latch~~ — **no red, structurally**: synchronously it cannot change what B meets (no await between), and with a yield added `abandonInFlightPasses` covers the same window. Removing the latch entirely DOES red (1), so the case has teeth; the latch's unique window is M72's | not isolable |
+| M94 | the CAS writes no marker — the claim goes back to a bare verification | `adoption-claim-is-a-compare-and-set.test.ts` (4) |
+| M95 | the marker never goes stale (the TTL comparison is dropped) | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the dead-claimant case, the wedge) |
+| M96 | the staleness window is zero, so no claim is ever live | `adoption-claim-is-a-compare-and-set.test.ts` (2 — the race case AND the inside-the-window case) |
+| M97 | the survival branch keeps its claim instead of giving it back | `adoption-claim-is-a-compare-and-set.test.ts` (1) + `boot-adoption.test.ts` (1 — the round-25 in-process restart) |
+| M98 | the give-back is not CAS'd, so a refusal strips the winner's claim | `adoption-claim-is-a-compare-and-set.test.ts` (2) + `boot-adoption.test.ts` (1) |
+| M99 | the give-back writes without confirming it held the lock | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

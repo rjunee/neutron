@@ -64,6 +64,7 @@
  * owner's own work under a pane id herdr reissued.
  */
 
+import { randomUUID } from 'node:crypto'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { registerLiveProcessSafe } from '@neutronai/tools/process-registry.ts'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
@@ -97,6 +98,7 @@ import {
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
+  ADOPTION_CLAIM_TTL_MS,
   SESSION_COMPACT_IDLE_QUIESCE_MS,
   defaultIsPidAlive,
   runOutputScan,
@@ -166,26 +168,54 @@ export interface BootAdoptionDeps {
    *  to the real `ps`; a case injects one so "somebody else owns this transcript" is
    *  reachable without starting a second claude. */
   listProcesses?: () => ProcessListing[] | undefined
+  /**
+   * AN ORDERING SEAM, awaited between the row claim's compare-and-set and the publish
+   * that acts on it. Defaults to nothing and exists for one case.
+   *
+   * The gap it opens is REAL — `claimRowOrUnwind` returns a promise and the two acts are
+   * separated by a suspension point in the live path too — but in-process the CAS and the
+   * publish run in a single synchronous stretch, so no concurrent pass can be scheduled
+   * between them and the two-incarnation race cannot be constructed at all. The
+   * alternative was to hand-write another incarnation's marker into the row, which tests
+   * the REFUSAL while leaving the marker WRITE unexercised: drop the write and such a case
+   * stays green, which is the shape of vacuity this suite keeps finding. Same argument as
+   * {@link listProcesses} — an injection point whose purpose is to make an otherwise
+   * unreachable branch reachable.
+   */
+  afterRowClaim?: () => Promise<void> | void
   /** Diagnostics sink. Defaults to stderr. */
   log?: (msg: string) => void
   budgetMs?: number
 }
 
 /**
+ * THREE REFUSALS, THREE SENTENCES — and the distinctions are the point, not the prose.
+ *
+ * A refused adoption can mean three different things and they are not interchangeable:
+ * ANOTHER INCARNATION OWNS THIS ROW (a finding about somebody else), I COULD NOT TAKE
+ * THE LOCK (the absence of a finding), and THE ROW NOW DESCRIBES A DIFFERENT CHILD (a
+ * finding about the row). An earlier revision gave three branches identical text, which
+ * means no case can tell which one fired: a test named for one passes when another ran
+ * and reports that it proved something it did not. The same collapse this tree keeps
+ * paying for, in a string.
+ */
+/** Another incarnation won the compare-and-set. A finding ABOUT SOMEBODY ELSE — distinct
+ *  from {@link LOCK_UNACQUIRED_REASON} ("I could not find out who owns it") and from
+ *  {@link ROW_MOVED_REASON} ("the row now names a different child"). */
+const CLAIMED_ELSEWHERE_REASON =
+  'another incarnation holds the adoption claim on this row — it got to the compare-and-set first, so this pass is not the owner and publishing would make it a second owner of one live transcript'
+
+/** The claim could not be established because the lock was not held — the ABSENCE of a
+ *  finding, which licenses neither publishing nor closing. */
+const LOCK_UNACQUIRED_REASON =
+  'the registry lock was NOT acquired for this adoption\'s row claim, so the compare-and-set was not atomic — the pane is left running and the row left alone, and the next construction of this substrate reconciles it'
+
+/**
  * The shutdown abandonment reason, WITH THE POINT IT WAS TAKEN AT.
  *
  * One shared sentence for the disposition, so a reader can grep it, and a distinct
- * clause for WHERE — because the three sites are three different branches and an
- * earlier revision gave all of them identical text. Identical text means no test can
- * tell which one ran: a case named for the attach-side check passes when the pre-attach
- * check fired instead, and says it proved something it did not. The same collapse this
- * tree keeps paying for, in a string.
+ * clause for WHERE — three sites, three branches, for the reason given above.
  */
-/** The claim could not be established because the lock was not held. Distinct from
- *  {@link ROW_MOVED_REASON}: "someone else owns this row" is a finding, and "I could not
- *  find out who owns it" is the absence of one. */
-const LOCK_UNACQUIRED_REASON =
-  'the registry lock was NOT acquired for this adoption\'s row claim, so the compare-and-set was not atomic — the pane is left running and the row left alone, and the next construction of this substrate reconciles it'
 
 const shutdownAbandonReason = (
   at: 'before the attach' | 'with the attach in flight' | 'at the row claim',
@@ -1171,6 +1201,60 @@ export function deleteOwnPoolEntry(sessionKey: string, session: ReplSession): vo
 }
 
 /**
+ * GIVE THE ADOPTION CLAIM BACK, if this session holds it (#539, Argus r37).
+ *
+ * CAS'd on `adoption_claim_by` so a pass can only ever release its OWN claim — releasing
+ * another incarnation's would hand its row to a third. Called from every path that stops
+ * owning a session, which is the same four the round-thirty-one table enumerates: without
+ * it the shutdown survival branch would leave a claim behind and the next boot — the one
+ * the whole feature exists to serve — would be refused until the TTL elapsed.
+ *
+ * Best-effort and silent on failure: the TTL is the backstop, so a failed release costs a
+ * bounded refusal rather than a wedge.
+ */
+export function releaseAdoptionClaim(
+  registryPath: string | undefined,
+  sessionKey: string,
+  claimedBy: string | undefined,
+): void {
+  if (registryPath === undefined || claimedBy === undefined) return
+  let acquired = false
+  try {
+    withRegistry(
+      registryPath,
+      (registry) => {
+        // AND A WRITE IS ONLY SAFE WHILE THE LOCK HOLDS — the same argument the claim
+        // makes, and this path is if anything more exposed to it. `withFlockSync` runs the
+        // callback UNGUARDED when the FFI is missing or `flock` returns nonzero, and both
+        // look like success from in here. `withRegistry` is a whole-registry
+        // read-modify-write: a save from a snapshot loaded without the lock DROPS any row a
+        // concurrent incarnation wrote in between. That is the lost update the claim's own
+        // comment warns about, performed by the tidy-up rather than by the decision — and
+        // it would corrupt rows belonging to keys this pass has nothing to do with.
+        //
+        // Skipping costs one bounded refusal on THIS key (the marker stands until its TTL),
+        // which is precisely what the TTL is for. Losing somebody else's row costs a live
+        // REPL nothing can find. Not a close call.
+        if (!acquired) return { registry, result: undefined, skipSave: true as const }
+        const prev = registry[sessionKey]
+        if (prev === undefined || prev.adoption_claim_by !== claimedBy) {
+          return { registry, result: undefined, skipSave: true as const }
+        }
+        const { adoption_claim_at: _a, adoption_claim_by: _b, ...rest } = prev
+        registry[sessionKey] = rest
+        return { registry, result: undefined }
+      },
+      {},
+      (ok) => {
+        acquired = ok
+      },
+    )
+  } catch {
+    /* the TTL is the backstop */
+  }
+}
+
+/**
  * Turn the clear's outcome into the CLOSE's outcome — exhaustively, so a new
  * `ClearOutcome` fails the typecheck here instead of defaulting into `closed`.
  *
@@ -1291,6 +1375,11 @@ async function claimRowOrUnwind(args: {
   /** The pid this adoption is attached to — written back when the row's is stale. */
   readonly pid: number
   readonly recordedPid: number | undefined
+  /** THIS pass's incarnation — minted fresh per adoption, and the only thing that
+   *  distinguishes two claimants of one row. */
+  readonly incarnation: string
+  /** Injected so a case can drive the TTL boundary without sleeping through it. */
+  readonly now: number
   readonly deps: BootAdoptionDeps
   /** Install the session and answer `adopted`. Runs ONLY if the row is still ours. */
   readonly publish: () => RowAdoptionOutcome
@@ -1310,7 +1399,7 @@ async function claimRowOrUnwind(args: {
   /** What the claim's critical section concluded. THREE, not a boolean: the row is ours,
    *  the row moved, or we never held the lock — and the third must not be able to reach
    *  the code that writes. */
-  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired'
+  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired' | 'claimed-elsewhere'
   let claim: ClaimResult
   // THE CLAIM IS A COMPARE-AND-SET, AND A CAS IS ONLY A CAS WHILE THE LOCK HOLDS
   // (Argus r14). `withFlockSync` deliberately runs unguarded when FFI is missing or
@@ -1354,7 +1443,29 @@ async function claimRowOrUnwind(args: {
         // THE PID IS THE ONE FIELD AN ADOPTION MAY CORRECT: the child is the same process
         // it always was, so a disagreement means the row was stale — and a stale pid is
         // what every liveness probe above here uses.
-        if (args.recordedPid !== args.pid) registry[args.sessionKey] = { ...prev, pid: args.pid }
+        // A VERIFICATION IS NOT A CLAIM (Argus r37). Everything above this line only
+        // READ the row, and the lock is released the moment this callback returns —
+        // `publish()` runs after it. So two incarnations could each take the lock in turn,
+        // each find the row unchanged BECAUSE the other had only read it, and each publish
+        // an attached wrapper on the same pane: two owners of one live transcript, which is
+        // the invariant this module exists to hold. Nothing already in the row can tell
+        // them apart — the generation is RESTORED from this row so both carry the same one,
+        // and the pid is the same pane's process. Only a write can.
+        const claimedAt = prev.adoption_claim_at
+        const claimedBy = prev.adoption_claim_by
+        const live =
+          claimedAt !== undefined && args.now - claimedAt < ADOPTION_CLAIM_TTL_MS
+        if (live && claimedBy !== undefined && claimedBy !== args.incarnation) {
+          return { registry, result: 'claimed-elsewhere' as ClaimResult, skipSave: true }
+        }
+        // OURS FROM HERE, and the write is what makes it so. The next claimant reads a
+        // CHANGED row and takes the refusal path above rather than a fresh success.
+        registry[args.sessionKey] = {
+          ...prev,
+          ...(args.recordedPid !== args.pid ? { pid: args.pid } : {}),
+          adoption_claim_at: args.now,
+          adoption_claim_by: args.incarnation,
+        }
         return { registry, result: 'ours' as ClaimResult }
       },
       {},
@@ -1390,6 +1501,18 @@ async function claimRowOrUnwind(args: {
     )
     return args.release(LOCK_UNACQUIRED_REASON)
   }
+  if (claim === 'claimed-elsewhere') {
+    // ANOTHER INCARNATION HOLDS THIS ROW. Not published and not closed: its pane is
+    // somebody else's to finish adopting, and `undecided` refuses the spawn without
+    // touching anything. The reason names the claim so a log reader can tell this from a
+    // row that moved — "somebody else got here first" and "the row now describes a
+    // different child" are different facts.
+    log(
+      `row ${args.sessionKey.slice(0, 32)}: another incarnation holds the adoption claim on pane ` +
+        `${args.expected.handle} — giving the child back rather than becoming a second owner.`,
+    )
+    return args.release(CLAIMED_ELSEWHERE_REASON)
+  }
   if (claim === 'row-moved') {
     log(
       `row ${args.sessionKey.slice(0, 32)} was REPLACED while this adoption was attaching — it now names another ` +
@@ -1407,6 +1530,9 @@ async function claimRowOrUnwind(args: {
       )
     }
   }
+  // THE CLAIM IS TAKEN AND NOTHING IS PUBLISHED YET — the window a second incarnation
+  // must lose in. See {@link BootAdoptionDeps.afterRowClaim}.
+  await args.deps.afterRowClaim?.()
   return args.publish()
 }
 
@@ -1763,6 +1889,7 @@ async function adoptRow(
    */
   const unwind = async (reason: string, attached?: PtyChild): Promise<RowAdoptionOutcome> => {
     sink.unregisterIf(record.sessionId, session)
+    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
@@ -1798,6 +1925,7 @@ async function adoptRow(
   ): RowAdoptionOutcome => {
     const reason = shutdownAbandonReason(at, signal.boundExpired)
     sink.unregisterIf(record.sessionId, session)
+    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
     // THE WRAPPER LETS GO OF THE PANE IT KEEPS ALIVE (Argus r26). `HerdrHost.open` starts
     // the poll loop before it returns the child, so a pass abandoned AFTER a completed
     // attach was leaving a live wrapper on a pane it had decided not to own — and the
@@ -1828,6 +1956,7 @@ async function adoptRow(
    *  give-back is the same, and only the reason differs. */
   const releaseWithReason = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
     sink.unregisterIf(record.sessionId, session)
+    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
     // Same hand-over as {@link release} — see the note there.
     attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
@@ -1848,6 +1977,11 @@ async function adoptRow(
     log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
     return { kind: 'undecided', sessionKey, reason }
   }
+
+  /** Minted once per pass: the value that distinguishes this claimant from any other,
+   *  and the value every give-back path CASes against. */
+  const claimIdentity = randomUUID()
+  session.adoptionClaimBy = claimIdentity
 
   let primed = false
   let child: PtyChild
@@ -1969,6 +2103,10 @@ async function adoptRow(
     expected: { handle, generation },
     pid: child.pid,
     recordedPid: record.pid,
+    // THIS PASS'S OWN IDENTITY, minted once above and recorded on the session so every
+    // path that stops owning it can give the claim back.
+    incarnation: claimIdentity,
+    now: Date.now(),
     deps,
     publish: () => {
       // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive

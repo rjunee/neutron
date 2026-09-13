@@ -23,7 +23,11 @@ import {
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
 import { claimShutdownSurvival } from './gateway-shutdown-survival.ts'
-import { resetBootAdoption, settleBootAdoptionsForShutdown } from './boot-adoption.ts'
+import {
+  releaseAdoptionClaim,
+  resetBootAdoption,
+  settleBootAdoptionsForShutdown,
+} from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
@@ -1163,6 +1167,11 @@ export async function shutdownAllPersistentRepls(
         // THAT STOPS OWNING A SESSION WITHOUT THE CHILD EXITING — four of them across two
         // files. The audit table is drawn that way now.
         session.liveHandle?.unregister()
+        // AND THE ADOPTION CLAIM. The fourth path that stops owning a session, and the one
+        // where leaving the claim behind would be worst: the next construction is exactly
+        // what this branch keeps the pane alive FOR, and a claim left set would refuse it
+        // until the TTL elapsed.
+        releaseAdoptionClaim(registryPath, key, session.adoptionClaimBy)
         //
         // `return`, not `continue`: this is the per-child teardown closure, and the
         // walk that calls it is above.
