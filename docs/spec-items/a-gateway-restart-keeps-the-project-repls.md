@@ -251,7 +251,11 @@ it must not swallow.
       **AND THE REFUSAL JOINS THE ERROR VOCABULARY**, carrying `repl_unreconciled` stamped on
       the thrown error rather than inferred from its prose: an unclassified retryable spawn
       error is mapped by the composer to a synthetic 429, so a local lock failure would cool
-      a healthy credential — the provider charged for a filesystem problem.
+      a healthy credential — the provider charged for a filesystem problem. The stamp is
+      VALIDATED against the taxonomy where it crosses into trusted use, because both consumers
+      index a lookup table with it: an unrecognised stamp is treated as unstamped rather than
+      trusted, since throwing there would replace the original failure with a `TypeError` and
+      skip the `channel.close()` that ends the turn's stream.
       *Verified by* `__tests__/pane-handle-persistence.test.ts` (the real flock forced to
       fail at each transition, asserting what was written, what the caller did about it and
       the class it emitted, each with a lock-held positive control),

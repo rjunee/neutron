@@ -14,6 +14,7 @@
  * the shape-matching lives here alongside the producer.
  */
 
+import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import type { SubstrateErrorClass } from '../../../events.ts'
 
 /**
@@ -90,7 +91,14 @@ export interface SubstrateClassed {
 export function classifyThrownSpawnError(err: unknown): SubstrateErrorClass | undefined {
   if (typeof err === 'object' && err !== null) {
     const stamped = (err as Partial<SubstrateClassed>).substrateErrorClass
-    if (typeof stamped === 'string') return stamped
+    // VALIDATED AGAINST THE TAXONOMY, not merely typeof-checked. The consumer does
+    // `SUBSTRATE_ERROR_CODES[code].retryable`, so a value that is a string but not a member
+    // would throw INSIDE the catch that is handling a spawn failure — turning a handled
+    // refusal into an unhandled crash on the turn path. Anything unrecognised falls through
+    // to the message matcher, which is the same disposition as never having been stamped.
+    if (typeof stamped === 'string' && Object.hasOwn(SUBSTRATE_ERROR_CODES, stamped)) {
+      return stamped
+    }
   }
   return classifySpawnError(err instanceof Error ? err.message : String(err))
 }

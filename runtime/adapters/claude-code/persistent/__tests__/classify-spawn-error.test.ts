@@ -116,4 +116,19 @@ describe('#539 r42 — BOTH refusal verbs join the same class', () => {
     )
     expect(classifyThrownSpawnError('an ordinary crash')).toBeUndefined()
   })
+
+  test('a stamp that is not a taxonomy member is ignored, not trusted', () => {
+    // The consumer does `SUBSTRATE_ERROR_CODES[code].retryable`, so trusting an arbitrary
+    // string would throw INSIDE the catch handling a spawn failure — turning a handled
+    // refusal into an unhandled crash on the turn path. An unrecognised stamp falls back to
+    // the message, which is the same disposition as never having been stamped at all.
+    const bogus = Object.assign(new Error('Executable not found in $PATH: "claude"'), {
+      substrateErrorClass: 'not_a_real_class',
+    })
+    expect(classifyThrownSpawnError(bogus)).toBe('binary_not_found')
+    const bogusAndUnmatched = Object.assign(new Error('nothing recognisable'), {
+      substrateErrorClass: 'not_a_real_class',
+    })
+    expect(classifyThrownSpawnError(bogusAndUnmatched)).toBeUndefined()
+  })
 })

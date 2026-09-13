@@ -2033,6 +2033,44 @@ Asked for after the second instance rather than the third. **Only one was mis-cl
 | shutdown-survival fail-closed (r14) | the child is killed at shutdown | nothing — no turn is in flight | one cold `--resume` on the next boot |
 | an in-flight turn on a fenced session (r39) | the per-turn inactivity watchdog | `turn_timeout`, retryable | one turn, retryable |
 
+### Round forty-three: the stamp joined a lookup table
+
+The mechanism round forty-two added — a producer naming its own `SubstrateErrorClass` on the
+thrown error — **joined a LOOKUP TABLE**, and both consumers do
+`SUBSTRATE_ERROR_CODES[code].retryable`. A stamp that is a string but not a member therefore
+threw `TypeError: undefined is not an object` **inside the catch that was handling the
+original failure**. Two consequences, and the second is worse: the real error is replaced by
+a TypeError, and `channel.close()` is skipped, so the stream never terminates.
+
+**The rule it was subject to was "anything used as a key into `SUBSTRATE_ERROR_CODES` must be
+a member of it"** — and the validation now happens once, in the classifier, at the point the
+value crosses from untrusted into trusted. Same shape as round twenty-seven's `channelName`
+check at the parse boundary, for the same reason. It does not throw: the classifier runs on
+an error path and must not be able to produce a second error, so an unrecognised stamp is
+treated as *unstamped* and falls through to the text matcher — the honest answer, because we
+were handed something claiming to be a classification that is not one.
+
+**The mutation does not fail, it HANGS, and that is the evidence for the second
+consequence.** M120 (remove the membership check) reds the classifier's unit case and then
+**times out** on the end-to-end one: with the TypeError thrown inside the catch,
+`channel.close()` never runs and the drain loop never ends. A case that asserted only the
+classifier's return value could not have shown that, which is why the end-to-end case drains
+to completion rather than using the helper that throws on the first error.
+
+#### The whole stamp path, enumerated rather than the one site fixed
+
+| Role | Sites | Validates? |
+|---|---|---|
+| **Writers** | one: `PaneOwnershipUnrecordedError` (`spawn.ts`) | **cannot emit an unknown code** — the field is `readonly substrateErrorClass = 'repl_unreconciled' as const` on a class declaring `implements SubstrateClassed`, whose field type is the `SubstrateErrorClass` union, so an invalid code is a compile error |
+| **Readers** | one: `classifyThrownSpawnError` | yes, against `SUBSTRATE_ERROR_CODES` |
+| **Table indexers** | two: `pool.ts` (the spawn catch and the mid-turn catch) | keyed on the reader's return only — safe *because* the single boundary validates |
+
+**So the "a writer that can emit an unknown code" version of this defect cannot occur for our
+own writer**, and the residual — an error object from OUTSIDE this tree carrying a
+coincidental `substrateErrorClass` — is exactly what the check handles. A pluggable PTY host
+(#540 keeps the host selectable) is the realistic source, which is why the end-to-end case
+drives it through `host.spawn` rather than by calling the classifier.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2043,7 +2081,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one and M116–M119 in round forty-two, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two and M120–M121 in round forty-three, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2193,6 +2231,8 @@ count from the rows below rather than trusting this sentence.
 | M117 | the classifier stops matching the SERVE refusal | `classify-spawn-error.test.ts` (1) |
 | M118 | a genuine `rate_limited` stops cooling the credential | `build-llm-call-substrate.test.ts` (2 — the r42 control AND the pre-existing taxonomy matrix) |
 | M119 | **both** the carrier and the matcher removed — the r41 defect exactly | `pane-handle-persistence.test.ts` (1) |
+| M120 | the membership check is removed — the r43 defect exactly | `classify-spawn-error.test.ts` (1) + `persistent-repl-substrate.test.ts` (1, **by TIMEOUT** — the skipped `channel.close()`) |
+| M121 | the membership check rejects legitimate codes too | `classify-spawn-error.test.ts` (2) + `persistent-repl-substrate.test.ts` (2, incl. the valid-stamp control) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
