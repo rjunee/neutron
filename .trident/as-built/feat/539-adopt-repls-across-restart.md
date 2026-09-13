@@ -460,6 +460,49 @@ over — the same procedural lesson round eleven recorded for the "still covers"
 applied one round later to a different pattern. A grep across the suites now shows every
 hold seam returning a handshake.
 
+### Round thirteen: two causes, one signal, and the wrong one winning
+
+**Neither cause was wrong; their interaction was.** `abandonInFlightPasses` skipped a
+pass that was already abandoned. So when the evidence timer fired first and the gateway
+shut down second, the cause stayed `evidence-bound` — and when the held attach finally
+returned, the pass took `unwind` and **closed the pane**, in the middle of a shutdown
+whose contract three hundred lines above says an unfinished pass is left alone. Two
+guards, each correct alone, composing into the one outcome both exist to prevent.
+
+**The ruling and its reasoning, kept with the code.** `unwind` closes because the child is
+verified as ours on our transcript, so leaving it is how a COLD SPAWN becomes a second
+owner. That argument does not hold during a shutdown: no cold spawn is coming, this
+process is going away, the row still names the pane, and the next boot visits that row and
+adopts-or-closes it on FRESH evidence. Leaving the pane is recoverable at the next boot;
+closing it destroys the conversation the whole feature exists to keep. The same asymmetry
+as the survival decision, arrived at from the other side. So `shutdown` outranks
+`evidence-bound`, and the upgrade is **one-way**: `abandonInFlightPasses` upgrades rather
+than skipping, and the timer's early return refuses to downgrade.
+
+**Both halves are now asserted rather than left to ordering.** The reverse direction was
+already safe by accident of where the early return sat; it is load-bearing now, so there
+is a case for it (shutdown first, timer second) and M53 reds when the return is removed.
+Without that case the one-way property would have been half-tested, which is what the gate
+asked me to check rather than assume.
+
+**The signal records both facts, because they are two findings.** `boundExpired` is set
+unconditionally by the timer and is independent of the operative `cause`, and the reason
+text says which one decided: *"the evidence bound expired AND the gateway then shut down …
+the SHUTDOWN is the operative cause"*. A reader looking at a pane that outlived its
+evidence window and was left alive anyway needs the ordering to understand it.
+
+**And the early return got an observable.** It used to `return` silently, which made the
+shutdown-first case impossible to write without a sleep — the test hung on a log line that
+branch never emitted. It now logs that the bound expired against an already-abandoned
+pass and that the bound does not take the disposition back. That is genuine diagnostic
+value, and it is also the only handle the case has: **a branch with no observable cannot
+be tested except by guessing, which is the same defect as the sleeps, one level down.**
+
+**The control matters here more than usual.** Both ordering cases assert the pane survives,
+and a bound that had simply stopped working would satisfy both. A third case runs the
+evidence timeout with no shutdown at all and requires `closed-unadoptable` with the pane
+closed, so the bound is still proved to do its job.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -470,7 +513,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten and M50–M51 in round twelve, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve and M52–M53 in round thirteen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -552,6 +595,8 @@ count from the rows below rather than trusting this sentence.
 | M49 | `entered` resolves at construction, not in the held method | **did NOT red — see round ten; the ordering is guaranteed elsewhere and this is recorded rather than claimed** |
 | M50 | the blanket whitespace refusal is restored | `pane-adoption-verdict.test.ts` (2) |
 | M51 | `argv0IsClaude` compares argv[0]'s first whitespace-delimited word | `pane-adoption-verdict.test.ts` (1) |
+| M52 | `abandonInFlightPasses` skips an already-abandoned pass again | `boot-adoption.test.ts` (1) |
+| M53 | the evidence timer overwrites a `shutdown` cause | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

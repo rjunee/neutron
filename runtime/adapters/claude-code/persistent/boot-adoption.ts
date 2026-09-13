@@ -164,8 +164,13 @@ export interface BootAdoptionDeps {
  * check fired instead, and says it proved something it did not. The same collapse this
  * tree keeps paying for, in a string.
  */
-const shutdownAbandonReason = (at: 'before the attach' | 'with the attach in flight' | 'at the row claim'): string =>
-  `the gateway shut down ${at} — the pane is still running and the row still names it, so the next boot reconciles it`
+const shutdownAbandonReason = (
+  at: 'before the attach' | 'with the attach in flight' | 'at the row claim',
+  boundExpired = false,
+): string =>
+  boundExpired
+    ? `the evidence bound expired AND the gateway then shut down ${at} — the SHUTDOWN is the operative cause, so the pane is left running: the row still names it and the next boot reconciles it on fresh evidence`
+    : `the gateway shut down ${at} — the pane is still running and the row still names it, so the next boot reconciles it`
 
 const defaultLog = (msg: string): void => {
   process.stderr.write(`[repl-adopt] ${msg}\n`)
@@ -190,6 +195,11 @@ const defaultLog = (msg: string): void => {
 interface AbandonSignal {
   abandoned: boolean
   cause: 'evidence-bound' | 'shutdown' | null
+  /** The evidence timer fired, whether or not it is the operative CAUSE. Recorded
+   *  separately because the two facts are independent: a pass can outrun its bound and
+   *  THEN be caught by a shutdown, and a log reader needs both to understand why a pane
+   *  that looked closeable was left alive. */
+  boundExpired: boolean
 }
 
 /**
@@ -253,7 +263,7 @@ export function beginBootAdoption(
   }
   const live = forRegistry.get(sessionKey)
   if (live !== undefined) return live.promise
-  const signal: AbandonSignal = { abandoned: false, cause: null }
+  const signal: AbandonSignal = { abandoned: false, cause: null, boundExpired: false }
   const started = reconcileOwnRepl(options, sessionKey, deps, signal).catch((e: unknown) => {
     // A pass that THREW decided nothing, and must not be mistaken for one that found
     // nothing: `reconcileRow` converts every expected failure into a verdict, so
@@ -278,7 +288,25 @@ export function beginBootAdoption(
   // rather than in an adoption built on observations that are no longer current.
   const budgetMs = deps.budgetMs ?? BOOT_ADOPTION_BUDGET_MS
   const timer = setTimeout(() => {
-    if (signal.abandoned) return
+    // RECORDED UNCONDITIONALLY: the bound expired, and that stays true even when the
+    // shutdown got here first and owns the disposition.
+    signal.boundExpired = true
+    // ONE-WAY, AND NOW LOAD-BEARING. A `shutdown` cause must never be downgraded to
+    // `evidence-bound`, because the two call for opposite acts on the pane: the bound
+    // closes it, the shutdown leaves it. This early return is the half that protects the
+    // shutdown-then-timer order; `abandonInFlightPasses` is the half that protects the
+    // timer-then-shutdown order, by UPGRADING rather than skipping.
+    if (signal.abandoned) {
+      // SAID OUT LOUD RATHER THAN RETURNED SILENTLY. The bound really did expire, and a
+      // reader looking at a pane that outlived its evidence window deserves to see why it
+      // was left alive anyway — and it is the only observable this branch has.
+      ;(deps.log ?? defaultLog)(
+        `boot adoption for key=${sessionKey.slice(0, 32)}: the ${budgetMs}ms evidence bound expired, but this ` +
+          `pass was already abandoned (${signal.cause ?? 'unknown cause'}) — the bound does not take the ` +
+          'disposition back, so the pane is left as that abandonment left it',
+      )
+      return
+    }
     signal.abandoned = true
     signal.cause = 'evidence-bound'
     ;(deps.log ?? defaultLog)(
@@ -391,7 +419,22 @@ function abandonInFlightPasses(): string[] {
   const abandoned: string[] = []
   for (const forRegistry of passes.values()) {
     for (const [key, handle] of forRegistry) {
-      if (handle.settled || handle.signal.abandoned) continue
+      // A SETTLED PASS HAS NOTHING LEFT TO DECIDE. Everything else is upgraded.
+      if (handle.settled) continue
+      // ALREADY OURS — idempotent, and the only cause this must not overwrite.
+      if (handle.signal.cause === 'shutdown') continue
+      // AND AN `evidence-bound` PASS IS UPGRADED, NOT SKIPPED (Argus r13). Skipping it
+      // left the cause at `evidence-bound`, so when the held attach finally returned the
+      // pass took the `unwind` path and CLOSED the pane — in the middle of a shutdown
+      // whose whole contract is that an unfinished pass is left alone.
+      //
+      // `unwind`'s argument for closing is that the child is verified as ours on our
+      // transcript, so leaving it is how a COLD SPAWN becomes a second owner. That
+      // argument does not hold here: there is no cold spawn coming, this process is
+      // going away, the row still names the pane, and the next boot visits that row and
+      // adopts-or-closes it on FRESH evidence. Leaving the pane is recoverable at the
+      // next boot; closing it destroys the conversation the feature exists to keep. The
+      // same asymmetry as the survival decision, reached from the other side.
       handle.signal.abandoned = true
       handle.signal.cause = 'shutdown'
       abandoned.push(key)
@@ -486,7 +529,7 @@ export async function reconcileOwnRepl(
   options: PersistentReplSubstrateOptions,
   sessionKey: string,
   deps: BootAdoptionDeps = {},
-  signal: AbandonSignal = { abandoned: false, cause: null },
+  signal: AbandonSignal = { abandoned: false, cause: null, boundExpired: false },
 ): Promise<RowAdoptionOutcome> {
   const log = deps.log ?? defaultLog
   const registryPath = options.replRegistryPath
@@ -1210,7 +1253,7 @@ async function adoptRow(
         `pane ${handle}: this gateway is shutting down mid-verification — LEAVING the pane and the row ` +
           'exactly as they are for the next boot to reconcile',
       )
-      return { kind: 'undecided', sessionKey, reason: shutdownAbandonReason('before the attach') }
+      return { kind: 'undecided', sessionKey, reason: shutdownAbandonReason('before the attach', signal.boundExpired) }
     }
     const close = await closeAndClear(
       host,
@@ -1340,7 +1383,7 @@ async function adoptRow(
     at: 'with the attach in flight' | 'at the row claim',
     attached?: PtyChild,
   ): RowAdoptionOutcome => {
-    const reason = shutdownAbandonReason(at)
+    const reason = shutdownAbandonReason(at, signal.boundExpired)
     sink.unregisterIf(record.sessionId, session)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     pool.delete(sessionKey)

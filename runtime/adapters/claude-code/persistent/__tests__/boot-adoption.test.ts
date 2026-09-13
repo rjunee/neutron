@@ -1041,3 +1041,132 @@ describe('one registry, two projects: a substrate reconciles ITS OWN row and not
     expect(resp.status).toBe(401)
   })
 })
+
+
+describe('the evidence bound and the shutdown, in both orders', () => {
+  /**
+   * ARGUS r13. The two causes call for OPPOSITE acts on the pane — `evidence-bound`
+   * closes it, `shutdown` leaves it — so which one is operative when both have happened
+   * is the whole question, and `abandonInFlightPasses` used to skip a pass that was
+   * already abandoned. The cause stayed `evidence-bound`, the held attach returned, the
+   * pass took `unwind`, and the pane was CLOSED in the middle of a shutdown whose
+   * contract says an unfinished pass is left alone.
+   *
+   * The ruling, and the reason it is not merely a preference: `unwind`'s argument for
+   * closing is that the child is verified as ours on our transcript, so leaving it is how
+   * a COLD SPAWN becomes a second owner. There is no cold spawn coming here — this
+   * process is going away, the row still names the pane, and the next boot visits that
+   * row and adopts-or-closes it on fresh evidence. Leaving is recoverable; closing
+   * destroys the conversation the feature exists to keep.
+   */
+  const supervise = (f: Fixture): void => {
+    supervisedBySessionKey.set(KEY, {
+      replRegistryPath: f.registryPath,
+    } as unknown as PersistentReplSubstrateOptions)
+  }
+
+  /** Resolves when the evidence timer has actually fired — its log line is the only
+   *  observable it has. A sleep here would let the case decay into the plain shutdown
+   *  test the moment the runner got slow. */
+  function boundWatcher(): { fired: Promise<void>; log: (msg: string) => void } {
+    let resolve!: () => void
+    const fired = new Promise<void>((r) => {
+      resolve = r
+    })
+    return {
+      fired,
+      log: (msg: string) => {
+        // BOTH of the timer's lines: it says "too old" when it owns the disposition and
+        // "bound expired, already abandoned" when it does not. Matching only the first
+        // would hang forever in the shutdown-first order, which is the case that needs
+        // this most.
+        if (/evidence is too old|evidence bound expired/.test(msg)) resolve()
+      },
+    }
+  }
+
+  it('TIMER FIRST, THEN SHUTDOWN: the shutdown wins and the pane is left alive', async () => {
+    const f = fixture()
+    supervise(f)
+    const { entered, release } = f.host.holdAttach()
+    const bound = boundWatcher()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: bound.log,
+      budgetMs: 20,
+    })
+    await entered
+    // THE PREMISE, ASSERTED. Without this the evidence timer might never fire and the
+    // case would quietly become the plain shutdown test, which already passes.
+    await bound.fired
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
+    release()
+
+    const outcome = await pass
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    // BOTH FACTS, AND WHICH ONE DECIDED. A reader needs the ordering to understand why a
+    // pane that looked closeable was left running.
+    expect(reason).toMatch(/evidence bound expired/)
+    expect(reason).toMatch(/SHUTDOWN is the operative cause/)
+    // THE ASSERTION THAT CARRIES IT: the pane is still there.
+    expect(f.host.closed).toEqual([])
+    const row = readRow(f.registryPath)
+    expect(row?.pane_handle).toBe(HANDLE)
+    expect(row?.child_generation).toBe(GENERATION)
+    expect(pool.get(KEY)).toBeUndefined()
+  })
+
+  it('SHUTDOWN FIRST, THEN TIMER: the timer does not take the cause back', async () => {
+    // The other direction of the same one-way rule, and the case mutation (b) needs:
+    // without it, deleting the evidence timer's early return would downgrade a shutdown
+    // to `evidence-bound` with nothing to notice.
+    const f = fixture()
+    supervise(f)
+    const { entered, release } = f.host.holdAttach()
+    const bound = boundWatcher()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: bound.log,
+      budgetMs: 120,
+    })
+    await entered
+    // The shutdown lands first — its grace is far below the evidence budget.
+    await shutdownAllPersistentRepls({ adoptionGraceMs: 10 })
+    // ...and THEN the evidence timer fires, while the attach is still held.
+    await bound.fired
+    release()
+
+    const outcome = await pass
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    // The bound DID expire and is recorded; the shutdown is still what decided.
+    expect(reason).toMatch(/evidence bound expired/)
+    expect(reason).toMatch(/SHUTDOWN is the operative cause/)
+    expect(f.host.closed).toEqual([])
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+  })
+
+  it('THE CONTROL: with no shutdown at all, the bound still CLOSES', async () => {
+    // Neither case above may be passing because the evidence bound stopped working. With
+    // nothing else in play it must still end the pane, which is what it is for.
+    const f = fixture()
+    const { entered, release } = f.host.holdAttach()
+    const bound = boundWatcher()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: bound.log,
+      budgetMs: 20,
+    })
+    await entered
+    await bound.fired
+    release()
+
+    const outcome = await pass
+    expect(outcome.kind).toBe('closed-unadoptable')
+    expect(f.host.closed).toEqual([HANDLE])
+  })
+})
