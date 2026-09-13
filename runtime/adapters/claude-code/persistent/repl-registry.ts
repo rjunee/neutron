@@ -727,7 +727,17 @@ export function withRegistryRead<T>(
  */
 export function withRegistry<T>(
   path: string,
-  mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },
+  mutate: (registry: ReplRegistry) => {
+    registry: ReplRegistry
+    result: T
+    /** Ask for NO WRITE AT ALL. A callback that decides not to act must be able to say
+     *  so: returning the registry unchanged still SAVES it, and the snapshot it saves
+     *  was loaded before the callback ran — so a concurrent writer's newer row is
+     *  silently dropped. That is a lost update performed by a caller that refused to
+     *  act, which is the opposite of what refusing is for. Optional, so no existing
+     *  caller changes. */
+    skipSave?: true
+  },
   options: WithRegistryOptions = {},
   onOutcome?: (acquired: boolean) => void,
 ): T {
@@ -758,9 +768,16 @@ export function withRegistry<T>(
   return withFlockSync(
     registryLockPath(path),
     () => {
-      const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
-      const { registry, result } = mutate(current)
-      if (!skipSave) saveRegistry(path, registry)
+      const { registry: current, skipSave: corruptSkip } = loadRegistryForMutation(
+        path,
+        onCorrupt,
+        onDropRow,
+      )
+      const { registry, result, skipSave: callerSkip } = mutate(current)
+      // EITHER skip suppresses the write, and they are different facts: the corrupt-path
+      // skip protects a file this module could not parse, the caller's skip protects a
+      // file another WRITER may have changed under a lock we did not hold.
+      if (corruptSkip !== true && callerSkip !== true) saveRegistry(path, registry)
       return result
     },
     onOutcome,

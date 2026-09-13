@@ -28,6 +28,7 @@ import { shutdownAllPersistentRepls } from '../pool.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
+import { withRegistry } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
@@ -1279,12 +1280,18 @@ describe('the row claim rests on a lock, and says so when it does not get one', 
     // A stale row pointing at a pane we DID close is the recoverable direction — the next
     // boot probes that handle and gets a positive absence.
     //
+    // THE LOCK FAILS ONLY FOR THE CLEAR, which is what this case is about. Since r18 the
+    // pre-close gate ALSO reads the row under the lock, so failing the flock for the
+    // whole pass would refuse the close itself and this case would never reach the clear
+    // at all — it would silently become a different test. The fake's `onClose` hook runs
+    // inside `closeHandle`, which is exactly between the two.
+    //
     // The row deliberately MATCHES, so the refusal is the only thing that can stop the
     // clear; a fixture whose row already failed the comparison would make this case
-    // vacuous, which is the shape that has bitten this branch three times.
+    // vacuous, which is the shape that has bitten this branch four times.
     const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
     expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
-    setFlockImplForTests(() => 1)
+    f.host.onClose = () => setFlockImplForTests(() => 1)
     const outcome = await run(f)
 
     // The pane was a claude on our transcript without our channel, so it is closed —
@@ -1316,5 +1323,131 @@ describe('the row claim rests on a lock, and says so when it does not get one', 
     expect(outcome.kind).toBe('closed-foreign-owner')
     expect(f.host.closed).toEqual([HANDLE])
     expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+})
+
+
+describe('a refusal writes NOTHING, and the close requires the row as well as the process', () => {
+  afterEach(() => setFlockImplForTests(undefined))
+
+  /** The registry as another writer would leave it: compact, which is NOT what
+   *  `saveRegistry` emits. The formatting is the witness — a byte-identical rewrite is
+   *  invisible to a field comparison, and that is precisely the write being hunted. */
+  function writeCompact(path: string, registry: Record<string, unknown>): string {
+    const bytes = JSON.stringify(registry)
+    writeFileSync(path, bytes)
+    return bytes
+  }
+
+  it('a refused claim does not rewrite the registry FILE', async () => {
+    // ARGUS r18. `withRegistry` saved unconditionally, so a callback that returned the
+    // registry unchanged still wrote it — from a snapshot loaded before the callback ran,
+    // WITHOUT the lock. Field comparison cannot see that: our row matches our snapshot by
+    // construction. Bytes can.
+    const f = fixture({ record: { pid: 1 } })
+    const before = writeCompact(f.registryPath, {
+      [KEY]: { ...(readRow(f.registryPath) as object), pid: 1 },
+    })
+    expect(before).not.toContain('\n')
+    setFlockImplForTests(() => 1)
+
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    // NOT REWRITTEN AT ALL — not even with the same content.
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
+
+  it('THE CONTROL: a claim that DOES act rewrites the file', async () => {
+    // Without this, a `withRegistry` that had simply stopped writing would satisfy the
+    // case above. The same fixture with the lock granted must change the bytes.
+    const f = fixture({ record: { pid: 1 } })
+    const before = writeCompact(f.registryPath, {
+      [KEY]: { ...(readRow(f.registryPath) as object), pid: 1 },
+    })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('adopted')
+    expect(readFileSync(f.registryPath, 'utf8')).not.toBe(before)
+    expect(readRow(f.registryPath)?.pid).toBe(4242)
+  })
+
+  it('AND THE LOST UPDATE ITSELF, at the level it can actually be constructed', async () => {
+    // The consequence of writing on a refusal is that a row another incarnation wrote
+    // BETWEEN the snapshot and the save is erased. That interleave is cross-process by
+    // nature: `withRegistry` loads and saves inside one synchronous flock section, so a
+    // pass-level case cannot get between them and would pass either way — which is the
+    // vacuity this branch keeps catching. So it is constructed where it CAN be: the
+    // callback itself plays the concurrent writer, which is exactly the window.
+    const f = fixture()
+    const other = 'other-instance other-user other-proj other-cred'
+    let sawSnapshot = false
+    const result = withRegistry(
+      f.registryPath,
+      (registry) => {
+        sawSnapshot = true
+        // Another incarnation writes a DIFFERENT key after our snapshot was taken.
+        const onDisk = JSON.parse(readFileSync(f.registryPath, 'utf8')) as Record<string, unknown>
+        onDisk[other] = { sessionKey: other, sessionId: 'c'.repeat(8), cwd: '/srv/other', pid: 9191 }
+        writeFileSync(f.registryPath, JSON.stringify(onDisk))
+        // ...and we decline to act, which must mean declining to WRITE.
+        return { registry, result: 'refused' as const, skipSave: true }
+      },
+    )
+    expect(sawSnapshot).toBe(true)
+    expect(result).toBe('refused')
+    const after = JSON.parse(readFileSync(f.registryPath, 'utf8')) as Record<string, { pid?: number }>
+    // Their row is still there. Without `skipSave` our stale snapshot overwrites it.
+    expect(after[other]?.pid).toBe(9191)
+    expect(after[KEY]).toBeDefined()
+  })
+
+  it('does NOT close a pane the row has re-claimed under a NEWER generation', async () => {
+    // ARGUS r18. A newer incarnation of OURS on a reused pane id classifies as
+    // `close-foreign-owner` — it is a claude on this transcript that is not our child —
+    // so the identity check alone happily authorises ending the thing that replaced us.
+    //
+    // THE ROW MOVES DURING THE PASS, not before it. Writing the new row up front would
+    // simply make it the record the pass DECIDES from, and the case would prove nothing:
+    // the pass must start out owning (HANDLE, GENERATION) and discover at the moment of
+    // the close that the pane has been re-claimed.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    expect(f.host.inspections).toEqual([HANDLE])
+    // SAME handle, NEW generation: the pane was re-claimed, not replaced.
+    writeRegistry(f.registryPath, { pane_handle: HANDLE, child_generation: 'gen-NEWER' })
+    release()
+
+    const outcome = await pass
+    // NOT CLOSED. That is the whole assertion.
+    expect(f.host.closed).toEqual([])
+    expect(outcome.kind).toBe('undecided')
+    expect(readRow(f.registryPath)?.child_generation).toBe('gen-NEWER')
+  })
+
+  it('but DOES close a pane no row names — the act this path exists for', async () => {
+    // The other side, and it is why "refuse whenever the row changed" would be wrong: if
+    // the row names a DIFFERENT pane, nothing names the one we are holding, so it is an
+    // unreferenced live claude on this transcript. Closing it is the orphan-and-second-
+    // owner prevention this module is for. Same construction, one field different.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    writeRegistry(f.registryPath, { pane_handle: 'w9:p-ELSEWHERE', child_generation: 'gen-newer' })
+    release()
+
+    const outcome = await pass
+    expect(f.host.closed).toEqual([HANDLE])
+    expect(outcome.kind).toBe('undecided')
+    expect(readRow(f.registryPath)?.pane_handle).toBe('w9:p-ELSEWHERE')
   })
 })

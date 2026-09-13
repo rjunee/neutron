@@ -669,6 +669,87 @@ control — an empty machine, and a busy machine with nothing of ours on it — 
 that matters most here: without it, answering `unknown` for everything would satisfy the
 finding and the feature would never clear a handle again.
 
+### Round eighteen: the refusals were writing the file, and the close was licensed by half the evidence
+
+**Two rounds of fail-closed work did not yet do what it said.** `withRegistry` called
+`saveRegistry` unconditionally after the callback, and `skipSave` came only from the
+corrupt-load path — the mutate callback had no way to ask for one. So both refusal sites,
+returning the registry unchanged because they had not got the lock, still **wrote the
+file**, from a snapshot loaded before the callback ran. A concurrent incarnation's newer
+row is dropped: **a lost update performed by the code that refuses to act because it did
+not get the lock**. The callback can now return `skipSave: true`, and both sites do.
+
+**And the tests could not have seen it, for two separate reasons.** They compared parsed
+fields of OUR row, which match our snapshot by construction — so a byte-identical rewrite
+is invisible, and another writer's row disappearing is invisible. The first is now caught
+by writing the fixture in a compact, non-`saveRegistry` formatting and comparing **bytes**:
+the formatting is the witness, which is the M41 lesson applied where it finally matters.
+
+**The second could not be constructed at the level it was asked for, and that is reported
+rather than papered over.** The lost update needs a writer to land BETWEEN the snapshot
+and the save, and `withRegistry` loads and saves inside one synchronous flock section — so
+a pass-level case cannot get between them and would have passed either way, which is
+exactly the vacuity this branch keeps catching. It is constructed where it can be: a
+direct `withRegistry` case whose own callback plays the concurrent writer, which IS that
+window. It reds under M61; the pass-level version would not have.
+
+**The close was licensed by the process alone.** `closeAndClear` re-checked process
+identity, closed, and only then ran the row CAS. A newer incarnation of OURS on a reused
+pane id classifies as `close-foreign-owner` — it is a claude on this transcript that is not
+our child — so the identity gate authorised ending the very thing that replaced us, and
+the CAS reported `row-moved` after the pane was already gone. The row is now read under
+the lock immediately before the close.
+
+**The first version of that fix was too strong, and the over-strict mutation is what says
+so.** Refusing whenever the row had changed broke the act this path exists for: if the row
+names a DIFFERENT pane, nothing names the one we are holding, so it is an unreferenced
+live claude on this transcript and closing it is the orphan-and-second-owner prevention
+the module is for. The rule is narrower — refuse only when the row names **this** pane
+under another generation (someone re-claimed it), or when the row could not be read at all
+(the same "unestablished evidence licenses no destructive act" rule the `unavailable`
+branch above it already follows). M63 mutates it back to the over-strict form and reds two
+cases; both directions are pinned.
+
+**What the pre-close check achieves, said at both its own site and in the spec item.** It
+does NOT eliminate the window — a row can still move between the read and the close. It
+narrows that window from the whole close (three awaits, any of which a spawn can complete
+inside) to the gap between two adjacent statements with no I/O between them, and it changes
+what LICENSES the act: the row is now required as well as the process. Closing the window
+properly needs a durable "closing" marker written under the lock before the close, which
+trades this residual for another — a crash between marker and close leaves a row marked
+closing over a live pane. My view, offered rather than punted: the narrowing is the right
+trade here, because the remaining window contains no I/O and the marker's own residual is
+harder to reason about than the one it removes. It is written as a narrowing in both
+places, not as an elimination.
+
+**The lock-vs-clear test had to be rebuilt for an honest reason.** Since the pre-close gate
+now reads the row under the lock too, forcing the flock to fail for the whole pass refuses
+the CLOSE and the case never reaches the clear — it would silently have become a different
+test. The flock is now failed inside `onClose`, which runs between the two.
+
+### An instrument note: a red check that is not about the code, and how to tell
+
+`Analyze (javascript-typescript)` failed on `7c4ec676`. It was not a finding, and the way
+to establish that is worth keeping, because **"CodeQL failed" reads identically whether a
+query found something or an upload dropped a file.**
+
+The discriminator is **whether an analysis was recorded for the ref**:
+
+- `GET /code-scanning/analyses?ref=refs/pull/<n>/merge` — an alert-bearing failure has one;
+  an upload failure has none.
+- `GET /code-scanning/alerts?ref=…&state=open` — empty here.
+- The job log corroborates rather than decides: every query interpreted, `CodeQL scanned
+  2730 out of 2730 TypeScript files`, SARIF exported, `Uploading results`, and then nothing
+  before the step failed.
+
+Every open alert in the repo at that moment was pre-existing on `main`, in files this
+branch does not touch (`js/redos` in `cores/sdk/manifest.ts`, `js/polynomial-redos` in
+three `tasks/`/`scribe/` files). The right response was to change nothing — not the code,
+and not the alert state. This is the same family as the branch's other instrument findings
+— a scan that cannot see a shape, a branch with no observable, a byte comparison whose
+bytes are indistinguishable — and it belongs with them: **before treating a red as a
+finding, establish that the instrument ran.**
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -679,7 +760,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen and M59–M60 in round seventeen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen and M61–M63 in round eighteen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -770,6 +851,9 @@ count from the rows below rather than trusting this sentence.
 | M58 | a claim that throws closes the pane again | `boot-adoption.test.ts` (1) |
 | M59 | the scan reports `none` whenever nothing strictly matched | `orphan-adoption.test.ts` + `boot-adoption.test.ts` (3) |
 | M60 | the consumer clears the handle on an `unknown` scan | `orphan-adoption.test.ts` + `boot-adoption.test.ts` (2) |
+| M61 | `withRegistry` ignores the caller's `skipSave` | `boot-adoption.test.ts` (2) |
+| M62 | the pre-close gate does not consult the row | `boot-adoption.test.ts` (1) |
+| M63 | the pre-close gate refuses on ANY row change (**over-strict**) | `boot-adoption.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

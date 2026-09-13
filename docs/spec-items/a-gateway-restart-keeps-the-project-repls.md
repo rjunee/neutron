@@ -257,6 +257,20 @@ above under *Why reconciliation is per key*; repeated here because it is a resid
 reader should not have to infer it. Nothing is reconciled for a project this gateway has
 not been asked to serve yet.
 
+**The close is licensed by the row as well as the process, but the window is narrowed
+rather than eliminated.** A pane is only closed when the row still names it — checked
+under the flock immediately before the close — because a newer incarnation of ours on a
+reused pane id is indistinguishable, to a process-identity check, from a foreign owner.
+That check makes the destructive act require the row and not just the process, and it
+shrinks the exposed window from the whole close (an inspection round trip, a `/health`
+probe and a close, each an await during which a spawn can complete) to the gap between
+that read and the next statement, with no I/O in between. **It does not close the window.**
+A row can still move inside that gap. Closing it properly would need a durable "closing"
+marker written under the lock before the close, which trades this residual for a different
+one — a crash between the marker and the close leaves a row marked closing over a live
+pane — so the narrowing is what shipped and this paragraph is here so nobody reads it as
+the stronger claim.
+
 **A REPL that was mid-spawn when the shutdown landed is killed rather than kept (#674).**
 The shutdown's late-spawn path terminates a session whose spawn settled after the pending
 grace expired, without consulting the survival gate — so a herdr-hosted child whose row

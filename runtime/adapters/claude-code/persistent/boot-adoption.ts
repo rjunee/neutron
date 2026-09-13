@@ -76,7 +76,13 @@ import {
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
 import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
-import { getRecord, loadRegistry, withRegistry, type ReplRegistryRecord } from './repl-registry.ts'
+import {
+  getRecord,
+  loadRegistry,
+  withRegistry,
+  withRegistryRead,
+  type ReplRegistryRecord,
+} from './repl-registry.ts'
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
@@ -905,6 +911,45 @@ async function closeAndClear(
       reason: `the pane no longer identifies as this row's transcript at close time (${still.kind})`,
     }
   }
+  // AND THE ROW MUST STILL NAME THIS CHILD AT THE MOMENT OF THE CLOSE (Argus r18).
+  //
+  // The process check above is not sufficient to license a destructive act. A NEWER
+  // INCARNATION OF OURS on a reused pane id classifies as `close-foreign-owner` — it is
+  // a claude on this transcript that is not OUR child — so the identity gate happily
+  // authorises closing the very thing that replaced us. The clearing CAS below would
+  // then report `row-moved`, which is true and arrives after the pane is already gone.
+  //
+  // WHAT THIS ACHIEVES, AND WHAT IT DOES NOT. It does NOT eliminate the window; a row
+  // can still move between this read and `closeHandle`. It narrows that window from the
+  // whole close — an inspection round trip, a `/health` probe and a close, each an await
+  // during which a spawn can complete — to the gap between this read and the next
+  // statement, with no I/O in between. And it changes what licenses the act: the
+  // destructive step now requires the ROW as well as the process, instead of the process
+  // alone. The residual is stated in the spec item rather than being described as an
+  // elimination.
+  if (registryPath !== undefined) {
+    const owned = rowStillNames(registryPath, sessionKey, {
+      handle,
+      generation: record.child_generation,
+    })
+    if (owned === 'reclaimed') {
+      log(
+        `pane ${handle}: the ROW now names this pane under ANOTHER generation — NOT closing. A newer ` +
+          'incarnation on a reused pane id looks exactly like a foreign owner to the identity check, and ' +
+          'ending it would destroy the child that replaced us.',
+      )
+      return { kind: 'row-moved' }
+    }
+    if (owned === 'unreadable') {
+      // The same rule the `unavailable` branch above already follows: evidence we could
+      // not gather does not license a destructive act.
+      log(`pane ${handle}: the row could not be re-read under the lock before the close — NOT closing`)
+      return {
+        kind: 'unverified',
+        reason: 'the row could not be re-read under the lock immediately before the close',
+      }
+    }
+  }
   try {
     await host.closeHandle(handle)
   } catch (e) {
@@ -920,6 +965,52 @@ async function closeAndClear(
       deps,
     ),
   )
+}
+
+/**
+ * Does the row STILL name this (handle, generation)? Read under the flock, written
+ * nowhere — the pre-close gate's half of the row check (Argus r18).
+ *
+ * Separate from {@link clearPaneHandleIfUnchanged} because the two ask the same question
+ * at opposite ends of the destructive act and only one of them writes. This one licenses;
+ * that one records.
+ */
+function rowStillNames(
+  registryPath: string,
+  sessionKey: string,
+  expected: { readonly handle: string; readonly generation: string | undefined },
+): 'ours' | 'reclaimed' | 'not-named' | 'unreadable' {
+  try {
+    let acquired = false
+    const row = withRegistryRead(
+      registryPath,
+      (registry) => registry[sessionKey],
+      (ok) => {
+        acquired = ok
+      },
+    )
+    // An unheld lock makes this read unordered against a concurrent writer, and the act
+    // it licenses is destructive — so it is not evidence, by the same rule the claim and
+    // the shutdown decision already follow.
+    if (!acquired) return 'unreadable'
+    // THE DISTINCTION THAT MATTERS IS WHICH PANE THE ROW NAMES, not merely that the row
+    // changed. Refusing on any change is too strong and breaks the act this module exists
+    // to perform:
+    //
+    //   - the row names THIS pane with ANOTHER generation → somebody re-claimed this
+    //     exact pane, and closing it destroys the child that replaced us. REFUSE.
+    //   - the row names a DIFFERENT pane, or no row exists → nothing names the pane we
+    //     are holding, so it is an unreferenced live claude on this transcript. Closing
+    //     it is precisely the orphan-and-second-owner prevention this path is for.
+    //     PROCEED.
+    //   - the row names this pane and this generation → ours. PROCEED.
+    if (row?.pane_handle === expected.handle) {
+      return row.child_generation === expected.generation ? 'ours' : 'reclaimed'
+    }
+    return 'not-named'
+  } catch {
+    return 'unreadable'
+  }
 }
 
 /**
@@ -1071,7 +1162,11 @@ async function claimRowOrUnwind(args: {
         // already rewritten the pid without mutual exclusion, while logging that it had
         // left the row alone. The clear below got this right; the claim beside it did not
         // inherit it.
-        if (!acquired) return { registry, result: 'lock-unacquired' as ClaimResult }
+        // NO WRITE AT ALL, not "write the same thing back". Without `skipSave` this
+        // returns the snapshot loaded before the callback ran and `withRegistry` saves
+        // it — dropping any row a concurrent incarnation wrote in between. A lost update
+        // performed by the branch that refuses to act because it did not get the lock.
+        if (!acquired) return { registry, result: 'lock-unacquired' as ClaimResult, skipSave: true }
         const prev = registry[args.sessionKey]
         if (
           prev === undefined ||
@@ -1235,7 +1330,7 @@ function clearPaneHandleIfUnchanged(
         // written for a LIVE pane — stranding that pane, which is the unrecoverable
         // direction. A stale row pointing at a pane we did close is the recoverable one:
         // the next boot probes the handle, gets a positive `gone`, and clears it then.
-        return { registry, result: 'lock-unacquired' as ClearOutcome }
+        return { registry, result: 'lock-unacquired' as ClearOutcome, skipSave: true }
       }
       // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
       // whose `pane_handle` key is present-but-undefined would serialise to a key the
