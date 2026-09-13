@@ -187,6 +187,8 @@ count from the rows below rather than trusting this sentence.
 | M32 | the `row-moved` verdict is computed and discarded | `adoption-refuses…` (1) |
 | M33 | the close path ignores a moved row | `boot-adoption.test.ts` (1) |
 | M34 | the close path never REPORTS a moved row | `boot-adoption.test.ts` (1) |
+| M35 | a failed row claim publishes the adoption anyway | `boot-adoption.test.ts` (1) |
+| M36 | the row claim does not compare handle and generation | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -350,9 +352,27 @@ function.**
 The second one also had a test that asserted the row was preserved and *expected* the
 unsafe verdict — so the case pinned the half that already worked.
 
-What changed is the shape, not the vigilance: `clearHandleThenVerdict` returns the
-CALLER'S VERDICT rather than a status, so a caller that fails to use it fails to return
-anything and the typecheck refuses it. Where a status is genuinely needed (`CloseOutcome`)
+3. **The pid write's own `wrote` boolean, in the round that named the habit.** It
+   compared the row correctly and reached a LOG: an adoption whose row had been
+   replaced mid-attach left its child live in the pool and answered `adopted` while the
+   durable row named another incarnation's child. Two live owners on one transcript —
+   the invariant the item exists to hold — produced by the fix for instance 2, in the
+   same file, while the paragraph above it was being written.
+
+   **And the argument for leaving it did not survive contact with the branch's own
+   code.** I had disclosed it as out of scope because two gateways sharing an instance
+   home is outside the design — but the compare-and-clear six hundred lines up exists
+   *because* they can race on this registry, and `repl-registry.ts` designs its
+   mutations for cross-process concurrency by construction. The same race cannot be a
+   blocker in one place and out of scope in the other. A disclosure is not a decision.
+
+What changed is the shape, not the vigilance, and it had to change twice.
+`clearHandleThenVerdict` returns the CALLER'S VERDICT rather than a status, so a caller
+that fails to use it fails to return anything and the typecheck refuses it.
+`claimRowOrUnwind` goes further because its failure branch has WORK to do as well as a
+verdict to report: it owns both outcomes — the publish and the unwind are passed in, so
+there is no path where the answer is computed and ignored AND no path where the failure
+branch forgets to give the child back. Where a status is genuinely needed (`CloseOutcome`)
 it grew a `row-moved` member that the one mapping function must handle. A `void`
 function with an interesting return value is an invitation, and this module had two.
 

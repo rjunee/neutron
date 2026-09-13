@@ -785,6 +785,89 @@ function errorText(e: unknown): string {
  * it" shape this module was already caught on once, arriving through the fix for it.
  */
 /**
+ * CLAIM THE ROW FOR THIS ADOPTION — publish the session, or give the child back.
+ *
+ * THE THIRD INSTANCE OF ONE HABIT, AND THE REASON THE SHAPE CHANGED AGAIN. The pid
+ * write here already compared the row correctly and returned a `wrote` boolean — which
+ * reached a LOG and nothing else. So an adoption whose row had been replaced mid-pass
+ * left its child live in the pool and reported `adopted`, while the durable row named
+ * somebody else's: two live owners on one transcript, which is the invariant this whole
+ * item exists to hold. Exactly the shape of the two instances before it — a value added
+ * last to a function whose caller was already written to ignore it.
+ *
+ * THE ARGUMENT FOR LEAVING IT WAS NOT AVAILABLE, and that is worth stating: "two
+ * gateways sharing one instance home is outside this design" cannot be true here while
+ * the compare-and-clear six hundred lines up exists precisely because they can race on
+ * this file (`repl-registry.ts`'s mutation model is cross-process by construction). The
+ * same race cannot be a blocker in one place and out of scope in the other.
+ *
+ * So this function owns BOTH outcomes. The caller returns its result and can do nothing
+ * else with it: there is no branch in which the verdict is computed and ignored, and
+ * none in which the failure path forgets to unwind.
+ */
+async function claimRowOrUnwind(args: {
+  readonly registryPath: string | undefined
+  readonly sessionKey: string
+  readonly expected: { readonly handle: string; readonly generation: string }
+  /** The pid this adoption is attached to — written back when the row's is stale. */
+  readonly pid: number
+  readonly recordedPid: number | undefined
+  readonly deps: BootAdoptionDeps
+  /** Install the session and answer `adopted`. Runs ONLY if the row is still ours. */
+  readonly publish: () => RowAdoptionOutcome
+  /** Take everything back — pool entry, child, sink registration, watchers, pane. */
+  readonly unwind: (reason: string) => Promise<RowAdoptionOutcome>
+}): Promise<RowAdoptionOutcome> {
+  const log = args.deps.log ?? defaultLog
+  // Unsupervised: there is no row, so there is nothing to race for and nothing to
+  // claim. (`reconcileOwnRepl` cannot reach an adoption without a registry, so this is
+  // a total-function guard rather than a live path.)
+  if (args.registryPath === undefined) return args.publish()
+  const registryPath = args.registryPath
+  let stillOurs: boolean
+  try {
+    stillOurs = withRegistry(registryPath, (registry) => {
+      const prev = registry[args.sessionKey]
+      if (
+        prev === undefined ||
+        prev.pane_handle !== args.expected.handle ||
+        prev.child_generation !== args.expected.generation
+      ) {
+        return { registry, result: false }
+      }
+      // THE PID IS THE ONE FIELD AN ADOPTION MAY CORRECT: the child is the same process
+      // it always was, so a disagreement means the row was stale — and a stale pid is
+      // what every liveness probe above here uses.
+      if (args.recordedPid !== args.pid) registry[args.sessionKey] = { ...prev, pid: args.pid }
+      return { registry, result: true }
+    })
+  } catch (e) {
+    // The registry could not be read or written. We cannot establish that the row is
+    // still ours, and an adoption that cannot be confirmed is not one: give the child
+    // back rather than publish on an unverified claim.
+    return await args.unwind(`the registry could not be claimed for this adoption: ${errorText(e)}`)
+  }
+  if (!stillOurs) {
+    log(
+      `row ${args.sessionKey.slice(0, 32)} was REPLACED while this adoption was attaching — it now names another ` +
+        `incarnation's child. Giving pane ${args.expected.handle} back rather than serving a second owner.`,
+    )
+    return await args.unwind(ROW_MOVED_REASON)
+  }
+  if (args.recordedPid !== args.pid) {
+    // WHAT IS ON DISK, not what was asked for.
+    const after = getRecord(registryPath, args.sessionKey)
+    if (after?.pid !== args.pid) {
+      log(
+        `row ${args.sessionKey.slice(0, 32)} still records pid ${String(after?.pid)} after adopting pid ${args.pid} — ` +
+          'liveness probes will ask about the wrong process',
+      )
+    }
+  }
+  return args.publish()
+}
+
+/**
  * Clear the handle and PRODUCE THE CALLER'S VERDICT — the shape that makes the result
  * impossible to drop.
  *
@@ -1176,10 +1259,9 @@ async function adoptRow(
       ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
     })
 
-    // In the pool LAST, because being in the pool is what makes this session servable:
-    // until every line above has run, a turn that found it here would inject into a
-    // session whose exit wiring, watchers or scan target were still missing.
-    pool.set(sessionKey, Promise.resolve(session))
+    // The pool insert is the LAST thing, and it is now inside the row claim below:
+    // being in the pool is what makes this session servable, and it must not become
+    // servable until the durable row has been confirmed to still name THIS child.
   } catch (e) {
     // A WATCHER THAT WOULD NOT START MUST NOT STRAND A LIVE CHILD. Everything between
     // the attach and the pool insert can throw — a host's `beginOutput`, a watcher
@@ -1192,49 +1274,23 @@ async function adoptRow(
     )
   }
 
-  // WHAT THE ROW NOW HOLDS, read back, not what we asked it to hold. The pid is the
-  // one field adoption can legitimately correct — the child is the same process, so a
-  // disagreement means the row was stale, and a stale pid is what every liveness probe
-  // above here uses.
-  //
-  // AND ONLY ONTO THE ROW THIS PASS ADOPTED FROM. Same hazard as the handle clear: the
-  // decision came from a snapshot taken before the inspection, the health probe and the
-  // attach, and another incarnation can have written a whole new child into this key
-  // meanwhile. Writing our pid over THAT row would point every liveness probe at a
-  // process belonging to a different child.
-  if (registryPath !== undefined && record.pid !== child.pid) {
-    try {
-      const wrote = withRegistry(registryPath, (registry) => {
-        const prev = registry[sessionKey]
-        if (
-          prev === undefined ||
-          prev.pane_handle !== handle ||
-          prev.child_generation !== generation
-        ) {
-          return { registry, result: false }
-        }
-        registry[sessionKey] = { ...prev, pid: child.pid }
-        return { registry, result: true }
-      })
-      if (!wrote) {
-        log(
-          `row ${sessionKey.slice(0, 32)} moved while this adoption was running — NOT writing pid ${child.pid} ` +
-            'over it; the row now describes a child this pass did not adopt',
-        )
-      } else {
-        const after = getRecord(registryPath, sessionKey)
-        if (after?.pid !== child.pid) {
-          log(
-            `row ${sessionKey.slice(0, 32)} still records pid ${String(after?.pid)} after adopting pid ${child.pid} — ` +
-              'liveness probes will ask about the wrong process',
-          )
-        }
-      }
-    } catch (e) {
-      log(`could not update pid for ${sessionKey.slice(0, 32)}: ${errorText(e)}`)
-    }
-  }
-  return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
+  // CLAIM THE ROW, THEN PUBLISH — one act, and the only place this function can answer
+  // `adopted` from. If the row was replaced while this pass was inspecting, probing and
+  // attaching, the child we hold is a SECOND owner of that transcript: the durable row
+  // names the one that should serve it, so ours is given back rather than served.
+  return await claimRowOrUnwind({
+    registryPath,
+    sessionKey,
+    expected: { handle, generation },
+    pid: child.pid,
+    recordedPid: record.pid,
+    deps,
+    publish: () => {
+      pool.set(sessionKey, Promise.resolve(session))
+      return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
+    },
+    unwind: (reason) => unwind(reason, child),
+  })
 }
 
 /** Fire this key's pass without awaiting it, for the wiring site that is synchronous

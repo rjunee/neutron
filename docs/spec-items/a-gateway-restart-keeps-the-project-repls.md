@@ -122,6 +122,15 @@ it must not swallow.
       *Verified by* `__tests__/boot-adoption.test.ts` ("does NOT close a pane whose
       identity changed after the inspection", plus its vanished and positive-control
       siblings).
+- [ ] **AN ADOPTION WHOSE ROW IS REPLACED MID-ATTACH GIVES THE CHILD BACK.** The pass
+      publishes nothing until it has re-claimed the row; if another incarnation wrote
+      its own child there, A's pool entry, sink registration, watchers and pane are all
+      taken back and the verdict is `undecided`. Serving it would be a second live owner
+      of a transcript the durable row assigns to somebody else.
+      *Verified by* `__tests__/boot-adoption.test.ts` ("an adoption whose row is
+      replaced mid-attach GIVES THE CHILD BACK" — asserting the pool, `childByKey`, a
+      401 on the child's own credential and the closed pane, not just the row), with an
+      uncontended positive control beside it.
 - [ ] **A WRITE ONLY EVER TOUCHES THE ROW IT DECIDED ABOUT.** Clearing a handle, and
       correcting an adopted pid, are compare-and-set on the (handle, generation) pair
       the pass inspected. A row another incarnation replaced mid-pass is left exactly as

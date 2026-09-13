@@ -610,18 +610,50 @@ describe('a clear only ever touches the row it decided about', () => {
     expect(readRow(f.registryPath)?.pane_handle).toBe('w9:p-NEWER')
   })
 
-  it('does not write an adopted pid onto a row that moved under it either', async () => {
-    // The same exposure on the other write this pass makes.
+  it('an adoption whose row is replaced mid-attach GIVES THE CHILD BACK', async () => {
+    // THE POSTCONDITIONS ARE EXTERNAL, and an earlier version of this case asserted
+    // only that B's row kept its pid — which the unsafe behaviour also produced. A
+    // left its child live in the pool and reported `adopted` while the durable row
+    // named B's: two live owners on one transcript.
     const f = fixture({ record: { pid: 1 } })
+    const credential = deriveChildSinkToken(sink.token, GENERATION)
     const release = f.host.holdInspect()
     const pass = reconcileOwnRepl(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })
     await Bun.sleep(20)
     writeRegistry(f.registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 777 })
     release()
-    await pass
+
+    const outcome = await pass
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/replaced by another incarnation/i)
+    // NOTHING OF A'S SURVIVES: not the pool entry a turn would be served from...
+    expect(pool.get(KEY)).toBeUndefined()
+    expect(childByKey.get(KEY)).toBeUndefined()
+    // ...nor the sink registration its child would reply through...
+    expect(await postReply(credential)).toBe(401)
+    // ...nor the pane, which is closed rather than left as a second owner.
+    expect(f.host.closed).toEqual([HANDLE])
+    // And B's row is untouched, pid included.
     const row = readRow(f.registryPath)
     expect(row?.pid).toBe(777)
     expect(row?.pane_handle).toBe('w9:p-NEWER')
+    expect(row?.child_generation).toBe('gen-newer')
+  })
+
+  it('an UNCONTENDED adoption still installs, and corrects a stale pid', async () => {
+    // The positive control for the case above: refusing every adoption would satisfy
+    // it and deliver nothing. The row's pid is deliberately stale here, so the claim
+    // has a write to make as well as a comparison.
+    const f = fixture({ record: { pid: 1 } })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('adopted')
+    expect(await pool.get(KEY)).toBeDefined()
+    expect(childByKey.get(KEY)).toBeDefined()
+    expect(f.host.closed).toEqual([])
+    // The pid the pass attached to is now the one every liveness probe will read.
+    expect(readRow(f.registryPath)?.pid).toBe(4242)
+    // And the row it claimed is otherwise intact.
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 })
 
