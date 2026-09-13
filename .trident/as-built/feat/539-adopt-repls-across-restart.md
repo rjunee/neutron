@@ -1472,6 +1472,65 @@ boot visits/reconciles/re-adopts": `SPEC.md` 0, spec item 0, `boot-adoption.ts` 
 `pool.ts` 0 — and 1 each in the as-built and `gateway-shutdown-survival.ts`, both of which
 are the corrective prose quoting what was wrong. Precise statements: 3 / 5 / 5 / 2 / 4 / 1.
 
+### Round thirty-three: a sentence that names ONE exception reads as qualified for all of them
+
+`SPEC.md`'s 2026-09-12 Decisions Log entry still said *"the next boot VISITS that row and
+adopts or closes; there is no branch that leaves a verified pane running"*. This branch's
+own unmerged text (`git show origin/main:SPEC.md | grep -c 'A GATEWAY RESTART KEEPS'` → 0),
+so it was fixed in place. The 2026-09-13 entry narrowing it was not enough on its own:
+"narrows and does not supersede" leaves two normative statements in one log, one of them
+false, and a reader who stops at the first has been told something untrue.
+
+**Why the subject-indexed sweep passed over it — the third limit on the rule.** That
+sentence is immediately followed by *"**The residual is named rather than hidden** — a
+registry lost between shutdown and boot strands one pane per session key…"*. The site
+**carries a residual**, just not this one: it qualifies the registry-loss case and says
+nothing about the unconstructed-substrate case. A classifier asking "does this site
+acknowledge an exception" gets a yes and moves on.
+
+> **The three limits, in order of discovery:**
+> 1. (r11) Grep the claim, not the file you were handed — a claim has siblings.
+> 2. (r32) Grep the claim's SUBJECT, not its wording — a paraphrase is invisible to a
+>    search for the phrase you last saw it in.
+> 3. (r33) Then ask **which** exception each qualification covers — *a sentence that names
+>    one exception reads as qualified for all of them*, and an adjacent "the residual is…"
+>    is the most convincing way for a universal claim to hide.
+
+The bullet now states **both** residuals plainly rather than merging them, because they have
+different causes and different remedies: (1) a row whose substrate this process never
+constructs is visited by nothing until the next construction reaches it; (2) a registry lost
+between shutdown and boot strands one pane per session key. "No branch that leaves a
+verified pane running" is kept and scoped to the rows a construction reaches.
+
+**Re-classification with the third question, and it converges.** Of the twenty universal
+candidates, thirteen were already resolved in round thirty-two and the rest now answer the
+third question explicitly:
+
+| Candidate | Qualification covers | Verdict |
+|---|---|---|
+| `SPEC.md:297` log bullet | *was* registry-loss only | **was false — fixed this round**, now names both |
+| `SPEC.md:293` log headline | the late-spawn (#674) **and** the construction scoping | correct |
+| `gateway-shutdown-survival.ts:25` | the unconstructed case, named three lines below | correct |
+| `repl-registry.ts:346/530/792` — "every row" | n/a — the subject is parsing, read errors and writes, not reconciliation | correct, different subject |
+| spec item `:83` — "enumerating every row would be worse" | n/a — argues AGAINST the thing | correct |
+| as-built ×5 | quotations of the false claim inside its own correction | correct |
+
+**No fourteenth.** The sweep converges.
+
+**Consistency check, with the Decisions Log entries counted on their own line** — the one
+place the claim was missed twice:
+
+| Artefact | unqualified | precise |
+|---|---|---|
+| Log entry, 2026-09-12 "A GATEWAY RESTART KEEPS ITS PROJECT REPLS" | **0** | 4 |
+| Log entry, 2026-09-13 "EVERY PROJECT REPL … PER SUBSTRATE" | **0** | (its whole subject) |
+| `SPEC.md` §2 body | **0** | 1 |
+| spec item | **0** | 4 |
+| `boot-adoption.ts` | **0** | 7 |
+| `pool.ts` | **0** | 1 |
+| `gateway-shutdown-survival.ts` | 1 — the quotation in its own correction | 3 |
+| as-built | 5 — all quotations inside corrections | 7 |
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
