@@ -1380,7 +1380,7 @@ cells rather than being left out because one row does not apply to it.
 | sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` (identity-guarded) |
 | `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` | released, guarded on `=== child` |
 | `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key | released, guarded on the awaited session being ours |
-| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped | stopped, and set to `undefined` — this child's transcript is terminal |
+| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped | **both** stopped and both references cleared — `sizeWatchdog` was stopped and RETAINED until r53, which this cell overstated; the reference is cleared now rather than the wording softened |
 | the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live | **n/a — the child has EXITED.** This is the cell the old scope line was drawn around: there is no hand-over to make and no pane to close, which is why the path looked outside the table and is exactly why it still needs every other row |
 | **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind | cancelled |
 | **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | n/a — the fence sets `fenced` instead, which is the same statement for a path whose whole purpose is to stop serving | **cleared — the r51 defect: this cell was empty, and a dispatched deadline callback fenced a key whose child had just died, so a crashed REPL became a permanently refused one instead of respawning** |
@@ -2442,9 +2442,9 @@ child mirror, the timer.
 | Field | Could the handle have been replaced before the callback ran? | Guard |
 |---|---|---|
 | `session.selfFenceTimer` (r49) | **yes** — a renewal re-arms every tick | identity comparison, **added here** |
-| `childByKey` | yes — a concurrent respawn | `=== session.child` (r30) | released, guarded on `=== child` |
-| `pool` entry | yes — a newer session under the same key | `deleteOwnPoolEntry`'s peek (r30) |
-| sink registration | yes | `unregisterIf` (identity-scoped) | released — `unregisterIf` (identity-guarded) |
+| `childByKey` | yes — a concurrent respawn | `=== session.child` (r30) |
+| `pool` entry | yes — a newer session under the same key | `deleteOwnPoolEntry`'s peek (r30) — **and the exit teardown's REJECT arm, which had no guard at all until r53** |
+| sink registration | yes | `unregisterIf` (identity-scoped) |
 | `liveHandle` | yes | identity-scoped `unregister()` (r30/r31) |
 | `activeTurn` | yes — a later turn | `t.turnId !== turnId` (r5/r6) |
 | the spawn reservation (r47) | yes | CAS on the reserver id, released in a `finally` |
@@ -2487,7 +2487,7 @@ Every one of those was a state in which two gateways could serve one transcript,
 corruption the item exists to prevent. The adoption path itself is a few hundred lines; the
 rest is the protocol, its failure dispositions, and the instruments that prove each one — and
 **the mutation table is the part to read first** — see its own header for the counted breakdown
-(140 rows with a red behind them, 7 recorded as evidence of something other than a guard).
+(143 rows with a red behind them, 7 recorded as evidence of something other than a guard).
 
 ### Round fifty-one: a new guard inherits every existing path's obligations
 
@@ -2560,10 +2560,54 @@ guard), M93 (not isolable); 140 live; the scope note, the table header and the t
 print the same two numbers; the per-structure table has six columns on every one of its nine
 rows.
 
+### Round fifty-three: the table caught the code, and three claims caught themselves
+
+**The audit table found a defect in the implementation — the first time on this branch it has
+worked in that direction.** The table said the exit teardown's pool deletion was "guarded on the
+awaited session being ours"; the REJECT arm deleted the current entry with no identity check at
+all. Capture promise A, the key is replaced by B, A rejects — and A's catch evicts **B**, leaving
+a live session with no entry in the map every turn resolves through.
+
+> **A claim precise enough to be falsified is worth more than a vaguer true one.** The cell did
+> not say "the pool is cleaned up"; it said what the guard was, and that is what made the gap
+> checkable. Twenty-three rounds of writing cells that specific paid for itself here.
+
+**The arm came from round thirty, and its reasoning was right about one axis and silent about the
+other**: *a pooled promise that rejects owns no child, so deleting it is right, and dropping the
+arm would wedge a rejected entry under the key forever.* True of FULFILLED-versus-REJECTED, and
+nothing about IDENTITY. Both halves are kept — a genuinely current rejected entry is still
+removed, which M149 pins, because the alternative fix ("never delete on rejection") reintroduces
+exactly the wedge round thirty was protecting against.
+
+**Three accuracy items, all in this record, all narrow:**
+
+- **The delayed-callback table was malformed** — two rows carried a fourth cell, appended by the
+  script that widened the *other* table one round earlier, because both tables have rows starting
+  `| childByKey |` and `| sink registration |`. A mechanical edit matched on a row's first cell
+  and hit the wrong table. Both tables are now checked block-by-block against their own headers
+  (13 blocks, 0 malformed rows), which is the check that catches this class rather than this
+  instance.
+- **The mutation introduction restated the claim its own correction had just fixed.** Round
+  fifty-two added the counted breakdown and left the blanket sentence standing three lines above
+  it — *the "correcting it in one artefact moves the lag" shape from round twenty-two, happening
+  inside a single file.* The introduction is scoped to the 140 live rows now.
+- **The watcher cell overstated.** It said both watchers were "stopped, and set to `undefined`";
+  child exit stopped `sizeWatchdog` and retained the reference. Given round thirty-one's
+  live-handle lesson, a retained reference on a path that stops owning gets the question rather
+  than the softer wording: both readers already tolerate `undefined`, so the reference is cleared
+  and the cell is true.
+
 ### Mutation table
 
-Each row reverts one guard and names the file that goes red. Every mutation is applied
-and reverted mechanically, with the tree verified clean afterwards.
+**The 143 LIVE rows** each revert one guard and name the file that goes red; every mutation is
+applied and reverted mechanically, with the tree verified clean afterwards. The other seven
+record why a mutation CANNOT red, and are not evidence that a guard is tested — the breakdown is
+immediately below.
+
+*(Round fifty-three: this introduction is the second attempt at this sentence. Round fifty-two
+added the counted breakdown and left the blanket claim standing three lines above it — the
+"correcting it in one artefact moves the lag" shape from round twenty-two, happening inside one
+file. The claim is scoped to the live rows now rather than restated beside its own correction.)*
 
 **THE COUNT, BROKEN DOWN, because a headline that overstates this table is the same defect as a
 stale count in a criterion — in the artefact whose whole purpose is to be checkable.** Round
@@ -2571,7 +2615,7 @@ fifty-two caught exactly that: a sentence claiming all 147 rows had a red behind
 seven do not and say so in their own cells. Round twenty caught the same shape (M38 presented as
 live evidence) and the remedy is the one used then — name the kinds and count them.
 
-> **147 rows = 140 LIVE + 7 RECORDED-BUT-NOT-EVIDENCE.**
+> **150 rows = 143 LIVE + 7 RECORDED-BUT-NOT-EVIDENCE.**
 >
 > A live row has been applied and observed to redden the named case(s). The other seven are
 > kept because *why* a mutation cannot red is itself a finding — but they are not evidence that
@@ -2593,7 +2637,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one and M148–M150 in round fifty-three, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2771,6 +2815,9 @@ count from the rows below rather than trusting this sentence.
 | M145 | a released session can still be fenced (no claim guard) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M146 | child exit leaves `paneClaimBy` set — the r51 defect | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M147 | ~~child exit clears the claim AFTER the cancel~~ — **no red, structurally**: adjacent synchronous statements, so no callback can observe the gap. Recorded because the ruling asked for the answer either way, and because it retires a claim the comment made | no-op by construction |
+| M148 | the reject arm drops its identity check — the r53 defect | `child-exit-pool-identity.test.ts` (1) |
+| M149 | the reject arm is dropped entirely | `child-exit-pool-identity.test.ts` (1 — the current-rejection control; without it the "fix" wedges the key) |
+| M150 | the size-watchdog reference is retained again | `child-exit-pool-identity.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

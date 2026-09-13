@@ -69,8 +69,15 @@ export function wireChildExit(args: ChildExitWiring): void {
       // terminal; a respawn starts a fresh watcher for the new child.
       session.deadTurnWatcher?.stop()
       session.deadTurnWatcher = undefined
-      // Stop the size-watchdog cadence — the child it watched is gone (row #13).
+      // Stop the size-watchdog cadence — the child it watched is gone (row #13) — AND CLEAR
+      // THE REFERENCE, which this path did not (r53). `deadTurnWatcher` two lines up was
+      // cleared and this one was not, and the audit table's cell claimed both were: an
+      // asymmetry with no reason behind it, and the round-thirty-one lesson says a retained
+      // reference on a path that stops owning deserves the question rather than the softer
+      // wording. Stopping makes it inert; clearing makes the cell true and leaves nothing for
+      // a later reader to wonder about.
       session.sizeWatchdog?.stop()
+      session.sizeWatchdog = undefined
       // F4 — reconcile the watchdog's live-process view against this real exit,
       // distinguishing a CLEAN/EXPECTED exit from a CRASH so CrashedAgentDetector can
       // actually observe crashes in production (a child that exits between 30 s ticks
@@ -143,7 +150,19 @@ export function wireChildExit(args: ChildExitWiring): void {
         try {
           if ((await pooled) === session) pool.delete(sessionKey)
         } catch {
-          pool.delete(sessionKey)
+          // THE REJECT ARM IS IDENTITY-GUARDED TOO (Argus r53), and this is the third arm of
+          // the same rule rather than a new one. Round thirty said to keep this arm because "a
+          // pooled promise that rejects owns no child, so deleting it is right, and dropping
+          // the arm would wedge a rejected entry under the key forever" — sound about the
+          // FULFILLED-versus-REJECTED axis and silent about IDENTITY. A rejected STALE promise
+          // owning nothing is not a licence to delete a different, CURRENT entry: capture A,
+          // the key is replaced by B, A rejects, and A's catch evicts B — a live session with
+          // no pool entry, which is the map every turn resolves through.
+          //
+          // `pool.get(...) === pooled` rather than awaiting again: the current value is what
+          // matters, and re-awaiting a rejected promise would only re-throw. Both halves are
+          // kept — a genuinely current rejected entry is still removed.
+          if (pool.get(sessionKey) === pooled) pool.delete(sessionKey)
         }
       }
     }),
