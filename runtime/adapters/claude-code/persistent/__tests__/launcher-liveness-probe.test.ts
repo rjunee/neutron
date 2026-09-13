@@ -48,7 +48,11 @@ function writeRegistry(path: string, rows: Partial<ReplRegistryRecord>[]): void 
       sessionKey,
       sessionId: `session-${i}`,
       cwd: `/work/repo-${i}`,
-      channelName: `chan-${i}`,
+      // A CONFORMING GENERATED NAME per row (`neutron-` + 32 hex), because the registry
+      // schema now requires the shape `spawn.ts` actually emits — a row that cannot have
+      // been produced by this system is dropped. The index still varies the name, so rows
+      // stay distinguishable.
+      channelName: `neutron-${String(i).padStart(32, '0')}`,
       has_session: true,
       ...row,
     }

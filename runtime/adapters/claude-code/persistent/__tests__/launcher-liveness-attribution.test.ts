@@ -43,7 +43,7 @@ function registry(over: Partial<ReplRegistryRecord> = {}, opts: { noPid?: boolea
     sessionKey: KEY,
     sessionId: 'session-1',
     cwd: '/repo',
-    channelName: 'chan-1',
+    channelName: 'neutron-15ab0d54e889689d70965ba3f945b480',
     has_session: true,
     pid: DEAD_PID,
     child_generation: 'gen-1',

@@ -1463,7 +1463,7 @@ describe('a refusal writes NOTHING, and the close requires the row as well as th
         sawSnapshot = true
         // Another incarnation writes a DIFFERENT key after our snapshot was taken.
         const onDisk = JSON.parse(readFileSync(f.registryPath, 'utf8')) as Record<string, unknown>
-        onDisk[other] = { sessionKey: other, sessionId: 'c'.repeat(8), cwd: '/srv/other', pid: 9191 }
+        onDisk[other] = { sessionKey: other, sessionId: 'neutron-4a8a08f09d37b73795649038408b5f33'.repeat(8), cwd: '/srv/other', pid: 9191 }
         writeFileSync(f.registryPath, JSON.stringify(onDisk))
         // ...and we decline to act, which must mean declining to WRITE.
         return { registry, result: 'refused' as const, skipSave: true }
@@ -1725,7 +1725,7 @@ describe('a row DROPPED as schema-invalid is unreadable, not absent — and only
           pane_handle: 'w9:p-ELSEWHERE',
           child_generation: 'gen-newer',
         },
-        [OTHER]: { sessionKey: OTHER, sessionId: SESSION_ID, cwd: '/x', channelName: 'c', has_session: 'no' },
+        [OTHER]: { sessionKey: OTHER, sessionId: SESSION_ID, cwd: '/x', channelName: 'neutron-4a8a08f09d37b73795649038408b5f33', has_session: 'no' },
       }),
     )
     release()
@@ -1762,7 +1762,7 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
     sessionKey: OTHERKEY,
     sessionId: 'cccccccc-1111-2222-3333-444444444444',
     cwd: '/srv/other',
-    channelName: 'neutron-otherotherotherotherotherother11',
+    channelName: 'neutron-2dc8057d4bfa9cb7fec3924ca8f450ee',
     has_session: true,
     pid: 9191,
   }

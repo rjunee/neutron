@@ -163,7 +163,7 @@ describe('the registry row records the current child terminal', () => {
         sessionKey: key,
         sessionId: 'eeeeeeee-1111-2222-3333-444444444444',
         cwd: '/tmp/neutron-handle',
-        channelName: 'neutron-stale',
+        channelName: 'neutron-904a860d597f559a30a30e0748dcec8e',
         has_session: false,
         pane_handle: 'w9:p-from-a-previous-life',
         // A pid the kernel will not know (above `pid_max`), so the boot pass can

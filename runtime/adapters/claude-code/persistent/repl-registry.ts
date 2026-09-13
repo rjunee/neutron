@@ -381,6 +381,33 @@ export function serializeRegistry(registry: ReplRegistry): string {
   return JSON.stringify(registry, null, 2)
 }
 
+/**
+ * The generated dev-channel form, and the ONLY one a row may carry.
+ *
+ * `spawn.ts` emits `` `neutron-${randomBytes(16).toString('hex')}` `` — 32 lowercase hex
+ * characters, always. Checked against what the spawner actually produces rather than
+ * against a guess about it.
+ */
+const GENERATED_CHANNEL_NAME = /^neutron-[0-9a-f]{32}$/
+
+/**
+ * WHY `channelName` IS THE ONE FIELD WITH A SHAPE (#539, Argus r27).
+ *
+ * `typeof x === 'string'` was enough while every channel name in the system had been
+ * generated in-process moments earlier. Adoption changed that: it is the first path that
+ * takes this value from DISK and feeds it to `replSessionConfigPaths`, which builds
+ * `join(tmpdir(), 'neutron-repl-' + channelName)` — and the child-exit path UNLINKS what
+ * those paths point at. A row carrying `x/../../../some/dir` therefore turns "the registry
+ * is garbage" into "files outside the temp directory get deleted", which is a far worse
+ * failure than the one it starts from.
+ *
+ * A row that fails this is DROPPED, and since round twenty a dropped TARGET row surfaces
+ * as `unreadable` rather than reading as absence — so the malformed row becomes a REFUSAL
+ * rather than a deletion. That is the two rounds composing: the shape check makes the bad
+ * value visible and specific here, `readRegistryState` makes the consequence safe, and
+ * `replSessionConfigPaths` enforces the containment property itself so no future caller
+ * can bypass either.
+ */
 function isMinimalRecord(raw: unknown): boolean {
   if (raw === null || typeof raw !== 'object') return false
   const r = raw as Record<string, unknown>
@@ -388,6 +415,7 @@ function isMinimalRecord(raw: unknown): boolean {
     typeof r.sessionId === 'string' &&
     typeof r.cwd === 'string' &&
     typeof r.channelName === 'string' &&
+    GENERATED_CHANNEL_NAME.test(r.channelName) &&
     typeof r.has_session === 'boolean'
   )
 }

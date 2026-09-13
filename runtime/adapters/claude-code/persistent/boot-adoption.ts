@@ -25,8 +25,12 @@
  * on a session key, because a spawn for a key whose pane is still alive puts two
  * `claude` processes on one transcript — the exact invariant the repo enforces by
  * killing the old process (`session-respawn.ts`, `spawn.ts`). So:
- *   - `beginBootAdoption` runs once per registry path, started by the same block that
- *     arms the watchdog (`adapters/claude-code/index.ts`);
+ *   - `beginBootAdoption` runs once per (registry path, SESSION KEY) — NOT once per
+ *     registry, which is what an earlier revision of this line said and what six rounds
+ *     went into removing. One registry holds a row per pool key, and reconciling one row
+ *     under another row's options would scope a REPL to the wrong project; see the
+ *     `passes` docblock below for the full argument. Started by the same block that arms
+ *     the watchdog (`adapters/claude-code/index.ts`);
  *   - `awaitBootAdoption` gates the watchdog tick, the boot drain AND
  *     `getOrSpawnSession`. A turn that arrives during the pass waits for it; the pass
  *     is bounded so the wait is too.

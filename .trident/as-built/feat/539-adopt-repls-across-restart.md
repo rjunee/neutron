@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M81 less M31, M38 and M80 = 78**.
+only dead row. The live count is therefore **M1–M84 less M31, M38 and M80 = 81**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1171,6 +1171,57 @@ release variants now `detach?.()` the child they hand back.
 of the round-nine and round-twenty-four cases. M45 (3), M46 (2), M47 (1) and M72 (1) all
 still red. Nothing eaten — and saying so is only worth anything because the check was run.
 
+### Round twenty-seven: a persisted string became a filesystem path, and the exit path deletes
+
+**The chain.** `isMinimalRecord` accepted any string as `channelName`;
+`replSessionConfigPaths` builds `join(tmpdir(), 'neutron-repl-' + channelName)` with no
+containment check; adoption feeds it the **persisted** value; and the child-exit path
+UNLINKS what those paths point at. A row carrying `x/../../../some/dir` therefore deletes
+`session-mcp.json` / `session-settings.json` / `session-tools.json` under that directory —
+bounded to three filenames, which is the only thing keeping it from being worse.
+
+**Newly reachable through this branch, which is why it was not deferrable.** Before
+adoption, the channel name was always one `spawn.ts` had generated in-process moments
+earlier. Adoption is the first caller that takes it from disk, where it can be corrupted,
+hand-edited, or written by anything else running as this user. The threat model is a local
+write to the registry — and it converts "the registry is garbage" into "files outside the
+temp directory get deleted", which is a much worse failure than the one it starts from.
+
+**Two layers, because they answer different questions.** The containment check lives in
+`replSessionConfigPaths`, so the property holds for **every caller including ones that do
+not exist yet** and cannot be bypassed by a new one. The shape check lives at the registry
+boundary — `^neutron-[0-9a-f]{32}$`, checked against what `spawn.ts` actually emits
+(`randomBytes(16).toString('hex')`) rather than against a guess — so a bad value is visible
+early and specific. **Neither alone.**
+
+**And the two rounds compose.** A row failing the shape check is dropped, and since round
+twenty a dropped TARGET row surfaces as `unreadable` rather than reading as absence — so
+the malformed row becomes a REFUSAL instead of a deletion.
+
+**My first test expectations were wrong, and correcting them is the clearest statement of
+why both layers exist.** I listed `x/y`, `../evil` and `/etc` as escapes. They are not:
+`join` keeps all three under the temp directory, so the containment check correctly permits
+them. Containment asks *"could this delete something outside the temp dir"*; the shape
+check asks *"could this row have been produced by this system at all"*. Only the second
+rejects those three, and the case now says so rather than quietly dropping them.
+
+**The schema tightening had a blast radius worth reporting: 67 new failures** across
+thirteen test files, every one a fixture using a channel name production could never emit
+(`'chan-1'`, `'c'`, `'persisted-channel'`). The same "fixture encodes my model rather than
+reality" shape this branch has now hit six times — and this time the model was *the
+registry schema itself*. The fixtures were rewritten to conforming names derived
+deterministically per distinct literal, so rows that needed to differ still differ, and two
+`trident/` files were reverted because their `channelName` is a `buildReplArgv` input
+rather than a registry row — churn in another lane's file for no gain. Verified against the
+baseline: 2 failures before the change, the same 2 after (`buildGBrainMemory`, unrelated).
+
+**The module header contradicted the design it introduces**, saying `beginBootAdoption`
+"runs once per registry path" while the cache is nested by registry path AND session key —
+the exact ambiguity six rounds went into removing, reintroduced at the top of the file a
+reader meets first. Corrected, with the reason, and grepped for siblings with a positive
+control; the one other hit (`gateway-shutdown-survival.ts`, "once per registry loss") is
+about registry LOSS, not adoption scope, and is correct as written.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1181,7 +1232,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five and M79–M81 in round twenty-six, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six and M82–M84 in round twenty-seven, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1293,6 +1344,9 @@ count from the rows below rather than trusting this sentence.
 | M79 | `detached` dropped from `send`'s EXECUTION-time check | `herdr-adoption.test.ts` (1) |
 | M80 | ~~`detached` dropped from `send`'s QUEUE-time check~~ — **subsumed**: the execution-time check catches it, so this patch cannot red. The two overlap by design | subsumed |
 | M81 | `release` does not detach the attached child | `boot-adoption.test.ts` (1) |
+| M82 | the containment check is removed from `replSessionConfigPaths` | `session-config-containment.test.ts` (4) |
+| M83 | the registry accepts any string as `channelName` again | `session-config-containment.test.ts` (8) |
+| M84 | the pattern rejects a legitimate generated name (**over-strict — stops cleaning up credential files**) | `session-config-containment.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

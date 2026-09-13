@@ -137,7 +137,7 @@ function seed(path: string, over: Partial<ReplRegistryRecord> = {}): ReplRegistr
     sessionKey: 'cc-trident-fire-o-abc /repo',
     sessionId: 'session-1',
     cwd: '/repo',
-    channelName: 'chan-1',
+    channelName: 'neutron-15ab0d54e889689d70965ba3f945b480',
     has_session: true,
     pid: 4242,
     child_generation: 'gen-live',
