@@ -127,16 +127,16 @@ its own domain's blind spot** — this file's stated rule is that a site it cann
 reported and never skipped, and that rule had been applied one level in (at the resolver)
 and not at the entry.
 
-So seven controls now append a real thirteenth call in each named argument shape and
+So eight controls now append a real thirteenth call in each named argument shape and
 require the guard to go red on every one, asserting BOTH halves: the site is **seen** (the
 enumeration grows to 13) and it is **refused**. A shape that is seen but silently passes is
 the same defect in a different coat. The shapes are: an inline object literal; an
 identifier bound to a literal; an identifier bound to a composer; an object whose interior
 *comment* mentions the field but which has no such property; an inline conditional spread
 that carries it only sometimes; a shape the scanner does not handle (a conditional
-expression); and no argument at all. The two refusals — `'absent'` and `'unresolved'` —
-both fail the guard but are reported apart, so the next author knows whether to add a stamp
-or to teach the scanner a shape.
+expression); no argument at all; and a call reached through a property access. The two
+refusals — `'absent'` and `'unresolved'` — both fail the guard but are reported apart, so
+the next author knows whether to add a stamp or to teach the scanner a shape.
 
 ### What the orchestrator does with it
 
@@ -299,12 +299,13 @@ first cut actually shipped.
 
 | # | Mutation of the guard | Result |
 |---|---|---|
-| N1 | the recogniser accepts only an identifier argument (**the shipped defect**) | 5 fail |
+| N1 | the recogniser accepts only an identifier argument (**the shipped defect**) | 6 fail |
 | N2 | presence is a substring of the object's source again | 2 fail |
 | N3 | an `'unresolved'` site stops failing — dropped rather than reported | 3 fail |
 | N4 | a conditional spread counts as the property being present | 1 fail |
-| N5 | composer following removed | 12 fail |
-| N6 | a shorthand property no longer counts | 12 fail |
+| N5 | composer following removed | 13 fail |
+| N6 | a shorthand property no longer counts | 13 fail |
+| N7 | a call reached through a property access stops being recognised | 1 fail |
 
 **N2 and N4 survived their first run, and the fix was to the CONTROLS, not the scanner.**
 The comment-trap case put its comment *outside* the object literal, where a raw-source
@@ -314,6 +315,12 @@ in the spread's own text. Both are now spelled the way this file really writes t
 comments inside the object, and `...(cond ? { … } : {})` inline. A control that cannot fail
 is not a control, and the only way to find out is to break the thing it guards.
 
+N7 closes the twin of the argument axis. The callee match required a bare identifier, and
+`PropertyAccessExpression` is unreachable in a flat script where every call is one —
+which is precisely the argument the first cut could have made for identifier-only
+arguments, the day before someone wrote an inline literal. A recogniser narrowed to what
+the file happens to contain is one that stops working the moment the file changes.
+
 ### Verified by running, not by reading
 
 - `bun test trident/` — 4178 pass, 0 fail, 119 files (4122 before this change).
@@ -322,7 +329,7 @@ is not a control, and the only way to find out is to break the thing it guards.
 - `scripts/ci/lint.sh` — every gate 0 found.
 - `node --check trident/inner-workflow.mjs` — parses to the expected illegal-top-level-return,
   which is the file's documented shape and not a regression.
-- The seventeen mutations above, plus six against the guard itself, each applied to the
+- The seventeen mutations above, plus seven against the guard itself, each applied to the
   shipped source and reverted.
 - An end-to-end pass through the shipped modules (`parseInnerResult` →
   `innerTerminalFailureReason` → `interpretFailure`) for each speaking kind: four distinct

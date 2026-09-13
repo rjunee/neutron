@@ -121,7 +121,7 @@ function terminalSites(src: string): TerminalSite[] {
   const lineOf = (n: ts.Node): number => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
   walk(sf, (n) => {
     if (!ts.isCallExpression(n)) return
-    if (!ts.isIdentifier(n.expression) || n.expression.text !== 'writeTerminalResult') return
+    if (!callsTerminalWrite(n)) return
     const arg = n.arguments[0]
     const line = lineOf(n)
     if (arg === undefined) {
@@ -145,6 +145,23 @@ function terminalSites(src: string): TerminalSite[] {
     sites.push({ label, line, ...readCause(resolved) })
   })
   return sites
+}
+
+/**
+ * IS THIS A CALL TO `writeTerminalResult`? Asked of the CALLEE and of nothing else.
+ *
+ * BOTH SPELLINGS, because the axis the argument fix closed has a twin. Today the function
+ * is a flat top-level declaration and every call is a bare identifier, so
+ * `PropertyAccessExpression` is unreachable — and that is exactly the argument the first
+ * cut could have made for identifier-only arguments the day before someone wrote an
+ * inline literal. A recogniser narrowed to what the file happens to contain is a
+ * recogniser that stops working the moment the file changes, which is the whole defect
+ * class this file is about.
+ */
+function callsTerminalWrite(n: ts.CallExpression): boolean {
+  if (ts.isIdentifier(n.expression)) return n.expression.text === 'writeTerminalResult'
+  if (ts.isPropertyAccessExpression(n.expression)) return n.expression.name.text === 'writeTerminalResult'
+  return false
 }
 
 /** The object literal an argument ultimately names, or `null` when it names none. */
@@ -270,6 +287,11 @@ async function newExitPath() {
   'no argument at all': `
 async function newExitPath() {
   await writeTerminalResult()
+}`,
+  'a call reached through a property access': `
+const terminal = { writeTerminalResult }
+async function newExitPath() {
+  await terminal.writeTerminalResult({ ok: false, checkpoint: 'new-exit' })
 }`,
 }
 
