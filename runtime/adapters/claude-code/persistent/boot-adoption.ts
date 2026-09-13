@@ -98,9 +98,10 @@ import {
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
-  ADOPTION_CLAIM_TTL_MS,
+  ADOPTION_CLAIM_TAKEOVER_MS,
   SESSION_COMPACT_IDLE_QUIESCE_MS,
   defaultIsPidAlive,
+  probeClaimantLiveness,
   runOutputScan,
   surfaceSizeAlert,
 } from './signatures.ts'
@@ -183,6 +184,13 @@ export interface BootAdoptionDeps {
    * unreachable branch reachable.
    */
   afterRowClaim?: () => Promise<void> | void
+  /** The clock the row claim reads. Injected so a case can cross the takeover threshold
+   *  without sleeping through it, matching `supervision.ts`'s `wopts.now`. */
+  now?: () => number
+  /** Is the process holding a claim still there — see {@link probeClaimantLiveness}. A case
+   *  injects one because two incarnations in one test process share a pid, so the real probe
+   *  can only ever answer `alive` and the takeover path would be unreachable. */
+  claimantLiveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
   /** Diagnostics sink. Defaults to stderr. */
   log?: (msg: string) => void
   budgetMs?: number
@@ -1201,6 +1209,106 @@ export function deleteOwnPoolEntry(sessionKey: string, session: ReplSession): vo
 }
 
 /**
+ * WHAT A RENEWAL DID (#539, Argus r38) — four answers, because three of them are not
+ * success and two of them are not the same failure.
+ *
+ * `not-ours` is the one that matters: the row now names a DIFFERENT claimant, so this
+ * gateway has been taken over and must not write. Distinct from `no-row` (the row is gone
+ * entirely) and from `unwritable` (the lock was not held, or the registry threw) — "somebody
+ * else owns it" and "I could not find out" are the distinction this whole module is built
+ * on, and a boolean would collapse them at the one place the collapse is dangerous.
+ */
+export type ClaimRenewal = 'renewed' | 'not-ours' | 'no-row' | 'unwritable'
+
+/**
+ * REFRESH THIS GATEWAY'S CLAIM, so that an unexpired claim means a live claimant.
+ *
+ * THE COMPARE-AND-SET IS THE POINT, not the timestamp. A refresh that wrote blindly would
+ * let a gateway renew a claim somebody else has legitimately taken over — which is the
+ * original two-owner defect arriving through the back door, and worse than the defect,
+ * because it would be a gateway asserting ownership it had already lost. So: write only if
+ * the marker is still ours.
+ *
+ * Same lock discipline as the give-back, for the same reason — this is a whole-registry
+ * read-modify-write, and an unguarded save drops rows this key has nothing to do with.
+ */
+export function renewAdoptionClaim(
+  registryPath: string,
+  sessionKey: string,
+  claimedBy: string,
+  now: number = Date.now(),
+  claimantPid: number = process.pid,
+): ClaimRenewal {
+  let acquired = false
+  try {
+    return withRegistry(
+      registryPath,
+      (registry) => {
+        if (!acquired) {
+          return { registry, result: 'unwritable' as ClaimRenewal, skipSave: true as const }
+        }
+        const prev = registry[sessionKey]
+        if (prev === undefined) {
+          return { registry, result: 'no-row' as ClaimRenewal, skipSave: true as const }
+        }
+        if (prev.adoption_claim_by !== claimedBy) {
+          return { registry, result: 'not-ours' as ClaimRenewal, skipSave: true as const }
+        }
+        registry[sessionKey] = {
+          ...prev,
+          adoption_claim_at: now,
+          // Re-stamped rather than assumed: a row written before this field existed, or by
+          // a pass that could not read its own pid, gets one on the first renewal.
+          adoption_claim_pid: claimantPid,
+        }
+        return { registry, result: 'renewed' as ClaimRenewal }
+      },
+      {},
+      (ok) => {
+        acquired = ok
+      },
+    )
+  } catch {
+    return 'unwritable'
+  }
+}
+
+/**
+ * RENEW WHATEVER CLAIM THIS GATEWAY HOLDS ON ONE POOLED SESSION — the supervision tick's
+ * one-line entry point.
+ *
+ * `Bun.peek` rather than `await`, matching {@link deleteOwnPoolEntry}: the pool holds
+ * promises, a key may hold a spawn that has not settled, and a tick must not block on one.
+ * An unsettled entry simply is not renewed this tick — it has no claim yet either, since the
+ * claim is taken at the end of the adoption that publishes it.
+ */
+export function renewOwnAdoptionClaim(
+  registryPath: string,
+  sessionKey: string,
+  now: number,
+  log: (msg: string) => void = defaultLog,
+): ClaimRenewal | 'no-claim' {
+  const pooled = pool.get(sessionKey)
+  if (pooled === undefined) return 'no-claim'
+  const session = Bun.peek(pooled) as ReplSession | undefined
+  const claimedBy = session?.adoptionClaimBy
+  if (session === undefined || claimedBy === undefined) return 'no-claim'
+  const outcome = renewAdoptionClaim(registryPath, sessionKey, claimedBy, now)
+  if (outcome === 'not-ours') {
+    // LOUD, AND NOTHING ELSE. Another incarnation now holds this row, which means this
+    // gateway missed enough ticks to be taken for dead while still running. Re-claiming
+    // would make it the second owner it was replaced for being unable to be; the operator
+    // gets the sentence and the session runs out its life unrenewed.
+    log(
+      `row ${sessionKey.slice(0, 32)}: the adoption claim is NO LONGER OURS — another incarnation took ` +
+        'this row over while this gateway was not renewing. Not re-claiming: that would make this the ' +
+        'second owner of a transcript somebody else is already serving.',
+    )
+  }
+  return outcome
+}
+
+/**
  * GIVE THE ADOPTION CLAIM BACK, if this session holds it (#539, Argus r37).
  *
  * CAS'd on `adoption_claim_by` so a pass can only ever release its OWN claim — releasing
@@ -1240,7 +1348,7 @@ export function releaseAdoptionClaim(
         if (prev === undefined || prev.adoption_claim_by !== claimedBy) {
           return { registry, result: undefined, skipSave: true as const }
         }
-        const { adoption_claim_at: _a, adoption_claim_by: _b, ...rest } = prev
+        const { adoption_claim_at: _a, adoption_claim_by: _b, adoption_claim_pid: _c, ...rest } = prev
         registry[sessionKey] = rest
         return { registry, result: undefined }
       },
@@ -1378,8 +1486,11 @@ async function claimRowOrUnwind(args: {
   /** THIS pass's incarnation — minted fresh per adoption, and the only thing that
    *  distinguishes two claimants of one row. */
   readonly incarnation: string
-  /** Injected so a case can drive the TTL boundary without sleeping through it. */
+  /** Injected so a case can drive the takeover boundary without sleeping through it. */
   readonly now: number
+  /** THIS gateway's own process id, recorded with the claim so the next claimant can
+   *  establish this one's death rather than wait it out. */
+  readonly claimantPid: number
   readonly deps: BootAdoptionDeps
   /** Install the session and answer `adopted`. Runs ONLY if the row is still ours. */
   readonly publish: () => RowAdoptionOutcome
@@ -1451,11 +1562,34 @@ async function claimRowOrUnwind(args: {
         // the invariant this module exists to hold. Nothing already in the row can tell
         // them apart — the generation is RESTORED from this row so both carry the same one,
         // and the pid is the same pane's process. Only a write can.
+        //
+        // AND A CLAIM MUST GO ON MEANING SOMETHING (Argus r38). For one round this asked
+        // only how OLD the claim was, which is a different question from the one that
+        // matters: a healthy owner that had been serving this pane for ninety-one seconds
+        // had a claim any new gateway was entitled to overwrite, and the invariant fell to
+        // the clock instead of to a race. An age is evidence about a claimant only while
+        // something keeps the two in step — so the owner RENEWS on its supervision tick, and
+        // what expires is a claim nobody is refreshing.
+        //
+        // TWO WAYS TO ESTABLISH THE CLAIMANT IS GONE, and the cheap one is exact: if its
+        // process is provably dead the claim dies with it, immediately, which is what keeps
+        // a CRASHED gateway's panes adoptable at once instead of after a threshold. The
+        // threshold covers everything a pid cannot say — a wedged gateway still holding its
+        // process open, a pid we may not signal, a row written before this field existed.
         const claimedAt = prev.adoption_claim_at
         const claimedBy = prev.adoption_claim_by
-        const live =
-          claimedAt !== undefined && args.now - claimedAt < ADOPTION_CLAIM_TTL_MS
-        if (live && claimedBy !== undefined && claimedBy !== args.incarnation) {
+        const claimedPid = prev.adoption_claim_pid
+        let live = false
+        if (claimedBy !== undefined && claimedBy !== args.incarnation) {
+          const liveness =
+            claimedPid === undefined ? 'unknown' : args.deps.claimantLiveness?.(claimedPid) ?? probeClaimantLiveness(claimedPid)
+          const renewedRecently =
+            claimedAt !== undefined && args.now - claimedAt < ADOPTION_CLAIM_TAKEOVER_MS
+          // `gone` is the only answer that overrides the threshold; `alive` and `unknown`
+          // both defer to it, so a question we could not ask costs a wait, never a pane.
+          live = liveness !== 'gone' && renewedRecently
+        }
+        if (live) {
           return { registry, result: 'claimed-elsewhere' as ClaimResult, skipSave: true }
         }
         // OURS FROM HERE, and the write is what makes it so. The next claimant reads a
@@ -1465,6 +1599,7 @@ async function claimRowOrUnwind(args: {
           ...(args.recordedPid !== args.pid ? { pid: args.pid } : {}),
           adoption_claim_at: args.now,
           adoption_claim_by: args.incarnation,
+          adoption_claim_pid: args.claimantPid,
         }
         return { registry, result: 'ours' as ClaimResult }
       },
@@ -2106,7 +2241,8 @@ async function adoptRow(
     // THIS PASS'S OWN IDENTITY, minted once above and recorded on the session so every
     // path that stops owning it can give the claim back.
     incarnation: claimIdentity,
-    now: Date.now(),
+    now: (deps.now ?? Date.now)(),
+    claimantPid: process.pid,
     deps,
     publish: () => {
       // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive

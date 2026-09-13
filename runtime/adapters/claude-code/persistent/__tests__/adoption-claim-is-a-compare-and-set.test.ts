@@ -13,16 +13,24 @@
  * the row on adoption rather than minted (that is what makes the reply credential resolve
  * across a restart, #537), so both claimants carry the same one; the pid is the same pane's
  * process. Only a WRITE distinguishes them, so the claim became a compare-and-set:
- * `adoption_claim_by` + `adoption_claim_at`, with `ADOPTION_CLAIM_TTL_MS` as the staleness
- * rule — the same shape as `supervision.ts`'s `respawn_in_flight_at`.
+ * `adoption_claim_by` + `adoption_claim_at` — the same shape as `supervision.ts`'s
+ * `respawn_in_flight_at`.
  *
- * WHAT THE TTL IS FOR, and it is the harder half. A claimant that dies between marking and
- * publishing leaves a marker nobody will ever clear, and a permanent marker would wedge the
- * row so that NOTHING could adopt that pane again — a REPL preserved across the restart and
- * then unreachable forever, which is worse than the defect being fixed. Two things bound
- * it: every path that stops owning a session gives its own claim back (CAS'd, so it can
- * only ever release its own), and a marker older than the TTL is ignored. The first keeps
- * the ordinary hand-over instant; the second is the backstop for the crash.
+ * AND THEN A SECOND DEFECT INSIDE THE FIRST REMEDY (r38). The marker was bounded by a bare
+ * time-since-adoption, which answers "how long ago did somebody claim this" while the
+ * question being asked is "is that somebody still alive". A healthy owner's claim therefore
+ * aged out underneath it and the next gateway to boot was entitled to attach a second
+ * wrapper: the same two-owner outcome, defeated by the clock instead of by a race. So the
+ * owner RENEWS on its supervision tick, `ADOPTION_CLAIM_TAKEOVER_MS` is a multiple of that
+ * tick's interval, and what expires is a claim nobody is refreshing.
+ *
+ * WHAT BOUNDS THE CRASH, which is the harder half. A claimant that dies between marking and
+ * publishing leaves a marker nobody will ever clear, and a permanent one would wedge the row
+ * so that NOTHING could adopt that pane again — a REPL preserved across the restart and then
+ * unreachable forever, which is worse than the defect being fixed. Three things bound it:
+ * every path that stops owning a session gives its own claim back (CAS'd, so it can only
+ * ever release its own); a claim whose gateway PROCESS is provably gone is taken over at
+ * once; and past the threshold an unrefreshed claim is ignored whatever the pid says.
  *
  * WHY A SEAM. In-process the CAS and the publish run in one synchronous stretch, so no
  * second pass can be scheduled between them and the race cannot be built at all. The
@@ -38,12 +46,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   releaseAdoptionClaim,
+  renewAdoptionClaim,
   reconcileOwnRepl,
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
-import { ADOPTION_CLAIM_TTL_MS } from '../signatures.ts'
+import { ADOPTION_CLAIM_TAKEOVER_MS, DEFAULT_WATCHDOG_INTERVAL_MS } from '../signatures.ts'
+import { runReplWatchdogTick } from '../supervision.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
@@ -116,18 +126,52 @@ function fixture(over: RowOverride = {}): Fixture {
   return { options, host, registryPath }
 }
 
-/** One incarnation's pass. `afterRowClaim` is the ordering seam; every other dep is the
- *  same one the rest of the suite injects. */
+/** What a pass may be told about the world: where the seam is, what time it is, and
+ *  whether the process holding any existing claim is still there. */
+interface PassOpts {
+  afterRowClaim?: () => Promise<void> | void
+  /** The clock the claim reads — so a case can cross the takeover threshold without
+   *  sleeping through ninety seconds. */
+  now?: () => number
+  /** Two incarnations in one test process share a pid, so the REAL probe can only ever
+   *  answer `alive` and the takeover-on-death path would be unreachable without this. */
+  claimantLiveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+}
+
+/** One incarnation's pass. Every dep here is one the rest of the suite injects too. */
 function pass(
   f: Fixture,
-  afterRowClaim?: () => Promise<void> | void,
+  opts: PassOpts = {},
 ): Promise<Awaited<ReturnType<typeof reconcileOwnRepl>>> {
   return reconcileOwnRepl(f.options, KEY, {
     host: f.host,
     health: async () => true,
     log: () => {},
-    ...(afterRowClaim === undefined ? {} : { afterRowClaim }),
+    ...opts,
   })
+}
+
+/**
+ * ONE SUPERVISION TICK, at the time the case says it is — the renewal's real carrier.
+ *
+ * Driven through `runReplWatchdogTick` rather than by calling the renewal directly,
+ * because what these cases have to establish is that the renewal is WIRED: a refresh
+ * function nothing invokes leaves the claim expiring exactly as it did before. The probes
+ * are pinned healthy so the tick takes no other action.
+ */
+async function tickAt(f: Fixture, nowMs: number): Promise<void> {
+  await runReplWatchdogTick(f.options, {
+    now: () => nowMs,
+    healthProbe: async () => true,
+    isPidAlive: () => true,
+  })
+}
+
+/** The gateway owns this key, which is what makes the tick visit it. */
+function supervise(f: Fixture): void {
+  supervisedBySessionKey.set(KEY, {
+    replRegistryPath: f.registryPath,
+  } as unknown as PersistentReplSubstrateOptions)
 }
 
 beforeAll(async () => {
@@ -160,11 +204,13 @@ describe('two incarnations racing for one row', () => {
     const gap = new Promise<void>((res) => {
       releaseGap = res
     })
-    const a = pass(f, async () => {
+    const a = pass(f, {
+      afterRowClaim: async () => {
       // RESOLVED INSIDE THE HOOK, not at construction time. `entered` resolving early is
       // a sleep by another name, and this branch has already paid for that once.
-      enteredGap()
-      await gap
+        enteredGap()
+        await gap
+      },
     })
 
     // AWAITED, NOT SLEPT: B must run while A is genuinely between its claim and its
@@ -223,39 +269,182 @@ describe('two incarnations racing for one row', () => {
   })
 })
 
-describe('a marker must not outlive the claimant that wrote it', () => {
-  it('a claimant that died between marking and publishing does NOT wedge the row', async () => {
-    // The failure mode the staleness rule exists for: a gateway killed in the microseconds
-    // between its compare-and-set and its publish leaves a marker no release path will
-    // ever clear. Without the TTL that pane is unadoptable forever — a REPL kept alive
-    // across the restart and then unreachable, which is worse than two owners.
-    const f = fixture({
-      adoption_claim_by: 'an-incarnation-that-never-came-back',
-      adoption_claim_at: Date.now() - ADOPTION_CLAIM_TTL_MS - 1_000,
+describe('a claim expires when it stops being RENEWED, not when it gets old', () => {
+  /**
+   * ROUND THIRTY-EIGHT, and the defect was in the remedy the round before. A bare
+   * time-since-adoption TTL answers "how long ago did somebody claim this row"; the
+   * question it was being asked is "is that somebody still alive". Those come apart the
+   * moment an owner survives the window: a healthy gateway that had been serving a pane
+   * for ninety-one seconds held a claim the next gateway to boot was entitled to
+   * overwrite, and it would attach a second wrapper. The invariant, defeated by the clock
+   * rather than by a race — the same two-owner outcome through a slower door.
+   */
+  const MINUTE = 60_000
+
+  it('a LIVE owner that has renewed keeps the pane, long past the old expiry', async () => {
+    // THE CASE THE TTL COULD NOT PASS. A publishes at T0 and goes on living; its
+    // supervision tick refreshes the claim every interval. B arrives well past the
+    // takeover threshold measured from the ADOPTION, and must still be refused, because
+    // what the threshold measures now is the time since the last RENEWAL.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const ownersChild = f.host.attached[0]
+    const ownersSession = await pool.get(KEY)
+    expect(ownersSession).toBeDefined()
+
+    // A LIVES, and its ticks say so. Six intervals takes us past the threshold measured
+    // from the adoption — which is the whole point of the case.
+    let t = t0
+    for (let i = 0; i < 8; i += 1) {
+      t += DEFAULT_WATCHDOG_INTERVAL_MS
+      await tickAt(f, t)
+    }
+    expect(t - t0).toBeGreaterThan(ADOPTION_CLAIM_TAKEOVER_MS)
+    expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t)
+
+    // B BOOTS IN THE GAP BETWEEN TWO RENEWALS — and not a millisecond after the last one,
+    // which is what makes this a test of the two numbers rather than of one. A takeover
+    // threshold shorter than the renewal interval would expire every claim before its owner
+    // could refresh it; the interval this case waits (TWO, so a single skipped tick is
+    // included — the supervision tick's in-flight gate DROPS a tick whose predecessor is
+    // still running) is inside the documented slack and must not be enough to lose the pane.
+    const sinceLastRenewal = 2 * DEFAULT_WATCHDOG_INTERVAL_MS
+    expect(sinceLastRenewal).toBeLessThan(ADOPTION_CLAIM_TAKEOVER_MS)
+    const b = await pass(f, {
+      now: () => t + sinceLastRenewal,
+      claimantLiveness: () => 'alive',
     })
-    const outcome = await pass(f)
-    expect(outcome.kind).toBe('adopted')
-    // And the dead claimant's marker is REPLACED, not merely ignored: the next racer must
-    // lose against this incarnation, not against a ghost.
-    const row = readRow(f.registryPath)
-    expect(row?.adoption_claim_by).not.toBe('an-incarnation-that-never-came-back')
+    expect(b.kind).toBe('undecided')
+    expect(b.kind === 'undecided' && b.reason).toMatch(/holds the adoption claim/i)
+
+    // EXACTLY ONE WRAPPER, and it is A's. B attached before the claim (the claim is the
+    // last act) and handed its child back non-destructively.
+    expect(f.host.attached).toHaveLength(2)
+    expect(ownersChild?.detached).toBe(false)
+    expect(f.host.attached[1]?.detached).toBe(true)
+    expect(f.host.closed).toEqual([])
+    // A'S SESSION IS UNTOUCHED — the pool still resolves to the session A published, not
+    // to a replacement, and the row still carries A's marker.
+    expect(await pool.get(KEY)).toBe(ownersSession)
+    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(ownersSession?.adoptionClaimBy)
   })
 
-  it('...but a marker still inside the window refuses, pane left running', async () => {
-    // The other side of the same constant. Together these two pin `ADOPTION_CLAIM_TTL_MS`
-    // as a real boundary rather than a value nothing reads.
-    const f = fixture({
-      adoption_claim_by: 'another-incarnation-mid-adoption',
-      adoption_claim_at: Date.now() - 1_000,
+  it('...and an ordinary first adoption claims, publishes AND renews', async () => {
+    // THE POSITIVE CONTROL, with a second job. It proves the refusal above is not a gate
+    // that refuses everyone — and it proves the renewal is WIRED, which is the half a
+    // refusal test can never see: an unrenewed claim expires exactly as the TTL did, and
+    // every case here would still pass.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t0)
+
+    await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    // And the pane is still served by the one wrapper that was there before the tick.
+    expect(f.host.attached).toHaveLength(1)
+    expect(f.host.attached[0]?.detached).toBe(false)
+  })
+
+  it('an owner that STOPPED renewing loses the pane once the threshold passes', async () => {
+    // The other side of the same rule, and a REAL absence of renewal rather than a
+    // hand-written old timestamp: A adopts and publishes, its ticks stop (the gateway is
+    // gone), and nothing refreshes the marker. The liveness probe cannot settle it —
+    // `unknown` is what a pid we may not signal answers — so this is the threshold doing
+    // the work alone.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const stale = readRow(f.registryPath)?.adoption_claim_by
+    pool.clear()
+    childByKey.clear()
+    resetBootAdoptionForTests()
+
+    const b = await pass(f, {
+      now: () => t0 + ADOPTION_CLAIM_TAKEOVER_MS + 1,
+      claimantLiveness: () => 'unknown',
     })
-    const outcome = await pass(f)
-    expect(outcome.kind).toBe('undecided')
-    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/holds the adoption claim/i)
+    expect(b.kind).toBe('adopted')
+    // REPLACED, not merely ignored: the next racer must lose against this incarnation
+    // rather than against a ghost.
+    const after = readRow(f.registryPath)?.adoption_claim_by
+    expect(typeof after).toBe('string')
+    expect(after).not.toBe(stale)
+  })
+
+  it('a claimant whose PROCESS IS GONE loses the pane immediately, not after the threshold', () => {
+    // WHY THE PID IS IN THE ROW. Renewal alone would make a CRASHED gateway's panes
+    // unadoptable for a full threshold — and a crash is a restart, which is the behaviour
+    // this whole item exists to deliver. A process that is provably gone is a positive
+    // finding, so the claim dies with it and the very next boot adopts.
+    //
+    // Synchronous on purpose: this is the claim rule, not a pass.
+    const f = fixture()
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    return pass(f, { now: () => t0 })
+      .then(async (first) => {
+        expect(first.kind).toBe('adopted')
+        pool.clear()
+        childByKey.clear()
+        resetBootAdoptionForTests()
+        // ONE SECOND later — nowhere near the threshold.
+        const b = await pass(f, { now: () => t0 + 1_000, claimantLiveness: () => 'gone' })
+        expect(b.kind).toBe('adopted')
+      })
+  })
+
+  it('but a claimant we could not ASK about is not treated as gone', async () => {
+    // `gone` and "I could not find out" are different facts, and `defaultIsPidAlive`
+    // answers `false` for both — which is why this rule uses its own three-valued probe.
+    // An EPERM or an unreadable answer must leave the claim standing until the threshold,
+    // because the alternative is taking a pane away from an owner that is serving it.
+    const f = fixture()
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    pool.clear()
+    childByKey.clear()
+    resetBootAdoptionForTests()
+
+    const b = await pass(f, { now: () => t0 + 1_000, claimantLiveness: () => 'unknown' })
+    expect(b.kind).toBe('undecided')
+    expect(b.kind === 'undecided' && b.reason).toMatch(/holds the adoption claim/i)
     expect(f.host.closed).toEqual([])
-    expect(f.host.attached[0]?.detached).toBe(true)
-    // UNTOUCHED. A refusal that overwrote the live claimant's marker would hand the row to
-    // whoever asked third.
-    expect(readRow(f.registryPath)?.adoption_claim_by).toBe('another-incarnation-mid-adoption')
+  })
+
+  it('a renewal is a compare-and-set: a superseded owner cannot take its claim back', async () => {
+    // THE BACK DOOR. A refresh that wrote blindly would let a gateway that had already
+    // been legitimately taken over re-assert ownership on its next tick — the original
+    // two-owner defect, arriving through the tidy-up, and worse than the original because
+    // the row would then name a gateway nobody is talking to.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const aSession = await pool.get(KEY)
+    const aClaim = aSession?.adoptionClaimBy
+    expect(typeof aClaim).toBe('string')
+
+    // B takes the row over, legitimately: A stopped renewing and the threshold passed.
+    pool.clear()
+    childByKey.clear()
+    resetBootAdoptionForTests()
+    const t1 = t0 + ADOPTION_CLAIM_TAKEOVER_MS + 1
+    expect((await pass(f, { now: () => t1, claimantLiveness: () => 'unknown' })).kind).toBe('adopted')
+    const bClaim = readRow(f.registryPath)?.adoption_claim_by
+    expect(bClaim).not.toBe(aClaim)
+
+    // A'S NEXT TICK FIRES ANYWAY — it does not know it was replaced. Driven with A's own
+    // claim identity rather than through the pool-reading wrapper, because the pool now
+    // holds B's session: asking the wrapper would renew B's claim and prove nothing.
+    expect(renewAdoptionClaim(f.registryPath, KEY, aClaim as string, t1 + MINUTE)).toBe('not-ours')
+    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(bClaim)
+    // And B's own renewal still works, so the CAS is not simply refusing everything.
+    expect(renewAdoptionClaim(f.registryPath, KEY, bClaim as string, t1 + MINUTE)).toBe('renewed')
+    expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t1 + MINUTE)
   })
 })
 

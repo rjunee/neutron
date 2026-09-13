@@ -214,17 +214,30 @@ it must not swallow.
       this: both passes see the same restored `child_generation` and the same pane pid, so
       nothing distinguishes two readers of an unmodified row, and each would publish an
       attached wrapper onto the same pane.
-      The marker is bounded by `ADOPTION_CLAIM_TTL_MS`, and every path that stops owning a
-      session gives its own claim back — CAS'd on the identity that took it, and only while
-      the registry lock is confirmed held, since the give-back is a whole-registry write and
-      an unguarded one would drop a concurrent incarnation's row. A claimant
-      killed between marking and publishing therefore costs one TTL, not a pane that can
-      never be adopted again.
+      AN UNEXPIRED CLAIM MEANS A LIVE CLAIMANT, not merely a recent one. The owner RENEWS on
+      its supervision tick and `ADOPTION_CLAIM_TAKEOVER_MS` is a multiple of that tick's
+      interval, so what expires is a claim nobody is refreshing — a bare time-since-adoption
+      let a healthy owner's claim lapse underneath it and handed a live pane to the next
+      gateway to boot. The refresh is the same compare-and-set, so a gateway already taken
+      over cannot re-assert ownership; the marker also carries the claiming gateway's pid, so
+      a claimant whose process is provably gone is taken over at once rather than after the
+      threshold (`alive` and "could not ask" both defer to the threshold, so the pid can only
+      ever accelerate — and it needs its own three-valued probe, because `defaultIsPidAlive`
+      answers `false` for a real ESRCH and an EPERM alike).
+      Every path that stops owning a session gives its own claim back — CAS'd on the identity
+      that took it, and only while the registry lock is confirmed held, since the give-back is
+      a whole-registry write and an unguarded one would drop a concurrent incarnation's row.
+      A claimant killed between marking and publishing therefore costs one bounded refusal,
+      not a pane that can never be adopted again.
       *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` (the
       two-incarnation race, with the second pass run inside the real window between the
-      first's compare-and-set and its publish; the single-incarnation positive control; both
-      sides of the staleness boundary; and the hand-over that clears the marker so the next
-      boot is not refused).
+      first's compare-and-set and its publish; a LIVE owner that has renewed keeping its pane
+      well past the old expiry, with the competitor arriving in the gap between two renewals;
+      the single-incarnation positive control, which also proves the renewal is wired; an
+      owner that STOPPED renewing losing the pane once the threshold passes; a claimant whose
+      process is gone losing it at once, and one we could not ask about NOT losing it; the
+      renewal refusing to overwrite a legitimate takeover; and the hand-over that clears the
+      marker so the next boot is not refused).
 - [ ] **A WRITE ONLY EVER TOUCHES THE ROW IT DECIDED ABOUT.** Clearing a handle, and
       correcting an adopted pid, are compare-and-set on the (handle, generation) pair
       the pass inspected. A row another incarnation replaced mid-pass is left exactly as

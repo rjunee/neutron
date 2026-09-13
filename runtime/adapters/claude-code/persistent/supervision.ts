@@ -11,7 +11,7 @@ import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watc
 import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, cmdlineMatchesSession, defaultReadCmdline, registerOrphanKill } from './orphan-adoption.ts'
-import { awaitBootAdoption } from './boot-adoption.ts'
+import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
@@ -478,6 +478,23 @@ export async function runReplWatchdogTick(
   const results: Array<{ sessionKey: string; action: string; respawned: boolean }> = []
 
   for (const sessionKey of keys) {
+    // #539 — RENEW THIS GATEWAY'S ADOPTION CLAIM FIRST, before anything in this tick can
+    // decide to respawn or alert. The claim is what stops a second gateway attaching to a
+    // pane this one is serving, and it is deliberately NOT a time-since-adoption TTL: it
+    // expires when it stops being refreshed, so THIS loop is the thing that makes an
+    // unexpired claim mean a live owner.
+    //
+    // WHY THIS TICK CARRIES IT, with the consequences stated rather than discovered later:
+    //   - it already visits exactly the sessions this gateway owns, at a cadence
+    //     (`DEFAULT_WATCHDOG_INTERVAL_MS`) the takeover threshold is a multiple of;
+    //   - it is gated by `awaitBootAdoption`, so nothing renews a claim before the pass
+    //     that takes it has settled;
+    //   - it has an in-flight gate, so a slow tick SKIPS rather than queues — which is why
+    //     the threshold allows six missed ticks instead of one;
+    //   - and a gateway wedged badly enough that this loop stops running loses its claims.
+    //     That is the correct outcome and not an accident: a gateway that cannot tick cannot
+    //     serve that REPL either, and the pane is better off adopted by one that can.
+    renewOwnAdoptionClaim(registryPath, sessionKey, now)
     const record = registry[sessionKey]
     const probe = await probeReplLiveness(sessionKey, record, healthProbe, isPidAlive)
     const verdict = detectReplWedged(probe)

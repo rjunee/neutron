@@ -167,17 +167,54 @@ export const CONTEXT_RESET_COMMAND = '/clear'
  *  respawn crashed before clearing it) and a new respawn may proceed. */
 export const RESPAWN_IN_FLIGHT_TTL_MS = 90_000
 /**
- * #539 — how long a boot-adoption claim on a row holds off a second incarnation.
+ * #539 — HOW LONG A BOOT-ADOPTION CLAIM SURVIVES WITHOUT BEING RENEWED, expressed as a
+ * multiple of the cadence that renews it. The two numbers are related on purpose: chosen
+ * independently, a threshold under one renewal interval expires every claim before its
+ * owner can refresh it, and one over-long hides a dead owner for minutes.
  *
- * The window it must cover is tiny — between the locked comparison and the publish a few
- * statements later — so this is not sized for the work. It is sized for the FAILURE: a
- * claimant that dies after marking leaves the row unadoptable until this elapses, and the
- * asymmetry decides the value. Too generous costs one cold `--resume` on a key whose
- * claimant died; too tight lets a second incarnation adopt a pane the first is already
- * attached to, which is the two-owner invariant this module exists to hold. Matches
- * {@link RESPAWN_IN_FLIGHT_TTL_MS} because it is the same problem with the same remedy.
+ * WHY IT IS NOT A TIME-SINCE-ADOPTION TTL, which is what this was for one round. A bare
+ * age answers "how long ago did somebody claim this", and the question being asked is
+ * "is that somebody still alive". Those coincide only while nothing keeps them in step —
+ * so a perfectly healthy owner's claim aged out at ninety seconds and the NEXT gateway to
+ * boot was entitled to overwrite it and attach a second wrapper to a pane already being
+ * served. The invariant, defeated by the clock rather than by a race.
+ *
+ * SIX TICKS OF SLACK, so a single slow or skipped tick never hands a live pane away —
+ * the supervision tick has an in-flight gate and drops a tick whose predecessor is still
+ * running, which is common under load and says nothing about ownership. A gateway that
+ * misses six consecutive ticks is not serving that REPL either way.
  */
-export const ADOPTION_CLAIM_TTL_MS = 90_000
+export const ADOPTION_CLAIM_TAKEOVER_MS = 6 * DEFAULT_WATCHDOG_INTERVAL_MS
+
+/**
+ * IS THE PROCESS THAT HOLDS A CLAIM STILL THERE — three answers, because two would be a
+ * defect (#539).
+ *
+ * {@link defaultIsPidAlive} cannot be used for this. It answers `false` for a genuine
+ * ESRCH *and* for an EPERM — a process alive under another uid — and for every other
+ * error besides, so "gone" and "I could not ask" share a branch. Here that collapse would
+ * license the takeover of a pane whose owner is alive and serving it, which is the exact
+ * outcome the claim exists to prevent.
+ *
+ * Only `gone` accelerates anything. `alive` and `unknown` both defer to the renewal
+ * threshold, so an unreadable answer costs a bounded wait rather than a second owner.
+ */
+export function probeClaimantLiveness(
+  pid: number,
+  kill: (pid: number, signal: 0) => true = process.kill.bind(process),
+): 'alive' | 'gone' | 'unknown' {
+  if (!Number.isInteger(pid) || pid <= 0) return 'unknown'
+  try {
+    kill(pid, 0)
+    return 'alive'
+  } catch (e) {
+    const code = (e as { code?: string } | undefined)?.code
+    if (code === 'ESRCH') return 'gone'
+    // EPERM means the process EXISTS and belongs to somebody else. Anything else is a
+    // question we could not ask.
+    return code === 'EPERM' ? 'alive' : 'unknown'
+  }
+}
 /** Rolling window for the respawn-rate cap. */
 export const RESPAWN_CAP_WINDOW_MS = 60 * 60 * 1000
 /** Max respawns per `RESPAWN_CAP_WINDOW_MS` before the hard cap trips (auto-

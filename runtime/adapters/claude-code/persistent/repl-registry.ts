@@ -326,6 +326,21 @@ export interface ReplRegistryRecord {
   adoption_claim_at?: number
   /** The incarnation that holds the claim — see {@link ReplRegistryRecord.adoption_claim_at}. */
   adoption_claim_by?: string
+  /**
+   * THE OS PROCESS OF THE GATEWAY HOLDING THE CLAIM, so a claimant's death can be
+   * established rather than waited out (#539).
+   *
+   * The renewal threshold alone answers "has this claim been refreshed recently", and after
+   * a CRASH that answer is yes for up to a threshold's worth of seconds — during which the
+   * next gateway refuses to adopt a pane whose owner is already gone. That is the headline
+   * behaviour of this item paying for its own safety mechanism. A pid turns the common case
+   * into a positive finding: `ESRCH` means gone, and gone means adoptable NOW.
+   *
+   * IT ONLY EVER ACCELERATES. `alive` and "could not ask" both fall back to the threshold,
+   * so a recycled pid costs a bounded wait and never a takeover — the direction that
+   * matters, since the opposite would hand a live pane to a second owner.
+   */
+  adoption_claim_pid?: number
   /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
    *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
    *  or a deploy). Written just before each kill, read back so the death is reported as

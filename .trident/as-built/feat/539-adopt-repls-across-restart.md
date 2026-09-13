@@ -1657,8 +1657,10 @@ ruling.** `child_generation` is *restored* from the row rather than minted (that
 makes the #537 reply credential resolve across a restart), so both claimants carry the same
 one; `pid` is the same pane's process; `incarnation` is minted per pass but never persisted.
 Only a write distinguishes two readers, so the claim became a **compare-and-set**:
-`adoption_claim_by` + `adoption_claim_at`, staleness-bounded by `ADOPTION_CLAIM_TTL_MS`
-(90 s) — the shape `supervision.ts` already uses for `respawn_in_flight_at` /
+`adoption_claim_by` + `adoption_claim_at`, staleness-bounded by a ninety-second
+`ADOPTION_CLAIM_TTL_MS` (**retired in round thirty-eight, which is why a grep for that name
+finds nothing: a bare age was the next defect, and the constant is now
+`ADOPTION_CLAIM_TAKEOVER_MS`, derived from the renewal interval**) — the shape `supervision.ts` already uses for `respawn_in_flight_at` /
 `RESPAWN_IN_FLIGHT_TTL_MS`. I had no better mechanism to propose and said so.
 
 **The failure mode the design is actually against is the crash, not the race.** A claimant
@@ -1718,6 +1720,62 @@ carries the single-incarnation positive control, the expired-marker case, the
 inside-the-window case and the hand-over case. M96 (staleness window of zero) reds the race
 case and the inside-the-window case rather than only one; recorded as run, not as predicted.
 
+### Round thirty-eight: the claim expired while its owner was alive
+
+The round-thirty-seven remedy had a hole, and it was in the mechanism the ruling asked
+for. `claimRowOrUnwind` treated any claim older than ninety seconds as stale and
+overwrote it, and **nothing renewed it** — the only writes were the initial
+compare-and-set and the teardown releases (verified: two writers in the whole tree). So a
+gateway that adopted at T0 and stayed perfectly healthy held a claim that any gateway
+booting at T0+90s was entitled to take, and it would attach a second wrapper to a pane
+already being served. **The same two-owner outcome, through a slower door: the invariant
+defeated by the clock rather than by a race.**
+
+**The sentence that names the defect.** A TTL measures *time since the claim was written*,
+and the question it is being asked is *whether the claimant is still alive*. Those are the
+same number only while something keeps them in step. Nothing did.
+
+**The property, and the two mechanisms that hold it.** An unexpired claim must mean the
+claimant was alive recently; an expired one must mean it was not.
+
+1. **Renewal.** The owner refreshes its claim on the supervision tick, so what expires is a
+   claim *nobody is refreshing*. The refresh is the SAME compare-and-set — a blind write
+   would let a gateway that had already been legitimately taken over re-assert ownership on
+   its next tick, which is the original defect arriving through the tidy-up and worse than
+   the original, because the row would then name a gateway nobody is talking to.
+2. **The claimant's pid, as a positive death signal.** Renewal alone answers "has this been
+   refreshed recently", and after a CRASH that answer is *yes* for a full threshold — during
+   which the next gateway refuses to adopt a pane whose owner is already gone. **That is
+   this item's headline behaviour paying for its own safety mechanism**, so the marker
+   carries the claiming gateway's pid: `ESRCH` is a finding, and a claim whose process is
+   provably gone dies with it immediately.
+
+**The pid only ever accelerates, which is the direction that matters.** `alive` and "could
+not ask" both defer to the threshold, so a recycled pid costs a bounded wait and never a
+takeover. It needed its own three-valued probe: `defaultIsPidAlive` answers `false` for a
+genuine `ESRCH`, for an `EPERM` (a process alive under another uid) and for every other
+error alike — **this branch's oldest named defect, false and unknown sharing a branch**, and
+here the collapse would license taking a pane from an owner that is serving it.
+
+**Where the renewal lives, with its consequences stated rather than discovered.** The
+supervision tick (`runReplWatchdogTick`) visits exactly the sessions this gateway owns, at
+`DEFAULT_WATCHDOG_INTERVAL_MS`; the takeover threshold is `6 ×` that, so the two numbers are
+related by construction rather than ordered by luck. The tick is gated by
+`awaitBootAdoption`, so nothing renews before the pass that takes the claim has settled, and
+it has an in-flight gate that DROPS a tick whose predecessor is still running — which is why
+the threshold allows six missed ticks and not one. **A gateway wedged badly enough that this
+loop stops running loses its claims**, and that is the correct outcome rather than an
+accident: a gateway that cannot tick cannot serve that REPL either, and the pane is better
+off adopted by one that can.
+
+**The mutation the gate named did not red on its first writing, and the test was at fault**
+— the M41 shape again, in the round that added it. The live-owner case checked B one second
+after a renewal, so a threshold of *half* a renewal interval still passed it: the case
+needed only that the threshold exceed one second, which pins nothing about the relation.
+Rewritten to place B **in the gap between two renewals** (two intervals, so a single skipped
+tick is included), it reds — and now the case fails if the two constants are ever chosen
+independently.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1728,7 +1786,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read and M100–M104 in round thirty-eight, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1858,6 +1916,11 @@ count from the rows below rather than trusting this sentence.
 | M97 | the survival branch keeps its claim instead of giving it back | `adoption-claim-is-a-compare-and-set.test.ts` (1) + `boot-adoption.test.ts` (1 — the round-25 in-process restart) |
 | M98 | the give-back is not CAS'd, so a refusal strips the winner's claim | `adoption-claim-is-a-compare-and-set.test.ts` (2) + `boot-adoption.test.ts` (1) |
 | M99 | the give-back writes without confirming it held the lock | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M100 | the supervision tick does not renew | `adoption-claim-is-a-compare-and-set.test.ts` (2 — the live owner AND the positive control) |
+| M101 | the refresh is unconditional rather than a CAS | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the superseded owner) |
+| M102 | the takeover threshold is set below the renewal interval | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the live owner, **after the case was rewritten to test in the gap between renewals; it did not red before**) |
+| M103 | the pid fast-path is removed, so a dead claimant waits out the threshold | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M104 | an `unknown` liveness answer is treated as `gone` | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
