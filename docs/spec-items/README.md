@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**27 items.** 4 block the harness-orchestrator cutover; 1 still needs a spec.
+**28 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
