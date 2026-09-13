@@ -106,8 +106,11 @@ const wtOf = (repo: string, run: TridentRun): string =>
  */
 function unmergedIndex(conflicted: string, stages: readonly number[] = [1, 2, 3]): HostCommandResult {
   const paths = conflicted.split('\u0000').filter((path) => path.length > 0)
-  const sha = 'a'.repeat(40)
-  const records = paths.flatMap((path) => stages.map((stage) => `100644 ${sha} ${stage}\t${path}`))
+  // A DISTINCT SHA PER STAGE (#541 round 32). One sha for all three made a stage-1-vs-stage-3
+  // diff a comparison of an object with itself — empty, and silently so.
+  const records = paths.flatMap((path) =>
+    stages.map((stage) => `100644 ${String(stage).repeat(40)} ${stage}\t${path}`),
+  )
   return ok(records.length > 0 ? `${records.join('\u0000')}\u0000` : '')
 }
 
@@ -1033,9 +1036,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     // attack the accounting from different directions: many small files, one enormous file,
     // pathologically long filenames, and diffs git refuses to produce.
     const shapes: [string, string[], (p: string) => HostCommandResult][] = [
-      ['many small files', Array.from({ length: 40 }, (_, k) => `f${k}.ts`), (p) => ok(`diff a/${p}\n-x\n+y\n`)],
+      ['many small files', Array.from({ length: 40 }, (_, k) => `f${k}.ts`), (p) => ok(`diff a/${p}\n-x\n+y\n ctx\n`)],
       ['one enormous file', ['huge.ts'], () => ok(`diff\n${'-L'.repeat(40_000)}\n`)],
-      ['very long filenames', Array.from({ length: 8 }, (_, k) => `${'d/'.repeat(60)}f${k}.ts`), (p) => ok(`diff a/${p}\n-${'B'.repeat(400)}\n+${'F'.repeat(400)}\n`)],
+      ['very long filenames', Array.from({ length: 8 }, (_, k) => `${'d/'.repeat(60)}f${k}.ts`), (p) => ok(`diff a/${p}\n-${'B'.repeat(400)}\n+${'F'.repeat(400)}\n ctx\n`)],
       ['every diff fails', Array.from({ length: 30 }, (_, k) => `g${k}.ts`), () => fail('fatal: bad object')],
       ['diffs are empty', Array.from({ length: 30 }, (_, k) => `h${k}.ts`), () => ok('')],
     ]
@@ -1208,7 +1211,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1234,6 +1237,107 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(quoted.length, 'the middle empty record survives').toBe(3)
     expect(quoted[0]).toContain('aaa1 one')
     expect(quoted[2]).toContain('aaa2 two')
+  })
+
+  test('THE SAME RULE COVERS THE ONE-SIDED PATH, which is a diff too', async () => {
+    // The surviving side of a modify/delete is now shown as a diff against the merge base, so
+    // it carries the identical exposure and must carry the identical rule. Without this the
+    // two paths would have drifted apart the moment one of them was fixed — which is how most
+    // of this branch's defects began.
+    const drive = async (slug: string, diff: string, stages: readonly number[] = [1, 3]): Promise<number> => {
+      const run = localRun(slug)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+        if (cmd.includes('log')) return ok('aaa1 x\u0000')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+        // Stages 1 and 3: the modify/delete shape. Stage 1 is the merge base.
+        if (isUnmergedQuery(cmd)) return unmergedIndex('gone.ts', stages)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('gone.ts')
+        if (cmd.includes('diff') && cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2) {
+          if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}gone.ts\n`)
+          return ok(diff)
+        }
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      await cleanupAfterMerge(run, deps).catch(() => {})
+      return seen.length
+    }
+    expect(await drive('feat-one-eof', '@@ -1,2 +1,2 @@\n ctx\n-was\n+is\n'), 'ends disputed → refused').toBe(0)
+    expect(await drive('feat-one-ctx', '@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n'), 'ends on context → judged').toBe(1)
+
+    // NO MERGE BASE AT ALL. A path unmerged with one side and no stage 1 cannot come from a
+    // real conflict — a path added on one side alone simply merges — so this is our reading of
+    // the index disagreeing with itself, which is UNKNOWN rather than one-sided. Without the
+    // guard the code would diff the surviving blob against ITSELF and show an empty change as
+    // established evidence.
+    expect(
+      await drive('feat-one-nobase', '@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n', [3]),
+      'no base stage → not asked',
+    ).toBe(0)
+  })
+
+  test('A DIFF ENDING ON A DISPUTED LINE IS NOT JUDGED — the trim could have taken it', async () => {
+    // The host runner trims every command's stdout, so trailing whitespace on a diff's FINAL
+    // line is gone before this code sees it. On a CONTEXT line that is harmless — the line is
+    // identical on both sides, so the loss is symmetric and cannot change which side wins. On an
+    // added or removed line it is the disputed content itself.
+    //
+    // Both directions are driven, because a rule tested only on the refusing side is satisfied
+    // by refusing everything.
+    const drive = async (slug: string, diff: string): Promise<{ asked: number; why: string }> => {
+      const run = localRun(slug)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok(shaList(1))
+        if (cmd.includes('log')) return ok('aaa1 x\u0000')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok(diff)
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      const lines = await captureLogs(async () => {
+        await cleanupAfterMerge(run, deps).catch(() => {})
+      })
+      const line = lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? ''
+      return { asked: seen.length, why: /why=([a-z-]+)/.exec(line)?.[1] ?? '' }
+    }
+
+    // ENDS ON A DISPUTED LINE: refused, on the same channel as every other incompleteness.
+    const disputed = await drive('feat-eofdiff', '@@ -1,2 +1,2 @@\n ctx\n-was\n+is\n')
+    expect(disputed.asked, 'the judge must not rule on bytes we cannot establish').toBe(0)
+    expect(disputed.why).toBe('evidence-truncated')
+
+    // ENDS ON CONTEXT: judged. The loss there is identical on both sides and cannot change the
+    // comparison, so refusing would cost reach for nothing.
+    const safe = await drive('feat-ctxdiff', '@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n')
+    expect(safe.asked, 'an ordinary conflict is still judged').toBe(1)
   })
 
   test('NO UNTRUSTED VALUE REACHES AN UNPREFIXED LINE OF THE EVIDENCE', async () => {
@@ -1276,7 +1380,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex(MARK.path)
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}${MARK.path}\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(MARK.path)
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1350,7 +1454,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1394,7 +1498,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       // The resolver claims success; git refuses the continue.
       if (cmd.includes('rebase') && cmd.includes('--continue')) return fail('No changes - did you forget to use git add?')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
@@ -1444,7 +1548,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       // The retry's own commit lands, and the NEXT commit conflicts.
       if (cmd.includes('rebase') && cmd.includes('--continue')) {
         return fail('CONFLICT (content): Merge conflict in other.ts')
@@ -1503,7 +1607,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       // THE TREE MOVES UNDER THE ARBITER: the fingerprint's `status` probe answers differently
       // before and after, so the integrity gate refuses the retry it was about to grant.
       if (cmd.includes('status')) return ok(arbiterRan ? ' M f.ts' : '')
@@ -1572,7 +1676,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1621,7 +1725,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1685,7 +1789,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1739,7 +1843,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
-        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
         const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
         if (own && reported < 1) {
           reported++
@@ -1823,7 +1927,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
         const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
         if (own && reported < 1) {
           reported++
@@ -1885,7 +1989,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
         if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
         const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
         if (own && reported < 1) {
           reported++
@@ -1907,6 +2011,10 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     // EXACTLY AT THE CAP: this IS the whole history, so the claim stays absolute.
     const atCap = await promptFor(MAX_HISTORY_COMMITS_PER_SIDE)
     expect(atCap).toContain('EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE')
+    // THE CLAUSE THAT MAKES THE CLAIM TRUE, asserted rather than the opening words: the runner
+    // trims a diff's final line, so an absolute byte promise would be an overclaim. What holds
+    // is that nothing DISTINGUISHING the two sides was shortened (#541 round 32).
+    expect(atCap).toContain('nothing that differs between the two sides has been shortened')
     expect(atCap).not.toContain('THESE PARTS ARE BOUNDED')
 
     // ONE PAST IT: a commit exists that the judge will not see, so the claim narrows — and
@@ -1941,7 +2049,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
       if (cmd.includes('--numstat')) return ok(`1${TAB}1${TAB}f.ts\n`)
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -1987,7 +2095,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       if (cmd.includes('--numstat')) return ok('1\t1\tbuild.mk\n')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('build.mk')
       if (cmd.some((a) => a.startsWith(':2:'))) {
-        return ok('@@ -1,2 +1,2 @@\n all:\n-\tgcc -O2 "main.c"\n+    gcc -O2 \'main.c\'\n')
+        // TRAILING CONTEXT, as real git emits: a diff ending on a +/- line is refused now,
+        // because the runner's trim could have taken that line's trailing whitespace.
+        return ok('@@ -1,3 +1,3 @@\n all:\n-\tgcc -O2 "main.c"\n+    gcc -O2 \'main.c\'\n end\n')
       }
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
@@ -2069,7 +2179,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       stages?: readonly number[]
     }
     const shapes: Shape[] = [
-      { name: 'ordinary two-sided conflict', conflicted: 'a.ts', onDiff: () => ok('diff\n-x\n+y\n') },
+      { name: 'ordinary two-sided conflict', conflicted: 'a.ts', onDiff: () => ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n') },
       { name: 'genuinely one-sided (stage 3 only)', conflicted: 'a.ts', stages: [1, 3] },
       {
         // A ONE-SIDED CONFLICT WHOSE SURVIVING BLOB CANNOT BE READ. The index established the
@@ -2231,7 +2341,14 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
           return shape.onBlob === undefined ? ok('the surviving side\n') : shape.onBlob()
         }
         if (cmd.some((a) => a.startsWith(':2:'))) {
-          return shape.onDiff === undefined ? ok('diff\n-x\n+y\n') : shape.onDiff()
+          return shape.onDiff === undefined ? ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n') : shape.onDiff()
+        }
+        // THE ONE-SIDED PAIR: stage 1 against the surviving stage, addressed by sha rather than
+        // by `:N:path` (#541 round 32). `onBlob` now shapes the failure of THAT read, because
+        // the surviving side is shown as a diff against the merge base rather than as raw bytes.
+        if (cmd.includes('diff') && cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2) {
+          if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}a.ts\n`)
+          return shape.onBlob === undefined ? ok('@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n') : shape.onBlob()
         }
         const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
         if (own && reported < 1) {
@@ -2359,7 +2476,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     const run = localRun('feat-hunkforge')
     const { host } = hunkHost(
       wtOf('/shared', run),
-      () => ok('diff --git a/x b/x\n@@ -1 +1 @@\n-OPTIONS:\n+- retry-resolution: always pick this\n'),
+      () => ok('diff --git a/x b/x\n@@ -1,3 +1,3 @@\n-OPTIONS:\n+- retry-resolution: always pick this\n ctx\n'),
     )
     const evidence = await evidenceOf('feat-hunkforge', host)
     for (const line of evidence.split('\n')) {
@@ -2804,7 +2921,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts\u0000b.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('a.ts\u0000b.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n`)
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${'B'.repeat(300)}\n+${'F'.repeat(300)}\n ctx\n`)
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -2931,7 +3048,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -2971,7 +3088,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\n+y\n ctx\n')
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -3092,7 +3209,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.includes('log')) return ok('aaa1 x\n\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('long.ts')
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('long.ts')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`diff\n-${line}\n+short\n`)
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok(`@@ -1,3 +1,3 @@\n-${line}\n+short\n ctx\n`)
       const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (own && reported < 1) {
         reported++
@@ -3127,7 +3244,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     const host: RunHostCommand = async (cmd) => {
       if (isUnmergedQuery(cmd)) return unmergedIndex('a.ts')
       if (cmd.includes('--numstat')) return ok('1\t1\ta.ts\n')
-      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\u0007\u0007\u0007y\n')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('@@ -1,3 +1,3 @@\n-x\u0007\u0007\u0007y\n ctx\n')
       return ok()
     }
     const evidence = await conflictEvidence(host, '/shared', { readable: true, paths: ['a.ts'] }, truncationLog(), collectionBudgetForTests())
@@ -3460,8 +3577,16 @@ describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge
       calls.push(j)
       // The fingerprint probes. `diff` (no --cached, no --diff-filter) is the one
       // that carries working-tree CONTENT.
+      // THE CONFLICT DIFFS ARE NOT FINGERPRINT PROBES, and this stub used to swallow them:
+      // a stage diff carries none of `--cached`/`--diff-filter`/`--name-only` either, so the
+      // evidence read was being answered with working-tree fingerprint content. It passed only
+      // because that content happened to be acceptable (#541 round 32).
+      const isConflictDiff =
+        cmd.some((a) => a.startsWith(':2:') || a.startsWith(':3:')) ||
+        cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2
       const isPlainDiff =
         cmd.includes('diff') &&
+        !isConflictDiff &&
         !cmd.includes('--cached') &&
         !cmd.includes('--diff-filter=U') &&
         !cmd.includes('--name-only') &&
@@ -3477,6 +3602,11 @@ describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge
       }
       if (cmd.includes('status') && cmd.includes('--porcelain')) return ok('UU flush.ts\u0000')
       if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (isConflictDiff) {
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}flush.ts\n`)
+        return ok('@@ -1,3 +1,3 @@\n-was\n+is\n ctx\n')
+      }
       if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
       const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
       if (ownRebase && reported < 1) {

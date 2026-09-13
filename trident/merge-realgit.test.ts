@@ -1235,6 +1235,56 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 
+  test('REAL GIT: a conflict whose FINAL diff line is disputed is not judged', async () => {
+    // THE BOUNDARY THE OTHER FIDELITY TESTS AVOID, and avoid for a reason: they place a line
+    // AFTER the whitespace-bearing one, so the runner's trim never touches it. Here the change
+    // reaches EOF, so the diff's last line IS the disputed one — and `spawnCapture` trims every
+    // command's stdout (`git-mode.ts:1223`), taking that line's trailing whitespace before this
+    // code can see it.
+    //
+    // The claim the judge reads says nothing that differs between the sides has been shortened.
+    // Rather than qualify the sentence, the conflict is simply not arbitrated: the same rule
+    // the rest of this function follows.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.eof')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // Last line of the file, differing ONLY in trailing whitespace, plus a distinct earlier
+    // line so the two patches are not whitespace-identical (git's patch-id ignores whitespace).
+    writeFileSync(join(fwt, 'README.md'), 'tag: FEAT\nrecipe   \n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat eof')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'tag: MAIN\nrecipe\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main eof')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    // THE PREMISE, MEASURED: git really does emit a diff ending on a +/- line here, and the
+    // runner really does trim its trailing whitespace away.
+    const raw = await spawnCapture(
+      ['git', '-C', repo, 'diff', '--no-color', ':2:README.md', ':3:README.md'],
+      repo,
+    )
+    const lastLine = raw.stdout.split('\n').filter((l) => l.length > 0).pop() ?? ''
+    expect(lastLine.startsWith('+') || lastLine.startsWith('-'), 'the diff ends on a disputed line').toBe(true)
+    expect(lastLine.endsWith(' '), 'and its trailing whitespace is already gone').toBe(false)
+
+    const evidence = await conflictEvidence(
+      spawnCapture,
+      repo,
+      { readable: true, paths: ['README.md'] },
+      truncationLog(),
+      collectionBudgetForTests(),
+    )
+    // The evidence itself is still assembled — the loss is recorded on the truncation channel,
+    // which `assembleEvidence` consults, so the refusal happens where every other one does.
+    expect(evidence.kind).toBe('complete')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
   test('a path the INDEX does not list as unmerged is UNKNOWN, never complete', async () => {
     // The old fixture's real subject, now named and asserted correctly. Our own two views of
     // the tree disagree — the caller says this path is conflicted, the index does not list it

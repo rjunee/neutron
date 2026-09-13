@@ -1667,6 +1667,57 @@ whitespace, and the test asserts the rendered name has none.
 unquoted; the heading no longer attributing the words; and ref names no longer folded to a token
 — the last red only after the fixture was fixed.
 
+### ROUND 32 — the residual was honest in SPEC and absent from the prompt
+
+The judge-facing sentence claimed byte-completeness the pipeline cannot deliver: `spawnCapture`
+trims every command's stdout, so a diff's final-line trailing whitespace is gone before this
+code sees it. **The disclosure existed in the Decisions Log and not in the one text that
+matters** — a residual honest in SPEC and missing from the prompt is still an overclaim to the
+party acting on it. And by this branch's own standard ("nothing has been shortened" is a claim
+about the BYTES) it was a real defect, not cosmetics.
+
+**Measuring first changed the answer twice.**
+
+1. The exposure is **wider than trailing whitespace**. `cat-file blob` returns the file's own
+   bytes, so the trim also took the **leading** whitespace of the whole content — a file opening
+   with an indented line arrived with that indentation gone, which is precisely the disputed
+   content in a Makefile. That path mattered more than the one reported.
+2. The **history is safe**, which I had assumed was exposed. Its records end in NUL, and NUL is
+   not whitespace, so the trim removes only the final separator newline.
+
+**The fix makes the claim true rather than qualifying it**, which is the coordinator's second
+option and the rule the rest of the function follows:
+
+- **The one-sided path is now a diff against the merge base**, not raw bytes. The `diff --git`
+  header puts repository-authored text at the start of stdout, so no content byte is at either
+  end of the exposed region any more — and it is better evidence besides, since the judge is
+  weighing a CHANGE against a deletion and now sees the change.
+- **One rule for both paths**: if the diff's final line is an added or removed line, the trim
+  may have taken disputed content, and the loss is reported on the **same truncation channel** as
+  every other incompleteness — landing on `evidence-truncated`, refused by the one owner that
+  writes the claim. No second mechanism.
+- **A context line is exempt, and that is the point rather than a concession.** It is identical
+  on both sides by definition, so whitespace lost from it is lost from BOTH and cannot change
+  which side the judge prefers. Refusing there would cost reach for nothing.
+- The sentence now says what holds: **nothing that differs between the two sides has been
+  shortened**.
+
+**The rule immediately found my fixtures were unrealistic.** Twenty stub diffs ended on a `+`
+or `-` line; real git emits three lines of trailing context unless the change reaches EOF. I
+fixed the fixtures rather than weakening the rule — and one of them, `treeChangingHost`, turned
+out to be answering the CONFLICT DIFF with working-tree fingerprint content, because its
+"is this a plain diff" matcher excluded `--cached` and `--diff-filter` but not the stage diffs.
+It had passed only because that content happened to be acceptable.
+
+**Also caught: `unmergedIndex` gave every stage the same sha**, so a stage-1-vs-stage-3 diff was
+a comparison of an object with itself — empty, and silently so.
+
+**Five mutations, three of which needed new fixtures first:** the rule removed; the rule firing
+on context lines too (22 tests — the non-vacuity direction); the one-sided path losing the rule;
+the claim returning to an absolute byte promise; and the base stage falling back to the survivor,
+which only alters an index state no real conflict produces and so needed a synthetic one to
+drive.
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
@@ -1930,7 +1981,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and thirty-seven mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and forty-two mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

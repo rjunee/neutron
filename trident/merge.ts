@@ -1922,15 +1922,34 @@ const QUOTE = '| '
  */
 
 /**
- * One untrusted line, quoted at column 0 with its content intact.
+ * DID THE HOST RUNNER'S TRIM TAKE DISPUTED CONTENT? (#541 round 32.)
  *
- * ONE RESIDUAL, DISCLOSED RATHER THAN PAPERED OVER: the shared host runner trims the whole of
- * a command's stdout (`git-mode.ts:1223`), so trailing whitespace on the LAST line of a diff is
- * gone before this function sees it. Everything interior — tabs, leading indentation, trailing
- * spaces on any other line, quotes — is now exact. Removing that trim would touch every caller
- * of `spawnCapture` in trident (sha comparisons, path lists) and is not a change this seam can
- * make safely, so it is recorded here and in the change record instead of being claimed away.
+ * `spawnCapture` trims every command's stdout (`git-mode.ts:1223`), and removing that would
+ * touch every caller in trident — sha comparisons, path lists — so this seam cannot. What it
+ * CAN do is stop claiming byte-completeness the pipeline does not deliver. The residual was
+ * disclosed in the Decisions Log and absent from the one text that matters, which is what the
+ * judge reads before ruling: a residual honest in SPEC and missing from the prompt is still an
+ * overclaim to the party acting on it.
+ *
+ * For a unified diff the trim costs exactly one thing — trailing whitespace on the FINAL line —
+ * because the leading bytes are protected by the `diff --git` header and everything else is
+ * interior. WHICH MATTERS ONLY WHEN THAT LINE IS DISPUTED. A context line is by definition
+ * identical on both sides, so whitespace lost from it is lost from BOTH and cannot change which
+ * side the judge prefers. An added or removed line IS the disputed content, and its trailing
+ * whitespace is exactly what a Makefile or YAML conflict turns on — so a diff ending on one is
+ * not trustworthy evidence and the judge is not asked.
+ *
+ * Reported through the SAME truncation channel as every other loss rather than a second
+ * mechanism, so it lands on `evidence-truncated` and is refused by the one owner that writes
+ * the completeness claim.
  */
+function finalLineCouldBeTrimmed(diff: string): boolean {
+  const lines = diff.split('\n').filter((line) => line.length > 0)
+  const last = lines[lines.length - 1] ?? ''
+  return last.startsWith('+') || last.startsWith('-')
+}
+
+/** One untrusted line, quoted at column 0 with its content intact. */
 function quoteLine(line: string): string {
   return `${QUOTE}${sanitiseForPrompt(line)}`
 }
@@ -2204,30 +2223,55 @@ export async function conflictEvidence(
         // statement with genuinely nothing to show.
         body = `${QUOTE}(no two-sided diff: neither side has a version of this path)`
       } else {
-        const blob = stage.get(side === 'BASE' ? 2 : 3) ?? ''
-        const size = await objectSize(run_host, repo, blob)
-        if (size === null) return { kind: 'unreadable', why: 'blob' }
-        if (!budget.weigh(size)) return { kind: 'over-budget' }
-        let res: HostCommandResult
+        // SHOWN AS A DIFF AGAINST THE MERGE BASE, not as the raw file (#541 round 32).
+        //
+        // `cat-file blob` hands back the file's own bytes, and the runner's trim then strips the
+        // whole content's LEADING whitespace as well as its trailing — measured, not assumed: a
+        // file opening with an indented line arrives with that indentation gone, which is
+        // precisely the disputed content in a Makefile. Diffing stage 1 against the surviving
+        // stage puts the `diff --git` header in front, so no content byte sits at the start of
+        // stdout any more, and the trim's whole cost collapses to the same final-line case the
+        // two-sided path already handles. It is better evidence besides: the judge is weighing a
+        // CHANGE against a deletion, and this shows the change rather than the whole file.
+        //
+        // Stage 1 is the merge base. A path unmerged with only one of stages 2/3 and no base
+        // cannot arise from a real conflict — a path added on one side alone simply merges — so
+        // its absence means our reading of the index is wrong, which is unknown, not one-sided.
+        const survivor = stage.get(side === 'BASE' ? 2 : 3) ?? ''
+        const baseBlob = stage.get(1)
+        if (baseBlob === undefined) return { kind: 'unreadable', why: 'not-in-index' }
+        for (const sha of [baseBlob, survivor]) {
+          const size = await objectSize(run_host, repo, sha)
+          if (size === null) return { kind: 'unreadable', why: 'blob' }
+          if (!budget.weigh(size)) return { kind: 'over-budget' }
+        }
+        let oneStat: HostCommandResult
         try {
-          res = await run_host(['git', '-C', repo, 'cat-file', 'blob', blob], repo)
+          oneStat = await run_host(
+            ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--numstat', '--no-color', baseBlob, survivor],
+            repo,
+          )
         } catch {
           return { kind: 'unreadable', why: 'blob' }
         }
-        // The index says this object exists, so a failure to read it means we did not
-        // establish the conflict — not that the side is empty.
-        if (!res.ok) return { kind: 'unreadable', why: 'blob' }
-        // AND THE SURVIVING SIDE MIGHT NOT BE TEXT EITHER. Without this, a deleted-or-modified
-        // PNG went through `quoteAll`, where `defang` turns its bytes into a wall of spaces —
-        // binary laundered into something that LOOKS like evidence. `--numstat` is not
-        // available here (there is only one blob, not a pair), so this uses git's own binary
-        // heuristic directly: a NUL byte in the content. It fails toward not-asking, which is
-        // the safe direction — a UTF-16 text file would escalate rather than be shown wrongly.
-        if (res.stdout.includes('\u0000')) return { kind: 'binary' }
+        if (!oneStat.ok) return { kind: 'unreadable', why: 'blob' }
+        if (isBinaryNumstat(oneStat.stdout)) return { kind: 'binary' }
+        let oneRes: HostCommandResult
+        try {
+          oneRes = await run_host(
+            ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--no-color', baseBlob, survivor],
+            repo,
+          )
+        } catch {
+          return { kind: 'unreadable', why: 'blob' }
+        }
+        if (!oneRes.ok) return { kind: 'unreadable', why: 'blob' }
+        if (finalLineCouldBeTrimmed(oneRes.stdout)) shortened.noteLoss()
         const other = side === 'BASE' ? 'branch' : 'base'
         body =
           `${QUOTE}(no two-sided diff: only the ${side}'s version of this path exists — the ` +
-          `${other} deleted or never added it. Its full content follows.)\n${quoteAll(res.stdout)}`
+          `${other} deleted or never added it. Shown against the merge base, so \`+\` is what ` +
+          `the ${side} side changed.)\n${quoteAll(oneRes.stdout)}`
       }
     } else {
       // IS THIS PAIR EVEN TEXT? ASK GIT, DO NOT READ ITS PROSE (#541 round 18).
@@ -2277,6 +2321,7 @@ export async function conflictEvidence(
       // BOTH STAGES EXIST, so git has no reason to fail. If it does, we did not establish
       // the conflict and must not pretend otherwise.
       if (!res.ok) return { kind: 'unreadable', why: 'diff' }
+      if (res.stdout.trim().length > 0 && finalLineCouldBeTrimmed(res.stdout)) shortened.noteLoss()
       body =
         res.stdout.trim().length > 0
           ? quoteAll(res.stdout)
@@ -2504,6 +2549,13 @@ type EvidencePart =
  */
 export interface TruncationLog {
   fold: (value: string) => string
+  /**
+   * A loss this code did not perform but cannot rule out — today, the host runner's trim taking
+   * trailing whitespace off a disputed diff line. Same channel as `fold` so there is still ONE
+   * thing that knows, and so the completeness claim stays unreachable whenever anything was
+   * lost, by whichever mechanism.
+   */
+  noteLoss: () => void
   any: () => boolean
 }
 
@@ -2518,6 +2570,9 @@ export function truncationLog(): TruncationLog {
       const folded = foldEvidenceReporting(value, ARBITER_PROMPT_BYTES_MAX)
       if (folded.truncated) truncated = true
       return folded.text
+    },
+    noteLoss: () => {
+      truncated = true
     },
     any: () => truncated,
   }
@@ -2584,11 +2639,12 @@ export function assembleEvidence(
       // THE CLAIM, MADE HERE BECAUSE THIS IS WHERE IT IS KNOWN. Every section above was
       // checked `present` on the way to this line; a `missing` one returned before it.
       (bounded.length === 0
-        ? `EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE: nothing below has been ` +
-          `shortened, summarised or left out, and no part of it was omitted because it could ` +
-          `not be read.`
-        : `THE CONFLICT BELOW IS PRESENT AND COMPLETE: nothing in it has been shortened, ` +
-          `summarised or left out, and no part of it was omitted because it could not be read. ` +
+        ? `EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE: nothing that differs between ` +
+          `the two sides has been shortened, summarised or left out, and no part of it was ` +
+          `omitted because it could not be read.`
+        : `THE CONFLICT BELOW IS PRESENT AND COMPLETE: nothing that differs between the two ` +
+          `sides has been shortened, summarised or left out, and no part of it was omitted ` +
+          `because it could not be read. ` +
           `THESE PARTS ARE BOUNDED and older material beyond the stated limit is not shown: ` +
           `${bounded
             .map((x) => (x.part.kind === 'present' ? (x.part.bounded ?? '') : ''))
