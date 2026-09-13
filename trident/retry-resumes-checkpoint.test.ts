@@ -1293,6 +1293,16 @@ describe('THE PRIOR IS THE RUN THE CARD NAMES, not the newest row sharing its sl
       phase: 'failed', inner_checkpoint: 'fix-round-9', inner_checkpoint_head: HEAD,
       inner_verdict: 'REVIEW_NOT_RUN', base_sha: BASE, ralph_round: 2,
     })
+    // MAKE "LATER" TRUE INSTEAD OF LIKELY. `latestTerminalBySlug` orders by
+    // `started_at DESC, id DESC` (`store.ts:1103`), and `store.ts:1087` already records WHY
+    // the `id` tiebreak is there: "two rows can share a timestamp on a fast clock". These
+    // two rows are created in the same tick, so the tiebreak decides — and ids are random
+    // UUIDs, which made the precondition below a coin flip and this case fail on CI at
+    // random. Stamping `started_at` is what the sentence above has always claimed.
+    db.prepare<unknown, [string, string]>(
+      'UPDATE code_trident_runs SET started_at = ? WHERE id = ?',
+    ).run(new Date(Date.parse(priorA.started_at) + 1_000).toISOString(), priorB.id)
+    // The precondition, now ASSERTED AND ESTABLISHED rather than asserted and hoped for.
     expect(store.latestTerminalBySlug('proj-1', slugifyTask(CARD_A))!.id).toBe(priorB.id)
 
     // Card A retries, naming ITS OWN run.

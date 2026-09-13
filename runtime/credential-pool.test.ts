@@ -282,15 +282,35 @@ describe('no report can park a credential past the ceiling', () => {
     // ms, six hours to eleven, with every other ceiling assertion still green.
     const pool = one()
     const YEAR = 365 * 24 * 60 * 60_000
-    const t0 = Date.now()
-    reportFailure(pool, 'only', 429, YEAR)
+    // PIN THE CLOCK ACROSS THE PARK THAT ESTABLISHES THE ANCHOR. There are THREE
+    // reads on this path, not two: `t0` here, `reportFailure`'s own
+    // (`credential-pool.ts:413`, the proposed expiry), and `park`'s INDEPENDENT read
+    // (`:320`) — and it is that third one which becomes `cooldown_started_at` (`:333`).
+    // The ceiling is derived from the anchor (`:334`), so this assertion measures a
+    // bound against an instant two reads earlier than the one it was anchored to, and
+    // any millisecond boundary crossed in between puts `first - t0` over `MAX_PARK_MS`.
+    // Observed on CI as `Received: 21600001`; under a clock that ticks on every read,
+    // `21600002` — the `+2` being exactly the two internal reads.
+    //
+    // This is a defect in the test, not in the ceiling. The second half of this very
+    // case already pins the clock for the same reason; only this half read it live.
+    const realNow = Date.now
+    const t0 = realNow.call(Date)
+    Date.now = () => t0
     const c = pool.credentials[0]!
+    try {
+      reportFailure(pool, 'only', 429, YEAR)
+    } finally {
+      Date.now = realNow
+    }
     const first = c.cooldown_until!
     expect(first - t0).toBeLessThanOrEqual(MAX_PARK_MS)
+    // NON-VACUITY: a park was actually established. Without this, pinning the clock
+    // would also satisfy the bound if `reportFailure` had parked nothing at all.
+    expect(first - t0).toBe(MAX_PARK_MS)
 
     // A second in-flight report, five hours into the park, proposing the same
-    // over-ceiling window.
-    const realNow = Date.now
+    // over-ceiling window. `realNow` is the one captured above.
     Date.now = () => t0 + 5 * 60 * 60_000
     try {
       reportFailure(pool, 'only', 429, YEAR)
