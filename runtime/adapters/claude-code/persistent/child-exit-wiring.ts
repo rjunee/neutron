@@ -103,10 +103,35 @@ export function wireChildExit(args: ChildExitWiring): void {
       //   - the CLAIM, because a takeover keeps the SAME generation — it is the same
       //     child — so the generation cannot tell "still ours" from "somebody else owns
       //     this now". A row claimed by another gateway is left exactly alone.
-      // The child is gone, so the self-fence has nothing left to protect (r49).
+      // THE IN-MEMORY CLAIM GOES FIRST, BEFORE THE CANCEL (Argus r51). Round fifty made the
+      // fence's guard read `paneClaimBy` — "a session with no claim has nothing to fence" —
+      // and that premise is only true if EVERY give-back path clears it. This one predates
+      // the premise and was never told: it cancelled the timer and disowned the durable row
+      // and left the in-memory claim set. So a deadline callback already DISPATCHED when the
+      // child exited would arrive after the cancel, see a stale claim, and install a
+      // key-level fence — turning a crashed REPL into a permanently refused key instead of
+      // one that respawns.
+      //
+      // ON THE ORDERING, MEASURED RATHER THAN ASSERTED. Clearing the claim before the cancel
+      // reads as the safer order — a dispatched callback observes the cleared claim rather
+      // than racing the cancel — but the mutation that swaps them does NOT red, and the
+      // reason is structural: these are adjacent SYNCHRONOUS statements, and a runtime with no
+      // preemption between them cannot run a callback in the gap. So the order is a
+      // readability choice, not a guarantee, and this comment says so instead of claiming a
+      // property the code does not have. What IS load-bearing is that the clear happens at all
+      // (M146), and that it happens on this path (which is the finding).
+      //
+      // The round-thirty-one table has a column for this now — the durable row and the
+      // in-memory claim are two representations of one fact, and it tracked only the first.
+      // CAPTURED BEFORE IT IS CLEARED: the row disown below is CAS'd on this very value, so
+      // clearing it first without keeping it would make the teardown unable to release its
+      // own row — the fix for one path breaking another, which is the shape this round is
+      // about.
+      const claimHeldAtExit = session.paneClaimBy
+      session.paneClaimBy = undefined
       session.selfFenceTimer?.cancel()
       session.selfFenceTimer = undefined
-      disownPaneOnExit(args.registryPath, sessionKey, session)
+      disownPaneOnExit(args.registryPath, sessionKey, session, claimHeldAtExit)
       // Reclaim the temp config files now the child is gone (covers pool eviction,
       // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).
       unlinkSessionConfigs(session)
@@ -137,6 +162,9 @@ function disownPaneOnExit(
   registryPath: string | undefined,
   sessionKey: string,
   session: ReplSession,
+  /** The claim this session held when its child exited — passed explicitly because the
+   *  caller clears the live field first (r51), and this CAS is keyed on that value. */
+  claimHeldAtExit: string | undefined,
 ): void {
   if (registryPath === undefined) return
   try {
@@ -147,7 +175,7 @@ function disownPaneOnExit(
         if (prev === undefined) return { registry, result: undefined, skipSave: true as const }
         const stillOurChild = prev.child_generation === session.childGeneration
         const claim = prev.adoption_claim_by
-        const notSomebodyElses = claim === undefined || claim === session.paneClaimBy
+        const notSomebodyElses = claim === undefined || claim === claimHeldAtExit
         if (!stillOurChild || !notSomebodyElses) {
           return { registry, result: undefined, skipSave: true as const }
         }

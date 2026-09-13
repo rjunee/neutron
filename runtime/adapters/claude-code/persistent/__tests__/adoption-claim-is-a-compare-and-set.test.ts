@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   armSelfFence,
+  fencedReasonFor,
   setFenceTimerFactoryForTests,
   releaseAdoptionClaim,
   renewAdoptionClaim,
@@ -1114,6 +1115,58 @@ describe('the self-fence fires on its own, with nothing else running', () => {
     childByKey.clear()
     const again = await pass(f, { now: () => t0 + DEFAULT_WATCHDOG_INTERVAL_MS + 1_000 })
     expect(again.kind).toBe('adopted')
+  })
+
+  it('a child that EXITS while a deadline callback is dispatched is respawned, not fenced', async () => {
+    // ARGUS r51, and it is round forty-one's lesson arriving for round fifty's guard: **a new
+    // guard inherits every existing path's obligations.** Round fifty made the fence read
+    // `paneClaimBy` — "a session with no claim has nothing to fence" — which is true only if
+    // EVERY give-back path clears it. Child exit predates that premise and was never told: it
+    // cancelled the timer and disowned the durable row and left the in-memory claim set.
+    //
+    // So a deadline callback already DISPATCHED when the child exited arrived after the
+    // cancel, saw a stale claim, and installed a KEY-LEVEL fence — turning a crashed REPL into
+    // a permanently refused key instead of one that respawns. The worst kind of bug this
+    // branch produces: a safety mechanism denying service for the thing it was protecting.
+    const timer = manualFenceTimer()
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = (await pool.get(KEY)) as ReplSession
+    const child = f.host.attached[0]
+    expect(session.paneClaimBy).toBeDefined()
+
+    // THE CHILD DIES. Its teardown runs — including the cancel that cannot un-dispatch a
+    // callback already runnable.
+    child?.kill()
+    await Promise.resolve()
+    await Promise.resolve()
+    // The exit teardown invalidated the in-memory claim, which is what the dispatched callback
+    // will observe.
+    expect(session.paneClaimBy).toBeUndefined()
+
+    // THE DISPATCHED CALLBACK ARRIVES ANYWAY.
+    timer.fire(0)
+
+    // NO KEY-LEVEL FENCE. This is the assertion that carries it: a fence here would refuse
+    // every later turn for this key rather than letting the next one respawn.
+    expect(fencedReasonFor(KEY)).toBeUndefined()
+    expect(session.fenced).toBe(false)
+
+    // AND THE NEXT TURN REACHES THE SPAWN PATH rather than a refusal — the fake host throws
+    // from `spawn`, which is how this suite shows "it got that far".
+    resetBootAdoptionForTests()
+    pool.clear()
+    childByKey.clear()
+    let threw = ''
+    try {
+      await getOrSpawnSession(KEY, f.options, { prompt: 'hi', tools: [], model_preference: ['claude-opus-5'] })
+    } catch (e) {
+      threw = e instanceof Error ? e.message : String(e)
+    }
+    expect(threw).not.toMatch(/refusing to resume/i)
+    expect(threw).toMatch(/spawn is not part of these cases/i)
   })
 
   it('...and a healthy gateway whose renewals succeed never fences mid-turn', async () => {

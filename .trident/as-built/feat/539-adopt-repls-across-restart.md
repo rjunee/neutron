@@ -1375,6 +1375,7 @@ across two files, and five the next time someone adds one.
 | `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped |
 | the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live |
 | **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind |
+| **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | n/a — the fence sets `fenced` instead, which is the same statement for a path whose whole purpose is to stop serving |
 | **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses |
 | **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released |
 
@@ -2477,8 +2478,39 @@ were one question asked repeatedly, each answer exposing the next:
 Every one of those was a state in which two gateways could serve one transcript, which is the
 corruption the item exists to prevent. The adoption path itself is a few hundred lines; the
 rest is the protocol, its failure dispositions, and the instruments that prove each one — and
-**the mutation table is the part to read first**: 145 rows, each naming a guard and the case
+**the mutation table is the part to read first**: 147 rows, each naming a guard and the case
 that dies without it.
+
+### Round fifty-one: a new guard inherits every existing path's obligations
+
+Round fifty gave the fence a premise — *a session with no claim has nothing to fence* — and
+that is true only if **every** give-back path clears `paneClaimBy`. **Child exit predates the
+premise and was never told.** It cancelled the timer and disowned the durable row and left the
+in-memory claim set, so a deadline callback already DISPATCHED when the child exited arrived
+after the cancel, saw a stale claim, and installed a KEY-LEVEL fence — **turning a crashed REPL
+into a permanently refused key instead of one that respawns.** A safety mechanism denying
+service for the thing it was protecting.
+
+This is round forty-one's lesson, one mechanism later: *a structural fix that adds call sites
+inherits every rule those call sites are subject to* — and its mirror, **a new guard inherits
+every existing path's obligations.**
+
+**Where it would have been caught, and now is.** The ownership table tracks what each
+ownership-ending path must release, and it had a row for the DURABLE claim and none for the
+IN-MEMORY one. They are two representations of one fact. The table now carries the column, and
+child exit is the row that was empty.
+
+**One correction to my own first comment, made by measuring.** I wrote that clearing the claim
+BEFORE the cancel was load-bearing — "a dispatched callback observes the cleared claim rather
+than racing the cancel". **M147 swaps them and does not red**, and the reason is structural:
+they are adjacent synchronous statements and nothing can run between them. So the order is a
+readability choice, the comment now says so, and the mutation is recorded as non-reddening
+rather than quietly dropped. What is load-bearing is that the clear happens at all, and that it
+happens on *this* path.
+
+**Fixing one path nearly broke another**, which is the shape in miniature: the exit teardown's
+row disown is CAS'd on `paneClaimBy`, so clearing the field first left it unable to release its
+own row. The claim is captured before it is cleared and passed explicitly.
 
 ### Mutation table
 
@@ -2490,7 +2522,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine and M143–M145 in round fifty, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2666,6 +2698,8 @@ count from the rows below rather than trusting this sentence.
 | M143 | the timer clears its field unconditionally — the r50 defect | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M144 | the identity guard compares the wrong way round | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the stale case; the ordinary fence still fires, so it reds there rather than on the control, and that is reported as measured rather than as predicted) |
 | M145 | a released session can still be fenced (no claim guard) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M146 | child exit leaves `paneClaimBy` set — the r51 defect | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
+| M147 | ~~child exit clears the claim AFTER the cancel~~ — **no red, structurally**: adjacent synchronous statements, so no callback can observe the gap. Recorded because the ruling asked for the answer either way, and because it retires a claim the comment made | no-op by construction |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
