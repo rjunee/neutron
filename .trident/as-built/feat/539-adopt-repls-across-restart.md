@@ -1601,6 +1601,46 @@ That is the third kind of not-redding this branch has now catalogued, alongside 
 no single mutation isolates it.** Naming which kind matters, because only the first
 (superseded) means the row is dead.
 
+### Round thirty-six: the file that explains the subsystem is outside the subsystem
+
+`gateway/index.ts`'s shutdown comment still said the child is left alive *"when — and only
+when — a persisted registry row names its exact pane and its exact generation … Every other
+child is killed exactly as before."* This branch's own text (`git show
+origin/main:gateway/index.ts | grep -c 'when — and only when'` → 0). The "only when" half
+is true; the "when" half is false for a still-settling spawn, which is killed on resolution
+even when its row matches (#674) — and `SPEC.md` §2.3 and the 2026-09-12 log entry both say
+so now. So the normative documents were right and **the gateway's own comment, which is
+where a reader goes to find out what shutdown does, asserted the converse they disclaim.**
+
+"Every other child is killed exactly as before" went with it: a late-settling child WITH a
+matching row is killed too, so the sentence is **true by accident and misleading on
+purpose**.
+
+**Why the subject sweep missed it — the fourth limit.** Round thirty-two indexed on the
+subject and classified twenty candidates across `SPEC.md`, the spec item, the as-built and
+`runtime/adapters/claude-code/persistent/*.ts`. `gateway/index.ts` was outside every path
+the sweep pointed at.
+
+> **The four limits, in order of discovery:**
+> 1. (r11) Grep the claim, not the file you were handed — a claim has siblings.
+> 2. (r32) Grep the claim's SUBJECT, not its wording — a paraphrase is invisible to a
+>    search for the phrase you last saw it in.
+> 3. (r33) Then ask WHICH exception each qualification covers — a sentence that names one
+>    exception reads as qualified for all of them.
+> 4. (r36) **A subject sweep is only as wide as the paths you point it at, and the files
+>    most likely to restate a subsystem's guarantee are the ones OUTSIDE it.** The place
+>    that explains what a shutdown does is usually not inside the shutdown — so for a claim
+>    about a subsystem, sweep the callers, and specifically the file that wires it.
+
+**The biconditional at repo scope: 18 hits across 17 files, classified rather than edited.**
+All 18 belong to other subsystems — a pglite boot retry, a CI gate, a mutation prover, an
+email pipeline, config writes, migrations, onboarding, and docs. The `pool.ts` hit you
+flagged is about an inactivity-gate window edge (*"the ceiling's auth branch only ever
+engages on the exact-equal-window edge, and only when silent"*), **not** the survival claim —
+checked rather than assumed precise. A targeted grep for the biconditional *joined to*
+survival/row/pane wording across `runtime/`, `gateway/`, `SPEC.md`, the spec item and this
+record now returns **zero**. **No fifteenth site**, inside those paths or outside them.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
