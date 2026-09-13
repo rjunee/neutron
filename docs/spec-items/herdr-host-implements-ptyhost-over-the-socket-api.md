@@ -594,6 +594,28 @@ not-new. That is accepted and recorded here rather than hidden.
       overwhelmingly one shared isolation helper. Flagging them would require an allowlist
       that makes the guard a snapshot of the tree rather than a rule.
       verify: `bun test tests/integration/pty-e2e-registered.test.ts runtime/adapters/__tests__/env-switch.test.ts`
+- [ ] **THE PANE GUARD MAKES THE CONSTRUCTOR UNREACHABLE RATHER THAN DETECTING ITS USE.**
+      It searched `new HerdrHost\s*\(` — one spelling of one route. `herdrHost` is an
+      exported SINGLETON whose `.spawn(...)` never says `new`, `new (HerdrHost)(...)`
+      parenthesises past the pattern, and a factory hides it a call away; each opens a real
+      REPL container in the owner's workspace while the offender list stays empty.
+      WIDENING IS REFUSED ON EVIDENCE: after the factory comes a computed member, an
+      aliased binding, a re-export, and every round buys one spelling out of an infinite
+      set. A file that never NAMES the module cannot use anything it exports, in any syntax
+      that exists or will exist — and the forms of naming are closed (static import,
+      dynamic import, require), all carrying the specifier as a quoted string.
+      THE SPELLING-BOUND TEST IS DELETED, NOT KEPT BESIDE IT. Reachability subsumes it, and
+      a guard whose title promises more than its matcher delivers is worse than no guard.
+      AND THE ONE ASSUMPTION IS CLOSED RATHER THAN CAVEATED: a module that re-exported the
+      constructor would defeat the argument, so that is its own predicate with its own
+      assertion and its own fixture control — against this tree it has one observable,
+      `false`, which is exactly the shape that hides a mistyped pattern forever.
+      THE ENV GUARD CANNOT HAVE THIS, and the reason is stated: `process.env` is a global,
+      so there is no import to withhold. It takes the other half of the choice — a claim
+      narrowed to what it enforces, with the reflective write, the aliased binding and the
+      defined property each pinned as CURRENT behaviour, plus a measurement that the tree
+      contains none of them on a switch key today.
+      verify: `bun test tests/integration/pty-e2e-registered.test.ts`
 - [ ] **THE OBLIGATION STARTS WHEN THE TIMER IS ARMED, so the connector is called INSIDE
       the guard.** Invoking it above the surrounding `try` let a SYNCHRONOUS throw escape
       past the failure path, leaving the RPC deadline armed and the handlers registered.

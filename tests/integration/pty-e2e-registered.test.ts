@@ -132,6 +132,12 @@ export function matchesEnvBulkAssign(src: string): boolean {
 const asm = (...parts: string[]): string => parts.join('')
 const PROC = 'process'
 const KEY = 'HERDR_SOCKET_PATH'
+// Split out for the same reason: a fixture line that contains the keyword AND the
+// specifier is itself a match for the re-export patterns, so the keyword never appears
+// literally on a line that also names the module.
+const EXP = 'export'
+const HH_SPEC = "'../herdr-host.ts'"
+
 
 /**
  * The switches this guard polices, and the ONE module permitted to write them.
@@ -173,6 +179,55 @@ export function findSwitchOffenders(
     }
   }
   return offenders
+}
+
+/**
+ * Does this source REACH the module that defines the herdr pane constructor?
+ *
+ * STRUCTURAL, NOT A SPELLING MATCHER — and that is the whole point. The guard this
+ * replaces searched for `new HerdrHost(`, so `herdrHost.spawn(...)` (there is an exported
+ * singleton), `new (HerdrHost)(...)`, and a factory returning one each opened a real pane
+ * while the offender list stayed empty. Widening cannot terminate: after the factory comes
+ * a computed member, an aliased binding, a re-export. Every round of widening buys one
+ * spelling and leaves the set infinite.
+ *
+ * Reachability inverts it. A module's exports cannot be used by a file that never names
+ * the module, whatever syntax it would have used — so the question becomes "is the path in
+ * a string literal here", which has a small and closed set of forms: a static import, a
+ * dynamic `import()`, and `require()`. All three carry the specifier as a quoted string.
+ *
+ * The residual is a module that RE-EXPORTS the constructor, which would let a file reach it
+ * without naming this path. That is not left as prose — it is closed by its own assertion
+ * that no such re-exporter exists, which is what makes this argument complete rather than
+ * merely narrower.
+ */
+export function reachesHerdrHostModule(src: string): boolean {
+  return /['"`][^'"`]*herdr-host(?:\.ts)?['"`]/.test(src)
+}
+
+/** The module that owns the pane constructor. */
+export const HERDR_HOST_OWNER = 'runtime/adapters/claude-code/persistent/herdr-host.ts'
+
+/**
+ * Does this source RE-EXPORT the pane constructor or its singleton?
+ *
+ * THE ONE ASSUMPTION {@link reachesHerdrHostModule} RESTS ON. Reachability is an argument
+ * only if naming that module is the ONLY route to the constructor; a barrel that
+ * re-exported it would let a live proof reach it while naming something else entirely.
+ * Rather than leave that as a caveat in prose, it is a predicate with its own assertion,
+ * so the day someone adds such a barrel the reachability claim reds instead of quietly
+ * becoming false.
+ *
+ * Described rather than spelled in the patterns below: these scan every `.ts` including
+ * the file they live in, and writing the forms out longhand makes this file its own top
+ * offender — which it did, on the first run, for the third time on this branch.
+ */
+export function reexportsHerdrHost(src: string): boolean {
+  return (
+    /export\s[^\n]*\sfrom\s*['"`][^'"`]*herdr-host/.test(src) ||
+    /export\s*\{[^}]*\bHerdrHost\b[^}]*\}/.test(src) ||
+    /export\s*\{[^}]*\bherdrHost\b[^}]*\}/.test(src)
+  )
 }
 
 /** An assignment to the process's stderr writer, in any admitted spelling. */
@@ -246,7 +301,7 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // file that already had a correct one. There is now one sanctioned writer
   // (`tests/support/env-switch.ts`) and every other write is an offender outright —
   // no pairing to verify, because there is only one writer and it is written once.
-  test('no suite can silently switch a live proof off — the helper is the only writer', () => {
+  test('no suite writes a live-proof switch DIRECTLY or by bulk copy — the helper is the only writer', () => {
     const rels = allSourceFiles(REPO_ROOT).map((f) => relative(REPO_ROOT, f))
     const offenders = findSwitchOffenders(
       rels,
@@ -254,6 +309,60 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
       ENV_SWITCHES,
     )
     expect(offenders).toEqual([])
+  })
+
+  // THE BOUNDARY OF THAT TITLE, PINNED AS BEHAVIOUR. It says DIRECTLY or BY BULK COPY,
+  // and it means it: a reflective write, a write through an aliased binding, and a
+  // defined property all reach `process.env` without any of them appearing as an
+  // assignment to a literal key. These assert that the guard does NOT see them — not
+  // because that is desirable, but because a limit nobody can execute is a limit nobody
+  // believes. Widening the matcher to chase them cannot terminate: after reflection comes
+  // a computed key, a re-aliased alias, a proxy. The honest move is a claim narrow enough
+  // to be true and a boundary written as a test.
+  //
+  // WHY NOT STRUCTURAL, THE WAY THE PANE GUARD IS. Reachability works there because the
+  // constructor lives behind a module specifier a file must name. `process.env` is a
+  // global: every file in the repo can already reach it, so there is no import to
+  // withhold and nothing to make unreachable. The form-blind answer for this one is a
+  // RUNTIME check — snapshot the switches in the test preload, compare at process exit —
+  // which sees every spelling because it observes the value rather than the text. It
+  // changes a file every test in the repo loads, so it is named here as the next step
+  // rather than folded into this round.
+  describe('the switch guard does not claim what it cannot see', () => {
+    const REFLECT = asm('Reflect.', 'set(', PROC, ".env, '", KEY, "', '/dead')")
+    const ALIASED = asm('const e = ', PROC, '.env; e.', KEY, " = '/dead'")
+    const DEFINED = asm('Object.', 'defineProperty(', PROC, '.env, ', `'${'HERDR_SOCKET_PATH'}'`, ', { value: 1 })')
+
+    test('a reflective write is OUTSIDE this guard', () => {
+      expect(matchesEnvWrite(KEY, REFLECT)).toBe(false)
+      expect(matchesEnvBulkAssign(REFLECT)).toBe(false)
+    })
+    test('a write through an aliased binding is OUTSIDE this guard', () => {
+      expect(matchesEnvWrite(KEY, ALIASED)).toBe(false)
+      expect(matchesEnvBulkAssign(ALIASED)).toBe(false)
+    })
+    test('a defined property is OUTSIDE this guard', () => {
+      expect(matchesEnvWrite(KEY, DEFINED)).toBe(false)
+      expect(matchesEnvBulkAssign(DEFINED)).toBe(false)
+    })
+    // AND THE TREE HAS NONE OF THEM, which is what makes the stated boundary a boundary
+    // rather than a hole being walked through today. Measured, not assumed — and it reds
+    // the day one appears, which is the point at which the limit has to be revisited.
+    test('...and no source in the tree uses one of those forms on a switch', () => {
+      const found = allSourceFiles(REPO_ROOT)
+        .map((f) => relative(REPO_ROOT, f))
+        .filter((rel) => {
+          let src: string
+          try {
+            src = readFileSync(join(REPO_ROOT, rel), 'utf8')
+          } catch {
+            return false
+          }
+          if (!ENV_SWITCHES.some((k) => src.includes(k))) return false
+          return /Reflect\s*\.\s*set\s*\(|Object\s*\.\s*defineProperty\s*\(/.test(src)
+        })
+      expect(found).toEqual([])
+    })
   })
 
   // AND THE GUARD ABOVE CAN ACTUALLY FIRE. Its only observable against the tree is an
@@ -321,42 +430,135 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
   // transport defect survive eight green rounds: this lane's live surface has no
   // automated observer, so a rule about it has to be enforced statically, here, in a
   // test that DOES run in CI.
-  test('no live proof spawns a herdr pane outside the scoped helper', () => {
-    const SPAWNS = /new HerdrHost\s*\(/
-    const HELPER = 'runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.ts'
-    const offenders = allSourceFiles(REPO_ROOT)
-      .filter((f) => f.endsWith('.e2e.test.ts'))
-      .filter((f) => {
-        try {
-          return SPAWNS.test(readFileSync(f, 'utf8'))
-        } catch {
-          return false
-        }
-      })
-      .map((f) => relative(REPO_ROOT, f))
-    expect(offenders).toEqual([])
-    // POSITIVE CONTROL, both halves: the pattern finds the construction where it
-    // legitimately lives, and the walk reaches the e2e suites it is meant to police —
-    // an empty offender list proves nothing if either is wrong, and on this branch both
-    // have been.
-    expect(SPAWNS.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
-    // THE DOMAIN IS THE PROOFS THAT TOUCH HERDR, NOT THE FILENAME SUFFIX. This read
-    // `endsWith('.e2e.test.ts')`, which was every e2e suite in the repo at the time and
-    // therefore a domain scoped to the SAMPLE — the same mistake as the guard that
-    // scanned only `*.e2e.test.ts` for stderr patching, one level along. It broke the
-    // first time someone else's lane added an e2e proof: #541's real-`claude` tool-gate
-    // test is an e2e suite with zero herdr references, and it has no business owning a
-    // herdr pane helper. A suffix says how a test is RUN; the rule is about what it
-    // SPAWNS, so the recogniser reads the content.
-    const live = allSourceFiles(REPO_ROOT)
-      .filter((f) => f.endsWith('.e2e.test.ts'))
-      .filter((f) => /herdr/i.test(readFileSync(f, 'utf8')))
-    // A FLOOR, so the domain cannot quietly empty: narrowing the filter until it matches
-    // nothing would otherwise make every assertion below vacuously true.
+  //
+  // A SPELLING-BOUND VERSION OF THIS GUARD WAS DELETED RATHER THAN WIDENED. It searched
+  // `new HerdrHost\s*\(`, which is one spelling of one way to get a pane: `herdrHost` is
+  // an exported SINGLETON whose `.spawn(...)` never says `new`, `new (HerdrHost)(...)`
+  // parenthesises past the pattern, and a factory hides it a call away. Each opens a real
+  // pane in the owner's workspace while the offender list stays empty. Widening cannot
+  // terminate — after the factory comes a computed member, an aliased binding, a
+  // re-export — and a guard whose title promises more than its matcher delivers is worse
+  // than no guard, because the title is what the next reader believes. The reachability
+  // test below subsumes it completely: nothing can construct what it cannot reach.
+
+  // AND THE REAL GUARANTEE IS REACHABILITY, NOT RECOGNITION. Everything above hunts for a
+  // construction; this makes the construction UNREACHABLE from a live proof, which is the
+  // only form of this rule that does not need keeping current.
+  //
+  // The matcher it replaces searched `new HerdrHost\s*\(`. That is one spelling of one
+  // way to get a pane: `herdrHost.spawn(...)` uses the exported SINGLETON and never says
+  // `new`; `new (HerdrHost)(...)` parenthesises past the pattern; a factory hides it a
+  // call away. Each opened a real pane in the owner's workspace while the offender list
+  // stayed empty — and this is the guard with the user-visible blast radius, the one whose
+  // absence left four orphaned `claude` panes on his screen.
+  //
+  // WIDENING CANNOT TERMINATE. After the factory comes a computed member, an aliased
+  // binding, a re-export; every round buys one spelling out of an infinite set. So the
+  // claim changes shape instead: a file that never NAMES the module cannot use anything
+  // the module exports, in any syntax that exists or will exist. The forms of naming are
+  // closed — static import, dynamic `import()`, `require()` — and all three carry the
+  // specifier as a quoted string.
+  test('a live proof cannot REACH the pane constructor — unreachable, not merely unused', () => {
+    const rels = allSourceFiles(REPO_ROOT).map((f) => relative(REPO_ROOT, f))
+    const live = rels
+      .filter((rel) => rel.endsWith('.e2e.test.ts'))
+      .filter((rel) => /herdr/i.test(readFileSync(join(REPO_ROOT, rel), 'utf8')))
     expect(live.length).toBeGreaterThanOrEqual(3)
-    // ...and each of them reaches the helper, so "no offenders" is not "no spawns".
-    const usingHelper = live.filter((f) => readFileSync(f, 'utf8').includes('withLiveHerdrChild'))
+    const reaching = live.filter((rel) =>
+      reachesHerdrHostModule(readFileSync(join(REPO_ROOT, rel), 'utf8')),
+    )
+    expect(reaching).toEqual([])
+
+    // THE RESIDUAL, CLOSED RATHER THAN NAMED. Reachability is only an argument if this
+    // path is the ONLY way to the constructor — a module that re-exported it would let a
+    // live proof reach it while naming something else entirely. Nothing does, and that is
+    // asserted here so the argument above stays complete as the tree changes.
+    const reexporters = rels.filter((rel) => {
+      if (rel === HERDR_HOST_OWNER) return false
+      try {
+        return reexportsHerdrHost(readFileSync(join(REPO_ROOT, rel), 'utf8'))
+      } catch {
+        return false
+      }
+    })
+    expect(reexporters).toEqual([])
+
+    // ...AND THE HELPER IS WHAT THEY ACTUALLY USE, so "cannot reach the constructor" is
+    // not "does not spawn panes at all". Unreachability without this would be satisfied by
+    // a live proof that had quietly stopped being live.
+    const usingHelper = live.filter((rel) =>
+      readFileSync(join(REPO_ROOT, rel), 'utf8').includes('withLiveHerdrChild'),
+    )
     expect(usingHelper.length).toBe(live.length)
+
+    // POSITIVE CONTROL: the one sanctioned path DOES reach it, so "nothing reaches it" is
+    // not "the detector cannot see a reach".
+    expect(
+      reachesHerdrHostModule(
+        readFileSync(
+          join(REPO_ROOT, 'runtime/adapters/claude-code/persistent/__tests__/live-herdr-child.ts'),
+          'utf8',
+        ),
+      ),
+    ).toBe(true)
+  })
+
+  // EVERY FORM OF REACHING, ON ITS OWN — and the boundary, pinned as behaviour.
+  describe('reachability admits every way of naming the module', () => {
+    for (const [form, src] of [
+      ['a static import', `import { HerdrHost } from '../herdr-host.ts'`],
+      ['a type-only import', `import type { HerdrHostDeps } from '../herdr-host.ts'`],
+      ['an aliased import', `import { HerdrHost as H } from '../herdr-host.ts'`],
+      ['the exported singleton', `import { herdrHost } from '../herdr-host.ts'`],
+      ['a namespace import', `import * as hh from '../herdr-host.ts'`],
+      ['a dynamic import', `const m = await import('../herdr-host.ts')`],
+      ['require', `const m = require('../herdr-host.ts')`],
+      ['a deeper relative path', `import { HerdrHost } from '../../persistent/herdr-host.ts'`],
+      ['an extensionless specifier', `import { HerdrHost } from '../herdr-host'`],
+      ['a double-quoted specifier', `import { HerdrHost } from "../herdr-host.ts"`],
+    ] as const) {
+      test(`${form} counts as reaching the module`, () => {
+        expect(reachesHerdrHostModule(src)).toBe(true)
+      })
+    }
+
+    // THE BOUNDARY, EXECUTABLE RATHER THAN PROSE. Naming the class in a COMMENT is not
+    // reaching it — two of the live proofs do exactly that, and a guard that failed them
+    // would be demanding they stop explaining themselves.
+    test('naming the class in prose is NOT reaching it', () => {
+      expect(reachesHerdrHostModule(' * a real herdr PANE (`HerdrHost`, below), not a pty')).toBe(
+        false,
+      )
+    })
+
+    // AND THE STATED NON-GOAL, pinned as CURRENT behaviour so the limit is executable. A
+    // barrel that re-exported the constructor would let a file reach it without naming
+    // this path — this recogniser says false, and the assertion above is what makes that
+    // safe: no such barrel exists, and if one is ever added that assertion reds first.
+    test('a re-exporting barrel is NOT seen here — the re-exporter assertion is what closes it', () => {
+      expect(reachesHerdrHostModule(`import { HerdrHost } from './index.ts'`)).toBe(false)
+    })
+
+    // ...AND THAT ASSERTION CAN FIRE, which is the half an absence claim cannot supply
+    // for itself. The tree contains no re-exporter, so against the tree this predicate
+    // has exactly one observable — false — and a mistyped pattern would report a clean
+    // tree forever. Each admitted form is its own case, so narrowing to any one of them
+    // reds exactly one.
+    for (const [form, src] of [
+      ['a star re-export naming the module', asm(EXP, ' * from ', HH_SPEC)],
+      ['a named re-export naming the module', asm(EXP, ' { H } from ', HH_SPEC)],
+      ['a named re-export of the class', asm(EXP, ' { HerdrHost }')],
+      ['a named re-export of the singleton', asm(EXP, ' { herdrHost }')],
+    ] as const) {
+      test(`${form} is a re-exporter`, () => {
+        expect(reexportsHerdrHost(src)).toBe(true)
+      })
+    }
+
+    test('an ordinary export of something else is not a re-exporter', () => {
+      expect(reexportsHerdrHost(asm(EXP, ' { withLiveHerdrChild }'))).toBe(false)
+      expect(reexportsHerdrHost(asm(EXP, ' function spawnPane() {}'))).toBe(false)
+    })
   })
 
   // NO TEST MAY MONKEY-PATCH PROCESS STATE BY HAND — not just the live ones. The

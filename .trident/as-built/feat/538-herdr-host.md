@@ -2861,6 +2861,76 @@ leaves the original as a substring, so the `includes` check still matched. The m
 has to break the property, not resemble it; that is twice in two rounds that the
 resemblance was in my own mutation.
 
+### UNREACHABLE BEATS DETECTED: the pane guard stops being a matcher
+
+The guard with the user-visible blast radius searched `new HerdrHost\s*\(`. That is one
+spelling of one route to a pane. `herdrHost` is an exported SINGLETON whose `.spawn(...)`
+never says `new`; `new (HerdrHost)(...)` parenthesises past the pattern; a factory hides it
+a call away. Each opens a real `claude` container in the owner's workspace while the
+offender list stays empty — and this is the guard that exists because four of those were
+found on his screen.
+
+**Widening was refused, on evidence rather than taste.** The gate's own account of the
+#520 scanner: four rounds of widening a recogniser — argument shape, callee identifier,
+binding scope, return scope, element access — before concluding the claim was the wrong
+half. After the factory comes a computed member, an aliased binding, a re-export. Every
+round buys one spelling out of an infinite set.
+
+So the claim changed shape. **A file that never NAMES the module cannot use anything the
+module exports, in any syntax that exists or will exist.** The forms of naming are closed
+— a static import, a dynamic `import()`, a `require()` — and all three carry the specifier
+as a quoted string, which is one small regex with a finite job. The spelling-bound test was
+DELETED rather than kept alongside: reachability subsumes it completely, and a guard whose
+title promises more than its matcher delivers is worse than no guard, because the title is
+what the next reader believes.
+
+**The one assumption is closed rather than caveated.** Reachability is an argument only if
+naming that path is the ONLY route — a barrel that re-exported the constructor would let a
+live proof reach it while naming something else entirely. `reexportsHerdrHost` is its own
+predicate with its own assertion, so the day someone adds such a barrel the reachability
+claim reds instead of quietly becoming false. And that predicate needed a positive control
+of its own: against this tree it has exactly one observable, `false`, so each admitted
+re-export form is its own fixture case.
+
+**The env guard could not get the same treatment, and the reason is worth stating.**
+Reachability works for the constructor because it lives behind a module specifier a file
+must name. `process.env` is a global — every file already reaches it, so there is no import
+to withhold. That one gets the other half of the same choice: a claim narrowed to what it
+enforces (`DIRECTLY or by bulk copy`, in the title), with the reflective write, the aliased
+binding and the defined property each pinned as CURRENT behaviour. A limit nobody can
+execute is a limit nobody believes. Plus a measurement that the tree contains none of those
+forms on a switch key today, so the stated boundary is a boundary rather than a hole being
+walked through — and it reds the day one appears.
+
+### Two mutations that taught the same lesson from opposite ends
+
+`withLiveHerdrChildXX` leaves `withLiveHerdrChild` as a substring, so the `includes` check
+still matched and the mutation SURVIVED against a guard that was working correctly. M-P7
+removed the domain floor and emptied the filter in one edit, so the assertion meant to
+catch an emptied domain had itself been deleted — it survived for the same reason. Both
+times the defect was in my mutation, not the code. **A mutation has to break the property,
+not resemble it**, and the two ways to fail that are overlapping with what you replaced and
+deleting the thing that would have caught you.
+
+M-S5 is the mirror image and is kept for the opposite reason: it survives because `kill()`
+returns early once the child has exited, so no caller that latches can reach `send`'s
+synchronous door today. That one is a rule outliving its current callers rather than a weak
+test, and removing the line would re-acquire the defect for the next caller that latches.
+
+### The file caught me three times
+
+Every positive fixture here is an exact instance of what these guards hunt, and they scan
+every `.ts` including the file that defines them. Three separate rounds: the per-form
+matcher cases, the switch guard's fixture, and then the re-exporter patterns — twice in
+prose inside a docblock, which counts, and once in an assembled fixture where the keyword
+and the specifier still landed on one source line. Each time the guard reported this file
+as its own top offender, which is the instrument working.
+
+The tempting fix is to exempt the file that defines the rule. That is the one fix that must
+not be used: it puts the hole in the place nobody would look. Fixture text is joined at
+runtime, the keyword is split from the specifier, and the negatives stay literal — which is
+itself the demonstration that they are not matches.
+
 ### Mutation table
 
 Every guard was mutated. **Not every mutation reddened**, and the survivors are in the
@@ -3160,6 +3230,16 @@ Run against the named suites.
 | M-L1 | the live-proof domain goes back to the filename suffix | RED 1 |
 | M-L2 | the content filter is narrowed to match nothing | RED 1 — the floor, which exists so a narrowed domain cannot pass vacuously |
 | M-L3 | a live herdr proof stops using the scoped helper | RED 1 — after a first attempt SURVIVED because the rename left the original as a substring of itself |
+| M-P1 | reachability requires the `.ts` extension | RED 1 (the extensionless case) |
+| M-P2 | reachability admits single quotes only | RED 1 (the double-quoted case) |
+| M-P3 | reachability anchored to one exact specifier | RED 3 |
+| M-P4 | the re-export-by-specifier pattern is dropped | RED 2 |
+| M-P5 | the class re-export pattern is dropped | RED 1 |
+| M-P6 | the singleton re-export pattern is dropped | RED 1 |
+| M-P7 | the live domain is narrowed to nothing, floor intact | RED 1 — a first attempt deleted the floor in the same edit and SURVIVED, which is the mutation deleting its own witness |
+| M-P7b | the live domain is widened back to the filename suffix | RED 1 |
+| M-P8 | a live proof IMPORTS the pane constructor | RED 1 — the defect the whole guard exists for, now caught whatever it would have done with the import |
+| M-P9 | a live proof stops using the scoped helper | RED 1 |
 | M-A1 | the `trimToBytes` range check is removed entirely | RED 2 |
 | M-A2 | an out-of-range trim target is silently CLAMPED instead of refused | RED 2 — the choice of reject-over-clamp is itself pinned |
 | M-A3 | over-strict: `trimToBytes === maxBytes` rejected | RED 2 |
