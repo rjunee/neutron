@@ -563,7 +563,13 @@ async function spawnSession(
         throw new ChannelWedgedSpawnError(sessionKey, assertion.detail)
       }
       child.kill()
-      pool.delete(sessionKey)
+      // NO POOL DELETE HERE (Argus r56). `spawnSession` cannot name the entry it owns — the
+      // promise it is running inside is created by its caller — so a bare delete here removes
+      // whatever happens to be registered, and the readiness assertion above is an `await`:
+      // publish A, readiness waits, publish B, A fails, and this line evicted **B**. The
+      // rejection this throw produces reaches `spawning.catch`, which DOES hold the promise
+      // and deletes only its own entry. One site, one owner — rather than an unguarded delete
+      // racing a guarded one and winning because it runs first.
       throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
     }
 
@@ -956,7 +962,12 @@ function quarantineChild(
   session: ReplSession,
   options: PersistentReplSubstrateOptions,
   hosted: number,
+  /** The pool entry the CALLER resolved through, so this only ever removes that one (r56).
+   *  It could not name what it owned before, which the enumeration counts as the finding
+   *  rather than as a site to leave alone. */
+  ownEntry: Promise<ReplSession> | undefined,
 ): void {
+  if (ownEntry !== undefined && pool.get(sessionKey) !== ownEntry) return
   pool.delete(sessionKey)
   if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
   quarantinedChildren.set(session.childGeneration, { sessionKey, session, options })
@@ -1375,7 +1386,7 @@ export async function getOrSpawnSession(
         // they answer 0 and evict as before.
         const hosted = countHostedLiveWork(options, session.childGeneration)
         if (hosted > 0) {
-          quarantineChild(sessionKey, session, options, hosted)
+          quarantineChild(sessionKey, session, options, hosted, existing)
           quarantined = true
           // The quarantined child keeps ownership of its session transcript for as
           // long as it runs, so the replacement must NOT `--resume` the same id.
@@ -1403,7 +1414,13 @@ export async function getOrSpawnSession(
         // transcript with the dying child (the Argus-r3 one-owner invariant). The
         // credential-freshness path fires on every token rotation (regularly), unlike
         // the rarely-firing tool-surface mismatch, so honoring the await here matters.
-        pool.delete(sessionKey)
+        // ONLY OUR OWN ENTRY (r56). `existing` is the promise this turn resolved through, and
+        // the `await` above is a suspension point: a concurrent turn can evict and republish
+        // under this key while we wait, and evicting THAT is taking a live REPL out of the map
+        // every turn resolves through. `childByKey` one line down has been identity-guarded
+        // since r30 — two maps, two rules, one line apart, which is the contrast that was
+        // visible at every one of these sites.
+        if (pool.get(sessionKey) === existing) pool.delete(sessionKey)
         if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
         await terminateChild(session.child)
         // LATCH THE DEATH. An eviction is a child exit the supervision watchdog can
@@ -1415,7 +1432,9 @@ export async function getOrSpawnSession(
         await notifyEvictedChild(options, sessionKey, session.childGeneration, evictionReason)
       }
     } else {
-      pool.delete(sessionKey)
+      // Same rule as the eviction above: the child has exited, but the ENTRY may already be
+      // somebody else's.
+      if (pool.get(sessionKey) === existing) pool.delete(sessionKey)
     }
   }
   // Precedence: an explicit caller `forceResume` (admin/watchdog) wins; else a

@@ -2664,7 +2664,10 @@ about what "identity" has to mean.
 `getOrSpawnSession` deleted the pool entry unconditionally — a spawn that rejects after a
 replacement has been published under the same key would evict the replacement. Same shape, same
 fix; it is on this branch's own code rather than inherited, and the sweep for "who deletes a pool
-entry" is what found it.
+entry" is what found it. **(Round fifty-six correction: guarding that catch was not sufficient, and
+this paragraph overstated it. An UNGUARDED delete in the readiness-failure branch ran first and
+emptied the slot, so the guarded catch had nothing left to protect — and no case reached either
+site. See round fifty-six for the full enumeration.)*
 
 **The control could not see the difference**, which is the eighth fixture vacuity and the same
 shape as the other seven: it put a promise in the map and let the teardown find it, so "the
@@ -2673,6 +2676,55 @@ implementation could fail it. The fixture now models what production does — th
 session's record of what it was published under, together — and the new cases publish the
 replacement **before** the handler runs, in all three settlements, because a respawn publishes its
 promise before its child is ready and *pending* is the likeliest real shape.
+
+### Round fifty-six: every `pool.delete` in the tree, with a row each
+
+The fourth sibling of one operation, so the ask was the enumeration rather than the fix — and it
+is the right ask: we had found this defect at the fulfilled arm, the rejected arm, the
+callback-capture binding and now the readiness-failure branch, one round at a time.
+
+**The one the gate named.** `spawnSession` suspends in the readiness assertion; the failure branch
+ran a bare `pool.delete(sessionKey)`. Publish A → readiness awaits → publish B → A fails → the
+bare delete evicts **B**, and the identity-guarded catch that runs afterwards finds an empty slot
+and does nothing. **An unguarded delete raced a guarded one and won by running first**, which also
+made the as-built's claim that "the spawn-rejection site got the same fix" untrue.
+
+#### Every `pool.delete(` in the subsystem
+
+| Site | Which entry it intends to remove | Guarded? | Operand bound | Covered by |
+|---|---|---|---|---|
+| `pool.ts` `drainPool` | **every** entry, at shutdown | n/a — wholesale, by design | n/a | the shutdown suites |
+| `boot-adoption.ts` `deleteOwnPoolEntry` (rejected) | the current entry | yes — **no suspension point** between the read and the delete | at the read, same tick | M87/M88 |
+| `boot-adoption.ts` `deleteOwnPoolEntry` (fulfilled) | ours | yes — `Bun.peek` identity, same tick | at the read | M87/M88 |
+| `child-exit-wiring.ts` teardown | the entry this session was published under | yes | **publish time** (`session.pooledAs`, r55) | `child-exit-pool-identity.test.ts` |
+| `spawn.ts` readiness failure | it owns nothing it can NAME — the promise is its caller's | **fixed r56: it no longer deletes at all**; the rejection reaches the guarded catch | — | `pane-handle-persistence.test.ts` (r56 case) |
+| `spawn.ts` `spawning.catch` | its own published entry | yes (r55) | publish time (`spawning`) | the same case |
+| `spawn.ts` warm-reuse eviction | the entry this turn resolved through | **fixed r56** | `existing`, before the await | `evict-deletes-only-its-own-entry.test.ts` |
+| `spawn.ts` exited-child eviction | same | **fixed r56** | `existing` | same file |
+| `spawn.ts` `quarantineChild` | the quarantined child's entry | **fixed r56** — it could not name what it owned, so it is passed the caller's `existing` | `existing` | same file |
+| `supervision.ts` `evictPool` | clears the key **so a respawn can publish** | unconditional **by design** — this is the "about to replace our own entry" case the rule explicitly allows | n/a | the respawn suites |
+
+> **"Guard everything" would have been the wrong over-correction.** Two rows are deliberately
+> unguarded and say why: a wholesale shutdown drain, and an eviction whose entire purpose is to
+> clear the key for the publish that follows it. The rule is *don't delete somebody else's* — never
+> *don't delete*.
+
+**Three of the four fixes had no case that reached them**, and the fixture had to be built before
+the mutations meant anything: the warm-reuse path needs a pooled promise the case resolves late, the
+quarantine path needs a **poisoned** session (nothing else reaches `quarantineChild`), and the
+exited-child branch needs a warm child that has already exited. M157–M159 did not red until each
+existed.
+
+**And I caught one of my own vacuous fixtures this time, by asserting the premise.** The quarantine
+case was passing while `hostsLiveWork` was never called — it was re-testing the warm-reuse path
+under a different name. One line (`expect(asked).toBeGreaterThan(0)`) turned a green case into a red
+one. That is the ninth vacuity on this branch and the first found by the lane rather than the gate.
+
+**The attribution error the gate also named.** A claim that the spawn-rejection site was fixed had
+no case behind it, while the rows for that fix pointed at the child-exit test — *a mutation
+attributed to a case that cannot reach the mutated line*, which is round twenty-five's wrong-site
+hazard in its attribution form. Every row below now names the file that actually executes the
+mutated line, and each was verified by printing the line the patch landed on.
 
 ### Mutation table
 
@@ -2719,7 +2771,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one M148–M150 in round fifty-three M151–M152 in round fifty-four and M153–M155 in round fifty-five, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one M148–M150 in round fifty-three M151–M152 in round fifty-four M153–M155 in round fifty-five and M156–M159 in round fifty-six, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2905,6 +2957,10 @@ count from the rows below rather than trusting this sentence.
 | M153 | the entry is bound INSIDE the exit callback again — the r55 defect | `child-exit-pool-identity.test.ts` (2 — the pre-installed replacement cases) |
 | M154 | the identity guard is dropped | `child-exit-pool-identity.test.ts` (4) |
 | M155 | the pool delete is dropped entirely | `child-exit-pool-identity.test.ts` (2 — both current cases) |
+| M156 | the readiness-failure branch deletes the pool entry again — the r56 defect | `pane-handle-persistence.test.ts` (1) |
+| M157 | the warm-reuse eviction drops its identity guard | `evict-deletes-only-its-own-entry.test.ts` (2) |
+| M158 | `quarantineChild` drops its own-entry check | `evict-deletes-only-its-own-entry.test.ts` (1 — needs a POISONED session to reach) |
+| M159 | the exited-child eviction drops its identity guard | `evict-deletes-only-its-own-entry.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

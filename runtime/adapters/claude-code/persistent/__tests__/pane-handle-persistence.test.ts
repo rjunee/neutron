@@ -38,6 +38,7 @@ import {
 } from '../persistent-repl-substrate.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
+import type { ReplSession } from '../repl-session.ts'
 import { reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { registerSupervisedSubstrate, runReplWatchdogTick } from '../supervision.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
@@ -927,5 +928,74 @@ describe('an ownership write that did not LAND is a refusal, however it failed',
     const row = readRow(registryPath, poolKeyFor(options))
     expect(row?.pane_handle).toBe('w9:p-healthy')
     expect(typeof row?.adoption_claim_by).toBe('string')
+  })
+})
+
+describe('a spawn that FAILS READINESS deletes only its own pool entry (#539 r56)', () => {
+  /**
+   * THE FOURTH SIBLING OF ONE OPERATION, and the reason round fifty-six asked for an
+   * enumeration instead of a fix: `spawnSession` suspends in the readiness assertion, and the
+   * failure branch ran a bare `pool.delete(sessionKey)`. Publish A → readiness awaits → publish
+   * B → A fails readiness → the bare delete evicts **B**, and the identity-guarded catch that
+   * runs afterwards finds an empty slot and does nothing. The unguarded delete raced the
+   * guarded one and won by running first.
+   *
+   * `spawnSession` cannot name the entry it owns — the promise it runs inside is created by its
+   * caller — so the fix is that it does not delete at all: the rejection reaches
+   * `spawning.catch`, which holds the promise and removes only its own entry.
+   *
+   * THIS CASE ALSO FIXES AN ATTRIBUTION. Every earlier case for this operation drives
+   * `wireChildExit`; none reached `getOrSpawnSession`, so a claim that "the spawn-rejection
+   * site got the same fix" had no case behind it — a row that looks like evidence and is not.
+   */
+  it('a replacement published during the readiness window survives the failure', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    // A host that spawns a child which never becomes ready: no /channel-ready, no /health. The
+    // readiness assertion therefore fails after its (short, injected) budget.
+    let installReplacement: (() => void) | undefined
+    const neverReady: PtyHost = {
+      async spawn(): Promise<PtyChild> {
+        spawnCalls.push('w9:p-never-ready')
+        // INSIDE the spawn, before readiness — deterministic, no timing assumption.
+        installReplacement?.()
+        let exited = false
+        return {
+          pid: 4242,
+          paneHandle: 'w9:p-never-ready',
+          write() {},
+          kill() {
+            exited = true
+          },
+          exited: new Promise<number | null>(() => {}),
+          hasExited: () => exited,
+          wasKilledByUs: () => true,
+        }
+      },
+    }
+    const options = {
+      ...optionsFor(neverReady, registryPath),
+      // Short, so the assertion fails promptly rather than on the default multi-second budget.
+      assertConfig: { readyBudgetMs: 150, readyIntervalMs: 25, healthBudgetMs: 150, healthIntervalMs: 25 },
+    } as PersistentReplSubstrateOptions
+    const key = poolKeyFor(options)
+
+    // The replacement another turn publishes while our readiness assertion is waiting.
+    const replacement = new Promise<never>(() => {}) as unknown as Promise<ReplSession>
+    installReplacement = () => {
+      pool.set(key, replacement)
+    }
+
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/spawn failed|channel not ready|refusing/i)
+
+    // B SURVIVES. Before r56 the failing spawn's bare delete removed it, orphaning a live REPL
+    // out of the map every turn resolves through.
+    expect(pool.get(key)).toBe(replacement)
+    pool.delete(key)
   })
 })
