@@ -696,9 +696,20 @@ export interface WithRegistryOptions {
  * It does NOT save, which is the whole point of having it rather than a `withRegistry`
  * whose mutate returns its input: a byte-identical rewrite of every row is a write
  * this path has no business performing while the process is shutting down.
+ *
+ * `onOutcome` IS PASSED STRAIGHT THROUGH, and a caller whose correctness argument rests
+ * on the lock must consume it. `withFlockSync` runs its callback UNGUARDED in two
+ * states — no FFI, and `flock` returning nonzero — because for a generic helper running
+ * unguarded beats skipping the operation. Both are indistinguishable from success to
+ * anyone who does not ask. Taking the lock is not the same as HOLDING it, and this
+ * helper reports which happened rather than implying the stronger one.
  */
-export function withRegistryRead<T>(path: string, read: (registry: ReplRegistry) => T): T {
-  return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)))
+export function withRegistryRead<T>(
+  path: string,
+  read: (registry: ReplRegistry) => T,
+  onOutcome?: (acquired: boolean) => void,
+): T {
+  return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)), onOutcome)
 }
 
 export function withRegistry<T>(

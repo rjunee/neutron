@@ -16,15 +16,16 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { claimShutdownSurvival, shutdownSurvivalVerdict } from '../gateway-shutdown-survival.ts'
 import { pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import { withRegistryRead } from '../repl-registry.ts'
+import { setFlockImplForTests } from '../registry-lock.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 
@@ -217,14 +218,16 @@ describe('the survival decision is taken UNDER THE LOCK, against the row that is
       paneHandle: HANDLE,
       childGeneration: GENERATION,
       deps: {
-        withRegistryRead: (path, read) => {
+        withRegistryRead: (path, read, onOutcome) => {
           // B wins the lock immediately before us and takes the key for its own child.
           writeFileSync(
             path,
             JSON.stringify({ [KEY]: { ...row(), pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer' } }),
           )
           replaced = true
-          return withRegistryRead(path, read)
+          // The outcome is FORWARDED, not swallowed: a wrapper that dropped it would
+          // report "lock not acquired" and this case would pass for the wrong reason.
+          return withRegistryRead(path, read, onOutcome)
         },
       },
     })
@@ -245,9 +248,9 @@ describe('the survival decision is taken UNDER THE LOCK, against the row that is
       paneHandle: HANDLE,
       childGeneration: GENERATION,
       deps: {
-        withRegistryRead: (path, read) => {
+        withRegistryRead: (path, read, onOutcome) => {
           writeFileSync(path, JSON.stringify({ [KEY]: { ...row(), child_generation: 'gen-newer' } }))
-          return withRegistryRead(path, read)
+          return withRegistryRead(path, read, onOutcome)
         },
       },
     })
@@ -275,7 +278,12 @@ describe('the survival decision is taken UNDER THE LOCK, against the row that is
       sessionKey: KEY,
       paneHandle: undefined,
       childGeneration: GENERATION,
-      deps: { withRegistryRead: (path, read) => { took += 1; return withRegistryRead(path, read) } },
+      deps: {
+        withRegistryRead: (path, read, onOutcome) => {
+          took += 1
+          return withRegistryRead(path, read, onOutcome)
+        },
+      },
     })
     expect(noHandle.kind).toBe('kill')
     expect(took).toBe(0)
@@ -304,5 +312,103 @@ describe('the survival decision is taken UNDER THE LOCK, against the row that is
     const seen = withRegistryRead(registryPath, (registry) => registry[KEY]?.pane_handle)
     expect(seen).toBe(HANDLE)
     expect(readFileSync(registryPath, 'utf8')).toBe(bytesBefore)
+  })
+})
+
+
+describe('the survival decision FAILS CLOSED — a lock it cannot take is not a lock', () => {
+  /**
+   * ARGUS r8 BLOCKERS, and they are one defect in two places: the lock path can fail,
+   * and on failure the decision must not stay permissive.
+   *
+   * THE TWO OUTCOMES ARE NOT SYMMETRIC, which is the whole argument. The child here is
+   * OURS and we hold its handle, so killing it carries none of the recycled-identifier
+   * risk this module family exists to guard — the cost is one respawn at the next boot.
+   * The cost of a wrong `survive` is a process nothing will ever look for again, writing
+   * a second stream into a transcript another owner holds. When one outcome is
+   * recoverable and the other is not, the tie does not go to the permissive branch.
+   */
+  afterEach(() => setFlockImplForTests(undefined))
+
+  it('a READ THAT THROWS is a kill, and says so in words a row-mismatch never uses', () => {
+    const verdict = claimShutdownSurvival({
+      registryPath: registryWith(row()),
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+      deps: {
+        withRegistryRead: () => {
+          // The real shape: `openSync` on the lock raises ENXIO / ELOOP / EACCES, and
+          // the lock throws outright when its path is not a regular file.
+          throw new Error('registry-lock: lock path is not a regular file: /x/.registry.lock')
+        },
+      },
+    })
+    expect(verdict.kind).toBe('kill')
+    const reason = verdict.kind === 'kill' ? verdict.reason : ''
+    // "could not read the registry" and "no row names this pane" are different facts.
+    // Unknown must not print false's sentence.
+    expect(reason).toMatch(/could NOT BE READ/)
+    expect(reason).not.toMatch(/no persisted row names/)
+  })
+
+  it('AND THE POOL ACTS ON IT: teardown kills that child instead of skipping past it', async () => {
+    // The unit verdict alone cannot prove this. The bug was that the exception never
+    // REACHED a verdict: it escaped into teardown's own `catch {}`, which swallowed it
+    // and skipped the kill, the sink unregister and the config unlink. So the case has
+    // to be driven through the real `shutdownAllPersistentRepls`.
+    //
+    // The lock is made to throw the way production would — the lock path is a DIRECTORY,
+    // so `openSync` fails on it — rather than by injecting a fake, because the seam the
+    // pool uses has no dependency injection at all.
+    const registryPath = registryWith(row())
+    mkdirSync(join(dirname(registryPath), '.registry.lock'), { recursive: true })
+    const configPath = join(dirname(registryPath), 'session-mcp.json')
+    writeFileSync(configPath, '{}')
+    const { session, child } = pooledSession(HANDLE, configPath)
+    pool.set(KEY, Promise.resolve(session))
+    supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+
+    await shutdownAllPersistentRepls()
+
+    expect(child.killed).toBe(true)
+    // And the teardown it used to skip past ran too.
+    expect(await Bun.file(configPath).exists()).toBe(false)
+  })
+
+  it('a REAL flock that does not grant the lock is a kill, on a row that would otherwise survive', () => {
+    // THE ROW MATCHES. That is what makes this case about the lock and not about the
+    // row: without the override the very same call returns `survive` — the positive
+    // control below runs it. The fake is the flock SYSCALL only; `withFlockSync` and
+    // `withRegistryRead` are the real ones, so this distinguishes "decided under the
+    // lock" from "decided", which a mocked reader could not.
+    const registryPath = registryWith(row())
+    setFlockImplForTests(() => 1)
+    const verdict = claimShutdownSurvival({
+      registryPath,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+    })
+    expect(verdict.kind).toBe('kill')
+    const reason = verdict.kind === 'kill' ? verdict.reason : ''
+    expect(reason).toMatch(/LOCK WAS NOT ACQUIRED/)
+    // Again: not the sentence a missing row prints.
+    expect(reason).not.toMatch(/no persisted row names/)
+  })
+
+  it('THE POSITIVE CONTROL: the same row, with the lock actually granted, survives', () => {
+    // Two jobs. It stops "kill everything" from passing the three cases above, and it
+    // proves the survive branch is REACHABLE in this environment — if flock or FFI were
+    // unavailable here, every case above would pass for a reason that had nothing to do
+    // with the code under test.
+    const registryPath = registryWith(row())
+    const verdict = claimShutdownSurvival({
+      registryPath,
+      sessionKey: KEY,
+      paneHandle: HANDLE,
+      childGeneration: GENERATION,
+    })
+    expect(verdict).toEqual({ kind: 'survive', handle: HANDLE })
   })
 })

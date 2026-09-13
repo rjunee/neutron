@@ -105,8 +105,19 @@ export function shutdownSurvivalVerdict(input: ShutdownSurvivalInput): ShutdownS
 /** The one seam {@link claimShutdownSurvival} needs, so a case can model another
  *  incarnation winning the lock immediately before this decision. */
 export interface ShutdownSurvivalDeps {
-  /** Defaults to {@link withRegistryRead} — the registry read taken UNDER THE FLOCK. */
-  readonly withRegistryRead?: <T>(path: string, read: (registry: ReplRegistry) => T) => T
+  /** Defaults to {@link withRegistryRead} — the registry read taken UNDER THE FLOCK.
+   *  `onOutcome` reports whether the lock was actually HELD while the read ran, and this
+   *  caller rules on it: see {@link claimShutdownSurvival}. */
+  readonly withRegistryRead?: <T>(
+    path: string,
+    read: (registry: ReplRegistry) => T,
+    onOutcome?: (acquired: boolean) => void,
+  ) => T
+}
+
+/** Message text for a thrown value, without assuming it is an Error. */
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 /**
@@ -159,10 +170,66 @@ export function claimShutdownSurvival(args: {
   const read = args.deps?.withRegistryRead ?? withRegistryRead
   // NO registry configured is NOT an empty registry: either way nothing durable names
   // this pane, and `shutdownSurvivalVerdict` turns that into a kill with its own reason.
-  const record =
-    args.registryPath === undefined
-      ? undefined
-      : read(args.registryPath, (registry) => registry[args.sessionKey])
+  if (args.registryPath === undefined) {
+    return shutdownSurvivalVerdict({
+      paneHandle: args.paneHandle,
+      childGeneration: args.childGeneration,
+      record: undefined,
+    })
+  }
+  // BOTH OF THESE MUST SUCCEED FOR A SURVIVAL, AND NEITHER IS FREE.
+  //
+  // (1) The read can THROW. The lock's `openSync` raises on ENXIO / ELOOP / a missing
+  //     parent / EACCES, and the lock throws explicitly when its path is not a regular
+  //     file. Nothing above this catches it usefully: teardown's own `catch {}` would
+  //     swallow it and SKIP the kill, the sink unregister and the config unlink — the
+  //     child left alive by an exception nobody sees. That is worse than the race this
+  //     function was added to close, and it is a hazard the unlocked `getRecord` it
+  //     replaced did not have (`loadRegistry` answers `{}` on every read failure).
+  //
+  // (2) The lock can fail to be HELD. `withFlockSync` runs its callback unguarded when
+  //     FFI is missing and when `flock` returns nonzero — correct for a generic helper,
+  //     and indistinguishable from success to a caller that does not ask. This
+  //     function's whole correctness argument is the lock, so it asks.
+  //
+  // EITHER FAILURE IS A KILL, and the asymmetry is the reason rather than caution for
+  // its own sake. The child is OURS and we hold its handle, so killing it carries none
+  // of the recycled-identifier risk this module family exists to guard: the cost is one
+  // respawn at the next boot. The cost of a wrong `survive` is a process nothing will
+  // ever look for again, writing a second stream into a transcript another owner holds.
+  // When one outcome is recoverable and the other is not, the tie does not go to the
+  // permissive branch.
+  let acquired = false
+  let record: ReplRegistryRecord | undefined
+  try {
+    record = read(
+      args.registryPath,
+      (registry) => registry[args.sessionKey],
+      (ok) => {
+        acquired = ok
+      },
+    )
+  } catch (e) {
+    // DISTINCT FROM "no row names it": that is a finding about the registry's CONTENT,
+    // this is the absence of any finding at all. A log reader must be able to tell a
+    // stale row from a registry we never read.
+    return {
+      kind: 'kill',
+      reason:
+        `the registry could NOT BE READ (${errorText(e)}) — nothing establishes that a row names ` +
+        `pane ${args.paneHandle}, and a child left alive on an unread registry is one nothing ` +
+        'would ever look for again',
+    }
+  }
+  if (!acquired) {
+    return {
+      kind: 'kill',
+      reason:
+        `the registry LOCK WAS NOT ACQUIRED for the survival decision about pane ${args.paneHandle} ` +
+        '— the row was read unguarded, so another incarnation may have replaced it inside this ' +
+        'decision and the only thing that would make this safe is the lock we did not get',
+    }
+  }
   return shutdownSurvivalVerdict({
     paneHandle: args.paneHandle,
     childGeneration: args.childGeneration,

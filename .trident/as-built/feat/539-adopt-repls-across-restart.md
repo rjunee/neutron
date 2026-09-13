@@ -198,6 +198,64 @@ positive with that path named, rather than left to age out — a required securi
 that fails once and passes later with nobody having read the path is the silent-success
 shape this branch spent its rounds removing.
 
+### Round eight: taking the lock introduced a way to fail, and the failure was permissive
+
+Two findings, one defect in two places: the lock path can fail, and on failure the
+survival decision did not fail closed.
+
+**The read can THROW, and the throw went somewhere worse than nowhere.**
+`withRegistryRead` was called bare. `openSync` on the lockfile raises on ENXIO, ELOOP, a
+missing parent and EACCES, and `registry-lock.ts` throws outright when the path is not a
+regular file. That exception lands in teardown's own `catch { /* ignore */ }`, which
+skips `session.child.kill()`, the sink unregister and `unlinkSessionConfigs` — the child
+left alive by an exception nobody ever sees. **This was a regression round seven
+introduced**, not a pre-existing hazard: the `getRecord` path it replaced goes through
+`loadRegistry`, which answers `{}` on every read failure and never throws, and took no
+lock, so shutdown had no throwing site at all. Adding the lock added one.
+
+**And the lock may not have been HELD, which is not the same as taking it.**
+`withFlockSync` runs its callback unguarded in two states — FFI missing, and `flock`
+returning nonzero — because for a generic helper running unguarded beats skipping the
+operation, and both look exactly like success to a caller that does not ask. Its
+`onOutcome` parameter exists for a caller whose correctness argument rests on the lock,
+and this is that caller; `withRegistryRead` was discarding it. So on lock failure the
+stale-row race was still live while the header claimed the flock ruled it out.
+
+**Both are now `kill`, and the asymmetry is the argument rather than caution.** The child
+is ours and we hold its handle, so killing it carries none of the recycled-identifier
+risk this module family exists to guard: the cost is one respawn at the next boot. The
+cost of a wrong `survive` is a process nothing will ever look for again, writing a second
+stream into a transcript another owner holds. When one outcome is recoverable and the
+other is not, the tie does not go to the permissive branch. `survive` now requires BOTH a
+confirmed acquisition and a completed read.
+
+**The reasons are three different sentences, because they are three different facts.**
+"no persisted row names pane X" is a finding about the registry's content; "the registry
+could NOT BE READ" is the absence of any finding; "the registry LOCK WAS NOT ACQUIRED" is
+a finding about the instrument. Both new cases assert the text does NOT match the
+row-mismatch sentence, so unknown cannot quietly reuse false's words.
+
+**What the cases had to do that a unit assertion could not.** The throw case is also
+driven through the real `shutdownAllPersistentRepls`, because the bug was that the
+exception never reached a verdict — asserting the verdict alone would pass against the
+broken code. And the lock case overrides the flock SYSCALL via `setFlockImplForTests`,
+leaving the real `withFlockSync` and the real `withRegistryRead` in the path, on a row
+that matches: without the override the identical call returns `survive`, which the
+positive control runs. That is what separates "decided under the lock" from "decided",
+and a mocked reader could not have shown it.
+
+**A note on the positive control's second job.** It proves the survive branch is
+REACHABLE in this environment. If FFI or `flock` were unavailable on the runner, every
+fail-closed case above would pass for a reason having nothing to do with the code under
+test — the vacuity the M41 lesson is about, arriving from the other side.
+
+**Out of scope, and filed: #672.** The `ps`-derived string callers
+(`boot-adoption.ts`, `orphan-adoption.ts`, `supervision.ts`) still flatten and reparse,
+so requirement (a) in this module's header is stronger than `ps` can establish. The
+docblock on `argvMatchesSession` already says the whitespace rule is vacuous for the
+string form, so nothing written here overclaims — but the residual is real and belongs to
+that issue, not this PR.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -208,8 +266,11 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven and verified individually as they were
-written; each is listed with the count it reddens.
+afterwards. M37–M41 were added in round seven and M42–M44 in round eight, each verified
+individually as it was written and listed with the count it reddens. M44 was checked for
+vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
+genuinely reachable — a fixture whose row already mismatched would have made the mutation
+unobservable and the case worthless, which is the M41 shape one level up.
 
 **M41 did not red on its first writing, and the test was the thing at fault.** The
 no-write case compared the registry file's bytes before and after — against a fixture
@@ -277,6 +338,9 @@ count from the rows below rather than trusting this sentence.
 | M39 | the argv matcher refuses every vector (**over-strict**) | `pane-adoption-verdict.test.ts` (7) |
 | M40 | the survival decision reads an UNLOCKED snapshot again | `gateway-shutdown-survival.test.ts` (2) |
 | M41 | `withRegistryRead` writes the registry back | `gateway-shutdown-survival.test.ts` (1) |
+| M42 | the registry read is called bare again, with no catch | `gateway-shutdown-survival.test.ts` (2) |
+| M43 | the lock outcome is never asked for (`acquired` forced true) | `gateway-shutdown-survival.test.ts` (1) |
+| M44 | both failure branches return `survive` (**over-permissive**) | `gateway-shutdown-survival.test.ts` (3) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
