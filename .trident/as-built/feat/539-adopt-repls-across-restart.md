@@ -137,9 +137,15 @@ and reverted mechanically, with the tree verified clean afterwards.
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number
 written once and then never re-derived, in the one section whose whole purpose is
-auditability. The last full harness run covered **M1–M31 in one pass against this head: 31/31
-reddened their target**, with the worktree verified clean afterwards; M32–M33 were
-verified individually as they were added.
+auditability. The last full harness run covered **every live row in one pass against this head —
+M1–M36 less the superseded M31: 35/35 reddened their target** — with the worktree
+verified clean afterwards.
+
+**M31 stopped applying, and the harness said so rather than passing.** The write it
+mutated was replaced by `claimRowOrUnwind`, so its patch matched nothing — reported as
+`PATCH DID NOT APPLY` and counted against the run, which is the behaviour a mutation
+harness needs: a patch that silently no-ops is a row that claims coverage it is not
+providing. M35 and M36 are its successors and both redden.
 
 **M33 was NOT CAUGHT on its first full run, and that is worth recording.** The close
 path's moved-row window had no case at all: every existing row-moved case drove the
@@ -183,7 +189,7 @@ count from the rows below rather than trusting this sentence.
 | M28 | a dead recorded pid alone clears the handle | `boot-adoption.test.ts` (2) |
 | M29 | no identity re-check immediately before the close | `boot-adoption.test.ts` (2) |
 | M30 | the handle clear does not compare the row it decided about | `boot-adoption.test.ts` (1) |
-| M31 | the adopted-pid write does not compare it either | `boot-adoption.test.ts` (1) |
+| M31 | ~~the adopted-pid write does not compare it either~~ — **superseded by M35/M36**: that write now lives inside the row claim, so this patch no longer applies to any code | superseded |
 | M32 | the `row-moved` verdict is computed and discarded | `adoption-refuses…` (1) |
 | M33 | the close path ignores a moved row | `boot-adoption.test.ts` (1) |
 | M34 | the close path never REPORTS a moved row | `boot-adoption.test.ts` (1) |
