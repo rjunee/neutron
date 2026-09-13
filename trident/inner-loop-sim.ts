@@ -148,7 +148,7 @@ export async function writeSimulatedResult(
       sim.verdict === 'APPROVE'
         ? 'APPROVE'
         : recordedTerminalVerdict(
-            { verdict: sim.verdict ?? null, block_kind: sim.blockKind ?? null, checkpoint },
+            { verdict: sim.verdict ?? null, block_kind: sim.blockKind ?? null, checkpoint, escalation: null },
             sim.findings === undefined ? null : JSON.stringify(sim.findings),
           ),
       runId,

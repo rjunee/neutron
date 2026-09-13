@@ -129,9 +129,9 @@ function WorkBoardRowImpl({
   const [dragging, setDragging] = useState(false);
 
   const dot = dotState(item);
-  const tag = stepTag(item.run_progress);
+  const tag = stepTag(item);
   const round = roundText(item.run_progress);
-  const notice = runNotice(item.run_progress);
+  const notice = runNotice(item);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -329,7 +329,13 @@ function WorkBoardRowImpl({
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
           {notice !== null ? (
             <Text
-              style={notice.tone === 'failure' ? styles.failReason : styles.briefAlert}
+              style={
+                notice.tone === 'failure'
+                  ? styles.failReason
+                  : notice.tone === 'blocked'
+                    ? styles.blockedReason
+                    : styles.briefAlert
+              }
               numberOfLines={1}
               testID={`work-board-run-notice-${notice.tone}`}
             >
@@ -366,7 +372,7 @@ function WorkBoardCompletedRowImpl({
   variant?: 'done' | 'archived';
 }) {
   const archived = variant === 'archived';
-  const alert = archived ? null : runNotice(item.run_progress);
+  const alert = archived ? null : runNotice(item);
   const requestDelete = (): void => {
     Alert.alert('Remove this item?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -524,6 +530,14 @@ const styles = StyleSheet.create({
   failReason: {
     flexShrink: 1,
     color: PHASE.failed.fg,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // A BLOCKED card's reason is the escalation's own sentence — not a failure, so it
+  // must not wear the failure colour beside a "Blocked" tag.
+  blockedReason: {
+    flexShrink: 1,
+    color: PHASE.blocked.fg,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },

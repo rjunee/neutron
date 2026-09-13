@@ -106,6 +106,9 @@ describe('build-completion heads come from git', () => {
     const reason = innerTerminalFailureReason(
       { max_rounds: 3, round: 1, inner_checkpoint: null },
       {
+        // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+        // these, and a fixture that omitted the field would leave that untested.
+        escalation: null,
         ok: false,
         verdict: null,
         round: 1,
@@ -263,6 +266,9 @@ describe('an empty build is never reported as an unreadable head', () => {
     const reason = innerTerminalFailureReason(
       { max_rounds: 3, round: 1, inner_checkpoint: null },
       {
+        // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+        // these, and a fixture that omitted the field would leave that untested.
+        escalation: null,
         ok: false,
         verdict: null,
         round: 1,

@@ -126,7 +126,13 @@ describe('review-round cap — the value a real lane actually gets', () => {
     // point is to evaluate the predicate, not to have TS fold it to a constant.
     const verdict: string = 'REQUEST_CHANGES'
     const blockKind: string = 'code'
-    while (verdict === 'REQUEST_CHANGES' && round < cap && blockKind !== 'infra-only') {
+    // …and NOT ESCALATING. The escalation clause is what turns this cap back into a
+    // BACKSTOP: a run that stops and escalates never reaches it, so the only way to
+    // visit all nine fix rounds is for every round to have judged the code, produced
+    // no repeated finding, and kept the blocker+major count falling. That is the case
+    // this test still describes, and it is now the UNUSUAL one.
+    const escalation: unknown = null
+    while (verdict === 'REQUEST_CHANGES' && round < cap && escalation === null && blockKind !== 'infra-only') {
       round++ // the script's step — one round per iteration
       visited.push(round)
     }
@@ -177,20 +183,45 @@ describe('review-round cap — the two knobs may not drift apart', () => {
     // The concrete drift this catches: `round++` -> `round += 2` would skip
     // rounds, so a lane would get five fix rounds instead of nine while the cap
     // literal still read 10.
-    const loop =
-      /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*synthesis\.blockKind !== 'infra-only' &&\s*\n\s*synthesis\.blockKind !== 'advisory-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(
-        SRC,
-      )
+    // ANCHORED ON `round++`, NOT ON THE CONDITION'S EXACT TEXT. This used to pin every
+    // clause of the `while` in order, so it broke the moment a clause was legitimately
+    // ADDED — a pending re-plan became its own reason to iterate — even though the step
+    // it exists to guard had not changed. That is the third time in this branch that a
+    // source assertion has failed on a correct improvement, and the fix is the same
+    // each time: assert the thing you mean. What this test means is "one round per
+    // iteration", so it matches a `while (…) { round++ }` with any condition inside.
+    const loop = /while \(([\s\S]{0,800}?)\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
     // Proved to have MATCHED before anything is concluded from it.
     expect(loop).not.toBeNull()
+    // The cap clause is still IN that condition — without this, a loop that stepped by
+    // one but had lost its bound would pass.
+    expect(loop?.[1]).toContain('round < maxRounds')
   })
 
-  test('the loop guards all FOUR clauses — verdict, cap, infra-only, advisory-only', () => {
+  test('the loop guards the verdict, infra-only and advisory-only clauses', () => {
     // Dropping the infra-only clause would spend the (now larger) round budget
     // re-Forging against a review that never ran; dropping the advisory-only clause
     // would spend it re-Forging against findings already declared non-blocking.
     expect(SRC).toContain("finalVerdict === 'REQUEST_CHANGES' &&")
     expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
     expect(SRC).toContain("synthesis.blockKind !== 'advisory-only'")
+    // THE ESCALATION CLAUSE IS DELIBERATELY NOT ASSERTED HERE. It was, briefly, and the
+    // assertion was doing no work that `trident/__tests__/escalation-e2e.test.ts` does
+    // not do better: that suite RUNS the loop and shows a repeating run stopping at
+    // round 2 with one fix round dispatched, which is impossible with the clause
+    // removed. A source check beside it can only fail for a second reason — a correct
+    // refactor — which is exactly how this suite's re-plan assertion reddened CI on an
+    // improvement. The three above stay because they belong to the cards that added
+    // them and have no executed twin yet.
   })
+
+  // THE CAP IS A BACKSTOP NOW, NOT THE PRIMARY EXIT — and that is asserted by
+  // EXECUTION, not here. `trident/__tests__/escalation-e2e.test.ts` runs the shipped
+  // workflow and shows a run whose reviewers repeat a finding stopping at round 2 with
+  // a cap of 6, one fix round dispatched and two panels paid for; and a converging
+  // control run reaching its cap untouched. A version of that claim written here would
+  // have to re-execute the loop as a hand-written model — the shape this file already
+  // uses for the cap arithmetic above, and one that proves what the model says rather
+  // than what the script does.
+
 })

@@ -945,6 +945,156 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('the SUMMARY counts a blocked card as blocked — not failed, not running', async () => {
+    // `summarize` is a pure export of the module under test; imported here rather than
+    // at file scope because the module needs the happy-dom globals installed first.
+    const { summarize } = await import('../WorkBoardTab.tsx')
+    // The third rendering path to get this wrong in three rounds (the decoder dropped
+    // the card, the row said Failed, the summary counted it Failed), and all three had
+    // one cause: the reconcile KEEPS the terminal run link on a blocked card, that run's
+    // `step_label` is `failed`, and every derivation that asked the RUN before the LANE
+    // inherited the lie. The pane's chip is what the owner reads at a glance.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const blocked = summarize([
+      item({ id: 's1', status: 'blocked', linked_run_id: 'run-esc', run_progress: terminal }),
+    ])
+    expect(blocked).toEqual({ running: 0, failed: 0, active: 0, blocked: 1 })
+
+    // …AND WITH NO `run_progress` AT ALL, which is the shape once the run row ages out.
+    // `isLinkedRunning` reads "no progress reported" as "still running" — right for a
+    // live run that has not reported, wrong for one that ENDED — so without the lane
+    // check this counted as RUNNING instead.
+    expect(summarize([item({ id: 's2', status: 'blocked', linked_run_id: 'run-esc' })])).toEqual({
+      running: 0,
+      failed: 0,
+      active: 0,
+      blocked: 1,
+    })
+
+    // CONTROL: the same two fixtures in the FAILED lane still count as failed, so a
+    // summary that simply stopped counting failures would not pass the assertions above.
+    expect(
+      summarize([item({ id: 's3', status: 'failed', linked_run_id: 'run-esc', run_progress: terminal })]),
+    ).toEqual({ running: 0, failed: 1, active: 0, blocked: 0 })
+    expect(summarize([item({ id: 's4', status: 'failed', linked_run_id: 'run-esc' })])).toEqual({
+      running: 0,
+      failed: 1,
+      active: 0,
+      blocked: 0,
+    })
+  })
+
+  it('a BLOCKED card RENDERS, and offers NO play/retry control at all', async () => {
+    // Two failures in one fixture, both measured against the real render:
+    //  (1) the card must APPEAR. The decoders used to drop an unknown status, so a
+    //      blocked card vanished from the board — strictly worse than mislabelling it.
+    //  (2) it must offer NO ▶/↻. The dispatch chokepoint refuses a blocked card
+    //      (`card_blocked`), so the control could only produce that refusal, and '↻'
+    //      would read as "retry" — the one instruction that changes nothing here.
+    //
+    // THE RUN PROGRESS IS TERMINAL ON PURPOSE. A kept `linked_run_id` with NO
+    // run_progress makes `isLinkedRunning` true, which suppresses the control on its own
+    // — so a fixture without it passes whether or not the blocked lane is consulted at
+    // all (measured: it did). With a terminal run_progress the live-run suppressor is
+    // off, and the `blocked` lane is the only thing left that can remove the control.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const rows = [
+      item({ id: 'wb', title: 'Blocked on a dependency', status: 'blocked', linked_run_id: 'run-esc', run_progress: terminal }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    expect(container.textContent).toContain('Blocked on a dependency')
+    expect(container.querySelector('.cwb-btn-play')).toBeNull()
+
+    // (3) AND IT MUST SAY **BLOCKED**, not "Failed". The reconcile KEEPS the terminal
+    // run link so the reason stays reachable, and that run's `step_label` is `failed`
+    // — so a renderer that derives from the run step paints this card red and tags it
+    // Failed, which is precisely the belief the lane exists to prevent. Measured: it
+    // did. The tag, the dot and the reason line are all asserted, because each is a
+    // separate derivation and each was wrong.
+    const tag = container.querySelector('.cwb-tag')
+    expect(tag?.textContent).toBe('Blocked')
+    expect(tag?.className).toContain('cwb-tag-blocked')
+    expect(tag?.className).not.toContain('cwb-tag-failed')
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-blocked')
+    expect(dot!.className).not.toContain('cwb-dot-failed')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    // The escalation's own sentence is still shown — it is the most useful line on the
+    // card — but not in the failure tone, or the two halves of one row would disagree.
+    const reason = container.querySelector('.cwb-blocked-reason')
+    expect(reason?.textContent).toContain('BLOCKED')
+    expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
+  it('CONTROL: the same card in the FAILED lane still renders its Retry control', async () => {
+    // Byte-for-byte the fixture above except the lane, so the ONLY thing that can
+    // account for the difference is the lane. Without it, deleting the play control
+    // outright would pass the test above.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const rows = [
+      item({ id: 'wb2', title: 'Broken build', status: 'failed', linked_run_id: 'run-esc', run_progress: terminal }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+    // …and it still says FAILED, in the failure tone. Without this, renaming every tag
+    // to "Blocked" would pass the test above.
+    expect(container.querySelector('.cwb-tag')?.textContent).toBe('Failed')
+    expect(container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')!.className).toContain('cwb-dot-failed')
+    expect(container.querySelector('.cwb-fail-reason')).not.toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
   it('failed card with no run_progress: static cwb-dot-failed dot + Retry build control (A)', async () => {
     // Fixture (A): status='failed', no linked_run_id, no run_progress.
     // isLinkedRunning → false (no binding); canPlay → true; isRetry → true (status='failed') → '↻' 'Retry build'.

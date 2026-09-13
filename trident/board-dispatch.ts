@@ -438,6 +438,14 @@ export type BoardBoundBuildRejectionCode =
   | 'invalid_bound_pr'
   | 'review_needs_bound_pr'
   | 'underspecified'
+  // THE CARD IS BLOCKED — a previous build STOPPED ON PURPOSE and reported why
+  // (`work_board_items.status = 'blocked'`, migration 0140). NOT queued, unlike
+  // 'held': a hold is waiting for a condition the sweep can re-test, and nothing
+  // here can re-test a decision. Re-dispatching now reproduces the run that
+  // reached the block, which is the waste the escalation exists to stop, one
+  // level out from the fix loop it was stopped in. Clearing the block is a
+  // status write the orchestrator makes deliberately.
+  | 'card_blocked'
   | 'already_landed'
   // Something LIVE already holds this card's branch — a non-terminal run row,
   // or a linked-worktree lock naming a live pid. REFUSED *AND* QUEUED: nothing
@@ -598,6 +606,29 @@ export async function dispatchBoardBoundBuild(
       ok: false,
       code: 'unknown_board_item',
       message: `No Plan item "${board_item_id}" on this project's board. Use work_board_list to find the item id.`,
+    }
+  }
+
+  // (2a) THE CARD IS BLOCKED. Checked immediately after the item is found and
+  // BEFORE every other gate, because the answer does not depend on any of them:
+  // a blocked card is not startable whatever the task text says, whether or not
+  // a PR is bound, and however healthy the executor is. Placing it later would
+  // let an underspecified-or-executor refusal be reported for a card whose real
+  // problem is that somebody has to make a decision.
+  //
+  // NOT QUEUED. `held` parks a well-formed dispatch whose blocker the sweep can
+  // re-test; this one is waiting on a JUDGEMENT, and a sweep that re-fired it
+  // would relearn the same block on the orchestrator's behalf — exactly the loop
+  // this card closed inside the run, reopened one level out.
+  if (item.status === 'blocked') {
+    return {
+      ok: false,
+      code: 'card_blocked',
+      message:
+        `Plan item "${board_item_id}" is BLOCKED: a previous build stopped and escalated rather than ` +
+        'iterating, and nothing has cleared it. Read its reported reason, sequence whatever it says ' +
+        'is missing (or decide the plan), then move the card back to upcoming and dispatch again. ' +
+        'Re-dispatching while it is blocked just reproduces the run that reached the block.',
     }
   }
 

@@ -119,6 +119,9 @@
     --phase-fix-fg: #ffd27d;     --phase-fix-bg: rgba(255,210,125,.14);
     --phase-merged-fg: #7ddf9b;  --phase-merged-bg: rgba(125,223,155,.14);
     --phase-failed-fg: #ff8a8a;  --phase-failed-bg: rgba(255,138,138,.14);
+    /* BLOCKED is not FAILED — a build that stopped on purpose and needs a decision,
+       not one that broke. Orange rather than red so the two never read as one state. */
+    --phase-blocked-fg: #ffa94d; --phase-blocked-bg: rgba(255,169,77,.14);
     /* Usage-meter bands (see `.car-usage`). Own tokens rather than borrowed
        phase colours: what the meter means has nothing to do with a job's phase,
        and the two must be free to diverge. */
@@ -210,6 +213,7 @@
     --phase-fix-fg: #8a5f00;     --phase-fix-bg: rgba(138,95,0,.12);
     --phase-merged-fg: #146c2e;  --phase-merged-bg: rgba(20,108,46,.12);
     --phase-failed-fg: #c9252d;  --phase-failed-bg: rgba(201,37,45,.10);
+    --phase-blocked-fg: #a14f00; --phase-blocked-bg: rgba(161,79,0,.12);
     /* Darkened for contrast against the white stage — the dark-theme greens and
        ambers wash out on a light background at one pixel tall. */
     --usage-nominal: #1a7f37;
@@ -840,6 +844,7 @@
   .cwb-dot-fix     { border-color: var(--phase-fix-fg);    background: var(--phase-fix-fg); }
   .cwb-dot-merge   { border-color: var(--phase-merged-fg); background: var(--phase-merged-fg); }
   .cwb-dot-failed  { border-color: var(--phase-failed-fg); background: var(--phase-failed-fg); }
+  .cwb-dot-blocked { border-color: var(--phase-blocked-fg); background: var(--phase-blocked-fg); }
   .cwb-dot-done    { border-color: var(--success-fg);      background: var(--success-fg); }
   .cwb-dot-pulse   { animation: cwb-pulse 2s ease-in-out infinite; }
   @keyframes cwb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
@@ -854,6 +859,7 @@
   .cwb-tag-fix    { color: var(--phase-fix-fg);    background: var(--phase-fix-bg); }
   .cwb-tag-merge  { color: var(--phase-merged-fg); background: var(--phase-merged-bg); }
   .cwb-tag-failed { color: var(--phase-failed-fg); background: var(--phase-failed-bg); }
+  .cwb-tag-blocked { color: var(--phase-blocked-fg); background: var(--phase-blocked-bg); }
   /* round N — muted, next to the tag. No elapsed-minutes timer (M1: dropped). */
   .cwb-round { flex: 0 0 auto; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; }
   /* #NNN PR tag — muted, not blue; matches the round text's scale. */
@@ -861,6 +867,8 @@
   a.cwb-pr:hover { text-decoration: underline; }
   /* failure-reason one-liner (#340) — muted, single-line, truncates; full text on hover. */
   .cwb-fail-reason { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--phase-failed-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A BLOCKED card's reason is the escalation's own sentence — not a failure. */
+  .cwb-blocked-reason { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--phase-blocked-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Recovered brief-integrity alert — persistent but de-emphasized; full text on hover. */
   .cwb-brief-alert { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* FIX #341 — drag handle: bare ⠿ grip-dots, NO border/button chrome, so it

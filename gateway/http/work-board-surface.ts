@@ -42,7 +42,8 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
-  type WorkBoardTaskType, WorkBoardRunStillLiveError } from '@neutronai/work-board/store.ts'
+  type WorkBoardTaskType, WorkBoardRunStillLiveError,
+  WorkBoardBlockedCompletionError } from '@neutronai/work-board/store.ts'
 import {
   WorkBoardRemovalService,
   WORK_BOARD_REMOVAL_REASONS,
@@ -116,6 +117,13 @@ export type WorkBoardStartResult =
         // the ▶ route answers with the refusal sentence rather than spawning a
         // lane that would die ~15 minutes later blaming the CLI.
         | 'executor_unavailable'
+        // THE CARD IS BLOCKED — a previous build stopped and escalated rather than
+        // iterating, and nothing has cleared it. Falls through to the 409 arm like the
+        // other refusals, so the ▶ route answers with the refusal sentence (which names
+        // the decision and the unblocking step) instead of starting a run that would
+        // reach the same block. Deliberately NOT grouped with 'held': a hold is waiting
+        // for a condition a sweep can re-test, and nothing can re-test a decision.
+        | 'card_blocked'
         | 'backend_error'
       message: string
     }
@@ -228,7 +236,11 @@ const MAX_ITEM_ID_LEN = 128
 // 'archived' (SHELVED) is client-writable — it is the deprioritise lane, and the
 // whole point is that taking a card off the board no longer requires claiming it
 // shipped. 'failed' stays OUT: it is run-driven, written only by the terminal
-// reconcile, so a client PATCH of it is still a 400.
+// reconcile, so a client PATCH of it is still a 400. So does 'blocked', for the
+// same reason and one more: it IS the guardrail — the RUN reports and the
+// ORCHESTRATOR decides, so a build that could put a card into a lane of its own
+// choosing is a build re-prioritising the owner's queue. Moving a card OUT of
+// blocked is an ordinary PATCH to 'upcoming', and that move is the decision.
 const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
@@ -553,6 +565,11 @@ async function handleUpdate(
     if (err instanceof WorkBoardRunStillLiveError) {
       return jsonError(409, 'run_still_live', err.message)
     }
+    // 409 for the same reason: a BLOCKED card refusing completion is an answer about
+    // STATE, not a fault. The client shows the message, which names the unblocking step.
+    if (err instanceof WorkBoardBlockedCompletionError) {
+      return jsonError(409, 'card_blocked', err.message)
+    }
     return mapWriteError(err)
   }
 }
@@ -578,6 +595,11 @@ async function handleComplete(
   } catch (err) {
     if (err instanceof WorkBoardRunStillLiveError) {
       return jsonError(409, 'run_still_live', err.message)
+    }
+    // 409 for the same reason: a BLOCKED card refusing completion is an answer about
+    // STATE, not a fault. The client shows the message, which names the unblocking step.
+    if (err instanceof WorkBoardBlockedCompletionError) {
+      return jsonError(409, 'card_blocked', err.message)
     }
     throw err
   }

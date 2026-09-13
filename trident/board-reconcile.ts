@@ -30,15 +30,27 @@
  * number survives, and the docblock should not claim a mechanism that changed.
  */
 
+import { deriveEscalationBlock } from './escalation-block.ts'
 import { makeRepoWebUrlResolver } from './repo-web-url.ts'
 import type { TridentRun } from './store.ts'
 
-/** The minimal store surface the reconcile needs (`WorkBoardStore.detachRun`). */
+/**
+ * The minimal store surface the reconcile needs (`WorkBoardStore.detachRun`).
+ *
+ * `detachRun` AND NOTHING ELSE, and that narrowness is a GUARANTEE, not an accident of
+ * what happened to be needed. The RUN REPORTS; the ORCHESTRATOR DECIDES: a build must
+ * never mutate the board beyond setting its OWN card's terminal lane. `reorder`,
+ * `update`, `create` and `delete` are all absent from this interface, so the reconcile
+ * — the only board writer any build can reach — CANNOT reach them, whatever a run's
+ * escalation payload says. An autonomous run that could reorder the queue would
+ * re-prioritise the owner's work with no judgement in between, and the escalation
+ * payload is model-adjacent text: the one shape that must never become an instruction.
+ */
 export interface TridentBoardReconciler {
   detachRun(
     project_slug: string,
     run_id: string,
-    outcome: 'done' | 'failed',
+    outcome: 'done' | 'failed' | 'blocked',
     pr_info?: { pr: number | null; pr_url: string | null },
   ): Promise<unknown>
 }
@@ -69,7 +81,24 @@ export function buildBoardReconcileObserver(
   if (board === undefined) return null
   const resolve = opts.resolveRepoWebUrl ?? sharedResolver()
   return async (run: TridentRun): Promise<void> => {
-    const outcome = run.phase === 'done' ? 'done' : 'failed'
+    // BLOCKED IS NOT FAILED. A run that STOPPED ON PURPOSE — a reviewer proved the
+    // plan wrong, the card needs work outside it, or the same finding survived a fix
+    // round — lands on its own lane, so the card does not read as a broken build and
+    // does not sit in `upcoming` looking startable for the next dispatch to pick up and
+    // re-learn the same block.
+    //
+    // DERIVED THROUGH THE ONE DERIVER (`deriveEscalationBlock`), never by re-reading
+    // `inner_result` here: its gate is what makes a stale result from an earlier
+    // iteration unable to relabel this ending, and a second copy of that gate would
+    // drift from the one the chat message is composed with — the card and the message
+    // would then disagree about whether the owner is looking at something blocked or
+    // something broken.
+    //
+    // THE LANE IS ALL IT DERIVES. Nothing about the escalation reaches a position, an
+    // order or another card: the escalation names what is missing, and SEQUENCING is
+    // the orchestrator's call to make and report.
+    const outcome: 'done' | 'failed' | 'blocked' =
+      run.phase === 'done' ? 'done' : deriveEscalationBlock(run) !== null ? 'blocked' : 'failed'
     // `?? null` so a run row that predates the PR column (or a partial fixture)
     // is treated as PR-less rather than binding `undefined` into the UPDATE.
     const pr = run.pr ?? null

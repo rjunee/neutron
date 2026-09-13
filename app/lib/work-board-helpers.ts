@@ -93,6 +93,9 @@ export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'done') return 'Done';
   if (status === 'failed') return 'Failed';
   if (status === 'archived') return 'Shelved';
+  // TWO DIFFERENT WORDS, and that is the whole point of the lane: a blocked card needs
+  // a decision or a dependency, a failed one needs a retry.
+  if (status === 'blocked') return 'Blocked';
   return 'Upcoming';
 }
 
@@ -105,6 +108,10 @@ export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'in_progress') return 'done';
   if (status === 'failed') return 'upcoming';
   if (status === 'archived') return 'upcoming';
+  // BLOCKED → upcoming, like the other two non-linear lanes. Advancing a blocked card
+  // is the owner saying the block is cleared; it must NOT advance to 'done', which
+  // would claim work shipped that never built.
+  if (status === 'blocked') return 'upcoming';
   return 'done';
 }
 
@@ -173,7 +180,7 @@ export function dragReorderTarget(
 /* ── M1 redesign — phase color key + dot / tag / round derivations ───────── */
 
 /** The coarse phase color bucket a run step (or terminal state) maps to. */
-export type PhaseColorKey = 'build' | 'review' | 'fix' | 'merge' | 'failed';
+export type PhaseColorKey = 'build' | 'review' | 'fix' | 'merge' | 'failed' | 'blocked';
 
 /** Look up a phase color key's tokens from the theme's `PHASE` map. */
 export type PhaseColorLookup = Record<PhaseColorKey, PhaseColor>;
@@ -187,9 +194,19 @@ export interface PhaseTag {
  * The phase TAG for a bound run's inner step, or null when the item has no run
  * progress (a plain upcoming card shows just the gray dot + title). Sentence-
  * case copy, tinted capsule; failure uses "Didn't finish" (curly apostrophe —
- * matches the web copy exactly).
+ * matches the web copy exactly). *
+ * THE CARD'S OWN LANE WINS OVER THE RUN STEP, for `blocked` and only for `blocked`.
+ * Every other state here is REFINED by the bound run, which is right: a live run knows
+ * more about what is happening than a status column written at dispatch. `blocked` is
+ * the exception because the reconcile KEEPS the terminal run link (so the reported
+ * reason stays reachable), and that run's `step_label` is `failed` — so deriving from
+ * it painted a blocked card red and tagged it "Failed", which is the one thing the lane
+ * exists to stop the owner believing. The lane is written by the terminal reconcile
+ * from the run's own escalation; it is not a guess, and it is more recent than the step.
  */
-export function stepTag(rp: RunProgress | undefined): PhaseTag | null {
+export function stepTag(item: WorkBoardItem): PhaseTag | null {
+  if (item.status === 'blocked') return { label: 'Blocked', colorKey: 'blocked' };
+  const rp = item.run_progress;
   if (rp === undefined) return null;
   switch (resolveStepLabel(rp)) {
     case 'building':
@@ -226,13 +243,19 @@ export function briefAlertText(rp: RunProgress | undefined): string | null {
 
 export interface RunNotice {
   text: string;
-  tone: 'failure' | 'alert';
+  tone: 'failure' | 'alert' | 'blocked';
 }
 
 /** Terminal failure is the card's outcome; a recovered brief alert is only the
  * fallback notice while no terminal failure reason exists. */
-export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+export function runNotice(item: WorkBoardItem): RunNotice | null {
+  const rp = item.run_progress;
+  // A BLOCKED card's reason is the escalation's own sentence — the most useful line on
+  // the card — but it is not a FAILURE, and painting it in the failure tone beside a
+  // "Blocked" tag would have the two halves of one row disagree. (Mirrors the web
+  // `runNotice` in landing/chat-react/WorkBoardTab.tsx.)
   const failure = failureReasonText(rp);
+  if (item.status === 'blocked') return failure === null ? null : { text: failure, tone: 'blocked' };
   if (failure !== null) return { text: failure, tone: 'failure' };
   // A failed run that recorded REVIEW_NOT_RUN and no reason: say the one thing the
   // row proves instead of a blank. A null verdict (legacy frame) claims nothing.
@@ -263,6 +286,8 @@ export interface DotState {
  * outline.
  */
 export function dotState(item: WorkBoardItem): DotState {
+  // See `stepTag` for why the BLOCKED lane wins over the bound run's step.
+  if (item.status === 'blocked') return { colorKey: 'blocked', pulse: false };
   const rp = item.run_progress;
   if (rp !== undefined) {
     switch (resolveStepLabel(rp)) {
@@ -317,7 +342,16 @@ const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'ca
 export function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
   if (!linked) return false;
-  if (item.status === 'failed') return false;
+  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
+  // fall-through below reads "no progress reported" as "still running", which is right
+  // for a card whose run is live and has not reported yet — and wrong for one whose run
+  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
+  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
+  // reported reason stays reachable, so this is the shape that actually occurs. Without
+  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
+  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+  // wrong reason.
+  if (item.status === 'failed' || item.status === 'blocked') return false;
   const rp = item.run_progress;
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label);
 }
@@ -344,16 +378,33 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  *   - inline work that writes nothing for 90 s (a long test/build run, a
  *     research turn) reads NOT active and ▶ comes back. That is a deliberate
  *     false negative: this is a HINT, never a lock, and nothing here blocks.
- * This helper keeps reading the wire field unchanged.
+ * This helper keeps reading the wire field unchanged. *
+ * AND `blocked` IS A FOURTH SUPPRESSOR, and unlike `inline_active` it IS a lock. A
+ * blocked card is one whose build STOPPED ON PURPOSE and reported why; the dispatch
+ * chokepoint refuses it outright (`trident/board-dispatch.ts`, `card_blocked`), so a ▶
+ * here could only produce that refusal. Offering a control that cannot work is worse
+ * than offering none: it reads as "try again", which is the one thing that changes
+ * nothing. Clearing the block is a status write the owner or the orchestrator makes
+ * deliberately, and the card is playable again the moment it is made.
  */
 export function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;
+  return (
+    item.status !== 'done' &&
+    item.status !== 'blocked' &&
+    !isLinkedRunning(item) &&
+    !item.inline_active
+  );
 }
 
 /** ▶ vs ↻ — a card that carries a (now-detached) binding, a failed run, or a
  *  durable `status='failed'` lane RETRIES. The last check covers the runless
- *  failed card whose link was cleared by reconcile. */
+ *  failed card whose link was cleared by reconcile. *
+ *  A BLOCKED card is NEITHER. It keeps its `linked_run_id` (so the reported reason
+ *  stays reachable), which used to be enough to label it ↻ — telling the owner to retry
+ *  a card that the dispatch chokepoint will refuse. It is not a retry; it is a
+ *  decision. */
 export function isRetry(item: WorkBoardItem): boolean {
+  if (item.status === 'blocked') return false;
   if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true;
   if (item.run_progress?.step_label === 'failed') return true;
   return item.status === 'failed';

@@ -476,8 +476,13 @@ export interface AppWsWorkBoardItem {
   id: string
   title: string
   /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
-   *  and NEVER counted as completed — it is not a quieter `done`. */
-  status: 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
+   *  and NEVER counted as completed — it is not a quieter `done`.
+   *  `blocked` = the build STOPPED ON PURPOSE (migration 0140) and reported why:
+   *  the plan was wrong, a dependency is missing, or the fix rounds stopped
+   *  converging. It is ACTIVE (unfinished work that is waiting), run-driven only,
+   *  and deliberately NOT the same word as `failed` — one needs a decision, the
+   *  other needs a retry. */
+  status: 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived' | 'blocked'
   sort_order: number
   design_doc_ref: string | null
   inline_active: boolean
