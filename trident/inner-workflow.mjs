@@ -1503,8 +1503,23 @@ function unpinnedDiffBase() {
   // over `refs/remotes/` when disambiguating, so the shorthand silently resolves to the TAG —
   // measured on git 2.43 as two files where the qualified form gives one, with only a stderr
   // warning and exit 0, and this command's stderr goes to /dev/null.
-  // TWO ARMS, AND NEITHER CAN PRINT A BARE NAME. The remote-tracking ref when it resolves;
-  // `refs/heads/<base>` otherwise — whether or not THAT resolves, which is the point.
+  // THREE ARMS, KEYED ON THE EXIT CODE, because `false` and `unknown` want opposite answers.
+  // Measured on git 2.43: `rev-parse --verify --quiet` exits 0 for a ref that resolves, 1 for
+  // "no such ref", and 128 when it could not ask at all (`-C <not-a-repo>`).
+  //   0 → `refs/remotes/origin/<base>`
+  //   1 → `refs/heads/<base>`   — ABSENT legitimately selects the local branch (a fresh clone)
+  //   * → `refs/trident-probe-failed/<base>` — UNKNOWN selects NOTHING. `&& … || …` collapsed
+  //       this into the local branch, so a transient probe failure silently diffed against a
+  //       branch that may be stale: the Argus r4 shape reached through the error path. The
+  //       REASON the remote ref is preferred is that the local one may be stale, and a failed
+  //       probe says nothing about staleness.
+  //
+  // The poison ref is how a SUBSTITUTION refuses: it cannot throw the way `diffBaseRef` does
+  // (it is composed in this process and evaluated in another), so it names a ref git will
+  // reject — loudly, 128 — and the reason is legible in git's own error text. It still
+  // satisfies the shape property: every value that reaches a rev-range begins with `refs/`.
+  //
+  // NEITHER ARM CAN PRINT A BARE NAME. The remote-tracking ref when it resolves;
   //
   // The bare word is not inert: git resolves it against every namespace, and a same-named TAG
   // answers to it. This repository holds a live instance
@@ -1520,7 +1535,7 @@ function unpinnedDiffBase() {
   // shell substitution is composed in this process and evaluated in another, so it cannot
   // refuse — it can only name a ref the other process will refuse. Both halves are asserted
   // in `diff-base-option-shaped.test.ts`, including that this word is one git rejects.
-  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)} || printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)})"`
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1; case $? in 0) printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)};; 1) printf %s ${shSingleQuote(`refs/heads/${baseBranch}`)};; *) printf %s ${shSingleQuote(`refs/trident-probe-failed/${baseBranch}`)};; esac)"`
 }
 
 const diffBase =

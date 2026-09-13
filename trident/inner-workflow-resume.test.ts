@@ -339,7 +339,7 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // RESOLVES TO and the files it produces.
     for (const pr of [true, false]) {
       const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
-      expect({ pr, resolves: cmd.includes("printf %s 'refs/remotes/origin/main' || printf %s 'refs/heads/main'") }).toEqual({ pr, resolves: true })
+      expect({ pr, resolves: cmd.includes("case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf %s 'refs/trident-probe-failed/main';; esac") }).toEqual({ pr, resolves: true })
       // …and never the bare local name as a literal operand.
       expect(cmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
     }

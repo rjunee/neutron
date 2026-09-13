@@ -3178,7 +3178,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       calls.push(argv)
       return ok(NO_DRIFT_SHA)
     }
-    expect(await refResolves(recording, '/repo', 'refs/remotes/origin/main')).toBe(true)
+    expect(await refResolves(recording, '/repo', 'refs/remotes/origin/main')).toBe('resolved')
     expect(calls.map((c) => c.join(' '))).toEqual([ORIGIN_PROBE('main')])
   })
 
@@ -6970,10 +6970,13 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // the stage-1 test set, so a stale `refs/heads/<base>` adds every file the base has
     // moved past to that set. `NO_DRIFT_SHA` is what this harness answers the launch
     // `rev-parse` with, so it is the sha the run carries by fire time.
-    // `false` = "origin/<base> does not resolve", which is now the ONLY thing that
-    // selects the bare name. It used to be `'local'`, keyed on the merge mode — the
-    // defect the fifth review round found.
-    const resolvedBase = await diffBaseRef(marker, NO_DRIFT_SHA, async () => false)
+    // `'absent'` = "git looked and there is no such remote-tracking ref", which is the only
+    // non-resolution that still selects a fallback — and since round thirty-one it is a
+    // different value from `'unknown'` ("the probe could not answer"), which REFUSES. The
+    // fallback is `refs/heads/<base>`, never the bare name; and the selector used to be
+    // `'local'`, keyed on the merge mode — the defect the fifth review round found. None of
+    // it is reached here, because this run carries a pin.
+    const resolvedBase = await diffBaseRef(marker, NO_DRIFT_SHA, async () => 'absent')
     expect(resolvedBase).toBe(NO_DRIFT_SHA)
     const detail = buildTestStrategyDetail(repo, {
       cores: budget.cores,

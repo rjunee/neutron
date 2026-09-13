@@ -34,14 +34,16 @@ import { join } from 'node:path'
 
 import { fileURLToPath } from 'node:url'
 
-import { spawnCapture } from './git-mode.ts'
+import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import {
   diffBaseRef,
   refResolves,
   TridentEmptyBaseError,
   TridentOptionShapedBaseError,
   TridentPaddedBaseError,
+  TridentUndeterminedBaseError,
   TridentUnresolvableBaseError,
+  type RefProbe,
 } from './merge.ts'
 import { gitRangeArgv, type GitRangeArgv } from './git-range.ts'
 
@@ -132,12 +134,17 @@ const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.lo
  * from both missing, and until round eighteen the binding could not tell them apart.
  */
 function probe(
-  value: boolean | ((ref: string) => boolean),
-): ((ref: string) => Promise<boolean>) & { calls: number; asked: string[] } {
-  const fn = async (ref: string): Promise<boolean> => {
+  value: boolean | RefProbe | ((ref: string) => boolean | RefProbe),
+): ((ref: string) => Promise<RefProbe>) & { calls: number; asked: string[] } {
+  // A `boolean` still spells the two DEFINITE answers, because most rows are about which ref
+  // exists rather than about the probe failing. `'unknown'` is spelled explicitly, and it is a
+  // different value from `false` — which is the whole point: **false and unknown must not
+  // share a branch**, so they must not share a fixture either.
+  const asProbe = (v: boolean | RefProbe): RefProbe => (typeof v === 'boolean' ? (v ? 'resolved' : 'absent') : v)
+  const fn = async (ref: string): Promise<RefProbe> => {
     fn.calls += 1
     fn.asked.push(ref)
-    return typeof value === 'boolean' ? value : value(ref)
+    return asProbe(typeof value === 'function' ? value(ref) : value)
   }
   fn.calls = 0
   fn.asked = [] as string[]
@@ -315,7 +322,7 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     // The extraction must have found ALL of them — the pin, two qualified returns and four
     // refusals — or this asserts nothing. Pinned as a count so a new arm cannot slip in
     // unexamined.
-    expect(returns.length).toBe(7)
+    expect(returns.length).toBe(8)
     for (const r of returns) {
       const qualified =
         r.includes('base_sha.trim().toLowerCase()') || // the 40-hex pin
@@ -372,8 +379,145 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
       calls += 1
       throw new Error('should not be reached')
     }
-    expect(await refResolves(spy, '/repo', '--output=/tmp/x')).toBe(false)
+    // …and it answers UNKNOWN, not 'absent': declining to ask is not an answer, and 'absent'
+    // is the value that selects the local branch.
+    expect(await refResolves(spy, '/repo', '--output=/tmp/x')).toBe('unknown')
     expect(calls).toBe(0)
+  })
+})
+
+describe('FALSE AND UNKNOWN DO NOT SHARE A BRANCH — the probe answers three ways', () => {
+  /**
+   * ROUND THIRTY-ONE, and it is the #546 defect one level down. `refResolves` returned a
+   * BOOLEAN and swallowed every exception into `false`, so "git looked and there is no such
+   * ref" and "I could not ask git" arrived at `diffBaseRef` as one value — and that value
+   * SELECTS THE NEXT, LESS QUALIFIED ARM. A probe that could not run therefore promoted
+   * `refs/heads/<base>` silently, which is exactly the class of guess this branch exists to
+   * remove; the only thing between a broken probe and a wrong review base was the local
+   * branch happening not to exist either.
+   *
+   * THE PAIR BELOW IS THE CRITERION. A probe that REJECTS and a probe that answers ABSENT
+   * must reach DIFFERENT results — because without the pair, "handles probe failure" is
+   * satisfied by treating failure as absence, which IS the bug. And the complement guards
+   * the other side: a fix that refuses on EVERY non-resolution passes the pair and breaks
+   * the fresh-clone path repaired in round twenty-six.
+   */
+  const res = (exit_code: number, stdout = ''): HostCommandResult => ({
+    ok: exit_code === 0,
+    stdout,
+    stderr: '',
+    exit_code,
+  })
+
+  test('AT THE SOURCE: only exit 1 with empty stdout is ABSENT; everything else that is not an object name is UNKNOWN', async () => {
+    // Measured on git 2.43.0 in this repository: an existing ref exits 0 and prints the
+    // object name, a missing ref exits 1 and prints nothing, and `rev-parse` outside a
+    // repository exits 128. Those exit codes are the fixture — they are not assumed.
+    const rejecting = async (): Promise<never> => {
+      throw new Error('spawn EAGAIN')
+    }
+    expect(await refResolves(rejecting, '/repo', 'refs/remotes/origin/main')).toBe('unknown')
+    expect(await refResolves(async () => res(1), '/repo', 'refs/remotes/origin/main')).toBe('absent')
+    expect(await refResolves(async () => res(128), '/repo', 'refs/remotes/origin/main')).toBe('unknown')
+    // Exit 1 that nevertheless SAID something is not the measured shape of "no such ref".
+    expect(await refResolves(async () => res(1, 'fatal: ambiguous argument'), '/repo', 'refs/remotes/origin/main')).toBe('unknown')
+    // A zero exit whose stdout is not an object name establishes nothing either.
+    expect(await refResolves(async () => res(0, 'main'), '/repo', 'refs/remotes/origin/main')).toBe('unknown')
+    // …and the positive control, in the case git echoes and in the case it does not.
+    expect(await refResolves(async () => res(0, 'a'.repeat(40)), '/repo', 'refs/remotes/origin/main')).toBe('resolved')
+    expect(await refResolves(async () => res(0, 'A'.repeat(40)), '/repo', 'refs/remotes/origin/main')).toBe('resolved')
+  })
+
+  test('THE PAIR: a REJECTING probe and an ABSENT probe reach different results, on the same base', async () => {
+    const rejects = async (): Promise<never> => {
+      throw new Error('git unavailable')
+    }
+    // Both worlds are built from the REAL `refResolves`, so the distinction under test is the
+    // one the production probe draws and not one the fixture invents. Each world is reduced
+    // to an OUTCOME — refused-with-this-class, or resolved-to-this-ref — so that "different
+    // results" is a comparison the test actually makes rather than two assertions sitting
+    // near each other.
+    const outcome = async (
+      probeFn: (ref: string) => Promise<RefProbe>,
+    ): Promise<{ kind: string; value: string }> => {
+      try {
+        return { kind: 'resolved', value: await diffBaseRef('main', null, probeFn) }
+      } catch (err) {
+        return { kind: 'refused', value: (err as Error).constructor.name }
+      }
+    }
+    const undetermined = await outcome((ref) => refResolves(rejects, '/repo', ref))
+    // Same base, same non-resolving remote ref — the ONLY difference is that git ANSWERED.
+    const absent = await outcome(async (ref) =>
+      ref === 'refs/heads/main' ? 'resolved' : refResolves(async () => res(1), '/repo', ref),
+    )
+    expect(undetermined).toEqual({ kind: 'refused', value: 'TridentUndeterminedBaseError' })
+    expect(absent).toEqual({ kind: 'resolved', value: 'refs/heads/main' })
+    // The criterion itself. Fold 'unknown' back into 'absent' and these two become equal —
+    // which is the state this branch shipped in for thirty rounds.
+    expect(undetermined).not.toEqual(absent)
+  })
+
+  test('an UNDETERMINED remote probe refuses WITHOUT falling through — even where the local branch would resolve', async () => {
+    // The fall-through is the damage, so the absence of the second question is asserted:
+    // a refusal that still asked would be a refusal that could be turned into a fallback by
+    // one line moving.
+    const asked = probe((ref) => (ref === 'refs/remotes/origin/main' ? 'unknown' : 'resolved'))
+    await expect(diffBaseRef('main', null, asked)).rejects.toThrow(TridentUndeterminedBaseError)
+    expect(asked.asked).toEqual(['refs/remotes/origin/main'])
+    // AT THE LOCAL POSITION there is nothing left to fall through to, so 'unknown' refuses
+    // there too — as the UNRESOLVABLE class, which is the honest one: the remote ref was
+    // established absent, and only the local one is in doubt.
+    const localUnknown = probe((ref) => (ref === 'refs/heads/main' ? 'unknown' : 'absent'))
+    await expect(diffBaseRef('main', null, localUnknown)).rejects.toThrow(TridentUnresolvableBaseError)
+    expect(localUnknown.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
+  })
+
+  test('THE COMPLEMENT: an ABSENT remote probe still selects refs/heads/<base> — the fresh-clone path', async () => {
+    // Round twenty-six repaired a remote-only checkout; this is the other direction, and it
+    // is what stops "refuse on every non-resolution" from looking like a fix. A clone that
+    // has never fetched this base has an ABSENT remote-tracking ref, not an undetermined one.
+    const asked = probe((ref) => (ref === 'refs/heads/main' ? 'resolved' : 'absent'))
+    expect(await diffBaseRef('main', null, asked)).toBe('refs/heads/main')
+    expect(asked.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
+  })
+
+  test('THE .mjs SIDE: a probe that cannot run composes a ref git REFUSES, not the local branch', async () => {
+    // The distinction has to survive the language boundary, and the `.mjs` cannot throw: it
+    // composes a shell word in one process for another to evaluate. So it "refuses" by
+    // naming a ref that cannot exist — which still satisfies the shape property (it begins
+    // with `refs/`) and which git rejects loudly rather than resolving.
+    //
+    // THE THREE ARMS ARE EXERCISED BY REAL GIT, keyed on the same exit codes the TS probe
+    // reads: 0 in a repository that has the remote ref, 1 in one that does not, and 128
+    // where `rev-parse` cannot answer at all (outside a repository).
+    const w = await seedWorld('probe-tristate')
+    const composed = await workflowDiffBase({ baseBranch: 'main', repoPath: w.repo })
+    const wordIn = async (cwd: string): Promise<string> =>
+      (await spawnCapture(['bash', '-c', `printf %s ${composed}`], cwd)).stdout.trim()
+
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
+    expect(await wordIn(w.repo)).toBe('refs/remotes/origin/main')
+    await git(w.repo, 'update-ref', '-d', 'refs/remotes/origin/main')
+    expect(await wordIn(w.repo)).toBe('refs/heads/main')
+    // `w.target` is an empty directory outside any repository — measured exit 128.
+    expect(existsSync(join(w.target, '.git'))).toBe(false)
+    const outside = await spawnCapture(
+      ['bash', '-c', `git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1; printf %s $?`],
+      w.target,
+    )
+    expect(outside.stdout.trim()).toBe('128')
+    const poisoned = await wordIn(w.target)
+    expect(poisoned).toBe('refs/trident-probe-failed/main')
+    // …and that word is one git REFUSES, loudly, with nothing written — the property the TS
+    // throw provides on its side. Asserted in the repository, where the local branch DOES
+    // exist, so the refusal is the word's doing and not the world's.
+    const ranged = await spawnCapture(
+      ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${poisoned}..${w.head}`],
+      w.repo,
+    )
+    expect({ ok: ranged.ok, out: ranged.stdout.trim() }).toEqual({ ok: false, out: '' })
+    expect((await git(w.repo, 'rev-parse', 'refs/heads/main')).length).toBe(40)
   })
 })
 
@@ -650,10 +794,10 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1602, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2336, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2449, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5286, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1617, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2351, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2464, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5301, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
     { file: 'codex-review.sh', line: 413, why: 'shell: the standalone reviewer builds its own diff' },
   ]

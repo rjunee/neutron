@@ -283,7 +283,7 @@ export async function detectBaseBranch(
 export async function diffBaseRef(
   base_branch: string,
   base_sha: string | null | undefined,
-  ref_resolves: (ref: string) => Promise<boolean>,
+  ref_resolves: (ref: string) => Promise<RefProbe>,
 ): Promise<string> {
   if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
@@ -407,11 +407,19 @@ export async function diffBaseRef(
   // which is #546's own defect arriving through the RETURN FORM. The warning goes to stderr,
   // which both wrappers send to /dev/null. Same shape as `fstat` on a path instead of on the
   // descriptor you hold.
-  if (await ref_resolves(`refs/remotes/origin/${name}`)) return `refs/remotes/origin/${name}`
+  const remote = await ref_resolves(`refs/remotes/origin/${name}`)
+  if (remote === 'resolved') return `refs/remotes/origin/${name}`
+  // UNKNOWN IS NOT ABSENT, and the two want opposite behaviour. "No such remote-tracking ref"
+  // legitimately selects the local branch — a fresh clone is the ordinary case. "I could not
+  // ask" selects nothing: the REASON the remote ref is preferred is that the local one may be
+  // stale, and a failed probe says nothing about staleness. Falling through here on a
+  // transient failure is the Argus r4 shape — a review against a stale base, exit 0 — reached
+  // through the error path rather than through a naming mistake.
+  if (remote === 'unknown') throw new TridentUndeterminedBaseError(name)
   // THE FALLBACK, QUALIFIED. `refs/heads/<name>` is the base of record when no
   // remote-tracking ref resolves, and naming it in full is the difference between "the local
   // branch" and "whatever git picks for that word".
-  if (await ref_resolves(`refs/heads/${name}`)) return `refs/heads/${name}`
+  if ((await ref_resolves(`refs/heads/${name}`)) === 'resolved') return `refs/heads/${name}`
   // NO THIRD ARM. Neither ref resolves, and the bare name is REFUSED rather than returned.
   //
   // THIS REPOSITORY HOLDS A LIVE INSTANCE of why. `archive/agent-replies-prior-iter-3b35767`
@@ -449,6 +457,26 @@ export class TridentEmptyBaseError extends Error {
         'so an empty base yields a plausible wrong answer rather than a failure.',
     )
     this.name = 'TridentEmptyBaseError'
+  }
+}
+
+/**
+ * The REMOTE probe could not be answered — not "there is no such ref", which is a different
+ * thing with a different remedy. Thrown rather than falling through to the local branch,
+ * because the local branch may be stale and the probe that would have told us is the one that
+ * just failed. **False and unknown must not share a branch.**
+ */
+export class TridentUndeterminedBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base whose remote-tracking ref could not be probed: ${JSON.stringify(base)}. ` +
+        'refs/remotes/origin/' +
+        base +
+        ' neither resolved nor answered "no such ref" (git rev-parse exits 1 for absent, and ' +
+        'anything else means the question was not answered). Falling back to refs/heads/ here ' +
+        'would diff against a branch that may be stale — which is the defect #546 exists for.',
+    )
+    this.name = 'TridentUndeterminedBaseError'
   }
 }
 
@@ -510,13 +538,30 @@ export class TridentOptionShapedBaseError extends Error {
 }
 
 /**
- * Does `<ref>` name a commit in this repository?
+ * What a ref probe established — three outcomes, because two of them want OPPOSITE behaviour.
+ *
+ * `absent` legitimately means "fall back to the local branch": a fresh clone with no
+ * remote-tracking ref is the ordinary case. `unknown` means the probe could not run, and the
+ * safe answer there is a REFUSAL — the whole reason the remote ref is preferred is that the
+ * local one may be stale, and a failed probe says nothing about staleness. Collapsing them
+ * into `false` meant a transient probe failure silently selected a possibly-stale local
+ * branch, which is the Argus r4 shape this item exists to eliminate, reached through the
+ * error path instead of a naming mistake.
+ */
+export type RefProbe = 'resolved' | 'absent' | 'unknown'
+
+/**
+ * What `<ref>` is in this repository — resolved, definitively absent, or undetermined.
  *
  * The one input `diffBaseRef` cannot derive from what a caller already holds, split out so
  * `diffBaseRef` holds only the ORDER and never the I/O — it invokes this through a thunk, on
- * the arms that need an answer. Fail-closed toward the LESS QUALIFIED form: a probe that
- * cannot run answers false, which yields the behaviour this repository had before #546 rather
- * than a range against a ref that may not exist.
+ * the arms that need an answer.
+ *
+ * THREE ANSWERS, NOT TWO, since round thirty-one. It returned a boolean, and `false` meant
+ * both "git says there is no such ref" and "I could not find out" — so a probe that could not
+ * run fell through to the next, less qualified arm, which is the shape of the original #546
+ * defect one level down. `'absent'` is now exactly exit 1 with empty stdout; everything else
+ * that is not a resolved object name is `'unknown'`, and `diffBaseRef` refuses on it.
  *
  * IT TAKES A WHOLE REF, not a base branch name, since round eighteen: `diffBaseRef` now asks
  * it twice — `refs/remotes/origin/<base>` first, then `refs/heads/<base>` — because the
@@ -528,22 +573,30 @@ export async function refResolves(
   run_host: RunHostCommand,
   repo_path: string,
   ref: string,
-): Promise<boolean> {
+): Promise<RefProbe> {
   const name = ref.trim()
-  // Still declines to probe an option-shaped name — `git rev-parse ... "-x^{commit}"`
-  // is its own argv hazard — but that is no longer load-bearing for SAFETY: `diffBaseRef`
-  // now REFUSES such a name outright rather than falling through to it. See the argument
-  // there; this check is now only about not spending a subprocess on a doomed lookup.
-  if (name.length === 0 || name.startsWith('-')) return false
+  // Declines to probe an option-shaped name — `git rev-parse ... "-x^{commit}"` is its own
+  // argv hazard — and answers UNKNOWN rather than 'absent', because declining to ask is not
+  // an answer. (`diffBaseRef` refuses such a name before it gets here; this is about not
+  // spending a subprocess on a doomed lookup, and about not lying when it doesn't.)
+  if (name.length === 0 || name.startsWith('-')) return 'unknown'
+  let res
   try {
-    const res = await run_host(
+    res = await run_host(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`],
       repo_path,
     )
-    return res.ok && /^[0-9a-f]{40}$/.test(res.stdout.trim().toLowerCase())
   } catch {
-    return false
+    // The command could not be run at all. Nothing was established.
+    return 'unknown'
   }
+  if (res.ok && /^[0-9a-f]{40}$/.test(res.stdout.trim().toLowerCase())) return 'resolved'
+  // EXIT 1 IS THE ANSWER "NO SUCH REF", and it is the only thing that means absent. Measured
+  // on git 2.43: an existing ref exits 0, a missing one exits 1, and `-C <not-a-repo>` exits
+  // 128. Reading 128 — or a spawn failure, or garbage on stdout — as "absent" is what put
+  // `false` and `unknown` on one branch.
+  if (res.exit_code === 1 && res.stdout.trim() === '') return 'absent'
+  return 'unknown'
 }
 
 // ---------------------------------------------------------------------------

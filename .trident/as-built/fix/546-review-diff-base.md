@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5453` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5468` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -231,6 +231,58 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round thirty-one: false and unknown were sharing a branch — in the probe this branch added
+
+**The defect this branch exists to remove, one level down, in its own fix.** `refResolves`
+returned a **boolean**: `catch { return false }`, and `false` for any non-zero exit. But the
+caller reads `false` as *"there is no remote-tracking ref"* and responds by selecting the NEXT,
+LESS QUALIFIED arm — so a probe that could not run promoted `refs/heads/<base>` silently, on
+exactly the degraded environments (a missing binary, a repo that is not a repo, a rejected
+spawn) where the promotion is least defensible. **A boolean `ok` collapses "is false" with
+"could not find out", and the two want opposite behaviour**: absence is a fact about the
+repository and legitimately selects the local branch; a failed lookup establishes nothing and
+must refuse.
+
+**Tri-state, keyed on the exit code and measured, not assumed.** On git 2.43.0 an existing ref
+exits 0 and prints the object name, a missing one exits 1 and prints nothing, `rev-parse`
+outside a repository exits 128. So `'absent'` is *exactly* exit 1 with empty stdout; everything
+else that is not a resolved object name is `'unknown'`. At the remote position `'unknown'`
+throws `TridentUndeterminedBaseError` **without asking the second question** — the fall-through
+is the damage, so its absence is asserted. At the local position there is nothing left to fall
+through to, so anything but resolved refuses as `TridentUnresolvableBaseError`.
+
+**Both directions in one round, because each test alone is passed by the wrong fix.** "Handles
+probe failure" is satisfied by treating failure as absence — which IS the bug — so the criterion
+is a PAIR whose two outcomes must DIFFER, compared as outcomes rather than asserted separately.
+And refusing on every non-resolution passes that pair while breaking the fresh-clone path
+repaired in round twenty-six, so the complement pins `'absent'` → `refs/heads/<base>`. Mutation:
+`catch { return 'absent' }` reds 2, dropping the `'unknown'` throw reds 2, widening it to
+`remote !== 'resolved'` reds 7.
+
+**The `.mjs` cannot throw, so it refuses by naming a ref that cannot exist.** The substitution is
+now three-armed on `$?` — `0)` the remote-tracking ref, `1)` `refs/heads/<base>`, `*)`
+`refs/trident-probe-failed/<base>`. The poison ref still satisfies the shape property (it begins
+with `refs/`), and git rejects it loudly. All three arms are driven by REAL git in the parity
+suite, the third by evaluating the composed word outside any repository; the rejection is
+asserted in a repository where `refs/heads/<base>` DOES resolve, so it is the word's doing and
+not the fixture's.
+
+**And the spec already claimed the behaviour the code did not have** — "it also answers 'no' when
+it cannot run at all, which now fails CLOSED" — stated of *the probe in general* while the code
+failed OPEN at the arm that mattered. A sentence that is true of one position and false at
+another is not a rounding error: it is the thing that stops the next reader from checking. It now
+names the position.
+
+**One thing this round measured and deliberately did NOT fix.** Thirty rounds of edits have
+moved `inner-workflow.mjs` by roughly two hundred lines, and citations into it from files this
+branch does not touch have drifted with it — the CI-rollup pair cited in `GLOSSARY.md:176` as
+`:4708-4712` is now at `:4927`/`:4931`, and `run-evidence-probes.ts:201`'s `:1796` is at
+`:1987`. They were approximately right when written. Repointing them would widen a PR under
+review with changes unrelated to its subject, and the drift is not this branch's defect but a
+property of citing a 7,000-line file by line number at all: **every merge that edits it does
+this to every citation into it.** Recorded here with measured values rather than silently left,
+so the next reader knows the numbers are stale and why they were not touched.
 
 ### Round thirty: a gate that runs in CI has to be right in BOTH directions
 
@@ -1036,7 +1088,7 @@ about what this code does.** Each was read against the code it sits above:
 - **18 held**, and they are what make the sweep worth trusting: a sha cannot go stale;
   `refs/heads/<base>` is the best available base in every no-resolving-ref state; the only
   source of a padded name is configuration (`detectBaseBranch` trims its own output at
-  `merge.ts:191-195`); only trimmed values reach the return; `diffBase` is the only name this
+  `merge.ts:192-194`); only trimmed values reach the return; `diffBase` is the only name this
   file gives a *merge-base* diff — and that heading names its own exception two lines later;
   `--end-of-options` really does stop every measured family; a `0` from the gate means
   "none of the enumerated spellings", never "no bare-base range exists"; `bindingCount`
@@ -1492,7 +1544,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5286`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5301`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

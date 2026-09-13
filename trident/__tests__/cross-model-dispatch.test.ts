@@ -1258,7 +1258,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
       // word is not inert and a same-named tag answers to it. The SAME in local mode as in pr
       // mode: `local` means the outer loop merges locally, not that the repository has no
       // remote.
-      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 && printf %s 'refs/remotes/origin/main' || printf %s 'refs/heads/main')" 'local'`,
+      `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1; case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf %s 'refs/trident-probe-failed/main';; esac)" 'local'`,
     )
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
@@ -1269,7 +1269,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // time: which of the two qualified refs the command names is decided in the repository
     // where the diff runs, at the moment it runs. (This comment said the bare name "appears
     // only as the substitution's fallback, legitimately" — the arm round nineteen removed.)
-    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 && printf %s 'refs/remotes/origin/main' || printf %s 'refs/heads/main')" 'pr'`)
+    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' "$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1; case $? in 0) printf %s 'refs/remotes/origin/main';; 1) printf %s 'refs/heads/main';; *) printf %s 'refs/trident-probe-failed/main';; esac)" 'pr'`)
     expect(pr).not.toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.

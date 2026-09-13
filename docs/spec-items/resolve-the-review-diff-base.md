@@ -32,8 +32,15 @@ different states and the second is wider than what the code establishes: a repos
 `origin` configured while `refs/remotes/origin/<base>` is missing, deleted or never fetched, and
 there `refs/heads/<base>` is taken — the local branch, named in full — and when that does not
 resolve either the base is REFUSED rather than guessed. The probe is a single
-`git rev-parse --verify`, so it also answers "no" when it cannot run at all, which now fails
-CLOSED (a refusal) rather than falling through to a word git would resolve for us.
+`git rev-parse --verify`, and it answers three ways rather than two: **resolved**, **absent**
+(exit 1, empty stdout — git looked and there is no such ref), and **undetermined** (anything
+else: the command could not be spawned, exit 128 outside a repository, or output that is not an
+object name). Those two non-resolutions part company **at the remote position**, and the
+sentence is about that position specifically: an ABSENT `refs/remotes/origin/<base>` is the
+fresh-clone and never-fetched case, so it falls through to `refs/heads/<base>`, while an
+UNDETERMINED one refuses there and then rather than reading silence as absence. At the local
+position there is nothing left to fall through to, so anything but *resolved* refuses. Both
+refusals fail CLOSED; neither falls through to a word git would resolve for us.
 Deliberately **no fetch**: a build worktree should not be reaching the network to answer a
 diff-base question.
 
@@ -484,5 +491,27 @@ The resolution order is evidence-first, and is the same at every site:
       a control that passes for the wrong reason occupies the slot: one of them was
       `'git diff refs/tags/' + baseBranch` with no `..` at all, so the matcher never examined
       it and its silence proved nothing.
+- [ ] **A probe that CANNOT ANSWER is a different input from one that answers NO, and the two
+      reach different results.** `refResolves` returned a boolean and folded every exception,
+      every non-1 exit and every unparseable stdout into `false` — and `false` SELECTS THE NEXT,
+      LESS QUALIFIED ARM, which is the #546 defect one level down. It is now tri-state:
+      `'absent'` is exactly exit 1 with empty stdout (measured on git 2.43.0; `rev-parse`
+      outside a repository exits 128), everything else that is not a resolved object name is
+      `'unknown'`, and an `'unknown'` at the REMOTE position refuses with
+      `TridentUndeterminedBaseError` without asking the second question. Verified by "THE PAIR:
+      a REJECTING probe and an ABSENT probe reach different results, on the same base", which
+      compares the two OUTCOMES rather than asserting them separately, and by "AT THE SOURCE".
+      **Both directions, because each alone is satisfiable by the wrong fix**: reading a failed
+      probe as absence passes any test that only asks for "handles probe failure", so the pair
+      must be unequal; and refusing on EVERY non-resolution passes the pair while breaking the
+      fresh-clone path repaired in round twenty-six, so "THE COMPLEMENT: an ABSENT remote probe
+      still selects `refs/heads/<base>`" pins the other side. Mutation-verified: returning
+      `'absent'` from the catch reds two tests, dropping the `'unknown'` throw reds two, and
+      widening it to `remote !== 'resolved'` reds seven. The `.mjs` cannot throw — it composes a
+      word for another process — so it names `refs/trident-probe-failed/<base>`, which satisfies
+      the shape property and which git rejects; verified by "THE .mjs SIDE", which drives all
+      three arms with real git (ref present, ref absent, and outside a repository) and shows the
+      poisoned word producing exit non-zero and no output in a repository where
+      `refs/heads/<base>` does exist, so the refusal is the word's doing and not the world's.
 - [ ] **Every site in the class is either fixed or has evidence that it is correct.** The
       dispositions are recorded in the as-built record for the branch that ships this.
