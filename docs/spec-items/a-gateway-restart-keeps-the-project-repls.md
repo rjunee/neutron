@@ -57,10 +57,14 @@ refusal criterion and delivers nothing, so each refusal is paired with the accep
 it must not swallow.
 
 - [ ] **A TURN AFTER THE RESTART IS SERVED BY THE SAME CHILD.** Not "a REPL answers" —
-      no `claude` is launched, and the answer comes back through the surviving
-      dev-channel and the surviving child's own credential.
+      no `claude` is launched, and the answer is one only the ATTACHED child could have
+      produced: its bridge refuses to answer until a gateway has attached to its pane
+      and released its output gate, and every reply names the pane it was taken over
+      through and the pid it runs as. A fixture that answered on its own authority would
+      satisfy "a reply arrived" while the attach did nothing, which is what an earlier
+      revision of this criterion's test did.
       *Verified by* `runtime/adapters/claude-code/persistent/__tests__/adopted-repl-serves-a-turn.test.ts`
-      (the assertion that carries it is `spawns === 0`).
+      (`spawns === 0`, AND the reply naming this pane and pid).
 - [ ] **NOTHING SPAWNS ON A KEY THAT HAS NOT BEEN RECONCILED.** A turn arriving while
       the pass is in flight WAITS; it does not cold-resume past it.
       *Verified by* the same file's "WAITS for the adoption rather than cold-spawning
@@ -103,6 +107,21 @@ it must not swallow.
       only where the pane can never be adopted again (the host switch).
       *Verified by* `__tests__/boot-adoption.test.ts` ("LEFT RUNNING when only the host
       failed to answer" and "DOES kill a verified survivor — the one case that may").
+- [ ] **A DEAD RECORDED PID IS NOT PROOF THE TRANSCRIPT IS FREE.** Where the pane
+      authority cannot be consulted, a resume is licensed only by a scan that RAN over
+      every live process and found no `claude` on this session — never by the recorded
+      pid alone, because a pane relaunched under a NEW pid leaves that pid dead while a
+      live process owns the transcript.
+      *Verified by* `__tests__/boot-adoption.test.ts` ("REFUSES when another live process
+      is a claude on this session", "REFUSES when the transcript-owner scan could not
+      run at all", and the `tail -f` case that must not read as an owner).
+- [ ] **IDENTITY IS RE-ESTABLISHED AT THE MOMENT OF A CLOSE.** A pane whose identity
+      changed between the inspection that decided and the close that acts is LEFT ALONE
+      (the id may have been reissued to a stranger); one that vanished in that window
+      counts as closed.
+      *Verified by* `__tests__/boot-adoption.test.ts` ("does NOT close a pane whose
+      identity changed after the inspection", plus its vanished and positive-control
+      siblings).
 - [ ] **AN UNVERIFIED PANE IS NEVER CLOSED.** A pane running something else, or one the
       host could not speak for and whose pid the process table does not confirm, is left
       alone and reported undecided — the recycled-identifier rule, applied to a pane id.

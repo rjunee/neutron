@@ -454,10 +454,124 @@ describe('when the host cannot answer', () => {
         health: async () => true,
         log: () => {},
         orphanDeps: () => ({ ...probe, terminatePid: async () => {} }),
+        // AND NOBODY ELSE HOLDS THE TRANSCRIPT. Injected rather than left to the real
+        // `ps`, so the case states the condition it depends on instead of inheriting
+        // whatever this machine happens to be running.
+        listProcesses: () => [{ pid: 1, cmdline: '/sbin/init' }],
       })
       expect(outcome.kind).toBe('handle-cleared')
       expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
     }
+  })
+})
+
+describe('a dead pid is not proof the transcript is free', () => {
+  it('REFUSES when another live process is a claude on this session', async () => {
+    // The shape the spec item raises and an earlier revision missed: a pane relaunched
+    // under a NEW pid (herdr's own restore does exactly this) leaves the RECORDED pid
+    // dead while a live process owns the transcript. Clearing the handle there would
+    // authorise a second `--resume`.
+    const f = fixture()
+    f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => false, // the recorded pid IS dead
+        readCmdline: () => undefined,
+        terminatePid: async () => {},
+      }),
+      listProcesses: () => [
+        { pid: 1, cmdline: '/sbin/init' },
+        // Somebody relaunched it: same transcript, different pid, and not our spawn.
+        { pid: 9931, cmdline: `claude --resume ${SESSION_ID}` },
+      ],
+    })
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toContain('9931')
+    // And the handle is NOT forgotten — the next boot must still look at that pane.
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
+  })
+
+  it('REFUSES when the transcript-owner scan could not run at all', async () => {
+    const f = fixture()
+    f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => false,
+        readCmdline: () => undefined,
+        terminatePid: async () => {},
+      }),
+      // `ps` failed. Establishes nothing — and must not read as "nobody owns it".
+      listProcesses: () => undefined,
+    })
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/could not run/i)
+  })
+
+  it('ignores a process that merely MENTIONS the session id', async () => {
+    // The recycled-pid trap in scan form: a `tail -f` on the transcript path carries
+    // the uuid and lives under `.claude/`, and is not an owner.
+    const f = fixture()
+    f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
+    const outcome = await reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+      orphanDeps: () => ({
+        isPidAlive: () => false,
+        readCmdline: () => undefined,
+        terminatePid: async () => {},
+      }),
+      listProcesses: () => [
+        { pid: 7001, cmdline: `tail -f /home/u/.claude/projects/p/${SESSION_ID}.jsonl` },
+        { pid: 7002, cmdline: `vim /home/u/.claude/projects/p/${SESSION_ID}.jsonl` },
+      ],
+    })
+    expect(outcome.kind).toBe('handle-cleared')
+  })
+})
+
+describe('the pane is re-identified at the moment of the close', () => {
+  it('does NOT close a pane whose identity changed after the inspection', async () => {
+    // The window is real: between the inspection that decided and the close that acts
+    // there is a `/health` round trip at least. If the pane exits and the id is
+    // reissued in it, closing would destroy somebody else's pane.
+    const f = fixture()
+    f.host.inspectQueue = [
+      // Decides: a claude on our transcript without our channel → close-foreign-owner.
+      { kind: 'live', argv: ['claude', '--resume', SESSION_ID] },
+      // By the time we act, the id belongs to something else entirely.
+      { kind: 'live', argv: ['vim', '/etc/hosts'] },
+    ]
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    expect(f.host.closed).toEqual([])
+    expect(f.host.inspections.length).toBeGreaterThan(1)
+  })
+
+  it('treats a pane that vanished in that window as closed — the post-condition holds', async () => {
+    const f = fixture()
+    f.host.inspectQueue = [
+      { kind: 'live', argv: ['claude', '--resume', SESSION_ID] },
+      { kind: 'gone' },
+    ]
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('closed-foreign-owner')
+    // Nothing was closed by us, because there was nothing left to close.
+    expect(f.host.closed).toEqual([])
+    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+  })
+
+  it('still closes when the re-check agrees — the positive control', async () => {
+    const f = fixture({ argv: ['claude', '--resume', SESSION_ID] })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('closed-foreign-owner')
+    expect(f.host.closed).toEqual([HANDLE])
   })
 })
 

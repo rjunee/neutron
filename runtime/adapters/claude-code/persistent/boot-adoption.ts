@@ -64,15 +64,18 @@ import { herdrHost } from './herdr-host.ts'
 import {
   adoptOrKillOrphan,
   basenameOf,
+  defaultListProcesses,
   identifyOrphanPid,
+  scanTranscriptOwners,
   classifyPaneForAdoption,
   cmdlineMatchesSession,
   defaultReadCmdline,
   type OrphanAdoptionDeps,
   type OrphanAdoptionVerdict,
+  type ProcessListing,
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
-import { hostSupportsAdoption, type AdoptableHost, type PtyChild } from './pty-host.ts'
+import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
 import { getRecord, loadRegistry, patchRecord, withRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
@@ -142,6 +145,10 @@ export interface BootAdoptionDeps {
   health?: (port: number, opts: { expectedSessionId?: string; timeoutMs?: number }) => Promise<boolean>
   /** The pid-table fallback for a pane the host could not speak for. */
   orphanDeps?: (record: ReplRegistryRecord, claudeBasename: string) => OrphanAdoptionDeps
+  /** The whole-machine process listing behind {@link scanTranscriptOwners}. Defaults
+   *  to the real `ps`; a case injects one so "somebody else owns this transcript" is
+   *  reachable without starting a second claude. */
+  listProcesses?: () => ProcessListing[] | undefined
   /** Diagnostics sink. Defaults to stderr. */
   log?: (msg: string) => void
   budgetMs?: number
@@ -432,14 +439,16 @@ async function reconcileRow(
       case 'leave-not-ours':
         return { kind: 'undecided', sessionKey, reason: verdict.reason }
       case 'close-foreign-owner': {
-        const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
-        return closed
-          ? { kind: 'closed-foreign-owner', sessionKey, reason: verdict.reason }
-          : {
-              kind: 'undecided',
-              sessionKey,
-              reason: `a foreign owner holds this transcript and the close FAILED — ${verdict.reason}`,
-            }
+        const close = await closeAndClear(
+          host,
+          handle,
+          registryPath,
+          sessionKey,
+          deps,
+          record,
+          claudeBasename,
+        )
+        return outcomeOfClose(close, sessionKey, 'closed-foreign-owner', verdict.reason)
       }
       case 'unverifiable':
       case 'unavailable':
@@ -548,22 +557,49 @@ async function pidFallback(
       if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
       return { kind: 'closed-by-pid', sessionKey }
     case 'dead':
-    case 'not-ours':
-      // BOTH ARE POSITIVE ABSENCES OF *OUR CHILD*, and the pair is stale together: the
-      // pid and the pane handle are written by the same spawn, in the same record, so a
-      // pid that is gone (`dead`) or that the kernel says belongs to a stranger
-      // (`not-ours`, i.e. our child released it and the number was reissued) means the
-      // child that wrote this row is no longer running — and the handle it wrote in the
-      // same breath names nothing of ours either. The transcript has no owner, so a
-      // resume is safe, and the stale handle is cleared so the next boot does not chase
-      // it. This is the same inference the pre-existing `#105` respawn path already
-      // makes when it leaves an unverified pid alone and spawns the replacement.
-      log(
-        `key=${sessionKey.slice(0, 32)}: ${why}; the process table says the recorded pid is ` +
-          `'${verdict}', so the child that wrote this row is gone and its handle is stale`,
+    case 'not-ours': {
+      // THE RECORDED CHILD IS GONE — AND THAT IS NOT THE QUESTION.
+      //
+      // An earlier revision stopped here and called it a positive absence: the pid and
+      // the handle are written by one spawn, so a dead pid means a stale handle. Sound
+      // for a pane nothing else touched, and WRONG for the case this item's own spec
+      // raises — a pane relaunched under a NEW pid (herdr's native restore does exactly
+      // that) leaves the recorded pid genuinely dead while a live process owns the
+      // transcript. Clearing the handle there authorises a second `claude --resume`.
+      //
+      // The config that makes that rare is in ANOTHER PROGRAM'S FILE, so it cannot be
+      // the guard. The question a spawn actually needs is about the TRANSCRIPT, so ask
+      // that: is ANY live process a `claude` on this session? Only a scan that RAN and
+      // found nobody is a positive absence.
+      const scan = scanTranscriptOwners(
+        record.sessionId,
+        deps.listProcesses ?? defaultListProcesses,
+        claudeBasename,
       )
-      if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
-      return { kind: 'handle-cleared', sessionKey }
+      if (scan.kind === 'none') {
+        log(
+          `key=${sessionKey.slice(0, 32)}: ${why}; the recorded pid is '${verdict}' AND no live process is a ` +
+            `claude on session ${record.sessionId.slice(0, 8)}, so the transcript has no owner and the handle is stale`,
+        )
+        if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+        return { kind: 'handle-cleared', sessionKey }
+      }
+      if (scan.kind === 'owners') {
+        return {
+          kind: 'undecided',
+          sessionKey,
+          reason:
+            `${why}; the recorded pid is '${verdict}' but pid(s) ${scan.pids.join(', ')} are running a claude on ` +
+            `session ${record.sessionId.slice(0, 8)} — the transcript HAS an owner this row does not name, and ` +
+            'resuming it would make a second one',
+        }
+      }
+      return {
+        kind: 'undecided',
+        sessionKey,
+        reason: `${why}; the recorded pid is '${verdict}' and the transcript-owner scan could not run (${scan.reason}), so nothing is established about who holds it`,
+      }
+    }
     case 'unreadable':
       // ALIVE AND UNREADABLE. The pid exists and the kernel would not tell us whose it
       // is, which is the absence of a finding rather than a finding of absence — the
@@ -595,17 +631,95 @@ async function closeAndClear(
   registryPath: string | undefined,
   sessionKey: string,
   deps: BootAdoptionDeps,
-): Promise<boolean> {
+  /** The row, so identity can be RE-ESTABLISHED at the moment of the close. */
+  record: ReplRegistryRecord,
+  claudeBasename: string,
+): Promise<CloseOutcome> {
+  const log = deps.log ?? defaultLog
+  // RE-CHECK AT THE MOMENT OF THE ACT, because everything between the first inspection
+  // and this line is time the pane can use to stop existing. The `/health` probe alone
+  // is a round trip; a stale-evidence close is further still. If the pane exits in that
+  // window and the server reissues the id, `closeHandle` would destroy a pane belonging
+  // to somebody else — against this module's own rule that an unverified pane is never
+  // closed, and reachable only because the FIRST look was the only look.
+  //
+  // A CHECK IS NOT A LOCK, and this does not pretend otherwise: the window shrinks to
+  // the gap between this reply and the close, and cannot be closed entirely without an
+  // atomic compare-and-close the API does not offer. What it removes is the wide,
+  // predictable window — the one a health probe and a 45-second evidence bound open.
+  let recheck: HandleInspection
+  try {
+    recheck = await host.inspectHandle(handle)
+  } catch (e) {
+    log(`pane ${handle}: the pre-close re-check THREW (${errorText(e)}) — not closing on unverified evidence`)
+    return { kind: 'unverified', reason: 'the pre-close identity re-check could not be made' }
+  }
+  if (recheck.kind === 'gone') {
+    // It closed itself between the two looks. The post-condition the caller wanted
+    // already holds, and the handle is stale.
+    if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
+    return { kind: 'closed' }
+  }
+  if (recheck.kind === 'unavailable') {
+    log(`pane ${handle}: the pre-close re-check could not be made (${recheck.reason}) — not closing`)
+    return { kind: 'unverified', reason: `the pre-close identity re-check failed: ${recheck.reason}` }
+  }
+  const still = classifyPaneForAdoption(
+    recheck,
+    { sessionId: record.sessionId, channelName: record.channelName },
+    claudeBasename,
+  )
+  // ONLY A PANE THAT IS STILL A CLAUDE ON THIS TRANSCRIPT MAY BE CLOSED. `adopt` (our
+  // own child) and `close-foreign-owner` (a claude on our transcript that is not our
+  // child) are the two shapes that license it; anything else — a stranger's pane under
+  // a reissued id, or a pane nothing can identify — is left alone.
+  if (still.kind !== 'adopt' && still.kind !== 'close-foreign-owner') {
+    log(
+      `pane ${handle}: identity CHANGED between the inspection and the close (now '${still.kind}') — leaving it alone`,
+    )
+    return {
+      kind: 'unverified',
+      reason: `the pane no longer identifies as this row's transcript at close time (${still.kind})`,
+    }
+  }
   try {
     await host.closeHandle(handle)
   } catch (e) {
-    ;(deps.log ?? defaultLog)(
-      `pane ${handle} could NOT be closed (${e instanceof Error ? e.message : String(e)}) — it is still running`,
-    )
-    return false
+    log(`pane ${handle} could NOT be closed (${errorText(e)}) — it is still running`)
+    return { kind: 'failed', reason: 'the close FAILED' }
   }
   if (registryPath !== undefined) clearPaneHandle(registryPath, sessionKey, deps)
-  return true
+  return { kind: 'closed' }
+}
+
+/**
+ * Turn a close attempt into this row's verdict.
+ *
+ * ONE PLACE, because there are three ways a close can end and only one of them is
+ * "nothing owns this transcript now". A boolean here is how "I refused to close it on
+ * unverified evidence" would quietly become "it is closed".
+ */
+function outcomeOfClose(
+  close: CloseOutcome,
+  sessionKey: string,
+  closedKind: 'closed-foreign-owner' | 'closed-unadoptable',
+  reason: string,
+): RowAdoptionOutcome {
+  if (close.kind === 'closed') return { kind: closedKind, sessionKey, reason }
+  return { kind: 'undecided', sessionKey, reason: `${reason}; and ${close.reason}` }
+}
+
+/** What {@link closeAndClear} did. THREE, not a boolean: "it is gone", "the close
+ *  failed" and "I would not close it on this evidence" are different facts, and only
+ *  the first licenses a resume. */
+type CloseOutcome =
+  | { readonly kind: 'closed' }
+  | { readonly kind: 'failed'; readonly reason: string }
+  | { readonly kind: 'unverified'; readonly reason: string }
+
+/** One-line error text. */
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 /**
@@ -672,23 +786,35 @@ async function adoptRow(
     // session, so a session registered under a different (or minted) generation can
     // never route this child's replies: it would sit in the pool answering 401 to its
     // own REPL. Close it and let the transcript be resumed cleanly.
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
+    const close = await closeAndClear(
+      host,
+      handle,
+      registryPath,
+      sessionKey,
+      deps,
+      record,
+      claudeBasenameFor(options),
+    )
     const reason = 'the row carries no child_generation, so this child\'s sink credential cannot be reproduced'
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
   const port = record.devchannel_port
   const health = deps.health ?? httpHealth
   if (port === undefined || port <= 0 || !(await health(port, { expectedSessionId: record.sessionId }))) {
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
+    const close = await closeAndClear(
+      host,
+      handle,
+      registryPath,
+      sessionKey,
+      deps,
+      record,
+      claudeBasenameFor(options),
+    )
     const reason =
       port === undefined || port <= 0
         ? 'the row records no dev-channel port, so there is nothing to inject a turn into'
         : `the dev-channel on port ${port} did not answer /health for session ${record.sessionId.slice(0, 8)}`
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
 
   // ── The child is established. Rebuild around it, in the same order `spawnSession`
@@ -700,11 +826,17 @@ async function adoptRow(
   // evidence — the identity we established is what licenses it — so that is what a
   // stale pass does.
   if (signal.abandoned) {
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
+    const close = await closeAndClear(
+      host,
+      handle,
+      registryPath,
+      sessionKey,
+      deps,
+      record,
+      claudeBasenameFor(options),
+    )
     const reason = `this verification took longer than the ${BOOT_ADOPTION_BUDGET_MS}ms evidence bound, so what it established is no longer current`
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
 
   // The sink FIRST, on the coordinates the surviving child was baked with (#537):
@@ -730,11 +862,17 @@ async function adoptRow(
     // would then all compare unequal and the first turn would evict what we just
     // adopted — so do not pretend: close it, and let the cold resume happen now
     // rather than one turn later.
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
+    const close = await closeAndClear(
+      host,
+      handle,
+      registryPath,
+      sessionKey,
+      deps,
+      record,
+      claudeBasenameFor(options),
+    )
     const reason = 'the row carries no usable spawn-time reuse properties, so the first turn would evict this session anyway'
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
   session.toolSurface = reuse.tool_surface
   session.toolBridgeActive = reuse.tool_bridge
@@ -787,10 +925,16 @@ async function adoptRow(
     pool.delete(sessionKey)
     session.sizeWatchdog?.stop()
     session.deadTurnWatcher?.stop()
-    const closed = await closeAndClear(host, handle, registryPath, sessionKey, deps)
-    return closed
-      ? { kind: 'closed-unadoptable', sessionKey, reason }
-      : { kind: 'undecided', sessionKey, reason: `${reason}; and the close FAILED` }
+    const close = await closeAndClear(
+      host,
+      handle,
+      registryPath,
+      sessionKey,
+      deps,
+      record,
+      claudeBasenameFor(options),
+    )
+    return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
 
   let primed = false

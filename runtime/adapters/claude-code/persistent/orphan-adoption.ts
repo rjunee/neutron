@@ -351,6 +351,102 @@ export function defaultReadCmdline(pid: number): string | undefined {
 }
 
 /**
+ * WHO, IF ANYONE, IS RUNNING A `claude` ON THIS TRANSCRIPT — asked of every process,
+ * not of one remembered pid (#539).
+ *
+ * THE QUESTION A SPAWN ACTUALLY NEEDS. "Is the recorded pid still ours?" answers
+ * something narrower, and an earlier revision of the boot-adoption fallback read a
+ * `dead` answer to THAT question as permission to resume the transcript. The gap is
+ * real and this tree's own spec item names it: a pane can be relaunched under a NEW
+ * pid — herdr's native restore does exactly that, `claude --resume <id>` — leaving the
+ * RECORDED pid genuinely dead while a live process owns the transcript. Authorising a
+ * second `--resume` there produces the two-owner corruption the whole item exists to
+ * prevent, and it does so via a guard that looked correct.
+ *
+ * So the instrument is scoped to the TRANSCRIPT: every live process, filtered by the
+ * same exact-shape matcher the kill gate uses ({@link cmdlineMatchesSession}), so a
+ * `tail -f …/<uuid>.jsonl` or an editor with it open is not mistaken for an owner.
+ *
+ * THREE ANSWERS, AND THE THIRD IS NOT THE FIRST. `none` means the scan RAN and found
+ * nobody; `unknown` means it could not be performed and establishes nothing. A caller
+ * that treats `unknown` as `none` has rebuilt the bug above in a new place.
+ *
+ * WHAT THE INSTRUMENT CAN SEE, measured rather than assumed (2026-09-13, this box):
+ * `ps -eo pid=,command=` piped (not a tty) emits FULL command lines — the live REPL
+ * children's 603-character argv arrives whole, and the longest line in a full listing
+ * was 1,368 characters. A truncating `ps` would silently answer `none` for a process
+ * whose `--resume <uuid>` fell off the end, which is why this is recorded here.
+ */
+export type TranscriptOwnerScan =
+  /** The scan ran and no live process is a `claude` on this transcript. */
+  | { readonly kind: 'none' }
+  /** At least one live process is. Their pids, for the message a caller writes. */
+  | { readonly kind: 'owners'; readonly pids: readonly number[] }
+  /** The scan could not be performed. Establishes NOTHING — never read as `none`. */
+  | { readonly kind: 'unknown'; readonly reason: string }
+
+/** One live process, as {@link scanTranscriptOwners} needs it. */
+export interface ProcessListing {
+  readonly pid: number
+  readonly cmdline: string
+}
+
+/**
+ * Every process on this machine, as `pid` + full command line — or `undefined` when the
+ * listing could not be taken, which is a different thing from an empty machine.
+ *
+ * `ps -eo pid=,command=` on darwin and Linux alike (the same portability argument
+ * {@link defaultReadCmdline} makes for the single-pid form). A non-zero exit, a throw,
+ * or empty output all answer `undefined`: the SAFE direction, because the caller's rule
+ * for "I could not look" is to establish nothing.
+ */
+export function defaultListProcesses(): ProcessListing[] | undefined {
+  try {
+    const res = spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8', timeout: 5_000, maxBuffer: 16 * 1024 * 1024 })
+    if (res.status !== 0) return undefined
+    const out = (res.stdout ?? '').trim()
+    if (out.length === 0) return undefined
+    const rows: ProcessListing[] = []
+    for (const line of out.split('\n')) {
+      const trimmed = line.trim()
+      const sep = trimmed.indexOf(' ')
+      if (sep <= 0) continue
+      const pid = Number(trimmed.slice(0, sep))
+      if (!Number.isInteger(pid) || pid <= 0) continue
+      rows.push({ pid, cmdline: trimmed.slice(sep + 1) })
+    }
+    return rows.length > 0 ? rows : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** See {@link TranscriptOwnerScan}. Pure given the listing; the IO is the injected
+ *  `listProcesses`. */
+export function scanTranscriptOwners(
+  sessionId: string,
+  listProcesses: () => ProcessListing[] | undefined,
+  claudeBasename: string = 'claude',
+): TranscriptOwnerScan {
+  if (sessionId === '') {
+    return { kind: 'unknown', reason: 'no session id to look for' }
+  }
+  let listing: ProcessListing[] | undefined
+  try {
+    listing = listProcesses()
+  } catch (e) {
+    return { kind: 'unknown', reason: `the process listing threw: ${e instanceof Error ? e.message : String(e)}` }
+  }
+  if (listing === undefined) {
+    return { kind: 'unknown', reason: 'the process listing could not be taken' }
+  }
+  const pids = listing
+    .filter((row) => cmdlineMatchesSession(row.cmdline, sessionId, claudeBasename))
+    .map((row) => row.pid)
+  return pids.length === 0 ? { kind: 'none' } : { kind: 'owners', pids }
+}
+
+/**
  * Identity-checked adopt-or-kill for a recorded registry pid (ISSUES #105).
  *
  *   - `no-pid`   — `pid` is undefined / not a positive integer.

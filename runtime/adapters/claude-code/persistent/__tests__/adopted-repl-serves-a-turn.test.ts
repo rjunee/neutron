@@ -47,6 +47,8 @@ const SESSION_ID = 'cccccccc-1111-2222-3333-444444444444'
 const CHANNEL = 'neutron-11112222333344445555666677778888'
 const GENERATION = 'gen-serves-a-turn'
 const HANDLE = 'w9:p11'
+/** The pid the surviving child reports — in the pane, and in every reply it sends. */
+const SURVIVOR_PID = 31337
 const INSTANCE = 'cc-llm-adopt'
 
 const dirs: string[] = []
@@ -59,53 +61,85 @@ function scratch(): string {
 }
 
 /**
- * The surviving child's dev-channel, as the previous gateway left it: listening on a
- * port the registry row records, answering `/health` for THIS session id, and echoing
- * a `/message` back to the sink under the credential its generation derives.
+ * THE SURVIVING CHILD, AS ONE OBJECT: the `claude` process, its dev-channel bridge and
+ * the pane the next gateway attaches to are facets of one thing, so the fixture models
+ * them as one thing.
+ *
+ * THIS SHAPE IS THE POINT, AND THE EARLIER ONE WAS THE DEFECT. The dev-channel used to
+ * be an independent server that answered `/message` by POSTing a reply to the sink on
+ * its own authority — so the sentence "the same REPL served the turn" was produced by a
+ * mock with NO LINK to the child the adoption attached. Cut the attach out entirely and
+ * the test still passed; only the spawn counter tied them together. That is exactly
+ * "asserting an outcome the broken fixture also produces", on the headline criterion.
+ *
+ * Now the bridge answers NOTHING until a gateway has attached to the pane AND released
+ * its output gate (`PtyChild.beginOutput`) — the wiring the adoption path performs —
+ * and every reply names the pane it was taken over through and the pid it runs as.
+ * Break the linkage and the turn gets a 503 and no reply; attach to the wrong pane and
+ * the reply says so.
  */
-function survivingDevChannel(): { port: number } {
-  const server = Bun.serve({
-    port: 0,
-    hostname: '127.0.0.1',
-    async fetch(req) {
-      const url = new URL(req.url)
-      if (url.pathname === '/health') {
-        // WITH the session id: `httpHealth`'s `expectedSessionId` guard is what makes
-        // a recycled port read as "not this REPL" rather than as health.
-        return Response.json({ ok: true, session_id: SESSION_ID })
-      }
-      if (req.method === 'POST' && url.pathname === '/message') {
-        const body = (await req.json()) as { text: string; turn_id?: string }
-        void fetch(`http://127.0.0.1:${sink.port}/reply`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            // The credential the SURVIVOR holds: HMAC(root token, its generation).
-            'X-Sink-Token': deriveChildSinkToken(sink.token, GENERATION),
-          },
-          body: JSON.stringify({
-            session_id: SESSION_ID,
-            text: `the same REPL as before: ${body.text}`,
-            turn_id: body.turn_id,
-          }),
-        }).catch(() => undefined)
-        return Response.json({ status: 'delivered' })
-      }
-      return new Response('nf', { status: 404 })
-    },
-  })
-  servers.push(server)
-  const port = server.port
-  if (port === undefined || port === 0) throw new Error('the surviving dev-channel bound no port')
-  return { port }
+class SurvivingRepl {
+  /** Set by `attach()`: the pane a gateway took this child over through. */
+  attachedVia: string | undefined
+  /** Set by `beginOutput()`: the consumer is wired and screens may flow. */
+  outputReleased = false
+  readonly port: number
+
+  constructor() {
+    const self = this
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      async fetch(req) {
+        const url = new URL(req.url)
+        if (url.pathname === '/health') {
+          // WITH the session id: `httpHealth`'s `expectedSessionId` guard is what makes
+          // a recycled port read as "not this REPL" rather than as health.
+          return Response.json({ ok: true, session_id: SESSION_ID })
+        }
+        if (req.method === 'POST' && url.pathname === '/message') {
+          const body = (await req.json()) as { text: string; turn_id?: string }
+          const via = self.attachedVia
+          if (via === undefined || !self.outputReleased) {
+            // NOBODY IS DRIVING THIS CHILD. A real bridge would be delivering a prompt
+            // into a `claude` whose gateway had wired nothing; it refuses and sends no
+            // reply, so the turn fails instead of being invented.
+            return Response.json({ status: 'no-attached-gateway' }, { status: 503 })
+          }
+          void fetch(`http://127.0.0.1:${sink.port}/reply`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              // The credential the SURVIVOR holds: HMAC(root token, its generation).
+              'X-Sink-Token': deriveChildSinkToken(sink.token, GENERATION),
+            },
+            body: JSON.stringify({
+              session_id: SESSION_ID,
+              text: `served by the child in pane ${via} (pid ${SURVIVOR_PID}): ${body.text}`,
+              turn_id: body.turn_id,
+            }),
+          }).catch(() => undefined)
+          return Response.json({ status: 'delivered' })
+        }
+        return new Response('nf', { status: 404 })
+      },
+    })
+    servers.push(server)
+    const port = server.port
+    if (port === undefined || port === 0) throw new Error('the surviving dev-channel bound no port')
+    this.port = port
+  }
 }
 
-/** A host that can adopt, and that COUNTS any spawn so a cold start cannot hide. */
+/** A host that COUNTS any spawn, and whose `attach` hands back a child wired to the
+ *  {@link SurvivingRepl} the dev-channel answers for. */
 class CountingAdoptableHost implements AdoptableHost {
   spawns = 0
   attachHold: Promise<void> | undefined
   releaseAttach: (() => void) | undefined
   closed: string[] = []
+
+  constructor(private readonly survivor: SurvivingRepl) {}
 
   hold(): () => void {
     this.attachHold = new Promise<void>((res) => {
@@ -123,7 +157,7 @@ class CountingAdoptableHost implements AdoptableHost {
     if (handle !== HANDLE) return { kind: 'gone' }
     return {
       kind: 'live',
-      pid: 31337,
+      pid: SURVIVOR_PID,
       argv: [
         'claude',
         '--resume',
@@ -137,6 +171,10 @@ class CountingAdoptableHost implements AdoptableHost {
 
   async attach(handle: string, opts: PtySpawnOpts): Promise<PtyChild> {
     if (this.attachHold !== undefined) await this.attachHold
+    // THE LINKAGE. From here the surviving child knows which pane it was taken over
+    // through — and its bridge will answer a turn, but not before.
+    this.survivor.attachedVia = handle
+    const survivor = this.survivor
     let exited = false
     let resolveExit: (c: number | null) => void = () => {}
     const exitedPromise = new Promise<number | null>((res) => {
@@ -144,25 +182,31 @@ class CountingAdoptableHost implements AdoptableHost {
     })
     opts.onScreen?.('')
     return {
-      pid: 31337,
+      pid: SURVIVOR_PID,
       paneHandle: handle,
       write() {},
       writeKey() {},
       kill() {
         exited = true
+        survivor.attachedVia = undefined
+        survivor.outputReleased = false
         resolveExit(null)
       },
       exited: exitedPromise,
       hasExited: () => exited,
       wasKilledByUs: () => true,
-      beginOutput: () => {},
+      beginOutput: () => {
+        survivor.outputReleased = true
+      },
     }
   }
 
   async closeHandle(handle: string): Promise<void> {
     this.closed.push(handle)
+    this.survivor.attachedVia = undefined
   }
 }
+
 
 function optionsFor(host: AdoptableHost, registryPath: string): PersistentReplSubstrateOptions {
   return {
@@ -183,7 +227,7 @@ function writeSurvivorRow(registryPath: string, devPort: number, key: string): v
     cwd: '/tmp/neutron-adopt',
     channelName: CHANNEL,
     has_session: true,
-    pid: 31337,
+    pid: SURVIVOR_PID,
     devchannel_port: devPort,
     child_generation: GENERATION,
     pane_handle: HANDLE,
@@ -227,18 +271,22 @@ afterEach(async () => {
 
 describe('the first turn after a gateway restart', () => {
   it('is served by the REPL that was already running — nothing is spawned', async () => {
-    const host = new CountingAdoptableHost()
+    const survivor = new SurvivingRepl()
+    const host = new CountingAdoptableHost(survivor)
     const registryPath = join(scratch(), 'repl-registry.json')
-    const { port } = survivingDevChannel()
     const options = optionsFor(host, registryPath)
-    writeSurvivorRow(registryPath, port, poolKeyFor(options))
+    writeSurvivorRow(registryPath, survivor.port, poolKeyFor(options))
 
     // Constructing the substrate is what a restarted gateway does on its first turn
     // for this key; it starts the boot-adoption pass for that key.
     const substrate = createPersistentReplSubstrate(options)
     const answer = await drain(substrate.start(spec('are you still there?')))
 
-    expect(answer).toContain('the same REPL as before')
+    // THE ANSWER CAME FROM THE CHILD THE ADOPTION ATTACHED TO: it names the pane it
+    // was taken over through and the pid it runs as, neither of which a reply invented
+    // by the fixture could carry.
+    expect(answer).toContain(`served by the child in pane ${HANDLE}`)
+    expect(answer).toContain(`pid ${SURVIVOR_PID}`)
     expect(answer).toContain('are you still there?')
     // THE ACCEPTANCE: a turn was served and no `claude` was launched.
     expect(host.spawns).toBe(0)
@@ -246,12 +294,12 @@ describe('the first turn after a gateway restart', () => {
   })
 
   it('WAITS for the adoption rather than cold-spawning past it', async () => {
-    const host = new CountingAdoptableHost()
+    const survivor = new SurvivingRepl()
+    const host = new CountingAdoptableHost(survivor)
     const release = host.hold()
     const registryPath = join(scratch(), 'repl-registry.json')
-    const { port } = survivingDevChannel()
     const options = optionsFor(host, registryPath)
-    writeSurvivorRow(registryPath, port, poolKeyFor(options))
+    writeSurvivorRow(registryPath, survivor.port, poolKeyFor(options))
 
     const substrate = createPersistentReplSubstrate(options)
     let settled = false
@@ -268,7 +316,7 @@ describe('the first turn after a gateway restart', () => {
 
     release()
     const answer = await turn
-    expect(answer).toContain('the same REPL as before')
+    expect(answer).toContain(`served by the child in pane ${HANDLE}`)
     expect(host.spawns).toBe(0)
   })
 })

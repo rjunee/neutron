@@ -131,10 +131,15 @@ mechanism, the mutation that removes it reddens the test.
 
 ### Mutation table
 
-Each row reverts one guard and names the file that goes red. **All 24 were re-run
-against the FINAL head** (not against the state each was written at), applied and
-reverted mechanically, with the tree verified clean afterwards: 24/24 reddened their
-target.
+Each row reverts one guard and names the file that goes red. Every mutation is applied
+and reverted mechanically, with the tree verified clean afterwards.
+
+**The count is the table's own length, and it did not use to be.** An earlier revision
+of this paragraph said "All 24" twice while the table already listed 25 — a number
+written once and then never re-derived, in the one section whose whole purpose is
+auditability. It is stated here as a property of the list below rather than as a
+remembered figure, and the last full re-run against the head was 24/24 at the time,
+with M25–M29 verified individually as they were added.
 
 | # | Mutation | Reddens |
 |---|---|---|
@@ -163,6 +168,10 @@ target.
 | M23 | the pid fallback kills a healthy REPL after a host blip | `boot-adoption.test.ts` (1) |
 | M24 | the host switch never terminates a verified survivor | `boot-adoption.test.ts` (1) |
 | M25 | the refusal is not stamped with its error class | `classify-spawn-error.test.ts` (1) |
+| M26 | the adopt path never releases the child's output gate | `adopted-repl-serves-a-turn.test.ts` (2) |
+| M27 | the adopt path attaches a DIFFERENT pane | `adopted-repl-serves-a-turn.test.ts` (2) |
+| M28 | a dead recorded pid alone clears the handle | `boot-adoption.test.ts` (2) |
+| M29 | no identity re-check immediately before the close | `boot-adoption.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -236,6 +245,48 @@ for "the command line could not be read at all". Identical for the KILL decision
 written for — neither licenses a SIGTERM — and opposite for this one, where the first
 says our child is gone and the second says nothing. `unreadable` is now its own verdict;
 the kill path treats it exactly as before.
+
+### Round three: three findings from the gate, and the fixture that could not fail
+
+**The acceptance test could not prove the thing it was named for.** Its dev-channel was
+an independent server that answered `/message` by POSTing a reply to the sink on its own
+authority, and the attached child's `write`/`writeKey` were no-ops — so "the same REPL
+served the turn" was a sentence produced by a mock with NO link to the child the
+adoption attached. Breaking the attach→turn connection entirely left the test green;
+only the spawn counter tied them together. That is the shape this tree keeps paying for:
+asserting an outcome the broken fixture also produces, here on the headline criterion.
+
+The surviving child is now ONE object. Its bridge answers nothing until a gateway has
+attached to the pane and released the output gate — the wiring the adoption path
+performs — and every reply names the pane it was taken over through and the pid it runs
+as. M26 (never release the gate) and M27 (attach a different pane) both redden it; under
+the old fixture neither would have.
+
+**A dead recorded pid is not proof the pane is empty.** `dead` and `not-ours` used to
+clear the handle and permit a resume, on the argument that the pid and the handle are
+written by one spawn and go stale together. Sound for a pane nothing else touched, and
+wrong for the case this item's own spec item raises: a pane relaunched under a NEW pid
+(herdr's native restore does exactly that) leaves the recorded pid genuinely dead while
+a live process owns the transcript. The `resume_agents_on_restore = false` set on this
+box closes the common route in practice — but **a guard that depends on a setting in
+another program's file is not a guard**. The question is now asked of the TRANSCRIPT
+rather than of one remembered pid: `scanTranscriptOwners` filters every live process
+through the same exact-shape matcher, and only a scan that RAN and found nobody is a
+positive absence. What the instrument can see was measured, not assumed: `ps -eo
+pid=,command=` piped emits the live REPLs' 603-character argv whole (longest line in a
+full listing: 1,368), so a `--resume <uuid>` cannot fall off the end unseen.
+
+**A destructive time-of-check/time-of-use gap.** Between the inspection that decided and
+the `closeHandle` that acted there was a `/health` round trip at minimum, and up to the
+45-second evidence bound — a window in which the pane can exit and its id be reissued,
+so a close could destroy a stranger's pane against this module's own rule. Identity is
+re-established immediately before the close, and only a pane that is still a claude on
+this row's transcript may be closed; a changed identity is `undecided` and a pane that
+vanished in the window is treated as closed, because that post-condition already holds.
+A check is not a lock and the record does not claim one: what is removed is the wide,
+predictable window, not the instant between the reply and the call. The fake host grew a
+scripted inspection queue for this — a fixture that cannot change cannot test that two
+reads agree.
 
 ### The protocol gate covers the adoption surface, not just the spawn
 

@@ -37,6 +37,18 @@ export class FakeAdoptableHost implements AdoptableHost {
   readonly attached: FakeAttachedChild[] = []
   /** Force `inspectHandle` to answer this regardless of pane state. */
   inspectOverride: HandleInspection | undefined
+  /**
+   * ANSWERS FOR SUCCESSIVE `inspectHandle` CALLS, so a case can make the pane CHANGE
+   * between the inspection that decided and the re-check that acts.
+   *
+   * Without it every look returns the same thing, and the whole class of
+   * time-of-check/time-of-use defect is unreachable in the suite — a fixture that
+   * cannot change cannot test that two reads agree. Entries are consumed in order; the
+   * last one repeats once the queue is exhausted.
+   */
+  inspectQueue: HandleInspection[] | undefined
+  /** Every `inspectHandle` call, so a case can assert the re-check happened at all. */
+  readonly inspections: string[] = []
   /** Make `attach` reject. */
   attachError: Error | undefined
   /** Make `closeHandle` reject — a close that closes nothing. */
@@ -64,6 +76,13 @@ export class FakeAdoptableHost implements AdoptableHost {
   }
 
   async inspectHandle(handle: string): Promise<HandleInspection> {
+    this.inspections.push(handle)
+    const queued = this.inspectQueue
+    if (queued !== undefined && queued.length > 0) {
+      // The last entry repeats: a case scripts the CHANGE it cares about and does not
+      // have to predict how many times the code under test looks.
+      return queued.length === 1 ? (queued[0] as HandleInspection) : (queued.shift() as HandleInspection)
+    }
     if (this.inspectOverride !== undefined) return this.inspectOverride
     const pane = this.panes.get(handle)
     if (pane === undefined) return { kind: 'gone' }
