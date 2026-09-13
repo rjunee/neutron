@@ -87,18 +87,40 @@ class CountingHost implements AdoptableHost {
   private inspectHold: Promise<void> | undefined
   private releaseInspect: (() => void) | undefined
 
-  holdInspect(): () => void {
+  private inspectEntered: (() => void) | undefined
+
+  /** Hold the next inspection, and hand back a HANDSHAKE as well as a release.
+   *  `entered` resolves inside the held method, so a case knows the window was entered
+   *  rather than sleeping and hoping. See `boot-adoption-host.ts` for the full argument;
+   *  resolving it here at construction time would restore the guess exactly. */
+  holdInspect(): { entered: Promise<void>; release: () => void } {
+    const entered = new Promise<void>((res) => {
+      this.inspectEntered = res
+    })
     this.inspectHold = new Promise<void>((res) => {
       this.releaseInspect = res
     })
-    return () => {
-      this.inspectHold = undefined
-      this.releaseInspect?.()
+    return {
+      entered,
+      release: () => {
+        this.inspectHold = undefined
+        this.releaseInspect?.()
+      },
     }
   }
 
+  /** Every `inspectHandle` entry, so a case can assert it is INSIDE the window rather
+   *  than assuming it. */
+  inspectEntries = 0
+
   async inspectHandle(): Promise<HandleInspection> {
-    if (this.inspectHold !== undefined) await this.inspectHold
+    this.inspectEntries += 1
+    if (this.inspectHold !== undefined) {
+      // RESOLVED HERE, inside the held method — the only position that proves the pass
+      // reached this boundary.
+      this.inspectEntered?.()
+      await this.inspectHold
+    }
     return this.inspection
   }
 
@@ -295,11 +317,17 @@ describe('a row replaced mid-pass refuses the spawn', () => {
     writeRow(registryPath)
     const host = new CountingHost()
     host.inspection = { kind: 'gone' }
-    const release = host.holdInspect()
+    const { entered, release } = host.holdInspect()
     const options = optionsFor(host, registryPath)
     const attempt = attemptSpawn(options)
 
-    await Bun.sleep(20)
+    // AWAITED, NOT SLEPT. The row must be replaced while the inspection is genuinely in
+    // flight; a sleep that lost its race would replace it before the pass looked, and
+    // the case would assert the refusal against a completely different code path.
+    await entered
+    // Inside the inspection right now — the handshake's meaning, asserted, so a version
+    // that resolved it at construction time (a sleep by another name) reds here.
+    expect(host.inspectEntries).toBe(1)
     writeRow(registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 5150 })
     release()
 

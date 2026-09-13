@@ -1008,6 +1008,29 @@ export async function shutdownAllPersistentRepls(
   // be reported are reported first and nothing pending is in front of them.
   const settledNow: Array<[string, ReplSession]> = []
   const stillSpawning: Array<[string, Promise<ReplSession>]> = []
+  /**
+   * THE FIRST CALL OF THIS MUST NOT BE PRECEDED BY ANY `await`. Read this before
+   * collapsing the two calls below into one.
+   *
+   * Draining `pool` is the only part of `shutdownAllPersistentRepls` that runs
+   * synchronously with its caller, and #518's guarantees depend on that. A queued
+   * child-exit handler is sitting in the microtask queue whenever a child died just
+   * before teardown; ANY yield in front of the first drain lets it run first and delete
+   * the entry this walk was about to report, and the death is then attributed to
+   * nothing at all.
+   *
+   * This is measured, not theorised: a bare `await Promise.resolve()` placed before the
+   * first drain is enough to break it, and it reds three cases in
+   * `poison-eviction-live-work-guard.test.ts` —
+   *   - "a child that was ALREADY DEAD when teardown arrived … reports cause unknown and
+   *     records it AS undetermined";
+   *   - "a delivered undetermined report is not reported again … the next watchdog tick
+   *     says NOTHING further";
+   *   - "… THE COMPLEMENT — an UNDELIVERED unknown still leaves the edge open for retry".
+   *
+   * That is why #539's wait for the reconciliation passes sits BETWEEN two drains rather
+   * than in front of the first one, which is where it was originally asked to go.
+   */
   const drainPool = (): number => {
     let taken = 0
     for (const [key, p] of pool.entries()) {
@@ -1030,7 +1053,10 @@ export async function shutdownAllPersistentRepls(
   }
   drainPool()
 
-  // #539 — NOW WAIT FOR THE RECONCILIATION PASSES, AND DRAIN AGAIN.
+  // #539 — NOW WAIT FOR THE RECONCILIATION PASSES, AND DRAIN AGAIN. The position is
+  // load-bearing in both directions: after the first drain because that one cannot be
+  // preceded by a yield (see `drainPool`), and before the teardown walk because a pass
+  // that settles must be torn down like any other session.
   //
   // A pass between `host.attach` and its publish is in neither place this function
   // looks: it was not a `pool` entry when the drain above ran, and nothing else waits

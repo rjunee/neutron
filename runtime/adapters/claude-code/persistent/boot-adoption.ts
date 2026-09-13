@@ -154,10 +154,18 @@ export interface BootAdoptionDeps {
   budgetMs?: number
 }
 
-/** One sentence for every shutdown abandonment, so a reader can grep the disposition
- *  rather than matching three near-identical phrasings. */
-const SHUTDOWN_ABANDON_REASON =
-  'the gateway shut down while this reconciliation was in flight — the pane is still running and the row still names it, so the next boot reconciles it'
+/**
+ * The shutdown abandonment reason, WITH THE POINT IT WAS TAKEN AT.
+ *
+ * One shared sentence for the disposition, so a reader can grep it, and a distinct
+ * clause for WHERE — because the three sites are three different branches and an
+ * earlier revision gave all of them identical text. Identical text means no test can
+ * tell which one ran: a case named for the attach-side check passes when the pre-attach
+ * check fired instead, and says it proved something it did not. The same collapse this
+ * tree keeps paying for, in a string.
+ */
+const shutdownAbandonReason = (at: 'before the attach' | 'with the attach in flight' | 'at the row claim'): string =>
+  `the gateway shut down ${at} — the pane is still running and the row still names it, so the next boot reconciles it`
 
 const defaultLog = (msg: string): void => {
   process.stderr.write(`[repl-adopt] ${msg}\n`)
@@ -1192,7 +1200,7 @@ async function adoptRow(
         `pane ${handle}: this gateway is shutting down mid-verification — LEAVING the pane and the row ` +
           'exactly as they are for the next boot to reconcile',
       )
-      return { kind: 'undecided', sessionKey, reason: SHUTDOWN_ABANDON_REASON }
+      return { kind: 'undecided', sessionKey, reason: shutdownAbandonReason('before the attach') }
     }
     const close = await closeAndClear(
       host,
@@ -1318,14 +1326,18 @@ async function adoptRow(
    * `undecided`, so nothing reads this as permission to resume the transcript, and so
    * the key is not cached against a later pass.
    */
-  const release = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
+  const release = (
+    at: 'with the attach in flight' | 'at the row claim',
+    attached?: PtyChild,
+  ): RowAdoptionOutcome => {
+    const reason = shutdownAbandonReason(at)
     sink.unregisterIf(record.sessionId, session)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     pool.delete(sessionKey)
     session.sizeWatchdog?.stop()
     session.deadTurnWatcher?.stop()
     log(`pane ${handle}: ${reason} — registrations released, pane and row left alone`)
-    return { kind: 'undecided', sessionKey, reason: SHUTDOWN_ABANDON_REASON }
+    return { kind: 'undecided', sessionKey, reason }
   }
 
   let primed = false
@@ -1375,7 +1387,7 @@ async function adoptRow(
     // the window a second pass can race: the pane is attached and nothing has claimed
     // the row yet, so a publish-only check would leave exactly this gap open.
     if (signal.cause === 'shutdown') {
-      return release('this gateway shut down while the attach was in flight', child)
+      return release('with the attach in flight', child)
     }
     return await unwind('the evidence bound elapsed while the attach was in flight', child)
   }
@@ -1454,7 +1466,7 @@ async function adoptRow(
       // inside it; publishing into a pool that has already been drained would reinstall
       // this key behind the teardown's back.
       if (signal.abandoned && signal.cause === 'shutdown') {
-        return release('this gateway shut down before the row claim completed', child)
+        return release('at the row claim', child)
       }
       pool.set(sessionKey, Promise.resolve(session))
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }

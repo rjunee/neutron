@@ -319,7 +319,7 @@ describe('evidence that has gone stale', () => {
     // argv, the dev-channel's answer — has stopped describing now, so the pass takes
     // the act that needs no fresh evidence.
     const f = fixture()
-    const release = f.host.holdAttach()
+    const { entered, release } = f.host.holdAttach()
     // Through the PRODUCTION entry point, because that is what arms the clock — a
     // case that called the pass directly would supply an unarmed signal and pass
     // whatever the code did.
@@ -331,6 +331,12 @@ describe('evidence that has gone stale', () => {
     })
     // The gate does NOT release here: `outcome` is still pending, which is the
     // property this bound is deliberately not about.
+    //
+    // The handshake first, so the 80ms is spent INSIDE the attach — that is what makes
+    // the 20ms budget elapse in the window this case is named for. The sleep that
+    // remains is the SUBJECT (a bound elapsing), not a guess about where the pass got
+    // to, which is why it stays while the synchronisation sleeps went.
+    await entered
     await Bun.sleep(80)
     release()
     const settled = await outcome
@@ -555,12 +561,18 @@ describe('a clear only ever touches the row it decided about', () => {
     const f = fixture()
     // The pane this pass will decide about is gone...
     f.host.panes.delete(HANDLE)
-    const release = f.host.holdInspect()
+    const { entered, release } = f.host.holdInspect()
     const pass = reconcileOwnRepl(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })
 
     // ...and while the inspection is in flight, another incarnation finishes a spawn
-    // and writes ITS child into the same key.
-    await Bun.sleep(20)
+    // and writes ITS child into the same key. AWAITED, NOT SLEPT: the handshake
+    // resolves inside the held method, so the window is entered rather than assumed.
+    await entered
+    // THE HANDSHAKE'S MEANING, ASSERTED. The pass is inside `inspectHandle` right now —
+    // it pushed this handle on the way in. Without this line the case would still pass
+    // when `entered` resolved at construction time, i.e. when it had become a sleep
+    // again, which is the mutation that must red.
+    expect(f.host.inspections).toEqual([HANDLE])
     writeRegistry(f.registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 5150 })
     release()
 
@@ -619,9 +631,10 @@ describe('a clear only ever touches the row it decided about', () => {
     // named B's: two live owners on one transcript.
     const f = fixture({ record: { pid: 1 } })
     const credential = deriveChildSinkToken(sink.token, GENERATION)
-    const release = f.host.holdInspect()
+    const { entered, release } = f.host.holdInspect()
     const pass = reconcileOwnRepl(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })
-    await Bun.sleep(20)
+    await entered
+    expect(f.host.inspections).toEqual([HANDLE])
     writeRegistry(f.registryPath, { pane_handle: 'w9:p-NEWER', child_generation: 'gen-newer', pid: 777 })
     release()
 
@@ -802,14 +815,17 @@ describe('a shutdown that arrives mid-pass', () => {
     const f = fixture()
     supervise(f)
     const credential = deriveChildSinkToken(sink.token, GENERATION)
-    const release = f.host.holdAttach()
+    const { entered, release } = f.host.holdAttach()
     const pass = beginBootAdoption(f.options, KEY, {
       host: f.host,
       health: async () => true,
       log: () => {},
     })
-    // Let it get as far as the held attach before the gateway starts going away.
-    await Bun.sleep(20)
+    // THE PASS IS INSIDE THE ATTACH BEFORE THE GATEWAY STARTS GOING AWAY, and that is
+    // established rather than slept for. If the shutdown landed first this case would
+    // exercise the PRE-attach check and pass while claiming to prove the attach-side
+    // one — a control passing for the wrong reason.
+    await entered
     await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
     release()
 
@@ -817,13 +833,20 @@ describe('a shutdown that arrives mid-pass', () => {
     // Nothing was established, so nothing may resume this transcript on the strength
     // of it. `undecided` is also not cached, so the key frees itself.
     expect(outcome.kind).toBe('undecided')
-    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/shut down/i)
+    // WHICH CHECK FIRED, not merely that one did. The three abandonment sites carry
+    // distinct text precisely so this case cannot claim the attach-side check while the
+    // pre-attach one ran.
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/with the attach in flight/)
     // NOT IN THE POOL, and not mirrored — the teardown already ran, and an entry
     // arriving behind it is one nothing will ever tear down.
     expect(pool.get(KEY)).toBeUndefined()
     expect(childByKey.get(KEY)).toBeUndefined()
     // Not authorised either: a live credential on a session nobody holds is #537's bug.
     expect(await postReply(credential)).toBe(401)
+    // THE ATTACH RAN, so it is the attach-side check this case proved and not the
+    // pre-attach one. If the shutdown had landed first there would be no attached
+    // child here, and the case would be quietly testing a different branch.
+    expect(f.host.attached).toHaveLength(1)
     // AND THE PANE IS STILL THERE. This is the half that separates a shutdown
     // abandonment from an evidence-bound one: the row names it, so the next boot
     // reconciles it. Closing here would destroy the REPL the feature exists to keep.
@@ -839,14 +862,18 @@ describe('a shutdown that arrives mid-pass', () => {
     // pass publishes only because the shutdown waited for it.
     const f = fixture()
     supervise(f)
-    const release = f.host.holdAttach()
+    const { entered, release } = f.host.holdAttach()
     const pass = beginBootAdoption(f.options, KEY, {
       host: f.host,
       health: async () => true,
       log: () => {},
     })
-    await Bun.sleep(20)
-    // Released while the shutdown is inside its grace, not before it starts.
+    await entered
+    // RELEASED FROM INSIDE THE GRACE, not before the shutdown starts. The timer is
+    // armed after the handshake, so the 10ms is measured from a known position rather
+    // than from a guess about where the pass had got to; the grace below is two orders
+    // of magnitude larger, so the release lands inside it with room to spare even on a
+    // runner under load.
     setTimeout(release, 10)
     await shutdownAllPersistentRepls({ adoptionGraceMs: 2_000 })
 
@@ -867,13 +894,14 @@ describe('a shutdown that arrives mid-pass', () => {
     // to delete it while the first pass was still running.
     const f = fixture()
     supervise(f)
-    const release = f.host.holdAttach()
+    const { entered, release } = f.host.holdAttach()
     const first = beginBootAdoption(f.options, KEY, {
       host: f.host,
       health: async () => true,
       log: () => {},
     })
-    await Bun.sleep(20)
+    await entered
+    expect(f.host.attached).toHaveLength(0)
     await shutdownAllPersistentRepls({ adoptionGraceMs: 20 })
 
     // A later boot in the SAME process asks for this key again.

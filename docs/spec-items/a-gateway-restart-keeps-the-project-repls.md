@@ -86,11 +86,25 @@ red rather than passing against broken code.
 
 **A row whose substrate this process never constructs.** Its pane keeps running, its row
 stays exactly as it is, and the next construction of that substrate reconciles it — which
-is the same pass, at the moment there are options to run it under. Until then the pane is
-not lost and not leaked: it is labelled and visible in herdr, the row names it, and the
-pre-existing `#105` orphan path in the watchdog still covers it if it turns out to be
-wedged. What it is **not** is reconciled in advance of anything needing it, and that is a
-deliberate narrowing rather than an omission.
+is the same pass, at the moment there are options to run it under.
+
+Until then **nothing reconciles it and nothing reaps it**, and that has to be said without
+a softening clause. An earlier revision of this paragraph claimed the pre-existing `#105`
+orphan path in the watchdog covered such a pane if it wedged. It does not, and it cannot:
+that path resolves the OWNING substrate's options by pool key, and on `respawn-and-alert`
+a key with no registered options is pushed as **`unregistered-skip`** and skipped
+(`supervision.ts`, the `keyOptions === undefined` branch) — precisely so it is not
+actuated under the tick's own identity. `keyOptions === undefined` *is* the condition of
+the row described here, so the sentence written to name the residual honestly was naming
+as coverage the one path that declines to cover, and it was hiding it behind the same
+premise the narrowing rests on.
+
+What is true is narrower and still worth having: the pane is **labelled and visible** in
+herdr rather than reparented and invisible, and the row that names it is durable, so the
+next construction of its substrate finds it. What it is **not** is reconciled, reaped, or
+watched in the meantime. That is a deliberate narrowing rather than an omission — see
+*Why reconciliation is per key* for why actuating it under another substrate's options
+would be the worse defect — but it is a gap, not a covered case.
 
 ## Acceptance
 

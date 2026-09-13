@@ -148,12 +148,16 @@ production-wired (BYO `OPENAI_API_KEY`, selected by env); autonomous builds
 A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
 substrate becomes selectable"), which makes it a child of the herdr server
 rather than of the gateway: a **gateway** restart leaves it running and the next
-gateway re-adopts it with its conversation intact, while a **herdr server**
-restart does end it and recovery there is `--resume` onto the transcript
+gateway re-adopts it with its conversation intact **when that gateway constructs
+the substrate it belongs to** (Decisions Log 2026-09-13), while a **herdr
+server** restart does end it and recovery there is `--resume` onto the transcript
 (Decisions Log 2026-09-12, "a gateway restart keeps its project REPLs"). A
 surviving REPL is only ever left alive when a persisted registry row names its
 pane and its child generation; anything that cannot be found again is still
-killed at shutdown.
+killed at shutdown. Until its substrate is constructed, such a pane is neither
+reconciled nor reaped by anything — the supervision tick skips a key it has no
+options for (`unregistered-skip`) rather than actuating it under another
+substrate's identity.
 
 ### 2.4 — Memory
 

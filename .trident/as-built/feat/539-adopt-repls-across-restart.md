@@ -320,6 +320,60 @@ B's row first, which makes the wrong answer wrong by construction, and M48 reds.
 the M41 lesson one level up: a mutation has to be able to change the observed behaviour
 of the fixture the case actually runs.
 
+### Round ten: a residual that named its own gap as coverage, and a handshake instead of a sleep
+
+**The sentence written to be honest about the residual was the sentence hiding it.** The
+spec item said an unreconciled row's pane was "not lost and not leaked … the pre-existing
+`#105` orphan path in the watchdog still covers it if it turns out to be wedged." It does
+not, and it cannot: on `respawn-and-alert` that path resolves the OWNING substrate's
+options by pool key, and a key with no registered options is pushed as
+**`unregistered-skip`** and skipped (`supervision.ts`, the `keyOptions === undefined`
+branch) — deliberately, so it is not actuated under the tick's own identity.
+`keyOptions === undefined` is *exactly* the condition of the row being described. So the
+residual paragraph claimed as coverage the one path that declines to cover, and it hid
+the gap behind the same premise the narrowing rests on. Both documents now say the same
+true thing and name the skip so the claim is checkable against code rather than memory:
+such a pane keeps running, keeps its row, and **is not reconciled and not reaped by
+anything** until its substrate is next constructed. SPEC.md §2.3's unqualified "the next
+gateway re-adopts it" is qualified in the same terms.
+
+**The race cases guessed that they were inside the window.** Every one did
+`await Bun.sleep(20)` and then assumed the pass had reached `holdInspect`/`holdAttach`;
+the fake handed back only a release callback, so nothing established the boundary. The
+holds now return `{ entered, release }`, `entered` resolves at the top of the held method,
+and every case awaits it. The sleeps are deleted, not shortened. The two that remain are
+the evidence-bound cases, where a sleep IS the subject (a bound elapsing) rather than a
+guess about position, and the handshake now precedes them so the wait is spent inside the
+attach.
+
+**The mutation the gate asked for does not red, and the reason is worth more than the
+mutation.** Resolving `entered` at construction time — turning the handshake back into a
+sleep — leaves every case passing, because the ordering these cases rely on is guaranteed
+by two OTHER mechanisms: the hold is installed before the pass starts, so the pass cannot
+proceed past that boundary whatever the timing; and for the shutdown cases
+`settleBootAdoptionsForShutdown` awaits the in-flight pass, which gives it time to reach
+the attach regardless. The sleep was never load-bearing — which means it was never doing
+the job it appeared to do either. The handshake is still the right instrument (it states
+the boundary instead of estimating it, and it removes a dependency on an accidental
+property of the grace), but it is recorded here as a clarity fix rather than as a fix with
+a red-turning mutation behind it, because claiming the latter would be the same
+overstatement this round is about.
+
+**What DID make the claim checkable was a different defect, found while looking.** All
+three shutdown-abandonment sites returned *identical* reason text. Identical text means no
+test can tell which branch ran, so a case named for the attach-side check passes when the
+pre-attach check fired — the false/unknown collapse this tree keeps paying for, in a
+string. The reason now carries the point it was taken at (`before the attach` / `with the
+attach in flight` / `at the row claim`), the case asserts the specific one, and **M46
+(grace forced to zero) now reds through that assertion** rather than through a count.
+
+**And the invariant that was only in a PR conversation is now in the code.** The first
+`drainPool()` call cannot be preceded by any `await`; a bare `await Promise.resolve()`
+breaks it, and the comment names the three `poison-eviction-live-work-guard.test.ts` cases
+that go red when it is. An invariant discovered by measurement and recorded only in review
+is an invariant that gets re-broken by the next person who sees two drains of one map and
+simplifies them into one.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -330,7 +384,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight and M45–M48 in round nine, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine and M49 in round ten, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -409,6 +463,7 @@ count from the rows below rather than trusting this sentence.
 | M46 | the shutdown grace is zero, so the await never waits | `boot-adoption.test.ts` (1) |
 | M47 | `resetBootAdoption` clears in-flight passes again | `boot-adoption.test.ts` (1) |
 | M48 | the pass reconciles whichever row it finds first | `boot-adoption.test.ts` (1) |
+| M49 | `entered` resolves at construction, not in the held method | **did NOT red — see round ten; the ordering is guaranteed elsewhere and this is recorded rather than claimed** |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

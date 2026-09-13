@@ -70,21 +70,50 @@ export class FakeAdoptableHost implements AdoptableHost {
   private inspectHold: Promise<void> | undefined
   private releaseInspect: (() => void) | undefined
 
-  holdAttach(): () => void {
+  private attachEntered: (() => void) | undefined
+  private inspectEntered: (() => void) | undefined
+
+  /**
+   * Hold the next `attach` — and HAND BACK A HANDSHAKE, not just a release.
+   *
+   * `entered` resolves INSIDE the held method, so a case can know the pass actually
+   * reached the boundary before it moves the world. The previous shape returned only a
+   * release callback, and every case bridged the gap with `await Bun.sleep(20)` — a
+   * guess. On a loaded runner the guess loses: the shutdown (or the registry write)
+   * lands BEFORE the attach, the case exercises the PRE-attach check instead, and it
+   * passes while claiming to have proved the attach-side one. A control that passes for
+   * the wrong reason is the failure mode this fixture exists to make impossible, so the
+   * boundary is now observable rather than estimated.
+   *
+   * `entered` must be created here but RESOLVED in {@link attach}: resolving it at
+   * construction time restores the guess exactly, with a promise that looks like a
+   * handshake.
+   */
+  holdAttach(): { entered: Promise<void>; release: () => void } {
+    const entered = new Promise<void>((res) => {
+      this.attachEntered = res
+    })
     this.attachHold = new Promise<void>((res) => {
       this.releaseAttach = res
     })
-    return () => this.releaseAttach?.()
+    return { entered, release: () => this.releaseAttach?.() }
   }
 
-  /** Hold the NEXT (and every) `inspectHandle` until the returned function is called. */
-  holdInspect(): () => void {
+  /** Hold the NEXT (and every) `inspectHandle`, with the same handshake and for the
+   *  same reason — see {@link holdAttach}. */
+  holdInspect(): { entered: Promise<void>; release: () => void } {
+    const entered = new Promise<void>((res) => {
+      this.inspectEntered = res
+    })
     this.inspectHold = new Promise<void>((res) => {
       this.releaseInspect = res
     })
-    return () => {
-      this.inspectHold = undefined
-      this.releaseInspect?.()
+    return {
+      entered,
+      release: () => {
+        this.inspectHold = undefined
+        this.releaseInspect?.()
+      },
     }
   }
 
@@ -98,7 +127,12 @@ export class FakeAdoptableHost implements AdoptableHost {
 
   async inspectHandle(handle: string): Promise<HandleInspection> {
     this.inspections.push(handle)
-    if (this.inspectHold !== undefined) await this.inspectHold
+    if (this.inspectHold !== undefined) {
+      // RESOLVED HERE, at the top of the held method — the one place that proves the
+      // pass reached this boundary. See `holdInspect`.
+      this.inspectEntered?.()
+      await this.inspectHold
+    }
     const queued = this.inspectQueue
     if (queued !== undefined && queued.length > 0) {
       // The last entry repeats: a case scripts the CHANGE it cares about and does not
@@ -112,7 +146,11 @@ export class FakeAdoptableHost implements AdoptableHost {
   }
 
   async attach(handle: string, opts: PtySpawnOpts): Promise<PtyChild> {
-    if (this.attachHold !== undefined) await this.attachHold
+    if (this.attachHold !== undefined) {
+      // RESOLVED HERE, inside the held method. See `holdAttach`.
+      this.attachEntered?.()
+      await this.attachHold
+    }
     if (this.attachError !== undefined) throw this.attachError
     const pane = this.panes.get(handle)
     if (pane === undefined) throw new Error(`fake-adoptable-host: pane ${handle} does not exist`)
