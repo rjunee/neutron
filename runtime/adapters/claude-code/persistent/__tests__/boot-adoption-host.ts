@@ -148,9 +148,19 @@ export class FakeAdoptableHost implements AdoptableHost {
     return child
   }
 
+  /**
+   * Runs INSIDE `closeHandle`, before it returns — the seam a case needs to move the
+   * world at the one moment the pass is committed to an act and has not yet written
+   * its conclusion. Without it the window between the close and the registry write
+   * cannot be entered, and a guard over that window looks tested while nothing has
+   * exercised it.
+   */
+  onClose: (() => void) | undefined
+
   async closeHandle(handle: string): Promise<void> {
     if (this.closeError !== undefined) throw this.closeError
     this.panes.delete(handle)
     this.closed.push(handle)
+    this.onClose?.()
   }
 }

@@ -587,6 +587,29 @@ describe('a clear only ever touches the row it decided about', () => {
     expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
   })
 
+  it('a CLOSE whose row moves before the write reports undecided, not a close', async () => {
+    // The close path has its own window: the pane is ended, and the registry write that
+    // records it happens after. If the row is replaced in between, reporting
+    // `closed-foreign-owner` would license a resume of a transcript whose live owner
+    // another incarnation just wrote into that key — the close succeeded and the
+    // conclusion is still not ours to draw.
+    const f = fixture({ argv: ['claude', '--resume', SESSION_ID] })
+    f.host.onClose = () => {
+      writeRegistry(f.registryPath, {
+        pane_handle: 'w9:p-NEWER',
+        child_generation: 'gen-newer',
+        pid: 5150,
+      })
+    }
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/replaced by another incarnation/i)
+    // The pane WAS closed — that half happened and is not being denied.
+    expect(f.host.closed).toEqual([HANDLE])
+    // And the newer row is intact.
+    expect(readRow(f.registryPath)?.pane_handle).toBe('w9:p-NEWER')
+  })
+
   it('does not write an adopted pid onto a row that moved under it either', async () => {
     // The same exposure on the other write this pass makes.
     const f = fixture({ record: { pid: 1 } })

@@ -139,7 +139,16 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **M1–M31 in one pass against this head: 31/31
 reddened their target**, with the worktree verified clean afterwards; M32–M33 were
-verified individually as they were added. Re-derive the
+verified individually as they were added.
+
+**M33 was NOT CAUGHT on its first full run, and that is worth recording.** The close
+path's moved-row window had no case at all: every existing row-moved case drove the
+`gone` branch, so the guard on the CLOSE branch was untested while looking covered by
+neighbours. It took a new seam in the fake — a hook that runs inside `closeHandle`, so
+the world can move at the one moment the pass is committed to an act and has not yet
+written its conclusion — and the case now reddens both M33 and M34. A harness that
+reports a mutation as uncaught is doing its job; the value is in running it after every
+change rather than once. Re-derive the
 count from the rows below rather than trusting this sentence.
 
 | # | Mutation | Reddens |
@@ -177,6 +186,7 @@ count from the rows below rather than trusting this sentence.
 | M31 | the adopted-pid write does not compare it either | `boot-adoption.test.ts` (1) |
 | M32 | the `row-moved` verdict is computed and discarded | `adoption-refuses…` (1) |
 | M33 | the close path ignores a moved row | `boot-adoption.test.ts` (1) |
+| M34 | the close path never REPORTS a moved row | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
