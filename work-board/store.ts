@@ -563,6 +563,42 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
  * by every caller. The unblocking step is named, because it is the whole point — moving the
  * card OUT of `blocked` is the decision, and it is the owner's to make and report.
  */
+/**
+ * A BLOCKED CARD MAY NOT BE CLAIMED AS INLINE-ACTIVE.
+ *
+ * IT THROWS RATHER THAN SUPPRESSING, and that was a decision made on evidence rather than
+ * by symmetry with the completion guard. The flag looked like it had three independent
+ * writers, one of them a BULK reconcile — and a throw that turns a correct bulk write into
+ * a failed one would trade a quiet wrong answer for a loud wrong failure. So the writers
+ * were enumerated:
+ *
+ *   - `setInlineActive` — NO production callers at all.
+ *   - the TodoWrite reconcile (`work-board/todo-reconcile.ts`) — writes `{status}` only,
+ *     and never the flag.
+ *   - `open/composer.ts` — writes `inline_active: false`, a CLEAR, which is always allowed.
+ *   - the HTTP PATCH — accepts `title`, `status` and `design_doc_ref`, and cannot carry
+ *     the flag at all.
+ *
+ * So the ONLY production writer that can CLAIM the flag is the agent tool's
+ * `work_board_update` — precisely the caller that must be told, and no bulk caller exists
+ * to be broken. Suppressing it silently was worse than a miss: `update()` returned the
+ * unchanged card with success, the tool answered `ok: true`, and because its
+ * acknowledgement compares the REQUESTED patch against the previous value it could emit
+ * `inline_started` for a write that never happened — telling the agent the opposite of
+ * what occurred.
+ */
+export class WorkBoardBlockedInlineClaimError extends Error {
+  readonly item_id: string
+  constructor(item_id: string) {
+    super(
+      `refusing to mark item ${item_id} inline-active: it is BLOCKED — a build stopped on purpose and reported why, so nothing is moving on this card. ` +
+        'Read its reported reason, act on it, then move the card back to `upcoming` — that move is the decision. Clearing the flag is always allowed.',
+    )
+    this.name = 'WorkBoardBlockedInlineClaimError'
+    this.item_id = item_id
+  }
+}
+
 export class WorkBoardBlockedCompletionError extends Error {
   readonly item_id: string
   constructor(item_id: string) {
@@ -942,8 +978,19 @@ export class WorkBoardStore {
       // that sets ONLY `inline_active` on a card that is ALREADY blocked, which
       // `terminalTransition` cannot see because it looks at `patch.status`.
       const effectiveStatus = patch.status ?? current.status
-      const blockedClaim = patch.inline_active === true && effectiveStatus === 'blocked'
-      if (patch.inline_active !== undefined && !terminalTransition && !blockedClaim) {
+      // THROWN, NOT SUPPRESSED. An earlier cut simply declined to push the column, so this
+      // returned the unchanged card with success and the tool reported `inline_started`
+      // for a write that never happened — a silent no-op that reports success tells the
+      // caller the OPPOSITE of what occurred, which is worse than a miss. See
+      // `WorkBoardBlockedInlineClaimError` for the writer enumeration that made throwing
+      // safe here: no bulk caller can claim this flag.
+      //
+      // CLEARING IS STILL ALWAYS ALLOWED — only the claim is refused, and a clear can only
+      // ever move the row toward consistency.
+      if (patch.inline_active === true && effectiveStatus === 'blocked') {
+        throw new WorkBoardBlockedInlineClaimError(id)
+      }
+      if (patch.inline_active !== undefined && !terminalTransition) {
         push('inline_active', patch.inline_active ? 1 : 0)
       }
       if (patch.status !== undefined && patch.status !== current.status) {

@@ -11,6 +11,7 @@ import {
   workBoardProjectIdForKey,
   workBoardScopeKey,
   WorkBoardBlockedCompletionError,
+  WorkBoardBlockedInlineClaimError,
   WorkBoardRunStillLiveError,
   WorkBoardStore,
   WorkBoardValidationError,
@@ -936,10 +937,19 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     // (1) the generic patch path — the reachable case, and the one `terminalTransition`
     // could not see: the patch sets ONLY `inline_active`, so there is no status change
     // to notice.
-    await store.update(SLUG, a.id, { inline_active: true })
+    //
+    // IT THROWS, AND THE THROW IS THE ASSERTION. Checking only the persisted row passes
+    // against a SILENT NO-OP too — which is exactly what this used to be: `update()`
+    // declined to push the column and returned the unchanged card with SUCCESS, so the
+    // agent tool answered `ok: true` and could acknowledge `inline_started` for a write
+    // that never happened. A refusal that reports success is worse than a miss.
+    await expect(store.update(SLUG, a.id, { inline_active: true })).rejects.toThrow(
+      WorkBoardBlockedInlineClaimError,
+    )
     expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
 
-    // (2) the dedicated setter.
+    // (2) the dedicated setter. It has no production callers, so it stays a silent
+    // no-op by design — nothing downstream can claim success off it.
     await store.setInlineActive(SLUG, a.id, true)
     expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
 

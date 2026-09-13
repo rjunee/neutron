@@ -381,12 +381,31 @@ decision.
   pulsed, counted as `running`, and had its ▶ suppressed for the wrong reason.
 - **inline-activity** — the serious one, because it is WRITABLE BY AN AGENT: a blocked
   card exists to stop work, and `work_board_update` accepted `inline_active` independently
-  of status. Refused at the STORE (both `update` and `setInlineActive`), not at the tool,
-  because the flag has three independent writers and an invariant that holds only in the
-  caller that remembered it is not an invariant. Moving INTO the lane clears the flag, the
-  CLAIM is refused while in it, the CLEAR is always allowed (refusing it would strand a
-  stale flag with no writer able to stop it), and the DERIVATION refuses to read one — so
-  a flag stored before the block cannot outlive it.
+  of status. Refused at the STORE, not at the tool, because an invariant that holds only
+  in the caller that remembered it is not an invariant. `update()` THROWS
+  (`WorkBoardBlockedInlineClaimError`); moving INTO the lane clears the flag; the CLEAR is
+  always allowed (refusing it would strand a stale flag with no writer able to stop it);
+  and the DERIVATION refuses to read one, so a flag stored before the block cannot outlive
+  it. `setInlineActive` stays a silent no-op — it has no production callers, so nothing
+  downstream can claim success off it.
+
+  IT THROWS BECAUSE SUPPRESSING IS NOT REFUSING, and an earlier cut of this record said
+  "refused" while the code merely declined to write the column. `update()` then returned
+  the unchanged card with SUCCESS, the agent tool answered `ok: true`, and because its
+  acknowledgement compares the REQUESTED patch against the previous value it posted
+  `inline_started` for a write that never happened — telling the agent the opposite of what
+  occurred, which is worse than a miss.
+
+  THE CHOICE WAS MADE ON AN ENUMERATION, NOT ON SYMMETRY with the completion guard. The
+  flag looked like it had three independent writers, one of them a BULK reconcile, and a
+  throw that turns a correct bulk write into a failed one would trade a quiet wrong answer
+  for a loud wrong failure. So the writers were counted: `setInlineActive` has NO production
+  callers; the TodoWrite reconcile writes `{status}` only; `open/composer.ts` writes
+  `inline_active: false`, a clear; and the HTTP PATCH accepts `title`, `status` and
+  `design_doc_ref` and cannot carry the flag at all. The ONLY production claimer is the
+  agent tool — exactly the caller that must be told, with no bulk caller to break. The
+  tests assert the PUBLIC RESPONSE on both surfaces, because a test that checks only the
+  persisted row passes against the silent no-op too.
 
 Checked and deliberately UNCHANGED, with the reason: `project-rail.ts` (a blocked card
 with a bound terminal run raises rail ATTENTION, which is correct — it needs the owner;
@@ -621,6 +640,32 @@ new test passed whether the contradiction was refused or simply never delivered,
 mutation that re-drops the field stayed GREEN against it. It now asserts the REFUSAL was
 recorded, which only happens if the claim arrived. Asserting an outcome that the broken
 fixture also produces is how a test about a fixture defect inherits the fixture defect.
+
+### TWO NAMED RULES ABOUT INSTRUMENTS, AND A COUNT
+
+**Asserting an outcome the broken fixture also produces is how a test about a fixture
+defect inherits the defect.** Found the hard way here: the harness dropped `escalate` on the
+approval path, and the test written to catch that asserted "approved, not stopped" — which
+is ALSO what happens when the claim never arrives. It passed either way, and the mutation
+that re-dropped the field stayed green against it. The fix was to assert the REFUSAL was
+recorded, which can only happen if the claim arrived. Same family as "a control that cannot
+fail is not a control" and "an instrument that cannot report failure looks like one
+reporting success".
+
+**Suppressed is not refused.** A guard that declines to act and returns success tells the
+caller the opposite of what happened. Refusing loudly, or reporting the suppression in the
+result, are the only two honest options — and which one is right depends on who calls it,
+not on what the neighbouring guard does.
+
+**FIVE ONE-ARM INSTANCES ON THIS BRANCH.** A rule reasoned about carefully for one case and
+inherited unexamined by its neighbour: the `./` strip applied to every segment instead of
+the path; the summary sentence that outlived three corrections made below it; the
+`recordedTerminalVerdict` conjunction extended by a value and not re-read; the redaction
+applied to the declared arm and not the arithmetic one; and this guard, thrown for
+completion and suppressed for the inline claim in the same commit. At five it is a property
+of how the work was done, not a run of bad luck — the edit that adds a case is visible, and
+the clauses it inherits are not, so the reviewable moment is exactly the one that looks
+finished.
 
 ### A SEAM THAT FAILS LOUDLY WHEN EXTENDED
 

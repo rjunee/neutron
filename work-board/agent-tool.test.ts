@@ -312,6 +312,85 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     ])
   })
 
+  test('HEADLINE: claiming inline_active on a BLOCKED card is REFUSED, and acknowledges NOTHING', async () => {
+    // THE PUBLIC RESPONSE IS THE POINT, not the persisted row. The store used to decline
+    // to write the column and return the unchanged card with SUCCESS, so this tool
+    // answered `ok: true` — and because the acknowledgement below compares the REQUESTED
+    // patch against the previous value, it posted `inline_started` for a write that never
+    // happened. A test asserting only the row passes against that; a caller reading the
+    // response is told the opposite of what occurred.
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'stopped, not moving' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    await store.attachRun('acme', id, 'run-esc-inline')
+    await store.detachRun('acme', 'run-esc-inline', 'blocked')
+    expect(store.get('acme', id)?.status).toBe('blocked')
+    posts.length = 0
+
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: true },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean; error?: string }
+
+    // The refusal is an ANSWER the agent can act on…
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('BLOCKED')
+    expect(String(out.error)).toContain('upcoming')
+    // …NOTHING was acknowledged to the chat…
+    expect(posts).toEqual([])
+    // …and the row did not move.
+    expect(store.get('acme', id)?.inline_active).toBe(false)
+  })
+
+  test('CONTROL: CLEARING inline_active on a blocked card is allowed and does not refuse', async () => {
+    // Only the CLAIM is refused. A clear can only ever move the row toward consistency,
+    // and refusing it would strand a stale flag with no writer able to stop it.
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'clear me' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    await store.attachRun('acme', id, 'run-esc-clear')
+    await store.detachRun('acme', 'run-esc-clear', 'blocked')
+
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: false },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean }
+    expect(out.ok).not.toBe(false)
+    expect(store.get('acme', id)?.inline_active).toBe(false)
+  })
+
+  test('CONTROL: the SAME claim on an ordinary card still succeeds and acknowledges', async () => {
+    // Without this, "a blocked card refuses the claim" is satisfied by a tool that
+    // refuses every claim — which would remove the acknowledgement the pane depends on.
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'ordinary inline work' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    posts.length = 0
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: true },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean }
+    expect(out.ok).not.toBe(false)
+    expect(store.get('acme', id)?.inline_active).toBe(true)
+    expect(posts).toEqual([
+      { project_id: 'acme', item_id: id, title: 'ordinary inline work', kind: 'inline_started' },
+    ])
+  })
+
   test('an update setting inline_active true→true posts NOTHING (no transition)', async () => {
     const reg = new ToolRegistry()
     const { posts, ack } = spyAck()
