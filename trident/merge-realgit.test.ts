@@ -27,11 +27,16 @@ import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
 import {
   buildMergeCleanupDeps,
+  conflictEvidence,
+  truncationLog,
+  collectionBudgetForTests,
   runWorktreePath,
+  worktreeFingerprint,
   TridentBaseDriftHold,
   TridentMergeConflictEscalation,
   TridentMergeError,
 } from './merge.ts'
+import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
@@ -46,6 +51,34 @@ async function git(repo: string, ...args: string[]): Promise<void> {
 async function gitOut(repo: string, ...args: string[]): Promise<string> {
   const res = await spawnCapture(['git', '-C', repo, ...args], repo)
   return res.stdout
+}
+
+/**
+ * WHICH STAGES THE INDEX ACTUALLY HOLDS for one path, ascending.
+ *
+ * #541 round 35. Both modify/delete fixtures asserted their own premise with
+ * `expect(stages).not.toContain('\t2\t')` — AND THAT STRING CANNOT OCCUR. Real git emits
+ * `<mode> <sha> <stage>\t<path>`, so the stage digit is preceded by a SPACE and followed by the
+ * tab; measured directly against a modify/delete conflict in a scratch repo:
+ *
+ *   100644 df967b96… 1\tREADME.md
+ *   100644 10f0759f… 3\tREADME.md
+ *
+ * The assertion passed for every index, including an index with a stage 2 in it, so the comment
+ * above it — "the premise, asserted rather than assumed" — described something the code did not
+ * do. AN ABSENCE ASSERTION THAT CAN NEVER FIRE IS INDISTINGUISHABLE FROM A PASSING ONE, which is
+ * the subject of this entire branch, here in a test written to keep a fixture honest.
+ *
+ * So the field is PARSED, and callers assert the stages they expect to SURVIVE rather than only
+ * the one they expect absent: `[1, 3]` is a claim a broken fixture fails, `not.toContain` was a
+ * claim nothing could fail.
+ */
+function unmergedStages(out: string): number[] {
+  return out
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => Number(/^[0-7]{6} [0-9a-f]{40} ([123])\t/.exec(line)?.[1] ?? NaN))
+    .sort((a, b) => a - b)
 }
 
 /** A fresh base repo on `main` with one committed file. */
@@ -843,5 +876,567 @@ describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', ()
     expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
     // The operator's real scratch file in the shared checkout was never touched.
     expect(existsSync(join(repo, 'operator-scratch.txt'))).toBe(true)
+  }, 30_000)
+})
+
+describe('REAL git — the arbiter integrity baseline actually SEES a mutation (#541)', () => {
+  /**
+   * WHY THIS IS A REAL-GIT TEST. The scripted-host tests in `arbiter-wiring.test.ts`
+   * prove the merge seam CONSULTS `worktreeFingerprint` and refuses a retry when the
+   * value changes. None of them proves the function can see anything: they script the
+   * `diff` output themselves. If the probe set were wrong — if `git diff` printed
+   * nothing for an unmerged path, which is the single most important case, since a
+   * conflicted file is what the arbiter is looking at — every one of those tests would
+   * stay green while the guard detected nothing in production. That is the same
+   * unfalsifiable shape the guard itself exists to prevent, so the probe set is
+   * pinned against real git here.
+   */
+  test('editing a conflicted file changes the fingerprint; touching nothing leaves it identical', async () => {
+    const repo = await makeBaseRepo()
+    // Two incompatible edits to README.md so a rebase leaves a real `UU` path.
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.fp-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'feat-side\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edit')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'main-side\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main edit')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    const reb = await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(reb.ok).toBe(false)
+    // A genuinely unmerged path — the state the arbiter turn is rooted in.
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const before = await worktreeFingerprint(spawnCapture, repo)
+    expect(before).not.toBeNull()
+
+    // IDEMPOTENT: a turn that only READ leaves the fingerprint identical, or the
+    // guard would refuse every retry and the feature would be dead while green.
+    expect(await worktreeFingerprint(spawnCapture, repo)).toBe(before)
+
+    // AN EDIT IS SEEN — and note the status letter does NOT change (still UU), which
+    // is exactly why the fingerprint hashes CONTENT and not just `status`.
+    writeFileSync(join(repo, 'README.md'), 'an edit the arbiter made\n')
+    const afterEdit = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterEdit).not.toBeNull()
+    expect(afterEdit).not.toBe(before)
+
+    // A `git add` IS SEEN TOO.
+    await git(repo, 'add', 'README.md')
+    const afterStage = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterStage).not.toBe(before)
+    expect(afterStage).not.toBe(afterEdit)
+
+    // THE STAGED PROBE, ISOLATED. The step above does not actually prove
+    // `diff --cached` is pulling its weight: staging also empties the UNSTAGED diff,
+    // so the change is visible to the other probe and dropping `--cached` left this
+    // test green (verified by mutation). This is the case only `diff --cached` can
+    // see — re-staging DIFFERENT content over an already-staged resolution. The
+    // status letters do not move (`M ` before and after) and the unstaged diff is
+    // empty both times; the only difference is the staged CONTENT, which is exactly
+    // what an arbiter smuggling an edit into the merge would leave behind.
+    const statusBeforeRestage = await gitOut(repo, 'status', '--porcelain')
+    const unstagedBeforeRestage = await gitOut(repo, 'diff')
+    writeFileSync(join(repo, 'README.md'), 'different staged content\n')
+    await git(repo, 'add', 'README.md')
+    expect(await gitOut(repo, 'status', '--porcelain')).toBe(statusBeforeRestage)
+    expect(await gitOut(repo, 'diff')).toBe(unstagedBeforeRestage)
+    const afterRestage = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterRestage).not.toBe(afterStage)
+
+    // And a brand-new untracked file is seen (`status --untracked-files=all`).
+    writeFileSync(join(repo, 'smuggled.ts'), 'export const x = 1\n')
+    expect(await worktreeFingerprint(spawnCapture, repo)).not.toBe(afterRestage)
+
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a path that is not a git worktree fingerprints as null (fail-closed input)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-fp-nonrepo-'))
+    created.push(dir)
+    expect(await worktreeFingerprint(spawnCapture, dir)).toBeNull()
+  }, 20_000)
+})
+
+describe('REAL git — the arbiter is actually SHOWN both sides of the conflict (#541)', () => {
+  /** Length of the `| ` quote prefix, so a test can compare the CONTENT of two quoted lines. */
+  const QUOTE_LEN = 2
+
+  /**
+   * WHY REAL GIT. Round 8 removed every tool from the arbiter on the stated ground that the
+   * caller already supplied everything it needed. That was asserted rather than checked, and
+   * it was false — the caller sent filenames and histories, not the conflict. A scripted-host
+   * test cannot catch that class: it would happily confirm that whatever I chose to script
+   * arrives. Only real git can say whether a diff of the two conflict stages yields the two
+   * sides at all, which is the assumption the whole design rests on. (The stages were
+   * addressed as `:2:<path>`/`:3:<path>` when this was written and by object id since round
+   * 34; the assumption under test is the same either way, which is why this comment now
+   * names the stages rather than the spelling.)
+   */
+  test('both sides of a real conflicted file reach the evidence, labelled and quoted', async () => {
+    const repo = await makeBaseRepo()
+    // Two incompatible edits to the SAME line, so a rebase leaves real stages 2 and 3.
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'flush: DROP-THE-OLDEST-ENTRY\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edit')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'flush: BLOCK-UNTIL-SPACE\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main edit')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    const reb = await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(reb.ok).toBe(false)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    // A SMALL CONFLICT IS SHOWN WHOLE. There is no longer a `truncated` field to assert
+    // against: the two states are "complete" and "not asked" (#541 round 13).
+    expect(evidence.kind).toBe('complete')
+    const hunks = evidence.kind === 'complete' ? evidence.body : ''
+
+    // BOTH SIDES ARE PRESENT — this is the assertion round 8 shipped without.
+    expect(hunks).toContain('BLOCK-UNTIL-SPACE') // the base's version (`-`)
+    expect(hunks).toContain('DROP-THE-OLDEST-ENTRY') // the branch's version (`+`)
+    // Labelled so the judge knows which is which.
+    expect(hunks).toContain('README.md')
+    expect(hunks).toContain('= base')
+    // EVERY line is quote-prefixed: no untrusted line begins a line of the prompt.
+    for (const line of hunks.split('\n')) {
+      expect(line.startsWith('| '), line.slice(0, 60)).toBe(true)
+    }
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('REAL GIT: the history render produces EXACTLY ONE record per requested commit id', async () => {
+    // THE PLATFORM FACT THE PRODUCTION CHECK RESTS ON (#541 round 36). `sideHistory` now refuses
+    // a render that does not return one record per oid it resolved and weighed. That equality is
+    // only correct if git's framing really is one record per id, and the framing is NOT obvious:
+    //
+    //   raw:  'h1 subject\nbody\n\x00\nh2 subject\nbody\n\x00\n'
+    //
+    // git writes a newline BETWEEN entries, so `%x00` is NOT the last byte and a naive split
+    // yields N+1 elements whose last is '\n'. It is `spawnCapture`'s trim of the trailing
+    // newline that turns the final element into '' — the delimiter artifact the parser pops.
+    // Reasoning about `--format` alone gets this wrong, which is why it is measured here rather
+    // than asserted in a comment, and why `sideHistory` says so at the check.
+    const repo = await makeBaseRepo()
+    for (const n of [1, 2, 3]) {
+      writeFileSync(join(repo, `f${n}.txt`), `${n}\n`)
+      await git(repo, 'add', '.')
+      await git(repo, ...GIT_ID, 'commit', '-q', '-m', `commit ${n}\n\nbody line for ${n}`)
+    }
+    // A commit with NO body and one whose subject could be mistaken for framing, because both
+    // are shapes a real repository produces.
+    await git(repo, ...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'subject only')
+    await git(repo, ...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'a subject with\n\nblank lines\n\n\nin the body')
+
+    const ids = await gitOut(repo, 'log', '--format=%H')
+    const oids = ids.split('\n').map((x) => x.trim()).filter((x) => x.length > 0)
+    expect(oids.length, 'the fixture really has this many commits').toBe(6)
+
+    const res = await spawnCapture(
+      ['git', '-C', repo, '-c', 'core.quotePath=false', 'log', '--no-color', '--no-decorate', '-s',
+       '--format=%h %s%n%b%x00', '--no-walk=unsorted', ...oids],
+      repo,
+    )
+    expect(res.ok).toBe(true)
+    // THE EXACT PARSE `sideHistory` PERFORMS — copied in shape deliberately, because what is
+    // under test is that this parse yields N for N.
+    const framed = res.stdout.split('\u0000')
+    while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
+    expect(framed.length, 'one record per requested oid').toBe(oids.length)
+    // NOT VACUOUS: each record carries its own abbreviated sha, so these are six DISTINCT
+    // commits and not one record counted six times.
+    const shas = framed.map((r) => /([0-9a-f]{7,})/.exec(r)?.[1] ?? '')
+    expect(new Set(shas).size, 'six distinct commits').toBe(6)
+    // AND THE CONTROL ON THE PARSE ITSELF: asking for fewer ids yields fewer records, so the
+    // equality tracks the request rather than being a property of any output.
+    const two = await spawnCapture(
+      ['git', '-C', repo, 'log', '--no-color', '--no-decorate', '-s', '--format=%h %s%n%b%x00',
+       '--no-walk=unsorted', ...oids.slice(0, 2)],
+      repo,
+    )
+    const framedTwo = two.stdout.split('\u0000')
+    while (framedTwo.length > 0 && framedTwo[framedTwo.length - 1] === '') framedTwo.pop()
+    expect(framedTwo.length, 'two ids in, two records out').toBe(2)
+  }, 30_000)
+
+  test('a REAL modify/delete conflict is complete evidence, and names which side exists', async () => {
+    // THE FIXTURE THIS REPLACES NEVER MODELLED WHAT IT WAS NAMED FOR: it asked for
+    // `never-existed.ts` in a repo with no conflict at all, so it exercised "a path the index
+    // does not list" while claiming to test "a path on only one side". The two are different
+    // facts — the first is unknown, the second is definite — and the old code returned the
+    // same sentence for both, which is precisely why the fixture could not tell.
+    //
+    // Real git, measured: a modify/delete conflict carries index stages 1 and 3 only, and
+    // `git diff :2:<p> :3:<p>` exits 128 on it with `fatal: path '<p>' is in the index, but
+    // not at stage 2` — THE SAME OBSERVABLE AS A BROKEN READ. So this case can only be
+    // established from the index, and that is what the production code now does.
+    // THE FILE MUST EXIST AT THE BRANCH POINT, or there is nothing to clash: my first
+    // fixture branched BEFORE the path existed, so the rebase applied cleanly and the test
+    // failed on its own premise rather than on the code. Base has README.md; main deletes
+    // it; the branch modifies it.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.one-sided')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // A DISTINCTIVE TOKEN IN THE SURVIVING SIDE, so the assertion is about CONTENT rather
+    // than about the descriptive sentence — which is true whether or not the content is
+    // shown, and is therefore worthless as a detector.
+    writeFileSync(join(fwt, 'README.md'), 'the branch still wants this file\nKEEP-THE-FLUSH-GUARD\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edits README')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    await git(repo, 'rm', '-q', 'README.md')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main deletes README')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    const conflicted = await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')
+    expect(conflicted).toContain('README.md')
+    // THE PREMISE, NOW ACTUALLY ASSERTED: the index holds the merge base and the branch and
+    // NOTHING FROM `main`, which is what makes this the one-sided case rather than an ordinary
+    // content conflict. Stated as the whole stage set, so a fixture that stopped conflicting
+    // (`[]`), or one that produced a two-sided conflict instead (`[1, 2, 3]`), fails here —
+    // neither of which the old `not.toContain` could distinguish from success.
+    const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'README.md')
+    expect(unmergedStages(stages), 'base and branch only — main deleted the file').toEqual([1, 3])
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    // ESTABLISHED, so the judge is asked — refusing here would make the tier inert for every
+    // modify/delete conflict.
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(body).toContain('no two-sided diff')
+    // IT SAYS WHICH SIDE. The sentence this replaces could not, because it did not know
+    // whether it was describing a fact or an error.
+    expect(body).toMatch(/only the (BASE|BRANCH)'s version of this path exists/)
+    expect(body).not.toContain('could not read')
+    // AND IT SHOWS THAT SIDE — the load-bearing assertion (#541 round 17). Labelling the
+    // evidence `complete` while emitting only a sentence meant the judge could grant a retry
+    // on a modify/delete conflict WITHOUT SEEING THE CHANGE, under a prompt that tells it
+    // nothing has been left out. The earlier version of this test asserted the marker and
+    // never the blob, so it protected exactly that.
+    expect(body).toContain('KEEP-THE-FLUSH-GUARD')
+    // Still quoted, still not a crash, still not silence.
+    expect(body.split('\n').every((l) => l.startsWith('| '))).toBe(true)
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a REAL BINARY conflict is never passed off as shown evidence', async () => {
+    // THE FINDING TURNS ENTIRELY ON WHAT GIT EMITS, so this is real git and not a stub.
+    // Verified against this repository's own PNGs before writing the fix: `git diff` between
+    // two differing binary blobs EXITS 0 and prints only
+    //   `Binary files a/<sha> and b/<sha> differ`
+    // — no content at all. `ok && stdout.length > 0` had been standing in for "the diff is
+    // readable", and a binary blob satisfies both while telling you nothing, so the judge
+    // would have been handed a one-line notice under a prompt promising the conflict was
+    // shown complete.
+    //
+    // Third variant of one sentence on this branch: AN EXIT CODE IS NOT THE EVIDENCE.
+    const repo = await makeBaseRepo()
+    // Two PNG-signature files differing after the header — NUL bytes early, which is exactly
+    // git's own binary heuristic.
+    const png = (tail: string): Buffer =>
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]), Buffer.from(tail)])
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'logo.png'), png('FEAT-SIDE-PIXELS'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat logo')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'logo.png'), png('MAIN-SIDE-PIXELS'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main logo')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('logo.png')
+
+    // THE PREMISE, ASSERTED: git really does succeed here while producing no content. If this
+    // ever stops being true the test below is measuring something else.
+    const raw = await spawnCapture(
+      ['git', '-C', repo, 'diff', '--no-color', ':2:logo.png', ':3:logo.png'],
+      repo,
+    )
+    expect(raw.ok, 'git exits 0 on a binary pair').toBe(true)
+    expect(raw.stdout).toContain('Binary files')
+    expect(raw.stdout).not.toContain('FEAT-SIDE-PIXELS')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['logo.png'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('binary')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a ONE-SIDED binary conflict is not laundered into pseudo-text either', async () => {
+    // The surviving side of a modify/delete is read with `cat-file` and quoted, and `defang`
+    // would turn a PNG's bytes into a wall of spaces — binary made to LOOK like evidence.
+    // `--numstat` cannot help here (one blob, not a pair), so this uses git's own heuristic:
+    // a NUL byte in the content.
+    const repo = await makeBaseRepo()
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+      Buffer.from('ONLY-ON-THE-BRANCH'),
+    ])
+    writeFileSync(join(repo, 'art.png'), png)
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'base art')
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-one')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'art.png'), Buffer.concat([png, Buffer.from('-EDITED')]))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edits art')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    await git(repo, 'rm', '-q', 'art.png')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main deletes art')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    // THE SAME PREMISE, THE SAME WAY: a binary modify/delete, so stage 2 is absent and the
+    // other two are present. `toEqual` on the set is what makes that a falsifiable claim.
+    const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'art.png')
+    expect(unmergedStages(stages), 'base and branch only — main deleted the file').toEqual([1, 3])
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['art.png'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('binary')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a TEXT file whose CONTENT says "Binary files ... differ" is still shown', async () => {
+    // THE CONTROL FOR THE DETECTOR, and the reason it asks `--numstat` instead of matching the
+    // sentence: a text file may legitimately contain that line — this repository's own test
+    // files now do. Prose-matching would classify it binary and silently stop arbitrating on
+    // it, which is the same mistake as trusting the exit code, one layer up.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-text')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'Binary files a/x and b/y differ\nFEAT-TEXT-TOKEN\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat text')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'Binary files a/x and b/y differ\nMAIN-TEXT-TOKEN\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main text')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(body).toContain('FEAT-TEXT-TOKEN')
+    expect(body).toContain('MAIN-TEXT-TOKEN')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('A WHITESPACE-ONLY CONFLICT REACHES THE JUDGE WITH THE DISPUTED BYTES INTACT', async () => {
+    // THE CASE THE OLD RENDERING ERASED ENTIRELY. Evidence lines went through `defang` (which
+    // rewrites every run of \u0000-\u001f — TAB INCLUDED — to one space) and then `.trim()`.
+    // A conflict whose two sides differ ONLY in indentation therefore arrived as two
+    // identical-looking lines, and the judge was asked to choose between them under a sentence
+    // promising nothing had been shortened. Makefiles, Python and YAML conflict about exactly
+    // this.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.ws-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // Tab-indented (the Makefile spelling).
+    // EACH SIDE ALSO CHANGES A DISTINCT LINE, and that is load-bearing rather than decoration:
+    // `git patch-id` IGNORES WHITESPACE, so two branches whose only difference is indentation
+    // are seen as the same patch and the rebase SKIPS the commit entirely — "Successfully
+    // rebased", no conflict, nothing to test. Measured while writing this. The disputed line
+    // below still differs ONLY in whitespace, which is the thing under test.
+    writeFileSync(join(fwt, 'README.md'), 'all:\n\tgcc -O2 main.c\ntail: FEAT\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat tabs')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    // Space-indented, otherwise identical.
+    writeFileSync(join(repo, 'README.md'), 'all:\n    gcc -O2 main.c\ntail: MAIN\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main spaces')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    // THE PREMISE, ASSERTED. A fixture that fails to conflict would make every assertion
+    // below vacuous, and the first draft of this test did exactly that.
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    // THE TAB SURVIVES. Without it the two sides are the same string.
+    expect(body).toContain('\tgcc -O2 main.c')
+    // And so does the space-indented side.
+    expect(body).toContain('    gcc -O2 main.c')
+    // The two disputed lines are DIFFERENT in the evidence — the property the old rendering
+    // destroyed, asserted directly rather than inferred from the two `toContain`s above.
+    const disputed = body
+      .split('\n')
+      .filter((l) => l.includes('gcc -O2 main.c'))
+      .map((l) => l.slice(QUOTE_LEN))
+    expect(disputed.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(disputed).size, 'both sides must not render identically').toBeGreaterThan(1)
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('LEADING, TRAILING AND DIFF-MARKER WHITESPACE all survive rendering', async () => {
+    // The unified-diff CONTEXT MARKER is a single leading space, so `.trim()` removed the one
+    // character that says "this line is unchanged" — a context line ` \tcommand` arrived as
+    // `| command`, indistinguishable from an added or removed line at a different indent.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.ws2-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // A TRAILING LINE AFTER the disputed one, deliberately: `spawnCapture` trims the whole of
+    // git's stdout (`git-mode.ts:1223`), so trailing whitespace on the LAST line of a diff is
+    // gone before this code ever sees it. That residual is disclosed rather than papered over
+    // — see the note in `quoteLine` — and this fixture keeps the whitespace under test where
+    // the guarantee actually holds.
+    writeFileSync(join(fwt, 'cfg.yml'), 'ctx: keep\n  indented: FEAT   \ntail: end\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat cfg')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'cfg.yml'), 'ctx: keep\n  indented: MAIN\ntail: end\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main cfg')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('cfg.yml')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['cfg.yml'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    // Two-space indentation intact on both sides.
+    expect(body).toContain('  indented: FEAT')
+    expect(body).toContain('  indented: MAIN')
+    // TRAILING whitespace intact — it is a real difference and a common cause of conflicts.
+    expect(body).toContain('  indented: FEAT   ')
+    // git's own leading marker survives: some quoted line begins with a diff marker followed
+    // by the unchanged context line.
+    expect(body).toMatch(/\n\| [ +-]ctx: keep/)
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('REAL GIT: a conflict whose FINAL diff line is disputed is not judged', async () => {
+    // THE BOUNDARY THE OTHER FIDELITY TESTS AVOID, and avoid for a reason: they place a line
+    // AFTER the whitespace-bearing one, so the runner's trim never touches it. Here the change
+    // reaches EOF, so the diff's last line IS the disputed one — and `spawnCapture` trims every
+    // command's stdout (`git-mode.ts:1223`), taking that line's trailing whitespace before this
+    // code can see it.
+    //
+    // The claim the judge reads says nothing that differs between the sides has been shortened.
+    // Rather than qualify the sentence, the conflict is simply not arbitrated: the same rule
+    // the rest of this function follows.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.eof')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // Last line of the file, differing ONLY in trailing whitespace, plus a distinct earlier
+    // line so the two patches are not whitespace-identical (git's patch-id ignores whitespace).
+    writeFileSync(join(fwt, 'README.md'), 'tag: FEAT\nrecipe   \n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat eof')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'tag: MAIN\nrecipe\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main eof')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    // THE PREMISE, MEASURED: git really does emit a diff ending on a +/- line here, and the
+    // runner really does trim its trailing whitespace away.
+    const raw = await spawnCapture(
+      ['git', '-C', repo, 'diff', '--no-color', ':2:README.md', ':3:README.md'],
+      repo,
+    )
+    const lastLine = raw.stdout.split('\n').filter((l) => l.length > 0).pop() ?? ''
+    expect(lastLine.startsWith('+') || lastLine.startsWith('-'), 'the diff ends on a disputed line').toBe(true)
+    expect(lastLine.endsWith(' '), 'and its trailing whitespace is already gone').toBe(false)
+
+    const evidence = await conflictEvidence(
+      spawnCapture,
+      repo,
+      { readable: true, paths: ['README.md'] },
+      truncationLog(),
+      collectionBudgetForTests(),
+    )
+    // The evidence itself is still assembled — the loss is recorded on the truncation channel,
+    // which `assembleEvidence` consults, so the refusal happens where every other one does.
+    expect(evidence.kind).toBe('complete')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a path the INDEX does not list as unmerged is UNKNOWN, never complete', async () => {
+    // The old fixture's real subject, now named and asserted correctly. Our own two views of
+    // the tree disagree — the caller says this path is conflicted, the index does not list it
+    // — and a disagreement about our reading is not a fact about the conflict.
+    const repo = await makeBaseRepo()
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['never-existed.ts'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('unreadable')
+    expect(evidence.kind === 'unreadable' ? evidence.why : '').toBe('not-in-index')
+  }, 20_000)
+
+  test('an ENORMOUS conflict is NOT shown in part — it is over-budget, so the judge is never asked', async () => {
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-big')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    // ~200 KB of differing content on each side of the same file.
+    writeFileSync(join(fwt, 'README.md'), Array.from({ length: 4000 }, (_, k) => `feat line ${k}`).join('\n'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat big')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), Array.from({ length: 4000 }, (_, k) => `main line ${k}`).join('\n'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main big')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    // THE WHOLE POINT OF ROUND 13. This case used to return a 4 KiB fragment plus a notice
+    // saying it was a fragment — the shape that produced five defects in five rounds, twice
+    // AFTER the refactor built to make them impossible. There is now no partial value to
+    // get wrong: the only thing this returns is the decision not to ask.
+    expect(evidence.kind).toBe('over-budget')
+    // And there is NO body and NO byte count on that arm — a number here would mean "at
+    // least this much" while reading as a total, which is verbatim the round-12 defect.
+    expect(Object.keys(evidence)).toEqual(['kind'])
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a conflict that JUST fits is still shown, so the budget is a threshold and not a wall', async () => {
+    // THE OTHER DIRECTION, and it is the one that stops "escalate always" passing as a fix.
+    // A test suite that only proves big conflicts escalate is satisfied by a `conflictEvidence`
+    // that never returns `complete`; this pins that the budget admits real conflicts.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.hunk-fits')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), Array.from({ length: 20 }, (_, k) => `feat line ${k}`).join('\n'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat modest')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), Array.from({ length: 20 }, (_, k) => `main line ${k}`).join('\n'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main modest')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)
+    expect(body).toContain('feat line 19')
+    expect(body).toContain('main line 19')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 })

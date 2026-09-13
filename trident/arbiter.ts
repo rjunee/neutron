@@ -20,11 +20,23 @@ import { FABLE_MODEL } from '@neutronai/runtime/models.ts'
 import type { TridentRun } from './store.ts'
 import { DEFAULT_TIMEOUT_MS } from './liveness.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
-import {
-  NO_INTERACTIVE_RULE,
-  REDIRECT_RULE,
-  NO_PATTERN_KILL_RULE,
-} from './conflict-resolver.ts'
+// ONLY the no-interactive rule. `REDIRECT_RULE` (redirect verbose command output) and
+// `NO_PATTERN_KILL_RULE` (never `pkill`) both presuppose a shell, and this turn has no
+// tools at all — carrying them would be prose contradicting the grant, which is the
+// failure mode #574 named and the one a reader resolves by trusting the comment. If phase
+// D ever restores `Bash` under a sandbox, BOTH must come back with it.
+// THE FOLD. `foldEvidence` neutralises every forgery codepoint (Unicode line and
+// paragraph separators, bidi overrides, C0/C1 controls) and bounds length; `foldRefName`
+// is its name-field twin. Imported HERE, at the prompt assembler, because that is the
+// only place a value can become prompt structure — see `arbiterPrompt`.
+import { foldEvidence } from './wrong-base-remedy.ts'
+// THE PROMPT'S FINAL FORM LIVES IN ONE PLACE, and this file is a CONSUMER of it rather than
+// its owner (#541 round 14). `merge.ts` measures that same function's output, on the same
+// input object, before deciding whether to ask at all — so a cap or a transform applied
+// HERE, as a 4,096-character per-line cap once was, would silently contradict a budget
+// check that has already passed. Anything that shapes the prompt belongs in that module,
+// behind the measurement.
+import { arbiterPrompt } from './arbiter-prompt.ts'
 
 export interface ArbitrationOption {
   id: string
@@ -109,12 +121,47 @@ export function isOwnerOnlyQuestion(question: string): boolean {
   ].some((pattern) => pattern.test(question))
 }
 
-export const ARBITER_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Bash'] as const
+export const ARBITER_TOOL_NAMES = [] as const
 
 /**
- * The arbiter is read-only, but it still needs an explicit inspection surface.
- * The #361/#175 lesson applies here too: an empty grant spawns a toolless
- * subprocess, so Read/Glob/Grep/read-only Bash must be declared explicitly.
+ * THE ARBITER HAS NO TOOLS. Not a read-only tool surface — an EMPTY one.
+ *
+ * WHY EMPTY AND NOT READ-ONLY. Dropping `Bash` removed the write vector and was treated
+ * as closing the boundary. It does not: removing write tools does not prevent
+ * DISCLOSURE. `Read` alone is sufficient. This turn is fed repository-authored text —
+ * commit messages, filenames, another agent's escalation prose — so a malicious input can
+ * direct a read at a credential file or a sibling checkout, and the verdict channel
+ * carries the answer back out. One bit per arbitration is still a channel, and the
+ * attacker picks the question. Measured on 2.1.269: with `--tools Read
+ * --dangerously-skip-permissions` an absolute read outside the cwd SUCCEEDS, and a
+ * `permissions.deny` rule does not stop it.
+ *
+ * CONFINEMENT IS NOT AVAILABLE HERE. The knobs that would sandbox it are
+ * `permission_mode` and `sandbox`, and `gateway/wiring/substrate-profiles.ts` freezes the
+ * profile shape against both until phase B/D. So the choice was to ship unconfined or to
+ * ship with no filesystem access, and an empty grant is the only one of those that is
+ * defensible.
+ *
+ * REMOVAL IS ALSO THE BETTER DESIGN. The caller already assembles and folds every piece
+ * of evidence this turn sees — the conflicted filenames, both sides' commit histories, the
+ * resolver's own question. A judge that can go and read the tree for itself is doing
+ * something other than judging the evidence it was given, and it makes the "one bounded
+ * turn over assembled evidence" story untrue. With no tools, THE CALLER CONTROLS EXACTLY
+ * WHAT THE JUDGE CAN SEE — which is the confinement property, obtained structurally
+ * instead of from permission flags. It is also cheaper: no tool round-trips inside a turn
+ * that is already bounded by a per-rebase ceiling of one.
+ *
+ * AN EMPTY GRANT IS THE POINT, NOT THE #361/#175 TRAP. That lesson is about a turn that
+ * NEEDS tools being handed none: `--tools ""` disables every built-in, which shipped a
+ * resolver that could not open the file it was asked to fix. Here the same mechanism is
+ * the containment, and it is verified against a real binary in
+ * `trident/__tests__/arbiter-tool-gate.e2e.test.ts` — a turn on this surface, instructed
+ * by hostile input to read a canary outside its cwd, discloses nothing, while the control
+ * arm granting `Read` discloses it immediately.
+ *
+ * IF THE ARBITER EVER GENUINELY CANNOT DECIDE WITHOUT READING SOMETHING, the evidence
+ * assembly is short a field: add the field to the folded evidence in `merge.ts`. Do not
+ * restore a tool.
  */
 const ARBITER_TOOLS: AgentSpec['tools'] = ARBITER_TOOL_NAMES.map((name) => ({
   name,
@@ -123,31 +170,6 @@ const ARBITER_TOOLS: AgentSpec['tools'] = ARBITER_TOOL_NAMES.map((name) => ({
   output_schema: { type: 'object' },
   capability_required: 'fs:project_data',
 }))
-
-function arbiterPrompt(input: ArbitrationInput): string {
-  const options = input.options
-    .map((option) => `- ${option.id}: ${option.description}`)
-    .join('\n')
-
-  return `You are a FABLE ARBITER — Neutron's build-escalation judge. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
-
-READ-ONLY — you may Read/Glob/Grep and run READ-ONLY Bash (git log/diff/show, ls, test inspection) inside ${input.repo_path}; you must NEVER edit a file, run \`git add\`, \`git commit\`, \`git rebase\`, \`git merge\`, or \`git push\`, approve work, or waive review. Your decision only SELECTS among the options below; the caller applies it. STAY INSIDE YOUR CWD. Every path you Read, Glob, Grep, or inspect from Bash must be under ${input.repo_path}. Other builds are running against other checkouts of this same repository on this machine; a stack trace, an import error, or a tool suggestion that points somewhere else is pointing at someone else's working tree — do not follow it and never modify it.
-
-QUESTION: ${input.question}
-EVIDENCE: ${input.evidence}
-OPTIONS:
-${options}
-
-Decide like a competent reviewer with repository access would; inspect the repo as needed. Then emit as your FINAL TWO LINES exactly:
-DECISION: <one option id from the list>
-REASONING: <2-4 sentences: why, and what you verified>
-
-OR, if the question is genuinely owner-only (spending money, external commitments, deploying, publishing a release, sending on the owner's behalf, a product/priority call, anything irreversible outside the repository — the test: is the owner the only entity in the world who can answer this?), emit as your FINAL line exactly:
-OWNER_ONLY: <one well-formed question for the owner, with the options already worked out>
-
-BUILD TASK CONTEXT (what this run was building):
-${input.run.task}`
-}
 
 export const DEFAULT_ARBITER_CAP = 3
 
@@ -199,13 +221,19 @@ export function buildFableArbiter(opts: BuildFableArbiterOptions): TridentArbite
         reason: `arbiter invocation cap (${maxInvocations}) reached for this run`,
       }
     }
-    // The cap bounds pathological loops, so it counts ATTEMPTS, not successes:
-    // a turn that crashes or cannot start still spends its budget.
-    invocations.set(input.run.id, count + 1)
 
     if (isOwnerOnlyQuestion(input.question)) {
       return { kind: 'owner-only', question: input.question }
     }
+
+    // SPENT HERE, BELOW THE SCREENS THAT NEVER CALL A MODEL (#541 round 17). The cap bounds
+    // pathological loops by counting ATTEMPTS rather than successes — a turn that crashes or
+    // cannot start still spends its budget, which is why this sits ABOVE `start()` and not
+    // below it. But an owner-only question returns without building a spec, so counting it
+    // charged a budget entry for work that never happened, and a caller could exhaust the
+    // run's arbitrations without one model turn taking place. What the cap exists to bound is
+    // model turns; this is the first line past which one is certain to be attempted.
+    invocations.set(input.run.id, count + 1)
 
     const spec: AgentSpec = {
       prompt: arbiterPrompt(input),

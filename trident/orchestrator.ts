@@ -84,6 +84,7 @@ import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
+import type { TridentArbiter } from './arbiter.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import { readCommittedMutationClaim } from './mutation-claim-artifact.ts'
 import {
@@ -326,6 +327,24 @@ export interface BuildTridentOrchestratorOptions {
    * Absent → a conflict escalates immediately on both paths (no auto-resolve).
    */
   resolve_conflict?: MergeConflictResolver
+  /**
+   * THE ARBITER TIER (#541) — `buildFableArbiter` (`arbiter.ts`), threaded into the
+   * default `buildMergeCleanupDeps` so a LOCAL-mode rebase conflict the bounded
+   * resolver ESCALATED gets one read-only second opinion before the run terminates
+   * in chat. Ignored when `merge_deps` is supplied (the override owns its own deps),
+   * exactly like `resolve_conflict`.
+   *
+   * WIRED AT ONE HOLD, DELIBERATELY. Not the base-drift holds and not the dirty-
+   * worktree refusal: the only alternative to stopping at those is waiving a review
+   * gate or force-removing uncommitted work, and `arbiter.ts` forbids the first
+   * structurally (`FORBIDDEN_OPTION_IDS`) and the second by being read-only. An
+   * arbiter asked to adjudicate something it cannot see, or cannot legally choose,
+   * is worse than one that is not asked.
+   *
+   * ABSENT → byte-identical to today: a resolver escalation aborts the rebase and
+   * posts its specific question. So does `{kind:'unavailable'}`.
+   */
+  arbitrate?: TridentArbiter
   /**
    * PURITY PREFLIGHT SEAM — run the public leak gate on the branch's own tree
    * between the rebase replay and the lease push. DEFAULTS TO THE REAL RUNNER,
@@ -1876,7 +1895,17 @@ export async function rebaseOntoObservedBase(
           ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
         ]
         // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
-        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // each one is USUALLY a different commit that `git rebase --continue` advanced onto —
+        // #541 made that "usually" rather than "always": an arbiter-directed retry there
+        // re-runs the resolver on the SAME commit, deliberately — and the reason is weaker
+        // than it looks, so state it honestly: the resolver is NONDETERMINISTIC, so a second
+        // attempt may succeed where the first failed. It carries NO new information. The
+        // arbiter's reasoning is deliberately not threaded into that turn (passing an
+        // untrusted judge's prose into a credentialed, write-capable agent was a
+        // privilege-escalation path — `SPEC.md` Decisions Log 2026-09-12 names its absence as
+        // the trap), so what a retry buys is another draw, not a better brief. Writing that
+        // down is what stops someone restoring the channel to make this comment true. It
+        // still spends a round and never resets the counter, so the cap remains the bound. No such tier exists here; there is
         // exactly one apply, so a round that leaves the same work undone will leave it undone
         // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
         // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
@@ -2323,10 +2352,10 @@ export function buildTridentOrchestrator(
   const db_path = opts.db_path
   const merge_deps =
     opts.merge_deps ??
-    buildMergeCleanupDeps(
-      opts.run_host,
-      opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
-    )
+    buildMergeCleanupDeps(opts.run_host, {
+      ...(opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {}),
+      ...(opts.arbitrate !== undefined ? { arbitrate: opts.arbitrate } : {}),
+    })
   const foldAsBuilt =
     opts.fold_as_built ??
     ((run: TridentRun, base: string) =>
