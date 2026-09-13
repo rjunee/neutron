@@ -1483,8 +1483,9 @@ export function armSelfFence(
  * out would destroy the conversation the takeover just preserved. `detach` exists as a
  * separate verb for exactly this, and the survival branch proved it at round twenty-five.
  *
- * THE FIFTH PATH that stops owning a session without the child exiting, which the
- * per-structure audit table predicted there would eventually be. Same columns, same
+ * ONE OF THE FIVE PATHS that stop owning a session, which the per-structure audit table
+ * predicted there would eventually be — and its scope has since widened again to include child
+ * exit (r52), because excluding that path is where the round-fifty-one defect hid. Same columns, same
  * identity guards: `deleteOwnPoolEntry` so it can only ever remove ITS OWN entry — the
  * winner's entry may live in the same map, and evicting that would take the pane away from
  * the gateway that legitimately holds it.

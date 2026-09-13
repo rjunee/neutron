@@ -1363,21 +1363,29 @@ pinned at the unit level, which is the only place they are observable.
 
 Round thirty's version of this table was scoped to *"the three cleanup paths"* — the three
 in `boot-adoption.ts`. It found `liveHandle`, which is the column earning its place, and it
-could not find the fourth site because the boundary was drawn around one file. **The right
-unit is every path that stops owning a session WITHOUT the child exiting** — four of them
-across two files, and five the next time someone adds one.
+could not find the fourth site because the boundary was drawn around one file.
 
-| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch | `fenceLostSession` (r39) |
-|---|---|---|---|---|
-| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) |
-| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` |
-| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key |
-| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped |
-| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live |
-| **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind |
-| **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | n/a — the fence sets `fenced` instead, which is the same statement for a path whose whole purpose is to stop serving |
-| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses |
-| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released |
+**THE SCOPE WIDENED TWICE, and the second time was round fifty-two admitting the first one was
+still too narrow.** It read "every path that stops owning a session WITHOUT the child exiting"
+— four paths — and child exit was excluded on the grounds that the pane hand-over (the
+`detach`-versus-`close` question) does not arise there. That exclusion was reasonable for the
+structures the table started with and wrong for the ones it grew: **the round-fifty-one defect
+was child exit failing an obligation this table tracks** (the in-memory claim), which is the
+strongest possible argument that it belongs inside. So the unit is now **every path that stops
+owning a session**, five of them, and the child-exiting one carries its own distinguishing
+cells rather than being left out because one row does not apply to it.
+
+| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch | `fenceLostSession` (r39) | **child exit** (`child-exit-wiring`, added r52) |
+|---|---|---|---|---|---|
+| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` (identity-guarded) |
+| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` | released, guarded on `=== child` |
+| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key | released, guarded on the awaited session being ours |
+| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped | stopped, and set to `undefined` — this child's transcript is terminal |
+| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live | **n/a — the child has EXITED.** This is the cell the old scope line was drawn around: there is no hand-over to make and no pane to close, which is why the path looked outside the table and is exactly why it still needs every other row |
+| **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind | cancelled |
+| **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | n/a — the fence sets `fenced` instead, which is the same statement for a path whose whole purpose is to stop serving | **cleared — the r51 defect: this cell was empty, and a dispatched deadline callback fenced a key whose child had just died, so a crashed REPL became a permanently refused one instead of respawning** |
+| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses | **disowned** — handle and claim together, CAS'd on the claim held at exit (captured before the in-memory one is cleared) |
+| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released | released on a clean exit, `markCrashed()` on a crash — the one cell whose two answers are both correct, because the detector needs the crash recorded |
 
 **What "deliberately retained" means, measured rather than assumed.** M91 adds a redundant
 `unregister()` to `unwind` and **nothing reds** — the handle is identity-scoped, so a second
@@ -2434,9 +2442,9 @@ child mirror, the timer.
 | Field | Could the handle have been replaced before the callback ran? | Guard |
 |---|---|---|
 | `session.selfFenceTimer` (r49) | **yes** — a renewal re-arms every tick | identity comparison, **added here** |
-| `childByKey` | yes — a concurrent respawn | `=== session.child` (r30) |
+| `childByKey` | yes — a concurrent respawn | `=== session.child` (r30) | released, guarded on `=== child` |
 | `pool` entry | yes — a newer session under the same key | `deleteOwnPoolEntry`'s peek (r30) |
-| sink registration | yes | `unregisterIf` (identity-scoped) |
+| sink registration | yes | `unregisterIf` (identity-scoped) | released — `unregisterIf` (identity-guarded) |
 | `liveHandle` | yes | identity-scoped `unregister()` (r30/r31) |
 | `activeTurn` | yes — a later turn | `t.turnId !== turnId` (r5/r6) |
 | the spawn reservation (r47) | yes | CAS on the reserver id, released in a `finally` |
@@ -2478,8 +2486,8 @@ were one question asked repeatedly, each answer exposing the next:
 Every one of those was a state in which two gateways could serve one transcript, which is the
 corruption the item exists to prevent. The adoption path itself is a few hundred lines; the
 rest is the protocol, its failure dispositions, and the instruments that prove each one — and
-**the mutation table is the part to read first**: 147 rows, each naming a guard and the case
-that dies without it.
+**the mutation table is the part to read first** — see its own header for the counted breakdown
+(140 rows with a red behind them, 7 recorded as evidence of something other than a guard).
 
 ### Round fifty-one: a new guard inherits every existing path's obligations
 
@@ -2495,10 +2503,13 @@ This is round forty-one's lesson, one mechanism later: *a structural fix that ad
 inherits every rule those call sites are subject to* — and its mirror, **a new guard inherits
 every existing path's obligations.**
 
-**Where it would have been caught, and now is.** The ownership table tracks what each
-ownership-ending path must release, and it had a row for the DURABLE claim and none for the
-IN-MEMORY one. They are two representations of one fact. The table now carries the column, and
-child exit is the row that was empty.
+**Where it would have been caught, and now is — after a correction.** The ownership table
+tracks what each ownership-ending path must release, and it had a row for the DURABLE claim and
+none for the IN-MEMORY one; they are two representations of one fact, so the row was added. But
+the table's own scope line still said "WITHOUT the child exiting", so **the path this defect was
+on was outside the table it was supposedly now covered by** — an as-built claiming a coverage it
+did not have, which round fifty-two caught. Child exit is now an audited COLUMN with every
+obligation recorded, and the scope line has no qualifier left.
 
 **One correction to my own first comment, made by measuring.** I wrote that clearing the claim
 BEFORE the cancel was load-bearing — "a dispatched callback observes the cleared claim rather
@@ -2512,10 +2523,70 @@ happens on *this* path.
 row disown is CAS'd on `paneClaimBy`, so clearing the field first left it unable to release its
 own row. The claim is captured before it is cleared and passed explicitly.
 
+### Round fifty-two: the as-built claimed a coverage it did not have
+
+**No code findings** — the first round in a long stretch with none. Both blockers were in the
+record, and both are the shape this branch has spent fifteen rounds learning to catch: **a claim
+about an artefact, checked against the artefact.**
+
+**1 — the table did not cover what the prose said it covered.** Round fifty-one added the
+in-memory-claim ROW and then wrote that "child exit is the row that was empty" — while the
+table's own scope line still read *"every path that stops owning a session WITHOUT the child
+exiting"*. So the path the defect was on sat outside the table it was supposedly now covered by.
+Child exit is an audited COLUMN now, with every obligation recorded and its one distinguishing
+cell (there is no pane hand-over to make, because the child has gone) written down rather than
+used as a reason to leave it out. The scope line has no qualifier left, and the same stale
+qualifier in `pool.ts`'s and `boot-adoption.ts`'s comments went with it.
+
+> **Every widening of this table's scope has been forced by a defect on the path the previous
+> scope excluded.** Round thirty was scoped to one file and missed `pool.ts`'s survival branch;
+> the scope that replaced it excluded child exit and missed the in-memory claim. That is twice,
+> which is a pattern rather than a coincidence — so the unit is now "every path that stops
+> owning", with nothing for a later reader to reason past.
+
+**2 — the mutation headline was false by one row.** It said all 147 rows name a guard and a case
+that dies without it; seven do not, and say so in their own cells. **This matters more than its
+size**: the mutation table is this branch's primary evidence that its guards are tested, and a
+headline that overstates it is the same defect as a stale count in a criterion — in the one
+artefact whose whole purpose is to be checkable. Round twenty caught the identical shape (M38
+presented as live evidence) and the remedy is the one used then: name the kinds, count them, and
+exclude them from the live number. **147 = 140 live + 7 recorded-but-not-evidence**, classified
+four ways, with the breakdown at the table's head.
+
+**The consistency check, run rather than asserted** (and it is the check this round asked for):
+147 rows, 147 unique ids, no duplicates; 7 rows marked not-evidence by their own strikethrough
+and named individually — M31, M38 (superseded), M80, M116 (subsumed), M91, M147 (probe, not a
+guard), M93 (not isolable); 140 live; the scope note, the table header and the taxonomy all
+print the same two numbers; the per-structure table has six columns on every one of its nine
+rows.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
 and reverted mechanically, with the tree verified clean afterwards.
+
+**THE COUNT, BROKEN DOWN, because a headline that overstates this table is the same defect as a
+stale count in a criterion — in the artefact whose whole purpose is to be checkable.** Round
+fifty-two caught exactly that: a sentence claiming all 147 rows had a red behind them, when
+seven do not and say so in their own cells. Round twenty caught the same shape (M38 presented as
+live evidence) and the remedy is the one used then — name the kinds and count them.
+
+> **147 rows = 140 LIVE + 7 RECORDED-BUT-NOT-EVIDENCE.**
+>
+> A live row has been applied and observed to redden the named case(s). The other seven are
+> kept because *why* a mutation cannot red is itself a finding — but they are not evidence that
+> a guard is tested, and they are excluded from the live count:
+>
+> | Kind | Rows | What the row records |
+> |---|---|---|
+> | **superseded** | M31, M38 | the code the mutation targeted no longer exists; the row is history |
+> | **subsumed** | M80, M116 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed) |
+> | **probe, not a guard** | M91, M147 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
+> | **not isolable** | M93 | the case is reachable by a second guard, so removing this one alone changes nothing; removing the mechanism entirely DOES red |
+>
+> Four kinds, not five: M147 is filed under *probe, not a guard* rather than given its own,
+> because "the mutation is a no-op" is the same fact whether the reason is redundancy or the
+> runtime's semantics.
 
 **The count is the table's own length, and it did not use to be.** An earlier revision
 of this paragraph said "All 24" twice while the table already listed 25 — a number

@@ -1170,10 +1170,11 @@ export async function shutdownAllPersistentRepls(
         // a wrapper that has been retired.
         //
         // The scope that finds this is not "the cleanup paths in one file" but EVERY PATH
-        // THAT STOPS OWNING A SESSION WITHOUT THE CHILD EXITING — four of them across two
-        // files. The audit table is drawn that way now.
+        // THAT STOPS OWNING A SESSION — FIVE of them across three files, child exit included
+        // (r52: the exclusion of child exit was itself where a defect hid). The audit table in
+        // the as-built is drawn that way now, with a column per path.
         session.liveHandle?.unregister()
-        // AND THE ADOPTION CLAIM. The fourth path that stops owning a session, and the one
+        // AND THE ADOPTION CLAIM. One of the five paths that stop owning a session, and the one
         // where leaving the claim behind would be worst: the next construction is exactly
         // what this branch keeps the pane alive FOR, and a claim left set would refuse it
         // until the TTL elapsed.
