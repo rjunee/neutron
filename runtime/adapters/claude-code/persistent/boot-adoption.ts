@@ -525,11 +525,20 @@ function abandonInFlightPasses(): string[] {
 export async function settleBootAdoptionsForShutdown(
   graceMs: number = SHUTDOWN_ADOPTION_GRACE_MS,
   log: (msg: string) => void = defaultLog,
+  /** Fires once the latch is set and the snapshot is taken, BEFORE the wait begins — the
+   *  seam a case needs to start a pass inside the window this function opens. Production
+   *  passes nothing; without it a case can only pace with a sleep, and a sleep that lands
+   *  late passes for the wrong reason. */
+  onSnapshotTaken?: () => void,
 ): Promise<void> {
   // BEFORE THE SNAPSHOT, not after. Everything begun from here on is born abandoned; the
   // snapshot below deals with what was already running.
   shutdownLatched = true
   const inFlight = [...passes.values()].flatMap((m) => [...m.values()]).filter((h) => !h.settled)
+  // AFTER THE LATCH AND THE SNAPSHOT, BEFORE THE WAIT. Both facts matter to the caller
+  // that uses this: the latch is what a pass begun from here on will meet, and the
+  // snapshot is what this function will wait for.
+  onSnapshotTaken?.()
   if (inFlight.length === 0) return
   let timer: ReturnType<typeof setTimeout> | undefined
   const expired = new Promise<void>((resolve) => {

@@ -887,7 +887,7 @@ is to be checkable.
 **The class was swept, not just the instance.** Every mutation subject was checked for
 existence in the tree, with `primeLatches` (M1/M2's subject) as the positive control that
 the search works. `argvElementCarriesWhitespace` is the only absent one, so M38 is the
-only dead row. The live count is therefore **M1–M92 less M31, M38, M80 and M91 = 88**.
+only dead row. The live count is therefore **M1–M93 less M31, M38, M80, M91 and M93 = 88**.
 
 ### Round twenty-one: the sibling pattern, found inside the comment about the sibling pattern
 
@@ -1560,6 +1560,47 @@ version, which is round twenty-eight's mistake inverted: that fixture was meant 
 outside the boundary and was one level inside; this one is meant to be ON the boundary and
 would have been one level below it.
 
+### Round thirty-five: the last case pacing with a sleep, and what the mutation actually proves
+
+The shutdown-latch race case stated its window precisely in a comment — *after the
+snapshot, before drain two* — and **nothing established that B landed in it**. Two failure
+modes, asymmetric: if the `setTimeout` had not fired, `await passB` was `await undefined`,
+which is at least loud; if B started after the shutdown had completed, the latch refused it
+anyway and **the case passed without ever entering the window it is named for**. Sixth
+instance of an assertion satisfied under both the intended and the unintended ordering, and
+it was the only concurrency case left in the suite still pacing with a sleep while every
+other one handshakes — which was the tell.
+
+`settleBootAdoptionsForShutdown` now takes an `onSnapshotTaken` seam, threaded through
+`shutdownAllPersistentRepls`'s `onAdoptionSnapshot`, firing once the latch is set and the
+snapshot taken and before the wait begins. The `setTimeout`, the `sleep` and the `passB!`
+definite-assignment assertion are all deleted — with the handshake, B is assigned before it
+is awaited, so the `!` stopped being a claim the compiler could not check.
+
+**The premise is a recorded ordering rather than a promise**, because the two facts that
+matter are both orderings and "the latch is set" has no getter: the case asserts
+`order === ['snapshot']` and `shutdownDone === false` at the moment B begins, and
+`['snapshot', 'B-begins', 'shutdown-resolved']` at the end.
+
+**And the mutation does not red — measured in three variants, not argued.**
+
+| Variant | Result | Why |
+|---|---|---|
+| **M93** — seam fires a few statements earlier, before the latch | no red | There is **no await** between the seam and the latch, so the awaiting case resumes only after the latch is already set. Moving a *synchronous* call cannot change what B meets. |
+| **M93b** — seam fires, then yields, then latches, so B genuinely starts unlatched | no red | `abandonInFlightPasses` then catches B. **Two mechanisms converge on the same disposition, by design** — round twenty-four's "one disposition for this gateway is going away". |
+| **M93b + the latch removed entirely** | **1 fail** | So the case does have teeth. What it discriminates is *"some mechanism abandons a pass in this window"*, not *"the latch specifically"*. |
+
+So the honest report is: **there is no mutation that reds the seam alone**, and the reason is
+structural rather than a gap in the case. The latch's unique contribution — a pass begun
+after the settle has returned entirely — is covered by **M72**, which does red. The
+handshake's value here is determinism: it converts a case that could silently test the wrong
+window into one that cannot, which is worth having even where no mutation can distinguish it.
+
+That is the third kind of not-redding this branch has now catalogued, alongside subsumed
+(M80) and probe-not-guard (M91): **a guard whose effect is reachable by a second guard, so
+no single mutation isolates it.** Naming which kind matters, because only the first
+(superseded) means the row is dead.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -1570,7 +1611,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one and M92 in round thirty-four, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four and M93 in round thirty-five, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1693,6 +1734,7 @@ count from the rows below rather than trusting this sentence.
 | M90 | the survival branch does not unregister the live-process handle | `gateway-shutdown-survival.test.ts` (1) |
 | M91 | ~~`unwind` unregisters the live handle too~~ — **probe, not a guard**: nothing reds, because the handle is identity-scoped and a second `unregister()` is a no-op. Recorded because that is what makes the retained cell "not needed" rather than "must not" | no-op by design |
 | M92 | the cleanup guard permits `real === root` again | `session-config-containment.test.ts` (1) |
+| M93 | ~~the snapshot seam fires before the latch~~ — **no red, structurally**: synchronously it cannot change what B meets (no await between), and with a yield added `abandonInFlightPasses` covers the same window. Removing the latch entirely DOES red (1), so the case has teeth; the latch's unique window is M72's | not isolable |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

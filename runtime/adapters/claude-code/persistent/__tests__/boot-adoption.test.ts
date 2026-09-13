@@ -1934,19 +1934,48 @@ describe('a pass that STARTS after shutdown has looked', () => {
     const optionsB = { ...b.options, project_id: 'projB' } as PersistentReplSubstrateOptions
     const credentialB = deriveChildSinkToken(sink.token, GEN_B)
 
-    let passB!: ReturnType<typeof beginBootAdoption>
-    // Started while the settle is awaiting A — after the snapshot, before drain two.
-    setTimeout(() => {
-      passB = beginBootAdoption(optionsB, KEY_B, {
-        host: b.host,
-        health: async () => true,
-        log: () => {},
-      })
-    }, 5)
-    const shutdown = shutdownAllPersistentRepls({ adoptionGraceMs: 200 })
-    await Bun.sleep(30)
+    // HANDSHAKED, NOT PACED (Argus r35). The comment used to state the window precisely
+    // and nothing established that B landed in it: if the timer had not fired, `await
+    // passB` was `await undefined`; if B started after the shutdown had finished, the
+    // LATCH refused it anyway and the case passed without ever entering the window it is
+    // named for. An assertion satisfied under both the intended and the unintended
+    // ordering — the sixth time on this branch.
+    //
+    // `onAdoptionSnapshot` fires once the latch is set and the snapshot is taken, before
+    // the wait begins, which is exactly the window.
+    const order: string[] = []
+    let snapshotted!: () => void
+    const atSnapshot = new Promise<void>((r) => {
+      snapshotted = r
+    })
+    const shutdown = shutdownAllPersistentRepls({
+      adoptionGraceMs: 200,
+      onAdoptionSnapshot: () => {
+        order.push('snapshot')
+        snapshotted()
+      },
+    })
+    let shutdownDone = false
+    void shutdown.then(() => {
+      order.push('shutdown-resolved')
+      shutdownDone = true
+    })
+
+    await atSnapshot
+    // THE PREMISE, RECORDED RATHER THAN HOPED FOR: B begins after the snapshot and before
+    // the shutdown resolves. A recorded order is the instrument here because "the latch is
+    // set" has no getter, and the two facts that matter are both orderings.
+    expect(order).toEqual(['snapshot'])
+    expect(shutdownDone).toBe(false)
+    order.push('B-begins')
+    const passB = beginBootAdoption(optionsB, KEY_B, {
+      host: b.host,
+      health: async () => true,
+      log: () => {},
+    })
     heldA.release()
     await shutdown
+    expect(order).toEqual(['snapshot', 'B-begins', 'shutdown-resolved'])
 
     const outcome = await passB
     expect(outcome.kind).toBe('undecided')

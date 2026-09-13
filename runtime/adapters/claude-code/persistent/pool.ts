@@ -954,6 +954,10 @@ export async function shutdownAllPersistentRepls(
     pendingSpawnGraceMs?: number
     /** Test seam for {@link SHUTDOWN_ADOPTION_GRACE_MS}, same argument. */
     adoptionGraceMs?: number
+    /** Fires once the adoption settle has latched and snapshotted, before it waits — the
+     *  seam a concurrency case needs to act inside that window rather than pace it with a
+     *  sleep. Production passes nothing. */
+    onAdoptionSnapshot?: () => void
   } = {},
 ): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
@@ -1069,7 +1073,7 @@ export async function shutdownAllPersistentRepls(
   // restart. A pass that does NOT settle is marked `shutdown`-abandoned, which means
   // left alone rather than closed, and it checks that at its attach AND at its publish,
   // so nothing lands in `pool` behind this second drain.
-  await settleBootAdoptionsForShutdown(opts.adoptionGraceMs)
+  await settleBootAdoptionsForShutdown(opts.adoptionGraceMs, undefined, opts.onAdoptionSnapshot)
   const lateArrivals = drainPool()
   if (lateArrivals > 0) {
     process.stderr.write(
