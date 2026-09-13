@@ -158,6 +158,8 @@ every mutation was applied and reverted mechanically, and the tree was clean aft
 | M20 | the host switch returns `no-handle` instead of the pid fallback | `adoption-refuses…` + `boot-adoption` (3) |
 | M21 | `undecided` permits a spawn | `adoption-refuses-a-second-owner.test.ts` (5) |
 | M22 | an `undecided` pass is cached | `adoption-refuses-a-second-owner.test.ts` (1) |
+| M23 | the pid fallback kills a healthy REPL after a host blip | `boot-adoption.test.ts` (1) |
+| M24 | the host switch never terminates a verified survivor | `boot-adoption.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.
@@ -202,6 +204,17 @@ It now falls back to the process table — the one authority still available —
 where that too is inconclusive. This matters more than it looks: #540 keeps the
 in-process host selectable, so the first operator to flip that setting with live REPLs
 was the person who would have hit it.
+
+**And fixing them surfaced a hazard of the fix itself.** The pid fallback's first
+version killed anything it verified as ours — which, on the `unavailable` path, means
+killing a HEALTHY REPL because herdr failed to answer one socket call. A transport blip
+says nothing about the REPL behind it, and destroying it is precisely the loss this
+feature exists to prevent, at the moment the system is already unwell. Terminating is
+now licensed only where the pane can never be adopted again (the host switch);
+everywhere else the fallback is an IDENTITY probe with no side effect
+(`identifyOrphanPid`, split out of `adoptOrKillOrphan` so the two share one matcher),
+and a verified-alive survivor yields `undecided`: the pane stays, the turn refuses, the
+next turn adopts it.
 
 **The fix surfaced a third, smaller one.** Leaning on `adoptOrKillOrphan` for a SPAWN
 decision exposed a false/unknown collapse in its own verdict set: `not-ours` was

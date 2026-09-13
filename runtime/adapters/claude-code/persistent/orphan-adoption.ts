@@ -379,6 +379,40 @@ export async function adoptOrKillOrphan(
   claudeBasename: string = 'claude',
 ): Promise<OrphanAdoptionVerdict> {
   const log = deps.log ?? (() => {})
+  const identity = identifyOrphanPid(pid, sessionId, deps, claudeBasename)
+  if (identity !== 'ours') return identity
+
+  log(
+    `orphan-adoption: pid ${String(pid)} verified-ours for session ${sessionId.slice(0, 8)} — ` +
+      `terminating orphan before resume`,
+  )
+  await deps.terminatePid(pid as number)
+  return 'killed'
+}
+
+/**
+ * WHAT THE PROCESS TABLE SAYS ABOUT A RECORDED PID — with NO side effect.
+ *
+ * SPLIT OUT BECAUSE THE IDENTITY QUESTION AND THE KILL DECISION ARE NOT THE SAME
+ * QUESTION, and #539 asks the first without wanting the second. The boot-adoption pass
+ * uses this to answer "does something still own this transcript?" in situations where
+ * killing would be WRONG — a herdr that did not answer one probe says nothing about the
+ * REPL behind it, and terminating a healthy REPL because a socket blinked destroys
+ * exactly what the adoption feature exists to preserve. The kill path is this plus one
+ * more step, which is how the two cannot drift: one matcher, one liveness probe, one
+ * set of rules about recycled pids.
+ *
+ * Pure with respect to the PROCESS: it only probes and reads. `'ours'` means the pid is
+ * alive and is our `claude` for this session; every other value is exactly what
+ * {@link OrphanAdoptionVerdict} documents.
+ */
+export function identifyOrphanPid(
+  pid: number | undefined,
+  sessionId: string,
+  deps: Pick<OrphanAdoptionDeps, 'isPidAlive' | 'readCmdline' | 'log'>,
+  claudeBasename: string = 'claude',
+): 'ours' | 'not-ours' | 'unreadable' | 'dead' | 'no-pid' {
+  const log = deps.log ?? (() => {})
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return 'no-pid'
 
   if (!deps.isPidAlive(pid)) {
@@ -389,7 +423,7 @@ export async function adoptOrKillOrphan(
   const cmdline = deps.readCmdline(pid)
   if (cmdline === undefined) {
     // ALIVE, AND WE COULD NOT LOOK. Not a finding about the process — a failure to
-    // make one. Never killed (unchanged), and never reported as absence.
+    // make one. Never killed, and never reported as absence.
     log(
       `orphan-adoption: pid ${pid} is alive but its cmdline could not be read — nothing is ` +
         `established about it (session ${sessionId.slice(0, 8)})`,
@@ -404,13 +438,7 @@ export async function adoptOrKillOrphan(
     )
     return 'not-ours'
   }
-
-  log(
-    `orphan-adoption: pid ${pid} verified-ours for session ${sessionId.slice(0, 8)} — ` +
-      `terminating orphan before resume`,
-  )
-  await deps.terminatePid(pid)
-  return 'killed'
+  return 'ours'
 }
 
 /**

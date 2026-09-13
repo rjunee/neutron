@@ -64,10 +64,12 @@ import { herdrHost } from './herdr-host.ts'
 import {
   adoptOrKillOrphan,
   basenameOf,
+  identifyOrphanPid,
   classifyPaneForAdoption,
   cmdlineMatchesSession,
   defaultReadCmdline,
   type OrphanAdoptionDeps,
+  type OrphanAdoptionVerdict,
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink } from './pool-state.ts'
 import { hostSupportsAdoption, type AdoptableHost, type PtyChild } from './pty-host.ts'
@@ -374,6 +376,10 @@ export async function reconcileOwnRepl(
       `the configured PTY host cannot reach pane ${record.pane_handle} (the instance changed hosts)`,
       registryPath,
       deps,
+      // TERMINATE IF VERIFIED. This pane can never be adopted from this configuration
+      // again, and the transcript has to be usable — so a child we can positively
+      // identify as ours is ended deliberately rather than left to own it forever.
+      true,
     )
   }
   const outcome = await reconcileRow(
@@ -437,7 +443,17 @@ async function reconcileRow(
       }
       case 'unverifiable':
       case 'unavailable':
-        return await pidFallback(sessionKey, record, claudeBasename, verdict.reason, registryPath, deps)
+        // The host is configured and may answer again in a moment, so the fallback is
+        // an IDENTITY probe here and never a kill.
+        return await pidFallback(
+          sessionKey,
+          record,
+          claudeBasename,
+          verdict.reason,
+          registryPath,
+          deps,
+          false,
+        )
       case 'adopt':
         return await adoptRow(sessionKey, record, handle, options, host, deps, signal)
     }
@@ -469,6 +485,22 @@ async function pidFallback(
   why: string,
   registryPath: string | undefined,
   deps: BootAdoptionDeps,
+  /**
+   * MAY THIS FALLBACK END A PROCESS IT VERIFIES AS OURS?
+   *
+   * ONLY WHEN THE PANE IS UNREACHABLE FOR GOOD, which today means the configured host
+   * changed (#540 makes that a supported setting). There, the transcript is needed and
+   * the pane can never be adopted from this configuration again, so ending it is the
+   * only way forward.
+   *
+   * NOT when herdr merely failed to answer, and this is the whole reason the flag
+   * exists. A transport blip says NOTHING about the REPL behind it — killing a healthy
+   * child on one unanswered socket call destroys exactly what this feature exists to
+   * preserve, and it would do so at the moment the system is already unwell. There the
+   * honest outcome is `undecided`: the pane stays, the turn refuses, and the next turn
+   * re-probes and adopts if herdr has come back.
+   */
+  mayTerminate: boolean,
 ): Promise<RowAdoptionOutcome> {
   const orphanDeps =
     deps.orphanDeps?.(record, claudeBasename) ??
@@ -480,8 +512,26 @@ async function pidFallback(
           cmdlineMatchesSession(defaultReadCmdline(pid), record.sessionId, claudeBasename),
         ),
     } satisfies OrphanAdoptionDeps)
-  const verdict = await adoptOrKillOrphan(record.pid, record.sessionId, orphanDeps, claudeBasename)
   const log = deps.log ?? defaultLog
+  // IDENTIFY FIRST, ACT SECOND. `identifyOrphanPid` has no side effect, so the branch
+  // below decides whether anything is ended — the kill is not smuggled inside the
+  // question.
+  const identity = identifyOrphanPid(record.pid, record.sessionId, orphanDeps, claudeBasename)
+  if (identity === 'ours' && !mayTerminate) {
+    // ALIVE, AND VERIFIABLY THE CHILD THIS ROW DESCRIBES. The most informative answer
+    // there is — and the one that must NOT lead to a kill here: the pane is reachable
+    // in principle and only the host's answer went missing. Leave it running, refuse
+    // the spawn, and let the next turn adopt it.
+    return {
+      kind: 'undecided',
+      sessionKey,
+      reason: `${why}; the process table confirms the recorded child is STILL RUNNING and still ours, so it is left alone and nothing may resume its transcript until it can be adopted or ended deliberately`,
+    }
+  }
+  const verdict: OrphanAdoptionVerdict =
+    identity === 'ours'
+      ? await adoptOrKillOrphan(record.pid, record.sessionId, orphanDeps, claudeBasename)
+      : identity
   // FOUR VERDICTS, THREE MEANINGS, and getting that mapping right is the whole value of
   // the fallback. An earlier revision folded everything that was not `killed` into
   // `undecided`, which reads "I could not tell" onto two answers that are positive

@@ -90,6 +90,13 @@ it must not swallow.
       with no durable handle: the spawn proceeds. Without this half, a gate that refuses
       everything would satisfy the criterion above and stop the product working.
       *Verified by* the same file's second and third groups.
+- [ ] **A HEALTHY REPL IS NEVER KILLED BY A FAILED PROBE.** When the host does not
+      answer but the process table confirms the recorded child is alive and ours, it is
+      LEFT RUNNING and the spawn is refused — a transport blip must not destroy the
+      thing this item exists to preserve. Terminating a verified survivor is licensed
+      only where the pane can never be adopted again (the host switch).
+      *Verified by* `__tests__/boot-adoption.test.ts` ("LEFT RUNNING when only the host
+      failed to answer" and "DOES kill a verified survivor — the one case that may").
 - [ ] **AN UNVERIFIED PANE IS NEVER CLOSED.** A pane running something else, or one the
       host could not speak for and whose pid the process table does not confirm, is left
       alone and reported undecided — the recycled-identifier rule, applied to a pane id.

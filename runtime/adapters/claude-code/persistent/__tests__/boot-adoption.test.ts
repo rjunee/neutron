@@ -374,7 +374,12 @@ describe('evidence that has gone stale', () => {
 })
 
 describe('when the host cannot answer', () => {
-  it('falls back to the PID identity check and closes a VERIFIED-ours process', async () => {
+  it('a VERIFIED-ours process is LEFT RUNNING when only the host failed to answer', async () => {
+    // THE DESTRUCTIVE-ON-A-BLIP CASE. herdr not answering one probe says nothing about
+    // the REPL behind it: killing a healthy child here would destroy exactly what this
+    // feature exists to preserve, at the moment the system is already unwell. The pane
+    // stays, the row keeps its handle, and the spawn is refused until the next turn can
+    // adopt it.
     const f = fixture()
     f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
     const terminated: number[] = []
@@ -390,9 +395,11 @@ describe('when the host cannot answer', () => {
         },
       }),
     })
-    expect(outcome.kind).toBe('closed-by-pid')
-    expect(terminated).toEqual([4242])
-    expect(readRow(f.registryPath)?.pane_handle).toBeUndefined()
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/still running/i)
+    expect(terminated).toEqual([])
+    expect(f.host.closed).toEqual([])
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 
   it('a pid that is alive and UNREADABLE establishes nothing → undecided, nothing touched', async () => {
@@ -461,7 +468,7 @@ describe('rows that cannot be reconciled at all', () => {
     expect(f.host.attached).toHaveLength(0)
   })
 
-  it('a host that cannot adopt falls back to the PROCESS TABLE and kills a verified survivor', async () => {
+  it('a host that cannot adopt DOES kill a verified survivor — the one case that may', async () => {
     // The supported host switch (herdr → the in-process PTY host) with a live pane.
     // The configured host cannot see that pane, but the kernel can still say whether
     // the recorded pid is our claude — and if it is, killing it takes the pane with
