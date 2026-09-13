@@ -79,6 +79,8 @@ import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type P
 import {
   getRecord,
   loadRegistry,
+  normaliseRecord,
+  readRegistryState,
   withRegistry,
   withRegistryRead,
   type ReplRegistryRecord,
@@ -546,7 +548,27 @@ export async function reconcileOwnRepl(
   const log = deps.log ?? defaultLog
   const registryPath = options.replRegistryPath
   if (registryPath === undefined) return { kind: 'no-handle', sessionKey }
-  const record = getRecord(registryPath, sessionKey)
+  // A `{}` FROM A FAILED READ IS NOT A POSITIVE ABSENCE (Argus r19). `no-handle` is
+  // listed by `adoptionPermitsSpawn` under "nothing owns the transcript" and licenses a
+  // cold `claude --resume`. `loadRegistry` answers `{}` for a corrupt file and for a
+  // non-ENOENT read failure just as it does for a genuinely absent one, so a registry
+  // that merely could not be READ would authorise a second owner on a live transcript
+  // without anything ever inspecting the pane.
+  //
+  // ENOENT STAYS A TRUE ABSENCE: a cold boot has no registry, and a missing file that
+  // refused spawns would stop the system starting.
+  const state = readRegistryState(registryPath)
+  if (state.kind === 'unreadable') {
+    log(`key=${sessionKey.slice(0, 32)}: the registry could not be READ (${state.reason}) — refusing to decide`)
+    return {
+      kind: 'undecided',
+      sessionKey,
+      reason:
+        `the registry could NOT BE READ (${state.reason}), so nothing establishes whether a REPL is already ` +
+        'running on this transcript — this is the absence of a finding, not a finding of absence',
+    }
+  }
+  const record = state.kind === 'absent' ? undefined : normaliseRecord(state.registry[sessionKey])
   if (record === undefined || record.pane_handle === undefined) {
     return { kind: 'no-handle', sessionKey }
   }
@@ -982,9 +1004,14 @@ function rowStillNames(
 ): 'ours' | 'reclaimed' | 'not-named' | 'unreadable' {
   try {
     let acquired = false
-    const row = withRegistryRead(
+    // READ UNDER THE LOCK, AND THREE-STATE (Argus r19). `loadRegistry` does not THROW on
+    // a corrupt file — it answers `{}` — so the catch below never saw it and the row came
+    // back `undefined`, which this function reported as `not-named`: the PROCEED branch.
+    // Registry corruption therefore licensed closing a live pane whose ownership had not
+    // been established. "Nothing names this pane" is true of a registry that was read.
+    const state = withRegistryRead(
       registryPath,
-      (registry) => registry[sessionKey],
+      () => readRegistryState(registryPath),
       (ok) => {
         acquired = ok
       },
@@ -993,6 +1020,7 @@ function rowStillNames(
     // it licenses is destructive — so it is not evidence, by the same rule the claim and
     // the shutdown decision already follow.
     if (!acquired) return 'unreadable'
+    if (state.kind === 'unreadable') return 'unreadable'
     // THE DISTINCTION THAT MATTERS IS WHICH PANE THE ROW NAMES, not merely that the row
     // changed. Refusing on any change is too strong and breaks the act this module exists
     // to perform:
@@ -1004,6 +1032,7 @@ function rowStillNames(
     //     it is precisely the orphan-and-second-owner prevention this path is for.
     //     PROCEED.
     //   - the row names this pane and this generation → ours. PROCEED.
+    const row = state.kind === 'loaded' ? state.registry[sessionKey] : undefined
     if (row?.pane_handle === expected.handle) {
       return row.child_generation === expected.generation ? 'ours' : 'reclaimed'
     }

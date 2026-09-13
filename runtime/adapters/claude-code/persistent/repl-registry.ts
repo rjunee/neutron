@@ -394,6 +394,51 @@ function isMinimalRecord(raw: unknown): boolean {
 
 // ─── Disk-touching wrappers ────────────────────────────────────────────────
 
+/**
+ * THE READ THAT DISTINGUISHES "THERE IS NOTHING" FROM "I COULD NOT LOOK" (#539, Argus
+ * r19).
+ *
+ * `loadRegistry` answers `{}` for all three of: a genuinely absent file (ENOENT, the
+ * steady-state cold boot), a non-ENOENT read failure, and malformed JSON. It KNOWS the
+ * difference internally and tells nobody — and the mutation path already compensates
+ * (`loadRegistryForMutation` returns `skipSave` for exactly the read-failure case,
+ * because a write over a registry you could not read is a write over someone's data).
+ * The read path had no such compensation, and two decisions came to rest on it: a cold
+ * spawn licensed by "no row" and a pane CLOSED because "no row names it".
+ *
+ * Both of those are the branch's oldest named defect — false and unknown sharing a
+ * branch — at the bottom of the stack where every guard above reads through.
+ *
+ * `loadRegistry`'s own contract is deliberately UNCHANGED: it has many callers, and
+ * migrating them wholesale is a far larger diff than the two decisions that need this.
+ * Callers that only ever ask "give me what is there" are correct with `{}`; callers that
+ * DECIDE something on absence must use this instead.
+ *
+ * THE BOUNDARY THAT MUST NOT MOVE: ENOENT is a TRUE absence. A cold boot has no registry
+ * file, and if a missing file began refusing spawns nothing would ever start. `absent` is
+ * permission; `unreadable` is refusal.
+ */
+export function readRegistryState(
+  path: string,
+): { kind: 'loaded'; registry: ReplRegistry } | { kind: 'absent' } | { kind: 'unreadable'; reason: string } {
+  let contents: string
+  try {
+    contents = readFileSync(path, 'utf8')
+  } catch (e) {
+    // ENOENT on the read itself, not a separate `existsSync` — the same reasoning
+    // `loadRegistry` documents: a pre-check has a TOCTOU gap and collapses every stat
+    // error into "absent", which is the exact conflation this function exists to undo.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return { kind: 'unreadable', reason: `read-error: ${(e as Error).message}` }
+  }
+  const result = parseRegistryContents(contents)
+  if (result.kind === 'loaded') return { kind: 'loaded', registry: result.registry }
+  // WE GOT BYTES AND COULD NOT MAKE SENSE OF THEM. For the MUTATION path that is safe to
+  // rebuild from (the original is sidecar-preserved). For a DECISION it is not: the rows
+  // that file held are unknown, so it establishes nothing about what owns a transcript.
+  return { kind: 'unreadable', reason: result.kind === 'corrupt' ? result.reason : 'unparseable registry' }
+}
+
 /** Load the registry file. Returns `{}` on absent or corrupt (the steady-state
  *  cold-boot case). Corruption is logged via `onCorrupt` so the caller can
  *  observe it without this function throwing — a corrupt registry must never
@@ -492,7 +537,15 @@ export function saveRegistry(path: string, registry: ReplRegistry): void {
  * returns the loaded object untouched.
  */
 export function getRecord(path: string, sessionKey: string): ReplRegistryRecord | undefined {
-  const record = loadRegistry(path)[sessionKey]
+  return normaliseRecord(loadRegistry(path)[sessionKey])
+}
+
+/** The normalisation `getRecord` applies, as a pure function, so a caller that obtained
+ *  the registry another way (see {@link readRegistryState}) gets the SAME record rather
+ *  than a subtly different one. One rule, one place. */
+export function normaliseRecord(
+  record: ReplRegistryRecord | undefined,
+): ReplRegistryRecord | undefined {
   if (record === undefined) return undefined
   if (record.model === undefined) return record
   if (typeof record.model === 'string' && record.model.trim() !== '') return record

@@ -604,6 +604,7 @@ is or is not covered. **Checkable by someone who did not write it**, which is th
 | **Element-wise argv match** | `argvMatchesSession`: `classifyPaneForAdoption` (host vector), `cmdlineMatchesSession` (string form). `cmdlineMatchesSession`: `boot-adoption.ts:721`, `orphan-adoption.ts:489`/`:574`, `supervision.ts:140`. | **The vector caller.** Tests: "REFUSES an argv[0] that only looks like a claude once the vector is flattened", "REFUSES a smuggled argv[0] even when every OTHER rule is satisfied", "ACCEPTS a real builder argv whose paths contain spaces". The four string callers are `ps`-derived and cannot be handed a vector — **not covered, filed as #672**, and the docblock says the rule is vacuous for that form rather than implying coverage. |
 | **Protocol gate** (`verifyHerdrProtocol`) | Every `HerdrHost` method that opens a connection: `spawn`/`attach` (shared `open`, `:239`), `inspectHandle` (`:795`), `closeHandle` (`:851`). | **All of them.** Tests: `herdr-adoption.test.ts` protocol-gate cases for inspect and close; M15/M16 red when either gate is removed. |
 | **Absence is instrument-relative** (`scanTranscriptOwners` → `none`) | Its one consumer: the pid-fallback's handle clear at `boot-adoption.ts:788`, which is also what licenses the cold spawn at `spawn.ts:927`. | **Covered.** Tests: `orphan-adoption.test.ts` "answers UNKNOWN for a live owner whose spaced binary path the listing renders ambiguously", "a bystander holding the transcript open is UNKNOWN, not none", "a strict match still OUTRANKS an ambiguous one", control "a genuinely empty machine is still a positive absence"; and through the consumer, `boot-adoption.test.ts` "REFUSES rather than clears when a process merely MENTIONS the session id". M59 reds the unit, M60 reds the consumer. |
+| **Absence is read-relative** (`readRegistryState`) | Every production reader of `loadRegistry`/`getRecord`. **Migrated (they decide on absence):** `reconcileOwnRepl` (licenses a cold spawn), `rowStillNames` (licenses a close). **Not migrated, and why:** `boot-adoption.ts:1255/1385/1398` are read-BACKS after a write, used only for log text; `supervision.ts:468/602/957/1080/1144` and `:302` iterate the registry for rows to act on, so `{}` means "no work this tick" and the tick retries — the conservative direction; `supervision.ts:116` yields no pid, so the orphan gate never kills an unverified one; `gateway-shutdown-kill.ts` writes no marker, a missed record rather than a destructive act; `pool.ts:181` falls back to the best model, cosmetic; `gateway/diagnostics/instance-sources.ts:112` is display. **One does decide and is filed rather than fixed here:** `spawn.ts:722` `resumeDirectiveFor` returns `undefined` on absence, which means a FRESH session instead of a `--resume` — so under corruption it silently starts a new conversation rather than resuming the old one. Reached only through paths that do not go through the adoption gate (which now refuses on `unreadable`), so this branch narrows it without closing it. | **Covered** for the two migrated consumers: `boot-adoption.test.ts` "ENOENT … still PERMITS the spawn", "MALFORMED JSON refuses the spawn", "A NON-ENOENT READ FAILURE refuses the spawn too", "the CLOSE proceeds when the registry is genuinely gone", "but REFUSES to close when the registry is malformed", "and REFUSES to close on a non-ENOENT read failure". M64 and M65 red both directions. |
 | **Shutdown survival gate** | The three kill sites in `shutdownAllPersistentRepls`: the pooled walk (`pool.ts:1177`), the late-arriving spawn (`:1228`), the ephemeral sweep (`:1254`). | **One of three, and the other two for different reasons.** The pooled walk is covered — `gateway-shutdown-survival.test.ts` "LEAVES a findable herdr-hosted child alive…" with its kill-direction counterparts. The ephemeral sweep is **correctly** uncovered: never pooled, never in a row, so the gate would answer `kill` regardless. The late-arriving spawn is **not covered and is a real gap — filed as #674**, a known residual of the survival feature rather than a defect introduced here: it can end a herdr-hosted child whose row names its pane. |
 
 **On #674's difficulty, corrected, because a wrong reason recorded is how the next person
@@ -750,6 +751,64 @@ and not the alert state. This is the same family as the branch's other instrumen
 bytes are indistinguishable — and it belongs with them: **before treating a red as a
 finding, establish that the instrument ran.**
 
+### Round nineteen: the oldest defect on this branch, underneath every guard above it
+
+**`loadRegistry` answers `{}` for three different facts** — a genuinely absent file
+(ENOENT, the steady-state cold boot), a non-ENOENT read failure, and malformed JSON. It
+knows the difference internally and told nobody. The mutation path already compensated
+(`loadRegistryForMutation` returns `skipSave` for exactly the read-failure case, because a
+write over a registry you could not read is a write over someone's data); the READ path had
+no such compensation, and by round eighteen two decisions rested on it:
+
+- **a corrupt registry authorised a cold spawn.** `reconcileOwnRepl` read `undefined` and
+  answered `no-handle`, which `adoptionPermitsSpawn` lists under *"positive absence …
+  nothing owns the transcript"*. A live pane, a valid row, the file then corrupted, and
+  the next turn started a second `claude` on that transcript without inspecting the pane.
+- **and it licensed closing a live pane.** `rowStillNames` caught a *throw*, but
+  `loadRegistry` does not throw on a corrupt file — it returns `{}` — so the row came back
+  `undefined` and the function answered `not-named`, the PROCEED branch. "Nothing names
+  this pane" is true of a registry that was READ.
+
+That is **false and unknown sharing a branch**, this tree's own named defect, sitting at
+the bottom of the stack where every guard above it reads through. Both consequences are
+ones this feature exists to prevent, and both were reached through a helper nobody
+suspected because it never fails loudly.
+
+**`readRegistryState` reports the distinction** — `loaded` / `absent` / `unreadable`, the
+last carrying its reason — and **only the two deciding consumers were migrated**.
+`loadRegistry`'s contract is deliberately unchanged: it has many callers, and a wholesale
+migration is a far larger diff than this branch should carry at round nineteen. A caller
+that only asks "give me what is there" is correct with `{}`; a caller that DECIDES on
+absence is not.
+
+**The boundary that must not move, tested before anything else: ENOENT stays a true
+absence.** A cold boot has no registry file. If a missing file began refusing spawns,
+nothing would start. `absent` is permission, `unreadable` is refusal, and M65 mutates that
+pair the system-breaking way round and reds the two ENOENT cases.
+
+**`getRecord`'s normalisation became a shared function rather than being re-implemented.**
+The migrated read needed the same record `getRecord` returns, and copying four lines of
+model-normalisation into a second place is how two readers of one file quietly start
+disagreeing. `normaliseRecord` is now exported and `getRecord` is one line over it.
+
+**Six cases, three input shapes against each of the two consumers**, with the reason
+asserted to distinguish them: ENOENT (spawn permitted / close proceeds, unchanged),
+malformed JSON (both refuse), and a non-ENOENT read failure produced the way production
+would — the registry path is a directory, so `readFileSync` fails EISDIR rather than
+ENOENT.
+
+### An instrument note on my own monitor, since this branch collects them
+
+The CI watcher exited on `2dca13ff` reporting "ALL CHECKS SETTLED — 1 of 4 not green". It
+was wrong, and in the familiar direction: it breaks when every check it can see is
+non-pending, and at that moment GitHub had registered only the four CodeQL checks — the
+`ci` workflow was still **queued** and contributed nothing to the list. An empty or partial
+list satisfied "all settled" exactly as a complete one would.
+
+Same shape as the findings this branch has spent nineteen rounds on: **absence of evidence
+read as evidence**. The fix is the same as everywhere else — require a positive statement
+(the `ci` run reaching `completed`) rather than the absence of a pending one.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -760,7 +819,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen and M61–M63 in round eighteen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen and M64–M65 in round nineteen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -854,6 +913,8 @@ count from the rows below rather than trusting this sentence.
 | M61 | `withRegistry` ignores the caller's `skipSave` | `boot-adoption.test.ts` (2) |
 | M62 | the pre-close gate does not consult the row | `boot-adoption.test.ts` (1) |
 | M63 | the pre-close gate refuses on ANY row change (**over-strict**) | `boot-adoption.test.ts` (2) |
+| M64 | `unreadable` folds back into `absent` | `boot-adoption.test.ts` (4) |
+| M65 | `absent` is treated as `unreadable` (**system-breaking direction**) | `boot-adoption.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

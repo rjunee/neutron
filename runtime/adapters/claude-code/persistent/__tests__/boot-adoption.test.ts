@@ -22,7 +22,12 @@ import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { beginBootAdoption, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
+import {
+  adoptionPermitsSpawn,
+  beginBootAdoption,
+  reconcileOwnRepl,
+  resetBootAdoptionForTests,
+} from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
@@ -1449,5 +1454,103 @@ describe('a refusal writes NOTHING, and the close requires the row as well as th
     expect(f.host.closed).toEqual([HANDLE])
     expect(outcome.kind).toBe('undecided')
     expect(readRow(f.registryPath)?.pane_handle).toBe('w9:p-ELSEWHERE')
+  })
+})
+
+
+describe('a registry that could not be READ is not a registry with nothing in it', () => {
+  /**
+   * ARGUS r19, and it is this branch's oldest named defect sitting under every guard
+   * above it. `loadRegistry` answers `{}` for a genuinely absent file (ENOENT), for a
+   * non-ENOENT read failure, and for malformed JSON. It knows the difference and told
+   * nobody, and two decisions came to rest on it:
+   *
+   *   - `reconcileOwnRepl` answered `no-handle`, which `adoptionPermitsSpawn` lists under
+   *     "nothing owns the transcript" — so a corrupt registry LICENSED a second `claude`
+   *     on a live transcript without anything inspecting the pane;
+   *   - `rowStillNames` answered `not-named`, which is the PROCEED branch — so registry
+   *     corruption licensed CLOSING a live pane whose ownership was not established.
+   *
+   * THE BOUNDARY THAT MUST NOT MOVE is tested first: ENOENT is a true absence. A cold
+   * boot has no registry file, and a missing file that refused spawns would stop the
+   * system starting.
+   */
+  it('ENOENT — no registry at all — still PERMITS the spawn, exactly as on a cold boot', async () => {
+    const f = fixture()
+    rmSync(f.registryPath, { force: true })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('no-handle')
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(true)
+  })
+
+  it('MALFORMED JSON refuses the spawn, and says why in words absence never uses', async () => {
+    const f = fixture()
+    writeFileSync(f.registryPath, '{"this is not": ')
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    const reason = outcome.kind === 'undecided' ? outcome.reason : ''
+    expect(reason).toMatch(/could NOT BE READ/)
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(false)
+  })
+
+  it('A NON-ENOENT READ FAILURE refuses the spawn too', async () => {
+    // The registry path is a DIRECTORY, so `readFileSync` fails with EISDIR rather than
+    // ENOENT — the production shape of "the file is there and I could not read it".
+    const f = fixture()
+    rmSync(f.registryPath, { force: true })
+    mkdirSync(f.registryPath, { recursive: true })
+    const outcome = await run(f)
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/could NOT BE READ/)
+    expect(adoptionPermitsSpawn(outcome).ok).toBe(false)
+    rmSync(f.registryPath, { recursive: true, force: true })
+  })
+
+  /** Drive a pass that WILL try to close, and break the registry while it is inspecting —
+   *  so the pre-close row read is the thing that meets the broken file. */
+  async function closeWithRegistryBrokenMidPass(
+    f: Fixture,
+    breakIt: () => void,
+  ): Promise<Awaited<ReturnType<typeof reconcileOwnRepl>>> {
+    const { entered, release } = f.host.holdInspect()
+    const pass = reconcileOwnRepl(f.options, KEY, {
+      host: f.host,
+      health: async () => true,
+      log: () => {},
+    })
+    await entered
+    breakIt()
+    release()
+    return await pass
+  }
+
+  it('the CLOSE proceeds when the registry is genuinely gone — nothing names the pane', async () => {
+    // The permitting direction for the other consumer, and it must keep working: if no
+    // row names the pane we are holding, it is an unreferenced live claude and closing it
+    // is the orphan prevention this path exists for.
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    await closeWithRegistryBrokenMidPass(f, () => rmSync(f.registryPath, { force: true }))
+    expect(f.host.closed).toEqual([HANDLE])
+  })
+
+  it('but REFUSES to close when the registry is malformed', async () => {
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const outcome = await closeWithRegistryBrokenMidPass(f, () =>
+      writeFileSync(f.registryPath, '{"broken'),
+    )
+    // THE PANE SURVIVES. Corruption must not license a destructive act.
+    expect(f.host.closed).toEqual([])
+    expect(outcome.kind).toBe('undecided')
+  })
+
+  it('and REFUSES to close on a non-ENOENT read failure', async () => {
+    const f = fixture({ argv: oursArgv(SESSION_ID, 'neutron-someone-elses-channel') })
+    const outcome = await closeWithRegistryBrokenMidPass(f, () => {
+      rmSync(f.registryPath, { force: true })
+      mkdirSync(f.registryPath, { recursive: true })
+    })
+    expect(f.host.closed).toEqual([])
+    expect(outcome.kind).toBe('undecided')
+    rmSync(f.registryPath, { recursive: true, force: true })
   })
 })
