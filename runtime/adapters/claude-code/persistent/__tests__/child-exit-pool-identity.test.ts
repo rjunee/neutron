@@ -1,6 +1,10 @@
 /**
- * child-exit-pool-identity.test.ts — #539, Argus r53: the exit teardown's THREE pool arms are
- * all identity-guarded, including the rejected one.
+ * child-exit-pool-identity.test.ts — #539: **the pool delete is ONE identity guard on the entry this session was published under**.
+ *
+ * (That sentence is written identically in `child-exit-wiring.ts` and in the as-built, because
+ * three artefacts describing one structure in three different ways is how r55 found this file
+ * still claiming "three arms" after the implementation had collapsed them to one. A grep for
+ * the sentence is the check.)
  *
  * THE DEFECT, and how it was found. The audit table said pool deletion on this path was
  * "guarded on the awaited session being ours"; the reject arm deleted the current entry with no
@@ -69,6 +73,20 @@ function session(): ReplSession {
   return new ReplSession(KEY, 'gen-r53', SESSION_ID, CHANNEL, '/tmp')
 }
 
+/**
+ * PUBLISH a session the way production does: the map entry and the session's record of WHAT IT
+ * WAS PUBLISHED AS, together.
+ *
+ * The r55 control was weak precisely because it skipped the second half — it put a promise in
+ * the map and let the teardown find it, so "the current entry" and "the dying session's entry"
+ * were the same object by construction and no implementation could fail the case.
+ */
+function publish(s: ReplSession, p: Promise<ReplSession>): Promise<ReplSession> {
+  s.pooledAs = p
+  pool.set(KEY, p)
+  return p
+}
+
 /** Settle the fire-and-forget exit handler: it awaits the pooled promise, so a couple of
  *  microtask turns are enough and no timer is involved. Awaited, not slept. */
 async function settle(): Promise<void> {
@@ -86,7 +104,7 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
     // Not an unhandled rejection: the code under test is the only consumer that matters, and a
     // bare rejected promise in a suite is noise the runner reports.
     stale.catch(() => undefined)
-    pool.set(KEY, stale)
+    publish(dying, stale)
 
     wireChildExit({
       session: dying,
@@ -128,7 +146,7 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
       rejectCurrent = rej
     })
     current.catch(() => undefined)
-    pool.set(KEY, current)
+    publish(dying, current)
 
     wireChildExit({
       session: dying,
@@ -184,7 +202,7 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
     const stale = new Promise<ReplSession>((res) => {
       resolveStale = res
     })
-    pool.set(KEY, stale)
+    publish(dying, stale)
 
     wireChildExit({
       session: dying,
@@ -216,7 +234,7 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
     // dead child's session stays in the pool for every later turn to resolve through.
     const dying = session()
     const { child, exit } = fakeChild()
-    pool.set(KEY, Promise.resolve(dying))
+    publish(dying, Promise.resolve(dying))
 
     wireChildExit({
       session: dying,
@@ -233,4 +251,54 @@ describe("the exit teardown's pool arms are all identity-guarded", () => {
 
     expect(pool.get(KEY)).toBeUndefined()
   })
+
+  /**
+   * THE INTERLEAVING THE SUITE HAD NO SHAPE FOR (r55): the replacement is published BEFORE the
+   * exit handler runs at all. Every earlier case installed B after settling until the handler
+   * had already captured something, which tests late arrival — the opposite ordering.
+   *
+   * This is the one that distinguishes "the entry I was published under" from "whatever is in
+   * the map when my callback runs", and the three settlements are covered because a respawn
+   * publishes its promise BEFORE its child is ready: pending is the likeliest real shape.
+   */
+  for (const [name, makeReplacement] of [
+    ['fulfilled', () => Promise.resolve(session())],
+    ['pending', () => new Promise<ReplSession>(() => {})],
+    [
+      'rejected',
+      () => {
+        const p = Promise.reject(new Error('the replacement spawn failed'))
+        p.catch(() => undefined)
+        return p as Promise<ReplSession>
+      },
+    ],
+  ] as Array<[string, () => Promise<ReplSession>]>) {
+    it(`a replacement published BEFORE the handler runs survives (${name})`, async () => {
+      const dying = session()
+      const { child, exit } = fakeChild()
+      // The dying session was published, and then superseded — its own entry is gone from the
+      // map before its child's exit is even observed.
+      publish(dying, Promise.resolve(dying))
+      const replacement = makeReplacement()
+      pool.set(KEY, replacement)
+
+      wireChildExit({
+        session: dying,
+        child,
+        sessionKey: KEY,
+        sessionId: SESSION_ID,
+        liveHandle: () => undefined,
+        label: `r55.preinstalled-${name}`,
+        registryPath: undefined,
+      })
+
+      exit()
+      await settle()
+
+      // THE REPLACEMENT IS UNTOUCHED. Reading the map inside the callback would have captured
+      // IT, found it current, and deleted it — a live REPL orphaned out of the map every turn
+      // resolves through, which is what this file's header says must not happen.
+      expect(pool.get(KEY)).toBe(replacement)
+    })
+  }
 })

@@ -2721,7 +2721,11 @@ async function adoptRow(
           child,
         )
       }
-      pool.set(sessionKey, Promise.resolve(session))
+      // PUBLISHED, AND THE SESSION REMEMBERS WHAT IT WAS PUBLISHED AS (r55) — the promise its
+      // teardown will compare the map against.
+      const published = Promise.resolve(session)
+      session.pooledAs = published
+      pool.set(sessionKey, published)
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
     },
     unwind: (reason) => unwind(reason, child),

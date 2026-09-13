@@ -2635,8 +2635,44 @@ round is about does not exist there. Its round-thirty mutations were re-run (M87
 red, so that coverage was never resting on the wrong comparison.
 
 **And the test file's own header claimed three arms while covering one settlement.** A file-level
-claim is the same kind of instrument as a criterion. Four cases now — stale and current, rejected
-and fulfilled — and the header is true.
+claim is the same kind of instrument as a criterion. Four cases then — stale and current, rejected
+and fulfilled — though round fifty-five found the header still saying "three arms" after the
+implementation had collapsed them, which is why the structure is now described by **one sentence
+written identically in three places**:
+
+> **the pool delete is ONE identity guard on the entry this session was published under**
+
+`child-exit-wiring.ts`, `__tests__/child-exit-pool-identity.test.ts` and this file all carry it
+verbatim, and a grep for it is the check that they still agree.
+
+### Round fifty-five: which object, and as of when
+
+The same guard, wrong a third time — and the progression is the clearest thing on this branch
+about what "identity" has to mean.
+
+| Version | The comparison | Why it failed |
+|---|---|---|
+| **r53 and earlier** | `(await pooled) === session` | **value identity**: compares the RESOLVED VALUE to our session, which is true by construction — `pooled` is the promise our session was published under. It answers "is this my session", a question whose answer is always yes, and says nothing about the map |
+| **r54** | `pool.get(key) === pooled`, with `pooled` read **inside** the exit callback | **map identity, bound too late**: "is what I just read still what I just read" is a tautology. A replacement published BEFORE the callback ran was captured, found current, and deleted |
+| **r55 (now)** | `pool.get(key) === session.pooledAs`, bound at **publish** time | asks the only question that licenses a delete: *is the entry I was published under still the one registered* |
+
+> **An identity guard needs WHICH OBJECT and AS OF WHEN.** Every version got the first half
+> right. The rule generalises past this site: a captured operand read at the moment of acting is
+> not a capture at all.
+
+**A third site, found by sweeping rather than by being told.** `spawning.catch` in
+`getOrSpawnSession` deleted the pool entry unconditionally — a spawn that rejects after a
+replacement has been published under the same key would evict the replacement. Same shape, same
+fix; it is on this branch's own code rather than inherited, and the sweep for "who deletes a pool
+entry" is what found it.
+
+**The control could not see the difference**, which is the eighth fixture vacuity and the same
+shape as the other seven: it put a promise in the map and let the teardown find it, so "the
+current entry" and "the dying session's entry" were **the same object by construction** and no
+implementation could fail it. The fixture now models what production does — the map entry and the
+session's record of what it was published under, together — and the new cases publish the
+replacement **before** the handler runs, in all three settlements, because a respawn publishes its
+promise before its child is ready and *pending* is the likeliest real shape.
 
 ### Mutation table
 
@@ -2683,7 +2719,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one M148–M150 in round fifty-three and M151–M152 in round fifty-four, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three M122–M124 in round forty-four M125–M129 in round forty-five M130–M131 in round forty-six M132–M136 in round forty-seven M137–M139 in round forty-eight M140–M142 in round forty-nine M143–M145 in round fifty and M146–M147 in round fifty-one M148–M150 in round fifty-three M151–M152 in round fifty-four and M153–M155 in round fifty-five, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2866,6 +2902,9 @@ count from the rows below rather than trusting this sentence.
 | M150 | the size-watchdog reference is retained again | `child-exit-pool-identity.test.ts` (1) |
 | M151 | the guard compares the resolved VALUE again — the r54 defect, and #679's shape | `child-exit-pool-identity.test.ts` (2 — both stale cases) |
 | M152 | the pool delete is dropped entirely | `child-exit-pool-identity.test.ts` (2 — both current cases) |
+| M153 | the entry is bound INSIDE the exit callback again — the r55 defect | `child-exit-pool-identity.test.ts` (2 — the pre-installed replacement cases) |
+| M154 | the identity guard is dropped | `child-exit-pool-identity.test.ts` (4) |
+| M155 | the pool delete is dropped entirely | `child-exit-pool-identity.test.ts` (2 — both current cases) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

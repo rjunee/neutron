@@ -217,6 +217,20 @@ export class ReplSession {
   paneClaimConfirmedAt?: number
   /** #539 r49 — the autonomous self-fence timer's cancel handle. Cleared by every path that
    *  stops owning the pane, so a retired session leaves no timer behind. */
+  /**
+   * #539 r55 — THE POOL PROMISE THIS SESSION WAS PUBLISHED UNDER.
+   *
+   * The teardown's identity guard needs to name WHICH object and AS OF WHEN, and the second
+   * half is what three rounds of this guard kept missing. Bound inside the exit callback,
+   * `pool.get(key)` means "whatever is registered now" — a tautology that deletes a
+   * replacement installed before the callback ran. Bound HERE, at the moment this session was
+   * published, it means "the entry that is mine", which is the only thing a teardown may
+   * remove.
+   *
+   * `undefined` until published: a session that never entered the pool owns no entry, and its
+   * teardown must delete nothing.
+   */
+  pooledAs: Promise<ReplSession> | undefined
   selfFenceTimer: { cancel: () => void } | undefined
   private readonly incarnation: string = randomBytes(4).toString('hex')
 

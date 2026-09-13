@@ -1426,8 +1426,20 @@ export async function getOrSpawnSession(
     ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
+  // THE SESSION REMEMBERS THE PROMISE IT WAS PUBLISHED UNDER (r55). It cannot do this itself:
+  // the promise exists before the session does, and this is the only scope that holds both.
+  spawning.then(
+    (s) => {
+      s.pooledAs = spawning
+    },
+    () => undefined,
+  )
   spawning.catch(() => {
-    pool.delete(sessionKey)
+    // IDENTITY-GUARDED LIKE THE OTHERS (r55). This delete was unconditional: a spawn that
+    // rejects AFTER a replacement has been published under the same key would evict the
+    // replacement. Same shape as the exit teardown's arms, found by sweeping for the guard
+    // rather than by being told about this site.
+    if (pool.get(sessionKey) === spawning) pool.delete(sessionKey)
     // An async spawn failure (assertion / health) on a RESUME must clear the
     // in-flight stamp so the watchdog retries on the next tick instead of seeing
     // a latched "respawn in progress" that never completes (Codex P2-4).

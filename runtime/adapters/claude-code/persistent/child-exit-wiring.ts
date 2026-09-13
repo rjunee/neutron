@@ -145,35 +145,29 @@ export function wireChildExit(args: ChildExitWiring): void {
       // Drop the synchronous handle mirror only if it still points at THIS child —
       // a concurrent respawn may have already installed a fresh one for the key.
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
-      const pooled = pool.get(sessionKey)
-      if (pooled !== undefined) {
-        // MAP IDENTITY, NOT VALUE IDENTITY (Argus r54; the same defect is live on main and is
-        // filed as #679 — this file is the extracted copy, so the branch fixes a pre-existing
-        // defect rather than one it introduced).
-        //
-        // This read `if ((await pooled) === session) pool.delete(sessionKey)`, which compares
-        // the RESOLVED VALUE to our session — true by construction, since `pooled` is the very
-        // promise our session was published under — and says nothing about what the map holds
-        // NOW. The await is a suspension point: capture A, a respawn replaces `pool[key]` with
-        // B, A resolves, the condition passes, and `pool.delete` evicts **B**. A live REPL
-        // orphaned out of the map every turn resolves through, and the next turn spawns a third
-        // child. Not independent events either: the watchdog respawns on a dead pid, and a
-        // child exiting is what makes the pid dead.
-        //
-        // `pool.get(sessionKey) === pooled` is the question that licenses a delete — "is my
-        // session still the one registered" rather than "is this my session".
-        //
-        // ONE GUARD, NOT THREE ARMS. Round thirty documented fulfilled-ours, fulfilled-other
-        // and rejected as three cases; under map identity they collapse, because a map entry
-        // that is still `pooled` can only resolve to our own session. The `await` is kept
-        // solely to let a rejection settle — it no longer decides anything.
+      // THE ENTRY THIS SESSION WAS PUBLISHED UNDER — bound at publish time, not read here
+      // (Argus r55, the THIRD version of this one guard; see the as-built for why each earlier
+      // version failed). Reading the map inside this callback asks "what is registered now",
+      // which is a tautology: a replacement published before this callback ran would be
+      // captured, found current, and deleted — the very interleaving this file's own header
+      // says must not happen.
+      //
+      // `pooledAs` is `undefined` for a session that never entered the pool, and then there is
+      // no entry of ours to remove.
+      //
+      // Stated once, identically here, in `__tests__/child-exit-pool-identity.test.ts` and in
+      // the as-built, so a grep can check the three agree:
+      //   **the pool delete is ONE identity guard on the entry this session was published under**.
+      const ownEntry = session.pooledAs
+      if (ownEntry !== undefined) {
+        // Awaited only to let a rejection settle; the settlement decides nothing, because an
+        // entry that is still OURS is ours whichever way it resolved (r54).
         try {
-          await pooled
+          await ownEntry
         } catch {
-          // A rejected entry owns no child, which is why the arm exists (r30) — and it is
-          // still subject to the same identity question, which is why it no longer branches.
+          // A rejected entry owns no child, which is why this arm exists (r30).
         }
-        if (pool.get(sessionKey) === pooled) pool.delete(sessionKey)
+        if (pool.get(sessionKey) === ownEntry) pool.delete(sessionKey)
       }
     }),
   )
