@@ -2071,6 +2071,61 @@ coincidental `substrateErrorClass` — is exactly what the check handles. A plug
 (#540 keeps the host selectable) is the realistic source, which is why the end-to-end case
 drives it through `host.spawn` rather than by calling the classifier.
 
+### Round forty-four: the loser's safety depended on reading the winner
+
+`renewClaimForSession` fenced on `not-ours` and returned on everything else. So the
+interleaving that matters was unprotected: A's renewals start failing `unwritable`, A's
+timestamp expires, B takes the claim legitimately, and **A's renewals keep failing the same
+way — so A never observes `not-ours` and never fences.** Both serve. If the row vanishes
+instead, A sees `no-row` and B reads a missing row as `no-handle`, which explicitly permits a
+spawn, with A still live.
+
+**The shape: A's safety was made to depend on reading B's marker, and it cannot.** The same
+failure that costs A the lease — an unacquired lock, an unwritable registry, a vanished row, a
+throw — is the failure that stops A learning anything about the lease. Fixing this by making
+the loser look harder at the registry would have been wrong for exactly that reason.
+
+**A SELF-FENCING DEADLINE, measured from the last CONFIRMED renewal** — confirmed meaning the
+compare-and-set succeeded, not that one was attempted. Past `SELF_FENCE_AFTER_MS` without a
+confirmation, the session fences itself with the round-thirty-nine fencing: detach, evict its
+own pool entry, unregister, refuse turns. Never close — whoever takes the row next inherits a
+live REPL. **Every failed outcome takes the same path, because from the holder's seat
+`unwritable`, `no-row`, a throw and `not-ours` are one fact: *I can no longer prove I own
+this*.**
+
+**The constant is DERIVED, and the subtraction is the safety argument.**
+`SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG_INTERVAL_MS`. Both are
+measured from the same instant — the timestamp a confirmed renewal writes into the row — so
+the holder stops at least one full tick before any other gateway is entitled to take over. Two
+independently chosen constants could be reordered by a later edit, and the overlap would be an
+interval in which both gateways serve; M123 (make the deadline longer) reds.
+
+**The first case has no B in it at all**, which is the test of whether the property was
+actually achieved: if A's safety needed B to exist, that case could not be written.
+
+**Checked on the turn path as well as on the tick**, because the tick is what renews — a
+gateway whose tick loop has died renews nothing, and a deadline evaluated only there would
+let it serve past the moment another gateway may take the row. One timestamp comparison per
+turn, and it reads nothing but this session's own last confirmation.
+
+**And a third, found by a CI gate rather than by a test.** Re-basing those fixtures on
+`Date.now()` — necessary, because `getOrSpawnSession` reads the real clock and the two have to
+be commensurable — turned `expect(t - t0).toBeGreaterThan(THRESHOLD)` into a **wall-clock
+assertion in form**, and the `wall-clock-bound-check` gate caught it. The gate was right: `t0`
+really was a real-clock read, every increment being logical is invisible to a reader, and
+marking it `WALL-CLOCK-BOUND-OK` would have mislabelled it. The assertions are now arithmetic
+on constants (`8 * DEFAULT_WATCHDOG_INTERVAL_MS`), which says what is meant and cannot red
+under load. **A fixture change made to fix one instrument's blind spot walked into another
+instrument's rule** — the same lesson as round forty-one, in the tests rather than the code.
+
+**Two defects in my own first cut, both found by the suite rather than by review.** The
+turn-path check re-fenced an already-fenced key, overwriting the specific `not-ours` reason
+with the generic one — telling an operator less than was known. And it fenced whatever session
+the pool held, which in a fixture that mixes an injected clock with the real one was the
+WINNER: an injected clock has to be commensurable with the real one wherever a single case
+consults both, so those fixtures now base their origin on `Date.now()` rather than a fixed
+2026 date.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -2081,7 +2136,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two and M120–M121 in round forty-three, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine M108–M111 in round forty M112–M115 in round forty-one M116–M119 in round forty-two M120–M121 in round forty-three and M122–M124 in round forty-four, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -2233,6 +2288,9 @@ count from the rows below rather than trusting this sentence.
 | M119 | **both** the carrier and the matcher removed — the r41 defect exactly | `pane-handle-persistence.test.ts` (1) |
 | M120 | the membership check is removed — the r43 defect exactly | `classify-spawn-error.test.ts` (1) + `persistent-repl-substrate.test.ts` (1, **by TIMEOUT** — the skipped `channel.close()`) |
 | M121 | the membership check rejects legitimate codes too | `classify-spawn-error.test.ts` (2) + `persistent-repl-substrate.test.ts` (2, incl. the valid-stamp control) |
+| M122 | the renewal fences only on `not-ours` again — the r44 defect exactly | `adoption-claim-is-a-compare-and-set.test.ts` (2) |
+| M123 | the self-fencing deadline is LONGER than the takeover window | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the ordering case) |
+| M124 | a confirmed renewal does not move the deadline | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the positive control) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

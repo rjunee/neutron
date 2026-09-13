@@ -104,6 +104,7 @@ import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
   ADOPTION_CLAIM_TAKEOVER_MS,
+  SELF_FENCE_AFTER_MS,
   SESSION_COMPACT_IDLE_QUIESCE_MS,
   defaultIsPidAlive,
   probeClaimantLiveness,
@@ -343,6 +344,27 @@ export function beginBootAdoption(
     // also why the shutdown path refuses to let a child survive without a row: the
     // handle would have nowhere to be written and nobody to read it.
     return Promise.resolve({ kind: 'no-handle', sessionKey })
+  }
+  // AND THE SELF-FENCING DEADLINE IS CHECKED ON THE TURN PATH TOO (Argus r44), not only on
+  // the supervision tick. The tick is what RENEWS, so a tick that has stopped renews nothing
+  // — and if the deadline were only evaluated there, a gateway whose tick loop died would go
+  // on serving past the moment another gateway may take the row. Evaluated here it costs one
+  // timestamp comparison per turn and needs nothing but this session's own last confirmation.
+  //
+  // AND ONLY IF THIS KEY IS NOT ALREADY FENCED. A key fenced by the renewal path carries the
+  // more specific reason (`not-ours` — we SAW the takeover), and re-fencing here would
+  // overwrite it with the generic one, telling an operator less than was actually known.
+  const pooledForDeadline = fencedKeys.has(sessionKey) ? undefined : pool.get(sessionKey)
+  const liveForDeadline =
+    pooledForDeadline === undefined ? undefined : (Bun.peek(pooledForDeadline) as ReplSession | undefined)
+  if (liveForDeadline !== undefined && liveForDeadline.paneClaimBy !== undefined) {
+    fenceIfPastSelfDeadline(
+      sessionKey,
+      liveForDeadline,
+      (deps.now ?? Date.now)(),
+      'unwritable',
+      deps.log ?? defaultLog,
+    )
   }
   // FENCED: this gateway was taken off this key by another incarnation (see
   // {@link fenceLostSession}). Answered BEFORE the pass map, because a fenced key must not
@@ -1402,19 +1424,81 @@ export function renewClaimForSession(
   // so this branch can be taken; handing them further up to a tick that ignores them is how
   // this branch has twice ended up computing a classification and dropping it.
   const outcome = renewAdoptionClaim(registryPath, sessionKey, claimedBy, now)
-  if (outcome !== 'not-ours') return
-  // ANOTHER INCARNATION HOLDS THIS ROW, which means this gateway missed enough ticks to be
-  // taken for dead while it was still running. Logging alone was the r39 defect: the session
-  // stayed attached and kept answering turns on a pane it had lost. Re-claiming is not the
-  // answer either — that is the second owner it was replaced for being unable to be. It
-  // stops.
+  if (outcome === 'renewed') {
+    // CONFIRMED. This is the only thing that moves the self-fencing deadline, because it is
+    // the only outcome that proves this gateway still owns the pane.
+    session.paneClaimConfirmedAt = now
+    return
+  }
+  if (outcome === 'not-ours') {
+    // ANOTHER INCARNATION HOLDS THIS ROW, and we could see it. Logging alone was the r39
+    // defect: the session stayed attached and kept answering turns on a pane it had lost.
+    // Re-claiming is not the answer either — that is the second owner it was replaced for
+    // being unable to be. It stops.
+    fenceLostSession(
+      sessionKey,
+      session,
+      'the adoption claim is NO LONGER OURS — another incarnation took this row over while this gateway ' +
+        'was not renewing, so this one has STOPPED serving that pane: the wrapper is detached (never closed — ' +
+        'the REPL is the new owner\'s and it is live), the registrations are released, and turns for this key ' +
+        'are refused until a construction of this substrate reconciles it again',
+      log,
+    )
+    return
+  }
+  // AND EVERY OTHER OUTCOME IS THE SAME FACT FROM THIS SEAT (Argus r44): `unwritable`,
+  // `no-row` and a throw all mean *I can no longer prove I own this pane*. Fencing only on
+  // `not-ours` made this gateway's safety depend on READING THE WINNER'S MARKER — which it
+  // cannot do, because the very failure that costs it the lease is the failure that stops it
+  // seeing anything about the lease. A renewal stuck on `unwritable` never becomes
+  // `not-ours`, so the old holder served forever while the new one served too.
+  fenceIfPastSelfDeadline(sessionKey, session, now, outcome, log)
+}
+
+/**
+ * STOP SERVING BECAUSE WE CAN NO LONGER PROVE WE OWN IT (#539, Argus r44).
+ *
+ * THE PROPERTY THIS BUYS, stated because it is what makes the design correct rather than
+ * merely careful: **a lease holder never needs to read the other gateway's state to be
+ * safe.** Everything here is derived from this session's own last CONFIRMED renewal, so it
+ * holds under a partition, under an unwritable registry, under a vanished row, and under a
+ * lock this process can never acquire again — every case where looking harder at the registry
+ * would have told us nothing. Fixing r44 by making the loser look harder would have been
+ * wrong for exactly that reason.
+ *
+ * The deadline is {@link SELF_FENCE_AFTER_MS}, which is DERIVED from
+ * {@link ADOPTION_CLAIM_TAKEOVER_MS} by subtracting one renewal interval. Both are measured
+ * from the same instant — the timestamp a confirmed renewal writes — so this gateway has
+ * stopped at least a full tick before any other is entitled to take over.
+ *
+ * Same fencing as round thirty-nine, and for the same reason NOT a close: whoever takes this
+ * pane next inherits a live REPL.
+ */
+function fenceIfPastSelfDeadline(
+  sessionKey: string,
+  session: ReplSession,
+  now: number,
+  reason: ClaimRenewal,
+  log: (msg: string) => void,
+): void {
+  // No confirmation on record at all is treated as "now" rather than as "forever ago": the
+  // claim was taken moments ago by definition (it is what put this session in the pool), and
+  // a missing stamp must not fence a session that has never had a chance to renew.
+  const confirmedAt = session.paneClaimConfirmedAt
+  if (confirmedAt === undefined) {
+    session.paneClaimConfirmedAt = now
+    return
+  }
+  if (now - confirmedAt < SELF_FENCE_AFTER_MS) return
   fenceLostSession(
     sessionKey,
     session,
-    'the adoption claim is NO LONGER OURS — another incarnation took this row over while this gateway ' +
-      'was not renewing, so this one has STOPPED serving that pane: the wrapper is detached (never closed — ' +
-      'the REPL is the new owner\'s and it is live), the registrations are released, and turns for this key ' +
-      'are refused until a construction of this substrate reconciles it again',
+    `this gateway has NOT CONFIRMED ownership of its pane for ${String(now - confirmedAt)}ms (last renewal ` +
+      `outcome: ${reason}), which is past the self-fencing deadline — so it can no longer prove the pane is ` +
+      'ours and has STOPPED serving it. The wrapper is detached (never closed — the REPL is live and whoever ' +
+      'takes the row next inherits it), the registrations are released, and turns for this key are refused. ' +
+      'Deliberately NOT conditional on observing another owner: the failure that costs a lease is the failure ' +
+      'that hides who took it.',
     log,
   )
 }
@@ -2226,6 +2310,10 @@ async function adoptRow(
    *  and the value every give-back path CASes against. */
   const claimIdentity = randomUUID()
   session.paneClaimBy = claimIdentity
+  /** The instant the claim is stamped into the row — ALSO this session's first confirmed
+   *  ownership, so the self-fencing deadline starts from the same origin the takeover
+   *  threshold is measured from rather than from an unrelated clock read. */
+  const claimTakenAt = (deps.now ?? Date.now)()
 
   let primed = false
   let child: PtyChild
@@ -2351,7 +2439,7 @@ async function adoptRow(
     // THIS PASS'S OWN IDENTITY, minted once above and recorded on the session so every
     // path that stops owning it can give the claim back.
     incarnation: claimIdentity,
-    now: (deps.now ?? Date.now)(),
+    now: claimTakenAt,
     claimantPid: process.pid,
     deps,
     publish: () => {
@@ -2361,6 +2449,9 @@ async function adoptRow(
       if (signal.abandoned && signal.cause === 'shutdown') {
         return release('at the row claim', child)
       }
+      // CONFIRMED AT THE CLAIM. The compare-and-set above succeeded, which is the same
+      // evidence a renewal produces — so the self-fencing deadline runs from here.
+      session.paneClaimConfirmedAt = claimTakenAt
       pool.set(sessionKey, Promise.resolve(session))
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
     },

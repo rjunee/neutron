@@ -187,6 +187,29 @@ export const RESPAWN_IN_FLIGHT_TTL_MS = 90_000
 export const ADOPTION_CLAIM_TAKEOVER_MS = 6 * DEFAULT_WATCHDOG_INTERVAL_MS
 
 /**
+ * #539 r44 — WHEN A LEASE HOLDER MUST STOP SERVING ON ITS OWN EVIDENCE, having failed to
+ * confirm a renewal for this long.
+ *
+ * WHY A SELF-DEADLINE EXISTS AT ALL. Round thirty-nine made the loser fence when its renewal
+ * came back `not-ours` — i.e. when it SAW the takeover. It cannot rely on seeing it: the same
+ * failure that costs a gateway the lease (an unacquired lock, an unwritable registry, a
+ * vanished row, a throw) is the failure that stops it learning anything about who took over.
+ * A renewal that keeps answering `unwritable` never becomes `not-ours`, so the old holder
+ * served forever while the new one served too. **A lease holder has to be safe on the
+ * strength of what it knows about ITSELF**, and the only thing it reliably knows is when it
+ * last CONFIRMED a renewal.
+ *
+ * DERIVED, NOT CHOSEN, and the subtraction is the safety argument. Both this deadline and
+ * {@link ADOPTION_CLAIM_TAKEOVER_MS} are measured from the SAME instant — the timestamp a
+ * confirmed renewal writes into the row — so subtracting one renewal interval guarantees the
+ * old holder has stopped at least a full tick BEFORE any other gateway is entitled to take
+ * over. Two independently chosen constants could be reordered by a later edit and the overlap
+ * would be an interval in which both gateways serve; this cannot be, and the mutation that
+ * makes it longer than the takeover window reds.
+ */
+export const SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG_INTERVAL_MS
+
+/**
  * IS THE PROCESS THAT HOLDS A CLAIM STILL THERE — three answers, because two would be a
  * defect (#539).
  *

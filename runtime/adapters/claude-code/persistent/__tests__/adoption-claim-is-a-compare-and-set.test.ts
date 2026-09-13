@@ -56,7 +56,11 @@ import type { ReplSession } from '../repl-session.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
-import { ADOPTION_CLAIM_TAKEOVER_MS, DEFAULT_WATCHDOG_INTERVAL_MS } from '../signatures.ts'
+import {
+  ADOPTION_CLAIM_TAKEOVER_MS,
+  DEFAULT_WATCHDOG_INTERVAL_MS,
+  SELF_FENCE_AFTER_MS,
+} from '../signatures.ts'
 import { runReplWatchdogTick } from '../supervision.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
@@ -292,7 +296,12 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // what the threshold measures now is the time since the last RENEWAL.
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    // BASED ON THE REAL CLOCK, not a fixed date. These cases inject `now` into the claim
+    // path while `getOrSpawnSession` reads the real clock, and a fixed 2026 timestamp puts
+    // the two an arbitrary distance apart — which made the r44 self-fencing deadline fire
+    // spuriously on a session that had just confirmed. An injected clock has to be
+    // COMMENSURABLE with the real one wherever both are consulted in one case.
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     const ownersChild = f.host.attached[0]
     const ownersSession = await pool.get(KEY)
@@ -300,12 +309,19 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
 
     // A LIVES, and its ticks say so. Six intervals takes us past the threshold measured
     // from the adoption — which is the whole point of the case.
+    // THE SPAN IS ARITHMETIC ON CONSTANTS, and asserted as such rather than as a delta of
+    // two clock-derived values: the origin is seeded from the real clock (it has to be —
+    // `getOrSpawnSession` reads the real one), so `t - t0` would be a wall-clock comparison
+    // in form even though every increment here is logical. The product says what is meant
+    // and cannot red under load.
+    const renewedSpan = 8 * DEFAULT_WATCHDOG_INTERVAL_MS
+    expect(renewedSpan).toBeGreaterThan(ADOPTION_CLAIM_TAKEOVER_MS)
     let t = t0
     for (let i = 0; i < 8; i += 1) {
       t += DEFAULT_WATCHDOG_INTERVAL_MS
       await tickAt(f, t)
     }
-    expect(t - t0).toBeGreaterThan(ADOPTION_CLAIM_TAKEOVER_MS)
+    expect(t).toBe(t0 + renewedSpan)
     expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t)
 
     // B BOOTS IN THE GAP BETWEEN TWO RENEWALS — and not a millisecond after the last one,
@@ -342,7 +358,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // every case here would still pass.
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     expect(readRow(f.registryPath)?.adoption_claim_at).toBe(t0)
 
@@ -361,7 +377,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // the work alone.
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     const stale = readRow(f.registryPath)?.adoption_claim_by
     pool.clear()
@@ -388,7 +404,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     //
     // Synchronous on purpose: this is the claim rule, not a pass.
     const f = fixture()
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     return pass(f, { now: () => t0 })
       .then(async (first) => {
         expect(first.kind).toBe('adopted')
@@ -407,7 +423,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // An EPERM or an unreadable answer must leave the claim standing until the threshold,
     // because the alternative is taking a pane away from an owner that is serving it.
     const f = fixture()
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     pool.clear()
     childByKey.clear()
@@ -426,7 +442,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // the row would then name a gateway nobody is talking to.
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     const aSession = await pool.get(KEY)
     const aClaim = aSession?.paneClaimBy
@@ -539,7 +555,7 @@ describe('the gateway that LOST the claim stops serving the pane', () => {
   it('detaches, evicts ITS OWN entry, and refuses turns — while the winner keeps serving', async () => {
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
 
     // A ADOPTS AND PUBLISHES.
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
@@ -609,7 +625,7 @@ describe('the gateway that LOST the claim stops serving the pane', () => {
     // off by its own safety mechanism.
     const f = fixture()
     supervise(f)
-    const t0 = Date.parse('2026-09-13T12:00:00Z')
+    const t0 = Date.now()
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     const session = await pool.get(KEY)
     const child = f.host.attached[0]
@@ -622,5 +638,139 @@ describe('the gateway that LOST the claim stops serving the pane', () => {
     expect(child?.screensDelivered).toEqual(['an ordinary screen'])
     // And the turn path is open.
     expect(f.host.closed).toEqual([])
+  })
+})
+
+describe('a lease holder stops on its OWN evidence, without observing the winner', () => {
+  /**
+   * ARGUS r44, and it is the finding that makes the lease correct rather than careful.
+   *
+   * Round thirty-nine fenced when the renewal came back `not-ours` — when this gateway SAW
+   * the takeover. **It cannot rely on seeing it.** The same failure that costs a gateway its
+   * lease — an unacquired lock, an unwritable registry, a vanished row, a throw — is the
+   * failure that stops it learning anything about who took over. A renewal stuck on
+   * `unwritable` never becomes `not-ours`, so the old holder served forever and the new one
+   * served too: the two-owner state, produced by making A's safety depend on reading B's
+   * marker.
+   *
+   * So the deadline is measured from A's last CONFIRMED renewal, and nothing else. The cases
+   * below are written so the FIRST one has no B in it at all — if A's safety needed B to
+   * exist, that case could not be written.
+   */
+  const spec: AgentSpec = { prompt: 'hi', tools: [], model_preference: ['claude-opus-5'] }
+
+  it('fences itself when it cannot CONFIRM ownership, with no second gateway in existence', async () => {
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = await pool.get(KEY)
+    const child = f.host.attached[0]
+    expect(session?.paneClaimConfirmedAt).toBe(t0)
+
+    // RENEWALS BEGIN FAILING FOR REAL — the flock stops working, so every renewal answers
+    // `unwritable`. Not a stubbed return: the point is that the failure is the same one that
+    // would hide a takeover, and it is forced at the lock rather than at the function.
+    setFlockImplForTests(() => 1)
+    // Ticks keep firing and keep failing, right up to the deadline.
+    await tickAt(f, t0 + DEFAULT_WATCHDOG_INTERVAL_MS)
+    await tickAt(f, t0 + SELF_FENCE_AFTER_MS - 1)
+    // STILL SERVING: the deadline has not passed, and a gateway that fenced early would
+    // abandon a pane it still provably owned.
+    expect(child?.detached).toBe(false)
+    expect(await pool.get(KEY)).toBe(session)
+
+    // AND NOW IT PASSES.
+    await tickAt(f, t0 + SELF_FENCE_AFTER_MS)
+
+    // A HAS STOPPED, on its own account. No B exists — nothing has taken the row, and the
+    // registry still says the claim is A's; A simply cannot prove it any more.
+    expect(child?.detached).toBe(true)
+    child?.push('❯ 1. Yes, proceed')
+    expect(child?.screensDelivered).toEqual([])
+    expect(child?.keysSent).toEqual([])
+    expect(await pool.get(KEY)).toBeUndefined()
+    // AND THE PANE IS LEFT ALIVE — whoever takes the row next inherits a live REPL.
+    expect(f.host.closed).toEqual([])
+    expect(f.host.panes.has(HANDLE)).toBe(true)
+
+    // A turn is refused, through the same gate every other unestablished owner uses.
+    setFlockImplForTests(undefined)
+    let threw = ''
+    try {
+      await getOrSpawnSession(KEY, f.options, spec)
+    } catch (e) {
+      threw = e instanceof Error ? e.message : String(e)
+    }
+    expect(threw).toMatch(/refusing to resume/i)
+    expect(threw).toMatch(/NOT CONFIRMED ownership/i)
+  })
+
+  it('...and the deadline is strictly SHORTER than the window another gateway may take over in', async () => {
+    // THE RELATIONSHIP, pinned behaviourally rather than as an assertion about two numbers.
+    // A stops at the deadline; B is entitled to the row only after the takeover window. If
+    // those were reordered there would be an interval in which A still serves and B already
+    // owns — so the case drives BOTH and asserts the handover is clean.
+    expect(SELF_FENCE_AFTER_MS).toBeLessThan(ADOPTION_CLAIM_TAKEOVER_MS)
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const aSession = await pool.get(KEY)
+    const aChild = f.host.attached[0]
+
+    // A's renewals fail; A fences itself at its deadline.
+    setFlockImplForTests(() => 1)
+    await tickAt(f, t0 + SELF_FENCE_AFTER_MS)
+    expect(aChild?.detached).toBe(true)
+
+    // ONLY LATER may B take the row — and by then A has already stopped.
+    setFlockImplForTests(undefined)
+    resetBootAdoptionForTests()
+    const b = await pass(f, {
+      now: () => t0 + ADOPTION_CLAIM_TAKEOVER_MS + 1,
+      claimantLiveness: () => 'unknown',
+    })
+    expect(b.kind).toBe('adopted')
+    const bSession = await pool.get(KEY)
+    expect(bSession).toBeDefined()
+    expect(bSession).not.toBe(aSession)
+    // B SERVES, A DOES NOT.
+    const bChild = f.host.attached[1]
+    expect(bChild?.detached).toBe(false)
+    bChild?.push('a screen for the new owner')
+    expect(bChild?.screensDelivered).toEqual(['a screen for the new owner'])
+    aChild?.push('a screen for the old one')
+    expect(aChild?.screensDelivered).toEqual([])
+    // The pane was never closed on the way through.
+    expect(f.host.closed).toEqual([])
+  })
+
+  it('...and renewals that keep SUCCEEDING leave it serving indefinitely', async () => {
+    // THE POSITIVE CONTROL. A deadline that fired regardless would pass both cases above and
+    // stop every adopted REPL a minute after it was adopted — the feature, switched off by
+    // its own safety mechanism.
+    const f = fixture()
+    supervise(f)
+    const t0 = Date.now()
+    expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
+    const session = await pool.get(KEY)
+    const child = f.host.attached[0]
+
+    // Well past the deadline in elapsed time, but every tick confirms.
+    // Arithmetic on constants, for the reason given in the live-owner case above.
+    const confirmedSpan = 12 * DEFAULT_WATCHDOG_INTERVAL_MS
+    expect(confirmedSpan).toBeGreaterThan(SELF_FENCE_AFTER_MS)
+    let t = t0
+    for (let i = 0; i < 12; i += 1) {
+      t += DEFAULT_WATCHDOG_INTERVAL_MS
+      await tickAt(f, t)
+    }
+    expect(t).toBe(t0 + confirmedSpan)
+    expect(session?.paneClaimConfirmedAt).toBe(t)
+    expect(child?.detached).toBe(false)
+    expect(await pool.get(KEY)).toBe(session)
+    child?.push('an ordinary screen')
+    expect(child?.screensDelivered).toEqual(['an ordinary screen'])
   })
 })

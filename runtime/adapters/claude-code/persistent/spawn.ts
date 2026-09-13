@@ -598,6 +598,10 @@ async function spawnSession(
     // came to exist: while only adoption claimed, a spawner served a pane it had not
     // claimed and an adopter could take it out from under a live gateway.
     const paneClaimant = randomUUID()
+    /** Also this session's FIRST CONFIRMED ownership, if the write below lands — the origin
+     *  the r44 self-fencing deadline is measured from, and the same instant the row's
+     *  takeover threshold runs from. */
+    const paneClaimedAt = Date.now()
     if (child.paneHandle !== undefined) session.paneClaimBy = paneClaimant
     // #539 — and WHAT THIS CHILD WAS SPAWNED AS, so a re-adopted session can answer
     // the warm-reuse guards instead of failing all three and being evicted on the
@@ -651,7 +655,7 @@ async function spawnSession(
                 handle: child.paneHandle,
                 generation: childGeneration,
                 claimant: paneClaimant,
-                now: Date.now(),
+                now: paneClaimedAt,
                 pid: process.pid,
               })
             : disowned
@@ -678,6 +682,10 @@ async function spawnSession(
       // nobody; the turn fails retryably and the next one re-spawns against a registry
       // whose lock may by then be available. Refusing without killing would leave exactly
       // the unrecorded live child this branch is refusing to create.
+      // CONFIRMED, on the same evidence a renewal produces: the compare-and-set landed.
+      if (ownershipRecorded && child.paneHandle !== undefined) {
+        session.paneClaimConfirmedAt = paneClaimedAt
+      }
       if (!ownershipRecorded && child.paneHandle !== undefined) {
         try {
           child.kill()

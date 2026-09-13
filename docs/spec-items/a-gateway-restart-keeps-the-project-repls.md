@@ -7,6 +7,17 @@ cutover: true
 legacy_ref: "GitHub issue #539 (herdr step 2c)"
 ---
 
+> **WHY THIS ITEM IS `status: open` WITH EVERY BOX UNCHECKED WHILE THE AS-BUILT RECORD
+> SPEAKS IN THE PAST TENSE.** The two are not in conflict and the gap is deliberate. Each
+> criterion below is ticked in a FOLLOW-UP PR immediately after this one merges, so every
+> tick can cite a command run against the **merged** tree rather than against a branch that
+> may still change — a box ticked from a branch is a claim about code that has not landed,
+> which is the one kind of evidence this item's own record keeps refusing to accept
+> elsewhere. The as-built (`.trident/as-built/feat/539-adopt-repls-across-restart.md`)
+> records what shipped, which is its job; this file records what has been VERIFIED, which is
+> a different question with a later answer. `status: done` only if no box is left unticked;
+> any that cannot be honestly ticked stays open with its reason.
+
 The owner's acceptance criterion, verbatim: *a gateway restart brings every project
 REPL back with its conversation intact.*
 
@@ -280,6 +291,24 @@ it must not swallow.
       field-for-field; and an ordinary spawn claiming, serving and giving both back on exit)
       and `__tests__/pane-ownership-is-one-fact.test.ts` (no module outside the funnel writes
       either field, with a positive control so the check cannot go vacuous).
+- [ ] **A LEASE HOLDER STOPS ON ITS OWN EVIDENCE, WITHOUT OBSERVING THE WINNER.** Fencing
+      only when a renewal answers "not ours" made safety depend on READING the other
+      gateway's marker — which cannot work, because the same failure that costs a lease (an
+      unacquired lock, an unwritable registry, a vanished row, a throw) is the failure that
+      hides who took it: renewals stuck on one of those never become "not ours", so the old
+      holder served forever while the new one served too. So the session fences itself once it
+      has gone `SELF_FENCE_AFTER_MS` without a CONFIRMED renewal, whatever the reason, and
+      that constant is DERIVED from the takeover window by subtracting one renewal interval —
+      both measured from the same instant, so the holder stops at least a tick before any
+      other gateway may take over. Checked on the turn path as well as the tick, since a
+      gateway whose tick loop has died renews nothing.
+      *Verified by* `__tests__/adoption-claim-is-a-compare-and-set.test.ts` — the first case
+      has NO second gateway in it at all (if safety needed one, the case could not be
+      written): renewals fail at the real flock, the deadline passes, and the session delivers
+      no screen, sends no key, loses its pool entry and is refused a turn, with the pane left
+      alive. Then the same with a second gateway taking over afterwards, asserting it serves
+      and the old one does not; and a control where renewals keep confirming and the session
+      serves indefinitely.
 - [ ] **THE GATEWAY THAT LOSES THE CLAIM STOPS SERVING THE PANE, AND DOES NOT CLOSE IT.**
       A renewal that comes back `not-ours` means another incarnation took this row over while
       this gateway was not refreshing. Logging that and carrying on IS the two-owner state,

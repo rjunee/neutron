@@ -204,6 +204,17 @@ export class ReplSession {
    * of them.
    */
   paneClaimBy?: string
+  /**
+   * #539 r44 — WHEN THIS SESSION LAST CONFIRMED that it still owns its pane: the moment a
+   * compare-and-set actually succeeded, not the moment one was attempted.
+   *
+   * The distinction is the whole point. A renewal that fails — an unacquired lock, an
+   * unwritable registry, a row that vanished, a throw — tells this gateway nothing about who
+   * owns the pane now, so it cannot be treated as evidence of anything except the absence of
+   * evidence. Past {@link SELF_FENCE_AFTER_MS} without a confirmation, this session stops
+   * serving on its own account, WITHOUT needing to observe the winner.
+   */
+  paneClaimConfirmedAt?: number
   private readonly incarnation: string = randomBytes(4).toString('hex')
 
   /** Mint this incarnation's next turn-id as `<incarnation>:<seq>` — globally
