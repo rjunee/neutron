@@ -598,11 +598,12 @@ is or is not covered. **Checkable by someone who did not write it**, which is th
 | Guard | Call sites of what it guards | Covered? — with the test, or the issue |
 |---|---|---|
 | **Lock outcome consumed** (`onOutcome`) | `withFlockSync`'s three production callers: `sink-coordinates.ts:755`, `repl-registry.ts:712` (`withRegistryRead`), `repl-registry.ts:758` (`withRegistry`). | **All three.** `sink-coordinates` consumed it before this branch — the precedent I should have followed. Both registry helpers forward it. Tests: `gateway-shutdown-survival.test.ts` "a REAL flock that does not grant the lock is a kill…", `boot-adoption.test.ts` "REFUSES to publish when the lock was not acquired…". |
-| — its registry consumers | `withRegistryRead`: `claimShutdownSurvival`. `withRegistry`: the row claim (`boot-adoption.ts:1064`), the handle clear (`:1224`), `spawn.ts:600` + `:1180`, `repl-registry.ts:777/795/808`, `supervision.ts:239`. | **The three whose correctness rests on atomicity**, each with a named case above plus "REFUSES to clear the handle on a non-atomic write…". `spawn.ts` and the `repl-registry` helpers are merges and unsets with last-writer-wins semantics that predate this branch and never compare-then-write. **`supervision.ts:239` is different and I did check rather than assume:** it reads `respawn_in_flight_at`, tests the TTL, and writes the stamp under the same flock, returning `go` only when it claimed — a genuine CAS, and its own comment states the requirement ("two rapid force requests … can't both spawn the same sessionKey — exactly ONE spawn"). It does **not** consume `onOutcome`, so it has the same exposure this branch just fixed twice. Pre-existing on `main`, deliberately not widened into here, and it needs an issue of its own. |
+| — its registry consumers | `withRegistryRead`: `claimShutdownSurvival`. `withRegistry`: the row claim (`boot-adoption.ts:1064`), the handle clear (`:1224`), `spawn.ts:600` + `:1180`, `repl-registry.ts:777/795/808`, `supervision.ts:239`. | **The three whose correctness rests on atomicity**, each with a named case above plus "REFUSES to clear the handle on a non-atomic write…". `spawn.ts` and the `repl-registry` helpers are merges and unsets with last-writer-wins semantics that predate this branch and never compare-then-write. **`supervision.ts:239` is different and I did check rather than assume:** it reads `respawn_in_flight_at`, tests the TTL, and writes the stamp under the same flock, returning `go` only when it claimed — a genuine CAS, and its own comment states the requirement ("two rapid force requests … can't both spawn the same sessionKey — exactly ONE spawn"). It does **not** consume `onOutcome`, so it has the same exposure this branch just fixed twice. Pre-existing on `main`, deliberately not widened into here, and **filed as #675** — unlike #674 it does not fail in the conservative direction. |
 | **Row CAS on (handle, generation)** | Every site where this branch writes or erases a row it decided about: the claim, the clear. | **Both.** Tests: "an adoption whose row is replaced mid-attach GIVES THE CHILD BACK", "a CLOSE whose row moves before the write reports undecided, not a close", each with an uncontended positive control. |
 | **Abandonment cause** (`signal`) | The three points past which a pass must not act: pre-attach, post-attach, publish. | **All three**, each with its own reason string so a case cannot claim one and exercise another. Tests: "a pass still attaching when shutdown lands publishes NOTHING…", "TIMER FIRST, THEN SHUTDOWN…", "SHUTDOWN FIRST, THEN TIMER…", control "with no shutdown at all, the bound still CLOSES". |
 | **Element-wise argv match** | `argvMatchesSession`: `classifyPaneForAdoption` (host vector), `cmdlineMatchesSession` (string form). `cmdlineMatchesSession`: `boot-adoption.ts:721`, `orphan-adoption.ts:489`/`:574`, `supervision.ts:140`. | **The vector caller.** Tests: "REFUSES an argv[0] that only looks like a claude once the vector is flattened", "REFUSES a smuggled argv[0] even when every OTHER rule is satisfied", "ACCEPTS a real builder argv whose paths contain spaces". The four string callers are `ps`-derived and cannot be handed a vector — **not covered, filed as #672**, and the docblock says the rule is vacuous for that form rather than implying coverage. |
 | **Protocol gate** (`verifyHerdrProtocol`) | Every `HerdrHost` method that opens a connection: `spawn`/`attach` (shared `open`, `:239`), `inspectHandle` (`:795`), `closeHandle` (`:851`). | **All of them.** Tests: `herdr-adoption.test.ts` protocol-gate cases for inspect and close; M15/M16 red when either gate is removed. |
+| **Absence is instrument-relative** (`scanTranscriptOwners` → `none`) | Its one consumer: the pid-fallback's handle clear at `boot-adoption.ts:788`, which is also what licenses the cold spawn at `spawn.ts:927`. | **Covered.** Tests: `orphan-adoption.test.ts` "answers UNKNOWN for a live owner whose spaced binary path the listing renders ambiguously", "a bystander holding the transcript open is UNKNOWN, not none", "a strict match still OUTRANKS an ambiguous one", control "a genuinely empty machine is still a positive absence"; and through the consumer, `boot-adoption.test.ts` "REFUSES rather than clears when a process merely MENTIONS the session id". M59 reds the unit, M60 reds the consumer. |
 | **Shutdown survival gate** | The three kill sites in `shutdownAllPersistentRepls`: the pooled walk (`pool.ts:1177`), the late-arriving spawn (`:1228`), the ephemeral sweep (`:1254`). | **One of three, and the other two for different reasons.** The pooled walk is covered — `gateway-shutdown-survival.test.ts` "LEAVES a findable herdr-hosted child alive…" with its kill-direction counterparts. The ephemeral sweep is **correctly** uncovered: never pooled, never in a row, so the gate would answer `kill` regardless. The late-arriving spawn is **not covered and is a real gap — filed as #674**, a known residual of the survival feature rather than a defect introduced here: it can end a herdr-hosted child whose row names its pane. |
 
 **On #674's difficulty, corrected, because a wrong reason recorded is how the next person
@@ -622,6 +623,52 @@ The audit is the deliverable, not the table's current contents: the next guard t
 or its successors add should extend it, and a row that says "not covered, and here is why"
 is worth more than one that says "covered" without the enumeration behind it.
 
+### Round seventeen: a positive absence drawn from an instrument that could not see
+
+**The dangerous mirror of the spaced-path finding, not a repeat of it.**
+`scanTranscriptOwners` filtered a flattened `ps` listing with `cmdlineMatchesSession`. For
+a supported spaced binary path — `/opt/my tools/claude --resume <uuid>` — tokenisation
+gives `tokens[0]` = `/opt/my`, basename `my`, so the strict matcher refuses and the live
+owner is **invisible**. The scan answered `none`; the caller read that as "this transcript
+has no owner", cleared the durable handle, and licensed a cold `claude --resume` onto a
+transcript that already had one. **Two owners, reached by an absence claim rather than a
+presence one.**
+
+Round twelve's finding was the same input class failing SAFE — a spaced path was refused
+adoption. This one fails DANGEROUS, and that asymmetry is why it belonged here and not in
+#672: #663 is the branch that newly turns this scan into an *authorization to spawn*, so
+#663 owes the authorization's soundness. Third defect on this branch traceable to a path
+with a space in it, and the first that can destroy a conversation.
+
+**`none` is a claim about the instrument as much as about the machine.** The comment above
+the call site already said it — *"Only a scan that RAN and found nobody is a positive
+absence"* — and then applied it to one failure mode (the listing failing) while missing the
+other (the matcher being blind to a shape the listing rendered lossily). The type already
+had room: `unknown` existed and was reachable only from a failed listing.
+
+**The discriminator inverts the substring test's usual weakness.** This module's header is
+right that "the cmdline contains the uuid" is far too weak to license a KILL or an ADOPT —
+a `tail -f …/<uuid>.jsonl` satisfies it. That same weakness is exactly what makes it strong
+enough to refuse a claim of ABSENCE: if the uuid is on that command line at all, the scan
+cannot honestly say the transcript is unowned. A strict match still outranks an ambiguous
+one, because `owners` is the strongest statement available and both refuse the spawn.
+
+**An existing test asserted the behaviour this ruling makes wrong, and it was rewritten
+rather than deleted.** "ignores a process that merely MENTIONS the session id" expected
+`handle-cleared` for a `tail -f` bystander. That was right about the bystander and wrong
+about what the instrument can establish: since the scan cannot distinguish "bystander"
+from "owner I could not parse", it must not claim absence for either. The case now asserts
+`undecided`, the reason, and — the assertion that carries it — that the handle **survives**.
+The bystander costs a refusal, which is the direction to be wrong in: a refused clear is
+retried next turn, a second owner corrupts a conversation.
+
+**The rows are built by the real builder and joined the way `ps` renders them**, with the
+premise asserted (`cmdlineMatchesSession` really does fail on that row) so the case cannot
+decay into the ordinary-owner case if the matcher ever learns to parse it. The positive
+control — an empty machine, and a busy machine with nothing of ours on it — is the one
+that matters most here: without it, answering `unknown` for everything would satisfy the
+finding and the feature would never clear a handle again.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied
@@ -632,7 +679,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen and M57–M58 in round fifteen, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen and M59–M60 in round seventeen, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -721,6 +768,8 @@ count from the rows below rather than trusting this sentence.
 | M56 | the unacquired-lock branch CLOSES instead of releasing | `boot-adoption.test.ts` (1) |
 | M57 | the pid write is unconditional again (guard outside the callback) | `boot-adoption.test.ts` (1) |
 | M58 | a claim that throws closes the pane again | `boot-adoption.test.ts` (1) |
+| M59 | the scan reports `none` whenever nothing strictly matched | `orphan-adoption.test.ts` + `boot-adoption.test.ts` (3) |
+| M60 | the consumer clears the handle on an `unknown` scan | `orphan-adoption.test.ts` + `boot-adoption.test.ts` (2) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

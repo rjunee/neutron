@@ -423,7 +423,8 @@ export function defaultReadCmdline(pid: number): string | undefined {
  * whose `--resume <uuid>` fell off the end, which is why this is recorded here.
  */
 export type TranscriptOwnerScan =
-  /** The scan ran and no live process is a `claude` on this transcript. */
+  /** The scan ran, the instrument could have seen an owner, and there is none. The
+   *  ONLY answer that licenses clearing a handle or resuming a transcript. */
   | { readonly kind: 'none' }
   /** At least one live process is. Their pids, for the message a caller writes. */
   | { readonly kind: 'owners'; readonly pids: readonly number[] }
@@ -485,10 +486,44 @@ export function scanTranscriptOwners(
   if (listing === undefined) {
     return { kind: 'unknown', reason: 'the process listing could not be taken' }
   }
-  const pids = listing
-    .filter((row) => cmdlineMatchesSession(row.cmdline, sessionId, claudeBasename))
-    .map((row) => row.pid)
-  return pids.length === 0 ? { kind: 'none' } : { kind: 'owners', pids }
+  const owners: number[] = []
+  const ambiguous: number[] = []
+  for (const row of listing) {
+    if (cmdlineMatchesSession(row.cmdline, sessionId, claudeBasename)) {
+      owners.push(row.pid)
+      continue
+    }
+    // `none` MUST MEAN "THE INSTRUMENT COULD HAVE SEEN AN OWNER IF THERE WERE ONE"
+    // (Argus r17). `ps` renders an argv VECTOR as a flat string, and the strict matcher
+    // re-splits it on whitespace — so a supported spaced binary path,
+    // `/opt/my tools/claude --resume <uuid>`, tokenises with `tokens[0]` = `/opt/my`,
+    // basename `my`, and the live owner is invisible. Answering `none` there is a
+    // POSITIVE ABSENCE drawn from an instrument that cannot see the shape, and the
+    // caller clears the durable handle and licenses a cold spawn onto a transcript that
+    // already has a `claude` on it: two owners, reached by an absence claim rather than
+    // a presence one.
+    //
+    // THE DISCRIMINATOR INVERTS THE SUBSTRING TEST'S USUAL WEAKNESS. This file's header
+    // is right that "the cmdline contains the uuid" is far too weak to license a KILL or
+    // an ADOPT — a `tail -f …/<uuid>.jsonl` satisfies it. That same weakness is exactly
+    // what makes it strong enough to refuse a claim of ABSENCE: if the uuid is on that
+    // command line at all, this scan cannot honestly say the transcript is unowned. The
+    // `tail` trips it and costs a refusal, which is the direction to be wrong in.
+    if (row.cmdline.includes(sessionId)) ambiguous.push(row.pid)
+  }
+  // A STRICT MATCH OUTRANKS AN AMBIGUOUS ONE: `owners` is the strongest statement
+  // available and it is already the safe direction — it refuses the spawn either way.
+  if (owners.length > 0) return { kind: 'owners', pids: owners }
+  if (ambiguous.length > 0) {
+    return {
+      kind: 'unknown',
+      reason:
+        `pid(s) ${ambiguous.join(', ')} carry session ${sessionId.slice(0, 8)} on their command line but do ` +
+        'not parse as our exact launch shape — the listing is flattened, so a spaced binary or config path ' +
+        'renders ambiguously and this scan cannot tell an owner from a bystander. Refusing to report absence.',
+    }
+  }
+  return { kind: 'none' }
 }
 
 /**

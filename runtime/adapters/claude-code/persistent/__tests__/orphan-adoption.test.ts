@@ -13,10 +13,12 @@
  */
 
 import { describe, it, expect } from 'bun:test'
+import { buildReplArgv } from '../build-repl-argv.ts'
 import {
   adoptOrKillOrphan,
   cmdlineMatchesSession,
   registerOrphanKill,
+  scanTranscriptOwners,
   type OrphanAdoptionDeps,
 } from '../orphan-adoption.ts'
 
@@ -324,5 +326,92 @@ describe('registerOrphanKill — cross-restart killChild→spawnResume ordering 
     const { deps: d } = deps()
     registerOrphanKill('k', { sessionId: SESSION }, d, (k, p) => pending.set(k, p))
     expect(pending.size).toBe(0)
+  })
+})
+
+
+describe('scanTranscriptOwners: `none` is a claim about the INSTRUMENT as much as the machine', () => {
+  /**
+   * ARGUS r17, and it is the dangerous mirror of the spaced-path finding rather than a
+   * repeat of it. `ps` renders an argv VECTOR as one flat string and the strict matcher
+   * re-splits it on whitespace, so a supported spaced binary path becomes unparseable —
+   * `/opt/my tools/claude --resume <uuid>` tokenises with `tokens[0]` = `/opt/my`. The
+   * scan then answered `none`, the caller read that as "this transcript has no owner",
+   * cleared the durable handle, and licensed a cold `claude --resume` onto a transcript
+   * that already had one. TWO OWNERS, reached by an absence claim rather than a presence
+   * one — and the previous spaced-path finding failed SAFE, which is why this one is
+   * #663's to fix rather than #672's.
+   */
+  const CHANNEL_R17 = 'neutron-0123456789abcdef0123456789abcdef'
+
+  /** A listing row exactly as `ps -eo pid=,command=` renders a real launch: the argv the
+   *  builder emits, joined with spaces. Not hand-written — a hand-written row would
+   *  encode my model of the flattening rather than the flattening. */
+  const psRowFor = (claudeBin: string, pid: number) => ({
+    pid,
+    cmdline: buildReplArgv({
+      claudeBin,
+      sessionId: SESSION,
+      resume: true,
+      channelName: CHANNEL_R17,
+      mcpConfigPath: `/tmp/neutron-repl-${CHANNEL_R17}/session-mcp.json`,
+      settingsPath: `/tmp/neutron-repl-${CHANNEL_R17}/settings.json`,
+      appendSystemPromptFile: '/tmp/system-prompt.md',
+      model: 'claude-opus-5',
+    }).join(' '),
+  })
+
+  it('answers UNKNOWN for a live owner whose spaced binary path the listing renders ambiguously', () => {
+    const row = psRowFor('/opt/my tools/claude', 9100)
+    // THE PREMISE, ASSERTED: the strict match really does fail on this row. Without it
+    // the case would silently decay into the ordinary-owner case the moment the matcher
+    // learned to parse it.
+    expect(cmdlineMatchesSession(row.cmdline, SESSION)).toBe(false)
+    const scan = scanTranscriptOwners(SESSION, () => [row])
+    expect(scan.kind).toBe('unknown')
+    expect(scan.kind === 'unknown' && scan.reason).toMatch(/9100/)
+    expect(scan.kind === 'unknown' && scan.reason).toMatch(/do not parse as our exact launch shape/)
+  })
+
+  it('answers OWNERS for the ordinary unspaced launch — unchanged', () => {
+    const row = psRowFor('/usr/local/bin/claude', 9200)
+    expect(cmdlineMatchesSession(row.cmdline, SESSION)).toBe(true)
+    expect(scanTranscriptOwners(SESSION, () => [row])).toEqual({ kind: 'owners', pids: [9200] })
+  })
+
+  it('THE POSITIVE CONTROL: a genuinely empty machine is still a positive absence', () => {
+    // Second job, and it is the one that matters: without this, answering `unknown` for
+    // EVERYTHING would satisfy the first case and the feature would never clear a handle
+    // again. `none` has to stay reachable.
+    expect(scanTranscriptOwners(SESSION, () => [])).toEqual({ kind: 'none' })
+    // And a machine busy with processes that have nothing to do with us.
+    expect(
+      scanTranscriptOwners(SESSION, () => [
+        { pid: 1, cmdline: '/sbin/init' },
+        { pid: 2, cmdline: 'node /srv/app/server.js' },
+      ]),
+    ).toEqual({ kind: 'none' })
+  })
+
+  it('a bystander holding the transcript open is UNKNOWN, not none — the deliberate false alarm', () => {
+    // `tail -f …/<uuid>.jsonl` is not an owner, and this rule costs us a refusal for it.
+    // That is the price of the rule and it is asserted rather than hidden: the scan
+    // cannot tell a bystander from an owner it failed to parse, so it must not claim
+    // absence for either.
+    const scan = scanTranscriptOwners(SESSION, () => [
+      { pid: 9300, cmdline: `tail -f /home/u/.claude/projects/p/${SESSION}.jsonl` },
+    ])
+    expect(scan.kind).toBe('unknown')
+    expect(scan.kind === 'unknown' && scan.reason).toMatch(/9300/)
+  })
+
+  it('a strict match still OUTRANKS an ambiguous one', () => {
+    // `owners` is the strongest statement available, and both answers refuse the spawn,
+    // so the stronger one should be the one reported.
+    const scan = scanTranscriptOwners(SESSION, () => [
+      psRowFor('/opt/my tools/claude', 9400),
+      psRowFor('/usr/local/bin/claude', 9401),
+    ])
+    expect(scan).toEqual({ kind: 'owners', pids: [9401] })
   })
 })

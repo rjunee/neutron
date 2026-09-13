@@ -522,9 +522,20 @@ describe('a dead pid is not proof the transcript is free', () => {
     expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/could not run/i)
   })
 
-  it('ignores a process that merely MENTIONS the session id', async () => {
-    // The recycled-pid trap in scan form: a `tail -f` on the transcript path carries
-    // the uuid and lives under `.claude/`, and is not an owner.
+  it('REFUSES rather than clears when a process merely MENTIONS the session id', async () => {
+    // THE DELIBERATE FALSE ALARM, AND ITS COST, ASSERTED (Argus r17). A `tail -f` on the
+    // transcript path carries the uuid and is not an owner — and this scan now answers
+    // `unknown` for it rather than `none`.
+    //
+    // An earlier revision of this case expected `handle-cleared`, i.e. that a bystander
+    // was correctly ignored. That was right about the bystander and wrong about what the
+    // instrument can establish. `ps` flattens an argv VECTOR into a string, so a
+    // supported spaced binary path renders ambiguously and a live owner becomes
+    // invisible to the strict matcher; answering `none` there clears the handle and
+    // licenses a cold spawn onto an owned transcript. Since the instrument cannot
+    // distinguish "bystander" from "owner I cannot parse", it must not claim absence for
+    // either — so the bystander costs us a refusal. That is the direction to be wrong in:
+    // a refused clear is retried next turn, a second owner corrupts a conversation.
     const f = fixture()
     f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
     const outcome = await reconcileOwnRepl(f.options, KEY, {
@@ -541,7 +552,11 @@ describe('a dead pid is not proof the transcript is free', () => {
         { pid: 7002, cmdline: `vim /home/u/.claude/projects/p/${SESSION_ID}.jsonl` },
       ],
     })
-    expect(outcome.kind).toBe('handle-cleared')
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/do not parse as our exact launch shape/)
+    // AND THE HANDLE SURVIVES — the assertion that carries it. Clearing is what would
+    // license the second owner.
+    expect(readRow(f.registryPath)?.pane_handle).toBe(HANDLE)
   })
 })
 
