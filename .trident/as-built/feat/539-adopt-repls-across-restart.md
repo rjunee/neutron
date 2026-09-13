@@ -2691,18 +2691,18 @@ made the as-built's claim that "the spawn-rejection site got the same fix" untru
 
 #### Every `pool.delete(` in the subsystem
 
-| Site | Which entry it intends to remove | Guarded? | Operand bound | Covered by |
-|---|---|---|---|---|
-| `pool.ts` `drainPool` | **every** entry, at shutdown | n/a — wholesale, by design | n/a | the shutdown suites |
-| `boot-adoption.ts` `deleteOwnPoolEntry` (rejected) | the current entry | yes — **no suspension point** between the read and the delete | at the read, same tick | M87/M88 |
-| `boot-adoption.ts` `deleteOwnPoolEntry` (fulfilled) | ours | yes — `Bun.peek` identity, same tick | at the read | M87/M88 |
-| `child-exit-wiring.ts` teardown | the entry this session was published under | yes | **publish time** (`session.pooledAs`, r55) | `child-exit-pool-identity.test.ts` |
-| `spawn.ts` readiness failure | it owns nothing it can NAME — the promise is its caller's | **fixed r56: it no longer deletes at all**; the rejection reaches the guarded catch | — | `pane-handle-persistence.test.ts` (r56 case) |
-| `spawn.ts` `spawning.catch` | its own published entry | yes (r55) | publish time (`spawning`) | the same case |
-| `spawn.ts` warm-reuse eviction | the entry this turn resolved through | **fixed r56** | `existing`, before the await | `evict-deletes-only-its-own-entry.test.ts` |
-| `spawn.ts` exited-child eviction | same | **fixed r56** | `existing` | same file |
-| `spawn.ts` `quarantineChild` | the quarantined child's entry | **fixed r56** — it could not name what it owned, so it is passed the caller's `existing` | `existing` | same file |
-| `supervision.ts` `evictPool` | clears the key **so a respawn can publish** | unconditional **by design** — this is the "about to replace our own entry" case the rule explicitly allows | n/a | the respawn suites |
+| Site | Which entry it intends to remove | Guarded? | Operand bound | Covered by | **What else the site does — and does the guard gate it too? (r57)** |
+|---|---|---|---|---|---|
+| `pool.ts` `drainPool` | **every** entry, at shutdown | n/a — wholesale, by design | n/a | the shutdown suites | counts the take, peeks the status, attaches a catch to a rejected entry — **no guard to scope** |
+| `boot-adoption.ts` `deleteOwnPoolEntry` (rejected) | the current entry | yes — **no suspension point** between the read and the delete | at the read, same tick | M87/M88 | nothing — the delete **is** the function's only effect, which is exactly why its early `return`s are safe |
+| `boot-adoption.ts` `deleteOwnPoolEntry` (fulfilled) | ours | yes — `Bun.peek` identity, same tick | at the read | M87/M88 | same; one effect, one guard, `boot-adoption.ts:1288-1299` |
+| `child-exit-wiring.ts` teardown | the entry this session was published under | yes | **publish time** (`session.pooledAs`, r55) | `child-exit-pool-identity.test.ts` | clears the claim, cancels the self-fence timer, disowns the row, unlinks the configs, drops `childByKey` — **all of it above and outside** the `if (ownEntry !== undefined)` block (`child-exit-wiring.ts:136-170`); only the `await ownEntry` is inside, and that await exists *for* the delete |
+| `spawn.ts` readiness failure | it owns nothing it can NAME — the promise is its caller's | **fixed r56: it no longer deletes at all**; the rejection reaches the guarded catch | — | `pane-handle-persistence.test.ts` (r56 case) | nothing left to scope — the site no longer writes the map |
+| `spawn.ts` `spawning.catch` | its own published entry | yes (r55) | publish time (`spawning`) | the same case | also clears the respawn in-flight stamp — **outside** the one-line `if` (`spawn.ts:1491-1497`), which is right: the stamp is this spawn's whoever owns the entry |
+| `spawn.ts` warm-reuse eviction | the entry this turn resolved through | **fixed r56** | `existing`, before the await | `evict-deletes-only-its-own-entry.test.ts` | drops `childByKey`, awaits the old child's termination, latches the death via `notifyEvictedChild` — all **outside** the one-line `if` (`spawn.ts:1441-1450`) |
+| `spawn.ts` exited-child eviction | same | **fixed r56** | `existing` | same file | nothing else; the arm is a single statement (`spawn.ts:1455`) |
+| `spawn.ts` `quarantineChild` | the quarantined child's entry | **fixed r56** — it could not name what it owned, so it is passed the caller's `existing` | `existing` | same file | **THIS IS THE ONE THAT WAS WRONG.** It also removes the child from `childByKey`, registers it with the quarantine reaper, installs the exit notification, and reports the verdict — and r56 wrote the guard as an early `return`, so a foreign pool entry silenced **all four** (`spawn.ts:977-1008`). Scoped to the delete line in r57 |
+| `supervision.ts` `evictPool` | clears the key **so a respawn can publish** | unconditional **by design** — this is the "about to replace our own entry" case the rule explicitly allows | n/a | the respawn suites | single-statement callback (`supervision.ts:158-160`); nothing to gate |
 
 > **"Guard everything" would have been the wrong over-correction.** Two rows are deliberately
 > unguarded and say why: a wholesale shutdown drain, and an eviction whose entire purpose is to
@@ -2726,6 +2726,63 @@ attributed to a case that cannot reach the mutated line*, which is round twenty-
 hazard in its attribution form. Every row below now names the file that actually executes the
 mutated line, and each was verified by printing the line the patch landed on.
 
+### Round fifty-seven: a guard belongs to the effect, and the publish is a write too
+
+Two findings, and they are the same finding pointed in opposite directions.
+
+**One: the guard scoped too widely.** Round fifty-six gave `quarantineChild` the caller's
+`existing` and wrote the check as an early `return` at the top of the function. But that function
+has four effects and only one of them is about the pool: it also drops the child from
+`childByKey`, registers it with the quarantine reaper, and installs the `child.exited` hook that
+notifies its hosted work. With the early return, a turn whose pool entry had been replaced during
+the await did **none** of them — and the caller, which set `quarantined = true` from having
+*called* the function, then skipped the termination and the eviction notice that would otherwise
+have covered the child. **A live `claude` process, in no map, registered with no reaper, owed to
+nobody.**
+
+> A missing guard drops a map entry. **A guard scoped too widely leaks a process.** Four rounds of
+> this operation have been about adding guards; this is the first one about a guard doing too much,
+> and it is the worse direction.
+
+The fix is two lines and one type: the identity check now sits on the `pool.delete` line alone
+(`spawn.ts:986`), and `quarantineChild` returns `boolean` — *is this child now quarantined* —
+which the caller consumes (`spawn.ts:1408`). "Verdict computed and discarded" for the fourth time
+on this branch; the remedy each time has been to make the caller unable to assume it.
+
+**Two: the stale turn published over the winner** (`spawn.ts:1464-1475`). Guarding the deletes was
+half the job. A turn that resolved through `existing`, found the map now holding somebody else's
+entry, and then ran `pool.set(sessionKey, spawning)` took B out of the map just as surely as
+deleting it would have. The harm is *"B is no longer the pool entry"*; by-delete versus
+by-overwrite is a detail of **how**. It now serves the current entry instead — which is also the
+useful answer, since that entry is a live session for the key the caller asked about.
+
+**And the reason the existing cases could not see it: they measured the call and dismissed the
+outcome.** The r56 fixture recorded every `pool.delete` and explicitly reasoned that the final map
+state said nothing, because a turn that refuses a warm session legitimately publishes afterwards.
+So three cases asserted "no delete was issued while B was registered" and passed while B was
+overwritten one line later. The cases now assert both, and the second one is what turned the
+publish into a finding (M162/M163 below measure exactly that: with the publish unguarded, dropping
+the outcome assertion takes the suite back to green).
+
+**A third fixture defect, found while building the new case.** `warmSession`'s fake child had
+`exited: Promise.resolve(null)` — an already-dead child — while `hasExited()` returned false. The
+quarantine reaper hook fires on that promise, so every quarantined child un-quarantined itself on
+the next microtask and `quarantinedChildCount()` read 0. A fixture that says *alive* in one field
+and *dead* in another can only test one of them; the child's exit is now a deferred promise its
+own `kill()` resolves.
+
+**The new case asserts the outcome, not the registration.** `quarantinedChildCount()` going up by
+one is the mechanism; what says the child is not leaked is that the reaper can still **find and
+terminate it** once its hosted work drains — so the case drains the work, sweeps, and asserts the
+child was killed.
+
+**The enumeration gets a column** — *what else does this site do, and does the guard gate it too?*
+— and the other nine rows were re-checked against it. All nine are correctly scoped, and two of
+them are instructive: `deleteOwnPoolEntry`'s early `return`s are safe **because the delete is that
+function's only effect**, and the child-exit teardown keeps every non-pool obligation above and
+outside its `if` block (`child-exit-wiring.ts:136-170`). The difference between a safe early return
+and this round's defect is not the guard — it is how many effects the function has.
+
 ### Mutation table
 
 **Every row that is not struck through** reverts one guard and names the file that goes red;
@@ -2734,7 +2791,7 @@ struck-through rows record why a mutation CANNOT red and are **not** evidence th
 tested — they are listed by id immediately below.
 
 > **THE LIVE COUNT IS A SUBTRACTION, AND IT IS PERFORMED IN ONE PLACE: HERE.** *Live = the
-> table's length, minus the seven rows named in the taxonomy below.* No number is restated
+> table's length, minus the rows named in the taxonomy below.* No number is restated
 > anywhere else in this file, and that is deliberate rather than terse.
 >
 > *(Rounds fifty-two, fifty-three and fifty-four were all the same sentence. Fifty-two added a
@@ -2745,20 +2802,23 @@ tested — they are listed by id immediately below.
 
 **THE COUNT, BROKEN DOWN, because a headline that overstates this table is the same defect as a
 stale count in a criterion — in the artefact whose whole purpose is to be checkable.** Round
-fifty-two caught exactly that: a sentence claiming EVERY row had a red behind it, when seven do
+fifty-two caught exactly that: a sentence claiming EVERY row had a red behind it, when several do
 not and say so in their own cells. Round twenty caught the same shape (M38 presented as
 live evidence) and the remedy is the one used then — name the kinds and count them.
 
-> **THE SEVEN ROWS THAT ARE NOT EVIDENCE** — everything else in the table is live.
+> **THE ROWS THAT ARE NOT EVIDENCE** — everything else in the table is live.
 >
-> A live row has been applied and observed to redden the named case(s). The other seven are
+> *(The number is not written here either, for the reason above: round fifty-seven added one and
+> a stated count would have been wrong again. Count the ids in the table below it.)*
+>
+> A live row has been applied and observed to redden the named case(s). These rows are
 > kept because *why* a mutation cannot red is itself a finding — but they are not evidence that
 > a guard is tested, and they are excluded from the live count:
 >
 > | Kind | Rows | What the row records |
 > |---|---|---|
 > | **superseded** | M31, M38 | the code the mutation targeted no longer exists; the row is history |
-> | **subsumed** | M80, M116 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed) |
+> | **subsumed** | M80, M116, M161 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
 > | **probe, not a guard** | M91, M147 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
 > | **not isolable** | M93 | the case is reachable by a second guard, so removing this one alone changes nothing; removing the mechanism entirely DOES red |
 >
@@ -2961,6 +3021,10 @@ count from the rows below rather than trusting this sentence.
 | M157 | the warm-reuse eviction drops its identity guard | `evict-deletes-only-its-own-entry.test.ts` (2) |
 | M158 | `quarantineChild` drops its own-entry check | `evict-deletes-only-its-own-entry.test.ts` (1 — needs a POISONED session to reach) |
 | M159 | the exited-child eviction drops its identity guard | `evict-deletes-only-its-own-entry.test.ts` (1) |
+| M160 | `quarantineChild`'s guard goes back to an early `return` (the r56 shape) | `evict-deletes-only-its-own-entry.test.ts` (1 — the leaked-child case, and only it) |
+| ~~M161~~ | the caller sets `quarantined = true` from having CALLED `quarantineChild` instead of from what it reports | ~~nothing~~ — **subsumed**: the function has no reachable refusal path once the guard is scoped to the delete line, so ignoring its return is only harmful in the world M160 creates. Kept because the return value's job is to keep the caller honest if such a path is ever added |
+| M162 | the stale-turn publish guard is removed — `pool.set` runs unconditionally again | `evict-deletes-only-its-own-entry.test.ts` (4 — all of them) |
+| M163 | M162, **plus** the "B is still the entry" assertions removed | **nothing reds** — which is the point: this is precisely the r56 fixture, and it is how a real defect sat under three passing cases |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

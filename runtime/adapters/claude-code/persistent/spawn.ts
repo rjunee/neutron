@@ -954,9 +954,16 @@ interface QuarantinedChild {
  *  further turn (it is out of `pool`/`childByKey`) and is still alive. */
 const quarantinedChildren = new Map<string, QuarantinedChild>()
 
-/** Unhook a poisoned child that still hosts live work. It is removed from the
- *  pool so nothing can route a turn to it, and it is NOT terminated — its hosted
- *  workflows keep running until {@link sweepQuarantinedChildren} reaps it. */
+/**
+ * Unhook a poisoned child that still hosts live work. It is removed from the pool so nothing
+ * can route a turn to it, and it is NOT terminated — its hosted workflows keep running until
+ * {@link sweepQuarantinedChildren} reaps it.
+ *
+ * RETURNS WHETHER THE CHILD IS NOW QUARANTINED, because the caller's next decisions depend on
+ * it (r57). The caller used to set `quarantined = true` from having CALLED this — the "verdict
+ * computed and discarded" shape, for the fourth time on this branch — so a quarantine that did
+ * not happen still suppressed the termination and the notification that would have covered it.
+ */
 function quarantineChild(
   sessionKey: string,
   session: ReplSession,
@@ -966,9 +973,17 @@ function quarantineChild(
    *  It could not name what it owned before, which the enumeration counts as the finding
    *  rather than as a site to leave alone. */
   ownEntry: Promise<ReplSession> | undefined,
-): void {
-  if (ownEntry !== undefined && pool.get(sessionKey) !== ownEntry) return
-  pool.delete(sessionKey)
+): boolean {
+  // THE GUARD BELONGS TO THE EFFECT, NOT TO THE FUNCTION (Argus r57, and it is the mirror of
+  // the four rounds before it). "Do not delete somebody else's pool entry" scopes to the
+  // `pool.delete` LINE. As an early `return` it became "do none of this function's work", and
+  // the three obligations that have nothing to do with the pool went with it: the child stayed
+  // in `childByKey`, it was never registered with the quarantine reaper, and it got no exit
+  // notification — **a live child leaked, invisible to everything that would have reaped it.**
+  //
+  // A missing guard evicts a map entry; a guard scoped too widely leaks a process. The second
+  // is the worse direction, and this is the first time on this branch we have found one.
+  if (ownEntry === undefined || pool.get(sessionKey) === ownEntry) pool.delete(sessionKey)
   if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
   quarantinedChildren.set(session.childGeneration, { sessionKey, session, options })
   process.stderr.write(
@@ -988,6 +1003,9 @@ function quarantineChild(
       }
     }),
   )
+  // The child is registered with the reaper and out of the routing maps, which is what
+  // "quarantined" means. Reported rather than assumed.
+  return quarantinedChildren.get(session.childGeneration) !== undefined
 }
 
 /** Terminate quarantined children whose hosted work has drained. Fired (not
@@ -1386,8 +1404,8 @@ export async function getOrSpawnSession(
         // they answer 0 and evict as before.
         const hosted = countHostedLiveWork(options, session.childGeneration)
         if (hosted > 0) {
-          quarantineChild(sessionKey, session, options, hosted, existing)
-          quarantined = true
+          // FROM WHAT THE FUNCTION REPORTS, not from having called it (r57).
+          quarantined = quarantineChild(sessionKey, session, options, hosted, existing)
           // The quarantined child keeps ownership of its session transcript for as
           // long as it runs, so the replacement must NOT `--resume` the same id.
           // Every other eviction buys the Argus-r3 one-owner invariant by awaiting
@@ -1443,6 +1461,18 @@ export async function getOrSpawnSession(
   // (`evictedResume`); else the normal registry-resolved directive.
   const resume = forceResume
     ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
+  // A STALE TURN DOES NOT PUBLISH OVER THE WINNER (Argus r57). Guarding the DELETES was only
+  // half of it: this turn resolved through `existing`, and if the map now holds something else,
+  // another turn published while we were deciding. Overwriting that entry orphans a live REPL
+  // out of the map just as surely as deleting it would — the harm is "B is no longer the pool
+  // entry", and by-delete versus by-overwrite is a detail of how.
+  //
+  // Serving the current entry is the useful answer as well as the safe one: it is a live
+  // session for this key, which is what the caller asked for.
+  const currentBeforePublish = pool.get(sessionKey)
+  if (currentBeforePublish !== undefined && currentBeforePublish !== existing) {
+    return currentBeforePublish
+  }
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
   // THE SESSION REMEMBERS THE PROMISE IT WAS PUBLISHED UNDER (r55). It cannot do this itself:
