@@ -32,7 +32,10 @@ export const INDEX_FILENAME = 'README.md'
 export const GROUPS = ['trident', 'deploy', 'work-board', 'email-core', 'app', 'platform', 'security'] as const
 export type Group = (typeof GROUPS)[number]
 
-/** P0 is reserved for work the harness-orchestrator cutover is blocked on. */
+/** P0 is reserved for work that GATES the harness-orchestrator cutover — the same
+ *  standing property `cutover` records, so a P0 item carries `cutover: true` for life.
+ *  Neither field is progress: a finished P0 is still a P0 and still `cutover: true`.
+ *  Whether the cutover is *presently* blocked on it is `status`, and only `status`. */
 export const PRIORITIES = ['P0', 'P1', 'P2', 'P3'] as const
 export type Priority = (typeof PRIORITIES)[number]
 
@@ -46,7 +49,11 @@ export interface SpecItem {
   group: Group
   status: Status
   priority: Priority
-  /** True when the harness-orchestrator cutover is blocked on this item. */
+  /** True when this item GATES the harness-orchestrator cutover. PROVENANCE, not state:
+   *  it is set when the item is identified as gating and NEVER cleared, because clearing
+   *  it on completion would erase the record of what the cutover was gated on. It is
+   *  therefore not the answer to "is the cutover blocked on this" — that is
+   *  `cutover && status === 'open'`, which is what `renderIndex` lists. */
   cutover: boolean
   /** True when the item cannot be built as it stands — an open question is at the top
    *  of its body and must be answered first (standard §3.2). */

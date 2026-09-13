@@ -67,6 +67,28 @@ describe('the blocker list is what is still in the way, not what ever gated the 
     return end === -1 ? rest : rest.slice(0, end)
   }
 
+  // The OTHER half of the conjunction, and the mutant the cases below do not catch on
+  // their own: dropping the flag entirely (`i.status === 'open'`) passes every one of them
+  // while listing the whole open queue as cutover blockers.
+  test('an open item that does NOT gate the cutover is absent from the list and the count', () => {
+    const rendered = renderIndex([
+      { ...base, slug: 'gates-it', title: 'Gates it', status: 'open' },
+      { ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' },
+    ])
+    expect(blockerSection(rendered)).not.toContain('unrelated')
+    expect(blockerSection(rendered)).toContain('gates-it')
+    expect(rendered).toContain('(unrelated.md)') // still an item; only the blocker list drops it
+    expect(rendered).toContain('**2 items.** 1 blocks the harness-orchestrator cutover')
+  })
+
+  // A tree with open work but nothing gating the cutover must drop the heading, same as
+  // the all-done tree below — for the other reason.
+  test('no cutover item at all leaves no blocker section', () => {
+    const rendered = renderIndex([{ ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' }])
+    expect(rendered).not.toContain('## Blocking the cutover')
+    expect(rendered).toContain('**1 items.** 0 block the harness-orchestrator cutover')
+  })
+
   test('an open cutover item is listed', () => {
     const section = blockerSection(renderIndex([{ ...base, slug: 'still-open', title: 'Still open', status: 'open' }]))
     expect(section).toContain('still-open')
