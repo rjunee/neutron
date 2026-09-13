@@ -2215,6 +2215,11 @@ export async function conflictEvidence(
   const sections: string[] = []
   let used = 0
   for (const path of paths) {
+    // THE PATH LIVES HERE, and it has to, because the diff body below addresses git OBJECTS
+    // rather than pathspecs (#541 round 34) — its `a/`/`b/` are object ids, not filenames. That
+    // is explained ONCE in the section heading rather than on every label: per-file it cost
+    // ~70 bytes × the file count, which pushed a forty-file conflict over the prompt budget and
+    // turned a clarification into a refusal.
     const label = `${QUOTE.trim()} --- ${shortened.fold(path)} (\`-\` = base, \`+\` = branch)`
     // A path the caller called conflicted that the INDEX does not list as unmerged. Two
     // views of the same tree disagreeing is not a fact about the conflict, it is a fact
@@ -2304,19 +2309,40 @@ export async function conflictEvidence(
       // column means binary. Matching the sentence instead would be prose-parsing — and a TEXT
       // file whose contents happen to include the line `Binary files a and b differ` would
       // then be misclassified, which is the same mistake one layer up.
-      // BEFORE ANY CONTENT IS READ. Both stages exist here, so both shas are known; a side
-      // larger than the collection ceiling cannot produce a showable diff and must not be
-      // fetched to find that out.
+      // THE DECIDING READ AND THE ACTING READ ARE ONE READ (#541 round 34).
+      //
+      // These sizes come from `ls-files`, and the reads used to address `:2:<path>`/`:3:<path>`
+      // — which RE-RESOLVE the mutable index. If it moved in between, the 8 MiB ceiling was
+      // spent against one set of objects and the content fetched from another, which is the
+      // same defect `sideHistory` had two rounds ago and which `SPEC.md` already records as a
+      // rule: a budget computed from one resolution and spent against another is a consent
+      // check computed before the write.
+      //
+      // ELIMINATED RATHER THAN DETECTED. Re-reading `ls-files` afterwards and refusing on
+      // movement leaves a window and is the check-after-the-fact pattern this branch has
+      // rejected repeatedly; addressing the weighed OIDS closes it outright. It also makes the
+      // two paths IDENTICAL — the one-sided branch has diffed blob-to-blob since round 32, so
+      // leaving this one on pathspecs was the two of them drifting apart, which is how most of
+      // the defects here began.
+      //
+      // THE COST, STATED: a blob-to-blob diff renders its header as `a/<oid> b/<oid>` rather
+      // than the filename, and `--src-prefix`/`--dst-prefix` concatenate rather than replace,
+      // so they cannot fix it. The section label above already names the path, and the label
+      // now says the body's `a/`/`b/` are object ids so the judge cannot read them as paths.
+      const stageIds: string[] = []
       for (const stageNo of [2, 3] as const) {
-        const size = await objectSize(run_host, repo, stage.get(stageNo) ?? '')
+        const sha = stage.get(stageNo) ?? ''
+        const size = await objectSize(run_host, repo, sha)
         if (size === null) return { kind: 'unreadable', why: 'blob' }
         // ACCUMULATED across both sides AND across every conflicted file.
         if (!budget.weigh(size)) return { kind: 'over-budget' }
+        stageIds.push(sha)
       }
+      const [leftId, rightId] = stageIds as [string, string]
       let stat: HostCommandResult
       try {
         stat = await run_host(
-          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--numstat', '--no-color', `:2:${path}`, `:3:${path}`],
+          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--numstat', '--no-color', leftId, rightId],
           repo,
         )
       } catch {
@@ -2327,7 +2353,7 @@ export async function conflictEvidence(
       let res: HostCommandResult
       try {
         res = await run_host(
-          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--no-color', `:2:${path}`, `:3:${path}`],
+          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--no-color', leftId, rightId],
           repo,
         )
       } catch {
@@ -2831,7 +2857,11 @@ async function arbitrateConflict(
         part: { kind: 'present', text: quoteAll(ctx.resolver_question) },
       },
       {
-        heading: 'THE CONFLICT (`-` is the base\'s version, `+` is the branch\'s):',
+        heading:
+          "THE CONFLICT (`-` is the base's version, `+` is the branch's). Each file is named on " +
+          'its own `---` line below; the `a/`/`b/` names inside a diff header are git object ' +
+          'ids rather than paths, because the sides are addressed by the exact objects that ' +
+          'were read:',
         part: { kind: 'present', text: hunks.body },
       },
       {
@@ -3236,7 +3266,7 @@ async function rebaseBranchOntoBase(
       // payload is complete by construction. There is no truncation flag to qualify it
       // because there is no truncation: the two states are "the judge saw all of this" and
       // "the judge was not asked", and the second is counted by
-      // `merge_conflict_arbiter_oversize` above.
+      // `merge_conflict_arbiter_not_asked` above.
       // THE FIELD IS OMITTED WHEN UNKNOWN, not zeroed (#541 round 16). A `0` here would be
       // read as a measured size — and on the owner-only path the substrate was never started,
       // so there is no size to report at all. An absent key says that; a zero lies about it.

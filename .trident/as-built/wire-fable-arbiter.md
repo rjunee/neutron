@@ -566,9 +566,11 @@ is red whichever side drifts.
 
 **The kill criterion changed shape, and is recorded that way rather than quietly retuned.** It
 was "did resolutions cluster on complete payloads". It is now "how often is a conflict small
-enough to arbitrate at all" — the ratio of `merge_conflict_arbiter_oversize` to
-`merge_conflict_arbitration`. **If oversize dominates, the tier is nearly inert, and that is
-the next decision.** The oversize skip is deliberately a SEPARATE event and deliberately does
+enough to arbitrate at all" — the ratio of `merge_conflict_arbiter_not_asked` to
+`merge_conflict_arbitration`. **If not-asked dominates, the tier is nearly inert, and that is
+the next decision.** (This paragraph and `SPEC.md` both said `merge_conflict_arbiter_oversize`
+until round 34 below, which is the only place that retired spelling now appears.) The skip is
+deliberately a SEPARATE event and deliberately does
 not increment `arbitrationsThisRebase`: folding it into the arbitration line would pad the
 denominator of a tier that never ran, which is the same mistake the unwired-arbiter clause
 already exists to prevent, one branch over.
@@ -1757,6 +1759,75 @@ default branch returns**, and here the default was the bug.
 **Three mutations, one needing a new fixture first:** the lax conversion restored; leading zeros
 accepted; and an unknown size treated as zero on the ONE-SIDED path, which my two-sided fixture
 could not reach.
+
+### ROUND 34 — the budget and the read had drifted apart again, and the kill criterion named an event that did not exist
+
+**Two findings, one class, and the class is the branch's.**
+
+**The two-sided conflict sized one resolution and read another.** `conflictEvidence` took the
+stage-2 and stage-3 shas out of `ls-files --unmerged`, weighed *those objects* with
+`cat-file -s`, and then diffed `:2:<path>` and `:3:<path>` — **pathspecs, which re-resolve the
+index at read time**. If the index moved in between, the 8 MiB ceiling was spent against one set
+of objects and the content fetched from another. That is exactly the defect round 28 closed for
+the history, and `SPEC.md` already carries it as a rule: *a budget computed from one resolution
+and spent against another is a consent check computed before the write.* The rule was written,
+the sibling path was fixed, and this one was left behind — **the two paths drifting apart is how
+most of the defects in this lane began**, and by round 32 the one-sided path was already
+diffing blob-to-blob while this one still addressed the index.
+
+**Eliminated rather than detected.** Re-reading `ls-files` afterwards and refusing on movement
+leaves a window and is the check-after-the-fact pattern this branch has rejected repeatedly;
+addressing the weighed OIDs closes it outright and makes the two paths the same shape.
+
+**The cost is stated rather than hidden.** A blob-to-blob diff renders its header as
+`a/<oid> b/<oid>` rather than the filename, and `--src-prefix`/`--dst-prefix` *concatenate*
+rather than replace, so they cannot restore it. The section already names the path on its own
+`---` line; the section heading now says the `a/`/`b/` names inside a diff header are object ids
+rather than paths. **That note started out on every per-file label and had to move**: at ~70
+bytes × the file count it pushed a forty-file conflict past the prompt budget and turned a
+clarification into a refusal — a disclosure that suppresses the thing it discloses.
+
+**The kill criterion named a metric nothing emits.** `SPEC.md` called the escalation counter
+`merge_conflict_arbiter_oversize` three times; `merge.ts` emits
+`merge_conflict_arbiter_not_asked`. Nothing failed and no test could fail: **the criterion that
+decides whether this tier survives pointed at an event that is never written**, so it could not
+be evaluated by anyone reading the spec. Same class as the rest — a claim separated from the
+thing it describes — and the most consequential instance, because this is the sentence that was
+supposed to kill the feature on the numbers.
+
+**Corrected toward the code, not away from it.** The event fires for `over-budget`,
+`evidence-unreadable`, `evidence-binary` and `evidence-truncated`; only one of those four is a
+size, so the retired name would have mislabelled three of them. The entry is amended rather than
+superseded because **it has never landed** — `origin/main` has no copy of it — and every entry
+below it stays byte-identical to main.
+
+**And the spelling is now a relation, not a fact.** A test reads `SPEC.md`, extracts every
+`merge_conflict_*` identifier the kill-criterion section prints, and requires each to appear as
+an emitted event name in `merge.ts`. Red if the spec drifts; red if the code renames. Fixing the
+three words would have left the next edit free to do it again.
+
+**Four mutations, and one of them survived and was worth more than the three that died:**
+
+| # | mutation | result |
+|---|---|---|
+| M146 | address `:2:`/`:3:` pathspecs again instead of the weighed oids | **red, 12 tests** |
+| M147 | weigh the second side but never refuse on it | **SURVIVED** — see below |
+| M148 | treat an unreadable blob size as zero rather than unknown | **red, 2 tests** |
+| M149 | diff the stage-1 base against the branch instead of the two weighed sides | **red, 6 tests** |
+| M150 | restore the retired event name in `SPEC.md` | **red** |
+| M151 | rename the event in `merge.ts` only | **red** — the guard is red in both directions |
+
+**M147 survived because the budget is a running total, so somebody downstream always says no.**
+The oversized second stage was read, and the *verdict* still came back `over-budget` — supplied
+by a later `weigh` on the history, several steps after the read the ceiling exists to prevent.
+The test asserted the verdict and was satisfied. **Counting the outcome instead of the behaviour
+is the same substitution this whole branch is about**, committed inside a test written to police
+it. The ceiling test now counts the conflict body reads themselves, and the numbers are exact
+rather than zero: two stages of one file read **nothing**; two files read **one**, because the
+first fits and the second overruns; conflict-plus-history reads **one**, because the conflict
+fits on its own and the history is what overruns. A bare `0` would have passed for the wrong
+reason in two of those three, and a fixture that never diffs anything would have passed all
+three — so there is a control that an in-budget conflict *is* read.
 
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
