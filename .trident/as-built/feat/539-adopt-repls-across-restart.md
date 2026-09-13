@@ -374,6 +374,43 @@ that go red when it is. An invariant discovered by measurement and recorded only
 is an invariant that gets re-broken by the next person who sees two drains of one map and
 simplifies them into one.
 
+### Round eleven: the same false claim in three places, and only one of them was fixed
+
+The correction in round ten was right and it was applied to one of the three places the
+claim lived. The other two — the *"What happens to a row nothing constructs"* bullet in
+this branch's own new SPEC.md log entry, and the `passes` docblock in `boot-adoption.ts`
+— still said the watchdog's `#105` orphan path covered a pane whose substrate this
+process never constructed. Both false for exactly the reason established in the code:
+`supervisedBySessionKey` is populated by a substrate's own `registerSupervisedSubstrate`
+call, and on `respawn-and-alert` a key with no entry answers `unregistered-skip` and is
+skipped. "No registered options" and "this process never constructed that substrate" are
+the same condition, so the watchdog declines precisely the rows those sentences were
+about.
+
+**This is the branch's named habit appearing at the moment of correcting it** — a rule
+reasoned about carefully for one instance and inherited unexamined by its neighbours. The
+lesson is procedural and is written down because it generalises: **when you fix a claim,
+grep the claim rather than re-reading the file you were looking at.** `grep -rn 'still
+covers'` finds all three in one command, and a second grep for a string known to be
+present proves the search itself works before its emptiness is trusted.
+
+**The SPEC.md entry was edited in place rather than superseded, on the coordinator's
+ruling, and the reasoning is worth keeping.** The log's immutability protects entries
+that are already history: once a decision is on `main` a later reader may have acted on
+it, and rewriting it erases what they read. That entry is not on `main` — it is an
+unmerged line in this diff — and shipping a false sentence plus a third entry correcting
+it in the same merge serves nobody. Everything already on `main` stayed untouched, as it
+has all branch.
+
+**And the #546 finding in that round's gate was a stale-base artifact, correctly
+overruled.** #673 merged while round ten was in flight, so a review of this diff against
+current `main` presented #673's work — ticking #546's acceptance list, promoting its
+as-built, closing the item — as this branch's deletions. Both diffs were honest and their
+union was not. The fix was the rebase; performing the gate's suggested action (restoring
+the completed spec item) would have reverted a merged lane's work. Recorded because the
+shape recurs: **a per-diff review cannot see a merge that landed under it**, and the
+remedy is always to move the base, never to re-apply what the base already has.
+
 ### Mutation table
 
 Each row reverts one guard and names the file that goes red. Every mutation is applied

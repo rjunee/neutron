@@ -202,9 +202,19 @@ interface AbandonSignal {
  * one row's session from another row's options would put a REPL in the pool scoped to
  * the wrong project, and every tool call it made would be attributed there. Each
  * substrate therefore reconciles its OWN key, with its own options, and the rows whose
- * substrate this process has not constructed are left alone — their panes keep
- * running, and the pre-existing `#105` orphan path in the watchdog still covers them
- * if one of them turns out to be wedged.
+ * substrate this process has not constructed are left alone — their panes keep running
+ * and their rows stay, until the next construction of that substrate reconciles them.
+ *
+ * NOTHING COVERS THEM IN THE MEANTIME, and an earlier revision of this docblock said the
+ * opposite: that the pre-existing `#105` orphan path in the watchdog picked them up if
+ * one wedged. It does not. `supervisedBySessionKey` is populated by a substrate's own
+ * `registerSupervisedSubstrate` call, and on `respawn-and-alert` a key with no entry
+ * answers `unregistered-skip` and is skipped (`supervision.ts`) — deliberately, so it is
+ * never actuated under the tick's own options. "No registered options" is the same
+ * condition as "this process never constructed that substrate", so the watchdog declines
+ * exactly the rows this paragraph is about. The narrowing is still right — actuating a
+ * row under another substrate's identity is the worse defect — but it is a gap, not a
+ * covered case, and it must not be written as one.
  */
 interface PassHandle {
   readonly promise: Promise<RowAdoptionOutcome>
