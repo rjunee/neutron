@@ -460,6 +460,105 @@ function isMinimalRecord(raw: unknown): boolean {
   )
 }
 
+// ─── Pane ownership: the handle and its claim, which are ONE fact ──────────
+
+/**
+ * TAKING, KEEPING AND GIVING UP A PANE — the four mutations that may touch
+ * `pane_handle` / `adoption_claim_*`, and the only ones (#539, Argus r40).
+ *
+ * THE DEFECT THESE EXIST FOR was a scope error, not a bug. The claim was built into the
+ * ADOPTION path, and ownership is not a property of how a session came to exist. So:
+ *
+ *   - a FRESH SPAWN wrote a pane handle and no claim, leaving a row that was owned and
+ *     unclaimed — an adopter starting while that gateway was alive read an unclaimed row,
+ *     claimed it, attached and published. Two live wrappers on one pane, and the spawner
+ *     could not even notice, because renewal returns immediately for a session with no
+ *     claim of its own;
+ *   - a REPLACEMENT SPAWN dropped the dead child's `pane_handle` and INHERITED its
+ *     `adoption_claim_*`, so the row asserted ownership on behalf of a child that no
+ *     longer existed, and a restart inside the takeover window refused adoption on the
+ *     strength of it.
+ *
+ * Both are the same sibling-field shape: two fields describing one fact, writable
+ * independently. **Four careful call sites is what produced them**, so the fields are not
+ * written directly any more — `__tests__/pane-ownership-is-one-fact.test.ts` fails the
+ * build if any other module names them as object keys.
+ *
+ * THE INVARIANT IS DIRECTIONAL, and stating it precisely matters because the obvious
+ * symmetric version is wrong:
+ *
+ *   - a row whose pane is being SERVED by a live session carries THAT session's claim;
+ *   - writing or clearing a handle carries its claim with it, so no claim can outlive the
+ *     child it was taken for;
+ *   - but a handle with NO claim is a legitimate, load-bearing state: it is precisely
+ *     "this pane is alive and nobody is serving it", which is what a surviving shutdown
+ *     leaves behind and what the next boot adopts. {@link handOverPane} produces it
+ *     deliberately.
+ */
+export interface PaneOwner {
+  /** The durable terminal handle this child is running in. */
+  readonly handle: string
+  /** The child generation the handle belongs to — written together, always. */
+  readonly generation: string
+  /** The claiming gateway's per-pass identity. */
+  readonly claimant: string
+  readonly now: number
+  /** The claiming gateway's OS process, so its death can be established rather than
+   *  waited out. */
+  readonly pid: number
+}
+
+/** TAKE (or keep) ownership: the handle, its generation and this gateway's claim, in one
+ *  write. There is no ordering in which the row is owned but unclaimed. */
+export function ownPane(prev: ReplRegistryRecord, owner: PaneOwner): ReplRegistryRecord {
+  return {
+    ...prev,
+    pane_handle: owner.handle,
+    child_generation: owner.generation,
+    adoption_claim_at: owner.now,
+    adoption_claim_by: owner.claimant,
+    adoption_claim_pid: owner.pid,
+  }
+}
+
+/** GIVE UP ownership because the pane is gone or is not ours to describe: the handle and
+ *  the claim leave together. The generation stays — it identifies the child for the
+ *  crash/shutdown records that must outlive it. */
+export function disownPane(prev: ReplRegistryRecord): ReplRegistryRecord {
+  const {
+    pane_handle: _h,
+    adoption_claim_at: _a,
+    adoption_claim_by: _b,
+    adoption_claim_pid: _p,
+    ...rest
+  } = prev
+  return rest
+}
+
+/** HAND OVER: stop owning a pane that is STILL RUNNING, so the next construction can
+ *  adopt it. The handle stays on purpose — see the invariant note above. CAS'd, so a
+ *  gateway can only ever release its own claim. */
+export function handOverPane(
+  prev: ReplRegistryRecord,
+  claimant: string,
+): ReplRegistryRecord | undefined {
+  if (prev.adoption_claim_by !== claimant) return undefined
+  const { adoption_claim_at: _a, adoption_claim_by: _b, adoption_claim_pid: _p, ...rest } = prev
+  return rest
+}
+
+/** KEEP ownership alive: refresh the claim in place, CAS'd on it still being ours. The
+ *  handle is untouched because nothing about the pane changed. */
+export function refreshPaneClaim(
+  prev: ReplRegistryRecord,
+  claimant: string,
+  now: number,
+  pid: number,
+): ReplRegistryRecord | undefined {
+  if (prev.adoption_claim_by !== claimant) return undefined
+  return { ...prev, adoption_claim_at: now, adoption_claim_pid: pid }
+}
+
 // ─── Disk-touching wrappers ────────────────────────────────────────────────
 
 /**

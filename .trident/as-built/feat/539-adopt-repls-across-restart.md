@@ -1803,10 +1803,88 @@ not have. The fake now models what herdr does: the child IS the pane's process, 
 sets `paneGone` on every wrapper attached to that handle. M106 (fence with a kill instead of a
 detach) reds on the winner's assertions, without ever calling `closeHandle`.
 
+**Why a fenced key does not RE-PROBE, which is a choice and not an oversight.** The
+alternative is attractive: let a later turn re-run reconciliation, and the claim's
+compare-and-set refuses it while the winner is alive but lets this gateway re-adopt if the
+winner dies — self-healing, with no restart needed. It is not taken, for the reason this
+issue exists to respect. **A reconciliation pass ATTACHES before it claims**, and an attached
+wrapper carries the detector set: that is the branch's one destructive trap (a stale approval
+prompt answered `1`+Enter), and it would be re-armed against a pane somebody else is serving
+on every turn for as long as the situation lasts. The transient is already accepted ONCE per
+genuine adoption attempt; accepting it per-turn, indefinitely, against a pane we have
+positively established is not ours, is a different bargain. So the fence holds until this
+gateway's next construction — and the cost is stated rather than hidden: **if the winner then
+dies, that REPL is unreachable from this gateway until it restarts**, which is the event this
+whole feature makes cheap.
+
+**The one residual, checked rather than assumed.** A turn already IN FLIGHT on a fenced
+session will never be answered — the wrapper is detached, so no reply can arrive. I went
+looking for whether that HANGS, because a hang would be worse than the defect: it does not.
+The turn-inactivity watchdog is a per-turn `setInterval` created in the dispatch closure
+(`pool.ts:770`), not one of the session-scoped watchers the fence stops, so the turn ends at
+the inactivity bound with `{ kind: 'error', code: 'turn_timeout', retryable: true }`
+(`pool.ts:734`) and the retry meets the fence's own retryable refusal. Bounded, and with a
+disposition that already exists. Enqueuing that turn on the pending-respawns queue so a
+later owner replays it is the obvious improvement and is deliberately NOT taken here — it is
+a second mechanism's worth of surface, and the honest statement is that the turn fails
+retryably rather than that it is preserved.
+
 **What the fence must not take.** `deleteOwnPoolEntry`, not `pool.delete`: in one process the
 winner's session is under the SAME key, and an unconditional eviction removes the entry every
 turn resolves through — taking the pane away from the gateway that legitimately holds it,
 which is the defect inverted rather than fixed. M107 pins it.
+
+### Round forty: the claim was built into the adoption path, and ownership is not a route
+
+Two defects, one root, and the root is a **scope error**. The claim was minted where the
+pane was *adopted*, so it described how a session came to exist rather than who was serving
+the pane:
+
+1. **A fresh spawn never claimed.** It wrote a pane handle and no claim, leaving a row that
+   was **owned and unclaimed** — and an adopter starting while that gateway was alive read
+   it, claimed it, attached and published. Two live wrappers on one pane. Worse, the
+   spawner could not even *notice*: renewal returns immediately for a session with no claim
+   of its own, so the loser-detects-and-fences machinery of round thirty-nine was
+   unreachable from the very path that produced the state.
+2. **A replacement spawn inherited the dead child's claim.** The merge dropped
+   `pane_handle` and kept `adoption_claim_*`, so the row asserted ownership on behalf of a
+   child that no longer existed, and a restart inside the takeover window refused adoption
+   on the strength of it.
+
+**Both are the sibling-field shape**: two fields describing one fact, writable
+independently — the same shape as the r30 `pool` eviction and the r31 live-handle leak.
+
+**THE STRUCTURAL ANSWER, because four careful call sites is what produced them.** The
+fields are no longer written outside `repl-registry.ts`. Four named transitions replace
+them — `ownPane`, `disownPane`, `handOverPane`, `refreshPaneClaim` — and
+`__tests__/pane-ownership-is-one-fact.test.ts` fails the build if any other module writes
+either field, by object key, by assignment, or by a rest-destructure that strips one out.
+**A table would not have saved the fifth path.** M108 reds that guard as well as the
+behaviour case, which is the evidence that it is load-bearing rather than decorative.
+
+**The invariant is DIRECTIONAL, and the symmetric version would be wrong.** A row whose
+pane is being served carries that session's claim; writing or clearing a handle carries its
+claim with it. But **a handle with no claim is a legitimate, load-bearing state** — it is
+exactly "this pane is alive and nobody is serving it", which is what a surviving shutdown
+leaves behind and what the next boot adopts. `handOverPane` produces it deliberately.
+
+**And a rename, because the name was the bug.** `session.adoptionClaimBy` became
+`paneClaimBy`: while it was named for adoption, only the adoption path set it.
+
+**A defect in my own wiring, caught by a failing fixture rather than by reading.** The
+child-exit disown first resolved its registry path through `supervisedBySessionKey` — a map
+`shutdownAllPersistentRepls` CLEARS (`pool.ts:1325`) before the exit handlers finish. So the
+one teardown that always ends children would have silently skipped the row cleanup. The path
+is now captured at wiring time. **Ambient state that something else tears down is not a
+dependency a death handler can rely on.**
+
+**M109 did not red twice, and both times the TEST was wrong.** First the boot pass's clear
+disowned the row before the merge ever saw it, so the fixture proved nothing about the merge.
+Then, with the row planted so the merge did see it, `ownPane` overwrote all four fields
+anyway — **a missing disown is invisible whenever the replacement has a pane of its own**.
+The case that reaches it needs a replacement with NO handle (the supported #540 host switch),
+and only then does the disown carry the outcome. Two vacuous fixtures in one round, both
+found by the mutation refusing to red rather than by review.
 
 ### Mutation table
 
@@ -1818,7 +1896,7 @@ of this paragraph said "All 24" twice while the table already listed 25 — a nu
 written once and then never re-derived, in the one section whose whole purpose is
 auditability. The last full harness run covered **every live row in one pass — M1–M36 less the
 superseded M31: 35/35 reddened their target** — with the worktree verified clean
-afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight and M105–M107 in round thirty-nine, each verified
+afterwards. M37–M41 were added in round seven, M42–M44 in round eight, M45–M48 in round nine, M49 in round ten, M50–M51 in round twelve, M52–M53 in round thirteen, M54–M56 in round fourteen, M57–M58 in round fifteen, M59–M60 in round seventeen, M61–M63 in round eighteen, M64–M65 in round nineteen, M66–M67 in round twenty, M68–M69 in round twenty-one, M70–M71 in round twenty-three, M72–M74 in round twenty-four, M75–M78 in round twenty-five, M79–M81 in round twenty-six, M82–M84 in round twenty-seven, M85–M86 in round twenty-eight, M87–M89 in round thirty, M90–M91 in round thirty-one, M92 in round thirty-four, M93 in round thirty-five and M94–M98 in round thirty-seven, M99 in the same round's re-read M100–M104 in round thirty-eight M105–M107 in round thirty-nine and M108–M110 in round forty, each verified
 individually as it was written and listed with the count it reddens. M44 was checked for
 vacuity rather than assumed: the fixture row MATCHES, so the survive branch it forces is
 genuinely reachable — a fixture whose row already mismatched would have made the mutation
@@ -1956,6 +2034,9 @@ count from the rows below rather than trusting this sentence.
 | M105 | the `not-ours` outcome is logged and dropped (the r39 defect restored) | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M106 | the fence KILLS its child instead of detaching | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the winner's pane assertions) |
 | M107 | the fence evicts the pool entry unconditionally | `adoption-claim-is-a-compare-and-set.test.ts` (1 — the winner's entry is under the same key) |
+| M108 | the fresh spawn writes the handle but no claim | `pane-handle-persistence.test.ts` (2) + **`pane-ownership-is-one-fact.test.ts` (1)** — the funnel guard catches it too |
+| M109 | the replacement merge keeps the predecessor's claim | `pane-handle-persistence.test.ts` (1 — and only via a replacement with NO pane of its own; see above) |
+| M110 | the child-exit teardown releases the claim but keeps the handle | `pane-handle-persistence.test.ts` (1) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

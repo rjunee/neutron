@@ -188,15 +188,22 @@ export class ReplSession {
    *  this one, closing the cross-resume turnId collision (Argus r6). One
    *  `ReplSession` == one incarnation == one nonce. */
   /**
-   * #539 — the adoption claim this session holds on its registry row, if it took one.
+   * #539 — THE CLAIM THIS SESSION HOLDS ON ITS PANE, if it owns one.
    *
-   * Carried on the session because the paths that STOP OWNING it — `unwind`, both
-   * `release` variants and the shutdown survival branch — are the paths that must give the
-   * claim back, and only the session travels to all four. A claim left behind makes the
-   * row unadoptable until its TTL, which would break the very handover the survival branch
-   * exists for.
+   * Named for the PANE and not for adoption, because round forty found the scope error
+   * behind two defects at once: ownership is not a property of how a session came to
+   * exist. A freshly spawned session owns its pane exactly as an adopted one does, and
+   * while this was `adoptionClaimBy` only the adoption path set it — so a spawner held a
+   * pane it had not claimed, an adopter could take it while it was being served, and the
+   * spawner could not notice, because renewal returns immediately for a session with no
+   * claim.
+   *
+   * Carried on the session because the paths that STOP OWNING a pane — `unwind`, both
+   * `release` variants, the shutdown survival branch, the fence and the child-exit
+   * teardown — are the paths that must give it back, and only the session travels to all
+   * of them.
    */
-  adoptionClaimBy?: string
+  paneClaimBy?: string
   private readonly incarnation: string = randomBytes(4).toString('hex')
 
   /** Mint this incarnation's next turn-id as `<incarnation>:<seq>` — globally

@@ -24,7 +24,14 @@ import { assertReplAlive } from './post-spawn-assertion.ts'
 import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
-import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
+import {
+  type ReplRegistryRecord,
+  disownPane,
+  getRecord,
+  ownPane,
+  patchRecord,
+  withRegistry,
+} from './repl-registry.ts'
 import {
   readChildPid,
   recordGatewayShutdownKill,
@@ -461,6 +468,7 @@ async function spawnSession(
     // would silently skip the crash reconciliation there. See `ChildExitWiring`.
     liveHandle: () => liveHandle,
     label: 'spawn.then',
+    registryPath: options.replRegistryPath,
   })
   } catch (e) {
     // The spawn never produced a child, so the registration it was made for must not
@@ -578,11 +586,17 @@ async function spawnSession(
       first_ready_at: Date.now(),
     }
     if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
-    // #539 — the durable terminal handle, when this host issues one. Written HERE,
-    // at the same moment as the pid and the generation, because those three are one
-    // fact about one child: the next gateway reads all three together to decide
-    // whether the thing under the handle is still the child this row describes.
-    if (child.paneHandle !== undefined) record.pane_handle = child.paneHandle
+    // #539 — the durable terminal handle, when this host issues one. Applied at the merge
+    // below through {@link ownPane}, NOT set here: the handle and the claim that says who
+    // is serving it are one fact, and a row that carries one without the other is the
+    // round-forty defect. `ownPane` is the only thing that writes either.
+    //
+    // A CLAIM IDENTITY FOR A FRESH SPAWN, minted per spawn and recorded on the session,
+    // exactly as the adoption path does. Ownership is not a property of how the session
+    // came to exist: while only adoption claimed, a spawner served a pane it had not
+    // claimed and an adopter could take it out from under a live gateway.
+    const paneClaimant = randomUUID()
+    if (child.paneHandle !== undefined) session.paneClaimBy = paneClaimant
     // #539 — and WHAT THIS CHILD WAS SPAWNED AS, so a re-adopted session can answer
     // the warm-reuse guards instead of failing all three and being evicted on the
     // first turn after the restart. Read off the session, which is where the same
@@ -614,20 +628,29 @@ async function spawnSession(
           // child that is RUNNING, so a value inherited from its predecessor is a
           // claim about a pane this child does not have. It is re-stated below from
           // `record` when this spawn actually produced one.
-          pane_handle: _mergedHandle,
           ...merged
         } = prev ? { ...prev, ...record } : record
-        // #539 — THE HANDLE IS NOT MERGED, IT IS RE-STATED. A spread carries the
-        // PRIOR row's `pane_handle` through whenever this spawn produced none (the
-        // in-process host, a test double), so the row would keep asserting a pane for
-        // a child that has no pane — and the next boot would go looking for it. A
-        // handle describes the CURRENT child or it is absent; there is no inheriting
-        // one. Written back only from `record`, i.e. only from the child we just
-        // spawned.
+        // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
+        // move together. A spread carries the PRIOR row's `pane_handle` through whenever
+        // this spawn produced none (the in-process host, a test double), so the row would
+        // keep asserting a pane for a child that has no pane — and the next boot would go
+        // looking for it. It also carried the prior child's CLAIM: a replacement spawn
+        // inherited an ownership marker belonging to a child that no longer existed, and a
+        // restart inside the takeover window then refused adoption on the strength of it.
+        //
+        // `disownPane` first, unconditionally, so nothing from the predecessor survives;
+        // then `ownPane` only when THIS child actually has a pane.
+        const disowned = disownPane(merged as ReplRegistryRecord)
         registry[sessionKey] =
-          record.pane_handle !== undefined
-            ? { ...merged, pane_handle: record.pane_handle }
-            : merged
+          child.paneHandle !== undefined
+            ? ownPane(disowned, {
+                handle: child.paneHandle,
+                generation: childGeneration,
+                claimant: paneClaimant,
+                now: Date.now(),
+                pid: process.pid,
+              })
+            : disowned
         return { registry, result: undefined }
       })
     } catch {

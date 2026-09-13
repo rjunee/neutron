@@ -87,10 +87,14 @@ import {
 import { childByKey, pool, sink, supervisedBySessionKey } from './pool-state.ts'
 import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
 import {
+  disownPane,
   getRecord,
+  handOverPane,
   loadRegistry,
   normaliseRecord,
+  ownPane,
   readRegistryState,
+  refreshPaneClaim,
   withRegistry,
   withRegistryRead,
   type ReplRegistryRecord,
@@ -1269,16 +1273,14 @@ export function renewAdoptionClaim(
         if (prev === undefined) {
           return { registry, result: 'no-row' as ClaimRenewal, skipSave: true as const }
         }
-        if (prev.adoption_claim_by !== claimedBy) {
+        // Re-stamped rather than assumed: a row written before the pid field existed, or
+        // by a pass that could not read its own, gets one on the first renewal. The CAS
+        // lives in the helper, so `undefined` here means the row is no longer ours.
+        const refreshed = refreshPaneClaim(prev, claimedBy, now, claimantPid)
+        if (refreshed === undefined) {
           return { registry, result: 'not-ours' as ClaimRenewal, skipSave: true as const }
         }
-        registry[sessionKey] = {
-          ...prev,
-          adoption_claim_at: now,
-          // Re-stamped rather than assumed: a row written before this field existed, or by
-          // a pass that could not read its own pid, gets one on the first renewal.
-          adoption_claim_pid: claimantPid,
-        }
+        registry[sessionKey] = refreshed
         return { registry, result: 'renewed' as ClaimRenewal }
       },
       {},
@@ -1398,7 +1400,7 @@ export function renewClaimForSession(
   now: number,
   log: (msg: string) => void = defaultLog,
 ): void {
-  const claimedBy = session.adoptionClaimBy
+  const claimedBy = session.paneClaimBy
   if (claimedBy === undefined) return
   // THE RESULT IS CONSUMED WHERE IT IS PRODUCED. `renewAdoptionClaim`'s four answers exist
   // so this branch can be taken; handing them further up to a tick that ignores them is how
@@ -1458,11 +1460,13 @@ export function releaseAdoptionClaim(
         // REPL nothing can find. Not a close call.
         if (!acquired) return { registry, result: undefined, skipSave: true as const }
         const prev = registry[sessionKey]
-        if (prev === undefined || prev.adoption_claim_by !== claimedBy) {
+        // THE HANDLE STAYS. This is the hand-over, not a disown: the pane is still running
+        // and the row must go on naming it, or the next construction has nothing to adopt.
+        const handed = prev === undefined ? undefined : handOverPane(prev, claimedBy)
+        if (handed === undefined) {
           return { registry, result: undefined, skipSave: true as const }
         }
-        const { adoption_claim_at: _a, adoption_claim_by: _b, adoption_claim_pid: _c, ...rest } = prev
-        registry[sessionKey] = rest
+        registry[sessionKey] = handed
         return { registry, result: undefined }
       },
       {},
@@ -1707,13 +1711,19 @@ async function claimRowOrUnwind(args: {
         }
         // OURS FROM HERE, and the write is what makes it so. The next claimant reads a
         // CHANGED row and takes the refusal path above rather than a fresh success.
-        registry[args.sessionKey] = {
-          ...prev,
-          ...(args.recordedPid !== args.pid ? { pid: args.pid } : {}),
-          adoption_claim_at: args.now,
-          adoption_claim_by: args.incarnation,
-          adoption_claim_pid: args.claimantPid,
-        }
+        registry[args.sessionKey] = ownPane(
+          { ...prev, ...(args.recordedPid !== args.pid ? { pid: args.pid } : {}) },
+          {
+            // The handle and generation are RE-STATED rather than changed: this pass
+            // verified both against the row above, so `ownPane` writes back what is
+            // already there and adds the claim in the same write.
+            handle: args.expected.handle,
+            generation: args.expected.generation,
+            claimant: args.incarnation,
+            now: args.now,
+            pid: args.claimantPid,
+          },
+        )
         return { registry, result: 'ours' as ClaimResult }
       },
       {},
@@ -1918,8 +1928,11 @@ function clearPaneHandleIfUnchanged(
       // REMOVED, not set to `undefined`: the record type is exact-optional, and a row
       // whose `pane_handle` key is present-but-undefined would serialise to a key the
       // next reader has to special-case. Absent is the only representation of absent.
-      const { pane_handle: _gone, ...rest } = prev
-      registry[sessionKey] = rest
+      //
+      // AND THE CLAIM GOES WITH IT (r40). This path runs when the pane is gone or has been
+      // closed; a claim left behind would assert that somebody is serving a pane that no
+      // longer exists, which is the inherited-claim defect from the other direction.
+      registry[sessionKey] = disownPane(prev)
       return { registry, result: 'cleared' as ClearOutcome }
       },
       {},
@@ -2137,7 +2150,7 @@ async function adoptRow(
    */
   const unwind = async (reason: string, attached?: PtyChild): Promise<RowAdoptionOutcome> => {
     sink.unregisterIf(record.sessionId, session)
-    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
+    releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
     deleteOwnPoolEntry(sessionKey, session)
     session.sizeWatchdog?.stop()
@@ -2173,7 +2186,7 @@ async function adoptRow(
   ): RowAdoptionOutcome => {
     const reason = shutdownAbandonReason(at, signal.boundExpired)
     sink.unregisterIf(record.sessionId, session)
-    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
+    releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     // THE WRAPPER LETS GO OF THE PANE IT KEEPS ALIVE (Argus r26). `HerdrHost.open` starts
     // the poll loop before it returns the child, so a pass abandoned AFTER a completed
     // attach was leaving a live wrapper on a pane it had decided not to own — and the
@@ -2204,7 +2217,7 @@ async function adoptRow(
    *  give-back is the same, and only the reason differs. */
   const releaseWithReason = (reason: string, attached?: PtyChild): RowAdoptionOutcome => {
     sink.unregisterIf(record.sessionId, session)
-    releaseAdoptionClaim(registryPath, sessionKey, session.adoptionClaimBy)
+    releaseAdoptionClaim(registryPath, sessionKey, session.paneClaimBy)
     // Same hand-over as {@link release} — see the note there.
     attached?.detach?.()
     if (attached !== undefined && childByKey.get(sessionKey) === attached) childByKey.delete(sessionKey)
@@ -2229,7 +2242,7 @@ async function adoptRow(
   /** Minted once per pass: the value that distinguishes this claimant from any other,
    *  and the value every give-back path CASes against. */
   const claimIdentity = randomUUID()
-  session.adoptionClaimBy = claimIdentity
+  session.paneClaimBy = claimIdentity
 
   let primed = false
   let child: PtyChild
@@ -2300,6 +2313,7 @@ async function adoptRow(
       sessionId: record.sessionId,
       liveHandle: () => liveHandle,
       label: 'boot-adoption.exit',
+      registryPath,
     })
     // Only NOW may screens flow: the scan target and the activity handle both exist.
     child.beginOutput?.()

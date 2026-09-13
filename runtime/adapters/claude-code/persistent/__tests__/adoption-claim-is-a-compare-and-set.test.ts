@@ -332,7 +332,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     // A'S SESSION IS UNTOUCHED — the pool still resolves to the session A published, not
     // to a replacement, and the row still carries A's marker.
     expect(await pool.get(KEY)).toBe(ownersSession)
-    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(ownersSession?.adoptionClaimBy)
+    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(ownersSession?.paneClaimBy)
   })
 
   it('...and an ordinary first adoption claims, publishes AND renews', async () => {
@@ -429,7 +429,7 @@ describe('a claim expires when it stops being RENEWED, not when it gets old', ()
     const t0 = Date.parse('2026-09-13T12:00:00Z')
     expect((await pass(f, { now: () => t0 })).kind).toBe('adopted')
     const aSession = await pool.get(KEY)
-    const aClaim = aSession?.adoptionClaimBy
+    const aClaim = aSession?.paneClaimBy
     expect(typeof aClaim).toBe('string')
 
     // B takes the row over, legitimately: A stopped renewing and the threshold passed.
@@ -600,7 +600,7 @@ describe('the gateway that LOST the claim stops serving the pane', () => {
     bChild?.push('a screen for the new owner')
     expect(bChild?.screensDelivered).toEqual(['a screen for the new owner'])
     // Its row still names it: the loser's tidy-up is CAS'd and took nothing back.
-    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(bSession?.adoptionClaimBy)
+    expect(readRow(f.registryPath)?.adoption_claim_by).toBe(bSession?.paneClaimBy)
   })
 
   it('...and a renewal that SUCCEEDS leaves the owner serving normally', async () => {

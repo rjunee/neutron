@@ -238,6 +238,23 @@ it must not swallow.
       process is gone losing it at once, and one we could not ask about NOT losing it; the
       renewal refusing to overwrite a legitimate takeover; and the hand-over that clears the
       marker so the next boot is not refused).
+- [ ] **EVERY SESSION THAT OWNS A PANE CLAIMS IT, HOWEVER IT CAME TO EXIST.** A fresh
+      spawn takes a claim in the same write that records the pane handle; a child's exit
+      releases the handle and the claim together; a replacement spawn inherits neither.
+      While only the adoption path claimed, a spawner served a pane it had not claimed — an
+      adopter starting alongside it read an unclaimed row and attached a second wrapper, and
+      the spawner could not even detect it, because a session with no claim has nothing to
+      renew.
+      The handle and its claim are written in ONE module through four named transitions
+      (`ownPane`, `disownPane`, `handOverPane`, `refreshPaneClaim`); a row that is owned but
+      unclaimed cannot be produced by any other module, and that is enforced rather than
+      documented.
+      *Verified by* `__tests__/pane-handle-persistence.test.ts` (an actively-served fresh
+      spawn refusing an overlapping adopter, with one wrapper attached and the pane left
+      running; a replacement spawn clearing ownership its predecessor left behind, asserted
+      field-for-field; and an ordinary spawn claiming, serving and giving both back on exit)
+      and `__tests__/pane-ownership-is-one-fact.test.ts` (no module outside the funnel writes
+      either field, with a positive control so the check cannot go vacuous).
 - [ ] **THE GATEWAY THAT LOSES THE CLAIM STOPS SERVING THE PANE, AND DOES NOT CLOSE IT.**
       A renewal that comes back `not-ours` means another incarnation took this row over while
       this gateway was not refreshing. Logging that and carrying on IS the two-owner state,
