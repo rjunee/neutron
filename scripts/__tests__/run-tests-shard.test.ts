@@ -96,6 +96,15 @@ describe('run-tests.sh shard partition', () => {
     // would mean discovery broke and every assertion below would be vacuous.
     expect(all.length).toBeGreaterThan(100)
     expect(new Set(all).size).toBe(all.length)
+    // …AND IT IS AS LONG AS THE RUNNER SAYS IT IS. The gap/overlap assertions
+    // below compare the shard slices against THIS list, so they cannot see a whole
+    // LANE dropped from the plan output — the reference and the slices would lose
+    // the same files and agree perfectly. `declared files:` is counted before the
+    // lane split, so it is the independent number. (Mutation-checked: removing the
+    // bundle lane from the plan's `printf` left every other assertion here green.)
+    const declared = full.out.match(/^declared files: (\d+)$/m)
+    expect(declared).not.toBeNull()
+    expect(all.length).toBe(Number(declared?.[1]))
   }, PLAN_BUDGET_MS)
 
   // Each planner invocation costs ~15s (discovery + the pglite content grep over
@@ -103,6 +112,8 @@ describe('run-tests.sh shard partition', () => {
   // partition property, and the degenerate 1/1 pins the no-sharding case. Adding
   // 3 and 6 would cost another ~90s to re-test the same modular arithmetic.
   const laneCounts: number[] = []
+  const bundleCounts: number[] = []
+  let anyShardOut = ''
   for (const n of [2, 4]) {
     test(`${n} shards partition the set exactly — no gaps, no overlap`, () => {
       const slices: string[][] = []
@@ -115,6 +126,9 @@ describe('run-tests.sh shard partition', () => {
         if (n === 4) {
           const m = r.out.match(/executing \d+ general \+ (\d+) PGLite/)
           laneCounts.push(m ? Number(m[1]) : 0)
+          const b = r.out.match(/\+ (\d+) bundle of/)
+          bundleCounts.push(b ? Number(b[1]) : 0)
+          if (anyShardOut === '') anyShardOut = r.out
         }
       }
       const union = slices.flat()
@@ -165,6 +179,24 @@ describe('run-tests.sh shard partition', () => {
     const total = laneCounts.reduce((a, b) => a + b, 0)
     expect(total).toBeGreaterThan(0)
     expect(Math.max(...laneCounts)).toBeLessThan(total)
+  })
+
+  test('the browser-bundle lane EXISTS and is non-empty — the landing-server files are isolated', () => {
+    // WHY THE LANE IS THERE. `createLandingServer` lazily `Bun.build`s a ~0.9 MB
+    // browser bundle in-process, and that build throws `Bundle failed` with `EBADF
+    // reading file: …` once enough other files have run in the same process — a
+    // descriptor closed by some earlier file and reused under the bundler's reads.
+    // Measured on an UNMODIFIED main at the same chunk size, so it is a latent
+    // landmine any PR that adds a test file can step on: the chunk boundary moves,
+    // the landing server starts 404ing its own bundle, and six tests red for a
+    // reason unrelated to the change.
+    //
+    // Asserted as "the runner REPORTS a bundle lane with files in it", because the
+    // failure mode of this lane is silence: a mistyped grep pattern matches nothing
+    // and every landing-server file quietly rejoins a general chunk.
+    expect(anyShardOut).toMatch(/\+ \d+ bundle of \d+ discovered/)
+    expect(bundleCounts).toHaveLength(4)
+    expect(bundleCounts.reduce((a, b) => a + b, 0)).toBeGreaterThan(0)
   })
 
   test('a ONE-FILE general lane still plans that file — the cost packer must keep its path', () => {

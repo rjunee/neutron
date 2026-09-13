@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
+  type InnerResult,
   parseCheckpointFindings,
   parseInnerResult,
   type TridentWorkflowFirer,
@@ -47,7 +48,11 @@ interface ReviewPanelResult {
   verdict: ReviewVerdict | null
   findings: unknown[]
   reviewed_sha: string | null
-  block_kind: 'none' | 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
+  // THE DECODER'S OWN UNION, not a retyped copy of it. This used to restate the five
+  // strings, so every kind added upstream (the three escalation kinds) broke this
+  // assignment instead of flowing through it — and the temptation at that point is to
+  // widen by hand and let the two lists drift apart.
+  block_kind: InnerResult['block_kind']
   terminal_cause: string | null
   publish_requested?: boolean
   pr_merged?: boolean

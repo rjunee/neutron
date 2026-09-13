@@ -333,7 +333,11 @@ describe('the gate is WIRED, not merely written', () => {
   test('classifyBlock reads the peers INCLUDING the CI one', () => {
     // Otherwise a CI deferral would not classify as infra-only and the loop would
     // re-Forge against a pending check.
-    expect(code.includes('classifyBlock(gated, peers')).toBe(true)
+    // Matched on the SPREAD SOURCE rather than the literal name `gated`: the returned
+    // object is now `gated` with its verdict withheld when the reply contradicts itself,
+    // and this test's claim is that `classifyBlock` reads THAT object together with the
+    // peers — not that the variable is spelled a particular way.
+    expect(/classifyBlock\(\w+, peers/.test(code)).toBe(true)
   })
 
   test('LOCAL mode never spends an agent on a PR that does not exist', () => {
@@ -3144,6 +3148,13 @@ describe('a fully excused CI red still holds the merge', () => {
       'peers',
       'noReviewRan',
       'reviewRecord',
+      // The tail also reads the SEAT'S OWN RAW REPLY now, to pick up a self-declared
+      // escalation before this file's CI advisories are merged in. It is injected rather
+      // than reconstructed: in these fixtures `severityGated` IS what the seat said (the
+      // severity gate returns its input untouched for these shapes), and nothing here
+      // declares an escalation, so the claim is absent — which is what every assertion
+      // below assumes.
+      'synthesisRaw',
       [
         constLine('NON_BLOCKING_SEVERITIES'),
         constLine('ADVISORY_FINDING_KEY'),
@@ -3151,6 +3162,12 @@ describe('a fully excused CI red still holds the merge', () => {
         grab('isNonBlockingFinding'),
         grab('isCodeWorkFinding'),
         grab('normalizeVerdict'),
+        // A self-contradictory reply (APPROVE + escalate) may not approve, and the tail
+        // below asks this before it builds the returned object. Registered here for the
+        // same reason every other name on this list is: the tail is ASSEMBLED from named
+        // pieces rather than imported, so a helper it calls and this list omits throws
+        // `ReferenceError` instead of silently testing a stale assembly.
+        grab('contradictorySynthesis'),
         grab('classifyBlock'),
         SRC.slice(at, end),
       ].join('\n'),
@@ -3160,8 +3177,9 @@ describe('a fully excused CI red still holds the merge', () => {
       p: unknown[],
       n: boolean,
       r: string,
+      raw: unknown,
     ) => Record<string, unknown>
-    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.')
+    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.', severityGated)
   }
 
   const seatSaid = (severityGated: Record<string, unknown> | null): Record<string, unknown> =>

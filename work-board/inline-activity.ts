@@ -89,7 +89,14 @@ export function deriveInlineActive(
   ctx: InlineDerivationContext = {},
 ): boolean {
   // R1 mutant: terminal cards must never claim live inline work.
-  if (item.status === 'done' || item.status === 'failed') return false
+  //
+  // AND NEITHER MAY A BLOCKED ONE. Not because it is terminal — it is not, it is active
+  // work that is waiting — but because the lane exists to STOP work on the card, and a
+  // derivation that reads "inline-active" off a stored flag would contradict the refused
+  // dispatch and the absent ▶ beside it. The STORE refuses to write the claim
+  // (`update`/`setInlineActive`); this refuses to READ one, so a flag stored before the
+  // card was blocked cannot outlive the block either.
+  if (item.status === 'done' || item.status === 'failed' || item.status === 'blocked') return false
   // R2 mutant: a card bound to a LIVE run gets its activity from the fork lane,
   // not from chat evidence. `linked_run_id` is typed `string | null` by the store
   // but this is an exported dependency-free leaf — every other rule is total, so

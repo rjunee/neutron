@@ -226,6 +226,103 @@ describe('review-only dispatch contract', () => {
   })
 })
 
+describe('a BLOCKED card is not startable — the escalation has to mean something here', () => {
+  // The defect this closes: the escalation stopped the fix loop INSIDE the run, and then
+  // the next dispatch picked the same card up and relearned the same block. A lane that
+  // changes nothing at the dispatch boundary is decoration.
+  const blockedBoard: TridentBoardBinder = {
+    ...board,
+    get: () => ({
+      id: 'ready',
+      title: 'wire the CSV export button to the new endpoint with tests',
+      design_doc_ref: null,
+      linked_run_id: cardLink,
+      status: 'blocked',
+    }),
+  }
+
+  test('HEADLINE: the chokepoint REFUSES it, creates no run, and binds nothing', async () => {
+    let createCalls = 0
+    let attachCalls = 0
+    const originalCreate = store.create.bind(store)
+    store.create = async (input) => {
+      createCalls += 1
+      return originalCreate(input)
+    }
+    const recording: TridentBoardBinder = {
+      ...blockedBoard,
+      attachRun: async () => {
+        attachCalls += 1
+      },
+    }
+    try {
+      const result = await dispatchBoardBoundBuild(
+        { task: 'build the thing', board_item_id: 'ready' },
+        localDeps(recording),
+      )
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.code).toBe('card_blocked')
+      // The sentence has to say what to DO, because "retry" is the one instruction that
+      // changes nothing here.
+      expect(result.message).toContain('BLOCKED')
+      expect(result.message.toLowerCase()).toContain('upcoming')
+      // Nothing was created and nothing was bound — a refusal leaves no state.
+      expect(createCalls).toBe(0)
+      expect(attachCalls).toBe(0)
+    } finally {
+      store.create = originalCreate
+    }
+  })
+
+  test('it is NOT queued — a hold would relearn the block on the orchestrator’s behalf', async () => {
+    // `held` parks a dispatch whose blocker a sweep can re-test. Nothing can re-test a
+    // decision, so this must not wear that code (and must not write a hold row).
+    const result = await dispatchBoardBoundBuild(
+      { task: 'build the thing', board_item_id: 'ready' },
+      localDeps(blockedBoard),
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).not.toBe('held')
+    expect(result.code).not.toBe('branch_live')
+    expect('hold' in result).toBe(false)
+  })
+
+  test('CONTROL: the same card in any other lane still dispatches', async () => {
+    // Without this, a `return {ok:false}` bolted to the top of the chokepoint would pass
+    // both tests above while refusing every build on the board.
+    // A DISTINCT TASK PER LANE, because the branch name is derived from the task text
+    // and a second dispatch onto the same branch is refused by the branch-live gate —
+    // which would make this control pass for a reason that has nothing to do with the
+    // lane it is about.
+    const lanes = [
+      ['upcoming', 'export the ledger rows to csv'],
+      ['in_progress', 'add a retry to the webhook sender'],
+      ['failed', 'rename the settings pane header'],
+      [undefined, 'cache the avatar thumbnails'],
+    ] as const
+    for (const [status, task] of lanes) {
+      const lane: TridentBoardBinder = {
+        ...board,
+        get: () => ({
+          id: 'ready',
+          title: 'wire the CSV export button to the new endpoint with tests',
+          design_doc_ref: null,
+          linked_run_id: cardLink,
+          ...(status === undefined ? {} : { status }),
+        }),
+      }
+      const result = await dispatchBoardBoundBuild({ task, board_item_id: 'ready' }, localDeps(lane))
+      // Stated as "not refused AS BLOCKED" as well as "ok", so a future unrelated gate
+      // that refuses one of these lanes reports its own code rather than silently
+      // turning this control vacuous.
+      if (!result.ok) expect(result.code).not.toBe('card_blocked')
+      expect(result.ok).toBe(true)
+    }
+  })
+})
+
 describe('dispatchBoardBoundBuild credentialed merge-mode probe', () => {
   test("unauthenticated repository without an origin resolves to 'local'", async () => {
     let getCalls = 0

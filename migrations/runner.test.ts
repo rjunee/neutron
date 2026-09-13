@@ -199,6 +199,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     // IF NOT EXISTS and the two ADD COLUMNs are not; on the FRESH database this
     // test builds, every statement runs for real.
     139,
+    140,
   ])
   expect(result.skipped).toEqual([])
 

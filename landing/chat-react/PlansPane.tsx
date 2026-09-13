@@ -75,7 +75,11 @@ export interface PaneController {
 
 /** The count of live-or-in-flight work that KICKS the pane open — a live trident
  *  run (`running`) OR a plain in-flight card (`active`). A rise in this drives the
- *  auto-open; `failed` keeps it open but does not, on its own, kick it open. */
+ *  auto-open; `failed` keeps it open but does not, on its own, kick it open.
+ *  `blocked` is deliberately NOT here either, and for the same reason: a card that
+ *  STOPPED is not work kicking off. It keeps the pane open (below), because a decision
+ *  is owed — but opening the pane at the moment something stops would be the pane
+ *  announcing the absence of work. */
 function engagedCount(summary: WorkBoardSummary): number {
   return summary.running + summary.active
 }
@@ -99,7 +103,7 @@ export function usePlansPaneController(
   autoCloseMs: number = AUTO_CLOSE_MS,
 ): PaneController {
   const initialSticky = readSticky(projectId)
-  const hasWork = summary.running > 0 || summary.failed > 0 || summary.active > 0
+  const hasWork = summary.running > 0 || summary.failed > 0 || summary.active > 0 || summary.blocked > 0
   const [open, setOpen] = useState<boolean>(hasWork || initialSticky === true)
   // A manual choice pins the pane against auto-close until the next kickoff. On
   // mount we're pinned only if the open state came from the sticky (not live
@@ -128,8 +132,10 @@ export function usePlansPaneController(
       setOpen(true)
       return
     }
-    // Still working, or a failure demanding attention → keep it open.
-    if (now > 0 || summary.failed > 0) {
+    // Still working, or a failure demanding attention → keep it open. A BLOCKED card
+    // demands attention too — more squarely than a failure does, because a failure can
+    // be retried and a block cannot until somebody decides something.
+    if (now > 0 || summary.failed > 0 || summary.blocked > 0) {
       clearTimer()
       return
     }
@@ -140,7 +146,7 @@ export function usePlansPaneController(
         setOpen(false)
       }, autoCloseMs)
     }
-  }, [summary.running, summary.failed, summary.active, open, autoCloseMs, clearTimer])
+  }, [summary.running, summary.failed, summary.active, summary.blocked, open, autoCloseMs, clearTimer])
 
   useEffect(() => clearTimer, [clearTimer])
 
@@ -157,10 +163,17 @@ export function usePlansPaneController(
   return { open, toggle }
 }
 
-/** The count chip in the pane header: "2 running" / "1 failed" / "1 active" / nothing. */
+/** The count chip in the pane header: "2 running" / "1 blocked" / "1 failed" /
+ *  "1 active" / nothing. */
 function headerCount(summary: WorkBoardSummary): { text: string; dot: string } | null {
   if (summary.running > 0) {
     return { text: `${summary.running} running`, dot: 'cwb-dot-build' }
+  }
+  // BEFORE `failed`, so a board with one of each reports the one that needs a DECISION
+  // rather than the one that needs a retry — and so the chip can never say "failed"
+  // about a card the row beside it labels "Blocked".
+  if (summary.blocked > 0) {
+    return { text: `${summary.blocked} blocked`, dot: 'cwb-dot-blocked' }
   }
   if (summary.failed > 0) {
     return { text: `${summary.failed} failed`, dot: 'cwb-dot-failed' }
@@ -192,7 +205,7 @@ export function PlansPane({
   /** Test seam — override the auto-close settle. */
   autoCloseMs?: number
 }): React.JSX.Element {
-  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0, active: 0 })
+  const [summary, setSummary] = useState<WorkBoardSummary>({ running: 0, failed: 0, active: 0, blocked: 0 })
   const onSummary = useCallback((s: WorkBoardSummary) => setSummary(s), [])
   const { open, toggle } = usePlansPaneController(
     projectId,

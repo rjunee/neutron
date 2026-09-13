@@ -312,6 +312,85 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     ])
   })
 
+  test('HEADLINE: claiming inline_active on a BLOCKED card is REFUSED, and acknowledges NOTHING', async () => {
+    // THE PUBLIC RESPONSE IS THE POINT, not the persisted row. The store used to decline
+    // to write the column and return the unchanged card with SUCCESS, so this tool
+    // answered `ok: true` — and because the acknowledgement below compares the REQUESTED
+    // patch against the previous value, it posted `inline_started` for a write that never
+    // happened. A test asserting only the row passes against that; a caller reading the
+    // response is told the opposite of what occurred.
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'stopped, not moving' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    await store.attachRun('acme', id, 'run-esc-inline')
+    await store.detachRun('acme', 'run-esc-inline', 'blocked')
+    expect(store.get('acme', id)?.status).toBe('blocked')
+    posts.length = 0
+
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: true },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean; error?: string }
+
+    // The refusal is an ANSWER the agent can act on…
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('BLOCKED')
+    expect(String(out.error)).toContain('upcoming')
+    // …NOTHING was acknowledged to the chat…
+    expect(posts).toEqual([])
+    // …and the row did not move.
+    expect(store.get('acme', id)?.inline_active).toBe(false)
+  })
+
+  test('CONTROL: CLEARING inline_active on a blocked card is allowed and does not refuse', async () => {
+    // Only the CLAIM is refused. A clear can only ever move the row toward consistency,
+    // and refusing it would strand a stale flag with no writer able to stop it.
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store)
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'clear me' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    await store.attachRun('acme', id, 'run-esc-clear')
+    await store.detachRun('acme', 'run-esc-clear', 'blocked')
+
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: false },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean }
+    expect(out.ok).not.toBe(false)
+    expect(store.get('acme', id)?.inline_active).toBe(false)
+  })
+
+  test('CONTROL: the SAME claim on an ordinary card still succeeds and acknowledges', async () => {
+    // Without this, "a blocked card refuses the claim" is satisfied by a tool that
+    // refuses every claim — which would remove the acknowledgement the pane depends on.
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'ordinary inline work' },
+      ctx('owner', 'acme'),
+    )) as { item: { id: string } }
+    const id = created.item.id
+    posts.length = 0
+    const out = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id, inline_active: true },
+      ctx('owner', 'acme'),
+    )) as { ok?: boolean }
+    expect(out.ok).not.toBe(false)
+    expect(store.get('acme', id)?.inline_active).toBe(true)
+    expect(posts).toEqual([
+      { project_id: 'acme', item_id: id, title: 'ordinary inline work', kind: 'inline_started' },
+    ])
+  })
+
   test('an update setting inline_active true→true posts NOTHING (no transition)', async () => {
     const reg = new ToolRegistry()
     const { posts, ack } = spyAck()
@@ -690,6 +769,47 @@ describe('work_board_remove', () => {
  * longer has to mark them `done` — the misreport of 2026-08-14.
  */
 describe('work_board_update — the SHELVED lane (status=archived)', () => {
+  test('HEADLINE: the agent tool cannot complete a BLOCKED card, and is told why', async () => {
+    // The second public door into `done`. It funnels through the same store guard, and
+    // the refusal is surfaced as an ANSWER rather than a tool crash so the agent learns
+    // the unblocking step instead of retrying.
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const created = (await add.handler({ title: 'stopped, not shipped' }, ctx('owner'))) as {
+      item: { id: string }
+    }
+    await store.attachRun('owner', created.item.id, 'run-esc-tool')
+    await store.detachRun('owner', 'run-esc-tool', 'blocked')
+    expect(store.get('owner', created.item.id)?.status).toBe('blocked')
+
+    const res = (await update.handler(
+      { id: created.item.id, status: 'done' },
+      ctx('owner'),
+    )) as { ok?: boolean; error?: string }
+    expect(res.ok).toBe(false)
+    expect(String(res.error)).toContain('BLOCKED')
+    expect(String(res.error)).toContain('upcoming')
+    // The card did not move, and nothing claimed it shipped.
+    expect(store.get('owner', created.item.id)?.status).toBe('blocked')
+    expect(store.get('owner', created.item.id)?.completed_at).toBeNull()
+  })
+
+  test('CONTROL: the agent tool still completes an ordinary card', async () => {
+    // Without this, "the tool cannot complete a blocked card" is satisfied by a tool that
+    // completes nothing.
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const created = (await add.handler({ title: 'ordinary work' }, ctx('owner'))) as {
+      item: { id: string }
+    }
+    const res = (await update.handler(
+      { id: created.item.id, status: 'done' },
+      ctx('owner'),
+    )) as { ok?: boolean }
+    expect(res.ok).not.toBe(false)
+    expect(store.get('owner', created.item.id)?.status).toBe('done')
+  })
+
   test("the schemas advertise 'archived' but NEVER 'failed'", () => {
     for (const name of [WORK_BOARD_ADD_TOOL, WORK_BOARD_UPDATE_TOOL]) {
       const schema = registry.get(name)!.input_schema as {
@@ -698,6 +818,14 @@ describe('work_board_update — the SHELVED lane (status=archived)', () => {
       expect(schema.properties.status.enum).toContain('archived')
       // 'failed' is run-driven (terminal reconcile only) — not client-writable.
       expect(schema.properties.status.enum).not.toContain('failed')
+      // NEITHER IS 'blocked', and for that one it is the guardrail itself: the RUN
+      // reports and the ORCHESTRATOR decides, so an agent that could set this lane
+      // could park a card nobody asked it to park. Moving a card OUT of blocked is
+      // an ordinary `status:'upcoming'` update, and that move IS the decision — so
+      // the description has to say so rather than leave the agent to discover that
+      // its build was refused.
+      expect(schema.properties.status.enum).not.toContain('blocked')
+      expect(schema.properties.status.description).toContain('blocked')
       // The model is told archived ≠ shipped.
       expect(schema.properties.status.description).toContain('archived')
     }

@@ -61,6 +61,11 @@ import { FIRE_SETTLE_TIMEOUT_ERROR } from './fire-evidence.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import {
+  parseInnerEscalation as decodeEscalation,
+  type EscalationKind,
+  type InnerEscalation,
+} from './escalation-evidence.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -184,6 +189,32 @@ export interface InnerLoopInput {
  * column the workflow writes on its terminal path (`parseInnerResult`). This is
  * the EXACT shape `inner-workflow.mjs` returns + persists.
  */
+/**
+ * THE ESCALATION KINDS, as one closed list. The two REVIEWER-DECLARED kinds come first
+ * and the ARITHMETIC one last, and they are deliberately not interchangeable: the first
+ * two assert a cause a reviewer stated and proved with `whatIsMissing`; the third asserts
+ * only that fixing stopped working. A gate that let the arithmetic borrow one of the
+ * first two names would report a cause nobody measured.
+ */
+export { ESCALATION_KINDS, type EscalationKind } from './escalation-evidence.ts'
+
+/** `whatIsMissing` / `evidence` are persisted and delivered to the owner; bound them on
+ *  the way in, exactly as {@link TERMINAL_CAUSE_MAX} bounds the terminal cause.
+ *  OWNED BY `escalation-evidence.ts`, the leaf the STORE can also reach — see that file
+ *  for why the vocabulary lives there rather than here. */
+export { ESCALATION_TEXT_MAX } from './escalation-evidence.ts'
+
+/**
+ * WHAT THE RUN IS ESCALATING — reported by the run, acted on by the ORCHESTRATOR.
+ *
+ * It is a REPORT, not an instruction. It names what was found and what is missing; it
+ * never names a card to move, a position to move it to, or any other board mutation. A
+ * build that could reorder the owner's queue would let an autonomous run re-prioritise
+ * the work with no judgement in between, which is the one thing this whole mechanism is
+ * forbidden to do.
+ */
+export type { InnerEscalation } from './escalation-evidence.ts'
+
 export interface InnerResult {
   ok: boolean
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
@@ -228,13 +259,44 @@ export interface InnerResult {
   pr_merged: boolean
   /**
    * WHY the run is blocked, verbatim from the workflow
-   * ('none'|'code'|'infra-only'|'advisory-only'|'round-lost').
+   * ('none'|'code'|'infra-only'|'advisory-only'|'round-lost'|'design-gap'|
+   * 'missing-dependency'|'not-converging').
    * 'advisory-only' means the panel DID judge the code and found nothing actionable: the fix
    * loop exits without re-Forging, but a reviewer spoke, so it is a real REQUEST_CHANGES.
    * 'infra-only' means NO review seat ever judged the code — the stop says nothing about the
    * diff. null on legacy rows / any other value.
+   *
+   * THE LAST THREE ARE ESCALATIONS — the run STOPPED rather than spending its round budget
+   * iterating on a plan that cannot succeed. They are BLOCKED, not FAILED, and the
+   * distinction is the owner-visible one: 'design-gap' (a reviewer proved the PLAN is wrong)
+   * and 'missing-dependency' (this card needs work outside it) are REVIEWER-DECLARED and
+   * always arrive with an {@link InnerResult.escalation}; 'not-converging' is what the
+   * arithmetic measured — a finding survived a fix round, or the blocker+major count stopped
+   * falling — and deliberately names no cause, because the numbers show that fixing is not
+   * working and say nothing about why.
    */
-  block_kind: 'none' | 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
+  block_kind:
+    | 'none'
+    | 'code'
+    | 'infra-only'
+    | 'advisory-only'
+    | 'round-lost'
+    | 'design-gap'
+    | 'missing-dependency'
+    | 'not-converging'
+    | null
+  /**
+   * THE ESCALATION the run is reporting to the ORCHESTRATOR, or null when it is not
+   * escalating. Decoded FAIL-CLOSED and as a WHOLE: a payload missing its kind, or carrying
+   * an empty `whatIsMissing`, decodes to null rather than to a half-filled escalation —
+   * because a `design-gap` with nothing stated is exactly the bare complaint the workflow's
+   * own gate refuses, and a decoder that accepted one would reintroduce it downstream.
+   *
+   * THE RUN REPORTS; THE ORCHESTRATOR DECIDES. Nothing in this payload is an instruction:
+   * it carries what was found, never what to do about it, and no consumer may derive a board
+   * mutation from it beyond the card's own BLOCKED state.
+   */
+  escalation: InnerEscalation | null
   /**
    * The MEASURED cause of a terminal stop — the probe's/lane's/thrown error's own words,
    * already redacted by the workflow. null when absent/empty/not a string; the reason then
@@ -725,6 +787,23 @@ Settle your turn the instant the Workflow tool returns. The build continues in t
 export const TERMINAL_CAUSE_MAX = 500
 
 /**
+ * Decode the workflow's escalation payload, or `null`.
+ *
+ * FAIL-CLOSED AND ALL-OR-NOTHING. A payload whose `kind` is unrecognised, or whose
+ * `whatIsMissing` is absent/blank, decodes to `null` — never to a half-filled
+ * escalation. `whatIsMissing` is the whole reason a self-declared exit costs something
+ * to pull: an escalation that states nothing is the bare complaint the workflow's own
+ * gate already refuses, and a decoder that reconstructed one here would restore
+ * downstream exactly what the gate removed upstream.
+ *
+ * `triggers` DEGRADES TO `[]`, NOT TO A GUESS. The list says which gates fired; a
+ * garbled one is unknown, and inventing `['repeat-finding']` for it would assert the
+ * arithmetic fired when nothing says it did. Non-string members are dropped for the same
+ * reason.
+ */
+export { parseInnerEscalation } from './escalation-evidence.ts'
+
+/**
  * Decode the workflow's TYPED terminal result from the `inner_result` column.
  * Returns null when the column is null/empty or not a parseable object — i.e.
  * the workflow has NOT yet written a terminal result (still in flight). This is
@@ -800,9 +879,16 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
       p.blockKind === 'code' ||
       p.blockKind === 'infra-only' ||
       p.blockKind === 'advisory-only' ||
-      p.blockKind === 'round-lost'
+      p.blockKind === 'round-lost' ||
+      p.blockKind === 'design-gap' ||
+      p.blockKind === 'missing-dependency' ||
+      p.blockKind === 'not-converging'
         ? p.blockKind
         : null,
+    // THE ESCALATION, decoded as a WHOLE or not at all — see the field docs. Everything
+    // here is model-adjacent text that will be shown to the owner, so it is trimmed and
+    // clamped on the way in, exactly as `terminal_cause` is.
+    escalation: decodeEscalation(p.escalation),
     // THE MEASURED CAUSE (#240). Empty/absent/non-string → null, so the reason falls back
     // to the generic sentence rather than to an empty quotation.
     terminal_cause:

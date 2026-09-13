@@ -78,6 +78,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
   test('an inner-error at round 1 does NOT claim the rounds ran out', () => {
     // THE EXACT SHAPE OF RUN 1daded20. This is the assertion the old code could not pass.
     const reason = innerTerminalFailureReason(run({ inner_checkpoint: 'inner-error' }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 1,
       checkpoint: 'inner-error',
       block_kind: null,
@@ -104,6 +107,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // below for the one path that does). So the message states what was measured and stops.
     // This is the owner's rule applied literally: a generic catch-all gets a generic message.
     const reason = innerTerminalFailureReason(run({ round: 10 }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 10,
       checkpoint: 'argus-request-changes',
       block_kind: null,
@@ -122,7 +128,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // as a COUNT is the specific lie — it is the ceiling, and it was printed as the tally.
     // T4: the two `inner-error` rows carried NO findings, which is what they always were —
     // a build that threw before any reviewer saw it. They now say so (see the T4 describe).
-    const base = { block_kind: null, terminal_cause: null, verdict: 'REQUEST_CHANGES' as const }
+    // `escalation: null` — NOT ESCALATING. These four are the generic-catch-all shapes;
+    // the escalation branch must not fire on any of them.
+    const base = { block_kind: null, terminal_cause: null, escalation: null, verdict: 'REQUEST_CHANGES' as const }
     const cases = [
       { ...base, round: 1, checkpoint: 'inner-error', ok: false, findings_present: false },        // CODEX_HOME / brief / push credential
       { ...base, round: 10, checkpoint: 'argus-request-changes', ok: false, findings_present: true }, // ten real rounds
@@ -147,6 +155,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // inner workflow's own count is what actually happened. They are DELIBERATELY different
     // here — with the row's value the message would claim exhaustion.
     const reason = innerTerminalFailureReason(run({ round: 10, inner_checkpoint: null }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 2,
       checkpoint: 'inner-error',
       block_kind: null,
@@ -168,6 +179,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // boundary the other tests straddle without touching. The round says how far it got;
     // only the checkpoint says how it ended.
     const reason = innerTerminalFailureReason(run({ round: 10, inner_checkpoint: 'inner-error' }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 10,
       checkpoint: 'inner-error',
       block_kind: null,
@@ -187,6 +201,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
   test('past the ceiling claims nothing either', () => {
     // Guards against a future "well, BEYOND the ceiling must mean exhausted" shortcut.
     const reason = innerTerminalFailureReason(run({ round: 11 }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 11,
       checkpoint: 'inner-error',
       block_kind: null,
@@ -201,6 +218,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
   test('no checkpoint at all → still true, just less specific', () => {
     // Nothing is invented to fill the gap. This is the "generic" half of the owner's rule.
     const reason = innerTerminalFailureReason(run({ inner_checkpoint: null }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 3,
       checkpoint: null,
       block_kind: null,
@@ -216,6 +236,9 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
 
   test('a nonsense round from the workflow falls back to the row rather than printing it', () => {
     const reason = innerTerminalFailureReason(run({ round: 4 }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       round: 0,
       checkpoint: 'inner-error',
       block_kind: null,
@@ -248,6 +271,9 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     round: 1,
     checkpoint: 'argus-request-changes',
     block_kind: 'infra-only' as const,
+    // NOT ESCALATING — an infra-only stop is the MACHINE being broken, and the
+    // escalation branch (the PLAN being wrong) must not fire on it.
+    escalation: null,
     terminal_cause: cause,
     ok: false,
     verdict: 'REQUEST_CHANGES' as const,
@@ -292,6 +318,9 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     for (const kind of ['code', 'round-lost', 'none'] as const) {
       expect(
         innerTerminalFailureReason(run({ round: 1 }), {
+          // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+          // these, and a fixture that omitted the field would leave that untested.
+          escalation: null,
           round: 1,
           checkpoint: 'argus-request-changes',
           block_kind: kind,
@@ -330,6 +359,9 @@ describe('innerTerminalFailureReason — an infra-only stop names the cause it m
     const reason = innerTerminalFailureReason(
       run({ max_rounds: 10, round: 1, inner_checkpoint: 'forge-done' }),
       {
+        // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+        // these, and a fixture that omitted the field would leave that untested.
+        escalation: null,
         ok: false,
         verdict: null,
         round: 3,
@@ -369,6 +401,9 @@ describe('innerTerminalFailureReason — a THROW reports what it threw, not the 
     round: 1,
     checkpoint: 'inner-error' as string | null,
     block_kind: null,
+    // NOT ESCALATING — a THROWN workflow never reached the decision that produces one,
+    // and the escalation branch must not fire on it.
+    escalation: null,
     terminal_cause: cause,
     findings_present: false,
   })
@@ -439,6 +474,9 @@ describe('innerTerminalFailureReason — a THROW reports what it threw, not the 
     const decoded = parseInnerResult(raw)
     expect(decoded?.block_kind).toBeNull() // the fail-closed decode, not an assumption
     const reason = innerTerminalFailureReason(run({ round: 2 }), {
+      // NOT ESCALATING — the branch that quotes an escalation must not fire on any of
+      // these, and a fixture that omitted the field would leave that untested.
+      escalation: null,
       ok: decoded?.ok ?? false,
       verdict: decoded?.verdict ?? null,
       round: decoded?.round ?? 0,
@@ -1024,6 +1062,9 @@ describe('T4 — an inner-error with no findings is INFRASTRUCTURE, not a review
     round: 4,
     checkpoint: 'inner-error',
     block_kind: null,
+    // NOT ESCALATING — an inner-error never reached the escalation decision, and the
+    // branch that quotes one must not fire on it.
+    escalation: null,
     terminal_cause: null,
     findings_present: false,
     ...over,

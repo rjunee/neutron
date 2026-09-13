@@ -881,11 +881,63 @@ const VERDICT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['severity', 'title', 'evidence'],
+        // `key` IS REQUIRED, and that is the whole prerequisite of the repeat-finding
+        // gate. Without a reviewer-emitted identity, "is this the same finding as last
+        // round?" is a question about two free-text titles, and a model that rewords its
+        // own sentence between rounds defeats any matcher built on them. The gate
+        // therefore reads THIS field and nothing else: a finding that omits it is
+        // UNDECIDABLE, never "new" (see `findingIdentity`).
+        required: ['severity', 'title', 'evidence', 'key'],
         properties: {
           severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'nit'] },
           title: { type: 'string' },
           evidence: { type: 'string', description: 'file:line or concrete repro — verify-before-assert' },
+          key: {
+            type: 'string',
+            description:
+              'STABLE IDENTITY for this finding, as `file:symbol:rule` — e.g. ' +
+              '`trident/inner-loop.ts:parseInnerResult:tautological-test`. The SAME defect must ' +
+              'get the SAME key on every round, even if you word the title differently; a ' +
+              'different defect must get a different key. NEVER put a line number in a key — a ' +
+              'fix round moves lines, so a key carrying one stops matching itself next round ' +
+              'and the defect reads as two. The line belongs in `evidence`. Every other ' +
+              'segment is compared EXACTLY — including CASE, because `src/Foo.ts` and ' +
+              '`src/foo.ts` can be different files — so write the path and symbol exactly as ' +
+              'they appear in the repo and keep the key byte-identical between rounds. ' +
+              'Numbers that identify the defect (a status code, an error number) are welcome ' +
+              'and are what tells two findings apart. This is machine-read to decide whether ' +
+              'a finding survived a fix round.',
+          },
+        },
+      },
+    },
+    // THE SELF-DECLARED ESCALATION — the fast trigger, and never the only one.
+    // A reviewer that diagnoses a DESIGN gap (the plan itself is wrong) or a MISSING
+    // DEPENDENCY (the work needs something outside this card) has had exactly one channel
+    // for it — REQUEST_CHANGES, which means "go fix the code" and is handed to an agent
+    // contractually forbidden to re-plan. This is the second channel. It is OPTIONAL, and
+    // it is deliberately NOT trusted on its own: `whatIsMissing` is REQUIRED so it cannot
+    // be a bare complaint, and the arithmetic repeat-finding gate below runs whether or
+    // not this is present — a self-declared exit is an escape hatch an agent can learn to
+    // pull, so it may never be the only way out.
+    escalate: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'whatIsMissing'],
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['design-gap', 'missing-dependency'],
+          description:
+            "'design-gap' = the PLAN is wrong and no amount of fixing this diff can remove the " +
+            "finding. 'missing-dependency' = this card needs work that lives outside it.",
+        },
+        whatIsMissing: {
+          type: 'string',
+          description:
+            'REQUIRED and concrete: what the plan got wrong, or what dependency must land first. ' +
+            'An escalation without this is REFUSED and the build keeps iterating, so state the ' +
+            'specific thing — not "the design is bad".',
         },
       },
     },
@@ -2398,6 +2450,49 @@ SPEC / TASK CONTEXT:
 ${task}`
 }
 
+// THE BOUNDED RE-PLAN — the ONE thing a `design-gap` buys, and the only place in
+// this workflow where a planner hears a reviewer.
+//
+// The defect it closes is constraint (iii) of the trap: the planner runs once,
+// BEFORE the first review, so the agent permitted to re-plan never sees a finding,
+// while the agent that sees every finding is contractually forbidden to re-plan
+// ("do NOT re-plan or redesign"). Run `36b95167`'s planner AUTHORED the tautological
+// test that three reviewers then flagged in all nine rounds; no fix round could ever
+// have removed it, because removing it meant changing the spec that demanded it.
+//
+// THE FINDINGS ARE ATTACHED. That is the whole point of the seat and it is asserted
+// by a source test: a re-plan that cannot see what the reviewers said is the same
+// deaf planner that produced the bad plan, run a second time at full price.
+//
+// STRICTLY ONCE PER RUN (`decideEscalation` authorises it only while
+// `replansUsed === 0`). Unbounded re-planning does not fix the waste, it moves it up
+// one level: a plan↔fix oscillation burns the same rounds with a planner seat added
+// to each of them.
+//
+// READ-ONLY, like every other planning seat here: it returns a revised execution
+// spec, and the FIX round that follows is what writes code.
+function rePlanPrompt(findings, round, whatIsMissing) {
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampInstruction = stampCommand === null
+    ? ''
+    : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+  return `${stampInstruction}You are the TRIDENT ORCHESTRATOR / PLANNER (Fable), RE-PLANNING a build that a review panel says is following a WRONG PLAN. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+This run has already built and reviewed ${round} round(s) on branch ${forgeBranch}. The reviewers reported a DESIGN GAP: a defect that no amount of fixing this diff can remove, because the PLAN asked for it. You get ONE re-plan for this run — there is no second.
+WHAT THE REVIEWERS SAY IS MISSING OR WRONG:
+${whatIsMissing}
+THE REVIEWERS' FINDINGS (round ${round}) — these are the input you were never given the first time:
+${JSON.stringify(findings)}
+Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}). Inspect the branch as well as the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then \`git diff ${baseBranch}..${forgeBranch}\`.
+1. Decide what the ORIGINAL plan got wrong. A finding that recurs every round is usually something the plan itself asked for — say so plainly rather than restating the task.
+2. Return the revised full plan body as \`implementationPlan\` (do NOT write it to disk) and the single task to build now as \`topTask\`.
+3. Emit a REVISED EXECUTION SPEC as \`executionSpec\`: the exact TARGET FILES, the ACCEPTANCE CRITERION, and the TEST PLAN — precise enough that a cheaper model carries it out WITHOUT re-reasoning the design. It MUST address every finding above, including by REMOVING or REPLACING work the old plan asked for. Do not re-issue the old spec.
+4. Tag \`complexity\` 'mechanical' or 'reasoning'; when uncertain choose 'reasoning'.
+5. Return \`remainingTasks\` = the count of tasks still unchecked AFTER this one.
+Return via the schema. NEVER exit silently.
+ORIGINAL TASK:
+${task}`
+}
+
 // A wave child still gets a planning seat for the task-level execution spec, but
 // selection is already complete. It reads the shared parent plan from the member
 // branch and must quote the pinned checklist line verbatim; it may not pick an
@@ -3366,6 +3461,455 @@ function classifyBlock(synthesis, deferredPeers, noReviewRan = false, panelRejec
   // A malformed rejection is still a rejection, and a red PR still holds the merge.
   if (panelRejectedWithoutReason) return 'infra-only'
   return noReviewRan ? 'infra-only' : 'advisory-only'
+}
+
+// ── STOP AND ESCALATE, instead of iterating on a plan that cannot succeed ─────
+//
+// THE TRAP THIS CLOSES (run `36b95167`: ten rounds, ~2.5 h, a verdict knowable at
+// round 2). Three constraints compose and no one of them is wrong alone:
+//   (i)   the verdict enum is effectively binary, so a reviewer who diagnoses a DESIGN
+//         gap has one channel and that channel means "go fix the code";
+//   (ii)  Forge is contractually a PURE EXECUTOR, so the only agent that receives the
+//         findings is the one forbidden to act on what they mean;
+//   (iii) the planner runs ONCE, OUTSIDE this loop, so the only agent permitted to
+//         re-plan never hears a single reviewer finding.
+// The measured evidence: three findings recurred in ALL NINE review rounds and the
+// finding totals never converged (9, 8, 13, 9, 8, 12, 9, 10, 11). The planner had
+// AUTHORED one of them in its own execution spec, so no number of fix rounds could
+// ever have removed it.
+//
+// The escape hatch already existed in two flavours — the loop runs only while
+// `blockKind` is neither 'infra-only' nor 'advisory-only' — proving the category is
+// understood. What follows are its missing siblings: the ones that say the PLAN is
+// wrong rather than that the panel is absent.
+//
+// THREE TRIGGERS, and the ordering between "self-declared" and "arithmetic" is the
+// load-bearing part. A self-declared exit is an escape hatch an agent can learn to
+// pull, so it is never the ONLY trigger; the arithmetic gates need no agent to be
+// honest and run whether or not a declaration is present.
+
+/** The two kinds a REVIEWER may declare. Anything else is not an escalation. */
+const SELF_DECLARED_ESCALATION_KINDS = ['design-gap', 'missing-dependency']
+/** The kind the ARITHMETIC gates report. No reviewer may declare it: the numbers prove
+ *  that fixing is not working, and say NOTHING about why — so it must not borrow a name
+ *  ('design-gap', 'missing-dependency') that asserts a cause nobody measured. */
+const ARITHMETIC_ESCALATION_KIND = 'not-converging'
+/** The reviewer-authored key list, bounded: it is quoted into BOTH the evidence and the
+ *  `whatIsMissing`, and a run with many repeats would otherwise put an unbounded model
+ *  string into a persisted column and the project chat. */
+const REPEATED_KEYS_MAX = 300
+/**
+ * THE REPEATED KEYS, REDACTED AND BOUNDED AT THE POINT OF CONSTRUCTION.
+ *
+ * `repeat.repeated` holds REVIEWER-AUTHORED key strings. That was harmless while
+ * `findingIdentity` lower-cased keys and dropped every segment it did not recognise —
+ * and it stopped being harmless when this branch deliberately made keys FAITHFUL, to fix
+ * the collisions that were escalating converging runs. A key like
+ * `file:symbol:token-ghp_SECRET` now survives verbatim, and both interpolations below
+ * reach the owner: `whatIsMissing` is interpolated into the BLOCKED chat message by
+ * `trident/delivery.ts`, and `evidence` is persisted on the run row.
+ *
+ * MAKING A VALUE MORE TRUTHFUL MOVED IT INTO A CATEGORY IT WAS NOT PREVIOUSLY IN. The
+ * self-declared arm has always redacted (`validateEscalationClaim`); the arithmetic arm
+ * never did, and the widening is what turned that asymmetry into a leak.
+ *
+ * At CONSTRUCTION, not at delivery: the decoder's `ESCALATION_TEXT_MAX` truncation runs
+ * after persistence and is a bound, not a redaction.
+ */
+function redactedRepeatedKeys(keys) {
+  return redactProbeText(Array.isArray(keys) ? keys.join(', ') : '').slice(0, REPEATED_KEYS_MAX)
+}
+/** `whatIsMissing` is persisted and delivered to the owner; bound it like every other
+ *  model-supplied string this file keeps. */
+const WHAT_IS_MISSING_MAX = 500
+
+/**
+ * THE STABLE IDENTITY OF ONE FINDING, or '' meaning UNDECIDABLE.
+ *
+ * '' IS NOT "DIFFERENT FROM EVERY OTHER FINDING". It is "this round could not tell
+ * me what this finding is", and the caller must keep it out of BOTH definite
+ * answers — a finding with no key can neither prove a repeat nor prove there was
+ * none. Collapsing it into "new finding" is exactly how a repeat-finding gate
+ * silently stops gating.
+ *
+ * READ FROM `key` AND NOWHERE ELSE. Deriving a fingerprint from the title is the
+ * thing the spec item explicitly rules out: with free-text titles "same finding" is
+ * not machine-decidable, and a model that rewords its own sentence between rounds
+ * would defeat it while the gate reported green. `VERDICT_SCHEMA` makes `key`
+ * required, so a reviewer that answers the schema always supplies one; a finding
+ * this FILE authored (a lane blocker, a CI advisory, a suite blocker) carries none
+ * and is therefore undecidable by construction — which is honest, because none of
+ * them is a reviewer's judgement about the plan.
+ *
+ * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT, and the line between the two is
+ * narrower than it looks. Exactly two things survive, and each is a fact about the
+ * NOTATION rather than about the content it denotes:
+ *
+ *   - whitespace around a segment, in EVERY slot — a key is a token and the space beside
+ *     it is transport noise;
+ *   - a leading './' on the PATH SEGMENT ONLY — `./a/b.ts` and `a/b.ts` are the same file.
+ *     Nowhere else: `./` inside a symbol or a rule is two characters the reviewer chose.
+ *
+ * At least THREE segments are required — a bare word or a `file:line` pair is not a
+ * `file:symbol:rule` identity, and accepting one would let a title masquerade as a key.
+ *
+ * CASE IS PRESERVED, and it did not used to be. Lower-casing the whole key was the same
+ * mistake as the numeric strip below, in a different dimension: on a case-sensitive
+ * filesystem `src/Foo.ts:Handler:missing-auth` and `src/foo.ts:handler:missing-auth` can
+ * name genuinely different files and genuinely different symbols, and collapsing them made
+ * `repeatVerdict` report a repeat and escalate a run that was converging — the over-fire
+ * direction, the one way this gate is worse than the cap it replaced. Collapsing internal
+ * whitespace runs went with it, for the same reason: a filename may legitimately contain
+ * two consecutive spaces.
+ *
+ * THE GENERAL RULE, since this file has now got it wrong twice: EVERY NORMALISATION IS A
+ * CLAIM THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and for an identity
+ * derived from free text that claim is almost never safe. The move that works is the
+ * GRAMMAR one — the line number is excluded because it lives in `evidence`, not because
+ * this function subtracts it. What remains above survives only because each is a fact
+ * about the notation rather than about the content it denotes.
+ *
+ * NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction. This function used to
+ * DROP every purely-numeric segment, anywhere in the key, on the theory that a numeric
+ * segment is a line number a fix round would move. But a numeric segment is not a line
+ * number — it is whatever the reviewer put there. `api.ts:handler:401:missing-auth` and
+ * `api.ts:handler:403:missing-auth` are two DIFFERENT defects that both normalised to
+ * `api.ts:handler:missing-auth`, so the gate read them as ONE finding surviving a fix
+ * round and escalated a run that was converging. Status codes, error numbers, exit codes,
+ * CWE ids and ports are all ordinary content in the `rule` slot.
+ *
+ * THE ASYMMETRY IS THE WHOLE ARGUMENT, and it decides which way to fail when a reviewer
+ * disobeys the format and puts a line number in a key anyway:
+ *
+ *   - OVER-FIRING (two different findings read as one) STOPS A RUN THAT WAS CONVERGING,
+ *     and reports `not-converging` about it. That is the one way this gate can be WORSE
+ *     than the round cap it replaced — the cap only ever stopped a run that could not
+ *     converge — and the two are indistinguishable to an operator reading the escalation.
+ *   - UNDER-FIRING (one finding at a moved line read as two) merely fails to prove a
+ *     repeat. The run keeps going, the no-progress arithmetic still watches it, and the
+ *     round cap is still behind that.
+ *
+ * So the line number is excluded by the GRAMMAR rather than by subtraction: `VERDICT_SCHEMA`
+ * and all three prompts specify `file:symbol:rule` and say the line belongs in `evidence`.
+ * A key that carries one anyway simply fails to match next round, which is the safe half.
+ */
+function findingIdentity(f) {
+  if (f === null || typeof f !== 'object' || Array.isArray(f)) return ''
+  if (typeof f.key !== 'string') return ''
+  const segments = f.key
+    .split(':')
+    // TRIM EVERY SEGMENT: whitespace around a token really is transport noise in every
+    // slot. This also covers whitespace around the whole key, so an outer `.trim()` beside
+    // it is dead work (mutation-checked: removing it changed nothing).
+    .map((seg) => seg.trim())
+    // …AND STRIP `./` FROM THE PATH SEGMENT ONLY. `./a/b.ts` and `a/b.ts` name the same
+    // file, which makes this a fact about PATH NOTATION — and therefore a fact about
+    // segment zero and about nothing else. Applied to every segment it silently equated
+    // `a.ts:sym:./rule` with `a.ts:sym:rule`, two keys a reviewer chose to write
+    // differently, and `repeatVerdict` called them one finding surviving a fix round.
+    .map((seg, i) => (i === 0 ? seg.replace(/^\.\//, '') : seg))
+  // AN EMPTY SEGMENT MAKES THE KEY UNDECIDABLE — IT IS NOT DELETED. This used to
+  // `.filter(seg => seg !== '')`, and that filter was itself a CLAIM: that an empty
+  // segment could not have been meaningful. It is not one I can make about a
+  // reviewer-authored free-text key. `a.ts:sym::rule` and `a.ts:sym:rule` collapsed to one
+  // identity, so `repeatVerdict` reported a repeat on two keys written differently and
+  // escalated a run that was CONVERGING — the fourth time in this one function that a
+  // normalisation discarded content, and the fourth time in the over-fire direction.
+  //
+  // `''` IS THE ANSWER THE FUNCTION ALREADY GIVES when it cannot read a key, and it is the
+  // fail-safe half: an undecidable identity fails to PROVE a repeat, the run keeps going,
+  // and the no-progress arithmetic and the round cap are both still behind it.
+  //
+  // IT ALSO DISSOLVES THE CASE THE OLD FILTER POSITION WAS REASONING ABOUT. A leading
+  // colon (`:a.ts:sym:rule`) used to need the strip applied after filtering so that
+  // "segment zero" still meant the file. Now such a key is simply undecidable — a key with
+  // a leading colon is malformed, and saying so is better than silently repairing it into
+  // a confident identity.
+  //
+  // THE OVER-STRICT DIRECTION IS DELIBERATE AND STATED: a TRAILING colon
+  // (`a.ts:sym:rule:`) is undecidable too. `''.split(':')` yields a trailing empty
+  // segment, so that key states four things and one of them is nothing. Refusing it costs
+  // a repeat this gate might otherwise have proven; accepting it would mean deciding which
+  // of the reviewer's four segments to ignore, which is the very move this whole sequence
+  // has been removing.
+  if (segments.some((seg) => seg === '')) return ''
+  if (segments.length < 3) return ''
+  return segments.join(':')
+}
+
+/**
+ * One round's identities, WITH the count of findings whose identity could not be
+ * read, and WHETHER THE LIST WAS READABLE AT ALL.
+ *
+ * `readable: false` is the third answer and it is not `keys: []`. A synthesis that
+ * came back with `findings: 'oops'` (or nothing at all) did not report zero
+ * findings — it reported nothing this gate can use, and every sibling gate in this
+ * file asks `Array.isArray` first for the same reason.
+ */
+function roundIdentity(findings) {
+  if (!Array.isArray(findings)) return { keys: [], unknown: 0, readable: false }
+  const keys = []
+  let unknown = 0
+  for (const f of findings) {
+    const id = findingIdentity(f)
+    if (id === '') unknown += 1
+    else if (!keys.includes(id)) keys.push(id)
+  }
+  keys.sort()
+  return { keys, unknown, readable: true }
+}
+
+/**
+ * DID A FINDING SURVIVE A FIX ROUND? Three outcomes, and 'undecidable' may not share
+ * a branch with 'none'.
+ *
+ * THIS IS THE HARD GATE: it is arithmetic — a set intersection — and requires no
+ * agent to be honest. On the recorded data of run `36b95167` it fires at ROUND 2,
+ * because the same three findings are in both rounds' lists.
+ *
+ *  - 'repeat'      → at least one identity is in BOTH rounds. A finding that survived
+ *                    a round of fixing is proof that fixing is not working.
+ *  - 'none'        → both lists were readable, every finding in both carried a key,
+ *                    and no key is shared. This is the ONLY definite negative.
+ *  - 'undecidable' → a list was unreadable, or a finding carried no key. The gate
+ *                    could not determine the answer, which is NOT the same as
+ *                    determining there was no repeat. The caller must fall back to
+ *                    the identity-free `progressVerdict`, never to "carry on".
+ */
+function repeatVerdict(previousFindings, currentFindings) {
+  const before = roundIdentity(previousFindings)
+  const after = roundIdentity(currentFindings)
+  if (!before.readable || !after.readable) {
+    return { outcome: 'undecidable', repeated: [], reason: 'a round reported no readable finding list' }
+  }
+  const repeated = before.keys.filter((k) => after.keys.includes(k))
+  if (repeated.length > 0) return { outcome: 'repeat', repeated, reason: '' }
+  const unknown = before.unknown + after.unknown
+  if (unknown > 0) {
+    return {
+      outcome: 'undecidable',
+      repeated: [],
+      reason: `${unknown} finding(s) across the two rounds carried no stable key`,
+    }
+  }
+  return { outcome: 'none', repeated: [], reason: '' }
+}
+
+/**
+ * The blocker+major count for one round, or `null` when the list is not a list.
+ *
+ * `null`, NEVER 0. An unreadable round has an UNKNOWN count, and 0 is the best
+ * possible count — reading one as the other would report perfect convergence for a
+ * round that reported nothing at all.
+ */
+function blockingFindingCount(findings) {
+  if (!Array.isArray(findings)) return null
+  return findings.filter(
+    (f) => f !== null && typeof f === 'object' && (f.severity === 'blocker' || f.severity === 'major'),
+  ).length
+}
+
+/**
+ * NO PROGRESS — the identity-free backstop, over the blocker+major counts.
+ *
+ * Its ONLY virtue is that it needs no finding identity, so it still gates when
+ * `repeatVerdict` comes back 'undecidable'. It is noisier than the repeat gate (a
+ * round can legitimately fix three findings and surface two), which is why it is
+ * second and not first.
+ *
+ * Fires when the count is NOT STRICTLY DECREASING across the two most recent rounds.
+ * On the recorded data of run `36b95167` (4, 2, 6, 4, 2, 4, 4, 4, 5) that is round 3.
+ * A count this gate could not read is 'undecidable', never 'progress'.
+ */
+function progressVerdict(counts) {
+  if (!Array.isArray(counts) || counts.length < 2) return 'undecidable'
+  const before = counts[counts.length - 2]
+  const after = counts[counts.length - 1]
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return 'undecidable'
+  return after < before ? 'progress' : 'no-progress'
+}
+
+/**
+ * IS THIS A REAL SELF-DECLARATION, OR A BARE COMPLAINT?
+ *
+ * `whatIsMissing` is what makes a self-declared exit cost something to pull: an agent
+ * that must name the specific thing the plan got wrong, or the specific dependency
+ * that has to land first, cannot escalate reflexively. So an escalation without it is
+ * REFUSED — the run keeps iterating on the ordinary path and the refusal is reported,
+ * rather than the claim being honoured with an empty reason.
+ *
+ * The refusal reason NEVER quotes the model's own text back. The claim is
+ * attacker-shaped data by the same standard this file applies to every other
+ * model-supplied string, and a refusal is exactly the path where nobody is looking
+ * closely; it says WHICH RULE failed, which is all a reader needs.
+ */
+function validateEscalationClaim(raw, claimVerdict) {
+  const refuse = (why) => ({ ok: false, kind: '', whatIsMissing: '', refusedBecause: why })
+  if (raw === null || raw === undefined) return refuse('')
+  if (typeof raw !== 'object' || Array.isArray(raw)) return refuse('the declared escalation was not an object')
+  // AN APPROVAL THAT ALSO ESCALATES IS AN INCONSISTENT ANSWER, AND THAT IS A THIRD THING.
+  // `VERDICT_SCHEMA` permits `escalate` independently of `verdict`, so a seat can return
+  // `{verdict:'APPROVE', escalate:{kind:'missing-dependency', …}}`. Honouring the claim
+  // stopped a build a reviewer had APPROVED — the self-declared escape hatch overriding an
+  // affirmative verdict, and in the OVER-FIRING direction this file's own asymmetry
+  // argument calls the costly one.
+  //
+  // NEITHER HALF IS USABLE, AND THE ANSWER IS NOT AN APPROVING ONE. The claim is refused
+  // HERE — a contradicted declaration cannot fire a trigger — and the ANSWER is separately
+  // refused the right to approve, by `contradictorySynthesis` at the seam where the verdict
+  // is read. Both halves, because both come from the same seat in the same reply: if the
+  // reply contradicts itself, nothing in it is evidence, and choosing one half is picking a
+  // winner between two statements with equal claim to being the mistake.
+  //
+  // AN EARLIER CUT REFUSED ONLY THE CLAIM AND LET THE RUN PROCEED ON THE VERDICT. That
+  // reasoning — "refuse it like a bare complaint, keep false and unknown apart" — holds
+  // ONLY WHERE THE FALL-THROUGH IS INERT. Refusing a bare complaint beside a
+  // REQUEST_CHANGES costs nothing, because the run stops anyway. Beside an APPROVE it
+  // AUTHORISES AN IRREVERSIBLE MERGE on the strength of a reply the line above has just
+  // called self-contradictory. A symmetric rule applied to an asymmetric situation.
+  //
+  // AND THE ASYMMETRY RUNS THE OTHER WAY FROM THIS FILE'S USUAL ONE. The over-fire /
+  // under-fire argument elsewhere weighs stopping a converging run against failing to
+  // prove a repeat — both recoverable, so the tie goes to the safe half. Here one side is
+  // a retry and the other is a bad merge. When one outcome is recoverable and the other is
+  // not, the tie does not go to the verdict.
+  //
+  // JUDGED ON THE SEAT'S OWN VERDICT, not the gated one. `enforceSeverityGate` can turn a
+  // REQUEST_CHANGES into an APPROVE over all-non-blocking findings, and a seat that said
+  // REQUEST_CHANGES + escalate was CONSISTENT — the gate downgraded it afterwards. Reading
+  // the gated verdict here would refuse that seat's honest declaration, which is the very
+  // case the previous rounds fixed.
+  if (claimVerdict === 'APPROVE') {
+    return refuse('the reviewer returned APPROVE and an escalation in the same answer, which cannot both be true — neither half is usable, so the declaration is refused AND the answer may not approve')
+  }
+  const kind = typeof raw.kind === 'string' ? raw.kind.trim() : ''
+  if (!SELF_DECLARED_ESCALATION_KINDS.includes(kind)) {
+    return refuse(`the declared escalation kind is not one of ${SELF_DECLARED_ESCALATION_KINDS.join(', ')}`)
+  }
+  const what = typeof raw.whatIsMissing === 'string' ? raw.whatIsMissing.trim() : ''
+  if (what === '') {
+    return refuse(`a ${kind} escalation must state whatIsMissing, and this one stated nothing`)
+  }
+  return { ok: true, kind, whatIsMissing: redactProbeText(what).slice(0, WHAT_IS_MISSING_MAX), refusedBecause: '' }
+}
+
+/**
+ * IS THIS REPLY SELF-CONTRADICTORY? A seat that returns APPROVE and an `escalate` payload
+ * in one answer has said two things that cannot both be true.
+ *
+ * READ OFF THE SEAT'S OWN REPLY, for the same reason the claim is: `enforceSeverityGate`
+ * can turn a REQUEST_CHANGES into an APPROVE over all-non-blocking findings, and a seat
+ * that said REQUEST_CHANGES + escalate was CONSISTENT — the gate downgraded it afterwards.
+ * Judging the gated verdict would call that honest seat a liar.
+ *
+ * `escalate` is tested for PRESENCE, not validity. A malformed payload is still the seat
+ * having tried to escalate while approving, and "the declaration was badly formed" is not
+ * a reason to trust the approval that contradicts it.
+ */
+function contradictorySynthesis(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false
+  if (normalizeVerdict(raw.verdict) !== 'APPROVE') return false
+  return raw.escalate !== undefined && raw.escalate !== null
+}
+
+/**
+ * THE DECISION, for ONE completed review round. Pure: every input is already
+ * measured, and this function performs no I/O and mutates nothing.
+ *
+ * Returns exactly one of three actions, and the two escalating ones carry the
+ * evidence that produced them:
+ *   - 'continue'  → nothing fired; the fix loop takes its next round as before.
+ *   - 're-plan'   → a reviewer declared a DESIGN GAP and the run has not spent its
+ *                   one bounded re-plan. The planner gets the findings attached, so
+ *                   it is no longer deaf.
+ *   - 'stop'      → escalate to the ORCHESTRATOR and stop spending rounds.
+ *
+ * WHY A DESIGN-GAP RE-PLAN OUTRANKS THE ARITHMETIC. The re-plan is the SPECIFIC
+ * bounded remedy for exactly the condition the numbers are detecting, and it costs
+ * one planner seat rather than the rest of the round budget. It cannot be used to
+ * dodge the gate: it is available AT MOST ONCE per run, and the moment it is spent
+ * every trigger routes to 'stop'. A repeat finding after the bounded re-plan goes to
+ * the orchestrator — the re-plan gets exactly one chance to prove it changed
+ * something.
+ *
+ * WHY THE ARITHMETIC STILL RUNS WHEN A CLAIM IS PRESENT. `triggers` lists EVERY
+ * trigger that fired, so a run that stopped is never recorded as having stopped only
+ * because an agent said so. Suppress the declaration entirely and the repeat gate
+ * still fires on its own numbers; that is the property that makes the honesty of the
+ * panel irrelevant to whether waste is stopped.
+ */
+function decideEscalation(state) {
+  const round = Number.isFinite(state && state.round) ? state.round : 0
+  const claim = validateEscalationClaim(state ? state.claim : null, state ? state.claimVerdict : null)
+  const repeat = repeatVerdict(
+    state ? state.previousFindings : null,
+    state ? state.currentFindings : null,
+  )
+  const progress = progressVerdict(state ? state.blockingCounts : null)
+  const replansUsed = Number.isFinite(state && state.replansUsed) ? state.replansUsed : 0
+
+  const triggers = []
+  if (repeat.outcome === 'repeat') triggers.push('repeat-finding')
+  if (progress === 'no-progress') triggers.push('no-progress')
+  if (claim.ok) triggers.push(claim.kind)
+
+  const undecidable = []
+  if (repeat.outcome === 'undecidable') undecidable.push(`repeat-finding: ${repeat.reason}`)
+  if (progress === 'undecidable') undecidable.push('no-progress: fewer than two readable rounds of counts')
+
+  const evidence = [
+    `round ${round}`,
+    repeat.outcome === 'repeat'
+      ? `finding(s) ${redactedRepeatedKeys(repeat.repeated)} survived a fix round`
+      : `repeat-finding: ${repeat.outcome}${repeat.reason === '' ? '' : ` (${repeat.reason})`}`,
+    `blocker+major counts ${JSON.stringify(Array.isArray(state && state.blockingCounts) ? state.blockingCounts : null)} → ${progress}`,
+    claim.ok
+      ? `reviewer declared ${claim.kind}`
+      : claim.refusedBecause === ''
+        ? 'no reviewer declaration'
+        : `reviewer declaration REFUSED — ${claim.refusedBecause}`,
+    `bounded re-plans used: ${replansUsed}`,
+  ].join('; ')
+
+  const base = {
+    triggers,
+    evidence,
+    refusedClaim: claim.refusedBecause,
+    undecidable,
+    round,
+  }
+
+  if (claim.ok && claim.kind === 'design-gap' && replansUsed === 0) {
+    return { ...base, action: 're-plan', kind: 'design-gap', whatIsMissing: claim.whatIsMissing }
+  }
+  if (triggers.length === 0) return { ...base, action: 'continue', kind: '', whatIsMissing: '' }
+  // A VALID DECLARATION NAMES THE KIND; the arithmetic alone may not, because the
+  // numbers prove only that fixing is not working. See ARITHMETIC_ESCALATION_KIND.
+  const kind = claim.ok ? claim.kind : ARITHMETIC_ESCALATION_KIND
+  const whatIsMissing = claim.ok
+    ? claim.whatIsMissing
+    : repeat.outcome === 'repeat'
+      ? `the same finding(s) survived a fix round (${redactedRepeatedKeys(repeat.repeated)}), so fixing this diff is not removing them — the plan, not the code, is what needs deciding`
+      : 'the blocker+major count stopped falling across two rounds, so the fix rounds are not converging'
+  return { ...base, action: 'stop', kind, whatIsMissing }
+}
+
+/**
+ * THE FINDINGS THE FIX ROUND WAS ACTUALLY ASKED TO FIX — the only ones whose
+ * survival proves anything.
+ *
+ * `isCodeWorkFinding` is the SAME complete predicate `classifyBlock` uses to decide
+ * whether to re-Forge at all, reused rather than restated: a finding the loop would
+ * not have spent a round on cannot be evidence that the round was wasted. A nit that
+ * recurs is not a failure to converge, and a lane blocker is a dead seat rather than
+ * a defect in the plan.
+ *
+ * `null` for a non-array, so an unreadable synthesis stays UNREADABLE all the way
+ * into `roundIdentity` instead of arriving there as an empty round.
+ */
+function eligibleFixFindings(findings) {
+  if (!Array.isArray(findings)) return null
+  return findings.filter(isCodeWorkFinding)
 }
 
 /**
@@ -6391,10 +6935,10 @@ function codexReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${diffBase} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>, key:'codex:review:deferred'}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 
@@ -6415,9 +6959,9 @@ function kimiReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"; if grep -q ${shSingleQuote(KIMI_RATE_LIMIT_TOKEN)} ${shSingleQuote(errFile)}; then echo "KIMI_RATE_LIMITED=1"; else echo "KIMI_RATE_LIMITED=0"; fi
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
-- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major'. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
+- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major', key='kimi:review:deferred'. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
 - kimiRateLimited: copy the KIMI_RATE_LIMITED line VERBATIM — 1 → true, 0 → false. It is a grep result, NOT your judgement call and NOT something to infer from the error text: it says whether the provider REFUSED the call with HTTP 429 rather than the call failing. It says nothing about WHY it was refused and you must not guess. The status still blocks either way; this only decides whether the run reports a refusal or a transport fault, so reporting it wrongly sends the operator to the wrong place.
 Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
 }
@@ -6733,6 +7277,11 @@ Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying AS
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
+EVERY finding you return needs a STABLE \`key\` — \`file:symbol:rule\`. Carry a panelist's key through UNCHANGED; when two panelists describe ONE defect, merge them under ONE key; invent a key only for a finding that arrived without one, and use \`review:<short-slug-of-the-defect>:<rule>\` when no file is named. The SAME defect must get the SAME key on every round even if you word the title differently, because the build machine-reads these to decide whether a finding survived a fix round. Do NOT put a line number in a key.
+ESCALATE INSTEAD OF ASKING FOR A FIX when the findings are not about the code at all:
+- \`design-gap\` — the PLAN is wrong: no amount of editing this diff removes the finding, because the plan asked for the thing being flagged (a test the execution spec itself specified, an approach the spec chose).
+- \`missing-dependency\` — this card needs work that lives OUTSIDE it and must land first.
+Set \`escalate\` to \`{kind, whatIsMissing}\` only for those two. \`whatIsMissing\` is REQUIRED and must be CONCRETE — the specific thing the plan got wrong, or the specific dependency — because an escalation without it is REFUSED and the build keeps iterating. Still return the findings and the REQUEST_CHANGES verdict alongside it. Do NOT escalate merely because a finding is hard, large, or recurring: the build already detects a finding that survives a fix round on its own, and a reflexive escalation costs the run its one re-plan for nothing.
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
@@ -6862,7 +7411,51 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
   const panelRejectedWithoutReason =
     normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
-  return { ...gated, blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason), reviewRecord }
+  // THE SELF-DECLARED ESCALATION IS READ OFF THE SEAT'S OWN REPLY, and off nothing
+  // else. `synthesisRaw` is the panel's answer before this file merged its own CI
+  // advisories, suite blockers and lane findings into it; `gated` has them merged, and
+  // two of the merge arms above build a FRESH object that would drop or — worse —
+  // could one day carry a field this workflow wrote. A declaration that the PLAN is
+  // wrong is a REVIEWER's judgement or it is nothing, so it is taken from the reviewer
+  // and validated (`validateEscalationClaim`) at the point of use. A dead synthesis
+  // seat leaves `synthesisRaw` null and therefore declares nothing — which is correct:
+  // a seat that did not answer did not diagnose a design gap either.
+  const escalationClaim =
+    synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
+      ? (synthesisRaw.escalate ?? null)
+      : null
+  // THE SEAT'S OWN VERDICT, carried beside its own claim and for the same reason the claim
+  // is read off `synthesisRaw`: both halves of the contradiction have to come from the
+  // REVIEWER's answer. The gated verdict is this file's arithmetic about that answer, and
+  // comparing a reviewer's declaration against it would refuse consistent seats whose
+  // REQUEST_CHANGES the severity gate happened to downgrade.
+  const escalationClaimVerdict =
+    synthesisRaw !== null && typeof synthesisRaw === 'object' && !Array.isArray(synthesisRaw)
+      ? normalizeVerdict(synthesisRaw.verdict)
+      : null
+  // A SELF-CONTRADICTORY REPLY MAY NOT APPROVE. Forced HERE, at the one seam every reader
+  // of the verdict goes through, rather than at each `finalVerdict = …` assignment: the
+  // gated object IS the round's answer, and an answer that contradicts itself is not an
+  // approving one. Downgrading to REQUEST_CHANGES makes the fix loop take another round
+  // when the budget allows — which re-Forges, re-reviews and re-synthesises, so the retry
+  // is the loop's own — and when the cap leaves no round, the run ends NOT-APPROVED, which
+  // is the fail-closed direction. Nothing here invents a finding or an escalation kind it
+  // did not measure; it withholds the one authorisation that cannot be taken back.
+  const contradictory = contradictorySynthesis(synthesisRaw)
+  if (contradictory) {
+    log('trident-v2 escalation: synthesis returned APPROVE AND an escalation — the answer contradicts itself, so it may not approve')
+  }
+  const answered = contradictory ? { ...gated, verdict: 'REQUEST_CHANGES' } : gated
+  return {
+    ...answered,
+    blockKind: classifyBlock(answered, peers, noReviewRan, panelRejectedWithoutReason),
+    reviewRecord,
+    escalationClaim,
+    escalationClaimVerdict,
+    /** The round's reply said two things that cannot both be true. Carried so the terminal
+     *  result can REPORT it rather than leaving a downgraded verdict unexplained. */
+    contradictorySynthesis: contradictory,
+  }
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────
@@ -7826,6 +8419,127 @@ ${task}${reflectionGuidance}`,
     })
   }
 
+  // ── THE ESCALATION LEDGER ────────────────────────────────────────────────────
+  // Everything the repeat-finding and no-progress gates need, recorded once per
+  // completed review round. It is a LEDGER and not a pair of scalars deliberately:
+  // "did this finding survive a round" is a question about two rounds, and a gate
+  // that kept only the latest number could answer it only by trusting whoever last
+  // wrote that number.
+  //
+  // RECORDED ONLY FOR A ROUND THAT JUDGED THE CODE (`blockKind === 'code'`). An
+  // infra-only or advisory-only round exits the loop on its own clause below and
+  // says nothing about whether the PLAN is wrong — folding it into this ledger
+  // would let a dead review seat look like a finding that failed to converge, and
+  // would then report a lane outage under a kind that asserts a design defect.
+  const eligibleHistory = []
+  const blockingCounts = []
+  // The STOP decision, once made. Non-null ends the fix loop — see the `while`.
+  let escalation = null
+  // The bounded re-plan: authorised at most ONCE per run, and counted at the moment
+  // it is AUTHORISED rather than when it runs, so a second `design-gap` cannot be
+  // granted one while the first is still pending.
+  let replansUsed = 0
+  let rePlanPending = false
+  let rePlanNote = ''
+  // The VALIDATED `whatIsMissing` the re-plan will be briefed with — redacted and
+  // clamped by `validateEscalationClaim`, never the model's raw string re-read at the
+  // point of use. One validation, one value, so the prompt cannot be handed a claim
+  // the gate would have refused.
+  let rePlanWhatIsMissing = ''
+  const recordRoundForEscalation = (roundNumber, s) => {
+    if (s === null || typeof s !== 'object') return
+    // THE LEDGER RECORDS ONLY A ROUND THAT JUDGED THE CODE AND REJECTED IT. An infra-only
+    // or advisory-only round says nothing about whether FIXING is working, and folding one
+    // in would let a dead review seat look like a finding that failed to converge.
+    //
+    // AND AN `APPROVE` ROUND IS NOT A FAILURE TO CONVERGE — IT IS CONVERGENCE. This half
+    // was missing, and it was generating a bogus `not-converging` stop that only stayed
+    // invisible because the terminal result read `finalVerdict === 'APPROVE'` first and
+    // reported `blockKind: 'none'`, discarding it. Surfaced the moment an escalation was
+    // made to force the verdict (a run that stopped did not approve): a round 1 that
+    // rejected with NO blocker/major findings records a count of 0, the approving round 2
+    // recorded another 0, and `[0,0]` read as "the count stopped falling" — the fix
+    // rounds reported as not converging on the round they converged. The ledger measures
+    // whether REJECTIONS are getting smaller; an approval is the successful terminus and
+    // has no place in that series.
+    // …AND A ROUND WHOSE REPLY CONTRADICTED ITSELF JUDGED NOTHING. Its verdict was
+    // withheld rather than earned, so folding it into the convergence series would let a
+    // seat that keeps answering incoherently be reported as fix rounds that "stopped
+    // converging" — a cause nobody measured, which is the exact failure this card exists
+    // to remove. Measured: without this, two contradictory rounds produce
+    // `not-converging` with counts [0,0], blaming the fixes for a panel that never
+    // delivered a usable verdict.
+    const judgedCode =
+      s.blockKind === 'code' &&
+      normalizeVerdict(s.verdict) === 'REQUEST_CHANGES' &&
+      s.contradictorySynthesis !== true
+    if (judgedCode) {
+      eligibleHistory.push(eligibleFixFindings(s.findings))
+      blockingCounts.push(blockingFindingCount(s.findings))
+    }
+    // …BUT A DECLARATION IS NOT LEDGER ARITHMETIC, AND GATING IT ON `blockKind` WAS A
+    // CATEGORY ERROR. A reviewer's `escalate` is a claim about the WORK'S VIABILITY —
+    // the plan is wrong, or the dependency is not there yet. `blockKind` and severity are
+    // claims about the CODE'S QUALITY. Routing the first through a gate built for the
+    // second made this loop DEAFEST exactly when the reviewer was CLEAREST.
+    //
+    // THE CANONICAL CASE IT SILENTLY DROPPED: "the code is fine, the dependency isn't
+    // there yet" — one `minor` finding plus `escalate: {kind: 'missing-dependency'}`.
+    // `enforceSeverityGate` turns an all-non-blocking REQUEST_CHANGES into APPROVE and
+    // `classifyBlock` calls that list `advisory-only`, so the declaration never reached
+    // `decideEscalation` and the run proceeded AS APPROVED — merging work a reviewer had
+    // just said could not be built yet. The spec item is explicit that a run escalates
+    // when ANY trigger fires, and the declaration is the FAST one: it is the only trigger
+    // that can fire at round 1, before any arithmetic has two rounds to compare.
+    const claim = s.escalationClaim ?? null
+    // Nothing to decide on a round that neither judged the code nor declared anything;
+    // returning keeps the audit log free of a "continue" line per advisory round.
+    if (!judgedCode && claim === null) return
+    const decision = decideEscalation({
+      round: roundNumber,
+      // THE ARITHMETIC IS NEUTRALISED ON A ROUND THE LEDGER DID NOT RECORD, so consulting
+      // the declaration cannot re-fire the repeat/no-progress triggers over the PREVIOUS
+      // two code rounds — which were already decided on their own call. Both verdicts
+      // read `undecidable` from these, and only the claim can fire.
+      previousFindings:
+        judgedCode && eligibleHistory.length >= 2 ? eligibleHistory[eligibleHistory.length - 2] : null,
+      currentFindings: judgedCode ? eligibleHistory[eligibleHistory.length - 1] : null,
+      blockingCounts: judgedCode ? blockingCounts : [],
+      claim,
+      claimVerdict: s.escalationClaimVerdict ?? null,
+      replansUsed,
+    })
+    // A REFUSED DECLARATION IS REPORTED, NOT SWALLOWED. It is the one outcome an
+    // agent learns nothing from unless it is said out loud, and it never suppresses
+    // the arithmetic below — which is the property that makes the panel's honesty
+    // irrelevant to whether this run stops.
+    if (decision.refusedClaim !== '') log(`trident-v2 escalation: declaration REFUSED — ${decision.refusedClaim}`)
+    for (const note of decision.undecidable) log(`trident-v2 escalation: UNDECIDED — ${note}`)
+    if (decision.action === 're-plan') {
+      replansUsed += 1
+      rePlanPending = true
+      rePlanWhatIsMissing = decision.whatIsMissing
+      // NO VERDICT REPAIR HERE, DELIBERATELY. Restoring REQUEST_CHANGES at this point
+      // reads as the obvious move — the severity gate may have approved the round and a
+      // revised plan means the work is not done — but it would be a THIRD spelling of
+      // that rule and it cannot change any outcome: the loop below is entered on
+      // `rePlanPending` regardless of the verdict, and the fix round reassigns
+      // `finalVerdict` from its own re-review before anything reads it. If the loop
+      // cannot run at all (the cap), the pending flag becomes a STOP and the post-loop
+      // force covers it. Mutation-checked: removing such a repair changed nothing, which
+      // is why it is not here.
+      log(`trident-v2 escalation: design-gap declared at round ${roundNumber} — spending the ONE bounded re-plan (${decision.evidence})`)
+      return
+    }
+    if (decision.action === 'stop') {
+      escalation = decision
+      log(`trident-v2 escalation: STOP at round ${roundNumber} kind=${decision.kind} triggers=${decision.triggers.join('+')} — ${decision.evidence}`)
+      return
+    }
+    log(`trident-v2 escalation: continue at round ${roundNumber} — ${decision.evidence}`)
+  }
+  recordRoundForEscalation(round, synthesis)
+
   // BOUNDED fix loop — re-Forge against the findings, re-review, re-synthesize,
   // until APPROVE or maxRounds.
   // AN INFRA-ONLY BLOCK EXITS THE LOOP INSTEAD OF RE-FORGING. The gate still
@@ -7839,13 +8553,120 @@ ${task}${reflectionGuidance}`,
   // could only re-derive that and pay five seats to say it again. The two kinds are kept
   // apart because the OUTER loop reads them differently: 'infra-only' asserts no seat ever
   // judged the code, which on this arm would be false.
+  // AND AN ESCALATION EXITS IT TOO — the clause this card adds. `round < maxRounds`
+  // was the PRIMARY exit for a run that could not converge, which is exactly
+  // backwards: a cap is a backstop, and reaching it means nine rounds were bought to
+  // learn something arithmetic knew at round 2. `escalation === null` is what makes
+  // the cap a backstop again. It is placed before the blockKind clauses for
+  // readability only — the ledger above records nothing for a round that did not
+  // judge the code, so the two can never both be true.
+  // A PENDING RE-PLAN IS ITS OWN REASON TO ITERATE, and it has to be, because the other
+  // three clauses are all claims about CODE QUALITY while a re-plan is a claim about the
+  // WORK'S VIABILITY. A `design-gap` declared alongside only minor/nit findings is the
+  // case that proves it: `enforceSeverityGate` turns that round's verdict into APPROVE and
+  // `classifyBlock` calls the list `advisory-only`, so all three clauses were false, the
+  // loop never ran, and the ONE bounded re-plan the spec item grants was authorised and
+  // then silently discarded — reported as `re-plan-unreachable` with five rounds still in
+  // the budget. The blockKind clauses exist to stop the loop re-Forging against findings
+  // already declared non-blocking; that reasoning does not apply here, because a re-plan
+  // round does not re-Forge against the FINDINGS at all — it rebuilds against a REVISED
+  // PLAN.
   while (
-    finalVerdict === 'REQUEST_CHANGES' &&
+    escalation === null &&
     round < maxRounds &&
-    synthesis.blockKind !== 'infra-only' &&
-    synthesis.blockKind !== 'advisory-only'
+    (rePlanPending ||
+      (finalVerdict === 'REQUEST_CHANGES' &&
+        synthesis.blockKind !== 'infra-only' &&
+        synthesis.blockKind !== 'advisory-only'))
   ) {
     round++
+    // ── THE BOUNDED RE-PLAN RUNS HERE, BEFORE THE FIX AGENT ─────────────────────
+    // Authorised by `decideEscalation` at the END of the previous round, performed
+    // at the START of this one, so the revised execution spec exists before Forge is
+    // sent in. It runs INSIDE the loop — which is the whole correction: `plan:fable`
+    // is otherwise invoked once, outside it, and never hears a reviewer.
+    //
+    // A NULL PLAN IS NOT A RE-PLAN, AND NEITHER IS A THROWN ONE. The planner seat
+    // returning nothing is an UNKNOWN outcome, not a successful re-plan with an empty
+    // spec, and carrying on would send Forge in with the ORIGINAL plan while the run's
+    // one re-plan is recorded as spent. So it escalates to the orchestrator instead —
+    // the remedy was attempted, it did not produce anything, and the next decision is
+    // not this run's to make.
+    //
+    // THE THROW IS CAUGHT RIGHT HERE, and that is the whole point of the try. `agent()`
+    // REJECTS on a transport error, a schema refusal, an exhausted retry — and an
+    // uncaught rejection escapes the fix loop entirely, lands in the workflow's outer
+    // catch, and is persisted as `checkpoint: 'inner-error'` with NO escalation on it.
+    // A reviewer would have proved the plan was wrong, and the run would have reported
+    // an infrastructure death. That is this file's own subject — a terminal state that
+    // says the wrong thing about why — so `threw` and `returned nothing` are collapsed
+    // DELIBERATELY into one outcome ("the planner did not produce a plan") rather than
+    // by omission, and the evidence still says WHICH of the two it was.
+    if (rePlanPending) {
+      rePlanPending = false
+      log(`trident-v2 escalation: bounded re-plan (round ${round}) — plan:fable with ${Array.isArray(synthesis.findings) ? synthesis.findings.length : 0} finding(s) attached`)
+      let rePlan = null
+      // '' means the seat did not throw. A thrown cause is redacted + capped by the SAME
+      // helper every other persisted cause in this file goes through, because it is
+      // model/transport text and it reaches the owner.
+      let rePlanThrew = ''
+      try {
+        rePlan = await agent(
+          rePlanPrompt(
+            Array.isArray(synthesis.findings) ? synthesis.findings : [],
+            round - 1,
+            rePlanWhatIsMissing,
+          ),
+          withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+        )
+      } catch (err) {
+        rePlanThrew = infraCause(err && err.message ? String(err.message) : String(err))
+        // '' would read as "did not throw" two lines down, so a cause that redacts away
+        // to nothing still has to say that something was thrown.
+        if (rePlanThrew === '') rePlanThrew = 'the planner seat threw (no readable message)'
+        log(`trident-v2 escalation: bounded re-plan THREW — ${rePlanThrew}`)
+      }
+      // ONE EXPRESSION THAT BOTH DECIDES AND NAMES. The three outcomes are one
+      // outcome — "the planner did not produce a plan" — and the run still has to say
+      // WHICH, because a stop that cannot name what happened is the defect this whole
+      // card is about. Written as a single reason string rather than as a boolean
+      // beside a separate message: a condition and a description that are computed
+      // apart can disagree, and every arm here is load-bearing (mutating any one of
+      // them changes what the run reports).
+      const rePlanFailure =
+        rePlanThrew !== ''
+          ? `threw: ${rePlanThrew}`
+          : !rePlan
+            ? 'returned null'
+            : typeof rePlan.executionSpec !== 'string' || rePlan.executionSpec.trim() === ''
+              ? 'returned no executionSpec'
+              : ''
+      if (rePlanFailure !== '') {
+        escalation = {
+          action: 'stop',
+          kind: 'design-gap',
+          whatIsMissing:
+            'a reviewer declared the plan wrong and the ONE bounded re-plan produced no execution spec, so this run has no revised plan to build against',
+          triggers: ['design-gap', 're-plan-failed'],
+          evidence: `the bounded re-plan at round ${round} ${rePlanFailure}`,
+          refusedClaim: '',
+          undecidable: [],
+          round,
+        }
+        log(`trident-v2 escalation: STOP at round ${round} kind=design-gap — ${escalation.evidence}`)
+        break
+      }
+      // A RE-PLAN MAY RAISE THE EXECUTOR, NEVER LOWER IT. `modelForTag` routes
+      // 'mechanical' to Sonnet/medium and everything else to Opus/high, so adopting the
+      // tag wholesale let a re-plan DOWNGRADE the model on a run that had just proved
+      // hard enough to need re-planning — silently, and on the very rounds whose APPROVE
+      // ships the change. The asymmetry decides it: a wrong 'reasoning' costs money, a
+      // wrong 'mechanical' ships worse code. And the seat making the call is the same
+      // kind of seat that authored the plan the reviewers just rejected.
+      if (rePlan.complexity === 'reasoning') complexityTag = rePlan.complexity
+      rePlanNote = `\n\nTHE PLAN WAS REVISED (round ${round}) because the review panel reported a DESIGN GAP: the previous plan itself asked for what they are flagging. Build the REVISED EXECUTION SPEC below, not the original task description, and REMOVE or REPLACE work the old plan asked for where the spec says so.\nREVISED EXECUTION SPEC:\n${rePlan.executionSpec}`
+      log(`trident-v2 escalation: re-plan done — topTask="${rePlan.topTask}" complexity=${rePlan.complexity}`)
+    }
     log(`trident-v2 fix loop: round=${round}/${maxRounds} — re-Forge against findings`)
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
@@ -7860,7 +8681,7 @@ ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 
 TASK:
-${task}${reflectionGuidance}`,
+${task}${rePlanNote}${reflectionGuidance}`,
       `r${round}`,
     )
     // ONE READ OF THE CLAIM, THROUGH `oidClaim`, EXACTLY AS ROUND 1 DOES — the raw
@@ -8032,6 +8853,56 @@ ${task}${reflectionGuidance}`,
       head: reviewedHead,
       findings: synthesis.findings,
     })
+    // DID THIS ROUND FIX ANYTHING? Asked AFTER the re-review — the only moment two
+    // rounds of findings about two different commits both exist — and before the
+    // `while` re-tests its predicate, so a decision to stop costs zero further rounds.
+    recordRoundForEscalation(round, synthesis)
+  }
+
+  // ── AN AUTHORISED RE-PLAN THAT NEVER GOT A ROUND TO RUN IN ──────────────────
+  // `decideEscalation` can authorise the bounded re-plan at the END of any round,
+  // including the LAST one the cap allows — but the planner runs at the TOP of the next
+  // fix round, and `round < maxRounds` means there is no next fix round. With
+  // `maxRounds: 1` there is never one at all. The pending flag was then simply dropped
+  // and the run fell through as an ordinary `blockKind: 'code'` rejection: a reviewer
+  // said the PLAN is wrong, proved it with `whatIsMissing`, and the run reported a code
+  // rejection and stopped. That is the silent-drop this whole card exists to remove,
+  // reproduced by the card's own remedy.
+  //
+  // IT ESCALATES RATHER THAN STRETCHING THE CAP. Running the re-plan anyway would buy a
+  // round the cap refuses, and the decision this leaves is not the run's to make — the
+  // findings say the plan is wrong and there is no budget left to act on it, which is
+  // exactly what the orchestrator needs told.
+  if (escalation === null && rePlanPending) {
+    rePlanPending = false
+    escalation = {
+      action: 'stop',
+      kind: 'design-gap',
+      whatIsMissing: rePlanWhatIsMissing,
+      triggers: ['design-gap', 're-plan-unreachable'],
+      evidence: `a design gap was declared at round ${round} of ${maxRounds}, which is the last round the cap allows, so there is no round left for the bounded re-plan to run in`,
+      refusedClaim: '',
+      undecidable: [],
+      round,
+    }
+    log(`trident-v2 escalation: STOP at round ${round} kind=design-gap — ${escalation.evidence}`)
+  }
+
+  // A RUN THAT STOPPED DID NOT APPROVE. Reached only by a declaration on a round whose
+  // findings were all non-blocking: `enforceSeverityGate` had already turned that verdict
+  // into APPROVE, and the fix loop never runs, so `finalVerdict` is still APPROVE while
+  // `escalation` says the work cannot proceed. Left alone the terminal result below reads
+  // `finalVerdict === 'APPROVE'` FIRST and reports `blockKind: 'none'` — the escalation
+  // would vanish AND the outer loop would MERGE the branch, which is the worst available
+  // outcome: shipping work a reviewer just declared unbuildable, silently.
+  //
+  // For every pre-existing escalation path this is a no-op — they can only fire from
+  // inside the fix loop, which runs only while the verdict is REQUEST_CHANGES — so it
+  // closes the new door without touching the old ones, and makes the invariant explicit
+  // rather than incidental.
+  if (escalation !== null && finalVerdict === 'APPROVE') {
+    finalVerdict = 'REQUEST_CHANGES'
+    log(`trident-v2 escalation: verdict APPROVE → REQUEST_CHANGES (the run stopped at round ${escalation.round} kind=${escalation.kind})`)
   }
 
   // The MEASURED cause of an infra-only stop, computed once: it goes into the audit
@@ -8042,6 +8913,7 @@ ${task}${reflectionGuidance}`,
     roundLostItsWork === null &&
     roundLostItsDiff === null &&
     finalVerdict !== 'APPROVE' &&
+    escalation === null &&
     synthesis.blockKind === 'infra-only' &&
     terminalCause !== ''
   log(
@@ -8091,12 +8963,35 @@ ${task}${reflectionGuidance}`,
     // exists to draw. The FINDING below is what tells the two apart, because the
     // recovery differs — one needs the work recovered, the other needs a diff
     // regenerated against work that is already safely on the branch.
+    // AN ESCALATION IS ITS OWN KIND, and it is neither a code rejection nor an
+    // infrastructure outage. 'design-gap' and 'missing-dependency' are what a REVIEWER
+    // declared (and proved with `whatIsMissing`); 'not-converging' is what the
+    // arithmetic measured, and it deliberately names no cause — the numbers show that
+    // fixing is not working and say nothing about why. The outer loop reads all three
+    // as BLOCKED rather than FAILED (`trident/escalation-block.ts`).
     blockKind:
       roundLostItsWork !== null || roundLostItsDiff !== null
         ? 'round-lost'
         : finalVerdict === 'APPROVE'
           ? 'none'
-          : synthesis.blockKind || 'code',
+          : escalation !== null
+            ? escalation.kind
+            : synthesis.blockKind || 'code',
+    // THE ESCALATION ITSELF — what the orchestrator needs to act, carried as structured
+    // data rather than prose so no reader has to parse a sentence to route it.
+    // `triggers` lists EVERY gate that fired, so a stop is never recorded as having
+    // happened only because an agent said so.
+    ...(escalation === null
+      ? {}
+      : {
+          escalation: {
+            kind: escalation.kind,
+            whatIsMissing: escalation.whatIsMissing,
+            triggers: escalation.triggers,
+            evidence: escalation.evidence,
+            round: escalation.round,
+          },
+        }),
     // THE MEASURED CAUSE, present ONLY for an infra-only stop that actually measured
     // one. `blockKind` says the code was never judged; this says WHY, in the probe's
     // own words (redacted + capped). The outer loop's failure reason has been generic
