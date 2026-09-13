@@ -1,7 +1,7 @@
 ---
 title: HerdrHost implements PtyHost over the herdr socket API
 group: platform
-status: open
+status: done
 priority: P0
 cutover: true
 legacy_ref: "GitHub issue #538 (herdr step 2b)"
