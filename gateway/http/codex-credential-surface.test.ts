@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
@@ -359,4 +359,18 @@ describe('the top-level status describes the POOL, not the first seat', () => {
     expect(again.account).toBe('work')
     expect(again.replaced).toBe(true)
   })
+})
+
+
+test('project ownership refusal is a 409 for reads, connects and deletes; restoring owner works', async () => {
+  expect((await surface.handler(req('POST', PROJECT, { auth: subscriptionAuth() })))?.status).toBe(201)
+  const marker = join(codexProjectHome(codexHome, 'p1'), 'project-owner.json')
+  writeFileSync(marker, JSON.stringify('another-project'))
+  for (const method of ['GET', 'POST', 'DELETE']) {
+    const response = await surface.handler(req(method, PROJECT, method === 'POST' ? { auth: subscriptionAuth() } : undefined))
+    expect(response?.status).toBe(409)
+    expect(await response!.json()).toMatchObject({ code: 'codex_project_owner_refused' })
+  }
+  writeFileSync(marker, JSON.stringify('p1'))
+  expect((await surface.handler(req('GET', PROJECT)))?.status).toBe(200)
 })

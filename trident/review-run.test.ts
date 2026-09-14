@@ -1,3 +1,4 @@
+import { CodexProjectOwnerError } from './codex-project-owner.ts'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -550,4 +551,37 @@ describe('orchestrator bound-review dispatch', () => {
     expect(outcome.waiting).toBe(true)
     expect(outcome.run.subagent_run_id).toBe('control-fire-id')
   })
+})
+
+
+test('bound review refuses project ownership conflicts and resumes after repair', async () => {
+  let conflict = true
+  let reviews = 0
+  const orch = buildTridentOrchestrator({
+    fire_workflow: async () => { throw new Error('unexpected build') },
+    db_path: '/tmp/not-used-owner-review.db',
+    run_host: async () => ok(),
+    codex_home: '/static/global',
+    resolve_codex_home: () => {
+      if (conflict) throw new CodexProjectOwnerError()
+      return '/verified/project'
+    },
+    execute_bound_review: async (run, deps) => {
+      reviews++
+      expect(deps.codex_home).toBe('/verified/project')
+      return {
+        status: 'success', pr: run.bound_pr!, reviewed_sha: HEAD,
+        verdict: 'APPROVE', findings: [],
+        review_gate: { status: 'absent', detail: 'absent' },
+      }
+    },
+  })
+  const run = makeTridentRun({ id: 'owner-review', bound_pr: 515, subagent_run_id: null, subagent_status: null })
+  const refused = await orch.step(run)
+  expect(refused.note).toContain('ownership')
+  expect(refused.waiting).toBe(true)
+  expect(reviews).toBe(0)
+  conflict = false
+  expect((await orch.step(run)).run.phase).toBe('done')
+  expect(reviews).toBe(1)
 })

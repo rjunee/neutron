@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,6 +26,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { codexAuthPath, codexProjectHome, readMaterializedAuth } from './codex-auth.ts'
+import { migrateCodexProjectOwner } from './codex-project-owner.ts'
 import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
   buildRunCodexHomeResolver,
@@ -559,4 +561,47 @@ describe('one ChatGPT account cannot occupy two seats', () => {
     const again = await svc.connectAccount(OWNER, authFor('acct-1'), { slot: 'work' })
     expect(again.ok).toBe(true)
   })
+})
+
+describe('project directory ownership', () => {
+  test('owner resolves after restart; mismatches refuse every project access without changing credentials', async () => {
+    const svc = newService()
+    const target = { scope: 'project' as const, project_id: 'alpha' }
+    expect((await svc.connect(OWNER, subscriptionAuth(), target)).ok).toBe(true)
+    const home = codexProjectHome(codexHome, 'alpha')
+    expect(newService().resolveActiveCodexHome(OWNER, 'alpha')).toBe(home)
+    const before = readMaterializedAuth(home)
+    const stored = store.resolve(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)?.plaintext
+    writeFileSync(join(home, 'project-owner.json'), JSON.stringify('beta'))
+    expect(() => svc.resolveActiveCodexHome(OWNER, 'alpha')).toThrow('ownership')
+    expect(() => svc.status(OWNER, target)).toThrow('ownership')
+    await expect(svc.refreshSeatLiveness(OWNER, target)).rejects.toThrow('ownership')
+    await expect(svc.connect(OWNER, subscriptionAuth().replace('acc"', 'different"'), target)).rejects.toThrow('ownership')
+    await expect(svc.disconnect(OWNER, target)).rejects.toThrow('ownership')
+    expect(readMaterializedAuth(home)).toBe(before)
+    expect(store.resolve(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)?.plaintext).toBe(stored)
+    writeFileSync(join(home, 'project-owner.json'), JSON.stringify('alpha'))
+    expect(newService().resolveActiveCodexHome(OWNER, 'alpha')).toBe(home)
+    expect((await svc.disconnect(OWNER, target)).ok).toBe(true)
+  })
+})
+
+
+test('an explicitly migrated copy resolves the existing refreshed project credential', async () => {
+  const target = { scope: 'project' as const, project_id: 'legacy' }
+  await newService().connect(OWNER, subscriptionAuth(), target)
+  const original = codexProjectHome(codexHome, 'legacy')
+  const refreshed = subscriptionAuth().replace('"acc"', '"refreshed-access"')
+  writeFileSync(join(original, 'auth.json'), refreshed)
+  rmSync(join(original, 'project-owner.json'))
+  const copiedHome = join(tmp, 'migration-copy')
+  cpSync(codexHome, copiedHome, { recursive: true })
+  const copiedService = new CodexCredentialService({ store, codexHome: copiedHome, rotation: new SqliteCodexRotationStore(db) })
+  expect(() => copiedService.resolveActiveCodexHome(OWNER, 'legacy')).toThrow('ownership')
+  expect(migrateCodexProjectOwner(copiedHome, 'legacy')).toEqual({ changed: true })
+  const resolved = copiedService.resolveActiveCodexHome(OWNER, 'legacy')
+  expect(resolved).toBe(codexProjectHome(copiedHome, 'legacy'))
+  expect(readMaterializedAuth(resolved!)).toBe(refreshed)
+  expect(readMaterializedAuth(original)).toBe(refreshed)
+  expect(existsSync(join(original, 'project-owner.json'))).toBe(false)
 })
