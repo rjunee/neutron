@@ -13,7 +13,7 @@
  * issues none leaves the row with none, even when the row had one a moment ago.
  */
 
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import {
   existsSync,
   mkdirSync,
@@ -43,7 +43,8 @@ import type { ReplSession } from '../repl-session.ts'
 import { fenceLostSession, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { registerSupervisedSubstrate, runReplWatchdogTick } from '../supervision.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
-import { childByKey, pool } from '../pool-state.ts'
+import { childByKey, pool, sink } from '../pool-state.ts'
+import { ProcessRegistry, pushAmbientProcessRegistry } from '@neutronai/tools/process-registry.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
 
 const dirs: string[] = []
@@ -64,6 +65,8 @@ const killsByHandle: string[] = []
 /** Every `PtyHost.spawn` this file's hosts were asked for. The r47 assertion surface: what
  *  matters is that the loser NEVER STARTED a process, not that one was tidied up after. */
 const spawnCalls: string[] = []
+/** The sink port + per-child credential baked into the last spawned child's config. */
+let lastBakedSink: { port: number; token: string } | undefined
 
 function echoHost(paneHandle?: string, onSpawn?: () => void): PtyHost {
   return {
@@ -77,6 +80,9 @@ function echoHost(paneHandle?: string, onSpawn?: () => void): PtyHost {
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
       const { port: sinkPort, token } = bakedChildSinkInfo(argv)
+      // CAPTURED FOR THE AUTHORIZATION CASES (r63): this is the coordinate pair the CHILD was
+      // given, so a case can present exactly what the child presents.
+      lastBakedSink = { port: sinkPort, token }
       let exited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exitedPromise = new Promise<number | null>((res) => {
@@ -1192,5 +1198,288 @@ describe('the representations of ownership agree', () => {
         ourPid: process.pid,
       }),
     ).toBe(false) // R4 — and this is what lets the takeover the fence exists for actually happen
+  })
+})
+
+/**
+ * A CONTENDER MUST NOT REVOKE THE WINNER'S AUTHORIZATION (#539, Argus r63).
+ *
+ * Round forty-seven's rule is "no capability before ownership", and it was applied to the two
+ * capabilities that round's finding named: screen delivery and detector actuation. **Sink
+ * registration is also a capability** — it is what makes a reply from a child acceptable — and
+ * it is the one that is worse than the others, because acquiring it REVOKES somebody else's:
+ * `ReplSink.register` deletes the displaced session's credential.
+ *
+ * So a contender that registered before it claimed could strip the winner without ever winning
+ * anything: it wiped the winner's credential entry, lost the claim, and then unregistered what
+ * was left on its way out. The winner published, served, and its first reply got a 401.
+ *
+ * The existing race cases check the pane, the pool entry and the row — every representation of
+ * OWNERSHIP — and none of them presents a credential. These do.
+ */
+describe('a refused contender leaves the winner able to be answered', () => {
+  // AN AMBIENT PROCESS REGISTRY, so the live-process assertion below observes something. Without
+  // one `registerLiveProcessSafe` returns the no-op handle and the cell is untestable.
+  let processRegistry: ProcessRegistry
+  let clearRegistry: () => void = () => {}
+  beforeEach(() => {
+    processRegistry = new ProcessRegistry()
+    clearRegistry = pushAmbientProcessRegistry(processRegistry)
+  })
+  afterEach(() => {
+    clearRegistry()
+  })
+
+  async function authorize(credential: string): Promise<number> {
+    const port = lastBakedSink?.port as number
+    const resp = await fetch(`http://127.0.0.1:${port}/tools`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
+      body: JSON.stringify({ session_id: 'whatever' }),
+    })
+    return resp.status
+  }
+
+  it('an overlapping ADOPTER that loses the claim does not strip the winner\'s credential', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-auth'), registryPath)
+    const key = poolKeyFor(options)
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+    const row = readRow(registryPath, key)
+    const winner = (await pool.get(key)) as ReplSession
+    const winnerCredential = lastBakedSink?.token as string
+    // THE PREMISE: the credential the child was baked with is the one the sink derives for the
+    // winner's generation. If these ever diverged the case would be testing nothing.
+    expect(winnerCredential).toBe(sink.credentialFor(winner))
+    expect(await authorize(winnerCredential)).toBe(200)
+
+    // A second gateway adopts the same pane and LOSES — the row carries the winner's claim.
+    const adopter = new FakeAdoptableHost()
+    adopter.addPane('w9:p-auth', {
+      argv: [
+        'claude',
+        '--resume',
+        row?.sessionId as string,
+        '--dangerously-load-development-channels',
+        `server:${row?.channelName as string}`,
+      ],
+      screens: ['idle'],
+      pid: 4242,
+    })
+    resetBootAdoptionForTests()
+    const outcome = await reconcileOwnRepl(options, key, {
+      host: adopter,
+      health: async () => true,
+      log: () => {},
+      claimantPid: process.pid + 1,
+    })
+    expect(outcome.kind).toBe('undecided')
+
+    // AND THE WINNER CAN STILL BE ANSWERED. This is the assertion the race cases were missing:
+    // ownership was never in doubt here — authorization was.
+    expect(await authorize(winnerCredential)).toBe(200)
+    expect(await pool.get(key)).toBe(winner)
+    // AND IT IS STILL VISIBLE TO THE CRASHED-AGENT WATCHDOG (the second displacing capability):
+    // `registerLiveProcessSafe` unregisters the name first, so a contender that registered
+    // before claiming removed the winner's record and its own release then deleted what it had
+    // displaced — leaving a live REPL whose death nothing would report.
+    expect(processRegistry.list().filter((r) => r.name === key)).toHaveLength(1)
+    // THE CONTROL, so 200 is not simply what this route always answers.
+    expect(await authorize('not-a-credential')).toBe(401)
+  })
+
+  it('a FRESH SPAWN that loses the reservation does not strip the live session\'s credential', async () => {
+    // The same rule on the other path. A handle-less host writes NO claim (ownership is the
+    // pane's, and there is no pane), so a later turn for this key reaches the SPAWN path rather
+    // than being refused by a claim — which is what makes the reservation the thing that
+    // refuses, and therefore what makes this reachable at all.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const first = optionsFor(echoHost(), registryPath)
+    const key = poolKeyFor(first)
+    await drain(createPersistentReplSubstrate(first).start(spec('hi')))
+    const live = (await pool.get(key)) as ReplSession
+    const liveCredential = lastBakedSink?.token as string
+    expect(liveCredential).toBe(sink.credentialFor(live))
+    expect(await authorize(liveCredential)).toBe(200)
+
+    // The pool entry is dropped, so the next turn spawns rather than reusing — and the row
+    // records this transcript's id, so that spawn RESUMES it and therefore registers under the
+    // same session id the live one holds.
+    const row = readRow(registryPath, key)
+    expect(row?.sessionId).toBe(live.sessionId)
+    // THE PREMISE THAT MAKES THE COLLISION POSSIBLE: the next spawn must RESUME this
+    // transcript, or it mints a fresh session id and never registers under the live one's.
+    // This fixture's child never reports its session (the echo host answers `/health` and
+    // nothing else), so `has_session` is written below with the reservation — a row that names
+    // a transcript which demonstrably exists, since the live session is holding it.
+    pool.delete(key)
+    childByKey.delete(key)
+
+    // ANOTHER GATEWAY HOLDS THE RESERVATION: written by hand, because it is another process.
+    const current = JSON.parse(readFileSync(registryPath, 'utf8')) as ReplRegistry
+    const mine = current[key] as ReplRegistryRecord
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          [key]: {
+            ...mine,
+            has_session: true,
+            sessionId: live.sessionId,
+            spawn_reservation_by: 'the-other-gateway',
+            spawn_reservation_at: Date.now(),
+            spawn_reservation_pid: process.pid + 1,
+          },
+        },
+        null,
+        2,
+      ),
+    )
+    const second = {
+      ...optionsFor(echoHost(), registryPath),
+      claimantPid: process.pid + 2,
+      claimantLiveness: () => 'alive' as const,
+    } as PersistentReplSubstrateOptions
+    const events: Event[] = []
+    for await (const ev of createPersistentReplSubstrate(second).start(spec('two'))
+      .events as AsyncIterable<Event>) {
+      events.push(ev)
+    }
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.message).toMatch(/RESERVED this session key/i)
+
+    // AND THE LIVE SESSION IS STILL AUTHORIZED.
+    expect(await authorize(liveCredential)).toBe(200)
+  })
+})
+
+/**
+ * A SPAWN IN FLIGHT BLOCKS AN ADOPTION (#539, Argus r63).
+ *
+ * Round forty-seven's reservation exists because a `claude --resume <id>` appends through
+ * startup and readiness, so two of them on one transcript corrupts it. Only SPAWNERS consulted
+ * it. An adopter therefore walked straight past a live reservation, claimed the row, and the
+ * spawner — whose child was already writing — found out at its own ownership write.
+ *
+ * Found by enumerating capabilities rather than by a failure: the reservation is the ownership
+ * fact that licenses a fresh spawn's capabilities, and a fact only one path honours is not a
+ * fact about the key.
+ */
+describe('an adoption stands down for a spawn that is already in flight', () => {
+  function rowWithReservation(
+    registryPath: string,
+    key: string,
+    reservation: { by: string; at: number; pid: number } | undefined,
+  ): void {
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          [key]: {
+            sessionKey: key,
+            sessionId: 'dddddddd-1111-2222-3333-444444444444',
+            cwd: '/tmp/neutron-handle',
+            channelName: 'neutron-904a860d597f559a30a30e0748dcec8e',
+            has_session: true,
+            pane_handle: 'w9:p-in-flight',
+            child_generation: 'gen-in-flight',
+            pid: 4242,
+            // Required for adoption to get as far as the CLAIM: a row with no dev-channel port
+            // has nothing to inject a turn into, and the pass closes the pane before it ever
+            // contends. `deps.health` answers for it.
+            devchannel_port: 45999,
+            // ...and the spawn-time reuse properties, or the pass closes the pane on the
+            // grounds that the first turn would evict it anyway. `tools: []` in `spec`
+            // means an EMPTY tool surface, which is what a reusable row records here.
+            reuse: { tool_surface: '', tool_bridge: false, auth_fingerprint: '' },
+            ...(reservation === undefined
+              ? {}
+              : {
+                  spawn_reservation_by: reservation.by,
+                  spawn_reservation_at: reservation.at,
+                  spawn_reservation_pid: reservation.pid,
+                }),
+          },
+        },
+        null,
+        2,
+      ),
+    )
+  }
+
+  function adoptableFor(registryPath: string, key: string): FakeAdoptableHost {
+    const row = readRow(registryPath, key)
+    const host = new FakeAdoptableHost()
+    host.addPane('w9:p-in-flight', {
+      argv: [
+        'claude',
+        '--resume',
+        row?.sessionId as string,
+        '--dangerously-load-development-channels',
+        `server:${row?.channelName as string}`,
+      ],
+      screens: ['idle'],
+      pid: 4242,
+    })
+    return host
+  }
+
+  it('refuses, hands its child back, and leaves the pane and the row alone', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-in-flight'), registryPath)
+    const key = poolKeyFor(options)
+    rowWithReservation(registryPath, key, {
+      by: 'the-spawning-gateway',
+      at: Date.now(),
+      pid: process.pid + 1,
+    })
+    const adopter = adoptableFor(registryPath, key)
+    resetBootAdoptionForTests()
+    const outcome = await reconcileOwnRepl(options, key, {
+      host: adopter,
+      health: async () => true,
+      log: (m: string) => process.stderr.write(`[case] ${m}
+`),
+      claimantPid: process.pid + 2,
+      claimantLiveness: () => 'alive' as const,
+    })
+
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toMatch(/SPAWN RESERVATION/i)
+    // THE PANE IS LEFT RUNNING AND HANDED BACK — the spawner's `--resume` is mid-flight and the
+    // pane belongs to whoever finishes owning this row.
+    expect(adopter.attached).toHaveLength(1)
+    expect(adopter.attached[0]?.detached).toBe(true)
+    expect(adopter.closed).toEqual([])
+    // AND NOTHING WAS WRITTEN: no claim, and the reservation is untouched.
+    const after = readRow(registryPath, key)
+    expect(after?.adoption_claim_by).toBeUndefined()
+    expect(after?.spawn_reservation_by).toBe('the-spawning-gateway')
+  })
+
+  it('...and a reservation whose holder is GONE does not block the adoption', async () => {
+    // The positive control, and the one that keeps the guard from becoming "never adopt": a
+    // reservation left by a gateway that died must not make a preserved REPL unadoptable. The
+    // predicate answers that from the holder's liveness, which is why it is the same predicate.
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-in-flight'), registryPath)
+    const key = poolKeyFor(options)
+    rowWithReservation(registryPath, key, {
+      by: 'a-gateway-that-died-mid-spawn',
+      at: Date.now(),
+      pid: 4243,
+    })
+    const adopter = adoptableFor(registryPath, key)
+    resetBootAdoptionForTests()
+    const outcome = await reconcileOwnRepl(options, key, {
+      host: adopter,
+      health: async () => true,
+      log: () => {},
+      claimantPid: process.pid + 2,
+      claimantLiveness: () => 'gone' as const,
+    })
+    expect(outcome.kind).toBe('adopted')
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBeDefined()
   })
 })

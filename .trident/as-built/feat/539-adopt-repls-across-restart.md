@@ -2847,6 +2847,61 @@ environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are
 | **D6** | The in-memory claim (R3) was a plain field, so "what does this process hold" was not answerable — which is *why* the pid shortcut existed | `repl-session.ts` | **closed by the D1 fix**: the field is an accessor that maintains the register |
 | **D7** | The D1 fix itself added R4 **without a row in the release matrix**, so the reservation path acquired in the register and never released there; a failed durable release then wedged the key for this process until the TTL. Fencing had the same gap for the claim | `spawn.ts` (reservation release), `boot-adoption.ts` (`fenceLostSession`) | **FIXED r61**, with both directions mutation-covered (M173/M174/M175) and the matrix rule above |
 
+#### The second matrix: capabilities × when they may be enabled (r63)
+
+The release matrix runs *representations of ownership × paths that give it up*. This axis is the
+other one, and it exists because the whole-branch pass found a defect that the first matrix
+structurally cannot see:
+
+> **No capability is enabled before ownership is established, and no capability's acquisition may
+> revoke another session's.**
+
+The second clause is the one nobody had stated. Round forty-seven applied the first to the two
+capabilities its finding named — screen delivery and detector actuation. **Sink registration is
+also a capability** — it is what makes a reply acceptable — and it is worse than those two,
+because `ReplSink.register` *deletes the displaced session's credential*: a contender that never
+wins anything can still take the winner's authorization away.
+
+| Capability | What it grants | Earliest point it may be enabled | Displaces another session's? | Covered by |
+|---|---|---|---|---|
+| **screen delivery** (`child.beginOutput`) | the ring, `lastDataAt`, everything that reads a screen | adoption: **after the claim** (`enableAfterClaim`); fresh spawn: at the spawn, which is behind the **reservation** | no | the r47 cases in `adoption-claim-is-a-compare-and-set.test.ts` (*"a claimant is blind and mute until it holds the claim"*) |
+| **detector actuation** (auto-approve, resume-picker, wedged-prompt, auth-failure, rate-limit) | keystrokes into the child — the one that can answer a tool-approval prompt | registration is inert; actuation requires screens, so it inherits the row above | no | same describe, plus the first-screen latch cases |
+| **writes / turn dispatch** (`submitLine`, `child.write`) | driving the REPL | requires being the pool entry (published after the claim) and unfenced | no | the fence cases (*"detaches, evicts ITS OWN entry, and refuses turns"*) |
+| **the transcript watchdogs** (`sizeWatchdog` — which types compaction keys — and `deadTurnWatcher`) | actuation and transcript reads | adoption: inside `enableAfterClaim`; fresh spawn: behind the reservation | no | `child-exit-pool-identity.test.ts` for their release; enabling is structural |
+| **sink registration** (the credential: `/reply`, `/activity`, `/tool-call`, `/channel-ready`) | **being answerable at all** | adoption: inside `enableAfterClaim` (**moved r63**); fresh spawn: **after the reservation**, immediately before the spawn (**moved r63**) | **YES — it deletes the displaced session's credential** | *"an overlapping ADOPTER that loses the claim does not strip the winner's credential"*, *"a FRESH SPAWN that loses the reservation…"* (M176/M177) |
+| **live-process registration** (`registerLiveProcessSafe`) | visibility to the crashed-agent watchdog and the reaper | adoption: inside `enableAfterClaim` (**moved r63**); fresh spawn: behind the reservation | **YES — it unregisters the name first, and `unregister` is pid-guarded, which in an adoption is the SAME pane process** | the same case asserts the winner still has exactly one record (M180) |
+| **supervision registration** (`registerSupervisedSubstrate`) | the tick that renews, probes and respawns | per SUBSTRATE, not per session; its per-key acts are gated by the claim renewal and by `fencedKeys` | no | *"a fenced key with an UNHEALTHY probe raises nothing…"* |
+
+**The second displacing capability was found by enumerating, not by a failure.** Listing the
+capabilities forced the question "does acquiring this take anything from anyone", and
+`registerLiveProcessSafe` answers yes: it unregisters the name before installing, the name is the
+session key, and a losing adopter's release then deleted the record it had displaced — leaving a
+live REPL that the crashed-agent watchdog could never report on. That is the ~170-minute lag this
+whole change exists to remove, reintroduced by a pass that lost.
+
+**And a third finding fell out of the same question.** A fresh spawn's capabilities are licensed
+by the RESERVATION, not by the pane claim — the claim comes after the spawn, necessarily. So:
+who honours the reservation? Only spawners did. An adopter walked past a live reservation, claimed
+the row, and the spawner — whose `claude --resume` was already appending — discovered it at its own
+ownership write. **Two processes on one transcript for the length of a spawn, which is exactly what
+the reservation exists to prevent.** The adoption claim now consults the same predicate
+(`boot-adoption.ts`, `reserved-elsewhere`), with a case in each direction: a live holder blocks the
+adoption and the pane is handed back untouched; a holder whose process is gone does not (M178).
+
+**Is the enumeration closed?** The list is derived by reading both construction paths end to end
+and asking of every statement whether it grants the session an ability to act or to be acted upon.
+Two arguments that it is complete, and one that it is not:
+
+- *For:* a capability has to be **installed** by one of these two functions — there is no third
+  path that builds a session — and both were read line by line for this table.
+- *For:* the displacing ones are exactly the two that write into a **process-wide map keyed by
+  something two sessions can share** (`sessionId` → credential; `sessionKey` → process record). I
+  grepped for every module-level `Map` the session paths write to; there are no others.
+- *Against:* "grants an ability" is a judgement, not a property a grep can check. The watchdogs
+  were nearly missed because they read like bookkeeping and in fact type into the pane.
+
+So: **a floor, with a stated method** — the same honesty the release matrix's path list carries.
+
 #### The second walk (r61), after this round's changes
 
 Run the same way as the first: every write to each representation enumerated by grep and read.
@@ -3036,7 +3091,7 @@ live evidence) and the remedy is the one used then — name the kinds and count 
 > |---|---|---|
 > | **superseded** | M31, M38 | the code the mutation targeted no longer exists; the row is history |
 > | **subsumed** | M80, M116, M161, M169 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
-> | **probe, not a guard** | M91, M147 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
+> | **probe, not a guard** | M91, M147, M179 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
 > | **not isolable** | M93 | the case is reachable by a second guard, so removing this one alone changes nothing; removing the mechanism entirely DOES red |
 >
 > Four kinds, not five: M147 is filed under *probe, not a guard* rather than given its own,
@@ -3254,6 +3309,11 @@ count from the rows below rather than trusting this sentence.
 | M173 | `releaseSpawnReservation` does not drop the reserver locally | `pane-handle-persistence.test.ts` (1 — the failed-durable-release case, added r61) — **reclassified from "subsumed", which it never was**: no other mutation's failure implied it, and the document said in one place that the case was missing while claiming in another that the row was covered |
 | M174 | the reservation is released locally but NOT durably | `pane-handle-persistence.test.ts` (2 — the uncontended-spawn control and the no-stub case): the two representations can diverge either way, so both directions carry a red |
 | M175 | `fenceLostSession` keeps the claim in the local register | `adoption-claim-is-a-compare-and-set.test.ts` (1 — a fenced session must not block the takeover) |
+| M176 | the adoption registers with the sink BEFORE the claim (the pre-r63 site) | `pane-handle-persistence.test.ts` (1 — the refused adopter strips the winner's credential; the winner's own reply then gets a 401) |
+| M177 | the fresh spawn registers with the sink BEFORE the reservation decision | `pane-handle-persistence.test.ts` (1 — same harm on the spawn path: 401 where the case asserts 200) |
+| M178 | the adoption claim ignores a live spawn reservation | `pane-handle-persistence.test.ts` (1 — the adopter claims a row whose `claude --resume` is mid-flight) |
+| ~~M179~~ | the credential delete in `unregisterIf` is unguarded | ~~nothing~~ — **probe, not a guard**: the sessions-map identity check already refuses every interleaving I can construct, so the credential-level guard is defense for a path that would have to unregister by id alone. Kept because it encodes the rule where the rule applies; it is not evidence |
+| M180 | the live-process registration goes back before the claim | `pane-handle-persistence.test.ts` (1 — the winner ends with NO record in the process registry, so its death would never be reported) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

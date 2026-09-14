@@ -344,20 +344,6 @@ async function spawnSession(
   // this child can never refresh a different registry or a respawned successor.
   let liveHandle: LiveProcessHandle | undefined
 
-  // REGISTER IMMEDIATELY BEFORE THE SPAWN, AND UNDO IT IF THE SPAWN THROWS.
-  //
-  // Registration now grants a credential (`byCredential`), not merely a session-id
-  // entry, so a registration whose child never exists is a standing authorization with
-  // nothing behind it — and the config carrying that credential is already on disk. It
-  // used to sit ~200 lines earlier, where every throw in between (config writes, argv
-  // assembly, env merge) stranded one.
-  //
-  // It cannot move AFTER the spawn: the child can POST the moment it starts, and an
-  // unregistered credential would be refused. So it sits in the smallest window that
-  // works — the statement before — and the spawn is guarded, `unregisterIf` so a
-  // concurrent respawn that already re-registered this id is not evicted by our
-  // failure.
-  sink.register(sessionId, session)
   // ─── THE SPAWN RESERVATION (#539 r47) ──────────────────────────────────────────────────
   //
   // TAKEN BEFORE `PtyHost.spawn`, because that call is the moment this gateway becomes
@@ -377,11 +363,11 @@ async function spawnSession(
     hasSession: resume !== undefined,
   })
   if (reservation === 'taken' || reservation === 'unwritable') {
-    // NOTHING WAS STARTED, so there is nothing to kill and nothing to unwind except the sink
-    // registration taken one line above. The refusal carries `repl_unreconciled` like every
-    // other "this turn cannot be served here" — a key another gateway is spawning for, or a
-    // lock we could not take, is not the provider's fault.
-    sink.unregisterIf(sessionId, session)
+    // NOTHING WAS STARTED AND NOTHING WAS REGISTERED (r63). The sink registration used to be
+    // taken one line ABOVE this decision, which made a losing contender capable of revoking
+    // the winner's credential before it ever learned it had lost — so the unwind that stood
+    // here is gone with the registration that needed it. The refusal carries
+    // `repl_unreconciled` like every other "this turn cannot be served here".
     throw new PaneOwnershipRefusedError(
       `persistent-repl: refusing to serve session ${sessionKey.slice(0, 32)} — ` +
         (reservation === 'taken'
@@ -401,6 +387,19 @@ async function spawnSession(
   // ways to fail between the spawn and the ownership write (a readiness handshake, a config
   // write, a watcher). Once the row records ownership the claim protects the key, so the
   // reservation has done its whole job by the time this returns either way.
+  // REGISTERED BEHIND THE RESERVATION, AND IMMEDIATELY BEFORE THE SPAWN (r47 ordering,
+  // corrected r63).
+  //
+  // Sink registration is a CAPABILITY — it is what makes a reply from this child acceptable —
+  // and round forty-seven's rule is that no capability is enabled before ownership is
+  // established. It is also the one capability whose acquisition REVOKES another session's, so
+  // taking it before the reservation let a turn that went on to lose strip the winner.
+  //
+  // It cannot move later either: the child can POST the moment it starts, and an unregistered
+  // credential is a 401 on a reply we asked for. So it sits in the smallest window that
+  // satisfies both — after the reservation is won, before `PtyHost.spawn` — and a registration
+  // the sink refuses fails this turn rather than serving a child nothing can authorize.
+  sink.register(sessionId, session)
   try {
     let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {

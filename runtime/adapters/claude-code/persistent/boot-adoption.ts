@@ -143,6 +143,7 @@ import {
   SESSION_COMPACT_IDLE_QUIESCE_MS,
   defaultIsPidAlive,
   paneClaimBlocksUs,
+  spawnReservationBlocksUs,
   runOutputScan,
   surfaceSizeAlert,
 } from './signatures.ts'
@@ -263,6 +264,13 @@ export interface BootAdoptionDeps {
  *  {@link ROW_MOVED_REASON} ("the row now names a different child"). */
 const CLAIMED_ELSEWHERE_REASON =
   'another incarnation holds the adoption claim on this row — it got to the compare-and-set first, so this pass is not the owner and publishing would make it a second owner of one live transcript'
+
+/** A spawn for this key is ALREADY IN FLIGHT in another gateway (r63). Distinct from
+ *  {@link CLAIMED_ELSEWHERE_REASON}: nobody owns the row yet, but somebody is running
+ *  `claude --resume` against this transcript right now, and adopting its pane would make two
+ *  processes owners of one file. */
+const RESERVED_ELSEWHERE_REASON =
+  'another gateway holds a live SPAWN RESERVATION for this key and its `claude --resume` is starting now, so adopting this pane would put two processes on one transcript'
 
 /** The claim could not be established because the lock was not held — the ABSENCE of a
  *  finding, which licenses neither publishing nor closing. */
@@ -1893,7 +1901,7 @@ async function claimRowOrUnwind(args: {
   /** What the claim's critical section concluded. THREE, not a boolean: the row is ours,
    *  the row moved, or we never held the lock — and the third must not be able to reach
    *  the code that writes. */
-  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired' | 'claimed-elsewhere'
+  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired' | 'claimed-elsewhere' | 'reserved-elsewhere'
   let claim: ClaimResult
   // THE CLAIM IS A COMPARE-AND-SET, AND A CAS IS ONLY A CAS WHILE THE LOCK HOLDS
   // (Argus r14). `withFlockSync` deliberately runs unguarded when FFI is missing or
@@ -1967,6 +1975,31 @@ async function claimRowOrUnwind(args: {
         })
         if (live) {
           return { registry, result: 'claimed-elsewhere' as ClaimResult, skipSave: true }
+        }
+        // AND A SPAWN RESERVATION BLOCKS AN ADOPTION TOO (#539, Argus r63 — the gap the
+        // capability enumeration turned up).
+        //
+        // Round forty-seven's reservation stops two SPAWNERS reaching one transcript, and only
+        // spawners ever consulted it: this path never looked. So a gateway holding a live
+        // reservation — which means its `claude --resume <id>` is starting right now, appending
+        // through startup and readiness — could be overtaken by an adopter that claimed the row
+        // out from under it, and the spawner would learn of it only at its own ownership write,
+        // after its child had been writing. Two processes on one transcript for the length of a
+        // spawn: exactly what the reservation exists to prevent, in the direction nobody
+        // enumerated.
+        //
+        // The same predicate as the spawn path's, so the two cannot drift, and a dead or
+        // expired holder does not block by that predicate's own rules.
+        const reserved = spawnReservationBlocksUs(prev, {
+          ours: args.incarnation,
+          now: args.now,
+          ourPid: args.claimantPid,
+          ...(args.deps.claimantLiveness !== undefined
+            ? { liveness: args.deps.claimantLiveness }
+            : {}),
+        })
+        if (reserved) {
+          return { registry, result: 'reserved-elsewhere' as ClaimResult, skipSave: true }
         }
         // OURS FROM HERE, and the write is what makes it so. The next claimant reads a
         // CHANGED row and takes the refusal path above rather than a fresh success.
@@ -2046,6 +2079,17 @@ async function claimRowOrUnwind(args: {
         `${args.expected.handle} — giving the child back rather than becoming a second owner.`,
     )
     return args.release(CLAIMED_ELSEWHERE_REASON)
+  }
+  if (claim === 'reserved-elsewhere') {
+    // A SPAWN IS IN FLIGHT FOR THIS KEY IN ANOTHER GATEWAY. Give the child back, leave the pane
+    // and the row alone, and let the turn retry: the spawner either records ownership (and the
+    // next pass sees its claim) or releases the reservation and the pane is adoptable again.
+    log(
+      `row ${args.sessionKey.slice(0, 32)}: another gateway holds a live SPAWN RESERVATION for this key, so ` +
+        `adopting pane ${args.expected.handle} would put two processes on one transcript. Giving the child ` +
+        'back and leaving both alone.',
+    )
+    return args.release(RESERVED_ELSEWHERE_REASON)
   }
   if (claim === 'row-moved') {
     log(
@@ -2398,11 +2442,13 @@ async function adoptRow(
   // that child speaking.
   session.onChannelBound()
 
-  // Detectors, then the sink registration, then the attach — the same order, and the
-  // same reason, as the spawn path: the child can POST at any instant, and a
-  // registration that lands after the first POST is a 401 on a reply we asked for.
+  // Detectors here, THE SINK REGISTRATION NOT UNTIL THE CLAIM (r47's rule, corrected r63 —
+  // see `enableAfterClaim`). Registering detectors is inert: nothing can actuate one until
+  // output flows, which `beginOutput` gates on the claim. Registering with the SINK is not
+  // inert — it makes replies acceptable AND revokes the credential of whoever held this
+  // transcript id — so a contender that does it before claiming can strip the winner without
+  // ever winning anything itself.
   registerReplDetectors(session, options)
-  sink.register(record.sessionId, session)
 
   let liveHandle: LiveProcessHandle | undefined
   let scanChild: PtyChild | undefined
@@ -2622,13 +2668,21 @@ async function adoptRow(
   session.attachChild(child)
   childByKey.set(sessionKey, child)
   try {
-    liveHandle = registerLiveProcessSafe({
-      name: sessionKey,
-      pid: child.pid,
-      tool_name: 'cc-repl',
-      meta: { session_id: record.sessionId, channel: record.channelName },
-    })
-    session.liveHandle = liveHandle
+    // THE LIVE-PROCESS REGISTRATION IS ALSO A DISPLACING CAPABILITY, so it waits for the claim
+    // too (r63, the second one the capability enumeration found).
+    //
+    // `registerLiveProcessSafe` unregisters whatever holds the name first
+    // (`tools/process-registry.ts`), and the name is the SESSION KEY — so a contender that
+    // registered here, before it claimed, removed the winner's record; and `unregister` is
+    // guarded on the pid, which in an adoption is the SAME pane process, so the contender's own
+    // release then deleted the record it had displaced. Net effect: the winner serves with no
+    // entry in the process registry, so the crashed-agent watchdog can never report its death —
+    // the ~170-minute lag this change exists to remove, reintroduced by a pass that lost.
+    //
+    // Moved into `enableAfterClaim` below. The exit wiring reads it through a late-bound
+    // closure (`liveHandle: () => liveHandle`), so registering later is transparent to it, and
+    // an unwind before the claim finds nothing to unregister — which is correct, because
+    // nothing was registered.
     wireChildExit({
       session,
       child,
@@ -2661,6 +2715,23 @@ async function adoptRow(
    */
   const enableAfterClaim = (): void => {
     claimConfirmed = true
+    // THE PROCESS REGISTRY, now that this pass owns the row (r63). Ordered before the sink
+    // registration for no reason except that the watchdog's view should exist by the time
+    // replies can arrive.
+    liveHandle = registerLiveProcessSafe({
+      name: sessionKey,
+      pid: child.pid,
+      tool_name: 'cc-repl',
+      meta: { session_id: record.sessionId, channel: record.channelName },
+    })
+    session.liveHandle = liveHandle
+    // THE SINK REGISTRATION IS A CAPABILITY, AND IT IS THE ONE THAT REVOKES (r63). It belongs
+    // behind the claim like the eyes and hands: it is what makes this child's replies
+    // acceptable, and taking it displaces whoever held this transcript id. Behind the claim
+    // that displacement is a TAKEOVER — we own the row, the holder has lost it and its own
+    // renewal will fence it. Before the claim it was a revocation by a contender that had won
+    // nothing, which is the defect this move fixes.
+    sink.register(record.sessionId, session)
     // Only NOW may screens flow: the scan target and the activity handle both exist, and the
     // row has confirmed this child is ours to drive.
     child.beginOutput?.()
