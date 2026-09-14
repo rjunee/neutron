@@ -972,6 +972,18 @@ async function racerResult(
   return { ...(JSON.parse(line.slice('RESULT:'.length)) as Record<string, unknown>), __stderr: err }
 }
 
+/** Release synchronous child-side barriers only after every racer has crossed the
+ * loader's fast read and entered the injected lock. This drives the interleaving under
+ * test instead of assuming all children will consume a wall-clock head start equally. */
+async function releaseWhenAllReady(readyPaths: string[], releasePath: string): Promise<void> {
+  const deadline = Date.now() + 15_000
+  while (!readyPaths.every((path) => existsSync(path))) {
+    if (Date.now() > deadline) throw new Error('racers did not all reach the injected-lock barrier')
+    await Bun.sleep(2)
+  }
+  writeFileSync(releasePath, '')
+}
+
 describe('concurrent first startup — the live token IS the persisted token (#537)', () => {
   test('four processes minting the same absent token all end up with the ON-DISK value', async () => {
     // Deliberately the AMBIENT lock — nothing injected — because creation converges
@@ -1147,22 +1159,27 @@ describe('concurrent first startup — the live token IS the persisted token (#5
     const dir = scratch()
     const tokenPath = join(dir, SINK_TOKEN_FILENAME)
     writeFileSync(tokenPath, 'deadbeef\n', { mode: 0o600 })
-    const startAt = Date.now() + 700
+    const releasePath = join(dir, 'release')
+    const readyPaths = [0, 1, 2, 3].map((i) => join(dir, `ready-${i}`))
 
-    const racers = [0, 1, 2, 3].map(() =>
-      spawnRacer(
-        startAt,
+    const racers = readyPaths.map((readyPath) =>
+      spawnChild(
         `const m = await import(${JSON.stringify(SINK_COORDINATES_MODULE)});
+         const nodeFs = await import('node:fs');
          // ACQUISITION FAILED — the shape both failing states collapse into: no FFI,
          // or FFI present and \`flock\` returning nonzero. The caller cannot tell them
          // apart and must not need to.
-         const unacquired = { run: (_p, fn) => ({ acquired: false, value: fn() }) };
-         while (Date.now() < START) {}
+         const unacquired = { run: (_p, fn) => {
+           nodeFs.writeFileSync(${JSON.stringify(readyPath)}, '');
+           while (!nodeFs.existsSync(${JSON.stringify(releasePath)})) Bun.sleepSync(2);
+           return { acquired: false, value: fn() };
+         } };
          process.stdout.write('RESULT:' + JSON.stringify({
            token: m.loadOrCreateSinkToken(${JSON.stringify(tokenPath)}, unacquired),
          }) + '\\n')`,
       ),
     )
+    await releaseWhenAllReady(readyPaths, releasePath)
     const results = await Promise.all(racers.map(racerResult))
 
     // (1) said out loud by every process that actually ran the weaker region, exactly
