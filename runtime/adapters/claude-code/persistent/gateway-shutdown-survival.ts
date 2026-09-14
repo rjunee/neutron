@@ -47,7 +47,7 @@
  */
 
 import type { ReplRegistry, ReplRegistryRecord } from './repl-registry.ts'
-import { withRegistryRead } from './repl-registry.ts'
+import { readRegistryState, withRegistryRead } from './repl-registry.ts'
 
 /** Whether one pooled child may be left running when the gateway stops. */
 export type ShutdownSurvivalVerdict =
@@ -176,7 +176,16 @@ export function claimShutdownSurvival(args: {
       record: undefined,
     })
   }
-  const read = args.deps?.withRegistryRead ?? withRegistryRead
+  const read: NonNullable<ShutdownSurvivalDeps['withRegistryRead']> = args.deps?.withRegistryRead ??
+    ((path, inspect, onOutcome) => withRegistryRead(path, () => {
+      // Read inside the flock, retaining unknown rather than collapsing it to no row.
+      const state = readRegistryState(path)
+      if (state.kind === 'unreadable') throw new Error(state.reason)
+      if (state.kind === 'loaded' && state.droppedKeys.includes(args.sessionKey)) {
+        throw new Error('the registry row failed schema validation')
+      }
+      return inspect(state.kind === 'loaded' ? state.registry : {})
+    }, onOutcome))
   // NO registry configured is NOT an empty registry: either way nothing durable names
   // this pane, and `shutdownSurvivalVerdict` turns that into a kill with its own reason.
   if (args.registryPath === undefined) {

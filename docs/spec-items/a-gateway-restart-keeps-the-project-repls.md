@@ -421,23 +421,16 @@ it must not swallow.
       *Verified by* `__tests__/adopted-pane-latches.test.ts` (both directions).
 - [ ] **THE SHUTDOWN KILL IS NARROWED, NOT REMOVED.** A child survives only when a
       persisted row names its exact pane and its exact generation; every other child —
-      in-process hosts, quarantined children, ephemeral one-shots, any pane no row names,
-      and a child whose spawn had not settled when shutdown reached the pool, which is
-      killed when it later resolves regardless of the row it went on to write (#674) —
-      is still killed.
-      *Verified by* `__tests__/gateway-shutdown-survival.test.ts` (the verdict table and
-      the teardown cases).
+      in-process hosts, quarantined children, ephemeral one-shots, any pane no row names —
+      is still killed. A spawn resolving after the shutdown grace takes the same locked
+      decision using registry coordinates captured before teardown (#674). Missing rows,
+      mismatched panes or generations, unreadable data and unacquired locks must still
+      kill, with distinct reasons. A matching late row must survive and release its old
+      wrapper, while keeping its config files.
+      *Verified by* `__tests__/gateway-shutdown-survival.test.ts` (the verdict table,
+      teardown cases, and `late spawn survival after shutdown reset`, including the
+      before-partition positive control).
 
-      The last entry is a case the shipped narrowing does NOT cover, and it is in the
-      enumeration rather than only in the as-built because the second clause claims to
-      partition every child. "Survives only when…" is a necessary condition and remains
-      exactly true; a still-spawning child whose row DOES name its pane and generation
-      satisfies neither half of the partition as it was first written, so the list
-      claimed a completeness it did not have — which is a defect shape this item's own
-      record names, and it is not one to commit while cataloguing it. #674 tracks the
-      gap; it fails conservatively (one `--resume`, nothing orphaned and no second owner)
-      and the fix has to take the registry lock from a callback that runs after the
-      module state is torn down.
 - [ ] **A HANDLE DESCRIBES THE CURRENT CHILD OR IS ABSENT.** A spawn whose host issues
       no handle leaves no handle on the row, even when the row carried one a moment
       before.
@@ -486,14 +479,12 @@ residual remains and is deliberate: a TOCTOU window between the resolve and the 
 would need a handle-relative unlink to close, and a refused delete leaves a plaintext
 credential file in place rather than removing it — the safer direction, and not free.
 
-**A REPL that was mid-spawn when the shutdown landed is killed rather than kept (#674).**
-The shutdown's late-spawn path terminates a session whose spawn settled after the pending
-grace expired, without consulting the survival gate — so a herdr-hosted child whose row
-names its pane is ended anyway. This fails in the conservative direction: the cost is one
-`--resume` on the next turn, and nothing is orphaned and nothing becomes a second owner of
-a transcript. It is a residual of this feature rather than a defect introduced by it, and
-it is tracked separately because the fix has to take the registry lock from a callback
-that runs after the module state has been torn down.
+**Late resolution uses the same survival decision after teardown (#674).** The callback
+must retain the registry path before supervision clears, then read the current row under
+the flock after resolution. Failure to establish that the row names the exact pane and
+generation costs one `--resume`; it must never grant survival on an unreadable registry.
+The deferred-promise cases drive real shutdown to completion before publishing the row
+and resolving the spawn, so this requirement covers the reset boundary itself.
 
 If the registry file is **lost** between a shutdown and the next boot, the pane it
 named becomes unreferenced: nothing will reap it automatically. It is still a labelled,
