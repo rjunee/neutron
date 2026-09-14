@@ -64,7 +64,12 @@ import { join } from 'node:path'
 
 import { createLogger } from '@neutronai/logger'
 
-import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
+import {
+  assertDiffOutputHost,
+  type DiffOutputHost,
+  type EnvCapableHostRunner,
+  type HostCommandResult,
+} from './git-mode.ts'
 import { gitRangeArgv } from './git-range.ts'
 import { isQualifiedRevRangeOperand } from './rev-range-operand.mjs'
 import type { MergeCleanupDeps } from './git-mode.ts'
@@ -1842,7 +1847,7 @@ async function freeBranchFromWorktrees(
  * always really scoring `detectBaseBranch`'s answer, which is the bug.
  */
 export function buildMergeCleanupDeps(
-  run_host: RunHostCommand,
+  run_host: DiffOutputHost,
   opts: {
     base_branch?: string
     resolve_conflict?: MergeConflictResolver
@@ -1856,6 +1861,7 @@ export function buildMergeCleanupDeps(
     arbitrate?: TridentArbiter
   } = {},
 ): MergeCleanupDeps {
+  assertDiffOutputHost(run_host)
   return {
     async mergePr(run: TridentRun): Promise<void> {
       const repo = run.repo_path

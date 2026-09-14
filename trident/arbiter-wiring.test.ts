@@ -74,7 +74,7 @@ function buildMergeCleanupDeps(
   host: RunHostCommand,
   ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
 ): ReturnType<typeof buildRealMergeCleanupDeps> {
-  return buildRealMergeCleanupDeps(honourDiffOutput(host) as RunHostCommand, ...rest)
+  return buildRealMergeCleanupDeps(honourDiffOutput(host), ...rest)
 }
 
 

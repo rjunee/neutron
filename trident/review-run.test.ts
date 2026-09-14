@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { CodexProjectOwnerError } from './codex-project-owner.ts'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -383,10 +384,10 @@ describe('orchestrator bound-review dispatch', () => {
         return { status: 'fired', error: null }
       },
       db_path: '/tmp/not-used-bound-review.db',
-      run_host: async (cmd) => {
+      run_host: honourDiffOutput(async (cmd) => {
         hostCalls.push(cmd)
         return ok()
-      },
+      }),
       execute_bound_review: async (run) => {
         reviewCalls += 1
         return {
@@ -432,7 +433,7 @@ describe('orchestrator bound-review dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow: async () => ({ status: 'fired', error: null }),
       db_path: '/tmp/not-used-bound-empty-findings.db',
-      run_host: async () => ok(),
+      run_host: honourDiffOutput(async () => ok()),
       execute_bound_review: async (run) => ({
         status: 'success',
         pr: run.bound_pr!,
@@ -465,7 +466,7 @@ describe('orchestrator bound-review dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow: async () => ({ status: 'fired', error: null }),
       db_path: '/tmp/not-used-bound-real-findings.db',
-      run_host: async () => ok(),
+      run_host: honourDiffOutput(async () => ok()),
       execute_bound_review: async (run) => ({
         status: 'success',
         pr: run.bound_pr!,
@@ -497,10 +498,10 @@ describe('orchestrator bound-review dispatch', () => {
         return { status: 'fired', error: null }
       },
       db_path: '/tmp/not-used-bound-failure.db',
-      run_host: async (cmd) => {
+      run_host: honourDiffOutput(async (cmd) => {
         calls.push(cmd)
         return { ok: false, stdout: '', stderr: 'target unavailable', exit_code: 23 }
-      },
+      }),
     })
 
     const outcome = await step(makeTridentRun({
@@ -528,7 +529,7 @@ describe('orchestrator bound-review dispatch', () => {
         return { status: 'fired', error: null }
       },
       db_path: '/tmp/not-used-build-control.db',
-      run_host: async () => ok(),
+      run_host: honourDiffOutput(async () => ok()),
       base_branch: 'main',
       mint_run_id: () => 'control-fire-id',
       execute_bound_review: async () => {
@@ -560,7 +561,7 @@ test('bound review refuses project ownership conflicts and resumes after repair'
   const orch = buildTridentOrchestrator({
     fire_workflow: async () => { throw new Error('unexpected build') },
     db_path: '/tmp/not-used-owner-review.db',
-    run_host: async () => ok(),
+    run_host: honourDiffOutput(async () => ok()),
     codex_home: '/static/global',
     resolve_codex_home: () => {
       if (conflict) throw new CodexProjectOwnerError()

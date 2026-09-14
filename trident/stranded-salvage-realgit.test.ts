@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /**
  * REAL-git falsification tests for the terminal-failure salvage. A failing inner workflow never
  * returns an InnerResult here: the outer step must discover committed work from the branch ref,
@@ -276,7 +277,7 @@ function orchestrator(world: World, host: RunHostCommand) {
     base_branch: 'main',
     sleep: async () => {},
     now: () => NOW,
-    run_host: host,
+    run_host: honourDiffOutput(host),
   })
 }
 

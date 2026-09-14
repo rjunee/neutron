@@ -1165,7 +1165,7 @@ export function defaultRalphModeProbe(
 /** Production watchdog budget for a single host command. */
 export const DEFAULT_HOST_COMMAND_TIMEOUT_MS = 60_000
 
-export async function spawnCapture(
+async function spawnCaptureCommand(
   cmd: string[],
   cwd?: string,
   /**
@@ -1230,6 +1230,23 @@ export async function spawnCapture(
   }
 }
 
+/** A host whose command implementation owns git diff's output file side effect. */
+export type DiffOutputHost = EnvCapableHostRunner & { readonly writesDiffOutput: true }
+
+export const spawnCapture: DiffOutputHost = Object.assign(spawnCaptureCommand, {
+  writesDiffOutput: true as const,
+})
+
+/** Reject incomplete injected hosts synchronously, before any run can start. */
+export function assertDiffOutputHost(host: EnvCapableHostRunner): asserts host is DiffOutputHost {
+  if ((host as Partial<DiffOutputHost>).writesDiffOutput !== true) {
+    throw new TypeError(
+      'run_host must implement git diff --output=: use spawnCapture for real commands ' +
+        'or honourDiffOutput from trident/testing/diff-output-host.ts for a fake',
+    )
+  }
+}
+
 /**
  * An `EnvCapableHostRunner` with an environment baked in. A caller may also add
  * command-scoped variables (the salvage path uses this for its private index);
@@ -1242,9 +1259,10 @@ export async function spawnCapture(
  */
 export function makeCredentialedHostRunner(
   extraEnv: Record<string, string>,
-): EnvCapableHostRunner {
-  return (cmd, cwd, commandEnv, timeoutMs) =>
+): DiffOutputHost {
+  const host: EnvCapableHostRunner = (cmd, cwd, commandEnv, timeoutMs) =>
     spawnCapture(cmd, cwd, { ...extraEnv, ...commandEnv }, timeoutMs)
+  return Object.assign(host, { writesDiffOutput: true as const })
 }
 
 /**
@@ -1271,9 +1289,10 @@ export function makeCredentialedHostRunner(
  */
 export function makeLazyCredentialedHostRunner(
   loadEnv: () => Promise<Record<string, string>>,
-): EnvCapableHostRunner {
-  return async (cmd, cwd, commandEnv, timeoutMs) =>
+): DiffOutputHost {
+  const host: EnvCapableHostRunner = async (cmd, cwd, commandEnv, timeoutMs) =>
     spawnCapture(cmd, cwd, { ...(await loadEnv()), ...commandEnv }, timeoutMs)
+  return Object.assign(host, { writesDiffOutput: true as const })
 }
 
 /**

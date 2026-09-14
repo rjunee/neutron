@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 import { sink } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
@@ -86,7 +87,7 @@ function tridentInput(probe_launcher_alive?: NonNullable<CompositionInput['tride
     ...baseInput(),
     trident: {
       fire_inner_workflow: async () => ({ status: 'fired', error: null }),
-      run_host: async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 }),
+      run_host: honourDiffOutput(async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 })),
       delivery_sink: { send: async () => '' },
       ...(probe_launcher_alive === undefined ? {} : { probe_launcher_alive }),
     },
@@ -198,7 +199,7 @@ describe('trident unconfirmed-fire wiring — the composed orchestrator reads th
           settled: new Promise<FireOutcome>(() => {}),
           launcher: new Promise<string | null>(() => {}),
         }),
-        run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+        run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
         delivery_sink: { send: async () => '' },
       },
     })

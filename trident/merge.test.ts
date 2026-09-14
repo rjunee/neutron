@@ -21,23 +21,12 @@ import { honourDiffOutput } from './testing/diff-output-host.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
-/**
- * EVERY FAKE HOST IN THIS FILE MODELS `git diff --output=<path>` (#777).
- *
- * The size gate no longer measures the runner's stdout; it measures the file the
- * command writes. A fake that answers on stdout alone therefore measures ZERO and
- * ALLOWS — measured: a 1,048,577-byte diff reached `done` through the
- * orchestrator's own fake. `enforceMergeDiffGate` now treats an unwritten file as
- * "could not measure" and HOLDS, which is the right direction but would otherwise
- * hold seventy-odd tests that have nothing to do with the size gate. Wrapping the
- * host once here keeps those tests measuring what they mean to measure, and keeps
- * the gate fail-closed for everything that does not write a patch.
- */
+/** Construct each merge fixture through the required output-capable fake factory. */
 function buildMergeCleanupDeps(
   host: RunHostCommand,
   ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
 ): ReturnType<typeof buildRealMergeCleanupDeps> {
-  return buildRealMergeCleanupDeps(honourDiffOutput(host) as RunHostCommand, ...rest)
+  return buildRealMergeCleanupDeps(honourDiffOutput(host), ...rest)
 }
 
 function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
@@ -135,8 +124,8 @@ describe('pre-merge diff-size gate', () => {
   // THOSE MAY MERGE. The gate stopped reading the command's stdout, so the file is
   // now the only evidence there is. Measured on the first version of this change:
   // a host that answered the diff on stdout without honouring `--output=` measured
-  // ZERO, and a 1,048,577-byte diff MERGED. This builds the deps WITHOUT the
-  // output-honouring wrapper above, so it is the real unwritten-file case.
+  // ZERO, and a 1,048,577-byte diff MERGED. This explicitly injects a broken output-capable host
+  // to model output loss after construction; an ordinary bare fake is rejected there.
   test('a host that writes no patch file HOLDS as unmeasurable, and never merges', async () => {
     const { host, calls } = recordingHost((cmd) => {
       if (cmd.includes('diff') && cmd.includes('--binary')) return ok('x'.repeat(PINNED_LIMIT_BYTES + 1))
@@ -144,7 +133,7 @@ describe('pre-merge diff-size gate', () => {
     }, { honour_output: false })
     const error = await cleanupAfterMerge(
       makeRun({ inner_result: innerResult('a'.repeat(40)) }),
-      buildRealMergeCleanupDeps(host),
+      buildRealMergeCleanupDeps(Object.assign(host, { writesDiffOutput: true as const })),
     ).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(TridentMergeDiffHold)
     // NULL, not a number: this refusal says "I could not find out how big this

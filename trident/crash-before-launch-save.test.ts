@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /**
  * A crash that lands BEFORE the launch save must not re-fire a build every tick.
  *
@@ -83,7 +84,7 @@ function orchestrator(
     // #542 — see board-reconcile.test.ts: an empty `rev-parse` answer reads as a
     // repo the drift gate cannot assess, which pr mode holds on. This is a
     // healthy repo whose base has not moved.
-    run_host: async (cmd) => ({
+    run_host: honourDiffOutput(async (cmd) => ({
       ok: true,
       stdout:
         (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
@@ -97,7 +98,7 @@ function orchestrator(
             : '',
       stderr: '',
       exit_code: 0,
-    }),
+    })),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
     ...over,

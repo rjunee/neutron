@@ -83,7 +83,7 @@ export interface MiscCompositionInput {
    */
   trident?: {
     fire_inner_workflow: import('@neutronai/trident/inner-loop.ts').FireInnerWorkflow
-    run_host?: import('@neutronai/trident/merge.ts').RunHostCommand
+    run_host?: import('@neutronai/trident/git-mode.ts').DiffOutputHost
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**
      * Skill-forge trigger (parity gap #5) — an OPTIONAL observer the trident

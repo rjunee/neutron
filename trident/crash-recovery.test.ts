@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /**
  * A GATEWAY RESTART MUST NOT KILL AN IN-FLIGHT BUILD.
  *
@@ -78,11 +79,11 @@ function orchestrator(
   return buildTridentOrchestrator({
     fire_workflow: fire as never,
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
     begin_crash_recovery: (id) => store.beginCrashRecovery(id),
     ...over,
+    run_host: honourDiffOutput(over.run_host ?? (async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }))),
   })
 }
 

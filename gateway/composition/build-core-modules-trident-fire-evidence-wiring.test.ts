@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -74,7 +75,7 @@ const TIMEOUT_OUTCOME = { status: 'failed', error: FIRE_SETTLE_TIMEOUT_ERROR } a
 type RunHost = NonNullable<NonNullable<CompositionInput['trident']>['run_host']>
 
 /** The liveness wiring test's canned host: every git command answers `main`. */
-const PLAIN_HOST: RunHost = async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 })
+const PLAIN_HOST: RunHost = honourDiffOutput(async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 }))
 
 function timeoutFireInput(run_host: RunHost): CompositionInput {
   return {
@@ -207,12 +208,12 @@ describe('trident fire-evidence composition wiring — the composed orchestrator
     const mods = buildCoreModules(
       // SHAPED host — with the plain always-`main` stub `resolveResumeLiveHead` reads a
       // non-hex head and the launcher takes the resume-head bounded stop BEFORE the fire.
-      timeoutFireInput(async (cmd: string[]) => ({
+      timeoutFireInput(honourDiffOutput(async (cmd: string[]) => ({
         ok: true,
         stdout: cmd.includes('rev-parse') ? sha : 'main',
         stderr: '',
         exit_code: 0,
-      })),
+      }))),
     )
     const instance = await mods.tridentModule.init(fakeCtx)
     try {

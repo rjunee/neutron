@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 /**
  * Focused unit coverage for `open/wiring/substrates.ts` (C3a carve).
  *
@@ -579,12 +580,12 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       const orch = buildTridentOrchestrator({
         fire_workflow: async () => ({ status: 'fired', run_id: 'wf-dead', error: null }),
         db_path: join(dir, 'project.db'),
-        run_host: async (cmd) => ({
+        run_host: honourDiffOutput(async (cmd) => ({
           ok: true,
           stdout: cmd.includes('refs/remotes/origin/main^{commit}') ? 'a'.repeat(40) : '',
           stderr: '',
           exit_code: 0,
-        }),
+        })),
       })
       const loop = new TridentTickLoop({
         store: runs,
