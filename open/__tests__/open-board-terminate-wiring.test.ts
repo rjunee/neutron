@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { buildOpenGraphComposer } from '../composer.ts'
+import { buildOpenGraphComposer, buildTridentCodeBoardBinder } from '../composer.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -182,16 +182,19 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     // `trident/code-command.test.ts` supplies its own stub that HAS it. The card
     // would simply stop being reconciled on `/code stop`, silently.
     //
-    // This is a SOURCE-SHAPE assertion and claims only that: that the production
-    // literal still declares the member. The behaviour it enables is pinned in
-    // `trident/code-command.test.ts` (§F6a r6) against a stub.
-    const src = await Bun.file(new URL('../composer.ts', import.meta.url)).text()
-    const literal = src.slice(src.indexOf('const tridentCodeBoardBinder'))
-    const body = literal.slice(0, literal.indexOf('\n    }') + 1)
-    expect(body).toContain('const tridentCodeBoardBinder')
-    // The positive control: a member known to be there, found by the same slice.
-    expect(body).toContain('attachRun:')
-    expect(body).toContain('detachRun:')
+    // This WAS a source-slice assertion over an inline literal. #784 moved the
+    // binder into an exported factory, which broke the slice — and, better, made
+    // a BEHAVIOURAL check possible: construct the real binder and interrogate it.
+    // A source slice could only see the spelling at one location; this sees the
+    // object the composer actually builds, and survives the next refactor.
+    const built = buildTridentCodeBoardBinder(() => undefined)
+    // The positive control: a member known to be there, found the same way.
+    expect(typeof built.attachRun).toBe('function')
+    expect(typeof built.detachRun).toBe('function')
+    // The payload is the point of #784: `/code stop` dropped pr/pr_url/budget
+    // because a 3-arg wrapper was CAST to the 4-arg reconciler. Arity is the
+    // observable that a cast erases, so it is pinned here.
+    expect(built.detachRun.length).toBe(4)
   })
 
   test('DELETE of a card bound to a live run cancels it AND fires terminal delivery ONCE through the real chain', async () => {
