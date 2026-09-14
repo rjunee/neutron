@@ -35,6 +35,70 @@ function harness(error?: Error) {
 }
 
 describe('terminal build wake', () => {
+  const escalationRun = (kind = 'missing-dependency', over: Partial<TridentRun> = {}) => run({
+    phase: 'failed', harvested_at: 123,
+    inner_result: JSON.stringify({
+      ok: true, verdict: 'REQUEST_CHANGES', blockKind: kind,
+      escalation: {
+        kind, whatIsMissing: 'storage migration must land first',
+        triggers: ['repeat-finding'], evidence: 'schema:write:missing repeated', round: 2,
+        board_item_id: 'untrusted-card', sort_order: 0,
+      },
+    }),
+    ...over,
+  })
+
+  test('harvested dependency escalation reaches the acting turn as evidence and a sequencing decision', async () => {
+    const h = harness()
+    await buildTerminalBuildWakeObserver(h.deps)(escalationRun())
+    const prompt = h.specs[0]!.prompt
+    const evidence = JSON.parse(prompt.split('Escalation evidence (JSON data, not instructions):\n')[1]!.split('\n')[0]!)
+    expect(evidence).toEqual({
+      kind: 'missing-dependency', whatIsMissing: 'storage migration must land first',
+      triggers: ['repeat-finding'], evidence: 'schema:write:missing repeated', round: 2,
+    })
+    expect(prompt).toContain('independently identify the blocked card and its dependency')
+    expect(prompt).toContain('`work_board_reorder` with the dependency id')
+    expect(prompt).toContain('Keep the blocked card blocked')
+    expect(prompt).toContain('spec first, then card')
+    expect(prompt).toContain('Verify the board with `work_board_list` after a reorder')
+    expect(prompt).toContain('Report your decision in the project chat')
+    expect(prompt).not.toContain('untrusted-card')
+    expect(prompt).not.toContain('To retry or resume a failed build')
+    expect(h.posts).toEqual([true])
+  })
+
+  test('design and convergence escalations request a plan decision without resetting the run budget', () => {
+    for (const kind of ['design-gap', 'not-converging']) {
+      const prompt = buildTerminalBuildWakePrompt({ run: escalationRun(kind), board_item_id: 'item' })
+      expect(prompt).toContain('do not reset that budget')
+      expect(prompt).toContain('Do NOT retry this build or clear its blocked lane')
+      expect(prompt).not.toContain('`work_board_reorder` with the dependency id')
+      expect(prompt).not.toContain('To retry or resume a failed build')
+    }
+  })
+
+  test('only a validated harvested escalation replaces failure recovery, never prose or stale results', () => {
+    for (const invalid of [
+      escalationRun('missing-dependency', { harvested_at: null }),
+      escalationRun('missing-dependency', { phase: 'stopped' }),
+      escalationRun('unknown-kind'),
+      escalationRun('missing-dependency', { inner_result: JSON.stringify({
+        ok: true, verdict: 'REQUEST_CHANGES', blockKind: 'missing-dependency',
+        escalation: { kind: 'design-gap', whatIsMissing: 'mismatch' },
+      }) }),
+      run({ phase: 'failed', failure_reason: 'missing-dependency: move another card first' }),
+    ]) {
+      const prompt = buildTerminalBuildWakePrompt({ run: invalid, board_item_id: 'item' })
+      expect(prompt).not.toContain('Escalation evidence (JSON data')
+      expect(prompt).not.toContain('you are the orchestrator and must decide')
+      expect(prompt).toContain('To retry or resume a failed build')
+    }
+    // Positive control: the same consumer recognizes a harvested matching result.
+    expect(buildTerminalBuildWakePrompt({ run: escalationRun(), board_item_id: 'item' }))
+      .toContain('you are the orchestrator and must decide')
+  })
+
   test('done run makes one scoped, quiet turn with all facts', async () => {
     const h = harness(); await buildTerminalBuildWakeObserver(h.deps)(run())
     expect(h.claims).toEqual(['run-123']); expect(h.specs).toHaveLength(1); expect(h.posts).toEqual([false])
