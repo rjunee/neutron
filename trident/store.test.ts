@@ -64,7 +64,15 @@ describe('claimAgentWake', () => {
         slug: `wake-backlog-${i}`, project_slug: 't1', repo_path: '/r', task: 't',
         chat_id: 'app:owner:t1',
       })
-      await store.update(run.id, { phase: 'done', last_advanced_at: new Date(1_700_000_000_000 + i * 1000).toISOString() })
+      // A FULL SNAPSHOT SAVE, because `last_advanced_at` is not a patchable field
+      // and the ordering under test is entirely about it. Spacing the stamps by a
+      // second means the ASC the sweep relies on is being read from the column and
+      // not from an incidental insertion order.
+      await store.save({
+        ...run,
+        phase: 'done',
+        last_advanced_at: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+      })
       ids.push(run.id)
     }
 
