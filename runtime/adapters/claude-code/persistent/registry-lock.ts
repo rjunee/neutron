@@ -41,14 +41,15 @@ let _lib: { symbols: { flock: (fd: number, op: number) => number } } | null = nu
  * Same shape as `sinkPortOverrideRef`: one reference the boot path never touches and a
  * test can. It is not a second code path — production reads the same line either way.
  */
-let flockImpl: ((fd: number, op: number) => number) | undefined
+let flockImpl: ((fd: number, op: number) => number) | null | undefined
 
-/** Force `flock`'s return value. Pass `undefined` to restore the real syscall. */
-export function setFlockImplForTests(fn: ((fd: number, op: number) => number) | undefined): void {
+/** Force a syscall result, or `null` for missing FFI; `undefined` restores native loading. */
+export function setFlockImplForTests(fn: ((fd: number, op: number) => number) | null | undefined): void {
   flockImpl = fn
 }
 
 function getFlockLib(): typeof _lib {
+  if (flockImpl === null) return null
   if (_lib) return _lib
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

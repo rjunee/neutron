@@ -1,9 +1,9 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
-import { setFlockImplForTests } from '../registry-lock.ts'
+import { flockAvailable, setFlockImplForTests } from '../registry-lock.ts'
 import { classifyThrownSpawnError } from '../classify-spawn-error.ts'
 
 const dirs: string[] = []
@@ -23,11 +23,56 @@ function fixture() {
 test('a refused lock preserves config bytes and reports a local configuration failure', () => {
   const { dir, file } = fixture()
   const before = readFileSync(file, 'utf8')
+  expect(flockAvailable()).toBe(true)
   setFlockImplForTests(() => -1)
   let error: unknown
   try { ensureClaudeTrust({ cwd: dir, configDir: dir }) } catch (e) { error = e }
   expect(classifyThrownSpawnError(error)).toBe('spawn_configuration')
   expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+test('unavailable FFI warns once and still seeds on repeated calls', () => {
+  const { dir, file } = fixture()
+  setFlockImplForTests(null)
+  expect(flockAvailable()).toBe(false)
+  const warning = spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    for (const cwd of [dir, join(dir, 'another-project')]) {
+      expect(ensureClaudeTrust({ cwd, configDir: dir })).toBe(file)
+      const config = JSON.parse(readFileSync(file, 'utf8'))
+      expect(config.projects[cwd]).toEqual({
+        hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
+      })
+      expect(config.bypassPermissionsModeAccepted).toBe(true)
+      expect(config.hasCompletedOnboarding).toBe(true)
+      expect(config.custom).toBe('preserved')
+      expect(config.projects['/project-0'].hasTrustDialogAccepted).toBe(true)
+    }
+    expect(warning).toHaveBeenCalledTimes(1)
+    expect(warning.mock.calls[0]?.[0]).toContain('flock unavailable')
+  } finally {
+    warning.mockRestore()
+  }
+})
+
+test('normal acquisition seeds without an unavailable warning', () => {
+  const { dir, file } = fixture()
+  expect(flockAvailable()).toBe(true)
+  const warning = spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    expect(ensureClaudeTrust({ cwd: dir, configDir: dir })).toBe(file)
+    const config = JSON.parse(readFileSync(file, 'utf8'))
+    expect(config.projects[dir]).toEqual({
+      hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
+    })
+    expect(config.bypassPermissionsModeAccepted).toBe(true)
+    expect(config.hasCompletedOnboarding).toBe(true)
+    expect(config.custom).toBe('preserved')
+    expect(Object.keys(config.projects)).toHaveLength(19532)
+    expect(warning).not.toHaveBeenCalled()
+  } finally {
+    warning.mockRestore()
+  }
 })
 
 test('two overlapping process seeds retain both worktrees and existing config', async () => {

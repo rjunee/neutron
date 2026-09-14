@@ -30,11 +30,13 @@
  * The write is a read-merge-write so existing config/login state is preserved.
  */
 
-import { withFlockSync } from './registry-lock.ts'
+import { flockAvailable, withFlockSync } from './registry-lock.ts'
 import { SpawnConfigurationError } from './spawn-configuration-error.ts'
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+
+let warnedUnavailable = false
 
 export interface EnsureClaudeTrustInput {
   /** The REPL cwd to mark trusted (realpath'd internally). */
@@ -73,7 +75,7 @@ export function ensureClaudeTrust(input: EnsureClaudeTrustInput): string {
   const realCwd = resolveRealCwd(input.cwd)
 
   // A separate, stable inode: locking the config itself would lose exclusion
-  // when rename replaces it. Every Neutron seed reads and writes under this lock.
+  // when rename replaces it. Seeds serialize whenever FFI is available.
   return withFlockSync(`${file}.neutron.lock`, () => {
     let config: ClaudeConfig = {}
     if (existsSync(file)) {
@@ -101,8 +103,15 @@ export function ensureClaudeTrust(input: EnsureClaudeTrustInput): string {
     renameSync(tmp, file)
     return file
   }, (acquired) => {
-    if (!acquired) {
+    if (!acquired && flockAvailable()) {
       throw new SpawnConfigurationError('persistent-repl: cannot acquire Claude trust config lock')
+    }
+    // Missing FFI is not a denied lock. Accept possible concurrent lost updates
+    // (#751) rather than make every launch a non-retryable spawn_configuration
+    // failure. Like the sink token, warn once and proceed without serialization.
+    if (!acquired && !warnedUnavailable) {
+      warnedUnavailable = true
+      process.stderr.write('[claude-trust] flock unavailable; seeding without serialization; concurrent trust updates may be lost\n')
     }
   })
 }
