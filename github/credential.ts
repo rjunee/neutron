@@ -71,7 +71,7 @@ export async function storeGitHubToken(
   })
 }
 
-/** Read it back, or `null` when GitHub has never been connected. */
+/** Read it back, or `null` when no usable GitHub token is stored. */
 export async function readGitHubToken(
   store: Pick<SecretsStore, 'get'>,
   owner_handle: OwnerHandle,
@@ -84,6 +84,18 @@ export async function readGitHubToken(
   // Normalise an empty string to null so every caller has ONE "not connected"
   // check rather than two.
   return token !== null && token.length > 0 ? token : null
+}
+
+/** Remove the owner's row, including expired or unreadable credentials. */
+export async function deleteGitHubToken(
+  store: Pick<SecretsStore, 'list' | 'delete'>,
+  owner_handle: OwnerHandle,
+): Promise<boolean> {
+  const rows = await store.list({ owner_handle, kind: GITHUB_SECRET_KIND })
+  const row = rows.find((candidate) => candidate.label === GITHUB_SECRET_LABEL)
+  if (row === undefined) return false
+  await store.delete(row.id)
+  return true
 }
 
 /**

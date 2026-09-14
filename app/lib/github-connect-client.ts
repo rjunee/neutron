@@ -8,6 +8,7 @@
  *
  *   GET  /api/app/github-auth   what the state is right now
  *   POST /api/app/github-auth   start (or re-show) a device flow
+ *   DELETE /api/app/github-auth remove the stored token and cancel the flow
  *
  * WHY TWO CALLS AND NOT ONE. Device flow cannot complete inside a request: the
  * server asks GitHub for a code, the OWNER types it into a browser, and only then
@@ -84,6 +85,11 @@ export class GitHubConnectClient {
     return await this.req('POST');
   }
 
+  /** Remove the saved token locally; GitHub revocation is a separate action. */
+  async disconnect(): Promise<GitHubConnectState> {
+    return await this.req('DELETE');
+  }
+
   private async req(method: string): Promise<GitHubConnectState> {
     let res: Response;
     try {
@@ -109,6 +115,10 @@ export class GitHubConnectClient {
           ? (json['message'] as string)
           : `request failed (${res.status})`;
       throw new GitHubConnectError(code, message, res.status);
+    }
+    if (method === 'DELETE' && (json?.['status'] !== 'not_connected' ||
+      typeof json?.['removed'] !== 'boolean' || typeof json?.['cancelled'] !== 'boolean')) {
+      throw new GitHubConnectError('protocol_error', 'Could not confirm GitHub disconnect', res.status);
     }
     return (json ?? { status: 'not_connected' }) as GitHubConnectState;
   }

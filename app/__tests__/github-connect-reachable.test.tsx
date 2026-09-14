@@ -108,6 +108,10 @@ function installFetch(): void {
     // that drops it is not the wire, and a client that started reading `ok`
     // would be tested against a shape no server sends.
     if (url.includes('/api/app/github-auth')) {
+      if (method === 'DELETE') {
+        state = { status: 'not_connected' };
+        return json({ ok: true, ...state, removed: true, cancelled: false });
+      }
       if (method === 'POST') {
         if (startFailure !== null) {
           return json({ ok: false, ...startFailure.body }, startFailure.status);
@@ -477,4 +481,96 @@ describe('GitHub — reachable from a phone at all', () => {
     expect(byTestId('github-user-code')?.textContent).toBe(USER_CODE);
     expect(document.body.innerHTML).not.toContain('bearer-half-must-not-render');
   });
+});
+
+
+describe('GitHub disconnect', () => {
+  it('removes a connected credential and offers reconnect', async () => {
+    state = { status: 'connected' };
+    await mountIntegrations();
+    await press('github-disconnect');
+    expect(sent.some((r) => r.url.includes('/api/app/github-auth') && r.method === 'DELETE')).toBe(true);
+    expect(byTestId('github-status')?.textContent).toContain('Not connected');
+    expect(byTestId('github-disconnect')).toBeNull();
+    await press('github-connect');
+    expect(byTestId('github-user-code')?.textContent).toBe(USER_CODE);
+  });
+
+  it('does not claim disconnect on a malformed success or failed request', async () => {
+    for (const status of [200, 503]) {
+      state = { status: 'connected' };
+      await mountIntegrations();
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (input: string, init?: RequestInit) => {
+        if (init?.method === 'DELETE') return new Response('{}', { status });
+        return original(input, init);
+      }) as typeof fetch;
+      await press('github-disconnect');
+      expect(byTestId('github-error')?.textContent).toBeTruthy();
+      expect(byTestId('github-status')?.textContent).toContain('Connected');
+      mounted!.unmount();
+      mounted = null;
+      globalThis.fetch = original;
+    }
+  });
+
+  it('a stale successful or failed poll cannot undo a disconnect', async () => {
+    for (const fail of [false, true]) {
+      state = { status: 'awaiting_owner', user_code: USER_CODE, verification_uri: VERIFICATION_URI, expires_in_seconds: 900 };
+      await mountIntegrations();
+      const original = globalThis.fetch;
+      let release!: () => void;
+      globalThis.fetch = (async (input: string, init?: RequestInit) => {
+        if (fail && init?.method === 'POST') return new Response(JSON.stringify({ ok: true, status: 'connected' }));
+        if (String(input).includes('/api/app/github-auth') && init?.method === 'GET') {
+          await new Promise<void>((resolve) => { release = resolve; });
+          if (fail) throw new Error('offline');
+          return new Response(JSON.stringify({ ok: true, status: 'connected' }));
+        }
+        return original(input, init);
+      }) as typeof fetch;
+      await firePoll();
+      await press('github-disconnect');
+      // Reconnect before the old poll fails: a stale error must not erase the new connection.
+      if (fail) await press('github-connect');
+      await act(async () => { release(); await new Promise((r) => setTimeout(r, 0)); });
+      if (fail) expect(byTestId('github-status')?.textContent).toContain('Connected');
+      else expect(byTestId('github-status')?.textContent).toContain('Not connected');
+      mounted!.unmount();
+      mounted = null;
+      globalThis.fetch = original;
+    }
+  });
+});
+
+
+it('a poll started during disconnect cannot restore its old connection', async () => {
+  state = { status: 'awaiting_owner', user_code: USER_CODE, verification_uri: VERIFICATION_URI, expires_in_seconds: 900 };
+  await mountIntegrations();
+  const original = globalThis.fetch;
+  let releaseDelete!: () => void;
+  let releasePoll!: () => void;
+  let deletes = 0;
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    if (String(input).includes('/api/app/github-auth')) {
+      if (init?.method === 'DELETE') {
+        deletes++;
+        await new Promise<void>((resolve) => { releaseDelete = resolve; });
+        return new Response(JSON.stringify({ ok: true, status: 'not_connected', removed: false, cancelled: true }));
+      }
+      if (init?.method === 'GET') {
+        await new Promise<void>((resolve) => { releasePoll = resolve; });
+        return new Response(JSON.stringify({ ok: true, status: 'connected' }));
+      }
+    }
+    return original(input, init);
+  }) as typeof fetch;
+  await press('github-disconnect');
+  await press('github-disconnect');
+  expect(deletes).toBe(1);
+  await firePoll();
+  await act(async () => { releaseDelete(); await new Promise((r) => setTimeout(r, 0)); });
+  await act(async () => { releasePoll(); await new Promise((r) => setTimeout(r, 0)); });
+  expect(byTestId('github-status')?.textContent).toContain('Not connected');
+  globalThis.fetch = original;
 });
