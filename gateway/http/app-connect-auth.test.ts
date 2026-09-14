@@ -31,10 +31,18 @@ function surface(over: Partial<FederatedTokenStoreLike> = {}): {
       // the resolver always returns a valid claim bound to this surface's
       // instance. The unauthenticated 401 gate is covered in
       // `app-connect-auth-session-gate.test.ts`.
-      resolveUserClaim: async () => ({ project_slug: 'alice', user_id: 'u1' }),
+      resolveUserClaim: async () => ({ project_slug: 'alice', user_id: 'u1', session_id: 'session-one' }),
       project_slug: 'alice',
     }).handler,
   }
+}
+
+async function callbackRequest(handler: (req: Request) => Promise<Response | null>, url: string): Promise<Request> {
+  const start = await handler(new Request(new URL('/api/app/connect/auth/start', url).toString(), { method: 'POST' }))
+  const { auth_url } = await start!.json() as { auth_url: string }
+  const callback = new URL(url)
+  callback.searchParams.set('state', new URL(new URL(auth_url).searchParams.get('return_url')!).searchParams.get('state')!)
+  return new Request(callback.toString())
 }
 
 describe('app-connect-auth surface', () => {
@@ -48,9 +56,10 @@ describe('app-connect-auth surface', () => {
     const u = new URL(body.auth_url)
     expect(u.origin).toBe('https://auth.neutron.example')
     expect(u.pathname).toBe('/oauth/connect/google/start')
-    expect(u.searchParams.get('return_url')).toBe(
-      'https://alice.local/api/app/connect/auth/callback',
-    )
+    const callback = new URL(u.searchParams.get('return_url')!)
+    expect(callback.origin).toBe('https://alice.local')
+    expect(callback.pathname).toBe('/api/app/connect/auth/callback')
+    expect(callback.searchParams.get('state')).toMatch(/^[A-Za-z0-9_-]{43}$/)
   })
 
   test('POST /start?return_path=... bakes app_return into the callback return_url', async () => {
@@ -85,10 +94,9 @@ describe('app-connect-auth surface', () => {
   test('GET /callback?app_return=... redirects back to the originating page', async () => {
     const { handler } = surface()
     const res = await handler(
-      new Request(
+      await callbackRequest(handler,
         'https://alice.local/api/app/connect/auth/callback?connect_code=c1.s1&app_return=' +
           encodeURIComponent('/invite?invite=XYZ'),
-        { method: 'GET' },
       ),
     )
     expect(res!.status).toBe(302)
@@ -112,9 +120,8 @@ describe('app-connect-auth surface', () => {
   test('GET /callback redeems the code and 302s with connected', async () => {
     const { handler, redeemed } = surface()
     const res = await handler(
-      new Request(
+      await callbackRequest(handler,
         'https://alice.local/api/app/connect/auth/callback?connect_code=c1.s1',
-        { method: 'GET' },
       ),
     )
     expect(res!.status).toBe(302)
@@ -125,7 +132,7 @@ describe('app-connect-auth surface', () => {
   test('GET /callback without a code 302s with error', async () => {
     const { handler } = surface()
     const res = await handler(
-      new Request('https://alice.local/api/app/connect/auth/callback', { method: 'GET' }),
+      await callbackRequest(handler, 'https://alice.local/api/app/connect/auth/callback'),
     )
     expect(res!.status).toBe(302)
     expect(res!.headers.get('location')).toContain('connect=error')
@@ -138,9 +145,8 @@ describe('app-connect-auth surface', () => {
       },
     })
     const res = await handler(
-      new Request(
+      await callbackRequest(handler,
         'https://alice.local/api/app/connect/auth/callback?connect_code=bad',
-        { method: 'GET' },
       ),
     )
     expect(res!.status).toBe(302)

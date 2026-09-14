@@ -26,8 +26,7 @@
  * All four routes mutate or probe the instance-wide `FederatedTokenStore`, so
  * each one is gated behind the SAME cookie-session auth the chat surface uses
  * (`landing/session-cookie.ts` via the injected `resolveUserClaim` closure —
- * production wires the identical `cookieToUserClaim` the WS upgrade +
- * chat-history surface consume). Without this gate, an attacker on a publicly
+ * a composer must additionally supply a verified login-session ID). Without this gate, an attacker on a publicly
  * reachable Open gateway could hit `/callback?connect_code=<their code>`
  * to overwrite the instance's federated credential, or `/disconnect` to wipe it,
  * with NO authenticated session.
@@ -37,11 +36,15 @@
  * carries only the `SameSite=Lax` session cookie, never an `Authorization`
  * header. The XHR routes (`/start`, `/status`, `/disconnect`) are issued
  * same-origin from the web settings panel, so they carry the same cookie. This
- * surface is mounted in Open mode only (web-only); Managed never mounts it.
+ * surface is intended for Open mode; production boot wiring is still pending.
  *
  * The auth check runs BEFORE any `store` probe or mutation, so an
  * unauthenticated request gets a 401 with the federated-token store untouched.
  */
+
+import { randomBytes } from 'node:crypto'
+import { createLogger } from '@neutronai/logger'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 
 import {
   FederatedConnectError,
@@ -60,17 +63,22 @@ export interface FederatedTokenStoreLike {
 }
 
 /**
- * Verified app-session claim — the subset of `cookieToUserClaim`'s return
- * shape this surface needs. Structurally compatible with the closure
- * `gateway/index.ts` wires (which also carries an optional `set_cookie`).
+ * Verified app-session claim required by this surface.
+ * The current Open resolver must gain a distinct login-session identifier
+ * before it can satisfy this contract in production.
  */
 export interface AppConnectAuthClaim {
   project_slug: string
   user_id: string
+  /** Stable, verified login-session identifier, distinct across logins of one user.
+   * Must come from the session verifier, never from a request parameter. */
+  session_id: string
 }
 
 export interface AppConnectAuthDeps {
   store: FederatedTokenStoreLike
+  now?: () => number
+  log?: (event: string, fields: Record<string, string>) => void
   /** Base URL of the identity service, e.g. https://auth.example.test */
   auth_base_url: string
   /**
@@ -82,10 +90,9 @@ export interface AppConnectAuthDeps {
    * Cookie-session auth resolver — gates all four routes (M2.5 follow-up #6,
    * ISSUES #84). Returns the verified `{ project_slug, user_id }` claim on a
    * valid session cookie, or `null` when the cookie is missing / invalid /
-   * connect. Production wires the same `cookieToUserClaim` closure the WS
-   * upgrade + chat-history surface use. When cookie auth is unwired on a
-   * deploy, the boot path supplies a fail-closed resolver (`async () => null`)
-   * so the routes 401 rather than mutate unauthenticated.
+   * expired. The verified claim must also carry a stable login-session ID;
+   * an owner/user identity alone cannot distinguish two sessions. A composer
+   * without session verification must return null.
    */
   resolveUserClaim(req: Request): Promise<AppConnectAuthClaim | null>
   /**
@@ -134,6 +141,19 @@ export function createAppConnectAuthSurface(
 ): AppConnectAuthSurface {
   const authBase = deps.auth_base_url.replace(/\/+$/, '')
   const appRedirect = deps.app_redirect_path ?? '/'
+  const now = deps.now ?? Date.now
+  const log = deps.log ?? createLogger('connect-auth').warn
+  // Process-local by design: restart loses pending attempts and refuses callbacks.
+  // One attempt per verified login session; a new start supersedes the old one.
+  const pending = new Map<string, { nonce: string; expires: number; used: boolean }>()
+  const sessionKey = (claim: AppConnectAuthClaim): string =>
+    JSON.stringify([claim.project_slug, claim.user_id, claim.session_id])
+  const refuse = (dest: URL, outcome: 'failed_verification' | 'could_not_verify', reason: string): Response => {
+    log('connect_auth_state', { outcome, reason })
+    dest.searchParams.set('connect', 'error')
+    dest.searchParams.set('connect_error', outcome)
+    return Response.redirect(dest.toString(), 302)
+  }
 
   return {
     async handler(req: Request): Promise<Response | null> {
@@ -166,10 +186,19 @@ export function createAppConnectAuthSurface(
         claim === null ||
         ownerIdentityMismatch(claim.project_slug, deps.project_slug, deps.resolveOwnerHandle)
       ) {
+        if (sub === '/callback') {
+          log('connect_auth_state', { outcome: 'could_not_verify', reason: 'no_session' })
+        }
         return json(401, {
           error: 'unauthorized',
           message: 'a valid app session is required for connect auth',
         })
+      }
+
+      // Reject incomplete verifier output at runtime as well as at the type boundary.
+      if (!claim.session_id) {
+        log('connect_auth_state', { outcome: 'could_not_verify', reason: 'no_session_id' })
+        return json(401, { error: 'unauthorized', message: 'a verified login session is required' })
       }
 
       // POST /start[?provider=&return_path=/invite?invite=...] → auth URL.
@@ -183,6 +212,13 @@ export function createAppConnectAuthSurface(
         const providerRaw = (url.searchParams.get('provider') ?? 'google').toLowerCase()
         const provider = providerRaw === 'apple' ? 'apple' : 'google'
         const callback = new URL(`${url.origin}${BASE_PATH}/callback`)
+        const startedAt = now()
+        for (const [key, attempt] of pending) {
+          if (attempt.expires <= startedAt) pending.delete(key)
+        }
+        const nonce = randomBytes(32).toString('base64url')
+        pending.set(sessionKey(claim), { nonce, expires: startedAt + 10 * 60_000, used: false })
+        callback.searchParams.set('state', nonce)
         const returnPath = safeRelativePath(url.searchParams.get('return_path'))
         if (returnPath !== null) callback.searchParams.set('app_return', returnPath)
         const authUrl = new URL(`${authBase}/oauth/connect/${provider}/start`)
@@ -197,6 +233,16 @@ export function createAppConnectAuthSurface(
         const code = url.searchParams.get('connect_code') ?? ''
         const appReturn = safeRelativePath(url.searchParams.get('app_return'))
         const dest = new URL(appReturn ?? appRedirect, url.origin)
+        const attempt = pending.get(sessionKey(claim))
+        if (attempt === undefined) return refuse(dest, 'could_not_verify', 'no_pending_attempt')
+        if (attempt.expires <= now()) return refuse(dest, 'could_not_verify', 'expired')
+        if (attempt.used) return refuse(dest, 'could_not_verify', 'already_used')
+        const state = url.searchParams.get('state')
+        if (!state) return refuse(dest, 'failed_verification', 'missing_nonce')
+        if (!constantTimeEqual(state, attempt.nonce)) return refuse(dest, 'failed_verification', 'nonce_mismatch')
+        // Consume synchronously BEFORE the first redeem await, including failed redeems.
+        attempt.used = true
+        log('connect_auth_state', { outcome: 'verified', reason: 'matched' })
         if (code.length === 0) {
           dest.searchParams.set('connect', 'error')
           return Response.redirect(dest.toString(), 302)
