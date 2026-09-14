@@ -134,6 +134,24 @@ function runRunTests(h: Harness, extraEnv: Record<string, string> = {}): RunResu
 }
 
 describe('G8 run-tests.sh — chunk math', () => {
+  test('a shard assigned zero files passes without a missing-results diagnostic', () => {
+    const h = harness(1)
+    try {
+      const { code, out } = runRunTests(h, {
+        FAKE_BUN_DISC: '1',
+        NEUTRON_TEST_SHARD: '2/2',
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      })
+      expect(out).toContain('assigned here: 0 (shard 2/2)')
+      expect(out).toContain('run-tests: PASS')
+      expect(out).not.toContain('No such file or directory')
+      expect(out).not.toContain('results are missing')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
   test('5 files, CHUNK_SIZE=2 → 3 general chunks and a clean PASS', () => {
     const h = harness(5)
     try {

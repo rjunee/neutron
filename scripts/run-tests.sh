@@ -753,21 +753,26 @@ fi
 FAILED_CHUNKS=0
 RAN_TOTAL=0
 FAIL_LIST=""
-while read -r r_idx r_rc r_nfiles r_ran; do
-  RAN_TOTAL=$(( RAN_TOTAL + r_ran ))
-  if [ "$r_rc" != "0" ]; then
-    FAILED_CHUNKS=$(( FAILED_CHUNKS + 1 ))
-    if [ "$r_idx" = "pglite" ]; then
-      FAIL_LIST="${FAIL_LIST} PGLite-lane"
-    elif [ "$r_idx" = "device" ]; then
-      FAIL_LIST="${FAIL_LIST} device-lane"
-    elif [ "$r_idx" = "http" ]; then
-      FAIL_LIST="${FAIL_LIST} real-HTTP-lane"
-    else
-      FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
+if [ -f "$WORK/results" ]; then
+  while read -r r_idx r_rc r_nfiles r_ran; do
+    RAN_TOTAL=$(( RAN_TOTAL + r_ran ))
+    if [ "$r_rc" != "0" ]; then
+      FAILED_CHUNKS=$(( FAILED_CHUNKS + 1 ))
+      if [ "$r_idx" = "pglite" ]; then
+        FAIL_LIST="${FAIL_LIST} PGLite-lane"
+      elif [ "$r_idx" = "device" ]; then
+        FAIL_LIST="${FAIL_LIST} device-lane"
+      elif [ "$r_idx" = "http" ]; then
+        FAIL_LIST="${FAIL_LIST} real-HTTP-lane"
+      else
+        FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
+      fi
     fi
-  fi
-done < "$WORK/results"
+  done < "$WORK/results"
+elif [ "$SHARD_TOTAL" -ne 0 ]; then
+  echo "run-tests: FATAL — results are missing for ${SHARD_TOTAL} assigned file(s)." >&2
+  exit 1
+fi
 
 LANES=$NCHUNKS
 LANE_DESC="${NCHUNKS} general chunks"

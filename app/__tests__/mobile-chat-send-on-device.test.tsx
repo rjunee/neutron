@@ -144,6 +144,52 @@ describe('mobile chat send, on a runtime without WebCrypto (i.e. the device)', (
     screen.unmount();
   });
 
+  it('a failed bubble exposes a tappable retry that re-drives the same message', async () => {
+    const { screen, socket } = await mountChat('harness-project');
+    await screen.type('retry this exact send');
+    await screen.press('Send');
+
+    const firstFrame = socket.framesOfType('user_message')[0]!;
+    const clientMsgId = firstFrame['client_msg_id'] as string;
+    const { sessionCacheKeys, peekSession } = await import('../lib/chat-core/session-cache');
+    const session = peekSession(sessionCacheKeys()[0] ?? '')!;
+    const store = (session as unknown as {
+      store: {
+        getByClientMsgId(topicId: string, id: string): Promise<Record<string, unknown> | null>;
+        upsert(row: Record<string, unknown>): Promise<void>;
+      };
+      topic_id: string;
+    }).store;
+    const topicId = `app:${OWNER.id}:harness-project`;
+    const row = await store.getByClientMsgId(topicId, clientMsgId);
+    expect(row).not.toBeNull();
+    await store.upsert({ ...row!, status: 'failed' });
+
+    // An unrelated durable frame makes the mounted hook reload the store, just
+    // as production inbound traffic does after a persisted status transition.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'agent_message',
+        message_id: 'agent-refresh',
+        seq: 2,
+        ts: Date.now(),
+        body: 'refresh',
+        project_id: 'harness-project',
+      }),
+    });
+    await screen.settle();
+
+    await screen.press('Message failed to send — retry');
+    const frames = socket.framesOfType('user_message');
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({
+      body: 'retry this exact send',
+      client_msg_id: clientMsgId,
+    });
+    screen.unmount();
+  });
+
   it('sends from the General scope too (no project_id on the frame)', async () => {
     // General is the no-project scope; a send there must still be a real frame.
     const { screen, socket } = await mountChat('');

@@ -714,6 +714,14 @@ describe('MobileChatSession — unknown delivery (parity with WebChatSession)', 
     expect(resent.length).toBe(1); // exactly one resend
     expect(resent[0]).toMatchObject({ body: 'important', client_msg_id: 'ack-x' });
 
+    // Prove the mobile reconnect drain cannot restore its independent timeout
+    // writer; the initial-send deadline above cannot cover this second flush.
+    clock.advance(60_000);
+    await tick();
+    const reconnectedPending = (await session.messages())[0]!;
+    expect(reconnectedPending.status).toBe('sent');
+    expect(deliveryState(reconnectedPending)).toBe('pending');
+
     // The echo finally lands → reconciles to a single acked row (no dup, no stuck clock).
     s2.deliver({
       v: 1,

@@ -422,6 +422,13 @@ describe('unacknowledged sends remain pending', () => {
     expect(bodies).toEqual(['important']) // resent on the new socket
     expect(s2.frames('user_message').every((e) => e['client_msg_id'] === 'cmid-x')).toBe(true)
 
+    // The reconnect writer is independent of the initial-send writer. Advancing
+    // beyond the former deadline HERE makes a restored timer on flushUnacked
+    // observable instead of testing only the first socket's send path.
+    clock.advance(60_000)
+    await tick()
+    expect((await session.messages())[0]?.status).toBe('sent')
+
     // The echo finally lands → reconciles to a single acked row (no dup).
     s2.deliver({
       v: 1,
