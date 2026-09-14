@@ -283,10 +283,24 @@ export function collectTrackedAttributesFiles(
   const candidates = relevantAttributesPaths(paths)
   const env = checkAttrEnv(baseEnv)
   const treeish = clonedTreeish(repoRoot, env)
+  // ESTABLISH PRESENCE FIRST, THEN READ (#644). This loop used to ask `git show`
+  // one question and read TWO answers out of it: a nonzero exit became
+  // `content = null`, commented "not committed — it reaches no clone". But
+  // `git show` exits nonzero for a path that is not in the tree AND for a tree it
+  // could not read at all — a missing blob, a poisoned object directory, a git
+  // that would not run. "It is not there" and "I could not look" shared a branch,
+  // and the one that is a failure was spelled as the one that is a finding, in the
+  // same file whose sibling `clonedTreeContains` was already hardened against
+  // exactly that (see its catch). So: `clonedTreeContains` answers the EXISTENCE
+  // question against the same source, failing closed when it cannot; only a path
+  // it established as present is then read, and a failure to read THAT is a
+  // failure, not an absence.
+  const present = new Set(clonedTreeContains(repoRoot, candidates, baseEnv))
   const found: AttributesFile[] = []
 
   for (const path of candidates) {
-    let content: string | null = null
+    if (!present.has(path)) continue // established ABSENT from what a clone gets
+    let content: string
     if (treeish !== null) {
       try {
         content = execFileSync('git', ['-C', repoRoot, 'show', `${treeish}:${path}`], {
@@ -294,14 +308,17 @@ export function collectTrackedAttributesFiles(
           env,
           stdio: ['ignore', 'pipe', 'ignore'],
         })
-      } catch {
-        content = null // not committed — it reaches no clone
+      } catch (cause) {
+        throw new Error(
+          `could not read ${path} at ${treeish === '' ? 'the index' : treeish} of ${repoRoot} — ` +
+            'it is tracked there, so a failed read is a failure to look, not an absence',
+          { cause },
+        )
       }
     } else {
-      const onDisk = join(repoRoot, path)
-      content = existsSync(onDisk) ? readFileSync(onDisk, 'utf8') : null
+      content = readFileSync(join(repoRoot, path), 'utf8')
     }
-    if (content !== null) found.push({ path, content })
+    found.push({ path, content })
   }
   return found
 }
@@ -352,10 +369,8 @@ export function clonedTreeContains(
     try {
       // `''` is git's spelling for the index, and `ls-tree` has no such form —
       // an unborn HEAD is the one case that must ask `ls-files` instead.
-      const argv =
-        treeish === ''
-          ? ['-C', repoRoot, 'ls-files', '-z', '--', ...candidates]
-          : ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', treeish, '--', ...candidates]
+      if (treeish !== '') return trackedFilesAtRef(repoRoot, treeish, candidates, baseEnv)
+      const argv = ['-C', repoRoot, 'ls-files', '-z', '--', ...candidates]
       const stdout = execFileSync('git', argv, {
         encoding: 'utf8',
         env,
@@ -375,7 +390,42 @@ export function clonedTreeContains(
       )
     }
   }
-  return candidates.filter((c) => existsSync(join(repoRoot, c)))
+  return workingTreeFiles(repoRoot, candidates)
+}
+
+/**
+ * Which candidate paths are tracked by the named `ref`.
+ *
+ * The ref is required because “tracked” has no working-tree answer. A failed
+ * probe throws: an unreadable ref is different from a ref whose tree was read
+ * successfully and did not contain a candidate.
+ */
+export function trackedFilesAtRef(
+  repoRoot: string,
+  ref: string,
+  candidates: readonly string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  try {
+    const stdout = execFileSync(
+      'git',
+      ['-C', repoRoot, 'ls-tree', '-r', '-z', '--name-only', ref, '--', ...candidates],
+      {
+        encoding: 'utf8',
+        env: checkAttrEnv(baseEnv),
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    )
+    const tracked = new Set(stdout.split('\0').filter((path) => path.length > 0))
+    return candidates.filter((candidate) => tracked.has(candidate))
+  } catch (cause) {
+    throw new Error(`could not inspect tracked files at ref ${ref}`, { cause })
+  }
+}
+
+/** Which candidate paths currently exist in the working tree on disk. */
+export function workingTreeFiles(repoRoot: string, candidates: readonly string[]): string[] {
+  return candidates.filter((candidate) => existsSync(join(repoRoot, candidate)))
 }
 
 /**
