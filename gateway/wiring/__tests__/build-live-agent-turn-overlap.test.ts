@@ -182,3 +182,106 @@ describe('build-live-agent-turn — overlapping-turn serialization (go-live race
     expect(dispatches.map((d) => d.question)).toEqual([Q1, Q2])
   })
 })
+
+function latch() {
+  let release!: () => void
+  const promise = new Promise<void>((resolve) => { release = resolve })
+  return { promise, release }
+}
+
+test('terminal acting turns share chat admission, isolate projects, and never inject either direction', async () => {
+  const chatStarted = latch(), chatRelease = latch(), wakeStarted = latch(), wakeRelease = latch()
+  const starts: string[] = [], activity: string[] = [], injected: string[] = []
+  const run = buildLiveAgentTurn({
+    substrate: {
+      start(spec) {
+        const name = spec.prompt.includes('chat-first') ? 'chat-first' : spec.prompt
+        starts.push(name)
+        async function* events(): AsyncGenerator<Event> {
+          if (name === 'chat-first') { chatStarted.release(); await chatRelease.promise }
+          if (name === 'terminal-wake') { wakeStarted.release(); await wakeRelease.promise }
+          yield { kind: 'token', text: `reply:${name}` }
+          yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'chat' }
+        }
+        return { events: events(), async respondToTool() {}, async cancel() {}, tool_resolution: 'internal' }
+      },
+    },
+    injectActiveTurn: async (_turn, text) => { injected.push(text); return true },
+    activityInspector: {
+      turn_started: (scope) => { activity.push(`start:${scope}`) },
+      on_event: (scope) => { activity.push(`event:${scope}`) },
+      turn_finished: (scope) => { activity.push(`finish:${scope}`) },
+    },
+    personaLoader: { async load() { return '' } }, buttonStore: store,
+    project_slug: 'owner', owner_home: tmp, ack_delay_ms: 60_000,
+  })
+  const turn = { project_slug: 'owner', user_id: 'u', project_id: 'project-a',
+    topic_id: 'app:u:project-a', send() {}, observed_at: 0 }
+  const spec = (prompt: string, project_id = 'project-a'): AgentSpec => ({
+    prompt, tools: [], model_preference: ['test-model'], metering_context: { project_id },
+  })
+  const chat = run({ ...turn, user_text: 'chat-first' })
+  await chatStarted.promise
+  const wake = run.composeActingTurn(turn.topic_id, spec('terminal-wake'), { timeout_ms: 1000 })
+  // A different project must advance while this project's chat owns admission.
+  expect(await run.composeActingTurn('app:u:project-b', spec('other-project', 'project-b'), { timeout_ms: 1000 }))
+    .toBe('reply:other-project')
+  expect(starts).toEqual(['chat-first', 'other-project'])
+  expect(injected).toEqual([])
+  const next = run({ ...turn, user_text: 'chat-after' })
+  await Promise.resolve()
+  expect(injected).toEqual([])
+  chatRelease.release()
+  await chat
+  await wakeStarted.promise
+  const last = run({ ...turn, user_text: 'chat-last' })
+  await Promise.resolve()
+  expect(starts).toEqual(['chat-first', 'other-project', 'terminal-wake'])
+  expect(injected).toEqual([])
+  wakeRelease.release()
+  expect(await wake).toBe('reply:terminal-wake')
+  expect((await next).outcome).toBe('replied')
+  expect((await last).outcome).toBe('replied')
+  expect(starts).toEqual(['chat-first', 'other-project', 'terminal-wake', 'chat-after', 'chat-last'])
+  expect(activity.filter((v) => v === 'start:project-a')).toHaveLength(4)
+  expect(activity.filter((v) => v === 'finish:project-a')).toHaveLength(4)
+  expect(activity.filter((v) => v === 'event:project-a')).toHaveLength(8)
+  const history = await store.listHistoryByTopic({ topic_id: turn.topic_id, before: Date.now() + 1, before_prompt_id: null, now: Date.now(), limit: 20 })
+  expect(JSON.stringify(history)).toContain('chat-first')
+  expect(JSON.stringify(history)).toContain('chat-after')
+  expect(JSON.stringify(history)).not.toContain('terminal-wake')
+})
+
+test('acting turn failures release chat admission and finish observation', async () => {
+  const { substrate, dispatches } = makeRecordingSubstrate(0)
+  const finished: string[] = []
+  const run = buildLiveAgentTurn({
+    substrate: {
+      start(spec) {
+        if (spec.prompt !== 'broken-wake') return substrate.start(spec)
+        async function* events(): AsyncGenerator<Event> { throw new Error('wake failed') }
+        return { events: events(), async respondToTool() {}, async cancel() {}, tool_resolution: 'internal' }
+      },
+    },
+    activityInspector: { turn_started() {}, on_event() {}, turn_finished: (scope) => { finished.push(scope) } },
+    personaLoader: { async load() { return '' } }, buttonStore: store,
+    project_slug: 'owner', owner_home: tmp,
+  })
+  const failed = run.composeActingTurn('app:u', { prompt: 'broken-wake', tools: [], model_preference: [] }, { timeout_ms: 1000 })
+  const chat = run({ project_slug: 'owner', user_id: 'u', topic_id: 'app:u', user_text: 'after failure', send() {}, observed_at: 0 })
+  await expect(failed).rejects.toThrow('wake failed')
+  expect((await chat).outcome).toBe('replied')
+  expect(dispatches).toHaveLength(1)
+  expect(finished).toEqual(['general', 'general'])
+})
+
+test('acting timeout starts after admission and does not include queue waiting', async () => {
+  const { substrate } = makeRecordingSubstrate(40)
+  const run = buildLiveAgentTurn({ substrate, personaLoader: { async load() { return '' } },
+    buttonStore: store, project_slug: 'owner', owner_home: tmp })
+  const spec: AgentSpec = { prompt: 'wake', tools: [], model_preference: [] }
+  const first = run.composeActingTurn('app:u', spec, { timeout_ms: 1000 })
+  const second = run.composeActingTurn('app:u', spec, { timeout_ms: 65 })
+  expect(await first).toBe('ANSWER[wake]')
+  expect(await second).toBe('ANSWER[wake]')
+})

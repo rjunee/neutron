@@ -107,7 +107,7 @@ export function buildTerminalBuildWakeObserver(deps: TerminalBuildWakeDeps): (ru
       const board_item_id = await deps.boardItemIdForRun(run)
       // Names-only ToolDefs are the REPL `--tools` contract. EXECUTABILITY comes
       // from the substrate this observer is wired to: the tool-bridge-enabled
-      // background `cc-nudge-*` child with the same grants as a channel turn,
+      // project conversation, admitted through the chat runner's turn queue,
       // pinned by `open-terminal-build-wake-wiring.test.ts`.
       const tools: ToolDef[] = LIVE_AGENT_TOOL_NAMES.map((name) => ({
         name, description: `Built-in Claude Code tool '${name}' (terminal-build wake surface)`,

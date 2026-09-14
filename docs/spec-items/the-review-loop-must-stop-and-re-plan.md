@@ -123,5 +123,7 @@ Built on branch `fix/review-loop-stop-and-escalate`; record at
       result in project chat; the blocked lane remains enforced at dispatch.
       verify: `bun test work-board/dependency-sequencing.test.ts
       trident/escalation-block.test.ts trident/board-dispatch.test.ts`
-      This closes the sequencing box against the existing background wake seam; moving
-      orchestration into the project conversation remains part of the broader #545 work.
+      Terminal decision turns now use the project conversation's substrate and chat
+      queue. Launch, workflow control and checkpoint transport remain broader #545 work.
+      verify: `bun test gateway/wiring/__tests__/build-live-agent-turn-overlap.test.ts
+      open/__tests__/open-terminal-build-wake-wiring.test.ts`

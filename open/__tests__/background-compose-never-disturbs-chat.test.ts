@@ -468,12 +468,26 @@ describe('the work-board wakeup shares that background substrate', () => {
     .map((l) => l.replace(/\/\/.*$/, ''))
     .join('\n')
 
-  test('every timer-driven compose wrapper resolves to the background substrate', () => {
+  test('every BACKGROUND timer-driven compose wrapper resolves to the background substrate', () => {
     const wraps = [...code.matchAll(/buildSubstrateReminderLlm\(([A-Za-z_$][\w$]*)\)/g)].map(
       (m) => m[1]!,
     )
-    // The fired-reminder dispatcher, work-board wakeup, and terminal-build wake.
-    expect(wraps.length).toBe(3)
+    // TWO, not three. The terminal-build wake deliberately LEFT this set: it now
+    // composes on the project's trident-delivery conversation rather than the shared
+    // `cc-nudge-*` child, which is the orchestrator shape the pivot plan specifies.
+    //
+    // THE PROPERTY THIS FILE GUARDS IS UNCHANGED and is asserted directly for that
+    // wrapper instead of through this structural proxy: it never INJECTS into a
+    // conversation (`build-live-agent-turn-overlap.test.ts`, which asserts an empty
+    // injection list across interleaved chat and wake turns).
+    //
+    // WHAT DID CHANGE, stated rather than hidden: the wake shares per-topic admission
+    // on the project's DELIVERY conversation, so a turn there can queue behind a wake
+    // for at most its 4-minute timeout. That is a different trade, not a free one — and
+    // it is the trade the pivot plan chose, because the previous arrangement put all
+    // three wrappers on ONE `cc-nudge-*` child per project, whose collisions are the
+    // incident the comment below this test records.
+    expect(wraps.length).toBe(2)
     for (const name of wraps) {
       const resolved =
         name === 'reminderComposeSubstrate' ||
