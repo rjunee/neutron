@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  CapabilitySchema,
   NeutronManifestSchema,
   parseManifest,
   safeParseManifest,
@@ -183,6 +184,23 @@ describe('manifest — capability format', () => {
       capabilities: ['Read:Gmail'],
     })
     expect(r.success).toBe(false)
+  })
+
+  test('rejects a long ambiguous separator run without regex backtracking', () => {
+    const r = NeutronManifestSchema.safeParse({
+      ...validManifest,
+      capabilities: [`a:a-${'-'.repeat(100_000)}!`],
+    })
+    expect(r.success).toBe(false)
+  })
+
+  test('preserves the open resource grammar around repeated separators', () => {
+    for (const capability of ['a:a--', 'a:a..', 'a:a-/']) {
+      expect(CapabilitySchema.safeParse(capability).success).toBe(true)
+    }
+    for (const capability of ['a:a-', 'a:a.', 'a:a/']) {
+      expect(CapabilitySchema.safeParse(capability).success).toBe(false)
+    }
   })
 })
 
