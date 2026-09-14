@@ -16,6 +16,18 @@ lanes = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lanes)
 
 
+def terminate_and_close_pidfd(fd, timeout=3):
+    """Terminate the addressed process and confirm exit before closing its handle."""
+    try:
+        signal.pidfd_send_signal(fd, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    exited = bool(select.select([fd], [], [], timeout)[0])
+    os.close(fd)
+    if not exited:
+        raise TimeoutError('pidfd target did not exit during fixture teardown')
+
+
 class LaneProcesses(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='lane-process-proof-')
@@ -29,17 +41,25 @@ class LaneProcesses(unittest.TestCase):
         self.proc_listing.start()
 
     def tearDown(self):
+        # A confirmed close can RAISE, and teardown must still finish. Letting the
+        # TimeoutError propagate from inside the loop skipped every remaining handle,
+        # every child kill and the tmpdir cleanup -- so the one failure mode this
+        # helper exists to report would leak the children it exists to reap. Collect
+        # and re-raise after cleanup: still loud, no longer leaky.
+        failures = []
         for fd in self.handles:
             try:
-                signal.pidfd_send_signal(fd, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.close(fd)
+                terminate_and_close_pidfd(fd)
+            except Exception as e:
+                failures.append(e)
         for child in self.children:
-            child.kill()
+            if child.poll() is None:
+                child.kill()
             child.wait(timeout=3)
         self.proc_listing.stop()
         self.tmp.cleanup()
+        if failures:
+            raise failures[0]
 
     def launch(self, argv, **kwargs):
         p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
@@ -179,6 +199,16 @@ class LaneProcesses(unittest.TestCase):
             lanes.sweep(grace=0)
         send.assert_not_called()
         self.assertFalse(select.select([fd], [], [], 0)[0])
+
+    def test_pidfd_teardown_confirms_exit_before_close(self):
+        fd = 73
+        calls = []
+        with patch.object(signal, 'pidfd_send_signal', side_effect=lambda *args: calls.append(('signal', args))), \
+                patch.object(select, 'select', side_effect=lambda *args: (calls.append(('select', args)) or ([fd], [], []))), \
+                patch.object(os, 'close', side_effect=lambda arg: calls.append(('close', (arg,)))):
+            terminate_and_close_pidfd(fd)
+        self.assertEqual([kind for kind, _ in calls], ['signal', 'select', 'close'])
+        self.assertEqual(calls[1][1], ([fd], [], [], 3))
 
     def test_birth_and_boot_reuse_are_dead_not_identity(self):
         _, c = self.owner()
