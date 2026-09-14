@@ -565,6 +565,11 @@ export class ReplSink {
         return Response.json({ tools: replToolBridgeRef.current?.listToolSchemas() ?? [] })
       }
       if (url.pathname === '/tool-call') {
+        // A live child credential also serves the dev-channel; it does not grant
+        // access to the tool bridge. Enforce the spawn-time attachment here.
+        if (!session.toolBridgeActive) {
+          return Response.json({ ok: false, error: 'tool bridge not granted' }, { status: 403 })
+        }
         const bridge = replToolBridgeRef.current
         if (bridge === undefined) {
           return Response.json({ ok: false, error: 'no tool bridge wired' }, { status: 503 })
@@ -658,6 +663,11 @@ export class ReplSink {
         return Response.json({ status: 'ok' })
       }
       if (url.pathname === '/todo-sync') {
+        // Hook installation is not authorization: a child can POST directly.
+        // Board writes require the same bridge attachment as tool dispatch.
+        if (!session.toolBridgeActive) {
+          return Response.json({ status: 'forbidden', error: 'tool bridge not granted' }, { status: 403 })
+        }
         // TodoWrite→Work Board sync (WAVE 3.5 task B). The PostToolUse hook POSTs
         // the agent's TodoWrite list; reconcile it into THIS session's active
         // project scope through the shared store (one onChange live-push). The
