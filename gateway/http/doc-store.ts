@@ -364,6 +364,11 @@ export interface DocStoreOptions {
   /** Absolute path to the per-instance `<owner_home>` dir. */
   owner_home: string
   /**
+   * Clock used for delete-event ordering stamps. Production defaults to
+   * `Date.now`; tests may inject a clock to force write/delete ordering.
+   */
+  now?: () => number
+  /**
    * Override how the per-project docs root is resolved. Production
    * uses the default (`<owner_home>/Projects/<project_id>/docs`); the
    * test harness can swap this for a fixed dir without restructuring
@@ -406,6 +411,7 @@ export interface DocStoreOptions {
 
 export class DocStore {
   private readonly owner_home: string
+  private readonly now: () => number
   private readonly resolveProjectDocsRoot: (project_id: string) => string
   private readonly versionStore: DocVersionStore | null
   private readonly binaryStore: BinaryStore | null
@@ -413,6 +419,7 @@ export class DocStore {
 
   constructor(opts: DocStoreOptions) {
     this.owner_home = opts.owner_home
+    this.now = opts.now ?? (() => Date.now())
     this.resolveProjectDocsRoot =
       opts.resolveProjectDocsRoot ??
       ((project_id) => join(opts.owner_home, 'Projects', project_id, 'docs'))
@@ -852,7 +859,7 @@ export class DocStore {
     // "just after unlink", so any writer that races its rename in
     // after our unlink will fstat a mtime > delete_time (same wall
     // clock on a sane host), and the writer's event wins.
-    const delete_time = Date.now()
+    const delete_time = this.now()
     // Skip version/binary side-effects for a surfaced project-root doc — it
     // lives outside the docs/ git worktree + binary graph.
     if (!rootSurfaced) {
