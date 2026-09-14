@@ -1725,8 +1725,11 @@ describe('NeutronChatController — W5 GAP-4 failed-send retry affordance', () =
     controller.stop()
   })
 
-  it('surfaces delivery=failed in the view model for a timed-out send (drives the ⚠️ retry affordance)', async () => {
-    // A send whose ack never arrived (WebChatSession flipped it sent → failed).
+  it.each([
+    ['sent', 'pending'],
+    ['failed', 'failed'],
+    ['acked', 'delivered'],
+  ] as const)('renders %s as %s in the view model', async (status, delivery) => {
     const store = new InMemoryStore()
     await store.upsert({
       topic_id: TOPIC,
@@ -1734,11 +1737,11 @@ describe('NeutronChatController — W5 GAP-4 failed-send retry affordance', () =
       message_id: null,
       seq: null,
       role: 'user',
-      body: 'never acked',
+      body: 'delivery evidence',
       project_id: null,
       attachments: null,
       created_at: 1,
-      status: 'failed',
+      status,
     })
     const sockets: FakeSocket[] = []
     const controller = new NeutronChatController({
@@ -1762,10 +1765,9 @@ describe('NeutronChatController — W5 GAP-4 failed-send retry affordance', () =
     controller.start()
     await tick()
 
-    const failed = controller.getViewModel().messages.find((m) => m.text === 'never acked')
-    expect(failed?.status).toBe('failed')
-    // `buildDeliveryIndex` keys the RetryAffordance off `delivery === 'failed'`.
-    expect(failed?.delivery).toBe('failed')
+    const rendered = controller.getViewModel().messages.find((m) => m.text === 'delivery evidence')
+    expect(rendered?.status).toBe(status)
+    expect(rendered?.delivery).toBe(delivery)
     controller.stop()
   })
 })

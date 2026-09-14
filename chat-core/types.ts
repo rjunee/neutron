@@ -116,12 +116,19 @@ export interface MessageReaction {
  *  - `queued` — written to the local store, not yet handed to the socket
  *    (offline, or buffered before flush).
  *  - `sent`   — handed to the socket; awaiting the server echo.
- *  - `failed` — GAP-4: handed to the socket but no ack arrived within the
- *    ack-timeout window, so the socket was (silently) lost. A terminal-until-
- *    retried state that lets the UI swap the stuck 🕓 clock for a retry
- *    affordance. NOT a lost send: it is re-driven (idempotently, on
- *    `client_msg_id`) on the next reconnect and reconciles to `acked` when the
- *    echo finally lands.
+ *  - `failed` — an explicit rejection or send error; silence is not failure.
+ *    A later server echo still reconciles it to `acked`.
+ *
+ *    NO CLIENT PATH PRODUCES THIS TODAY, deliberately (#608). The only two
+ *    producers were the web + mobile ack-timeout flips, and they were the bug:
+ *    they turned "no echo yet" into "not delivered". Nothing replaced them
+ *    because nothing CAN yet — the only inbound failure frame
+ *    (`AppWsOutboundError`, wire-types/app-ws-envelope.ts) carries no
+ *    `client_msg_id`, so no rejection can be attributed to a message. The state
+ *    is retained, not dead: it round-trips through every store, it is ranked in
+ *    the monotonic merge (store.ts), both render layers map it to the ⚠️ retry
+ *    affordance, and `flushOne` re-drives it. A per-message rejection frame is
+ *    what would make it reachable again.
  *  - `acked`  — the server echo (with `seq` + `message_id`) has reconciled
  *    it. Inbound agent/user messages from the server are born `acked`.
  *

@@ -369,7 +369,7 @@ export function normalizeReactions(
   return cleaned.length > 0 ? sortReactions(cleaned) : null
 }
 
-// GAP-4 — `failed` ranks ABOVE `sent` (an ack-timeout flips sent → failed) but
+// GAP-4 — `failed` ranks ABOVE `sent` (an explicit failure beats socket acceptance) but
 // BELOW `acked` (a late echo still wins, resolving a failed row to acked). This
 // keeps status strictly monotonic, so the merge never regresses: a re-delivery /
 // resume echo (born `acked`) always beats a local `failed`, and a re-sent failed

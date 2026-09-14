@@ -1430,20 +1430,18 @@ live bugs today and is NOT gated on the shell decision.** Close, all in chat-cor
   `onclose`; on regained connectivity the client waits out the backoff (up to 15s dead
   air). Expose a `notifyReachable()` that resets backoff and reconnects now; surfaces wire
   it to their platform signal (browser `online` event; NetInfo via the W6 bridge on native).
-- **GAP-4 — no ack-timeout / `failed` state.** A `sent` message whose ack never arrives
-  stays 🕓 forever (`SendStatus`, `types.ts:123`). Add a per-message ack deadline that flips
-  `sent`→`failed` and re-queues on reconnect, so the UI can show a retry affordance instead
-  of a permanently-pending clock.
+- **GAP-4 — delivery knowledge (corrected by #608).** Socket acceptance without
+  an acknowledgement is pending, even beyond the former deadline. Only an explicit
+  rejection or error is failed; reconnect re-drives unacknowledged sends idempotently.
 - **GAP-5 — resume not wired on every re-open.** Ensure `onOpen` always drives
   `resumeAndFlush` (`web-session.ts:326-334`) from the persisted MAX seq cursor
   (`store.ts:414-422`), and flush the outbound queue on the SAME open, so a reconnect both
   catches up AND drains queued sends. Add a `flush-before-suspend` hook surfaces can call
   on backgrounding.
-**Care:** heartbeat cadence must not fight the one-reply-per-turn substrate; ack-timeout
-must be generous enough not to double-send a slow-but-live turn (idempotent `client_msg_id`
-makes a double-send safe, but avoid the churn). **Accept:** kill a socket at the OS layer
+**Care:** heartbeat cadence must not fight the one-reply-per-turn substrate.
+A missing acknowledgement alone must never declare failure or trigger a timed resend. **Accept:** kill a socket at the OS layer
 (airplane toggle) and the client detects it, reconnects on regain, catches up via seq
-cursor, drains the queue, and never shows a permanently-stuck clock — verified in a
+cursor, drains the queue, and resolves pending delivery when an acknowledgement arrives — verified in a
 chat-core test that simulates half-open + flap; no sync-engine merge-law change.
 
 ### W4 — `[BEHAVIOR]` Expo shell conversion · `opus` · XL · lane clients (LATE / post-window)
@@ -1947,7 +1945,7 @@ leaves the dated history intact.
 | D-10 | ChannelRouter | **MAKE IT REAL — the owner wants multi-channel capability (Telegram/Slack later) even though only web-chat exists today. X5 rescoped: register the AppWs adapter on the router, keep ChannelAdapter as the documented extension seam, conformance test that every ChannelKind a run can carry has an adapter.** |
 | D-11 | Audit reports tracking | **Keep untracked (plan doc is the tracked artifact).** |
 | D-12 | X6 scheduling | **Last unit of the window.** |
-| D-13 | Web+Expo UX architecture | **RESOLVED (Fable's call): Option D — `landing/chat-react` becomes the single canonical UI (desktop+mobile web AND inside the app via WebView/Expo-DOM shell); retire ~25-30k LOC of twin RN screens. Native app is unpublished; M1 redesign is web-side; every feature ships twice today. Gated on a WebView chat-feel spike; native ChatSyncSurface is the reversible carve-out. → W0 (decision, wave 0) + W4 (shell conversion, late); W2 resolves to react-markdown now. ⚠️ retires native code — spike-gated + reversible; flagged for your sanity-check.** <br>**Offline/online addendum (investigated 2026-07-02, wf_d202931d-304):** the sync CORE is already Telegram-grade and shared by all surfaces via `@neutron/chat-core` over one `/ws/app/chat` — so the hybrid fallback is clean. Four socket-lifecycle gaps found (no heartbeat/half-open detection, no reachability-triggered reconnect, no ack-timeout→`failed`, phone-flapping logic only in the native surface) → split into **W5** (shared chat-core hardening, pulled EARLY — fixes web+mobile-web today) + **W6** (native-shell↔WebView bridge injecting AppState/NetInfo/push/device_id the WebView can't see). Hybrid shape = **Architecture B**: one native-owned chat-core feeding the web view through the existing `ControllerSession` seam — no second sync engine either way. |
+| D-13 | Web+Expo UX architecture | **RESOLVED (Fable's call): Option D — `landing/chat-react` becomes the single canonical UI (desktop+mobile web AND inside the app via WebView/Expo-DOM shell); retire ~25-30k LOC of twin RN screens. Native app is unpublished; M1 redesign is web-side; every feature ships twice today. Gated on a WebView chat-feel spike; native ChatSyncSurface is the reversible carve-out. → W0 (decision, wave 0) + W4 (shell conversion, late); W2 resolves to react-markdown now. ⚠️ retires native code — spike-gated + reversible; flagged for your sanity-check.** <br>**Offline/online addendum (investigated 2026-07-02, wf_d202931d-304):** the sync CORE is already Telegram-grade and shared by all surfaces via `@neutron/chat-core` over one `/ws/app/chat` — so the hybrid fallback is clean. Four socket-lifecycle gaps found (no heartbeat/half-open detection, no reachability-triggered reconnect, unacknowledged delivery handling (corrected by #608), phone-flapping logic only in the native surface) → split into **W5** (shared chat-core hardening, pulled EARLY — fixes web+mobile-web today) + **W6** (native-shell↔WebView bridge injecting AppState/NetInfo/push/device_id the WebView can't see). Hybrid shape = **Architecture B**: one native-owned chat-core feeding the web view through the existing `ControllerSession` seam — no second sync engine either way. |
 
 **Scope expansion (Q1) — corrected by investigation:** the feared invisible Managed ABI
 **never existed** (old-monorepo artifact). New Managed runs stock vendored Open per

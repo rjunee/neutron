@@ -347,8 +347,10 @@ export function rowKey(message: ChatMessage): string {
  * Phase 4 adds `read` (blue double-tick): the message has been read by a
  * device other than the sender — the agent loop (which marks every inbound
  * user message read once it picks it up) or a second device on the account.
- */
-export type DeliveryState = 'pending' | 'sent' | 'failed' | 'delivered' | 'read';
+ *
+ * Delivery knowledge: pending (unknown), failed (rejected/errored), or
+ * acknowledged (delivered/read). Socket acceptance alone is still pending. */
+export type DeliveryState = 'pending' | 'failed' | 'delivered' | 'read';
 
 /**
  * Map a message's send status + receipt aggregate to its ladder state.
@@ -363,14 +365,10 @@ export function deliveryState(
   if (message.role !== 'user') return null; // only outbound messages show ticks
   switch (message.status) {
     case 'queued':
-      return 'pending'; // 🕓 — written locally, not yet on the wire (offline)
     case 'sent':
-      return 'sent'; // ✓ — handed to the socket, awaiting the server echo
+      return 'pending'; // 🕓 — delivery is unknown until the server echo
     case 'failed':
-      // W5 GAP-4 — handed to the socket but the ack never arrived within the
-      // ack-timeout, so the socket was silently lost. NOT a stuck 🕓 clock: the
-      // UI shows a retry affordance; the send is re-driven on the next reconnect.
-      return 'failed';
+      return 'failed'; // explicit rejection or send error
     case 'acked':
       // ✓✓ delivered; promotes to read once another device/agent has read it.
       return isReadByOther(message.read_by, selfDeviceId) ? 'read' : 'delivered';
@@ -411,10 +409,8 @@ export function deliveryGlyph(state: DeliveryState): string {
   switch (state) {
     case 'pending':
       return '🕓';
-    case 'sent':
-      return '✓';
     case 'failed':
-      return '⚠️'; // W5 GAP-4 — retry affordance, not a stuck clock
+      return '⚠️'; // explicit failure: retry affordance
     case 'delivered':
       return '✓✓';
     case 'read':

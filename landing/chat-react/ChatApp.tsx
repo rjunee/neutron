@@ -31,7 +31,8 @@ import { PlansPane } from './PlansPane.tsx'
 import { useChatRuntime } from './useNeutronChat.ts'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutronai/chat-core'
-import type { ChatViewModel, RenderMessage, ImportProgressVM, SystemNoticeVM } from './controller.ts'
+import { DeliveryIndicator } from './DeliveryIndicator.tsx'
+import type { DeliveryState, ChatViewModel, RenderMessage, ImportProgressVM, SystemNoticeVM } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
@@ -429,44 +430,32 @@ function MessageActions(): React.JSX.Element | null {
 /**
  * W5 GAP-4 — per-message delivery-failure state + a retry callback, shared to the
  * bubbles (which only get the render id via `useMessage`). Keyed by render `id`
- * (= the client_msg_id for user sends). When a send's ack never arrives its
- * status flips `sent`→`failed` ({@link deliveryFor}), and this surfaces the ⚠️
- * "Failed — retry" affordance instead of a stuck 🕓 clock — mirroring the mobile
- * `deliveryState`/`deliveryGlyph('failed') → '⚠️'` mapping so web and mobile agree.
+ * (= the client_msg_id for user sends). Only an explicit failure surfaces the
+ * "Failed — retry" affordance; an unacknowledged send remains pending.
  * Agent-native parity: retry re-drives the same idempotent send the reconnect path
  * would.
  */
 interface DeliveryCtx {
-  /** renderId → true when that user message failed to deliver. */
-  byRenderId: Map<string, boolean>
+  /** renderId → delivery knowledge for each user message. */
+  byRenderId: Map<string, DeliveryState>
   onRetry: (renderId: string) => void
 }
 const DeliveryContext = createContext<DeliveryCtx | null>(null)
 
-/** The ⚠️ "Failed — retry" affordance under a user bubble whose send timed out
- *  awaiting its ack. Renders nothing for any non-failed message. */
-function RetryAffordance(): React.JSX.Element | null {
+/** Render all delivery outcomes from the same per-message state. */
+function MessageDelivery(): React.JSX.Element | null {
   const ctx = useContext(DeliveryContext)
   const message = useMessage()
-  if (ctx === null) return null
-  if (ctx.byRenderId.get(message.id) !== true) return null
-  return (
-    <button
-      type="button"
-      className="car-msg-failed"
-      onClick={() => ctx.onRetry(message.id)}
-      aria-label="Message failed to send — retry"
-    >
-      ⚠️ Failed — retry
-    </button>
-  )
+  const state = ctx?.byRenderId.get(message.id)
+  if (ctx === null || state === undefined) return null
+  return <DeliveryIndicator state={state} onRetry={() => ctx.onRetry(message.id)} />
 }
 
-/** Build the renderId → failed index (only user sends can fail). */
-function buildDeliveryIndex(messages: readonly RenderMessage[]): Map<string, boolean> {
-  const map = new Map<string, boolean>()
+/** Build the renderId → delivery index for outbound messages. */
+function buildDeliveryIndex(messages: readonly RenderMessage[]): Map<string, DeliveryState> {
+  const map = new Map<string, DeliveryState>()
   for (const m of messages) {
-    if (m.role === 'user' && m.delivery === 'failed') map.set(m.id, true)
+    if (m.role === 'user' && m.delivery !== null) map.set(m.id, m.delivery)
   }
   return map
 }
@@ -674,7 +663,7 @@ function UserMessage(): React.JSX.Element {
           <EditedMarker />
           <MessageReactions />
           <MessageActions />
-          <RetryAffordance />
+          <MessageDelivery />
         </div>
       </MessagePrimitive.Root>
     </>
