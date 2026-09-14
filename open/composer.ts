@@ -159,6 +159,8 @@ import {
   SkillForgeProposalsStore,
   buildSkillForgeBackend,
   buildSkillForgeChatCommandFilter,
+  buildSkillForgeProposalCapture,
+  buildSkillForgeProposalOptions,
   completedWorkflowFromTridentRun,
 } from '@neutronai/skill-forge/index.ts'
 import {
@@ -1266,23 +1268,20 @@ export function buildOpenGraphComposer(
     // nobody. The only way to see a proposal was to type `/skills`, i.e. to
     // already suspect one existed. An offer nobody is told about is not an offer.
     //
-    // WHY `durability: 'inert'` AND NOT `'none'`. A proposal is produced by the
+    // WHY DURABLE `reply` AND NOT `'none'`. A proposal is produced by the
     // Trident terminal hook — it fires when a run FINISHES, which is precisely
     // when the owner is not watching (that is what made the run worth automating).
     // `'none'` is the transient live-only pill the substrate notice sink uses
     // (`gateway/http/substrate-notice-sink.ts`): it writes no row, so a client
     // that isn't connected at that instant never learns the notice happened — the
     // bubble would be gone by the time he opened the app, the one moment it needed
-    // to exist. `'inert'` persists an already-resolved agent history turn, so the
-    // proposal is in the transcript whenever he next hydrates, and it never
-    // becomes the topic's active prompt that his next message attaches to. Same
-    // reasoning, same durability, as the system-notice route.
+    // to exist. `reply` persists the resolvable button prompt, so the proposal and
+    // its controls hydrate together and the next explicit tap can be captured.
     //
-    // NOT `'reply'` + options: this is the system telling him something, not the
-    // owner speaking and not an agent turn. The decision surface already exists
-    // (`/skills approve|decline <id>` + the `skill_forge_*` MCP tools over ONE
-    // `SkillForgeBackend`) and the message quotes it, so there is nothing to
-    // rebuild here.
+    // This is a durable `reply` with opaque Approve / Edit / Decline options.
+    // Their deterministic capture routes through the SAME `SkillForgeBackend` as
+    // `/skills` and the agent tools, while the proposal row remains pending until
+    // an explicit approve or decline reaches that backend.
     //
     // ONE MESSAGE PER PROPOSAL, AND A RUN YIELDS AT MOST ONE. No batching is
     // needed and no burst is possible: `SkillForge.onWorkflowCompleted` audits a
@@ -1323,7 +1322,10 @@ export function buildOpenGraphComposer(
           }
           const result = await deliverNow(ownerNoticeTopic, {
             body: message,
-            durability: 'inert',
+            durability: 'reply',
+            options: buildSkillForgeProposalOptions(proposal.id),
+            idempotency_key: `skill-forge-proposal:${proposal.id}`,
+            metadata: { kind: 'skill-forge-proposal', proposal_id: proposal.id },
           })
           log.info('skill_forge_proposal_delivered', {
             id: proposal.id,
@@ -1340,6 +1342,10 @@ export function buildOpenGraphComposer(
       skillsDir: agentSkillsDir,
     })
     const skillForgeBackend = buildSkillForgeBackend(skillForge, skillForgeStore)
+    const skillForgeProposalCapture = buildSkillForgeProposalCapture({
+      backend: skillForgeBackend,
+      owner_user_id: OWNER_USER_ID,
+    })
     // The Trident-terminal trigger: on every terminal run, audit a `done`
     // workflow for skill-worthiness (the audit itself drops non-`done` runs).
     // Fire-and-forget by the trident module (it wraps this in try/catch).
@@ -5555,24 +5561,18 @@ export function buildOpenGraphComposer(
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
-            // Plan task 8 — deterministic ritual-approval capture. Late-bound deref
-            // of `ritualRegistration` (assigned in `init_ritual_planner`, which
-            // runs after this construction): the owner's tap of an `rap:` approval
-            // token resolves the approval + schedules on approve, and the LLM turn is
-            // NEVER dispatched for that act. `null` ⇒ no-op (LLM-less box), returning
-            // null so the normal turn runs.
-            // HOST DEPLOY rides this SAME seam (it is the generic opaque-token
-            // capture, not a ritual-only one). Both handlers return null for a
-            // token that is not theirs — `rap:` vs `hdp:` — so chaining them is
-            // total: an approval act NEVER reaches the LLM turn, and an ordinary
-            // reply ("yes", "sure, ship it", silence) NEVER reaches an approval
-            // row. Rituals first only because they are the older caller; the two
-            // token namespaces cannot collide.
-            ritualApprovalCapture: async (i) => {
+            // Deterministic opaque-button capture. Ritual, host-deploy and Skill
+            // Forge handlers return null for tokens outside their disjoint `rap:`,
+            // `hdp:` and `sfp:` namespaces. A matched decision never reaches the
+            // model; ordinary text never reaches a decision backend.
+            buttonDecisionCapture: async (i) => {
               const ritual =
                 ritualRegistration === null ? null : await ritualRegistration.handleOwnerButtonAnswer(i)
               if (ritual !== null) return ritual
-              return hostDeployService === null ? null : await hostDeployService.handleOwnerButtonAnswer(i)
+              const hostDeploy =
+                hostDeployService === null ? null : await hostDeployService.handleOwnerButtonAnswer(i)
+              if (hostDeploy !== null) return hostDeploy
+              return skillForgeProposalCapture(i)
             },
             // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
             // orchestrator's external memory). Returns the already-formatted,

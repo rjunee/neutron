@@ -24,6 +24,11 @@ export type { RegisterSkillResult } from './registrar.ts'
 export { buildSkillForgeBackend } from './backend.ts'
 export type { SkillForgeBackend } from './backend.ts'
 export {
+  buildSkillForgeProposalCapture,
+  buildSkillForgeProposalOptions,
+  type SkillForgeOwnerAnswerInput,
+} from './proposal-controls.ts'
+export {
   registerSkillForgeToolSurface,
   SKILL_FORGE_LIST_TOOL,
   SKILL_FORGE_DECIDE_TOOL,

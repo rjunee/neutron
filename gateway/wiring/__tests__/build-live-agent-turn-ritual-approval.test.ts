@@ -3,7 +3,7 @@
  * `build-live-agent-turn.ts`.
  *
  * Asserts:
- *   (a) with `ritualApprovalCapture` wired + a persisted prior prompt carrying an
+ *   (a) with `buttonDecisionCapture` wired + a persisted prior prompt carrying an
  *       `rap:` option, an EXACT-match user_text invokes the capture with the
  *       PERSISTED option values, ships the deterministic confirmation via `send`,
  *       persists an inert row, and NEVER dispatches the substrate turn.
@@ -100,7 +100,7 @@ function makeRunner(reply: string, capture: CaptureProbe['fn'], specs: AgentSpec
     substrate: makeStubSubstrate(reply, specs),
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,
-    ritualApprovalCapture: capture,
+    buttonDecisionCapture: capture,
     project_slug: 'alice',
     owner_home: tmp,
     model: 'test-model',

@@ -27,16 +27,16 @@
  * him work, noticed a pattern, drafted an offer, persisted it, and told nobody —
  * the only way to see a proposal was to type `/skills`, i.e. to already suspect
  * one existed. The fix posts it through `deliver` (`gateway/http/deliver.ts`,
- * the ONE out-of-turn delivery seam) at `durability: 'inert'`.
+ * the ONE out-of-turn delivery seam) as a durable button-backed reply.
  *
  * WHY THE DELIVERY TEST ASSERTS A DURABLE ROW AND NOT A SPY. "The notifier was
  * called" is exactly what the broken version also satisfied — it called a
  * function that logged. So the assertion here is the OUTCOME: after a `done` run,
- * the proposal message is a real durable turn in the owner's `app:<owner>` chat
- * topic, attributed to the system speaker. Delete the `deliver(...)` call from
+ * the proposal message is a real durable button prompt in the owner's
+ * `app:<owner>` chat topic. Delete the `deliver(...)` call from
  * the composer's notifier and this test fails (mutation-verified), because no row
  * exists. Note there is NO live socket in this test — which is the point of
- * `'inert'` over `'none'`: nobody is connected when a Trident run finishes, and
+ * a durable reply over `'none'`: nobody is connected when a Trident run finishes, and
  * the proposal must still be there when he next opens the app.
  *
  * Per CLAUDE.md (the "built but never invoked" incident class) this boots the
@@ -59,7 +59,6 @@ import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { SkillForgeProposalsStore } from '@neutronai/skill-forge/proposals-store.ts'
-import { SYSTEM_SPEAKER_USER_ID } from '@neutronai/channels/button-store.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
@@ -143,21 +142,16 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
   })
 }
 
-/**
- * Every durable turn the system authored into the owner's own chat topic — the
- * bare `app:<owner>` the live client binds AND hydrates. `persistInertAgentTurn`
- * stamps `resolution_speaker_user_id = '__system__'`, which is what separates a
- * delivered system notice from an ordinary agent reply row.
- */
-function systemTurnsInOwnerChat(): Array<{ body: string }> {
+/** Skill Forge prompts in the bare owner topic the live client binds and hydrates. */
+function skillForgePromptsInOwnerChat(): Array<{ body: string; options_json: string }> {
   return db
     .raw()
-    .query<{ body: string }, [string, string]>(
-      `SELECT body FROM button_prompts
-        WHERE topic_id = ? AND resolution_speaker_user_id = ?
+    .query<{ body: string; options_json: string }, [string, string]>(
+      `SELECT body, options_json FROM button_prompts
+        WHERE topic_id = ? AND idempotency_key LIKE ?
         ORDER BY created_at ASC`,
     )
-    .all(appWsTopicId(OWNER_USER_ID), SYSTEM_SPEAKER_USER_ID)
+    .all(appWsTopicId(OWNER_USER_ID), 'skill-forge-proposal:%')
 }
 
 describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
@@ -204,15 +198,15 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     const composition = await composer({ db, project_slug: 'owner' })
 
     // Nothing has spoken into the owner's chat yet.
-    expect(systemTurnsInOwnerChat().length).toBe(0)
+    expect(skillForgePromptsInOwnerChat().length).toBe(0)
 
     await composition.trident!.on_run_terminal!(doneRun())
 
     // THE BAR: the proposal ARRIVED. Not "the notifier ran" — the broken version
-    // also ran a notifier. A durable system turn exists in the topic the client
+    // also ran a notifier. A durable button prompt exists in the topic the client
     // hydrates. Removing the `deliver(...)` call from the composer's skill-forge
     // notifier makes this line fail with 0 rows.
-    const turns = systemTurnsInOwnerChat()
+    const turns = skillForgePromptsInOwnerChat()
     expect(turns.length).toBe(1)
 
     // It is the PROPOSAL, and it carries enough to decide without hunting: what
@@ -229,6 +223,9 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     // no `/skills list` round-trip just to find the handle.
     expect(body).toContain(`/skills approve ${proposal!.id}`)
     expect(body).toContain(`/skills decline ${proposal!.id}`)
+    const options = JSON.parse(turns[0]!.options_json) as Array<{ label: string; value: string }>
+    expect(options.map((option) => option.label)).toEqual(['Approve', 'Edit', 'Decline'])
+    expect(options.every((option) => option.value.startsWith('sfp:'))).toBe(true)
 
     cleanup(composition)
   }, 20_000)
@@ -247,7 +244,7 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
 
     const store = new SkillForgeProposalsStore({ db })
     expect((await store.listPending()).length).toBe(1)
-    expect(systemTurnsInOwnerChat().length).toBe(1)
+    expect(skillForgePromptsInOwnerChat().length).toBe(1)
 
     cleanup(composition)
   }, 30_000)
@@ -265,7 +262,7 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     expect((await store.listPending()).length).toBe(0)
     // No proposal ⇒ nothing delivered. Delivery hangs off the proposal, so the
     // owner is never pinged about a workflow that failed.
-    expect(systemTurnsInOwnerChat().length).toBe(0)
+    expect(skillForgePromptsInOwnerChat().length).toBe(0)
 
     cleanup(composition)
   }, 20_000)
@@ -307,7 +304,7 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     // dispatch ⇒ no `done` run ⇒ no auto-propose ⇒ nothing to deliver. Approving
     // a hand-seeded proposal is a decision, not a new offer, so it posts nothing
     // either: the owner's chat stays silent on a box with no credential.
-    expect(systemTurnsInOwnerChat().length).toBe(0)
+    expect(skillForgePromptsInOwnerChat().length).toBe(0)
 
     cleanup(composition)
   }, 20_000)

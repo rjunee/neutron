@@ -8,6 +8,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { SkillForge, type ProposalNotifier } from '../forge.ts'
 import { SkillForgeProposalsStore } from '../proposals-store.ts'
+import { buildSkillForgeBackend } from '../backend.ts'
+import {
+  buildSkillForgeProposalCapture,
+  buildSkillForgeProposalOptions,
+} from '../proposal-controls.ts'
 import type { CompletedWorkflow, ProposalRecord } from '../types.ts'
 
 class CapturingNotifier implements ProposalNotifier {
@@ -146,6 +151,60 @@ test('decline creates nothing and marks the proposal declined', async () => {
   // A declined workflow CAN be re-proposed on a later run (user may reconsider).
   const reproposed = await forge.onWorkflowCompleted(workflow)
   expect(reproposed).not.toBeNull()
+})
+
+test('proposal Approve control saves the skill and a second answer changes nothing', async () => {
+  const proposal = (await forge.onWorkflowCompleted(workflow))!
+  const options = buildSkillForgeProposalOptions(proposal.id)
+  const approve = options.find((option) => option.label === 'Approve')!.value
+  const capture = buildSkillForgeProposalCapture({
+    backend: buildSkillForgeBackend(forge, new SkillForgeProposalsStore({ db })),
+    owner_user_id: 'owner-1',
+  })
+
+  const first = await capture({ user_id: 'owner-1', user_text: approve, prior_option_values: [approve] })
+  expect(first?.body).toContain('Approved proposal')
+  expect((await new SkillForgeProposalsStore({ db }).get(proposal.id))?.status).toBe('approved')
+  expect(listPacks()).toEqual(['scrape-a-tweet-and-file-it-to-the-brief'])
+
+  const second = await capture({ user_id: 'owner-1', user_text: approve, prior_option_values: [approve] })
+  expect(second?.body).toContain('already answered')
+  expect(listPacks()).toEqual(['scrape-a-tweet-and-file-it-to-the-brief'])
+})
+
+test('proposal Decline control records declined and creates no skill', async () => {
+  const proposal = (await forge.onWorkflowCompleted(workflow))!
+  const options = buildSkillForgeProposalOptions(proposal.id)
+  const decline = options.find((option) => option.label === 'Decline')!.value
+  const capture = buildSkillForgeProposalCapture({
+    backend: buildSkillForgeBackend(forge, new SkillForgeProposalsStore({ db })),
+    owner_user_id: 'owner-1',
+  })
+
+  const result = await capture({ user_id: 'owner-1', user_text: decline, prior_option_values: [decline] })
+  expect(result?.body).toContain('Declined proposal')
+  expect((await new SkillForgeProposalsStore({ db }).get(proposal.id))?.status).toBe('declined')
+  expect(listPacks()).toEqual([])
+})
+
+test('proposal Edit control and unoffered tokens keep the proposal pending', async () => {
+  const proposal = (await forge.onWorkflowCompleted(workflow))!
+  const options = buildSkillForgeProposalOptions(proposal.id)
+  const edit = options.find((option) => option.label === 'Edit')!.value
+  const capture = buildSkillForgeProposalCapture({
+    backend: buildSkillForgeBackend(forge, new SkillForgeProposalsStore({ db })),
+    owner_user_id: 'owner-1',
+  })
+
+  expect(await capture({ user_id: 'owner-1', user_text: 'approve it', prior_option_values: [] })).toBeNull()
+  expect(await capture({ user_id: 'owner-1', user_text: edit, prior_option_values: [] })).toBeNull()
+  expect(await capture({ user_id: 'guest-1', user_text: edit, prior_option_values: [edit] })).toEqual({
+    body: 'Only the owner can decide Skill Forge proposals.',
+  })
+  const result = await capture({ user_id: 'owner-1', user_text: edit, prior_option_values: [edit] })
+  expect(result?.body).toContain(`/skills approve ${proposal.id} <new-name>`)
+  expect((await new SkillForgeProposalsStore({ db }).get(proposal.id))?.status).toBe('pending')
+  expect(listPacks()).toEqual([])
 })
 
 test('approving an already-decided proposal throws', async () => {
