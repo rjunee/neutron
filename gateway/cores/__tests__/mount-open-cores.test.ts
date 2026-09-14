@@ -131,7 +131,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
   expect(reloads).toContain('SOUL.md')
 })
 
-test('chains the free-Core chat-command filters — /cal and /email are ROUTED', async () => {
+test('chains the free-Core chat-command filters — /cal, /email, and /scrape are ROUTED', async () => {
   const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
@@ -164,6 +164,13 @@ test('chains the free-Core chat-command filters — /cal and /email are ROUTED',
   // /remind → claimed by the Reminders Core (the chain is general, not one-off).
   const remind = await mounted.chatCommandFilter.match({ ...base, body: '/remind me tomorrow' })
   expect(remind).not.toBeNull()
+
+  // /scrape → claimed by the Scraping Core through the production composer.
+  // Bare help is credential- and network-independent, so a fresh install proves
+  // reachability without weakening the optional-until-credentialed contract.
+  const scrape = await mounted.chatCommandFilter.match({ ...base, body: '/scrape' })
+  expect(scrape).not.toBeNull()
+  expect(scrape?.text).toContain('Scrape Core')
 
   // Plain prose falls through (null) so it reaches the live agent unchanged.
   const prose = await mounted.chatCommandFilter.match({

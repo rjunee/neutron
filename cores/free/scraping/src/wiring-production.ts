@@ -1,19 +1,18 @@
 /**
  * @neutronai/scraping-core — production wiring helper.
  *
- * Single source of truth for assembling the Scraping Core runtime: one
+ * Single source of truth for assembling the Scraping Core's chat runtime: one
  * `ScrapingBackend` (token resolved per-call via the capability-gated
- * `SecretsAccessor`) shared by BOTH the MCP-tool factory and the
- * `/scrape` chat-command filter, so the two surfaces read the same
- * Apify token + the same `fetch` impl. Mirrors
+ * `SecretsAccessor`) supplied to the `/scrape` chat-command filter. The MCP
+ * factory builds its own backend against the same guarded credential path.
+ * Mirrors
  * `cores/free/research/src/wiring-production.ts`.
  *
  * The backend factory in `gateway/boot-helpers.ts:buildCoresBackendFactories`
- * builds the backend independently from the per-install `SecretsAccessor`
- * (it has no access to the composer-level wiring), so the MCP path works
- * even when no composer threads this helper. This helper exists so a
- * composer that DOES wire the chat filter gets a backend that shares the
- * exact same token path.
+ * builds the MCP backend independently from its per-install `SecretsAccessor`.
+ * The production composer binds this helper to the same `SecretsStore` through
+ * the same manifest-gated accessor, so both surfaces resolve the exact same
+ * token path while retaining their surface-specific backend instances.
  */
 
 import type { SecretsAccessor } from '@neutronai/cores-sdk'
