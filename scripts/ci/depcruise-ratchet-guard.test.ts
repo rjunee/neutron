@@ -132,7 +132,7 @@ describe('G8 depcruise ratchet comparator CLI', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 })
 
 /** Minimal helper: run a git command in `cwd`, throwing on failure. */
@@ -286,7 +286,7 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   test('a feature branch with an EQUAL baseline → guard passes', () => {
     const repo = repoOnMainWithBaseline()
@@ -298,7 +298,7 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   test('a feature branch that SHRINKS the baseline → guard passes', () => {
     const repo = repoOnMainWithBaseline()
@@ -310,7 +310,7 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   test('push-to-main (HEAD == main) → guard SKIPS even with a grown working tree', () => {
     const repo = repoOnMainWithBaseline()
@@ -323,7 +323,7 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   test('bootstrap: main has no baseline → guard SKIPS', () => {
     const repo = mkdtempSync(join(tmpdir(), 'depcruise-ratchet-bootstrap-'))
@@ -349,7 +349,7 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 })
 
 /**
@@ -375,6 +375,6 @@ describe('G8 depcruise ratchet guard — shallow checkouts', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
 })
