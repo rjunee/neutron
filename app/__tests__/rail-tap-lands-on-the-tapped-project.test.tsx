@@ -21,11 +21,9 @@
  *
  * Three facts compose into that bounce:
  *
- *   1. The shell is ONE root-stack screen named `projects/[id]`, and
- *      expo-router only treats a dynamic segment as diverging when the route
- *      name is exactly `[id]` (`matchDynamicName`, `/^\[([^[\]]+?)\]$/`,
- *      expo-router 6.0.24). So an in-app project switch is applied to the CHILD
- *      navigator and the root route keeps the id you came FROM.
+ *   1. The shell was one root-stack screen named `projects/[id]`, so expo-router
+ *      did not treat its dynamic segment as the divergence point and the parent
+ *      kept the id you came FROM.
  *   2. The shell rendered the loading pane INSTEAD of `<Slot/>`. `<Slot/>` is
  *      the `[id]` group's navigator, so that unmounted it; remounting re-seeds
  *      it from the stale parent and it opens at its initial route — the

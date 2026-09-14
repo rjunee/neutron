@@ -696,12 +696,9 @@ export function ChatSyncSurface({
   // halves point opposite ways and an earlier version of this comment got the second
   // one backwards:
   //
-  //   * THIS COMPONENT survives, so this ref does. The shell is a single root-stack
-  //     screen named `projects/[id]`, and expo-router only diverges on a route named
-  //     exactly `[id]`, so a rail tap RE-RENDERS the chat screen rather than replacing
-  //     it (`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note).
-  //     The latch is therefore the longest-lived piece of state here — which is what
-  //     made the missing release matter at all.
+  //   * THIS COMPONENT can survive a same-screen parameter update, so this ref can
+  //     survive too. The latch is therefore the longest-lived piece of state here —
+  //     which is what made the missing release matter at all.
   //   * THE LIST DOES NOT survive. `useMobileChat`'s attach effect is keyed on
   //     `projectId` and its cleanup sets `ready` false
   //     (`app/lib/chat-core/use-mobile-chat.ts:447`), and this surface renders

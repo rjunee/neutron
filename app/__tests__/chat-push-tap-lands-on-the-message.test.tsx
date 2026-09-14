@@ -367,9 +367,8 @@ describe('the surface CONSUMES the pushed message id', () => {
       { method: 'scrollToIndex', arg: { index: 0, animated: true } },
     ]);
 
-    // ARM 6 — THE SAME TARGET, ARRIVING TWICE. This surface is not remounted by a
-    // project switch (`projects/[id]` does not diverge on the dynamic segment, and
-    // FlashList carries no `key`), so target-X → a render with no target → target-X
+    // ARM 6 — THE SAME TARGET, ARRIVING TWICE. This fixture rerenders the same
+    // surface, so target-X → a render with no target → target-X
     // again reaches the SAME component instance. The middle render carries no target,
     // which is the moment the latch has to be released: without that release the second
     // arrival hit the `honouredDeepLink === deepLinkTarget` early return and the

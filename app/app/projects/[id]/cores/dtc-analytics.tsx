@@ -276,7 +276,7 @@ export default function DtcAnalyticsDashboard() {
       </View>
 
       <Text style={styles.footnote}>
-        v1 surface — client-side parse mirrors the Core's CSV validator. Real backend wire-up lands
+        v1 surface — client-side parse mirrors the Core&apos;s CSV validator. Real backend wire-up lands
         when the per-Core HTTP surface ships (P5.x).
       </Text>
     </ScrollView>
