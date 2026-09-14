@@ -236,7 +236,23 @@ export class ProjectsClient {
    * of the list still renders).
    */
   async list(): Promise<ProjectListResult> {
-    const res = await this.req<ListResponse>('/api/app/projects', { device_id: await installationDeviceId() });
+    // A DEVICE ID THIS CLIENT CANNOT RESOLVE MUST NOT COST THE OWNER THEIR
+    // PROJECTS. The id scopes the per-device UNREAD MARK and nothing else, but
+    // `installationDeviceId` rethrows on a storage failure (installation-device.ts),
+    // and `resolveEntryRoute` catches every fetch failure into the General route —
+    // so awaiting it unconditionally here turned "storage was not ready" into "you
+    // have no projects", and dropped the owner on General at launch.
+    //
+    // Unknown device is its own state: the header is omitted, the server answers
+    // with `unread_count: null` (unknown rather than zero), and the list still
+    // arrives. That is the same rule the unread mark itself follows.
+    let device_id: string | undefined;
+    try {
+      device_id = await installationDeviceId();
+    } catch {
+      device_id = undefined;
+    }
+    const res = await this.req<ListResponse>('/api/app/projects', device_id === undefined ? {} : { device_id });
     return {
       projects: res.projects,
       source_errors: res.source_errors ?? [],
