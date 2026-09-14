@@ -99,6 +99,47 @@ class LaneProcesses(unittest.TestCase):
         self.handles.append(fd)
         return p, fd
 
+    def assert_survives(self, child, fd, phase, reports):
+        exited = bool(select.select([fd], [], [], 0)[0])
+        # A readable pidfd establishes exit, so wait can collect the actual status
+        # before teardown sends any signal of its own. Negative means a signal.
+        status = child.wait() if exited else child.poll()
+        self.assertFalse(exited, f'{phase}: pid={child.pid}, wait_status={status}, sweeps={reports}')
+
+    def test_survival_diagnostic_records_phase_and_wait_status(self):
+        for phase, code in [('first sweep: existing root', 0), ('second sweep: unrelated repo', -signal.SIGKILL)]:
+            with self.subTest(phase=phase):
+                if code == 0:
+                    child = self.launch([sys.executable, '-c', 'pass'])
+                    fd = os.pidfd_open(child.pid)
+                    self.handles.append(fd)
+                else:
+                    child, fd = self.child()
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                child.wait()
+                with self.assertRaises(AssertionError) as failure:
+                    self.assert_survives(child, fd, phase, {'first': {'reaped': [child.pid]}})
+                message = str(failure.exception)
+                self.assertIn(phase, message)
+                self.assertIn(f'wait_status={code}', message)
+                self.assertIn(f"'reaped': [{child.pid}]", message)
+
+    def test_global_sweep_reaps_dead_claim_but_preserves_unclaimed_removed_root(self):
+        root = self.root / '.claude/worktrees/wf_unclaimed'
+        root.mkdir(parents=True)
+        unclaimed, fd = self.child(cwd=root)
+        root.rmdir()
+        self.assertIsNone(lanes.environment_claim(unclaimed.pid))
+        # Prove the fallback would apply if this repository were configured.
+        self.assertTrue(lanes.deleted_root(unclaimed.pid, [str(self.root)], []))
+        claim = {'id': 'c' * 32, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0], 'boot': 'previous-boot'}
+        claimed, claimedfd = self.child(claim)
+        report = lanes.sweep(grace=.02)
+        self.assertIn(claimed.pid, report['reaped'])
+        self.assertTrue(select.select([claimedfd], [], [], 0)[0])
+        self.assertNotIn(unclaimed.pid, report['reaped'])
+        self.assert_survives(unclaimed, fd, 'global sweep without repositories', report)
+
     def test_dead_lane_socket_child_reaped_live_lane_survives(self):
         owner, c = self.owner()
         dead, deadfd = self.child(c)
@@ -164,11 +205,12 @@ class LaneProcesses(unittest.TestCase):
         sub.mkdir(parents=True)
         p, fd = self.child(cwd=sub)
         sub.rmdir()
-        lanes.sweep([str(self.root)], grace=.02)
-        self.assertFalse(select.select([fd], [], [], 0)[0])
+        self.assertIsNone(lanes.environment_claim(p.pid))
+        reports = {'first': lanes.sweep([str(self.root)], grace=.02)}
+        self.assert_survives(p, fd, 'first sweep: existing root', reports)
         root.rmdir()
-        lanes.sweep([str(self.root)[:-1] + 'x'], grace=.02)
-        self.assertFalse(select.select([fd], [], [], 0)[0])
+        reports['second'] = lanes.sweep([str(self.root)[:-1] + 'x'], grace=.02)
+        self.assert_survives(p, fd, 'second sweep: unrelated repo', reports)
 
     def test_recreated_root_and_unknown_root_survive(self):
         root = self.root / '.claude/worktrees/wf_recreated'
