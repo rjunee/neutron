@@ -81,7 +81,6 @@ import {
 import {
   GENERAL_PROJECT_EMOJI,
   GENERAL_PROJECT_NAME,
-  projectIdFromPathname,
   workTabBadgeCount,
   type RailProjectView,
 } from '../../../lib/project-rail-view';
@@ -150,15 +149,8 @@ const GENERAL_SCOPE_PROJECT: ProjectSettings = {
 export default function ProjectLayout() {
   const router = useRouter();
   const { user, status: authStatus } = useAuthSession();
-  // The URL is the authority for WHICH project the shell is showing.
-  // `useLocalSearchParams` is sticky inside this layout — navigating
-  // willow → general keeps the layout mounted, so it kept reporting the old
-  // id while the child chat screen saw the new one. That is why tapping General
-  // swapped the transcript but left the header and rail highlight on Willow.
-  // The param stays as the fallback for a non-project path.
-  const pathname = usePathname();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const project_id = projectIdFromPathname(pathname) ?? (typeof id === 'string' ? id : '');
+  const project_id = typeof id === 'string' ? id : '';
 
   useEffect(() => {
     if (authStatus === 'ready' && user === null) {
@@ -560,13 +552,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
     if (id !== project_id) {
       // STRAIGHT TO THE DESTINATION — no `/projects/<id>` hop.
       //
-      // The waypoint has to ask the ROUTER which project it is standing in, and
-      // across an in-app switch the router can answer with the PREVIOUS one: the
-      // shell is a single root-stack screen named `projects/[id]`, and
-      // expo-router only treats a dynamic segment as diverging when the route
-      // name is exactly `[id]` (`matchDynamicName`, `/^\[([^[\]]+?)\]$/` —
-      // expo-router 6.0.24), so the switch is applied to the CHILD navigator and
-      // the root route keeps the id you came FROM. Instrumented on device 2026-07-31 (project
+      // The waypoint used to ask the router which project it was standing in,
+      // when the root exposed the composite route name `projects/[id]` rather
+      // than a dynamic `[id]` node. That route shape left the parent id stale.
+      // Instrumented on device 2026-07-31 (project
       // names neutralised): `rail:tap=harbor:cur=willow; wp:mount=harbor;
       // wp:mount=willow; wp:go=willow/chat` — every rail tap landed on the
       // previously-active project, and the tapped one never loaded.
@@ -677,11 +666,9 @@ function ProjectShell({ project_id }: { project_id: string }) {
   //
   // This is not a cosmetic choice. `<Slot/>` IS the `[id]` group's navigator:
   // unmounting it destroys that navigator's state, and remounting re-seeds it
-  // from the PARENT route — which, across an in-app project switch, still says
-  // the project you came FROM. (The shell is one root-stack screen named
-  // `projects/[id]`, and expo-router only diverges on a dynamic segment whose
-  // route name is exactly `[id]`; see `lib/project-tab-route.ts` for the full
-  // trace.) The re-seeded navigator opens at its initial route — the
+  // from the PARENT route. Before `projects/_layout.tsx` made `[id]` its own
+  // dynamic node, that parent still named the project you came FROM. The
+  // re-seeded navigator opens at its initial route — the
   // `/projects/<id>` waypoint — carrying the STALE id, and the waypoint's whole
   // job is to navigate, so the owner was thrown back to the previous project.
   //

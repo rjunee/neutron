@@ -17,16 +17,10 @@
  *     wp:mount=willow;   ← …then the router re-reported the PREVIOUS one
  *     wp:go=willow/chat  ← …and the handoff went there
  *
- * The revert is structural, not a glitch. The project shell is ONE root-stack
- * screen named `projects/[id]` (`app/app/_layout.tsx`), and expo-router only
- * treats a dynamic segment as diverging when the route NAME is exactly
- * `[id]` — `matchDynamicName` is `/^\[([^[\]]+?)\]$/`, which does not match
- * `projects/[id]` (expo-router 6.0.24, `build/matchers.js`). So an in-app
- * switch from one project to another never diverges at the root: the action
- * lands on the CHILD navigator and the root route keeps `params.id` pointing at
- * the project you started from. Anything that later re-derives the scope from
- * the router can therefore be handed that stale id, and the waypoint did not
- * merely READ it — it navigated on it.
+ * The revert was structural, not a glitch. The project shell was one root-stack
+ * screen named `projects/[id]`, which expo-router did not recognise as a dynamic
+ * node. `app/app/projects/_layout.tsx` now gives `[id]` its own navigator node,
+ * so a switch diverges where the parameter lives and updates it.
  *
  * The fix is to stop asking. A rail tap already knows, exactly and
  * unambiguously, which project was tapped; resolving the tab HERE lets the

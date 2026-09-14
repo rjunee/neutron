@@ -213,7 +213,8 @@ describe('the entry is WIRED — the list screen is gone, not merely unused', ()
     expect(read('app', '_layout.tsx')).not.toContain('projects/index');
     // The project shell itself is still registered — this is a deletion, not a
     // regression that takes the workspace with it.
-    expect(read('app', '_layout.tsx')).toContain('<Stack.Screen name="projects/[id]" />');
+    expect(read('app', '_layout.tsx')).toContain('<Stack.Screen name="projects" />');
+    expect(read('app', 'projects', '_layout.tsx')).toContain('<Stack.Screen name="[id]" />');
   });
 
   it('NOTHING anywhere navigates to the list route any more', () => {

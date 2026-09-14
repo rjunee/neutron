@@ -81,29 +81,6 @@ export const GENERAL_PROJECT_ID = '~general';
 export const GENERAL_PROJECT_NAME = 'General';
 export const GENERAL_PROJECT_EMOJI = '\u{1F4AC}';
 
-/**
- * The rail id the CURRENT URL names, read from the pathname.
- *
- * Why not `useLocalSearchParams`: inside the `[id]` LAYOUT those params are
- * sticky. Navigating `willow → general` keeps the layout mounted, so the
- * layout kept reporting `willow` while the freshly-rendered child chat screen
- * correctly saw `general`. Observed on-device: tapping General swapped the
- * transcript to General's messages but left the header reading "Willow" and
- * the rail highlight on Willow. The pathname always reflects where we
- * actually are, so the shell derives from it and the whole chrome follows the
- * rail in one place.
- *
- * @returns the id segment of `/projects/<id>[/...]`, or `null` if the path is
- * not a project route.
- */
-export function projectIdFromPathname(pathname: string): string | null {
-  const parts = (pathname.split('?')[0] ?? '').split('/').filter((p) => p.length > 0);
-  if (parts[0] !== 'projects') return null;
-  const id = parts[1];
-  if (id === undefined || id.length === 0) return null;
-  return decodeURIComponent(id);
-}
-
 export function railIdToScope(railId: string): string {
   return railId === GENERAL_PROJECT_ID ? '' : railId;
 }

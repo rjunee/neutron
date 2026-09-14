@@ -18,12 +18,9 @@
  *
  * WHAT IT MODELS, and therefore what it can prove. The path is the single source
  * of truth: `usePathname()` returns it and `useLocalSearchParams()` DERIVES from
- * it (`/projects/<id>/<leaf>` ⇒ `{ id, ...query }`). Real expo-router carries
- * params on the route node instead, and their staleness across a
- * dynamic-segment change is the hazard `projectIdFromPathname` exists to dodge —
- * so a defect living ONLY in that divergence cannot appear here, and this
- * harness must not be read as clearing it. Everything downstream of "the path
- * changed" is faithful.
+ * it (`/projects/<id>/<leaf>` ⇒ `{ id, ...query }`). Route-node identity is
+ * covered separately by the route-tree regression test; everything downstream
+ * of "the path changed" is faithful here.
  */
 
 import {
@@ -42,7 +39,6 @@ type RouteTable = Record<string, ComponentType<unknown>>;
 let routing = false;
 let routes: RouteTable = {};
 let currentPath = '/';
-let paramsBlind = false;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -66,26 +62,10 @@ function subscribe(listener: () => void): () => void {
 export function installRouting(opts: {
   path: string;
   routes: RouteTable;
-  /**
-   * FAULT INJECTION: `useLocalSearchParams()` yields NOTHING, however the path
-   * reads.
-   *
-   * Not invented, and not exotic. `app/projects/[id]/_layout.tsx` records from
-   * the device that this hook stopped reporting the current `[id]` across a
-   * project switch, which is why the SHELL was changed to read
-   * `projectIdFromPathname(usePathname())` instead — and `index.tsx` has always
-   * carried an explicit `typeof id !== 'string' || id.length === 0` branch,
-   * i.e. its own author treated an absent param as reachable. That fix landed on
-   * the shell alone, leaving the screens INSIDE it reading the source the shell
-   * had already stopped trusting. This turns "the whole route family agrees on
-   * the scope" into something a test can fail, instead of a convention.
-   */
-  paramsBlind?: boolean;
 }): void {
   routing = true;
   routes = opts.routes;
   currentPath = opts.path;
-  paramsBlind = opts.paramsBlind === true;
   routerCalls.length = 0;
   notify();
 }
@@ -95,7 +75,6 @@ export function resetRouting(): void {
   routing = false;
   routes = {};
   currentPath = '/';
-  paramsBlind = false;
   routerCalls.length = 0;
   notify();
 }
@@ -176,7 +155,7 @@ export function useLocalSearchParams<T>(): T {
   if (query !== undefined) {
     for (const [k, v] of new URLSearchParams(query)) out[k] = v;
   }
-  return (paramsBlind ? {} : out) as T;
+  return out as T;
 }
 
 /** The screen the current path names. Nothing, in inert mode. */

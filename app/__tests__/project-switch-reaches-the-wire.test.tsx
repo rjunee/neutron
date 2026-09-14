@@ -140,14 +140,13 @@ function socketsFor(projectId: string): number {
   return FakeChatSocket.opened.filter((s) => s.url.includes(`project_id=${projectId}`)).length;
 }
 
-async function mountShell(path: string, opts: { paramsBlind?: boolean } = {}) {
+async function mountShell(path: string) {
   installRouting({
     path,
     routes: {
       index: ProjectIndexRedirect as never,
       chat: ProjectChatTab as never,
     },
-    ...(opts.paramsBlind === true ? { paramsBlind: true } : {}),
   });
   return mountScreen(
     createElement(
@@ -220,27 +219,6 @@ describe('switching projects', () => {
     screen.unmount();
   });
 
-  it(
-    'still reaches the tapped project when the route PARAM does not name it',
-    async () => {
-      // The hazard `_layout.tsx` recorded from the device, applied to the screens
-      // INSIDE the shell: the param does not carry the current `[id]`. The shell
-      // reads the path and is fine; the redirect screen and the chat surface must
-      // read the same thing, or the tap lands on the wrong scope (or on nothing)
-      // while the header and rail confidently name the right one.
-      const screen = await mountShell('/projects/willow/chat', { paramsBlind: true });
-      await waitReal(50, screen);
-      expect(socketsFor('willow')).toBeGreaterThan(0);
-
-      await tapRail('acme');
-      await waitReal(50, screen);
-
-      expect(currentRouterPath()).toBe('/projects/acme/chat');
-      expect(socketsFor('acme')).toBeGreaterThan(0);
-      screen.unmount();
-    },
-    20_000,
-  );
 });
 
 describe('a wait that cannot end is not allowed to be the screen', () => {
@@ -272,10 +250,10 @@ describe('a wait that cannot end is not allowed to be the screen', () => {
   );
 
   it('a redirect screen with NO scope to resolve goes to General, not to a spinner', async () => {
-    // Neither source names a project. The screen used to return from its effect
+    // The route names no project. The screen used to return from its effect
     // and leave its own ActivityIndicator up permanently — a dead end with a
     // live rail around it. General always exists and needs no fetch.
-    installRouting({ path: '/settings', routes: {}, paramsBlind: true });
+    installRouting({ path: '/settings', routes: {} });
     const screen = await mountScreen(
       createElement(
         AuthSessionProvider,
