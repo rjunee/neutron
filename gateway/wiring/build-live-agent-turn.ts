@@ -831,9 +831,16 @@ export interface LiveAgentTurnResult {
  * (`LiveAgentTurnRunner` in chat-bridge.ts) — this module owns the richer
  * result for tests.
  */
+export interface ProjectConversationRunner {
+  (turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult>
+  /** A host-origin acting turn shares chat admission and the conversational substrate.
+   * It returns its reply to the host's delivery contract; it is not a user message. */
+  composeActingTurn(topic_id: string, spec: AgentSpec, opts: { timeout_ms: number }): Promise<string>
+}
+
 export function buildLiveAgentTurn(
   input: BuildLiveAgentTurnInput,
-): (turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult> {
+): ProjectConversationRunner {
   const now = input.now ?? ((): number => Date.now())
   // Absolute-ceiling backstop for a turn (composer AbortController + substrate
   // `spec.turn_absolute_ceiling_ms`). This is NOT the fixed per-turn cap the old
@@ -1017,9 +1024,7 @@ export function buildLiveAgentTurn(
   }
 
   function enqueueTurn(turn: LiveAgentTurnRequest, topicKey: string): Promise<LiveAgentTurnResult> {
-    const prior = turnChains.get(topicKey) ?? Promise.resolve()
-    queuedTurnCount.set(topicKey, (queuedTurnCount.get(topicKey) ?? 0) + 1)
-    const run = prior.then(async () => {
+    return enqueue(topicKey, async () => {
       const acceptsInjection = turn.seed_turn !== true &&
         turn.button_prompt_id === undefined &&
         turn.user_text !== RETRY_TURN_VALUE &&
@@ -1031,6 +1036,12 @@ export function buildLiveAgentTurn(
         if (acceptsInjection) activeTopics.delete(topicKey)
       }
     })
+  }
+
+  function enqueue<T>(topicKey: string, work: () => Promise<T>): Promise<T> {
+    const prior = turnChains.get(topicKey) ?? Promise.resolve()
+    queuedTurnCount.set(topicKey, (queuedTurnCount.get(topicKey) ?? 0) + 1)
+    const run = prior.then(work)
     const tail = run.then(
       () => undefined,
       () => undefined,
@@ -1048,7 +1059,34 @@ export function buildLiveAgentTurn(
     return run
   }
 
-  return runLiveAgentTurn
+  return Object.assign(runLiveAgentTurn, {
+    composeActingTurn(topic_id: string, spec: AgentSpec, opts: { timeout_ms: number }): Promise<string> {
+      return enqueue(`${input.project_slug}:${topic_id}`, () =>
+        dispatchSpec(spec, opts.timeout_ms, spec.metering_context?.project_id ?? 'general'))
+    },
+  })
+
+  async function dispatchSpec(
+    spec: AgentSpec, timeout_ms: number, scope: string, onFirstToken?: () => void,
+  ): Promise<string> {
+    const inspector = input.activityInspector
+    const safely = (fn: () => void): void => {
+      try { fn() } catch { /* observation must never perturb a turn */ }
+    }
+    const teeEvent = inspector === undefined
+      ? undefined
+      : (ev: unknown): void => safely(() => inspector.on_event(scope, ev))
+    const handle = input.substrate.start(spec)
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), timeout_ms)
+    if (inspector !== undefined) safely(() => inspector.turn_started(scope))
+    try {
+      return await collectTokensToString(handle, ac.signal, onFirstToken, teeEvent)
+    } finally {
+      if (inspector !== undefined) safely(() => inspector.turn_finished(scope))
+      clearTimeout(timer)
+    }
+  }
 
   async function runTurnBody(
     turn: LiveAgentTurnRequest,
@@ -1556,42 +1594,10 @@ export function buildLiveAgentTurn(
     // Dispatch, collecting the reply text; the composer AbortController is a pure
     // ABSOLUTE-CEILING backstop (the substrate's activity watchdog does freeze
     // detection). Returns the text, or throws the substrate/abort error.
-    // ACTIVITY INSPECTOR — observe-only tee for this dispatch. Swallows its own
-    // throws so a broken inspector can never fail a user's turn.
-    const inspector = input.activityInspector
-    const safely = (fn: () => void): void => {
-      try {
-        fn()
-      } catch {
-        /* the activity inspector must never perturb a turn */
-      }
-    }
-    const teeEvent =
-      inspector === undefined
-        ? undefined
-        : (ev: unknown): void => safely(() => inspector.on_event(scope, ev))
-
     const dispatchOnce = async (): Promise<string> => {
-      const handle = input.substrate.start(buildSpec())
-      const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), absoluteCeilingMs)
-      // Bracket the dispatch so the inspector can tell a RESTING session from a
-      // WEDGED one. Marked per ATTEMPT (not per turn) so the silent freeze-retry
-      // below re-opens the window rather than leaving the scope permanently
-      // "in flight" — a leak there would make an idle project read as wedged
-      // forever, which is the exact class of lie this feature exists to kill.
-      if (inspector !== undefined) safely(() => inspector.turn_started(scope))
       try {
-        // FIX #347 — cancel the pending cold-start ack the moment the FIRST
-        // token streams (not only when the whole turn settles below), so a turn
-        // that starts replying before the ack delay elapses never fires a
-        // spurious "Waking up…" pill after the answer has begun.
-        return await collectTokensToString(handle, ac.signal, clearAckTimer, teeEvent)
+        return await dispatchSpec(buildSpec(), absoluteCeilingMs, scope, clearAckTimer)
       } finally {
-        if (inspector !== undefined) safely(() => inspector.turn_finished(scope))
-        clearTimeout(timer)
-        // Item 12 — the dispatch settled; cancel the cold-start ack if it
-        // hasn't already fired (warm/fast turn → no spurious "waking up").
         clearAckTimer()
       }
     }

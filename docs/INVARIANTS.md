@@ -58,6 +58,10 @@ with cross-references noted inline.
    separate-session twin of `cc-agent-`: equal grants because a ritual composes there and ISSUES
    #504 settled that it must reach Core tools; separate session because a background compose that
    aborts must not poison the child the owner is talking to. `open/wiring/substrates.ts`.
+   Terminal build decisions use `cc-agent-` through the chat runner's admission queue;
+   they are separate turns, never injected into an active owner turn. The host queue
+   serializes both directions and observes dispatch lifetime even on failure
+   (`gateway/wiring/build-live-agent-turn.ts`, `open/composer.ts`).
    Protects: **D1**/**D2**.
 8. `Bun.serve` selects the chained fetch handler per-request inside the serve arrow so the live
    server ref reaches WS upgrades; `maxRequestBodySize` = import cap + 64MB.

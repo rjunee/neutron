@@ -42,6 +42,7 @@ let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 const wakeDispatches: Array<{
   instance_id: string
+  project_id: string | undefined
   tool_bridge: boolean
   tool_names: string[]
 }> = []
@@ -54,12 +55,15 @@ function recordingSubstrate(opts: ClaudeCodeSubstrateOptions): Substrate {
       if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) {
         wakeDispatches.push({
           instance_id: opts.substrate_instance_id,
+          project_id: opts.project_id,
           tool_bridge: opts.enableToolBridge === true,
           tool_names: spec.tools.map((tool) => tool.name),
         })
       }
       async function* events(): AsyncGenerator<Event> {
+        if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) await wakeGate
         yield { kind: 'token', text: spec.prompt.includes('[TERMINAL BUILD WAKE]') ? 'WAKE-ACT-1' : 'ok' }
+        if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) wakeFinished = true
         yield {
           kind: 'completion',
           usage: { input_tokens: 1, output_tokens: 1 },
@@ -89,9 +93,15 @@ interface OpenSocket {
 }
 
 let harness: Harness | null = null
+let releaseWake: (() => void) | undefined
+let wakeGate: Promise<void> | undefined
+let wakeFinished = false
 
 beforeEach(() => {
   wakeDispatches.length = 0
+  wakeGate = undefined
+  releaseWake = undefined
+  wakeFinished = false
   savedEnv = {}
   for (const key of SAVED_ENV_KEYS) savedEnv[key] = process.env[key]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-terminal-build-wake-'))
@@ -107,6 +117,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  releaseWake?.()
   if (harness !== null) {
     await harness.close()
     harness = null
@@ -238,12 +249,51 @@ describe('Open terminal-build wake observer wiring', () => {
     expect(wakeFrames(sock.frames)).toHaveLength(1)
     expect(readWakeClaim()).toBe(firstClaim)
     expect(wakeDispatches).toHaveLength(1)
-    expect(wakeDispatches[0]!.instance_id.startsWith('cc-nudge-')).toBe(true)
+    expect(wakeDispatches[0]!.instance_id.startsWith('cc-agent-')).toBe(true)
     expect(wakeDispatches[0]!.tool_bridge).toBe(true)
     expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
 
     sock.close()
     await sleep(50)
+  }, 30_000)
+
+  test('terminal wake uses the project conversation in the production graph without a socket', async () => {
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+    const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+    const composition = await buildOpenGraphComposer({
+      env: process.env, ownerBearer: OWNER_BEARER,
+      substrateFactory: recordingSubstrate,
+    })({ db, project_slug: 'owner' })
+    try {
+      await seedProject(db, 'acme')
+      const runs = new TridentRunStore(db)
+      const run = await runs.create({ slug: 'project-wake', project_slug: workBoardScopeKey('owner', 'acme'),
+        repo_path: '/tmp/repo', task: 'terminal decision', chat_id: 'app:owner', channel_kind: 'app_socket' })
+      await runs.update(run.id, { phase: 'failed' })
+      wakeGate = new Promise<void>((resolve) => { releaseWake = resolve })
+      const observe = composition.trident?.on_terminal_wake
+      expect(observe).toBeDefined()
+      await observe!({ ...run, phase: 'failed' })
+      await observe!({ ...run, phase: 'failed' })
+      await waitFor(() => wakeDispatches.length === 1)
+      expect(wakeFinished).toBe(false)
+      releaseWake!()
+      await waitFor(() => wakeFinished)
+      const replies = () => db.all<{ topic_id: string }>(
+        'SELECT topic_id FROM button_prompts WHERE body = ?', ['WAKE-ACT-1'],
+      )
+      await waitFor(() => replies().length === 1)
+      expect(replies()).toEqual([{ topic_id: 'app:owner' }])
+      expect(wakeDispatches).toHaveLength(1)
+      expect(wakeDispatches[0]!.instance_id).toBe('cc-agent-owner')
+      expect(wakeDispatches[0]!.project_id).toBe('acme')
+      expect(wakeDispatches[0]!.tool_bridge).toBe(true)
+      expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+    } finally {
+      releaseWake?.()
+      for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
+      db.close()
+    }
   }, 30_000)
 
   test('the observer is constructed once and registered at every composition site', () => {

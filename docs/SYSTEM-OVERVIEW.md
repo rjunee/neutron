@@ -711,7 +711,8 @@ a slash-command.
 - **Security (opt-in per substrate).** The owner's two WARM conversational
   substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
   background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
-  work-board wakeup). The second is an equal-grant, separate-session twin of the
+  periodic work-board wakeup). Terminal build decision turns use the live chat
+  runner's queue and substrate. The second is an equal-grant, separate-session twin of the
   first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
   frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
   a fired ritual must have "access to everything general has access to" — the

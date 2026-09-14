@@ -286,7 +286,7 @@ import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-swee
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
-import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import { buildTerminalBuildWakeObserver, TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
@@ -4325,23 +4325,26 @@ export function buildOpenGraphComposer(
     // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
     // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
     // boot-replay / a second site observing the same row compose ZERO duplicate
-    // turns. Registered LAST in each chain so the multi-minute wake compose never
-    // delays board reconcile or skill-forge; by then the reconcile has usually
+    // turns. The callback returns without waiting for its queued decision.
+    // Board reconcile and skill-forge run first; reconciliation has usually
     // detached `linked_run_id`, so the prompt's "Board item id" is commonly
     // "none" (a module-supported shape) — the wake turn still carries run id /
     // branch / task and has board tools to locate the item. Accepted tradeoff.
     // The wake observer must stay on a tool-bridge-enabled substrate with
     // channel-turn grants; `open-terminal-build-wake-wiring.test.ts` pins it.
-    const terminalBuildWake = buildTerminalBuildWakeObserver({
+    const observeTerminalBuildWake = buildTerminalBuildWakeObserver({
       claimWake: (id) => boardRunStore.claimAgentWake(id),
       boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
-      // The SAME background `cc-nudge-*` seam the fired-reminder + work-wakeup
-      // paths compose through — never the owner's chat REPL. Null when LLM-less
-      // → the observer returns before claiming (module-tested).
-      llm:
-        reminderComposeSubstrate === null
-          ? null
-          : { compose: (spec, opts) => buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts) },
+      // Resolve at invocation after the shared chat runner has been constructed.
+      // Its queue admits the wake before the timeout starts, on the project REPL.
+      llm: liveAgentSubstrate === null ? null : {
+        compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
+          tridentDeliveryChatId(spec.metering_context?.project_id === 'general'
+            ? null : spec.metering_context?.project_id ?? null),
+          spec,
+          { timeout_ms: opts?.timeout_ms ?? TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS },
+        ),
+      },
       projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
       // Durable inert row + live push to the run's own chat; buzz only when loud.
       post: async (run, reply, opts) => {
@@ -4354,6 +4357,11 @@ export function buildOpenGraphComposer(
       },
       logger: log,
     })
+    // A board tool may terminate a run from the very chat turn the wake queues
+    // behind. Return the terminal hook immediately so that turn can settle.
+    const terminalBuildWake = async (run: TridentRun): Promise<void> => {
+      fireAndForget('composer.terminalBuildDecision', observeTerminalBuildWake(run))
+    }
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
