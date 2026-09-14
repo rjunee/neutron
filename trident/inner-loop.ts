@@ -1112,7 +1112,31 @@ export function buildSubstrateWorkflowFire(
           }
           if (ev.kind === 'error') {
             fireAndForget('inner-loop.cancel', handle.cancel())
-            return { status: 'failed', error: 'fire turn raised an error before settling' }
+            // CARRY WHAT THE PRODUCER KNEW. This used to return a fixed sentence and
+            // drop `ev.message` and `ev.code` on the floor, so every substrate
+            // failure — a refused spawn, a poisoned key, an exhausted credential, a
+            // turn timeout — reached the run row as the same eleven words, and the
+            // only way to tell them apart was to go and read the gateway journal
+            // next to the timestamp.
+            //
+            // Measured 2026-09-14: four runs failed with this string. The first
+            // took 94 seconds and the fourth SEVENTEEN MILLISECONDS between
+            // `fire-dispatched` and `failed` — plainly two different faults wearing
+            // one label, and the row could not say which. The producer stamps
+            // `code` precisely so a consumer does not have to regex `message`; this
+            // seam was discarding both.
+            //
+            // The prefix is kept verbatim because the orchestrator matches on it
+            // (`FIRE_SETTLE_TIMEOUT_ERROR` and friends compare exact strings), so
+            // the detail is APPENDED rather than substituted.
+            const detail = [ev.code, ev.message].filter((part) => typeof part === 'string' && part !== '')
+            return {
+              status: 'failed',
+              error:
+                detail.length === 0
+                  ? 'fire turn raised an error before settling'
+                  : `fire turn raised an error before settling: ${detail.join(': ')}`,
+            }
           }
           // token / thinking / status / tool_* events carry nothing terminal for
           // the launcher turn — ignored.
