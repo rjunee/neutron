@@ -18,7 +18,7 @@
  *   - a null pace must read as an em dash, never `0.0×` ("burning nothing")
  *   - a null projection must OMIT its row (null is the common GOOD case; a permanent
  *     "—" trains the eye to hunt for a warning that is normally absent)
- *   - a null account label must read "active credential" and never guess
+ *   - a null account label must withhold usage and never guess
  *   - an ABSENT reset instant must read "unknown", never "available now" — the one
  *     that decides whether the owner raises concurrency or waits
  */
@@ -90,7 +90,7 @@ type Json = Record<string, unknown>;
  */
 function account(over: Json = {}): Json {
   return {
-    account_label: null,
+    account_label: 'acct-1',
     measured_at: NOW,
     session: HOT_SESSION,
     weekly: ROOMY_WEEKLY,
@@ -114,7 +114,7 @@ function poolOf(over: Json = {}): Json {
 function pools(
   session: unknown,
   weekly: unknown,
-  account_label: string | null = null,
+  account_label: string | null = 'acct-1',
 ): Record<string, unknown> {
   return { pools: [poolOf({ accounts: [account({ session, weekly, account_label })] })] };
 }
@@ -339,9 +339,31 @@ describe('what the screen refuses to say', () => {
     expect(textOf('usage-kimi-acct-0-session-pct')).toBe('75%');
   });
 
-  it('never guesses the account, and uses a real label when given one', async () => {
+  it('withholds unidentified numbers while preserving named and unknown rows', async () => {
+    response = { status: 200, body: { pools: [poolOf({ accounts: [
+      account({ account_label: null }),
+      account({ account_label: 'acct-2' }),
+      account({ account_label: 'acct-unreachable', session: null, weekly: null }),
+      account({ account_label: '   ' }),
+    ] })] } };
     await mountUsage();
-    expect(textOf('usage-anthropic-acct-0-name')).toBe('active credential');
+    expect(textOf('usage-anthropic-scope')).toBe('Samples from this install’s active credential only. Other connected accounts are not probed.');
+    for (const i of [0, 3]) {
+      expect(textOf(`usage-anthropic-acct-${i}-name`)).toBe('Unknown account — usage withheld');
+      expect(byTestId(`usage-anthropic-acct-${i}-session-pct`) === null).toBe(true);
+      expect(byTestId(`usage-anthropic-acct-${i}-weekly-pct`) === null).toBe(true);
+      expect(textOf(`usage-anthropic-acct-${i}-capacity`)).toBe('capacity unknown — account unidentified');
+    }
+    expect(textOf('usage-anthropic-acct-1-name')).toBe('acct-2');
+    expect(textOf('usage-anthropic-acct-1-session-pct')).toBe('75%');
+    expect(textOf('usage-anthropic-acct-2-name')).toBe('acct-unreachable');
+    expect(textOf('usage-anthropic-acct-2-capacity')).toBe('capacity unknown — one window not reported');
+  });
+
+  it('never guesses the account, and uses a real label when given one', async () => {
+    response = { status: 200, body: pools(HOT_SESSION, ROOMY_WEEKLY, null) };
+    await mountUsage();
+    expect(textOf('usage-anthropic-acct-0-name')).toBe('Unknown account — usage withheld');
     response = { status: 200, body: pools(HOT_SESSION, ROOMY_WEEKLY, 'acct-2') };
     await press('usage-refresh');
     expect(textOf('usage-anthropic-acct-0-name')).toBe('acct-2');

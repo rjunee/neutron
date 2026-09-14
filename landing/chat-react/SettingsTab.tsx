@@ -59,6 +59,7 @@ import {
   WebUsageDashboardClient,
   accountCapacityNote,
   accountName,
+  USAGE_SCOPE_NOTE,
   capacityLine,
   connectionNote,
   formatAge,
@@ -1712,6 +1713,7 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
           {formatAge(view.age_ms)}
         </span>
       </div>
+      <p className="cset-sub" data-testid={`usage-${view.pool}-scope`}>{USAGE_SCOPE_NOTE}</p>
       {/* THE LINE THE OWNER ASKED FOR, first in the card and above every bar: "how
           hard can I push this provider right now". It names the BINDING window,
           because a countdown to a 5-hour reset says nothing about capacity while
