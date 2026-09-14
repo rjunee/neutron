@@ -195,6 +195,11 @@ test('every profile records the expected bypass, confinement, credential, and mo
         skip_permissions: false,
         restricted: true,
         extra_dirs: [TRIDENT_SCRIPT_DIR],
+        // `--tools` decides what EXISTS, this decides what may be USED, and the
+        // launcher's whole job is one `Workflow` call. Without the grant the call
+        // raised "Run a dynamic workflow?" and the turn wedged on a prompt that
+        // could not be answered (a 440,003-char script "cannot be shown in full").
+        allowed_tools: ['Workflow'],
         permission_mode: 'acceptEdits',
         github_credential: true,
         frontier_model_floor: false,

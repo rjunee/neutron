@@ -256,3 +256,39 @@ describe('buildReplArgv', () => {
     })
   })
 })
+
+/**
+ * `--tools` DECIDES WHAT EXISTS; `--allowedTools` DECIDES WHAT MAY BE USED.
+ *
+ * Measured on the live fire launcher 2026-09-14 (pid started 22:56):
+ *
+ *     --tools           Workflow,Read,Glob,Grep,Write,Edit,Bash,Task,TodoWrite
+ *     --allowedTools    (empty)
+ *     --permission-mode acceptEdits
+ *
+ * The launcher's entire job is one `Workflow` call. With the tool available but
+ * not permitted it raised "Run a dynamic workflow?" and the turn wedged on the
+ * prompt with `1. No` preselected — and the prompt was unanswerable, because a
+ * 440,003-character script "cannot be shown in full — approval is unavailable".
+ * `acceptEdits` does not cover it: that accepts EDITS, not a tool approval.
+ */
+describe('--allowedTools is a separate gate from --tools', () => {
+  it('emits the profile grant even with no MCP tool bridge attached', () => {
+    const argv = buildReplArgv({ ...base, allowedMcpTools: ['Workflow'], resume: false })
+    expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('Workflow')
+  })
+
+  it('carries an MCP namespace and a built-in grant together, in one flag', () => {
+    // They are the same CLI flag, so a second source must MERGE rather than win.
+    const argv = buildReplArgv({ ...base, allowedMcpTools: ['mcp__neutron', 'Workflow'], resume: false })
+    expect(argv.filter((a) => a === '--allowedTools')).toHaveLength(1)
+    expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('mcp__neutron,Workflow')
+  })
+
+  it('omits the flag entirely when nothing is granted — the control', () => {
+    // Without this, "always emit --allowedTools ''" would satisfy the cases above
+    // while granting nothing, which is the state that wedged the launcher.
+    const argv = buildReplArgv({ ...base, resume: false })
+    expect(argv).not.toContain('--allowedTools')
+  })
+})

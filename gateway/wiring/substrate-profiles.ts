@@ -85,6 +85,22 @@ export interface SubstrateProfile {
   /** Confine file tools to cwd/add-dir and refuse bypass mode. */
   readonly restricted?: boolean
   /**
+   * Built-in tools this profile's agents may use WITHOUT an approval prompt.
+   *
+   * `--tools` decides what EXISTS; this decides what may be USED. They are
+   * different gates and a tool needs both. Measured 2026-09-14 on the live fire
+   * launcher: `--tools Workflow,Read,…` with `--allowedTools` EMPTY, so the
+   * `Workflow` call raised "Run a dynamic workflow?" and the turn wedged on it
+   * with `1. No` preselected — and the prompt could not even be answered, because
+   * a 440,003-character script "cannot be shown in full — approval is
+   * unavailable; deny or send feedback".
+   *
+   * `permission_mode: 'acceptEdits'` does not cover it: that accepts EDITS, not an
+   * arbitrary tool-approval prompt. This is the same shape as the arbiter's denied
+   * reply — availability granted, permission withheld — one gate further out.
+   */
+  readonly allowed_tools?: readonly string[]
+  /**
    * Dirs this profile's agents may read BESIDES their cwd. Only meaningful with
    * `restricted`, which makes cwd + this list the agent's whole readable
    * filesystem — so every entry is a deliberate widening of the confinement and
@@ -481,6 +497,9 @@ export const PROFILE_WARM_FIRE: SubstrateProfile = {
   // (`codex-build.sh`, `checkpoint.sh`, `stage-stamp.sh`, `codex-review.sh`,
   // `worktree-cleanup.sh`, `gh-authed.ts`), which the command gate confines too.
   extra_dirs: [TRIDENT_SCRIPT_DIR],
+  // THE LAUNCHER'S ENTIRE JOB IS ONE `Workflow` CALL, so it has to be allowed to
+  // make it. Nothing else is granted: `--tools` still bounds what exists.
+  allowed_tools: ['Workflow'],
   permission_mode: 'acceptEdits',
   // Trident v2's build loop. Without it a run against a PRIVATE repo dies at
   // `fatal: could not read Username for 'https://github.com'` — measured on the

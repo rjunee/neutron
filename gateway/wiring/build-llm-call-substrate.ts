@@ -771,6 +771,7 @@ export function buildLlmCallSubstrate(
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveRestricted = input.profile?.restricted
         const effectiveExtraDirs = input.profile?.extra_dirs
+        const effectiveAllowedTools = input.profile?.allowed_tools
         const effectivePermissionMode = input.profile?.permission_mode
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
         // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
@@ -845,6 +846,7 @@ export function buildLlmCallSubstrate(
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
         if (effectiveRestricted !== undefined) opts.restricted = effectiveRestricted
         if (effectiveExtraDirs !== undefined) opts.extra_dirs = effectiveExtraDirs
+        if (effectiveAllowedTools !== undefined) opts.allowed_tools = effectiveAllowedTools
         if (effectivePermissionMode !== undefined) opts.permission_mode = effectivePermissionMode
         if (effectiveTurnInactivityMs !== undefined) {
           opts.turn_inactivity_ms = effectiveTurnInactivityMs

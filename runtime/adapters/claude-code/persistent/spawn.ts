@@ -277,7 +277,16 @@ async function spawnSession(
     // `--tools` only gates the BUILT-IN set, so the security-critical
     // `--tools ""` for untrusted-content REPLs is untouched; this allow-list is
     // the MCP-tool permission grant (`mcp__neutron`), added ONLY here.
-    ...(toolBridgeActive ? { allowedMcpTools: [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] } : {}),
+    // ONE `--allowedTools`, TWO SOURCES. The MCP namespace grant (when the tool
+    // bridge is attached) and the profile's built-in grant are the same CLI flag,
+    // so they merge here rather than racing to be the one that sets it.
+    ...(((): { allowedMcpTools?: string[] } => {
+      const grants = [
+        ...(toolBridgeActive ? [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] : []),
+        ...(options.allowed_tools ?? []),
+      ]
+      return grants.length === 0 ? {} : { allowedMcpTools: grants }
+    })()),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
     ...(options.restricted !== undefined ? { restricted: options.restricted } : {}),
     ...(options.permission_mode !== undefined

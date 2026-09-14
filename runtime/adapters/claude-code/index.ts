@@ -105,6 +105,8 @@ export interface ClaudeCodeSubstrateOptions {
   restricted?: boolean
   /** Dirs readable BESIDES the cwd when `restricted` confines the file tools. */
   extra_dirs?: readonly string[]
+  /** Built-in tools permitted without an approval prompt (`--allowedTools`). */
+  allowed_tools?: readonly string[]
   /** Interactive permission mode; `dontAsk` denies would-be prompts. */
   permission_mode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**
@@ -457,6 +459,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
   if (options.restricted !== undefined) p.restricted = options.restricted
   if (options.extra_dirs !== undefined) p.extra_dirs = options.extra_dirs
+  if (options.allowed_tools !== undefined) p.allowed_tools = options.allowed_tools
   if (options.permission_mode !== undefined) p.permission_mode = options.permission_mode
   if (options.env !== undefined) p.env = options.env
   // Thread the per-instance config dir so the interactive-Max-login child can

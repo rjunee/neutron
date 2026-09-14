@@ -393,6 +393,11 @@ export interface PersistentReplSubstrateOptions {
    * agent's whole readable filesystem.
    */
   extra_dirs?: readonly string[]
+  /**
+   * Built-in tools this spawn may use WITHOUT an approval prompt. `--tools`
+   * decides what EXISTS; this decides what may be USED, and a tool needs both.
+   */
+  allowed_tools?: readonly string[]
   /** Interactive permission mode; `dontAsk` denies would-be prompts. */
   permission_mode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**
