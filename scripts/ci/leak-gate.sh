@@ -445,17 +445,20 @@ echo
 #                    concatenated into a camelCase identifier (both `openAlice`
 #                    and `aliceImport` escape `\balice\b`).
 #
-#   word:<token>     Case-SENSITIVE and word-bounded. Use ONLY for a proper noun
+#   word:<token>     Case-SENSITIVE and component-bounded. Use ONLY for a proper noun
 #                    that is also an ordinary English word or a common substring,
 #                    where the default kind would false-positive on prose. This
 #                    is the narrow exception, not the default — if unsure, don't.
 #
-# Word-bounding is expressed as `(^|[^A-Za-z0-9_])…([^A-Za-z0-9_]|$)` rather than
-# `\b`, because the message scan runs through awk and BSD awk has no `\b`.
+# Component bounding also recognizes lower/digit → uppercase camel-case edges,
+# while punctuation and string ends remain boundaries. It deliberately does not
+# split all-uppercase runs or a token followed by a lowercase suffix: those would
+# turn ordinary words containing a denylisted proper noun into findings.
 # A legitimate future collision is handled via the reviewable allowlist (rule ids
 # pii-denylist / pii-denylist-word), same as every other rule.
 compile_denylist() {
-  # $1 = "sub" | "word"; reads the raw denylist on stdin, writes an alternation.
+  # $1 = "sub" | "word" | "word-upper"; reads the raw denylist on stdin,
+  # writes an alternation. word-upper is the subset eligible for a left camel edge.
   awk -v kind="$1" '
     function esc(s,   out,i,c) {
       out=""
@@ -471,8 +474,9 @@ compile_denylist() {
       isword = (substr(line,1,5)=="word:")
       if (isword) line=substr(line,6)
       if (line=="") next
-      if ((isword?1:0) != (kind=="word"?1:0)) next
-      if (kind=="word") { printf "%s%s", (n++?"|":""), esc(line); next }
+      if ((isword?1:0) != (kind=="word" || kind=="word-upper" ? 1:0)) next
+      if (kind=="word-upper" && line !~ /^[A-Z]/) next
+      if (kind=="word" || kind=="word-upper") { printf "%s%s", (n++?"|":""), esc(line); next }
       gsub("^[/_ -]+","",line); gsub("[/_ -]+$","",line)
       m=split(line, parts, "[/_ -]+")
       pat=""
@@ -481,6 +485,16 @@ compile_denylist() {
       if (pat=="") next
       printf "%s%s", (n++?"|":""), pat }
     END { printf "\n" }'
+}
+word_component_pattern() {
+  local all="$1" upper="${2:-}"
+  # The left camel-case arm consumes the preceding character. That is safe for
+  # reporting and gives grep/awk a portable ERE without lookbehind support.
+  if [ -n "$upper" ]; then
+    printf '((^|[^A-Za-z0-9_])(%s)|[a-z0-9](%s))([^A-Za-z0-9_]|$|[A-Z])' "$all" "$upper"
+  else
+    printf '(^|[^A-Za-z0-9_])(%s)([^A-Za-z0-9_]|$|[A-Z])' "$all"
+  fi
 }
 echo "── Tier 1: owner PII denylist ─────────────────────────────────────────"
 # SOURCE RESOLUTION — the only part of Tier-1 that differs between CI and a
@@ -512,6 +526,8 @@ if [ -z "$PII_RAW" ] && [ "$IN_CI" = "0" ]; then
 fi
 PII_SUB_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist sub)"
 PII_WORD_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist word)"
+PII_WORD_UPPER_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist word-upper)"
+PII_WORD_PATTERN="$(word_component_pattern "$PII_WORD_ALT" "$PII_WORD_UPPER_ALT")"
 
 # ── --explain-denylist ────────────────────────────────────────────────────────
 # WHY THIS EXISTS (ISSUES #507). The denylist is a repository SECRET, so the local
@@ -547,7 +563,7 @@ if [ "$EXPLAIN_DENYLIST" = "1" ]; then
   echo "leak-gate --explain-denylist  (source: ${PII_SOURCE}, tree: ${SCAN_ROOT})"
   echo "Per-entry match counts over the TRACKED tree (${TOTAL_FILES} files). A large"
   echo "count on a short or common term means that entry is over-broad as a substring"
-  echo "— carry it as \`word:<term>\` so it only matches on token boundaries."
+  echo "— carry it as \`word:<term>\` so it only matches on component boundaries."
   echo ""
   printf '%8s  %-6s  %s\n' "MATCHES" "KIND" "ENTRY"
   # NOTE: prints the ENTRY, which is by definition owner PII. Correct here — this
@@ -559,7 +575,9 @@ if [ "$EXPLAIN_DENYLIST" = "1" ]; then
     case "$entry" in word:*) kind=word; term="${entry#word:}" ;; esac
     esc="$(printf '%s' "$term" | sed 's/[][\\.^$*+?{}|()/]/\\\\&/g')"
     if [ "$kind" = word ]; then
-      pat="(^|[^A-Za-z0-9_])${esc}([^A-Za-z0-9_]|$)"
+      upper=""
+      case "$term" in [A-Z]*) upper="$esc" ;; esac
+      pat="$(word_component_pattern "$esc" "$upper")"
     else
       pat="$esc"
     fi
@@ -588,7 +606,7 @@ if [ -n "$PII_SUB_ALT" ] || [ -n "$PII_WORD_ALT" ]; then
   echo "  denylist loaded from ${PII_SOURCE} (substring entries: $([ -n "$PII_SUB_ALT" ] && echo yes || echo no); word entries: $([ -n "$PII_WORD_ALT" ] && echo yes || echo no))"
   if [ "$MESSAGES_ONLY" = "0" ]; then
     [ -n "$PII_SUB_ALT" ]  && grep_rule pii-denylist      ci "(${PII_SUB_ALT})"
-    [ -n "$PII_WORD_ALT" ] && grep_rule pii-denylist-word cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+    [ -n "$PII_WORD_ALT" ] && grep_rule pii-denylist-word cs "$PII_WORD_PATTERN"
   fi
 elif [ "$SECRET_CONTEXT" = "canonical" ]; then
   cat >&2 <<'EOF'
@@ -710,7 +728,7 @@ if build_message_view; then
   grep_rule_messages private-path-msg ci "$PRIVATE_PATH_RE"
   grep_rule_messages neutron-computer-msg ci 'neutron\.computer'
   [ -n "$PII_SUB_ALT" ]  && grep_rule_messages pii-denylist-msg      ci "(${PII_SUB_ALT})"
-  [ -n "$PII_WORD_ALT" ] && grep_rule_messages pii-denylist-word-msg cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+  [ -n "$PII_WORD_ALT" ] && grep_rule_messages pii-denylist-word-msg cs "$PII_WORD_PATTERN"
 elif [ "$IN_CI" = "1" ]; then
   cat >&2 <<'EOF'
 leak-gate: FATAL — could not determine a commit range to scan. Commit messages and

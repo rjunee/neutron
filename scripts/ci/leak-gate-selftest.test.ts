@@ -371,7 +371,7 @@ describe('G8 leak-gate — planted findings FAIL', () => {
 // Synthetic denylist entries. `PATHY` is the path-shaped kind (the default:
 // case-insensitive, separator-flexible substring). `EMBEDDED` proves a token
 // concatenated into an identifier is caught. `WORDY` is the narrow
-// case-sensitive word-bounded kind.
+// case-sensitive component-bounded kind.
 const PATHY = '/opt/acmeowner-home'
 const EMBEDDED = 'zorblax'
 const WORDY = 'Marble'
@@ -1167,14 +1167,16 @@ describe('denylist MATCHING — case-insensitive, separator-flexible substring',
     }
   })
 
-  test('`word:` entries stay case-SENSITIVE and word-bounded', () => {
+  test('`word:` entries stay case-SENSITIVE and component-bounded', () => {
     // The narrow exception: a proper noun that is also an ordinary English word.
     // Documented in leak-gate.sh at the compile step; pinned here so the two
     // kinds cannot silently collapse into one.
     const cases: Array<[string, boolean]> = [
       [`A ${WORDY} bench.`, true], // exact proper-noun form ⇒ finding
+      [`open${WORDY}Import`, true], // camel-case component ⇒ finding
       [`a ${WORDY.toLowerCase()} bench`, false], // ordinary word ⇒ no finding
-      [`${WORDY}s are round`, false], // word-bounded ⇒ no finding
+      [`${WORDY}s are round`, false], // lowercase suffix ⇒ no finding
+      [`open${WORDY.toLowerCase()}Import`, false], // no lower-to-lower left edge
     ]
     for (const [body, shouldFail] of cases) {
       const dir = freshTree()
@@ -1193,6 +1195,20 @@ describe('denylist MATCHING — case-insensitive, separator-flexible substring',
       }
     }
   }, 60_000)
+
+  test('a lowercase entry does not gain a lower-to-lower left boundary', () => {
+    const dir = freshTree()
+    try {
+      writeFileSync(join(dir, 'src', 'w.ts'), 'const s = "openmarbleImport"\n')
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_PII_DENYLIST_B64: denylistB64(['word:marble']),
+      })
+      expect(out).not.toContain('[pii-denylist-word]')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('structural private-path rule (needs no secret)', () => {

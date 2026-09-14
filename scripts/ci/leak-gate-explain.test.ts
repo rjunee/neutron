@@ -123,19 +123,18 @@ describe('--explain-denylist identifies the over-broad entry', () => {
     expect(row).toMatch(/^\s*3\s+sub/)
   })
 
-  test('counts word matches case-SENSITIVELY, like the real cs rule', () => {
+  test('counts word matches case-SENSITIVELY with component boundaries', () => {
     // THE MIRROR PROPERTY. The real word rule is case-sensitive; if this folded
     // case it would report the UPPER line too and overstate the entry.
     const tree = fixtureTree({
-      'a.md': 'zqxterm here\nZQXTERM here\nprefix-zqxterm-suffix\n',
+      'a.md': 'Zqxterm here\nzqxterm here\nprefix-Zqxterm-suffix\nopenZqxtermImport\nZqxterms\n',
     })
-    const { stdout } = explain(tree, 'word:zqxterm\n')
-    const row = stdout.split('\n').find((l) => l.includes('word') && l.includes('zqxterm'))
+    const { stdout } = explain(tree, 'word:Zqxterm\n')
+    const row = stdout.split('\n').find((l) => l.includes('word') && l.includes('Zqxterm'))
     expect(row).toBeDefined()
-    // Two matches: the lowercase standalone token, and the hyphen-embedded one
-    // (`-` is a non-word character, so it counts as a token boundary). NOT the
-    // uppercase line — that is the case-sensitivity this test pins.
-    expect(row).toMatch(/^\s*2\s+word/)
+    // Three matches: standalone, hyphen-delimited, and a camel-case component.
+    // The uppercase spelling and lowercase suffix remain outside the boundary.
+    expect(row).toMatch(/^\s*3\s+word/)
   })
 
   test('flags a substring entry with many matches and names the word: fix', () => {
