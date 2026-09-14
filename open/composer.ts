@@ -89,7 +89,11 @@ import {
   PREWARM_AWAIT_CAP_MS_DEFAULT,
 } from '@neutronai/onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
-import { injectPersistentReplActiveTurn } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import {
+  deriveReplSupervisionPaths,
+  injectPersistentReplActiveTurn,
+} from '@neutronai/runtime/adapters/claude-code/index.ts'
+import { respawnSupervisedSession } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
 import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
@@ -200,6 +204,7 @@ import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 // collision. This is the overnight Trident reporter, NOT the daily brief — the
 // daily brief is the `morning-brief` RITUAL, fired as an ordinary reminder.
 import type { MorningBriefDeliverInput } from '@neutronai/onboarding/overnight/morning-brief.ts'
+import { createAdminRespawnSurface } from '@neutronai/gateway/http/admin-respawn-surface.ts'
 
 /**
  * C3d — the Open composition's return type. `CompositionInput` with the surfaces
@@ -257,6 +262,7 @@ export type OpenComposition = CompositionInput &
       | 'app_upload_surface'
       | 'app_voice_transcription_surface'
       | 'app_trident_phase_models_surface'
+      | 'admin_respawn_handler'
     >
   >
 
@@ -4012,6 +4018,15 @@ export function buildOpenGraphComposer(
       store: projectBackupStore,
     })
 
+    // Operator recovery for a hard-capped or channel-wedged REPL. The registry
+    // path comes from the same derivation the supervised substrate uses, while
+    // the per-boot app token keeps this force-respawn endpoint privileged.
+    const replRegistryPath = deriveReplSupervisionPaths(owner_home).replRegistryPath
+    const adminRespawnSurface = createAdminRespawnSurface({
+      gatewayToken: appWsToken,
+      respawn: (sessionKey) => respawnSupervisedSession(replRegistryPath, sessionKey),
+    })
+
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
     // SINGLE chat transport the served React client uses
     // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). Both
@@ -7208,6 +7223,8 @@ export function buildOpenGraphComposer(
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },
+      // Force-recovery endpoint named by the wedged-REPL operator alert.
+      admin_respawn_handler: adminRespawnSurface.handler,
       // Telegram inbound (`POST /webhook/telegram`). Spread rather than set to
       // `undefined`, because the route-slot ladder promotes on FIELD PRESENCE
       // (`route-slots.ts` `promote: (c) => c.telegram_webhook?.handler`) and the

@@ -45,6 +45,13 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
  * production graph / cron schedulers) and does not race the async cores mount.
  */
 const EXPECTED_COMPOSITION_KEYS = [
+  // #597 — the wedged-REPL recovery handler. Its presence HERE is the
+  // done-means-served proof this card is actually about: the documented recovery
+  // endpoint existed as a handler and was mounted nowhere, so an operator
+  // following the runbook got a 404. This snapshot boots the REAL composer, so
+  // the key appears only if `composeOpen` genuinely constructs and hands it over
+  // — a test calling the handler directly would have passed the whole time.
+  'admin_respawn_handler',
   'agent_dispatch',
   // SPEC § WAVE 3.5 — the ACTIVITY INSPECTOR snapshot surface
   // (`GET /api/app/projects/<id>/activity`, `GET /api/app/activity`). Its presence
