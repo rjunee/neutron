@@ -153,6 +153,17 @@ export const CHAT_COMMANDS: readonly ChatCommandCapability[] = [
     probe: '/research help',
     filter: 'createResearchChatCommandFilter',
   },
+  {
+    id: 'scrape',
+    command: '/scrape',
+    can: 'Fetch public Instagram and X content from chat',
+    broken:
+      'Typing /scrape in chat no longer reaches the scraping Core — the message is sent to the model instead of returning scraping help.',
+    // Bare `/scrape` returns static help before reading an Apify credential or
+    // making a network call, so it is deterministic on a fresh instance.
+    probe: '/scrape',
+    filter: 'createScrapingChatCommandFilter',
+  },
 ]
 
 /**
@@ -180,29 +191,7 @@ export interface KnownUnreachableChatCommand {
   readonly cost: string
 }
 
-export const CHAT_COMMANDS_KNOWN_UNREACHABLE: readonly KnownUnreachableChatCommand[] = [
-  {
-    id: 'scrape',
-    command: '/scrape',
-    filter: 'createScrapingChatCommandFilter',
-    probe: '/scrape',
-    why:
-      'The scraping Core\'s chat filter is built by `buildProductionScrapingCoreWiring` ' +
-      '(cores/free/scraping/src/wiring-production.ts:63), which is exported from the ' +
-      'core barrel (cores/free/scraping/index.ts:93) and CALLED BY NOTHING — the ' +
-      'composer wires the research Core\'s equivalent (gateway/cores/mount-open-cores.ts:312,397) ' +
-      'and never the scraping one. So `/scrape` is not in any chain. This was found by ' +
-      'widening this gate; it was invisible while the scan read one hardcoded file.',
-    cost:
-      'The owner cannot type `/scrape <url>`; it goes to the model, which answers about ' +
-      'scraping in general instead of scraping anything. The Apify-backed MCP tools ' +
-      '(`scrape_instagram` / `scrape_x`) still work, so the capability is reachable BY THE ' +
-      'AGENT and not by the owner — which breaks the agent-native parity ' +
-      'docs/SYSTEM-OVERVIEW.md:323 claims for this Core in exactly one direction. Fixing it ' +
-      'is a product change (a scraping backend must be threaded to the chain at mount ' +
-      'time), so it is pinned here rather than fixed inside a gate PR.',
-  },
-]
+export const CHAT_COMMANDS_KNOWN_UNREACHABLE: readonly KnownUnreachableChatCommand[] = []
 
 /**
  * Filters that EXIST in the product and are deliberately not probed, each with

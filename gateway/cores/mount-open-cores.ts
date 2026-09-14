@@ -83,6 +83,12 @@ import { createLogger } from '@neutronai/logger'
 const mountLog = createLogger('open-cores')
 import { buildReminderStoreBackend, buildSmartWrapComposer } from '@neutronai/reminders-core'
 import { buildProductionResearchCoreWiring } from '@neutronai/research-core'
+import {
+  buildProductionScrapingCoreWiring,
+  CORE_PACKAGE_NAME as SCRAPING_CORE_PACKAGE_NAME,
+  loadManifest as loadScrapingManifest,
+} from '@neutronai/scraping-core'
+import { buildSecretsAccessor } from '@neutronai/cores-sdk'
 
 /** The Google OAuth client-id env var. Present ⇒ the Cores OAuth path is
  *  configured; absent ⇒ the zero-creds Open default (in-memory Core clients). */
@@ -409,6 +415,20 @@ export async function mountOpenCores(
       }),
   })
 
+  // Scraping: bind the Core's declared Apify secret to the same per-instance
+  // SecretsStore used by installation, so the MCP tools and the owner-typed
+  // `/scrape` filter resolve the same credential through the same guarded path.
+  const scrapingWiring = buildProductionScrapingCoreWiring({
+    secretsAccessor: buildSecretsAccessor(
+      { manifest: loadScrapingManifest() },
+      {
+        owner_handle: ownerHandle,
+        store: input.secretsStore,
+        core_id: SCRAPING_CORE_PACKAGE_NAME,
+      },
+    ),
+  })
+
   // Email triage/summarize LLM — substrate-backed when available, else a stub that
   // throws so the Email Core renders its deterministic structured-row fallback.
   const emailLlm: (prompt: string) => Promise<string> =
@@ -484,6 +504,7 @@ export async function mountOpenCores(
       smartWrap: reminderSmartWrap,
     }),
     researchWiring.chat_command_filter,
+    scrapingWiring.chat_command_filter,
   ])
 
   return {
