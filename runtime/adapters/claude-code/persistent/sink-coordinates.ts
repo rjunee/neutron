@@ -413,8 +413,8 @@ function readSinkToken(path: string): ReadResult {
     // same thing: equality on a permission mask ALSO refuses files that are STRICTER
     // than demanded — 0400 under a hardened umask — and refusing those costs
     // everything on this path. The read side would silently re-mint a token that was
-    // never exposed, stranding every child baked with it; the create side (see
-    // `confirmInstalled`) would THROW and the sink would never start. An operator with
+    // never exposed, stranding every child baked with it; the create side would refuse
+    // the file before replacing it. An operator with
     // `umask 0277` is not a threat model. Provenance is not what this check can
     // establish anyway — an attacker who can write this directory can write 0600.
     if ((perms & 0o077) !== 0) {
@@ -561,42 +561,6 @@ function discard(tmp: string): void {
 }
 
 /**
- * Confirm what is actually on disk at `path` and return those bytes.
- *
- * NOT A GUARD, AND LABELLED AS ONE RATHER THAN COUNTED AS TWO. Both assertions
- * below — the mode re-check on the installed file and the read-back — are
- * belt-and-braces behind the create mode (`O_CREAT|O_EXCL, 0600` plus the `fchmod`)
- * and the atomic publish. The mode assertion asks the INVARIANT (no group/other
- * access) and not equality with 0600: an earlier revision asked for equality here
- * and that is a boot-block, because `umask 0277` makes the file 0400 — stricter than
- * demanded, and refused. No test can reach either without
- * sabotaging the filesystem, so neither is mutation-provable, and the honest
- * statement is that the guarantee comes from the CREATE, which IS mutation-proved.
- * They stay because the cost is two syscalls and the failure they would catch (a
- * token readable by another local user) is the one this module must never tolerate
- * silently.
- */
-function confirmInstalled(path: string): string {
-  const perms = statSync(path).mode & 0o777
-  if ((perms & 0o077) !== 0) {
-    throw new Error(
-      `repl-sink: refusing to use sink token at ${path}: it was created with mode ${perms
-        .toString(8)
-        .padStart(4, '0')}, which grants group/other access`,
-    )
-  }
-  const back = readSinkToken(path)
-  if (back.kind !== 'ok') {
-    throw new Error(
-      `repl-sink: could not confirm the sink token just written to ${path} (${
-        back.kind === 'reject' ? back.why : 'vanished'
-      })`,
-    )
-  }
-  return back.value
-}
-
-/**
  * CREATE-IF-ABSENT, and LOSE GRACEFULLY.
  *
  * `link(tmp, path)` publishes the staged token under its final name in ONE atomic
@@ -621,7 +585,7 @@ function confirmInstalled(path: string): string {
 function createTokenIfAbsent(path: string): string {
   const dir = dirname(path)
   mkdirSync(dir, { recursive: true })
-  const { tmp } = stageFreshToken(dir)
+  const { tmp, secret } = stageFreshToken(dir)
   try {
     linkSync(tmp, path)
   } catch (err) {
@@ -640,7 +604,14 @@ function createTokenIfAbsent(path: string): string {
   }
   // The inode now has two names; drop ours and keep the published one.
   discard(tmp)
-  return confirmInstalled(path)
+  // Return the bytes this process atomically published. In an unguarded replacement
+  // race a competitor may quarantine the destination immediately after our `link`;
+  // re-reading the pathname here can therefore fail with ENOENT even though our token
+  // was successfully published and remains visible under the quarantine name. The
+  // staged inode was fully written and fchmod'd before `link`, so another path read
+  // cannot strengthen its validity and introduces precisely that disappearing-name
+  // race.
+  return secret
 }
 
 /**
@@ -668,20 +639,20 @@ function createTokenIfAbsent(path: string): string {
  *   3. CREATE-IF-ABSENT at the real name via `createTokenIfAbsent`'s `link`, which
  *      has exactly ONE winner; every loser re-reads and ADOPTS the winner's bytes.
  *
- * So the value returned is always the value ON DISK, and two concurrent replacers
- * end up holding the SAME token rather than two different ones.
+ * So every value returned was published at the destination, and while serialised two
+ * concurrent replacers end up holding the SAME token rather than two different ones.
  *
  * WHAT IS STILL NOT CLOSED, stated rather than implied, because "return what is on
  * disk" does not by itself converge: a re-read happens at a moment, and a writer can
  * land after it. If B's re-verify (1) observes the bad file in the instant before A's
  * `link` (3) publishes, B will quarantine A's good token and publish its own, and A —
- * which already read its own value back — diverges from the disk. That window is a
+ * which already returned its published value — diverges from the disk. That window is a
  * few syscalls wide, requires an ALREADY-INVALID token file plus a second process
  * entering the same region within it, and it is the residue of a compare-and-swap on
  * a filename, which POSIX does not offer. Closing it entirely needs serialisation:
  * `withFlockSync` provides exactly that whenever Bun's FFI is available, which is
- * every supported deployment — it is defence in depth here, NOT the correctness
- * argument, because the steps above converge without it.
+ * every supported deployment. Without it the weaker published-somewhere bound above
+ * is the guarantee, rather than convergence on the final pathname.
  */
 function replaceUntrustedToken(path: string, why: string): string {
   const dir = dirname(path)
