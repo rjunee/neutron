@@ -8,12 +8,13 @@ import { getBestModel, getKnownFallbackModels, setBestModelOverride } from '../.
 import type { AgentSpec } from '../../../substrate.ts'
 import { type CwdDriftSupervisedEntry, type CwdDriftTickResult, type CwdProbe, runCwdDriftTick } from './cwd-drift-watchdog.ts'
 import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watchdog.ts'
+import type { SubstrateClassed } from './classify-spawn-error.ts'
 import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, argvMatchesSession, defaultReadArgv, registerOrphanKill } from './orphan-adoption.ts'
 import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
-import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withRegistry } from './repl-registry.ts'
+import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withOwnedRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
 import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnReplOutcome, executeRespawn, planRespawn, shouldPostRespawnNotice } from './session-respawn.ts'
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
@@ -32,6 +33,11 @@ import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const log = createLogger('repl-watchdog')
+
+/** Local recording failure; its class must survive changes to the message. */
+class RespawnClaimRefusedError extends Error implements SubstrateClassed {
+  readonly substrateErrorClass = 'repl_unreconciled' as const
+}
 
 // ---------------------------------------------------------------------------
 // Sprint-2 supervision actuation: respawn-is-always-resume, double-spawn-safe.
@@ -210,7 +216,7 @@ function recentRespawnCount(record: ReplRegistryRecord, now: number): number {
  * per-key gate + a registry-flock in-flight stamp serialize concurrent callers
  * so EXACTLY ONE spawn fires (brief § 6 acceptance #3). Respawn-is-always-resume
  * via `dispatchWedgeRespawn → planRespawn → executeRespawn` (brief § 6
- * acceptance #2 & #4). `force` (operator) bypasses the in-flight/cooldown gates
+ * acceptance #2 & #4). `force` (operator) bypasses the cooldown/cap checks, honors both in-flight gates,
  * and clears `capped_at`.
  */
 export function respawnReplSession(
@@ -236,8 +242,9 @@ export function respawnReplSession(
   const now = Date.now()
   try {
     // Cross-process guard + cap enforcement under the registry flock.
-    const decision = withRegistry<
+    const claim = withOwnedRegistry<
       | { kind: 'go'; record: ReplRegistryRecord }
+      | { kind: 'registry-write-refused' }
       | { kind: 'no-record' }
       | { kind: 'in-flight' }
       | { kind: 'capped'; just_tripped?: boolean }
@@ -275,7 +282,16 @@ export function respawnReplSession(
       const stamped: ReplRegistryRecord = { ...rec, respawn_in_flight_at: now }
       registry[sessionKey] = stamped
       return { registry, result: { kind: 'go', record: stamped } }
-    })
+    }, () => ({ kind: 'registry-write-refused' }))
+
+    // A decision is actionable only if its ownership write could be recorded.
+    if (claim.prevented || claim.result.kind === 'registry-write-refused') {
+      return {
+        ok: false, reason: 'registry-write-refused', sessionKey,
+        error: new RespawnClaimRefusedError(`Respawn claim not recorded: ${claim.why ?? 'unknown'}`),
+      }
+    }
+    const decision = claim.result
 
     if (decision.kind === 'no-record') return { ok: false, reason: 'session-not-found', sessionKey }
     if (decision.kind === 'in-flight') return { ok: false, reason: 'spawn-failed', sessionKey }

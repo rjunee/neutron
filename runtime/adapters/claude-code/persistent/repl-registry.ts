@@ -1109,8 +1109,8 @@ export function withRegistry<T>(
 /**
  * THE ENTRY POINT FOR A WRITE WHOSE CORRECTNESS RESTS ON THE LOCK (#539, Argus r41).
  *
- * WHY THIS EXISTS RATHER THAN A RULE. Six writes in this subsystem are only correct while
- * the flock is held, and four of them had already been fixed one at a time — rounds
+ * WHY THIS EXISTS RATHER THAN A RULE. Ownership writes in this subsystem are only correct while
+ * the flock is held. Several had already been fixed one at a time — rounds
  * fifteen, eighteen, twenty-one — each by adding `if (!acquired) return skipSave` inside
  * the callback. Round forty's structural work then ADDED TWO NEW ownership writes, and
  * both shipped without the check: written after the rule existed, by someone who knew it.
@@ -1128,9 +1128,9 @@ export function withRegistry<T>(
  * split, six lock-critical (the claim, the renewal, the give-back, the handle clear, the
  * fresh-spawn ownership write and the child-exit disown) and four lock-INDIFFERENT
  * (`upsertRecord`, `patchRecord`, `removeRecord`, `clearRespawnInFlight`), whose losses are
- * bounded degradations rather than invariant breaks. **The six now come through here, so
- * what is left below is the indifferent four** — which is the shape the decision was made
- * to produce. Inverting the default would instead have put the "unguarded is fine" opt-in on
+ * bounded degradations rather than invariant breaks. Those six were migrated at the split; the respawn in-flight CAS also uses
+ * this entry point (#675). The generic helpers remain appropriate only for writes whose
+ * correctness does not depend on exclusive ownership. Inverting the default would instead have put the "unguarded is fine" opt-in on
  * the three generic helpers, which between them carry ten transitive callers and are
  * exactly the path a future ownership-ish field would travel through — the same failure
  * mode, one level up and harder to see. And `withFlockSync` reports `acquired: false` when
