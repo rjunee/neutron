@@ -111,7 +111,7 @@ describe('formatting refuses to invent a number', () => {
   it('NEVER guesses which account a reading belongs to', () => {
     // The credential is swapped by a process outside this box. Naming an account
     // we cannot identify would be a confident lie about where the quota went.
-    expect(accountName(null)).toBe('active credential')
+    expect(accountName(null)).toBe('Unknown account — usage withheld')
     expect(accountName('acct-2')).toBe('acct-2')
   })
 })
@@ -263,7 +263,7 @@ function window_(over: Json = {}): Json {
  */
 function account(over: Json = {}): Json {
   return {
-    account_label: null,
+    account_label: 'acct-1',
     measured_at: NOW,
     session: window_(),
     weekly: window_({ window_ms: 7 * DAY, fraction: 0.5, pace: 1, exhausts_at: null }),
@@ -285,7 +285,7 @@ function poolOf(over: Json = {}): Json {
 }
 
 /** One pool, one account, with the session window overridden. */
-function pool(session: unknown, weekly: unknown, account_label: string | null = null): Response {
+function pool(session: unknown, weekly: unknown, account_label: string | null = 'acct-1'): Response {
   return json({ pools: [poolOf({ accounts: [account({ session, weekly, account_label })] })] })
 }
 
@@ -398,11 +398,33 @@ describe('the rendered usage card', () => {
     root.unmount()
   })
 
+  it('withholds unidentified numbers while preserving named and unknown rows', async () => {
+    const { container, root } = await mount(() => json({ pools: [poolOf({ accounts: [
+      account({ account_label: null }),
+      account({ account_label: 'acct-2' }),
+      account({ account_label: 'acct-unreachable', session: null, weekly: null }),
+      account({ account_label: '   ' }),
+    ] })] }))
+    const row = (id: string) => container.querySelector(`[data-testid="usage-anthropic-${id}"]`)
+    expect(row('scope')?.textContent).toBe('Samples from this install’s active credential only. Other connected accounts are not probed.')
+    for (const i of [0, 3]) {
+      expect(row(`acct-${i}-name`)?.textContent).toBe('Unknown account — usage withheld')
+      expect(row(`acct-${i}-session-pct`) === null).toBe(true)
+      expect(row(`acct-${i}-weekly-pct`) === null).toBe(true)
+      expect(row(`acct-${i}-capacity`)?.textContent).toBe('capacity unknown — account unidentified')
+    }
+    expect(row('acct-1-name')?.textContent).toBe('acct-2')
+    expect(row('acct-1-session-pct')?.textContent).toBe('75%')
+    expect(row('acct-2-name')?.textContent).toBe('acct-unreachable')
+    expect(row('acct-2-capacity')?.textContent).toBe('capacity unknown — one window not reported')
+    root.unmount()
+  })
+
   it('names the credential without guessing, and uses a real label when given one', async () => {
     const anon = await mount(() => pool(SESSION_HOT, null, null))
     expect(
       anon.container.querySelector('[data-testid="usage-anthropic-acct-0-name"]')?.textContent,
-    ).toBe('active credential')
+    ).toBe('Unknown account — usage withheld')
     anon.root.unmount()
 
     const named = await mount(() => pool(SESSION_HOT, null, 'acct-2'))

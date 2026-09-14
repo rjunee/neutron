@@ -71,8 +71,8 @@
  *     omitted entirely rather than shown empty, because an empty "caps at" row
  *     reads as a failure to compute.
  *   - `account_label: null` — no sidecar names the account behind this reading, or
- *     the one on disk describes a token the box is not holding. Renders as "active
- *     credential". It must NEVER guess a name.
+ *     the one on disk describes a token the box is not holding. Renders as an unknown
+ *     account, with its usage withheld. It must NEVER guess a name.
  *   - `capacity: { state: 'unknown' }` — nobody can say when this account frees
  *     up. Renders as "unknown", never as "now". A missing reset rendered as
  *     available is what would send the owner to raise concurrency into a wall,
@@ -722,14 +722,19 @@ export function projectPool(pool: UsagePool, now: number): ProjectedPool {
   const accounts: ProjectedAccount[] = pool.accounts.map((account) => {
     const age_ms = now - account.measured_at
     const stale = age_ms > pool.stale_after_ms
-    const { binding, capacity } = accountCapacity(account.session, account.weekly, now, stale)
+    // Identity is required before either windows or the pool headline can quote usage.
+    // Keep the row: unknown identity must not look like an empty account list.
+    const identified = account.account_label !== null && account.account_label.trim().length > 0
+    const session = identified ? account.session : null
+    const weekly = identified ? account.weekly : null
+    const { binding, capacity } = accountCapacity(session, weekly, now, stale)
     return {
       account_label: account.account_label,
       measured_at: account.measured_at,
       age_ms,
       stale,
-      session: projectWindow(account.session, stale, now),
-      weekly: projectWindow(account.weekly, stale, now),
+      session: projectWindow(session, stale, now),
+      weekly: projectWindow(weekly, stale, now),
       binding,
       capacity,
     }
@@ -887,9 +892,11 @@ export function paceNote(pace: number | null): string | null {
   return 'within the refill rate'
 }
 
+export const USAGE_SCOPE_NOTE = 'Samples from this install’s active credential only. Other connected accounts are not probed.'
+
 /** The account this reading belongs to, as the card should say it. NEVER guesses. */
 export function accountName(label: string | null): string {
-  return label ?? 'active credential'
+  return label?.trim() || 'Unknown account — usage withheld'
 }
 
 /**
@@ -947,6 +954,7 @@ function capacityWindowNote(key: 'session' | 'weekly', win: ProjectedWindow): st
  * half would be a card that simply declines to say anything.
  */
 export function accountCapacityNote(account: ProjectedAccount): string {
+  if (!account.account_label?.trim()) return 'capacity unknown — account unidentified'
   const c = account.capacity
   if (c.state === 'available') return 'available now'
   if (c.state === 'returns') return `capacity in ${formatCountdown(c.in_ms)}`
@@ -1021,7 +1029,7 @@ export function capacityLine(pool: ProjectedPool): string | null {
  *
  * NULL IN THREE CASES. The first two are "this would add no information":
  *   - a single-account pool, where the headline is already about the only account;
- *   - an unlabelled winner, where the honest name is "active credential" — naming
+ *   - an unlabelled winner (defensive fallback; projection withholds its usage) — naming
  *     it would read as a second account rather than as the one already on screen.
  *
  * ── AND THE THIRD IS A RECOMMENDATION NOTHING SUPPORTS ──────────────────────

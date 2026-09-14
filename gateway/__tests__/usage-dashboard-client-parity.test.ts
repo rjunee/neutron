@@ -202,7 +202,7 @@ describe('the two clients format identically', () => {
     for (const label of [null, 'acct-2', 'work']) {
       expect(mobile.accountName(label)).toBe(web.accountName(label))
     }
-    expect(mobile.accountName(null)).toBe('active credential')
+    expect(mobile.accountName(null)).toBe('Unknown account — usage withheld')
   })
 
   test('formatCountdown agrees, and NEITHER turns "unknown" into "now"', () => {
@@ -800,22 +800,13 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     })
   })
 
-  test('a LAPSED label double-counts for exactly one staleness window, and no longer', () => {
-    // THE KNOWN LIMITATION, pinned on the side that renders it rather than only in
-    // the store's prose — where it was previously stated WRONGLY as "a ghost row can
-    // never add availability".
-    //
-    // The label comes from a sidecar outside this process. If it stops resolving,
-    // the SAME credential starts writing rows that name no account, and the series
-    // then holds two account keys for one physical credential. Nothing here can tell
-    // that from a second account genuinely appearing, so nothing guesses — and for
-    // as long as the older row is still FRESH it is projected like any other
-    // reading, so the headline counts one credential twice.
+  test('a lost label stays unknown and cannot double-count availability', () => {
     const ghosted = poolOf([
       { account_label: 'owner-a', measured_at: NOW - 30 * 1000, session: win({ fraction: 0.2 }) },
       { account_label: null, measured_at: NOW, session: win({ fraction: 0.2 }) },
     ])
-    expect(project(ghosted, NOW).capacity.available_now).toBe(2)
+    expect(project(ghosted, NOW).capacity.available_now).toBe(1)
+    expect(project(ghosted, NOW).capacity.unknown).toBe(1)
 
     // AND THE WINDOW IS BOUNDED BY `stale_after_ms`, which is what makes it a cost
     // rather than a defect: past the deadline the ghost floors, its standing falls
@@ -910,15 +901,13 @@ describe('the pool headline names WHICH account it is about', () => {
     // A single-account pool: the headline is already about the only account, so a
     // "next up" line beside it is noise that teaches the eye to skip the row.
     expect(nextUp(AVAILABLE_POOL, NOW)).toBeNull()
-    // Two accounts, and the winner is unlabelled. The honest name for it is "active
-    // credential", which would read as a THIRD thing rather than as the account
-    // already on screen — so the note is omitted rather than guessed at.
+    // An unnamed reading cannot outrank an identified account.
     const unlabelled = poolOf([
       { account_label: null, session: win({ fraction: 0.2 }) },
       { account_label: 'owner-b', session: win({ fraction: 0.99, reset_at: NOW + HOUR }) },
     ])
-    expect(project(unlabelled, NOW).capacity.next_account_label).toBeNull()
-    expect(nextUp(unlabelled, NOW)).toBeNull()
+    expect(project(unlabelled, NOW).capacity.next_account_label).toBe('owner-b')
+    expect(nextUp(unlabelled, NOW)).toBe('Next up: owner-b')
   })
 
   test('it names NOBODY when no account can be vouched for', () => {
@@ -1119,4 +1108,24 @@ describe('the two decoders agree about what is an answer', () => {
     // has no reset instant and 99% spent, so the honest answer is unknown.
     expect(web.projectPool(pool, 1).accounts[0]!.capacity).toEqual({ state: 'unknown' })
   })
+})
+
+// The fixture has real windows: removing identity must change observable capacity.
+test('identity gates both windows and pool capacity without dropping unknown rows', () => {
+  const view = project(poolOf([
+    { account_label: null, session: win({ fraction: 0.2 }) },
+    { account_label: '  ', session: win({ fraction: 0.2 }) },
+    { account_label: 'acct-known', session: win({ fraction: 0.2 }) },
+    { account_label: 'acct-unreachable', session: null, weekly: null },
+  ]), NOW)
+  expect(view.accounts).toHaveLength(4)
+  for (const i of [0, 1, 3]) {
+    expect(view.accounts[i]!.session).toBeNull()
+    expect(view.accounts[i]!.weekly).toBeNull()
+    expect(view.accounts[i]!.capacity).toEqual({ state: 'unknown' })
+  }
+  expect(view.accounts[2]!.session!.fraction).toBe(0.2)
+  expect(view.capacity.available_now).toBe(1)
+  expect(view.capacity.unknown).toBe(3)
+  expect(view.capacity.next_account_label).toBe('acct-known')
 })

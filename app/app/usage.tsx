@@ -1,5 +1,5 @@
 /**
- * @neutronai/app — MODEL USAGE: every connected account, on one screen.
+ * @neutronai/app — MODEL USAGE: samples from the active credential.
  *
  * Reached as: chat header ☰ → Settings → Model usage. A registered route nothing
  * pushes is the ISSUES #385 defect, so the nav row in `settings.tsx` is part of this
@@ -31,7 +31,7 @@
  *   - an absent reset instant → "unknown", NEVER "now" and never omitted. That one
  *     is the difference between "wait" and "push", and getting it wrong sends the
  *     owner into a wall.
- *   - `account_label: null` → "active credential", never a guessed account name.
+ *   - `account_label: null` → unknown account, with usage withheld.
  *
  * The server sends only facts that DO NOT AGE — the instant each reading was taken,
  * each window's length and reset instant, the pace and the projection anchored at
@@ -69,6 +69,7 @@ import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.
 
 import {
   USAGE_POLL_MS,
+  USAGE_SCOPE_NOTE,
   UsageDashboardClient,
   accountCapacityNote,
   accountName,
@@ -218,6 +219,7 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
           {formatAge(view.age_ms)}
         </Text>
       </View>
+      <Text style={styles.muted} testID={`usage-${view.pool}-scope`}>{USAGE_SCOPE_NOTE}</Text>
       {/* THE LINE THE OWNER ASKED FOR: how hard can I push this provider right
           now. It names the BINDING window, because a countdown to a 5-hour reset
           says nothing about capacity while the 7-day window is spent. */}
@@ -416,7 +418,7 @@ export default function ModelUsageScreen() {
 
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll}>
         <Text style={styles.muted}>
-          Every connected account, in its own units — never added together. Each card says
+          Usage readings, in each provider’s own units — never added together. Each card says
           how much of each window is used, whether it is on track to run out, and when
           capacity comes back. Readings are kept for 30 days and always shown with their age.
         </Text>
