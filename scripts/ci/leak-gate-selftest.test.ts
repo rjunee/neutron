@@ -16,7 +16,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -514,6 +514,7 @@ describe('Tier-1 denylist is FAIL-CLOSED where secrets are available', () => {
 
 const LOCAL_TERM = 'willow' // neutral stand-in for a real denylist entry
 const PRE_PUSH_HOOK = fileURLToPath(new URL('../../.githooks/pre-push', import.meta.url))
+const PRE_COMMIT_HOOK = fileURLToPath(new URL('../../.githooks/pre-commit', import.meta.url))
 const INSTALL_HOOKS = fileURLToPath(new URL('../install-git-hooks.sh', import.meta.url))
 
 /** Write a plain-text denylist to a path OUTSIDE the fixture tree. */
@@ -834,6 +835,7 @@ function pushFixture(denylistEntries: string[] | null): {
   copyFileSync(PROSE_AWK, join(root, 'scripts', 'ci', 'extract-comment-prose.awk'))
   copyFileSync(INSTALL_HOOKS, join(root, 'scripts', 'install-git-hooks.sh'))
   copyFileSync(PRE_PUSH_HOOK, join(root, '.githooks', 'pre-push'))
+  copyFileSync(PRE_COMMIT_HOOK, join(root, '.githooks', 'pre-commit'))
   // The fixture tree is not the real repo, so the real allowlist's entries would
   // all be `allowlist-stale` here (exit 2, before any rule runs).
   writeFileSync(join(root, 'scripts', 'ci', 'leak-gate-allowlist.txt'), '')
@@ -965,18 +967,41 @@ describe('pre-push hook — the control fires before anything is published', () 
     }
   }, 60_000)
 
-  test('the installer REFUSES to arm the hook with no denylist', () => {
-    // Gate and pattern source ship together or neither is real (2026-07-29).
+  test('with no denylist the installer activates pre-commit but not pre-push', () => {
+    // The integrity hook has no pattern source; only the leak gate stays unarmed.
     const fx = pushFixture(null)
     try {
       const { code, out } = fx.install()
-      expect(out).toContain('NOT INSTALLED')
-      expect(code).not.toBe(0)
-      // Refusing must leave git untouched, not half-armed.
-      const cfg = execFileSync('bash', ['-c', `git -C "${fx.root}" config --get core.hooksPath || true`], {
+      expect(out).toContain('PARTIALLY INSTALLED')
+      expect(out).toContain('pre-commit → ACTIVE')
+      expect(out).toContain('pre-push  → NOT INSTALLED')
+      expect(code).toBe(0)
+      const cfg = execFileSync('git', ['-C', fx.root, 'config', '--get', 'core.hooksPath'], {
         encoding: 'utf8',
-      })
-      expect(cfg.trim()).toBe('')
+      }).trim()
+      expect(cfg).not.toBe('')
+      expect(existsSync(join(cfg, 'pre-commit'))).toBe(true)
+      expect(existsSync(join(cfg, 'pre-push'))).toBe(false)
+      execFileSync('git', ['-C', fx.root, 'hook', 'run', 'pre-commit'], { stdio: 'pipe' })
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('with a denylist the installer activates both hooks', () => {
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      const { code, out } = fx.install()
+      expect(out).toContain('FULLY INSTALLED')
+      expect(out).toContain('pre-commit → ACTIVE')
+      expect(out).toContain('pre-push  → ACTIVE')
+      expect(code).toBe(0)
+      const cfg = execFileSync('git', ['-C', fx.root, 'config', '--get', 'core.hooksPath'], {
+        encoding: 'utf8',
+      }).trim()
+      expect(cfg).not.toBe('')
+      expect(existsSync(join(cfg, 'pre-commit'))).toBe(true)
+      expect(existsSync(join(cfg, 'pre-push'))).toBe(true)
     } finally {
       fx.cleanup()
     }
