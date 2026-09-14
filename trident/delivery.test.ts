@@ -18,6 +18,7 @@ import {
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
 import { mergeDiffTooLargeReason } from './merge-diff-limit.ts'
+import { baseDriftHoldMessage } from './merge.ts'
 import { FIRE_PUBLISHED_REASON_MARKER, publishedFailureReason } from './fire-evidence.ts'
 import {
   innerTerminalFailureReason,
@@ -331,6 +332,76 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     expect(interp.input_needed.toLowerCase()).toContain('retry')
   })
 
+  test.each([
+    [
+      'the deterministic merge worktree',
+      'merge failed: refusing to reuse the merge worktree /repo/.trident-worktrees/feat-x-run1: ' +
+        'it has uncommitted changes that exist nowhere else, or could not be removed. Every retry ' +
+        're-derives this same path, so the merge will keep failing until a human clears it',
+    ],
+    [
+      'a lingering branch worktree',
+      'merge failed: trident PRESERVED uncommitted work instead of merging: /repo/build-x still has ' +
+        'changes that exist nowhere else (branch feat-x). Nothing was force-removed. Every retry ' +
+        're-checks the same paths, so this blocks until a human clears it',
+    ],
+  ])('a merge refusal preserving work in %s names the prerequisite and never says retry', (_label, reason) => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: reason, inner_verdict: 'APPROVE' }),
+    )
+    expect(interp.klass).toBe('merge-worktree-preserved')
+    expect(interp.summary.toLowerCase()).toContain('uncommitted work')
+    expect(interp.input_needed.toLowerCase()).toContain('inspect the preserved worktree')
+    expect(interp.input_needed.toLowerCase()).toContain('remove that worktree')
+    expect(interp.input_needed.toLowerCase()).not.toContain('retry')
+    assertNoRawLeak(`${interp.summary} ${interp.input_needed}`)
+  })
+
+  test('a base hold whose ref could not resolve keeps its retryable authored remedy', () => {
+    const reason = baseDriftHoldMessage(
+      'feat-x',
+      'main',
+      {
+        review_base_sha: null,
+        current_base_sha: null,
+        branch_head_sha: '1'.repeat(40),
+        moved: false,
+        overlap: [],
+        assessable: false,
+      },
+      [],
+    )
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: reason, inner_verdict: 'APPROVE' }),
+    )
+    expect(interp.klass).toBe('merge-base-held')
+    expect(interp.input_needed).toContain('re-run the build')
+    expect(interp.input_needed).toContain('current `main`')
+  })
+
+  test('a base hold over unrelated histories keeps its manual remedy and does not invite a retry', () => {
+    const reason = baseDriftHoldMessage(
+      'feat-x',
+      'main',
+      {
+        review_base_sha: '1'.repeat(40),
+        current_base_sha: '2'.repeat(40),
+        branch_head_sha: '3'.repeat(40),
+        moved: false,
+        overlap: [],
+        assessable: false,
+      },
+      [],
+    )
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: reason, inner_verdict: 'APPROVE' }),
+    )
+    expect(interp.klass).toBe('merge-base-held')
+    expect(interp.input_needed).toContain('A re-run will reach the same point')
+    expect(interp.input_needed).toContain('land this one by hand')
+    expect(interp.input_needed.toLowerCase()).not.toContain('reply to retry')
+  })
+
   // THE TWO HALVES MUST MOVE TOGETHER (this file's own contract, delivery.ts:279-284).
   // The hang watchdog now APPENDS a liveness disclosure to its reason and emits two
   // NEW variants alongside the original — the 2 h ceiling and the positively-dead
@@ -612,6 +683,7 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     expect(interp.klass).toBe('merge-mechanics')
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
     expect(interp.summary.toLowerCase()).toContain('git step failed')
+    expect(interp.input_needed.toLowerCase()).toContain('retry')
   })
 
   test('stale-state → plain, never surfaces "resolve your current index first"', () => {
