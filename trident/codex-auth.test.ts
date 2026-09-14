@@ -8,11 +8,17 @@
  */
 
 import { describe, expect, test, afterEach } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   codexAuthPath,
+  assertCodexControlSocketPath,
+  codexControlSocketPath,
+  CODEX_CONTROL_SOCKET_PATH_MAX_BYTES,
+  CodexControlSocketPathError,
+  codexProjectHome,
   deriveCodexStatus,
   materializeCodexAuth,
   readMaterializedAuth,
@@ -24,6 +30,15 @@ import {
 
 const NOW = 1_800_000_000_000 // fixed clock
 const now = (): number => NOW
+
+async function bindUnixSocket(path: string): Promise<NodeJS.ErrnoException | null> {
+  mkdirSync(dirname(path), { recursive: true })
+  const server = createServer()
+  return await new Promise((resolve) => {
+    server.once('error', (error: NodeJS.ErrnoException) => resolve(error))
+    server.listen(path, () => server.close(() => resolve(null)))
+  })
+}
 
 /** Build a minimal JWT access token with the given `exp` (seconds). */
 function jwt(expSeconds: number): string {
@@ -120,6 +135,125 @@ describe('materializeCodexAuth + resolveCodexHome', () => {
 
   test('resolveCodexHome is <owner_home>/.codex', () => {
     expect(resolveCodexHome({ owner_home: '/data/owner' })).toBe('/data/owner/.codex')
+  })
+
+  test('a realistically long project id produces a bounded control socket that binds', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'codex-socket-'))
+    const projectId = `customer-import-${'x'.repeat(112)}`
+    const projectHome = codexProjectHome(join(tmp, '.codex'), projectId)
+    const socketPath = codexControlSocketPath(projectHome)
+
+    expect(projectHome.split('/').at(-1)).toHaveLength(22)
+    expect(Buffer.byteLength(socketPath, 'utf8')).toBeLessThanOrEqual(
+      CODEX_CONTROL_SOCKET_PATH_MAX_BYTES,
+    )
+
+    // A BIND HERE IS CORROBORATION, NOT THE GUARD. Measured on this kernel: `node:net`
+    // and `Bun.listen` both bind pathnames up to 109 bytes, i.e. they are WIDER than the
+    // rule Codex (and libc) enforce at 107 — so a successful bind cannot witness the
+    // boundary and only the byte assertion above can. The boundary is pinned separately,
+    // against the measured subject, in the test below.
+    const bindError = await bindUnixSocket(socketPath)
+    if (bindError?.code === 'EPERM') {
+      // Some restricted test runners forbid AF_UNIX binds altogether. Prove that
+      // environmental refusal with a known-short positive control; anywhere that
+      // permits sockets must exercise the real bind above successfully.
+      const controlError = await bindUnixSocket(join(tmp, 'short.sock'))
+      expect(controlError?.code).toBe('EPERM')
+    } else {
+      expect(bindError).toBeNull()
+    }
+  })
+
+  test('a composed control socket over the bound is refused, never truncated', () => {
+    // MULTIBYTE ON PURPOSE: 33 × 'é' is 33 characters and 66 bytes, so a length-based
+    // check would pass this and a byte-based one must not.
+    const overlongGlobalHome = `/${'é'.repeat(33)}`
+    const unboundedSocket = codexControlSocketPath(overlongGlobalHome)
+    expect(Buffer.byteLength(unboundedSocket, 'utf8')).toBeGreaterThan(
+      CODEX_CONTROL_SOCKET_PATH_MAX_BYTES,
+    )
+
+    expect(() => assertCodexControlSocketPath(overlongGlobalHome)).toThrow(
+      CodexControlSocketPathError,
+    )
+    expect(() => assertCodexControlSocketPath(overlongGlobalHome)).toThrow(
+      /control socket path is \d+ bytes; the Linux maximum is 107 bytes/,
+    )
+    // REFUSED, NOT SHORTENED. A truncating implementation would have returned SOMETHING —
+    // a prefix that binds at the wrong place is worse than the overrun it replaces — so
+    // the absence of a return value is asserted rather than assumed.
+    let returned: unknown = 'not-called'
+    try {
+      returned = assertCodexControlSocketPath(overlongGlobalHome)
+    } catch {
+      returned = 'threw'
+    }
+    expect(returned).toBe('threw')
+  })
+
+  /**
+   * THE BOUND, IN BOTH DIRECTIONS, ON THE EXACT BYTE IT TURNS.
+   *
+   * An over-bound case alone is satisfied by a guard that refuses everything, which is the
+   * most common real defect here. So the byte BELOW the boundary must be accepted by the
+   * same call that refuses the byte above it.
+   *
+   * The numbers are not this file's opinion: `codex app-server daemon version`
+   * (codex-cli 0.154.0) was run against CODEX_HOMEs composed to put the derived socket
+   * pathname on each side of the line. 107 connects; 108 answers `path must be shorter
+   * than SUN_LEN`. A raw libc AF_UNIX bind agrees (107 binds, 108 is ENAMETOOLONG).
+   */
+  test('the bound turns between 107 and 108 bytes — accepted below, refused above', () => {
+    const suffixBytes = Buffer.byteLength(codexControlSocketPath(''), 'utf8')
+    // `codexControlSocketPath('')` is the relative suffix, so its length is what a home
+    // contributes on top of. Guard the arithmetic rather than trusting it.
+    expect(suffixBytes).toBeGreaterThan(0)
+    const homeOf = (socketBytes: number): string => {
+      const home = `/${'h'.repeat(socketBytes - suffixBytes - 2)}`
+      expect(Buffer.byteLength(codexControlSocketPath(home), 'utf8')).toBe(socketBytes)
+      return home
+    }
+
+    const atBound = homeOf(CODEX_CONTROL_SOCKET_PATH_MAX_BYTES)
+    expect(assertCodexControlSocketPath(atBound)).toBe(atBound)
+
+    const overBound = homeOf(CODEX_CONTROL_SOCKET_PATH_MAX_BYTES + 1)
+    expect(() => assertCodexControlSocketPath(overBound)).toThrow(CodexControlSocketPathError)
+  })
+
+  /**
+   * THE RESOLVERS ARE TOTAL, AND THAT IS A DECISION — not an omission (#637).
+   *
+   * A CODEX_HOME serves two unrelated purposes: it holds `auth.json` (what every caller in
+   * this tree does) and it is what a daemon derives a control socket from (what no caller
+   * in this tree does — SPEC.md records that `codex app-server daemon start` refuses on
+   * this install for want of a managed standalone distribution). Enforcing the socket
+   * bound at directory resolution charged the first for the second. MEASURED: a 26-byte
+   * owner home — `<home>/neutron`, the `resolveNeutronHome` default — pushed the composed
+   * project socket to 109 bytes, so `codexProjectHome` threw; that is the single call
+   * behind `connect`, `status`, `refreshSeatLiveness` and `resolveActiveCodexHome` for a
+   * PROJECT-scoped seat, and a project-scoped Codex credential that works today would have
+   * stopped working on a box that never binds a socket.
+   *
+   * This asserts that decision positively, so re-adding the throw to either resolver reds
+   * here and has to argue with this comment rather than sail past it. The refusal itself is
+   * not weakened — the test above still requires it of the gate that owns it.
+   */
+  test('the resolvers stay total over an over-long home; only the socket gate refuses', () => {
+    const longOwnerHome = `/${'o'.repeat(120)}`
+    const global = resolveCodexHome({ owner_home: longOwnerHome })
+    expect(global).toBe(`${longOwnerHome}/.codex`)
+    const project = codexProjectHome(global, 'proj-alpha')
+    expect(project.startsWith(`${global}/projects/`)).toBe(true)
+    expect(project.split('/').at(-1)).toHaveLength(22)
+
+    // …and the gate that DOES own the bound still refuses this very path, so the two
+    // assertions above are a scoping decision and not a hole.
+    expect(Buffer.byteLength(codexControlSocketPath(project), 'utf8')).toBeGreaterThan(
+      CODEX_CONTROL_SOCKET_PATH_MAX_BYTES,
+    )
+    expect(() => assertCodexControlSocketPath(project)).toThrow(CodexControlSocketPathError)
   })
 
   test('writes auth.json at CODEX_HOME with mode 0600', () => {
