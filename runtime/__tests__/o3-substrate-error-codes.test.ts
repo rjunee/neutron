@@ -32,6 +32,7 @@ const ALL_CLASSES: readonly SubstrateErrorClass[] = [
   'all_cooldown',
   'oauth_refresh',
   'repl_unreconciled',
+  'spawn_configuration',
 ]
 
 describe('SUBSTRATE_ERROR_CODES — registered code table', () => {
@@ -40,6 +41,7 @@ describe('SUBSTRATE_ERROR_CODES — registered code table', () => {
   })
 
   test('honours the O3 Care invariants: binary_not_found non-retryable, all_cooldown retryable', () => {
+    expect(SUBSTRATE_ERROR_CODES.spawn_configuration.retryable).toBe(false)
     expect(SUBSTRATE_ERROR_CODES.binary_not_found.retryable).toBe(false)
     expect(SUBSTRATE_ERROR_CODES.all_cooldown.retryable).toBe(true)
     // turn_timeout stays retryable on the same credential; channel_wedged does not.

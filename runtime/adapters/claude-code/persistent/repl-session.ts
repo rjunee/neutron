@@ -303,7 +303,7 @@ export class ReplSession {
     readonly childGeneration: string,
     readonly sessionId: string,
     readonly channelName: string,
-    /** The child's working directory (`options.cwd ?? process.cwd()` at spawn).
+    /** The child's explicitly supplied working directory.
      *  Load-bearing for resolving THIS session's transcript JSONL path
      *  (`sessionJsonlPath(sessionId, cwd, projectsDir)` — CC lays it out under
      *  `<projectsDir>/<cwd-dashed>/<sessionId>.jsonl`). The context-reset sweep

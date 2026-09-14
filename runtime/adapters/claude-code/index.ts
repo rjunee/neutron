@@ -84,8 +84,10 @@ export interface ClaudeCodeSubstrateOptions {
   /**
    * Working directory for the REPL. Affects both the binary's `--session-id`
    * transcript path (`~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`) and
-   * the CWD the REPL inherits. DERIVED, not part of the warm-pool key. Default:
-   * `process.cwd()`.
+   * the CWD the REPL inherits. DERIVED, not part of the warm-pool key. NO
+   * DEFAULT: a missing or blank value is refused at start/spawn as
+   * `spawn_configuration` rather than silently becoming the service's own cwd
+   * (`persistent/spawn-configuration-error.ts`).
    */
   cwd?: string
   /**
@@ -323,15 +325,15 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
  *     the process CWD, splitting supervision off the instance it supervises.
  *
  * A blank `cwd` therefore resolves to UNSET rather than to a substitute: the
- * caller said nothing, so the pool's own documented default (`process.cwd()`)
- * applies, which is a directory that exists. The supervision home keeps its own
+ * caller said nothing, so start/spawn refuses it as `spawn_configuration`.
+ * A launch requires an explicit directory. The supervision home keeps its own
  * documented fallback chain (`cwd`, then `NEUTRON_HOME`).
  *
  * WHEN BOTH ARE BLANK, SUPERVISION IS OFF, DELIBERATELY. `home: undefined`
  * skips the whole supervision block — registry, respawns, watchdog, heartbeat —
  * because there is nowhere to put a per-instance registry, and inventing one
  * under whatever CWD systemd chose is how two instances end up sharing a
- * registry that names neither. The REPL still runs; only recovery is absent.
+ * registry that names neither. A launch without cwd is also refused.
  * That direction is pinned in
  * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts`, at
  * the SEAM (whether the supervision block arms) and not only as a returned

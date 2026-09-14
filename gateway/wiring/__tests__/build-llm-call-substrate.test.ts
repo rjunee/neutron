@@ -887,6 +887,8 @@ test('O3 — code:aborted is authoritative in the COOLDOWN section too: a caller
 
 test('O3 — code-authoritative cooldown MATRIX (every taxonomy member): only rate_limited/http_status cool the SELECTED credential', async () => {
   const cases: Array<{ code: SubstrateErrorClass; retryable: boolean; message: string; cools: boolean }> = [
+    { code: 'spawn_configuration', retryable: false, message: 'opaque', cools: false },
+    { code: 'repl_unreconciled', retryable: true, message: 'opaque', cools: false },
     { code: 'binary_not_found', retryable: true, message: 'opaque', cools: false },
     { code: 'channel_wedged', retryable: true, message: 'opaque', cools: false },
     { code: 'turn_timeout', retryable: true, message: 'opaque', cools: false },

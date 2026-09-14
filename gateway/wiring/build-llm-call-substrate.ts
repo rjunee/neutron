@@ -294,7 +294,7 @@ export interface BuildLlmCallSubstrateInput {
    * silences the product.
    */
   credential_failure_lane?: FailureOrigin
-  /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
+  /** Cwd threaded to `createClaudeCodeSubstrateAuto`; Claude start refuses missing or blank values. */
   cwd?: string
   /**
    * Optional `--append-system-prompt-file` for the spawned REPL, threaded onto

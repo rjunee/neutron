@@ -72,6 +72,7 @@ export type SubstrateErrorClass =
   | 'all_cooldown'
   | 'oauth_refresh'
   | 'repl_unreconciled'
+  | 'spawn_configuration'
 
 export type Event =
   | { kind: 'token'; text: string }

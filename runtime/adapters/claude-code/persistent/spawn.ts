@@ -2,6 +2,7 @@
 // Session spawn / resume / turn-inject machinery + the respawn in-flight gate
 // (D2 split).
 
+import { requireReplCwd } from './spawn-configuration-error.ts'
 import { dropLocalOwnership } from './local-ownership.ts'
 import { randomUUID, randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -67,6 +68,7 @@ async function spawnSession(
   spec: AgentSpec,
   resume?: ResumeDirective,
 ): Promise<ReplSession> {
+  const cwd = requireReplCwd(options.cwd)
   // ISSUES #537 — start the sink on its DERIVED-PER-INSTANCE port with its
   // PERSISTED token, both keyed off this substrate's state dir (`sinkTokenPath`,
   // derived with the rest of the durable REPL state by
@@ -78,7 +80,6 @@ async function spawnSession(
     ...(options.sinkPort !== undefined ? { port: options.sinkPort } : {}),
     ...(options.sinkTokenPath !== undefined ? { tokenPath: options.sinkTokenPath } : {}),
   })
-  const cwd = options.cwd ?? process.cwd()
   const requestedModel = spec.model_preference[0]
   if (requestedModel === undefined) {
     throw new Error('persistent-repl: model_preference is empty; at least one model required')

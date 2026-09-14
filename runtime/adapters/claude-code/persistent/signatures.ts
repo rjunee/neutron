@@ -563,7 +563,7 @@ function dispatchResumePickerRecovery(
 ): void {
   if (session.resumePickerRecovering) return
   session.resumePickerRecovering = true
-  const cwd = options.cwd ?? process.cwd()
+  const cwd = session.cwd
   // Resolve the transcript root the SAME way the spawn / dead-turn watcher do so
   // an isolated `CLAUDE_CONFIG_DIR` session's JSONL is actually found (Codex P2) —
   // a raw `options.projectsDir` is undefined under claudeConfigDir and would fall

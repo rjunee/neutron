@@ -5,6 +5,7 @@
 import { getBestModel } from '../../../models.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { AgentSpec, Substrate } from '../../../substrate.ts'
+import { requireReplCwd } from './spawn-configuration-error.ts'
 import { classifyThrownSpawnError } from './classify-spawn-error.ts'
 import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
@@ -132,7 +133,7 @@ function enqueueDroppedInbound(
   const entry: PendingRespawnEntry = {
     sessionKey,
     sessionId: session.sessionId,
-    cwd: options.cwd ?? process.cwd(),
+    cwd: session.cwd,
     substrate_instance_id: options.substrate_instance_id,
     droppedInbound,
   }
@@ -302,7 +303,7 @@ export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
       options.credential_identity ?? '_nocred',
     ].join(SESSION_KEY_SEP)
   }
-  return `${options.substrate_instance_id}${SESSION_KEY_SEP}${options.cwd ?? process.cwd()}`
+  return `${options.substrate_instance_id}${SESSION_KEY_SEP}${options.cwd ?? ''}`
 }
 
 /**
@@ -387,7 +388,6 @@ async function disposeEphemeralSession(session: ReplSession): Promise<void> {
  * purposes never share a transcript. A session-ful dispatch always pools.
  */
 export function createPersistentReplSubstrate(options: PersistentReplSubstrateOptions): Substrate {
-  const cwd = options.cwd ?? process.cwd()
   const sessionKey = poolKeyFor(options)
   const inactivityDefaultMs = options.turnTimeoutMs ?? DEFAULT_TURN_INACTIVITY_MS
   const absoluteCeilingDefaultMs =
@@ -435,6 +435,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       const driver = (async (): Promise<void> => {
        try {
         try {
+          requireReplCwd(options.cwd)
           session = ephemeral
             ? await spawnEphemeralSession(options, spec)
             : await getOrSpawnSession(sessionKey, options, spec)
