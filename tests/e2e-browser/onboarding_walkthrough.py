@@ -241,7 +241,26 @@ def read_log_appended(start_offset):
 
 
 def run() -> int:
-    from playwright.sync_api import sync_playwright
+    # A MISSING PREREQUISITE IS "COULD NOT RUN", AND THIS FILE ALREADY KNOWS THAT.
+    # Every other not-a-pass path here is exit 2 precisely so a check that cannot
+    # check anything is never mistaken for one that passed — but this import sat
+    # bare, above `server_up()`, so on a host without the Playwright binding the
+    # walkthrough died with a TRACEBACK and exit 1, before a single assertion ran.
+    # Exit 1 is what a genuine assertion failure returns, so the two were
+    # indistinguishable to anything reading the exit code, and the walkthrough was
+    # read as BROKEN when it had never executed. It is exit 2 whether or not
+    # `E2E_ALLOW_SKIP` is set: an absent binding is not something a caller can
+    # opt out of, and returning 0 here is the false green this file exists to
+    # refuse.
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError as missing:
+        print("E2E COULD NOT RUN — the Python Playwright binding is not installed")
+        print(f"  {missing}")
+        print("  Install it on the lane host (`pip install playwright` +")
+        print("  `playwright install chromium`). This is exit 2, not a pass and")
+        print("  not a failure: nothing in this walkthrough has been executed.")
+        return 2
 
     if not server_up():
         # Exit 2, not 0. A check that cannot check anything must not be
