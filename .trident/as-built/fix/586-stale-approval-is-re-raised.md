@@ -138,3 +138,11 @@ The public leak gate found zero findings among rules that ran, but reported
 INCOMPLETE because the private PII denylist was unavailable. This is not a clean
 purity verdict. No full test-suite run, network operation, push, PR creation,
 or merge was performed for this continuation.
+
+The Core status result type also carries the optional expiry reason
+(`cores/free/reminders/src/backend.ts:266`). The Core package typecheck and
+focused ESLint check passed after this type-only addition. The original worker's
+final matrix independently confirmed 46 passing configurations and the same five
+failing configurations documented above; its five focused test files passed all
+123 tests. This follow-up preserves the concurrent continuation's main commit
+and validation record.
