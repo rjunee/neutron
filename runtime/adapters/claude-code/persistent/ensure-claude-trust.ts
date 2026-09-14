@@ -32,8 +32,8 @@
 
 import { flockAvailable, withFlockSync } from './registry-lock.ts'
 import { SpawnConfigurationError } from './spawn-configuration-error.ts'
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync, lstatSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 
 let warnedUnavailable = false
@@ -62,6 +62,37 @@ function resolveRealCwd(cwd: string): string {
   }
 }
 
+const retentionKey = 'neutronSeededProjectParentV1'
+
+// Record the immediate parent while a newly owned project is live. Its identity
+// distinguishes child deletion from an unavailable or replaced volume.
+function projectParentIdentity(cwd: string): string | undefined {
+  const parent = dirname(cwd)
+  try {
+    const stat = lstatSync(parent, { bigint: true })
+    if (!stat.isDirectory()) return undefined
+    return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`
+  } catch {
+    return undefined
+  }
+}
+
+function pruneRemovedProjects(projects: NonNullable<ClaudeConfig['projects']>, current: string): void {
+  for (const [path, project] of Object.entries(projects)) {
+    if (path === current) continue
+    const identity = project[retentionKey]
+    if (typeof identity !== 'string') continue
+    try {
+      // lstat preserves dangling links and unmounted mount-point directories.
+      lstatSync(path)
+    } catch (error) {
+      // EACCES, ENOTDIR, IO errors, etc. are uncertainty, never deletion proof.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT'
+        && projectParentIdentity(path) === identity) delete projects[path]
+    }
+  }
+}
+
 /**
  * Pre-seed trust + bypass acceptance for `cwd` in the claude config the child
  * will read. Idempotent. Returns the config-file path written (for logging).
@@ -82,18 +113,33 @@ export function ensureClaudeTrust(input: EnsureClaudeTrustInput): string {
       try {
         config = JSON.parse(readFileSync(file, 'utf8')) as ClaudeConfig
       } catch {
-        config = {}
+        throw new SpawnConfigurationError('persistent-repl: cannot read Claude trust config')
       }
+    }
+
+    if (config === null || typeof config !== 'object' || Array.isArray(config)
+      || (config.projects !== undefined && (config.projects === null
+        || typeof config.projects !== 'object' || Array.isArray(config.projects)
+        || Object.values(config.projects).some(p => p === null || typeof p !== 'object' || Array.isArray(p))))) {
+      throw new SpawnConfigurationError('persistent-repl: invalid Claude trust config shape')
     }
 
     config.hasCompletedOnboarding = true
     config.bypassPermissionsModeAccepted = true
     const projects = config.projects ?? {}
+    pruneRemovedProjects(projects, realCwd)
+    const newlySeeded = !Object.hasOwn(projects, realCwd)
     const existing = projects[realCwd] ?? {}
     projects[realCwd] = {
       ...existing,
       hasTrustDialogAccepted: true,
       hasCompletedProjectOnboarding: true,
+    }
+    const identity = projectParentIdentity(realCwd)
+    if (newlySeeded && identity !== undefined) {
+      try {
+        if (lstatSync(realCwd).isDirectory()) projects[realCwd]![retentionKey] = identity
+      } catch { /* An unavailable cwd cannot establish retention provenance. */ }
     }
     config.projects = projects
 
