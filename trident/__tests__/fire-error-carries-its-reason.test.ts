@@ -69,7 +69,11 @@ describe('a failed fire carries the producer’s reason', () => {
 
   it('a turn that COMPLETES is untouched by any of this', async () => {
     const out = await fireOnce([
-      { kind: 'completion', usage: { input: 0, output: 0 }, substrate_instance_id: 's' } as Event,
+      {
+        kind: 'completion',
+        usage: { input_tokens: 0, output_tokens: 0 },
+        substrate_instance_id: 's',
+      },
     ])
     expect(out.status).toBe('fired')
     expect(out.error).toBeNull()
