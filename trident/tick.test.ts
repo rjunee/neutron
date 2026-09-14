@@ -14,7 +14,7 @@ import {
 } from './state-machine.ts'
 import { TridentTickLoop } from './tick.ts'
 import { buildTridentTerminator } from './terminate.ts'
-import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
+import { buildTridentDelivery, interpretFailure, type OutboundSink } from './delivery.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 
 let tmp: string
@@ -269,6 +269,18 @@ describe('TridentTickLoop.runOnce', () => {
       // (leading ❌ + a human-facing summary), not a raw "build failed: <reason>".
       expect(sent[0]!.text).toContain('❌')
       expect(sent[0]!.text).toContain('sub-agent crashed')
+      // #796 PINS THE SPLIT, NOT A STRING. The ask that used to ride along with
+      // the evidence ("Reply to retry the build…") now belongs to the project
+      // decision turn, which consults the arbiter before involving the owner —
+      // so it must be ABSENT here. The two assertions above are its control:
+      // they fail if the announce is degraded to a stub instead of trimmed, so
+      // "no advice" can never be satisfied by "no message".
+      expect(sent[0]!.text).not.toContain('Reply to retry the build')
+      // And the clause IS what the interpreter would otherwise have appended —
+      // proving the absence above is a real removal, not a fixture that never
+      // produced one.
+      expect(interpretFailure(store.get(run.id)!).input_needed)
+        .toContain('Reply to retry the build')
     })
 
     test('a NON-terminal transition does not deliver', async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
-import { buildTridentDelivery, composeTerminalDelivery } from '@neutronai/trident/delivery.ts'
+import { buildTridentDelivery, composeTerminalDelivery, interpretFailure } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
 import type { ArbitrationOutcome } from '@neutronai/trident/arbiter.ts'
@@ -62,7 +62,19 @@ for (const family of ['returned-question', 'error-text', 'harvested-escalation',
     const hook = composeTerminalHook(buildTridentDelivery({ sink: { send: async (m) => { passive.push(m.text); return 'status' } } }),
       [buildTerminalBuildWakeObserver(h.deps)])
     await hook.onTerminal(run)
-    expect(passive).toEqual(['🛑 Build stopped; the project conversation has the result for investigation.'])
+    // THE ANNOUNCE IS THE RELOCATION, SPELLED OUT. #796 moves the ASK, not the
+    // evidence: the deterministic announce still interprets the failure (#352),
+    // and only `input_needed` — the owner-directed "reply to retry" clause — is
+    // withheld, because the project decision turn below consults the arbiter
+    // before deciding the owner is needed. Asserted as evidence-present AND
+    // ask-absent so a stub announce cannot satisfy this pair.
+    const interp = interpretFailure(run)
+    expect(passive).toHaveLength(1)
+    expect(passive[0]).toContain(interp.summary)
+    expect(passive[0]).not.toContain(interp.input_needed)
+    expect(passive[0]).toBe(composeTerminalDelivery(run, { include_advice: false })!.text)
+    // And the ask is not lost — the decision turn receives it in full.
+    expect(h.prompts[0]).toContain(interp.input_needed)
     expect(h.order).toEqual(['arbiter', 'project', 'post', 'complete'])
     expect(h.prompts[0]).toContain(JSON.stringify(composeTerminalDelivery(run)))
     expect(h.prompts[0]).toContain('owner-only')

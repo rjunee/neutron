@@ -7,9 +7,17 @@
  * approve/decline affordance. Pure (id + record in → string out) so the
  * channel layer just delivers it.
  *
- * The project conversation decides whether to offer the persisted proposal.
- * The closing line names the actual approve/decline command surface; a bare
- * "approve" reply is an ordinary conversation turn, not a proposal decision.
+ * THE CLOSING LINE NAMES A REAL SURFACE. It used to read "Reply *approve* …",
+ * which was harmless only while this message went nowhere but a log line. Now
+ * that the composer delivers it into the owner's chat (`open/composer.ts`, the
+ * skill-forge notifier), that instruction is live — and replying the bare word
+ * "approve" does NOT approve anything: it is an ordinary chat message that
+ * falls through to the LLM turn. The one surface that decides a proposal is the
+ * `/skills` command filter (`./command.ts` — `approve|decline <id>`, shared with
+ * the `skill_forge_*` MCP tools through one `SkillForgeBackend`), so the message
+ * quotes that verbatim, in the SAME wording `/skills list` already uses
+ * (`command.ts` list output). An offer whose acceptance instruction doesn't work
+ * is worse than no offer.
  */
 
 import type { ProposalRecord } from './types.ts'

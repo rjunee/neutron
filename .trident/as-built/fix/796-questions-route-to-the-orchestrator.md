@@ -2,13 +2,27 @@
 
 ### Change and evidence
 
-Terminal failure delivery now emits passive status rather than worker advice
-(`trident/delivery.ts:1446`). The unchanged `composeTerminalDelivery` formatter
-is consumed as JSON data by the project turn (`gateway/proactive/terminal-build-wake.ts:90`).
+Terminal failure delivery now withholds the owner-directed ASK and keeps the
+interpreted EVIDENCE (`trident/delivery.ts:1485`). The first draft of this branch
+replaced the whole failed announce with a stub; review established that the
+interpreted text then reached no owner-visible surface at all — its only
+remaining copy was the JSON inside the decision turn's prompt
+(`gateway/proactive/terminal-build-wake.ts:90`), and the turn's reply is
+free-form model text that nothing constrains to carry the reason. That is a
+deletion of #352's property, not a relocation of it, so the stub was withdrawn.
+
+What moves instead is exactly the clause that is a question to the owner:
+`FailureInterpretation.input_needed` ("Reply to retry the build, or take it from
+here manually."). `composeTerminalDelivery` gained one option,
+`include_advice` (`trident/delivery.ts:76`), which drops that clause and leaves
+every other byte identical; the announce composes with `include_advice: false`
+and the decision turn's evidence payload keeps the default. An injected
+`compose` override is used whole.
+
+The unchanged `composeTerminalDelivery` formatter is consumed as JSON data by
+the project turn (`gateway/proactive/terminal-build-wake.ts:90`).
 The resolver already returned its question (`trident/conflict-resolver.ts:247`);
 its shortcut was the shared terminal sender, not a separate resolver send.
-The filed delivery citation moved from 1274 to 1446; the resolver citation still
-lands on its ESCALATE parser.
 
 Failed results consult the existing arbiter before the project conversation
 (`gateway/proactive/terminal-build-wake.ts:111`). Its existing vocabulary is
@@ -18,11 +32,15 @@ becomes decision evidence; none sends by itself. An arbiter rejection becomes
 The project retains the live tool surface and originating-chat post
 (`open/composer.ts:4278`, `open/composer.ts:4288`).
 
-Skill proposals remain persisted and discoverable; the automatic notifier send
-is removed (`open/composer.ts:1253`). The decision prompt requests
-`skill_forge_list` (`gateway/proactive/terminal-build-wake.ts:97`). A production
-composition test demonstrates the project offering the persisted proposal
-(`open/__tests__/open-skill-forge-wiring.test.ts:190`).
+Skill proposals keep the button-backed delivery that #820 shipped on main. This
+branch originally removed that notifier send; the removal was written against a
+base that predated #820 and would have retired an owner-facing capability that
+landed the same day, under a routing-refactor banner. On rebase the delivery was
+kept and the branch's contradicting assertions dropped. The routing addition is
+additive on top of it: the decision prompt requests `skill_forge_list`
+(`gateway/proactive/terminal-build-wake.ts:97`), and a production composition
+test demonstrates the project offering the persisted proposal alongside the
+delivered prompt (`open/__tests__/open-skill-forge-wiring.test.ts:247`).
 
 ### Continuous maintenance and decisions
 
@@ -60,7 +78,9 @@ both passive worker delivery and a project-authored question in the right chat.
 
 | Guard and landing | Mutation | Red | Restored green |
 | --- | --- | --- | --- |
-| `trident/delivery.ts:1449` worker routing | force failure selector false | 1 | 0 |
+| `trident/delivery.ts:1485` announce composes without the ask | restore the stub announce | 1 | 0 |
+| `trident/delivery.ts:1485` announce composes without the ask | pass `include_advice: true` | 1 | 0 |
+| `trident/delivery.ts:1360` the flag actually drops the clause | ignore `include_advice` | 1 | 0 |
 | `gateway/proactive/terminal-build-wake.ts:138` project can ask | return before project post | 1 | 0 |
 | `gateway/proactive/terminal-build-wake.ts:111` arbiter first | skip arbitration | 1 | 0 |
 | `gateway/proactive/terminal-build-wake.ts:138` durable completion | ignore false post result | 1 | 0 |
@@ -115,3 +135,44 @@ or HTTP authorization changes, a second executor, feature flags, and changing
 formatter distinctions. This is the authorized routing step, not the withdrawn
 enforcement project. No network operations, push, PR creation, or merge were run.
 The as-built staging location follows the build-lane task's explicit override.
+
+### Review round — what changed after the lane exited
+
+1. **The stub was a regression, not a relocation.** Established by tracing the
+   only two owner-reaching surfaces for a terminal failure: the deterministic
+   announce (`trident/delivery.ts:1485`) and the decision turn's post
+   (`gateway/proactive/terminal-build-wake.ts:138`, whose text is the model's
+   `reply`). The interpreted message appeared in neither under the stub — only
+   in the prompt (`:90`) and the arbiter evidence field (`:115`). A `❌` grep
+   over the test tree matched seven files and zero of the wake-path tests, so
+   nothing asserted it reached the owner. Fixed by the advice/evidence split
+   above; `trident/tick.test.ts` now pins BOTH halves (evidence present, ask
+   absent, with the interpreter's own `input_needed` as the non-vacuity
+   control), and `gateway/proactive/__tests__/worker-question-routing.test.ts`
+   asserts the announce equals the advice-free composition while the ask is
+   present in full in the decision prompt.
+
+2. **Loop inventories.** Four were enumerated; two needed the declaration.
+   `loop/registry.test.ts` is a unit test of `LoopRegistry` over synthetic names
+   (`cron`/`reminders`/`trident`) and enumerates no production loop — no change.
+   `gateway/__tests__/loop-inventory-production-composer.test.ts` asserts the
+   GATEWAY graph's registry exactly, and `terminal-build-decisions` is
+   registered by the Open composer, so it was already passing; it was added to
+   that file's `OPEN_COMPOSER_LOOPS` (the must-be-absent list) so the
+   cross-boundary claim stays complete rather than silent.
+
+3. **Not verified.** The leak gate cannot run armed on this box (Tier-1 PII
+   denylist is a repository secret); CI's `purity` job is the evidence. No
+   production boot was exercised against a live substrate.
+
+4. **Open risk the review did NOT fix (follow-up, not a blocker for the routing
+   question).** `listPendingAgentWakes` (`trident/store.ts`) selects EVERY
+   terminal row with a non-empty `chat_id` and `agent_waked_at IS NULL`, with no
+   recency bound and no `LIMIT`. Migration `0127` added the column with no
+   backfill, so on a long-lived instance every terminal run that predates #335,
+   plus every run whose wake never claimed (an LLM-less boot returns before
+   claiming), is "pending". The first sweep after deploy would dispatch one
+   acting turn and one owner post per such row, sequentially, and repeat every
+   60 s until each posts. A recency floor (`last_advanced_at` within N hours)
+   or a `LIMIT` on the sweep query would bound it; both need their own test, so
+   this is filed rather than patched here.

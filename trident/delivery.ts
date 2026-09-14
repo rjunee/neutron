@@ -62,6 +62,20 @@ export interface ComposedDelivery {
   inline_choices?: InlineChoice[]
 }
 
+/**
+ * #796 — options for the ONE terminal-result composer.
+ *
+ * `include_advice: false` drops the `input_needed` clause and keeps everything
+ * else byte-identical. It exists so the deterministic chat ANNOUNCE can carry
+ * #352's interpreted evidence (glyph + plain-language summary + trail) without
+ * also carrying the owner-directed ask, which #796 routes to the project
+ * decision turn instead. Default `true` — every existing caller, including the
+ * decision turn's own evidence payload, is unchanged.
+ */
+export interface ComposeTerminalDeliveryOptions {
+  include_advice?: boolean
+}
+
 export interface BuildTridentDeliveryOptions {
   /** The outbound seam — production passes the instance `ChannelRouter`. */
   sink: OutboundSink
@@ -73,8 +87,11 @@ export interface BuildTridentDeliveryOptions {
    */
   channel_kind?: Topic['channel_kind']
   /**
-   * Override the result-message composer (else `composeTerminalDelivery`).
-   * Lets a caller restyle the copy without touching the routing/send path.
+   * Override the result-message composer. Lets a caller restyle the copy
+   * without touching the routing/send path. An override is used WHOLE — the
+   * default's `include_advice: false` split (#796) is not applied to it,
+   * because a caller supplying its own copy is already deciding what the
+   * announce says.
    */
   compose?: (run: TridentRun) => ComposedDelivery | null
 }
@@ -1331,9 +1348,19 @@ function workTitle(run: TridentRun): string {
  * says "merged and deployed" plainly, and drops branch/round jargon. A PR-mode
  * run still carries its PR number (an openable artifact, not jargon).
  */
-export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | null {
+export function composeTerminalDelivery(
+  run: TridentRun,
+  opts: ComposeTerminalDeliveryOptions = {},
+): ComposedDelivery | null {
   if (!isTerminalPhase(run.phase)) return null
   const title = workTitle(run)
+  // #796 — the ASK is separable from the EVIDENCE, and only the ask moves.
+  // `input_needed` is the clause addressed to the owner ("Reply to retry the
+  // build…"), which is exactly the worker question that must reach the
+  // orchestrator first. `summary` is the interpreted evidence #352 requires and
+  // is NEVER suppressed: omitting the ask must never cost the owner the reason.
+  const advice = (interp: FailureInterpretation): string =>
+    opts.include_advice === false ? '' : `\n${interp.input_needed}`
 
   switch (run.phase) {
     case 'done': {
@@ -1358,7 +1385,7 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // Every other class keeps the ❌ line byte-identical.
       if (interp.klass === 'infra-blocked') {
         return {
-          text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+          text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}${advice(interp)}${trail}`,
         }
       }
       // A FINISHED, PUSHED BUILD IS NOT A FAILURE EITHER. The words already said
@@ -1370,15 +1397,15 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // line byte-identical.
       if (interp.klass === 'escalated') {
         return {
-          text: `🛑 ${title} — build BLOCKED, not failed. It stopped instead of iterating.\n${interp.summary}\n${interp.input_needed}${trail}`,
+          text: `🛑 ${title} — build BLOCKED, not failed. It stopped instead of iterating.\n${interp.summary}${advice(interp)}${trail}`,
         }
       }
       if (interp.klass === 'published-unreviewed') {
         return {
-          text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}\n${interp.input_needed}${trail}`,
+          text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}${advice(interp)}${trail}`,
         }
       }
-      return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }
+      return { text: `❌ ${title} — ${interp.summary}${advice(interp)}${trail}` }
     }
     case 'stopped':
       // `/code stop` flips a row straight to `stopped` via the store (not
@@ -1433,7 +1460,6 @@ export function buildTridentDelivery(
   opts: BuildTridentDeliveryOptions,
 ): TridentTerminalHook {
   const fallback_channel_kind = opts.channel_kind ?? 'telegram'
-  const compose = opts.compose ?? composeTerminalDelivery
   return {
     async onTerminal(run: TridentRun): Promise<void> {
       // Derive the delivery channel from the RUN (#317) so a `/code` build
@@ -1443,12 +1469,26 @@ export function buildTridentDelivery(
       const channel_kind = run.channel_kind ?? fallback_channel_kind
       const topic = topicForRun(run, channel_kind)
       if (topic === null) return
-      const result = compose(run)
-      if (result === null) return
-      // Failure evidence and advice belong to the project decision turn.
-      const composed = run.phase === 'failed'
-        ? { text: '🛑 Build stopped; the project conversation has the result for investigation.' }
-        : result
+      // #796 — WHAT IT SAYS AND WHO DECIDES ARE DIFFERENT QUESTIONS.
+      //
+      // This announce is the owner's only DETERMINISTIC account of a terminal
+      // build; the project decision turn that follows it is a model turn whose
+      // text is free-form, so nothing there can be relied on to carry the
+      // reason. A stub here ("go look in the conversation") therefore does not
+      // relocate #352's interpreted failure message, it deletes it: the only
+      // remaining copy is the JSON inside a prompt
+      // (`gateway/proactive/terminal-build-wake.ts`), which the owner never sees.
+      //
+      // So the announce keeps the EVIDENCE and sheds only the ASK. The
+      // `input_needed` clause ("Reply to retry the build, or take it from here
+      // manually.") is the worker question #796 is about, and it is the project
+      // decision turn — which consults the arbiter first — that decides whether
+      // the owner is needed at all. An injected `compose` override is left
+      // whole: it is already choosing its own copy.
+      const composed = opts.compose !== undefined
+        ? opts.compose(run)
+        : composeTerminalDelivery(run, { include_advice: false })
+      if (composed === null) return
       const message: OutgoingMessage = { topic, text: composed.text }
       if (composed.inline_choices !== undefined && composed.inline_choices.length > 0) {
         message.inline_choices = composed.inline_choices
