@@ -166,6 +166,7 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { probeBuildFleet } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
   ensureKimiKeyExported,
@@ -4266,12 +4267,15 @@ export function buildOpenGraphComposer(
       } catch {
         /* best-effort */
       }
-      let activeTridentRuns = 0
-      try {
-        activeTridentRuns = boardRunStore.listNonTerminal().length
-      } catch {
-        /* best-effort */
-      }
+      // Process evidence owns this answer; durable rows only enrich the census.
+      // Unknown is CARRIED, not thrown: throwing here took `/status` out of the
+      // command chain entirely and sent the owner's message to the model instead
+      // (open/__tests__/reachability.test.ts caught exactly that). It is also not
+      // flattened to 0 — "zero active builds" is a real, actionable answer and
+      // must never stand in for "could not find out". Same vocabulary as
+      // `describeBuildFleet`, which already renders UNKNOWN (<reason>).
+      const fleet = probeBuildFleet()
+      const activeTridentRuns = fleet.status === 'known' ? fleet.lanes.length : null
       return {
         active_project: activeProject,
         model: getBestModel(),

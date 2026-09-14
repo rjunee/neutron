@@ -264,8 +264,9 @@ export interface StatusSnapshot {
   pending_reminders: number
   /** Count of ACTIVE work-board items in the active project scope. */
   active_work_items: number
-  /** Count of non-terminal (queued/running) Trident builds. */
-  active_trident_runs: number
+  /** Count of running Trident builds from the PROCESS census, or `null` when the
+   * census could not find out. Never 0 for unknown — that is a real answer. */
+  active_trident_runs: number | null
 }
 
 export function buildStatusChatCommandFilter(deps: {
@@ -299,7 +300,7 @@ export function formatStatusSnapshot(s: StatusSnapshot): string {
     `• Model: ${s.model}`,
     `• Pending reminders: ${s.pending_reminders}`,
     `• Active work items: ${s.active_work_items}`,
-    `• Active builds: ${s.active_trident_runs}`,
+    `• Active builds: ${s.active_trident_runs ?? 'UNKNOWN'}`,
   ].join('\n')
 }
 
