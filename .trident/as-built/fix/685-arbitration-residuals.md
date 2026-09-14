@@ -84,6 +84,14 @@ for the same search finding none in spawn.ts.
   prevents the relevant fixtures from reaching their subjects. This is not green
   validation and must be rerun in a socket-capable runner.
 
+  **RERUN, AND THE RESULT IS GREEN.** On a socket-capable runner the same two files
+  are **32 pass / 0 fail** (`pane-handle-persistence.test.ts` +
+  `spawn-failure-revokes-credential.test.ts`). The restriction was the build lane's
+  sandbox, not the change. The merge commit for PR #704 said as much; this shard
+  did not, and a reader arriving here was told the acceptance was still outstanding.
+  The mutation rows below are still labelled "NOT mutation proof" for the same
+  reason and are still owed a rerun — a green suite is not a mutation result.
+
 | Guard | Mutation and printed landing | Mutant result | Restored result |
 | --- | --- | --- | --- |
 | Readiness identity guard | `spawn.ts:550`: replace unregisterIf with unregister; fixed-to-mutant diff printed | 3 tests fail before the host is reached; NOT mutation proof | Same fixture restriction; NOT green |
