@@ -272,7 +272,7 @@ export function buildRitualFirePlanner(deps: RitualFirePlannerDeps): RitualFireP
       // must stop the fire: composing anyway would put a ritual in front of the
       // owner with nothing recorded about it, which is the data-loss class the
       // ledger exists to prevent. Throwing here surfaces to the dispatcher, which
-      // reverts the tick's claim so the occurrence retries on the next tick.
+      // records uncertainty so the occurrence can retry within its finite budget.
       await deps.runs.insertRunning({
         run_id,
         ritual_id,

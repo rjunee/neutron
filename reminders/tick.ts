@@ -3,13 +3,13 @@
  *
  * Runs every `tick_interval_ms`
  * (default 30 s — matches Nova's reminder loop), pulls due reminders via
- * `ReminderStore.listDue`, and dispatches each through the configured
+ * `ReminderStore.listDispatchable`, and dispatches each through the configured
  * `ReminderDispatcher`. Composition — which prompt a row fires with, which model,
  * where it posts — is entirely the dispatcher's responsibility, not this
  * module's.
  *
  * ONE DISPATCH PATH, NO EXCEPTIONS (ISSUES #504, SPEC Decisions Log 2026-08-05).
- * EVERY due row goes through `dispatcher.dispatch`. This loop does not know what
+ * EVERY eligible due row goes through `dispatcher.dispatch`. This loop does not know what
  * a ritual is, and there is deliberately no branch here on `ritual_id` — the
  * branch that used to live at this exact spot routed ritual rows to a separate
  * executor that spawned an ephemeral REPL with no tool bridge, which is why the
@@ -31,32 +31,10 @@ import { nextCronFire, parseCron } from '@neutronai/cron'
 import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
+import type { DeliveryObservation } from './delivery.ts'
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
 
 const log = createLogger('reminder-tick')
-
-/**
- * The one-shot half of the #319 claim revert: reopen the row, and — when the
- * caller wants it back at a DIFFERENT instant than it was claimed from — move
- * its `fire_at` there too.
- *
- * Split out as a named helper rather than an inline closure only because both
- * one-shot claim sites need the identical two-step, and a silently divergent
- * copy of "reopen, then reschedule" is the kind of drift that shows up as a row
- * retrying immediately in one code path and on a backoff in the other.
- */
-function reopenAt(
-  store: ReminderStore,
-  reminder: Reminder,
-): (fire_at_sec?: number) => Promise<boolean> {
-  return async (fire_at_sec = reminder.fire_at): Promise<boolean> => {
-    const reopened = await store.reopen(reminder.id)
-    if (reopened && fire_at_sec !== reminder.fire_at) {
-      await store.reschedule(reminder.id, fire_at_sec)
-    }
-    return reopened
-  }
-}
 
 /**
  * The zone a cron cadence is resolved in when the owner's own zone is not known
@@ -76,13 +54,8 @@ function reopenAt(
 export const REMINDER_FALLBACK_TIME_ZONE = 'UTC'
 
 export interface ReminderDispatcher {
-  /**
-   * Fire a single reminder. Implementations spawn a Haiku-class agent
-   * with the reminder body; on return the store marks fired. Throws
-   * surface as logged errors but DO NOT prevent the tick from continuing
-   * with other due reminders.
-   */
-  dispatch(reminder: Reminder): Promise<void>
+  /** Only an explicit delivery observation earns fired; void means unknown. */
+  dispatch(reminder: Reminder): Promise<DeliveryObservation | void>
 }
 
 /**
@@ -195,95 +168,30 @@ export class ReminderTickLoop {
     return { fired: this.firedCount - before, skipped_due_to_overlap: false }
   }
 
-  /**
-   * The domain tick body. Everything below is UNCHANGED from the original
-   * hand-rolled loop — including the #319 claim-before-dispatch +
-   * compare-and-swap revert ordering, which must not move. Only the loop
-   * scaffolding (single-flight guard, error catch-all, quiescing stop) was
-   * lifted out into {@link SupervisedLoop}.
-   */
   private async tickBody(): Promise<void> {
-    let fired = 0
-    // Scoped block: the body below is lifted verbatim from the old `runOnce`
-    // (its `try` block); the brace keeps it byte-identical for review.
-    {
-      const due = this.store.listDue(this.now() / 1000, this.per_tick_limit)
-      for (const reminder of due) {
-        // #319 — CLAIM the row BEFORE dispatch. The terminal state-change
-        // (markFired for one-shot rows; advanceRecurrence for recurring rows,
-        // per P2 v2 S9 / Codex S9-r1 P1 so weekly/monthly nudges keep firing
-        // instead of vanishing after one fire) is committed FIRST, THEN the
-        // post happens. This closes the crash-window double-fire: previously
-        // the row stayed `pending` until AFTER the post, so a process crash
-        // between a successful post and `markFired` left a due `pending` row
-        // that re-fired (double-sent) on restart. Claiming first means a crash
-        // at any point leaves an already-fired/advanced row that listDue won't
-        // re-pick. `claimRevert` un-does the claim on a (caught) dispatch
-        // throw, which always means the post did NOT succeed — so the row goes
-        // back to pending and retries next tick, preserving the existing
-        // deliver-or-retry contract. Only a true crash (no catch runs) takes
-        // the at-most-once path, which is the whole point.
-        //
-        // `claimRevert` takes the instant (unix SECONDS) the row should become
-        // due again, defaulting to the fire_at it was claimed from — which is
-        // what the deliver-or-retry contract wants (retry on the very next tick).
-        let claimRevert: ((fire_at_sec?: number) => Promise<unknown>) | null = null
-        // A row recurs when EITHER cadence column is set (coarse label OR cron
-        // spec) — `computeNextFire` resolves the next instant from whichever
-        // one is populated. A `null` return means an uncomputable cadence (a
-        // corrupt cron that can never fire); we degrade that row to a one-shot
-        // so a poison expression can't wedge the tick loop re-throwing forever.
-        const next_fire_at_sec = isRecurring(reminder)
-          ? computeNextFire(reminder, this.now() / 1000, this.ownerTimeZone(reminder.owner_slug))
-          : null
-        if (next_fire_at_sec !== null) {
-          const advanced = await this.store.advanceRecurrence(reminder.id, next_fire_at_sec)
-          if (advanced) {
-            // Revert = restore the original (due) fire_at so it re-fires — but
-            // ONLY if the row still carries the fire_at this claim wrote. A
-            // compare-and-swap so a concurrent owner reschedule during the
-            // dispatch await isn't clobbered by the revert (#319).
-            claimRevert = (fire_at_sec = reminder.fire_at) =>
-              this.store.revertRecurrenceAdvance(reminder.id, next_fire_at_sec, fire_at_sec)
-          } else {
-            // Defensive: the row stopped being a pending recurring row between
-            // listDue + now (e.g. cancelled mid-tick) — finalize as fired.
-            await this.store.markFired(reminder.id)
-            claimRevert = reopenAt(this.store, reminder)
-          }
-        } else {
-          if (isRecurring(reminder)) {
-            log.error('uncomputable_cadence_fire_once_then_retire', {
-              reminder: reminder.id,
-              recurrence_spec: JSON.stringify(reminder.recurrence_spec),
-            })
-          }
-          await this.store.markFired(reminder.id)
-          claimRevert = reopenAt(this.store, reminder)
+    await this.store.initializeDelivery()
+    const due = this.store.listDispatchable(this.now() / 1000, this.per_tick_limit)
+    for (const reminder of due) {
+      const next = isRecurring(reminder)
+        ? computeNextFire(reminder, this.now() / 1000, this.ownerTimeZone(reminder.owner_slug))
+        : null
+      const attempt = await this.store.beginDelivery(
+        reminder, this.now() / 1000, this.interval_ms / 1000, next,
+      )
+      if (attempt === null) continue
+      let observation: DeliveryObservation
+      try {
+        observation = await this.dispatcher.dispatch(reminder) ?? {
+          state: 'not-yet-known', reason: 'dispatcher returned without a delivery observation',
         }
-
-        try {
-          await this.dispatcher.dispatch(reminder)
-          fired++
-        } catch (err) {
-          // A caught throw means the post did NOT succeed (the dispatcher
-          // throws on a rejected/failed post, never after a delivered one) —
-          // revert the claim so the row stays pending and retries next tick.
-          try {
-            await claimRevert()
-          } catch (rerr) {
-            log.error('claim_revert_failed', {
-              reminder: reminder.id,
-              error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
-            })
-          }
-          log.error('dispatch_failed', {
-            reminder: reminder.id,
-            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-          })
-        }
+      } catch (err) {
+        // A throw can follow a side effect; it is not proof of non-delivery.
+        observation = { state: 'not-yet-known', reason: String(err) }
+        log.error('dispatch_failed', { reminder: reminder.id, error: String(err) })
       }
-      this.firedCount += fired
+      if (await this.store.observeDelivery(reminder, attempt, observation, this.now() / 1000, next)) {
+        this.firedCount++
+      }
     }
   }
 

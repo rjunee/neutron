@@ -108,7 +108,7 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     expect(store.get(r.id)?.status).toBe('pending')
 
     // Advance the clock a week + a tick — it fires AGAIN and posts AGAIN.
-    now += 8 * 24 * 60 * 60 * 1000
+    now = store.get(r.id)!.fire_at * 1000 + 30_000
     expect((await loop.runOnce()).fired).toBe(1)
     expect(outbound.posts).toHaveLength(2)
   })
@@ -160,10 +160,12 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     const dispatcher = buildReminderDispatcher({ outbound, llm, now: () => now })
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
 
-    // Tick 1: post rejected → dispatch throws → tick swallows → row stays pending.
+    // Tick 1: negative observation leaves the row pending.
     expect((await loop.runOnce()).fired).toBe(0)
     expect(store.get(r.id)?.status).toBe('pending')
     // Tick 2: post accepted → row flips to fired.
+    now += 30_000
+    now += 30_000
     expect((await loop.runOnce()).fired).toBe(1)
     expect(store.get(r.id)?.status).toBe('fired')
     expect(attempts).toBe(2)

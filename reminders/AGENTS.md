@@ -13,15 +13,16 @@ fire-time text is composed at fire time, never pre-rendered.
   `recurrence_spec` 5-field cron (mutually exclusive; `isRecurring()` is the
   single predicate). Optional `ritual_id` write/read path (charset-guarded).
 - `tick.ts` — a single-flight `setInterval` that CLAIMS each due row before
-  dispatch (crash-safe at-most-once), advances it via `computeNextFire`, and hands
+  dispatch in a durable observation ledger, advances completed occurrences via
+  `computeNextFire`, and hands
   EVERY due row to `dispatcher.dispatch`. **There is no `ritual_id` branch here and
   must never be one again** (ISSUES #504): the branch that used to live at that spot
   routed rituals to a separate executor on an ephemeral REPL with no tool bridge,
   which is why the morning brief could not read the owner's calendar.
 - `dispatcher.ts` + `message-shape.ts` — the ONE fire-time path. For a nudge: the
   three message shapes (literal / smart-wrap `[smart]` / pattern-template
-  `PATTERN:`) composed with live context, degrading to a literal fallback so a
-  reminder ALWAYS delivers. For a ritual: the approved prompt from the fire plan,
+  `PATTERN:`) composed with live context, degrading to a literal fallback when composition fails.
+  Delivery still requires an affirmative outbound receipt. For a ritual: the approved prompt from the fire plan,
   a wider budget, no literal fallback (a failure is recorded + noticed instead).
   BOTH compose through the SAME `llm.compose` call on the warm BACKGROUND compose
   substrate (`cc-nudge-*` — same grants as the owner's chat, its own session, so an
@@ -46,9 +47,10 @@ fire-time text is composed at fire time, never pre-rendered.
   that session. Read its docblock before reasoning about ritual safety from it.
 - `ritual-delivery.ts` — the notice FORMATTERS (one-line failure notice,
   3-consecutive-failure escalation rule), boot-reap of orphaned `running` rows, 30d
-  prune. `ritual-executor.ts` and `ritual-retry.ts` are GONE (ISSUES #504): with the
-  fire synchronous inside the tick and failures degrading rather than looping, there
-  is no detached turn to re-arm and no in-occurrence retry budget to police.
+  prune. `ritual-executor.ts` and `ritual-retry.ts` are GONE (ISSUES #504): the shared reminder loop owns the per-occurrence delivery retry budget
+  (five attempts, at most one hour after fire time), including unknown outcomes.
+  Only an affirmative outbound receipt earns `fired`; `reminder_delivery` retains
+  observation, attempts and exhaustion reason independently of scheduling status.
 - `ritual-runs.ts` — the `code_ritual_runs` writer.
 - `ritual-registration.ts` — the agent-callable propose/enable/approve/capture
   service. `propose` creates a BRAND-NEW ritual; `enable(id, schedule)` gives an
