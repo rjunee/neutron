@@ -7956,8 +7956,11 @@ try {
           withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
         )
         if (!plan) {
-          throw new Error(
-            `plan:fable returned null for pinned wave task ${pinnedMemberTaskId} — refusing to run Forge without a member execution spec`,
+          throw Object.assign(
+            new Error(
+              `plan:fable returned null for pinned wave task ${pinnedMemberTaskId} — refusing to run Forge without a member execution spec`,
+            ),
+            { blockKind: 'infra-only' },
           )
         }
         const pinnedLine = pinnedUncheckedTaskLine(plan.implementationPlan, pinnedMemberTaskId)
@@ -8134,10 +8137,13 @@ try {
       // IDENTICAL FOR BOTH PLANNERS — the cheap path is allowed to be cheaper, not
       // to be less safe.
       if (!plan) {
-        throw new Error(
-          usePlanNext
-            ? 'plan:next returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode'
-            : 'plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode',
+        throw Object.assign(
+          new Error(
+            usePlanNext
+              ? 'plan:next returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode'
+              : 'plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode',
+          ),
+          { blockKind: 'infra-only' },
         )
       }
       // ── THE RELAYED PLAN IS VERIFIED, NOT TRUSTED ───────────────────────────
