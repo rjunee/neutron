@@ -74,7 +74,7 @@
  * completed correctly and simply had no picture to draw.
  *
  * ⇒ it is an OPTIONAL mark (absence = `not_painted`, a normal outcome), but one
- * the recorder will WAIT a bounded {@link PAINT_SETTLE_MS} for once every required
+ * the recorder will WAIT a bounded {@link PAINT_SETTLE_FRAMES} for once every required
  * mark is in. Both halves are load-bearing: without the optionality a hidden tab
  * lies, and without the settle window the mark would be dropped on essentially
  * every switch, because the paint necessarily lands one frame AFTER the
@@ -208,6 +208,8 @@ export interface SwitchRecord {
    * stopped at the paint.
    */
   readonly servedFromCache: boolean
+  /** Whether paint was observed, known impossible, or could not be determined. */
+  readonly paint: 'painted' | 'not_painted' | 'unknown'
 }
 
 export interface SwitchTimingOptions {
@@ -222,8 +224,10 @@ export interface SwitchTimingOptions {
    * flushing first would report every slow-but-successful switch as incomplete.
    */
   deadlineMs?: number
-  /** How long to wait for `frame_rendered` alone. See {@link PAINT_SETTLE_MS}. */
-  paintSettleMs?: number
+  /** Frame scheduler used to bound the wait for `frame_rendered`. */
+  requestFrame?: (callback: () => void) => unknown
+  /** Visibility probe: hidden proves no paint; unknown must not be treated as hidden. */
+  visibility?: () => 'visible' | 'hidden' | 'unknown'
   /** How many finished records to keep for retrieval. */
   keep?: number
 }
@@ -241,15 +245,15 @@ export interface SwitchTimingOptions {
 const DEFAULT_DEADLINE_MS = 30_000
 
 /**
- * How long the recorder holds a fully-marked switch open for `frame_rendered`.
+ * How many presentation opportunities the recorder holds a fully-marked switch
+ * open for `frame_rendered`.
  *
  * The paint lands ONE FRAME after the `transcript` mark — both are queued behind
- * the same synchronous render — so a few tens of ms is all a visible tab needs.
- * A hidden tab never paints, and this window is the whole price of finding that
- * out: it expires, the record flushes `not_painted`, and no switch is misreported
- * as incomplete for lack of a picture nobody drew.
+ * the same synchronous render. Counting frames measures the browser's progress,
+ * not how quickly the machine happened to produce it. Two frames leave the
+ * paint mark's trailing task a full presentation opportunity to run.
  */
-const PAINT_SETTLE_MS = 250
+const PAINT_SETTLE_FRAMES = 2
 const DEFAULT_KEEP = 50
 
 /**
@@ -261,11 +265,13 @@ export class SwitchTimer {
   private readonly now: () => number
   private readonly emit: (record: SwitchRecord) => void
   private readonly deadlineMs: number
-  private readonly paintSettleMs: number
+  private readonly requestFrame: ((callback: () => void) => unknown) | undefined
+  private readonly visibility: () => 'visible' | 'hidden' | 'unknown'
   private readonly startedAt: number
   private readonly marks: Partial<Record<SwitchMark, number>> = {}
   private timer: ReturnType<typeof setTimeout> | null = null
-  private paintTimer: ReturnType<typeof setTimeout> | null = null
+  private paintWaitStarted = false
+  private paint: SwitchRecord['paint'] = 'unknown'
   private flushed = false
   /** See {@link servedFromCache}. Decides which marks are REQUIRED and which may set
    *  `total`, and rides out on the record so the reader can derive the rest; never
@@ -282,7 +288,11 @@ export class SwitchTimer {
     this.now = opts.now ?? (() => performance.now())
     this.emit = opts.emit ?? defaultEmit
     this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS
-    this.paintSettleMs = opts.paintSettleMs ?? PAINT_SETTLE_MS
+    this.requestFrame = opts.requestFrame ?? globalThis.requestAnimationFrame?.bind(globalThis)
+    this.visibility = opts.visibility ?? (() => {
+      if (typeof document === 'undefined' || typeof document.visibilityState !== 'string') return 'unknown'
+      return document.visibilityState === 'hidden' ? 'hidden' : 'visible'
+    })
     this.startedAt = this.now()
     this.timer = this.unrefed(setTimeout(() => this.flush(), this.deadlineMs))
   }
@@ -313,15 +323,14 @@ export class SwitchTimer {
     if (this.flushed) return
     if (this.marks[mark] !== undefined) return
     this.marks[mark] = round(this.now() - this.startedAt)
+    if (mark === 'frame_rendered') this.paint = 'painted'
     if (!this.requiredMarks.every((m) => this.marks[m] !== undefined)) return
     // Every required mark is in. The paint is the one absence worth waiting on:
     // it necessarily arrives a frame AFTER `transcript`, so flushing here would
     // drop it from every switch — and waiting forever would report every hidden
     // tab as incomplete. Bounded wait, then report what was actually observed.
     if (this.marks.frame_rendered !== undefined) this.flush()
-    else if (this.paintTimer === null) {
-      this.paintTimer = this.unrefed(setTimeout(() => this.flush(), this.paintSettleMs))
-    }
+    else this.settlePaintInFrames()
   }
 
   /**
@@ -354,7 +363,6 @@ export class SwitchTimer {
     if (this.flushed) return
     this.flushed = true
     this.timer = this.cleared(this.timer)
-    this.paintTimer = this.cleared(this.paintTimer)
     const waited = this.cached ? WAITED_MARKS_WHEN_CACHED : ALL_MARKS
     const seen = waited.map((m) => this.marks[m]).filter((v): v is number => v !== undefined)
     this.emit({
@@ -366,7 +374,34 @@ export class SwitchTimer {
         this.superseded || this.requiredMarks.some((m) => this.marks[m] === undefined),
       superseded: this.superseded,
       servedFromCache: this.cached,
+      paint: this.paint,
     })
+  }
+
+  /**
+   * Settle only after the browser has produced two more frames. A hidden document
+   * proves that no paint is due and may flush in the next task. Missing visibility or
+   * frame APIs prove nothing, so that UNKNOWN state deliberately falls through to
+   * the existing deadline instead of being collapsed into `not_painted`.
+   */
+  private settlePaintInFrames(): void {
+    if (this.paintWaitStarted) return
+    this.paintWaitStarted = true
+    const visibility = this.visibility()
+    if (visibility === 'hidden') {
+      this.paint = 'not_painted'
+      this.unrefed(setTimeout(() => this.flush(), 0))
+      return
+    }
+    if (visibility !== 'visible' || this.requestFrame === undefined) return
+    let remaining = PAINT_SETTLE_FRAMES
+    const next = (): void => {
+      if (this.flushed || this.marks.frame_rendered !== undefined) return
+      remaining -= 1
+      if (remaining === 0) this.flush()
+      else this.requestFrame?.(next)
+    }
+    this.requestFrame(next)
   }
 
   /** Never hold the process open for a measurement (node/bun test runners). */
@@ -426,8 +461,10 @@ function defaultEmit(r: SwitchRecord): void {
     `transcript_read=${fmt(r.marks.transcript_read)}`,
     `transcript=${fmt(tx)}`,
     `total=${fmt(r.total)}`,
+    `paint=${r.paint}`,
   ]
   for (const [mark, reason] of normal) {
+    if (mark === 'frame_rendered') continue
     if (r.marks[mark] === undefined) parts.push(`${reason}=${mark}`)
   }
   if (missing.length > 0) parts.push(`never_arrived=${missing.join(',')}`)
@@ -440,9 +477,12 @@ function defaultEmit(r: SwitchRecord): void {
 /**
  * Build the persisted perf report without ever accepting or embedding a bearer.
  *
- * `schema: 4` because a REPORTED FIELD CHANGED MEANING — the id moves whenever a
+ * `schema: 5` because a REPORTED FIELD was added — the id moves whenever a
  * definition does, without exception, because a gap in the numbering is free and a
  * collision is a wrong comparison nobody can detect afterwards.
+ *
+ * v5: `paint` distinguishes an observed paint, a hidden document where no paint
+ * was due, and an environment where the recorder could not determine either.
  *
  * v4: `incomplete` now also covers ABANDONED switches. Under v3 an abandoned
  * cache-served switch reported complete (its only required mark is stamped in the
@@ -464,7 +504,7 @@ function defaultEmit(r: SwitchRecord): void {
  */
 export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
   return {
-    schema: 4,
+    schema: 5,
     report_id: `web-switch-${createdAt}-${randomId()}`,
     created_at: createdAt,
     origin: globalThis.location?.origin ?? '',
@@ -488,6 +528,7 @@ export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebC
         incomplete: r.incomplete,
         superseded: r.superseded,
         served_from_cache: r.servedFromCache,
+        paint: r.paint,
       },
     }],
   }
