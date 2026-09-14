@@ -1683,11 +1683,12 @@ function forgeStep1(reenter) {
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
 function forgePushStep(reenter) {
+  const guardedCommit = `Commit only by running \`bash trident/commit-with-resolved-head.sh ${forgeBranch} <the git commit arguments>\`; never invoke \`git commit\` directly. The wrapper refuses before commit when HEAD cannot be resolved and names whether the git query failed, returned no object, or returned an unexpected value.`
   return memberMode
-    ? `Commit on ${forgeBranch} and stop. This is a wave-member branch owned by the parent join; do NOT push, open a PR, or run \`gh\`.`
+    ? `${guardedCommit} Commit on ${forgeBranch} and stop. This is a wave-member branch owned by the parent join; do NOT push, open a PR, or run \`gh\`.`
     : isPr
-    ? `Commit on ${forgeBranch} and stop. Do NOT push and do NOT run \`gh\`; the durable outer loop publishes and confirms the commit before review.`
-    : `Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
+    ? `${guardedCommit} Commit on ${forgeBranch} and stop. Do NOT push and do NOT run \`gh\`; the durable outer loop publishes and confirms the commit before review.`
+    : `${guardedCommit} Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
 }
 const FORGE_PR_LINE = memberMode
   ? 'PR_NUMBER=0   (wave member — no GitHub PR)'
