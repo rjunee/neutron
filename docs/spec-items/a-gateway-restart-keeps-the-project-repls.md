@@ -503,3 +503,17 @@ survival, and it is not zero. A sweep that enumerates `neutron-repl`-labelled pa
 reports the unclaimed ones is the obvious next step; it is deliberately NOT taken here,
 because one herdr server can host several Neutron instances and a sweep that cannot
 tell another instance's pane from a leaked one must not be allowed to close either.
+
+
+### Arbitration residual acceptance (#685)
+
+- [ ] Readiness failure removes its own sink registration and preserves a replacement
+      with the same session id. Verify with
+      `__tests__/spawn-failure-revokes-credential.test.ts`, including an unguarded-removal mutation.
+- [ ] The losing-adopter fixture also enters through `beginBootAdoption`: overlapping
+      callers share the held pass, preserve the winner's authorization and mirrors,
+      and a later call retries an undecided pass. Verify with
+      `__tests__/pane-handle-persistence.test.ts`, including a pass-map bypass mutation.
+- [ ] Fence duration follows SPEC.md Decisions Log 2026-09-14, "fence duration".
+- [ ] The claimant liveness probe documents its shared PID namespace assumption beside
+      the implementation; PID evidence is distinguished from claimant identity.

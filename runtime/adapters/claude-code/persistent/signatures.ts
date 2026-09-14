@@ -348,6 +348,11 @@ export function paneClaimBlocksUs(
  * license the takeover of a pane whose owner is alive and serving it, which is the exact
  * outcome the claim exists to prevent.
  *
+ * Deployment assumption: the probing gateway and every recorded claimant share one
+ * PID namespace. Across containers, the same numeric pid can name an unrelated live
+ * process and silently report `alive` for a foreign claimant. The random claimant id
+ * is ownership identity; the pid is only liveness evidence, never identity.
+ *
  * Only `gone` accelerates anything. `alive` and `unknown` both defer to the renewal
  * threshold, so an unreadable answer costs a bounded wait rather than a second owner.
  */
