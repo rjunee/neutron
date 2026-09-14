@@ -4126,7 +4126,10 @@ export async function branchNameRejection(
   }
   const check = await run_host(['git', '-C', repo_path, 'check-ref-format', '--branch', branch], repo_path)
   if (check.ok) return null
-  const detail = check.stderr.trim().slice(0, 120)
+  // Git may echo the `-C` operand when the probe fails. The durable refusal may
+  // preserve git's diagnosis, but never the repository's filesystem location.
+  const stderr = check.stderr.trim()
+  const detail = (repo_path.length > 0 ? stderr.split(repo_path).join('<repo>') : stderr).slice(0, 120)
   // WHY THE TWO REASONS ARE NOT ONE. `reason` is the durable audit trail an
   // operator reads months later, and "git rejects this name" sends them to fix
   // the name while "git never ran" sends them to fix the host. A spawn failure
@@ -4482,7 +4485,7 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
         ok: false,
         reason:
           `mutation proof refused: the run's branch name ${JSON.stringify(nominatedBranch).slice(0, 80)} ` +
-          `is rejected — ${rejection}. It was not passed to git, and no proof can be bound through it.`,
+          `is rejected — ${rejection}. It was not used to resolve a branch head, and no proof can be bound through it.`,
         exempt: false,
         evidence: null,
       }
