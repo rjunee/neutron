@@ -631,6 +631,12 @@ function legacyErrorCode(issue: z.ZodIssue): string {
       return inCapability ? ERROR_CODES.UNKNOWN_CAPABILITY : ERROR_CODES.TYPE_MISMATCH
     case 'custom':
       if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
+      // A capability refusal keeps its own code whichever validator produced it.
+      // `.regex()` raises `invalid_string` and `.refine()` raises `custom`, so
+      // swapping the backtracking pattern for a linear predicate silently moved a
+      // malformed capability from E_UNKNOWN_CAPABILITY to E_TYPE_MISMATCH. The
+      // taxonomy is the observable contract; the validator's shape is not.
+      if (inCapability) return ERROR_CODES.UNKNOWN_CAPABILITY
       return ERROR_CODES.TYPE_MISMATCH
     case 'too_small':
       if (inCoreApi) return ERROR_CODES.INVALID_SEMVER
