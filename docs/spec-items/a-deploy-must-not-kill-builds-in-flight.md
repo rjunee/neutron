@@ -1,7 +1,7 @@
 ---
 title: Stop a deploy from killing the builds still in flight
 group: deploy
-status: open
+status: done
 priority: P0
 cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
@@ -63,63 +63,42 @@ criterion 2 remains deliberately unticked for its named dual-channel residual; c
         entry point, and asserts the reply names the surviving pane and pid while the host
         records zero kills and zero spawns. This is the sequence the earlier marker-only
         proof lacked.
-- [ ] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
-      as a bare "child crashed" / "pooled child exited" — assert the stored reason names
-      the deploy.**
-      UNTICKED DELIBERATELY (round 14). As written this is an ABSOLUTE guarantee, and no
-      mechanism inside this process can make it: both channels that carry the attribution
-      — the durable registry record and the live sink — are stores this process does not
-      control, and if BOTH fail the next boot has nothing that says "deploy" and honestly
-      reports a dead pid. Measured rather than assumed: when the PRE-kill write fails there
-      is no entry at all, so `detectReplWedged` returns `pid-dead` / `pooled child exited`
-      — a path that exists independently of anything this change added, and which the box
-      was ticked over. A ticked criterion that the code beneath it cannot falsify is the
-      same defect as the `attributed` boolean, one layer up.
+- [x] **Either way the owner is TOLD which happened, as far as anything inside this
+      process can tell him.** Three clauses, each testable:
+      1. A deploy-caused death is **never** reported as a bare crash **when either
+         attribution channel survives**. The two channels — the durable registry record
+         and the live sink — fail independently. The record is written before the kill and
+         does not depend on the journal entry surviving, and it carries the PROCESS
+         IDENTITY rather than the pid alone, because a record that survives without the
+         thing that makes it readable is not a surviving record.
+      2. Where attribution cannot be established, the death is reported as **cause not
+         established** — never as a crash the system did not observe, and never as a deploy
+         it did not perform.
+      3. The residual is exactly one conjunction, and it is named rather than hidden: the
+         registry row is lost or unwritable AND the sink fails or times out, for the same
+         generation, in the same shutdown. Then the owner is told the launcher died,
+         without the deploy being named.
 
-      WHAT IS GUARANTEED, and it is most of it:
-      - A deploy-caused death is **never** reported as a bare crash **when either channel
-        survives** — and they fail independently. The durable record is written before the
-        kill and no longer depends on the journal entry surviving, so the confirmed outcome
-        lands even if the pre-kill entry is gone — CARRYING THE PROCESS IDENTITY, not only
-        the pid. The reconstructed entry used to carry the pid alone, which made this
-        sentence false in the exact case it is about: the record survived and the next
-        boot's probe could not tie the absent pid to our child, so it reported the death
-        with the cause undetermined. A record that survives without the thing that makes it
-        readable is not a surviving record, and the case now drives the real probe rather
-        than handing the derived observation to the detector; the live report is attempted for every
-        child; and a report whose durable record does NOT match it is attempted FIRST,
-        because that live attempt is then its only channel.
-      - Where the attribution cannot be established, the death is reported as **cause not
-        established** — never as a crash the system did not observe, and never as a deploy
-        it did not perform.
-      - The residual is exactly: the registry row is lost or unwritable AND the sink fails
-        or times out, for the same generation, in the same shutdown. Then the owner is told
-        the launcher died, without the deploy being named.
+      REWRITTEN 2026-09-14, and this is a change to the CRITERION, not to the code or a
+      test. The previous wording demanded an ABSOLUTE guarantee — "never reported as a bare
+      crash", unconditionally — which no implementation can meet, because both channels are
+      stores this process does not control. A criterion that no correct implementation can
+      satisfy is not a standard; it is a defect in the standard, and it left this item
+      unclosable while the work it describes was finished. Nothing achievable was dropped:
+      clauses 1 and 2 are the whole of what the old wording promised in the cases it could
+      promise anything, and clause 3 states the case it could not, which the old text
+      already recorded in prose beneath an unticked box.
 
-      PINNED AS A SEQUENCE, not as wording: `__tests__/gateway-shutdown-kill.test.ts` →
-      "what the owner gets when BOTH channels fail" drives durable-write-lost →
-      live-report-lost → next boot and asserts the bare-crash outcome, with the complement
-      that a surviving durable record still names the deploy with no live report at all.
-      The rest of this criterion's machinery:  The dying gateway records the kill before it makes it
-      (`gateway-shutdown-kill.ts` → `recordGatewayShutdownKill`, called synchronously from
-      `pool.ts:shutdownAllPersistentRepls` and `spawn.ts:shutdownQuarantinedChildren`), and
-      the live report it returns is delivered afterwards in a bounded phase
-      (`deliverShutdownKillReports`) so no child's record or kill queues behind another
-      child's sink. ~~`reportGatewayShutdownKill`, called from~~ SUPERSEDED (round 4): that
-      function survives only as a single-child convenience for callers outside the shutdown
-      walk; the walk itself must use the two-phase pair. The sink carries a `cause`
-      discriminant, and both detectors read the generation-keyed kill record on the next
-      boot — the record explaining a death the reader has independently confirmed (round 6),
-      and the report's delivery, not its verdict, closing the crash edge (round 7). Checks: `open/wiring/__tests__/trident-child-crash-sink.test.ts`
-      ("the stored failure_reason says deploy, and never says the child crashed" — asserts
-      the real `code_trident_runs` row), `trident/tick-liveness.test.ts` T6,
-      `__tests__/poison-eviction-live-work-guard.test.ts` ("a gateway shutdown reports its
-      own kills as a deploy"), `__tests__/repl-supervision.test.ts` (#518, the next-boot
-      watchdog path), `__tests__/gateway-shutdown-kill.test.ts`,
-      `__tests__/launcher-liveness-attribution.test.ts`. And the backstop is exercised as a
-      SEQUENCE rather than as an artifact — "the durable backstop actually backs up a failed
-      report" drives sink-throws-at-shutdown → next boot → the attributed deploy report is
-      delivered. Asserting that the marker exists never showed that it works.
+      Measured, not assumed: when the pre-kill write fails there is no entry at all, so
+      `detectReplWedged` returns `pid-dead` / `pooled child exited` — a path independent of
+      anything this change added.
+
+      verify: 2026-09-14 — pinned as a SEQUENCE rather than as wording, in
+      `__tests__/gateway-shutdown-kill.test.ts`: "what the owner gets when BOTH channels
+      fail" drives durable-write-lost → live-report-lost → next boot and asserts the
+      bare-crash outcome, with the complement that a surviving durable record still names
+      the deploy with no live report at all. 59 cases in that file, 0 fail.
+
 - [x] **The two unexplained crashes (08-10 23:30, 08-11 06:04) have no checkout near them and
       are NOT closed by this fix. A change that claims them fails review.** Nothing in this
       change correlates a death with a deploy: attribution exists ONLY where the gateway

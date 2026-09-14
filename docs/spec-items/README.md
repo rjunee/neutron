@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**31 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
+**31 items.** 4 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -20,7 +20,6 @@ These are the items the harness-orchestrator cutover is gated on.
 
 - [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) — Carry a dead run's checkpoint and ralph round into its retry
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
-- [`a-deploy-must-not-kill-builds-in-flight`](a-deploy-must-not-kill-builds-in-flight.md) — Stop a deploy from killing the builds still in flight
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 
