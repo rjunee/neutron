@@ -30,8 +30,18 @@ describe('/status active-build census wiring', () => {
 
     expect(bindStart).toBeGreaterThan(-1)
     expect(bindEnd).toBeGreaterThan(bindStart)
-    expect(binding).toContain('const activeTridentRuns = countActiveBuildRuns()')
+    // PROPERTY, not spelling. This asserted the literal line
+    // `const activeTridentRuns = countActiveBuildRuns()`, so a correct refactor
+    // broke it — which is what happened when the unknown case stopped throwing
+    // through the command chain (throwing took `/status` out of the chain
+    // entirely and sent the owner's message to the model). What matters is that
+    // the census is consulted and rows are not, so that is what is pinned.
+    expect(binding).toMatch(/\b(countActiveBuildRuns|probeBuildFleet)\(/)
     expect(binding).not.toContain('boardRunStore.listNonTerminal()')
+    // ...and that an unknown census is CARRIED, never flattened to a count.
+    // `0` is a real, actionable answer and must not stand in for "could not
+    // find out" — the whole point of this card.
+    expect(binding).toMatch(/status === 'known'[\s\S]{0,120}?:\s*null/)
     expect(source).toContain("from '@neutronai/trident/active-runs.ts'")
   })
 
