@@ -31,6 +31,7 @@
  * could only be secured as ephemeral.
  */
 
+import { randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join } from 'node:path'
 
@@ -130,8 +131,10 @@ function readPersistedSecret(
   }
 }
 
-/** Per-process temp-name sequence (pid + counter — deterministic, never Math.random). */
-let tmpSeq = 0
+/** Fresh identity per attempt; a PID is diagnostic, never unique across restarts. */
+export function stagingSecretPath(dir: string, prefix: string): string {
+  return join(dir, `${prefix}.${process.pid}.${randomBytes(8).toString('hex')}`)
+}
 
 /**
  * Install a fresh 0600 secret and RETURN THE ON-DISK BYTES. Called ONLY by the
@@ -148,7 +151,7 @@ let tmpSeq = 0
  */
 function installFreshSecret(spec: PersistedSecretSpec): string | null {
   const secret = spec.mint()
-  const tmp = join(spec.dir, `${spec.tmpPrefix}.${process.pid}.${(tmpSeq += 1)}`)
+  const tmp = stagingSecretPath(spec.dir, spec.tmpPrefix)
   let fd: number
   try {
     fd = fs.openSync(tmp, WX_NOFOLLOW, 0o600)

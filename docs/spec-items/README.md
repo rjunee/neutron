@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**31 items.** 4 block the harness-orchestrator cutover; 1 still needs a spec.
+**32 items.** 4 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -97,3 +97,4 @@ branch is cut (standard §3.1, §3.2).
 |---|---|---|---|
 | [`a-build-process-must-not-decrypt-secrets-it-was-not-given`](a-build-process-must-not-decrypt-secrets-it-was-not-given.md) | Stop a build process reading the owner's encryption keyfile | P1 | — |
 | [`merge-message-pii-and-a-deterministic-leak-window`](merge-message-pii-and-a-deterministic-leak-window.md) | Keep denylisted identities out of merge commit messages | P1 | — |
+| [`persisted-secret-staging-identity`](persisted-secret-staging-identity.md) | Persist secrets despite staging remnants after PID reuse | P1 | — |
