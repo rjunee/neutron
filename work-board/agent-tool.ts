@@ -21,7 +21,7 @@
  * turn (threaded from the topic-agnostic warm REPL's per-project session scope).
  * So a card added while chatting in project X lands on X's board; a General turn
  * (no active project) still scopes to the owner slug (the General board). The
- * input schemas expose only `title / status / design_doc_ref / id / before|after`.
+ * input schemas expose only `title / status / design_doc_ref / id / before|after|precedes`.
  * `design_doc_ref` schemes are allow-listed at the store.
  */
 
@@ -39,7 +39,7 @@ import {
   type WorkBoardStore, WorkBoardRunStillLiveError,
   WorkBoardBlockedCompletionError, WorkBoardBlockedInlineClaimError } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
-import type { WorkBoardChatAck } from './chat-ack.ts'
+import { dependencySequenceReport, type WorkBoardChatAck } from './chat-ack.ts'
 import {
   WORK_BOARD_REMOVAL_REASONS,
   type WorkBoardRemovalReason,
@@ -132,6 +132,7 @@ interface IdArg {
   id?: unknown
 }
 interface ReorderArgs {
+  precedes?: unknown
   id?: unknown
   before?: unknown
   after?: unknown
@@ -445,18 +446,21 @@ export function registerWorkBoardToolSurface(
     name: WORK_BOARD_REORDER_TOOL,
     description:
       'Reorder an active Work Board item — move it before or after another active item by id ' +
-      '(omit both to move it to the end). Only affects active + upcoming items.',
+      '(omit targets to move it to the end). For a missing dependency, independently read the board ' +
+      'and linked specs, then use precedes with the blocked card id: ensures the dependency is earlier ' +
+      'without moving it again if already earlier, keeps the blocked lane, and reports the sequencing call.',
     input_schema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'The item to move.' },
+        precedes: { type: 'string', description: 'Ensure this dependency precedes this blocked card. Exclusive of before/after.' },
         before: { type: 'string', description: 'Place it immediately before this item id.' },
         after: { type: 'string', description: 'Place it immediately after this item id.' },
       },
       required: ['id'],
       additionalProperties: false,
     },
-    output_schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+    output_schema: { type: 'object', properties: { ok: { type: 'boolean' }, changed: { type: 'boolean' }, report: { type: 'string' }, error: { type: 'string' } }, required: ['ok'] },
     capability_required: 'write:project_data',
     approval_policy: 'auto',
     handler: async (args, ctx) => {
@@ -468,8 +472,22 @@ export function registerWorkBoardToolSurface(
       const target: ReorderTarget = {}
       if (before !== undefined) target.before = before
       if (after !== undefined) target.after = after
-      await store.reorder(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, target)
-      return { ok: true }
+      if (a.precedes !== undefined) {
+        // Keep malformed input on the refusal path; never degrade to a generic reorder.
+        target.precedes = asString(a.precedes) ?? ''
+      }
+      try {
+        const result = await store.reorder(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, target)
+        if (result) {
+          const report = dependencySequenceReport(result.dependency_title, result.blocked_title, result.changed)
+          chatAck?.post({ project_id: ctx.project_id, item_id: id, title: result.dependency_title,
+            kind: 'dependency_sequenced', blocked_title: result.blocked_title, changed: result.changed })
+          return { ok: true, changed: result.changed, report }
+        }
+        return { ok: true }
+      } catch (err) {
+        return asErrorResult(err)
+      }
     },
   })
 

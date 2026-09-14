@@ -59,6 +59,8 @@ describe('terminal build wake', () => {
     })
     expect(prompt).toContain('independently identify the blocked card and its dependency')
     expect(prompt).toContain('`work_board_reorder` with the dependency id')
+    expect(prompt).toContain('`precedes` set to the blocked card id')
+    expect(prompt).toContain('include that report in your reply')
     expect(prompt).toContain('Keep the blocked card blocked')
     expect(prompt).toContain('spec first, then card')
     expect(prompt).toContain('Verify the board with `work_board_list` after a reorder')

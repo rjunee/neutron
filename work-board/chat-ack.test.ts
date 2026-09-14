@@ -263,13 +263,17 @@ describe('buildWorkBoardChatAck — never throws', () => {
     expect(resolvedCount.length).toBe(2)
   })
 
-  test('all three kinds are exhaustively covered', () => {
+  test('all four kinds are exhaustively covered', () => {
     const { ack, posts } = harness()
-    const kinds: WorkBoardChatAckKind[] = ['card_added', 'build_dispatched', 'inline_started']
+    const kinds = ['card_added', 'build_dispatched', 'inline_started', 'dependency_sequenced'] satisfies WorkBoardChatAckKind[]
     kinds.forEach((kind, idx) => {
-      ack.post({ project_id: 'p1', item_id: `i${idx}`, title: 't', kind })
+      const item = { project_id: 'p1', item_id: `i${idx}`, title: 't' }
+      ack.post(kind === 'dependency_sequenced'
+        ? { ...item, kind, blocked_title: 'blocked', changed: true }
+        : { ...item, kind })
     })
-    expect(posts.length).toBe(3)
+    expect(posts.length).toBe(4)
+    expect(posts[3]!.text).toContain('moved "t" before "blocked"')
   })
 })
 
