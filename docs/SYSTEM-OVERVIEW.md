@@ -8623,6 +8623,14 @@ silent truncation. For a single file, bare `bun test <file>` is fine.
   before the run fails). Lane membership is content-derived (any file mentioning
   `pglite`), so new PGLite tests are quarantined automatically; lane files still
   count toward the coverage audit.
+- **Real-HTTP isolation lane.** Test files that directly open `Bun.serve(...)` or
+  await a production `boot(...)` / `bootSignup(...)` helper run serially in
+  dedicated process(es), chunked at `NEUTRON_TEST_CHUNK_SIZE` like the general
+  lane. Real listeners share the host ephemeral-port allocator
+  across test processes; bounding listener acquisition prevents a concurrent
+  general chunk from exhausting it and turning `port: 0` into `EADDRINUSE`.
+  These tests retain the ordinary 15-second budget, get no retry, and count
+  toward the same fatal coverage audit.
 - **Tuning.** Peak RSS ≈ `NEUTRON_TEST_JOBS` × `NEUTRON_TEST_CHUNK_SIZE` ×
   per-file working set. Contended box / CI: `CHUNK_SIZE=60 JOBS=1` (bounded
   memory). Quiet dev box: `JOBS=4` (faster, more RAM). Full knob matrix +
