@@ -99,6 +99,20 @@ export type FailureClass =
   | 'stale-state'
   | 'merge-mechanics'
   /**
+   * THE BASE-DRIFT GATE HELD AN APPROVED MERGE. Its authored sentence keeps an
+   * unresolved ref (retryable) apart from resolved but unrelated histories
+   * (not retryable), so delivery preserves that measured remedy rather than
+   * allowing words inside it to select generic git-mechanics advice.
+   */
+  | 'merge-base-held'
+  /**
+   * THE MERGE STOPPED TO PRESERVE UNCOMMITTED WORK. Both local-merge worktree
+   * guards derive the same path on every attempt, so retrying before a human
+   * rescues and clears that work repeats the refusal. This is a refusal, not a
+   * failed git step, and therefore must not inherit `merge-mechanics` advice.
+   */
+  | 'merge-worktree-preserved'
+  /**
    * THE MERGE WAS REFUSED ON SIZE, AND NOTHING BROKE (#618). The pre-merge gate
    * measured the complete diff and found it above the ceiling the reviewer seat
    * can be shown in full, so the branch was not landed. Its own class because
@@ -1166,6 +1180,22 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE BASE-DRIFT GATE HELD THE MERGE. The producer's sentence already names
+  // what it measured and the corresponding remedy: a re-run for an unresolved
+  // ref or observed drift, and a manual look for histories that both resolve
+  // but still have no common ancestor. The latter sentence contains "checkout"
+  // and otherwise falls into generic mechanics, which discards that distinction
+  // and says to retry. Anchoring the producer's whole stable prefix prevents a
+  // branch name or quoted diagnostic later in the text from forging the class.
+  if (r.startsWith("i'm holding the merge of ")) {
+    return {
+      klass: 'merge-base-held',
+      summary:
+        'The build finished and was approved, but I held the merge because the reviewed base could not be confirmed as safe to land on.',
+      input_needed: reason,
+    }
+  }
+
   // An AMBIGUOUS content conflict the resolver escalated — the reason IS the
   // authored, specific question. Surface it (plain by construction, no stderr).
   if (isAuthoredConflictQuestion(reason) && !r.startsWith('merge failed')) {
@@ -1190,6 +1220,27 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       summary:
         'The build finished but the shared checkout was left mid-merge by an earlier build, which blocked this merge.',
       input_needed: `${retry} (I clean this up automatically now, so a retry should go through.)`,
+    }
+  }
+
+  // THE MERGE WORKTREE GUARD PRESERVED UNCOMMITTED WORK. There are two writers:
+  // provisioning refuses to replace this run's deterministic merge worktree,
+  // and branch cleanup refuses to remove a lingering build worktree. The
+  // orchestrator wraps both in `merge failed:`, so without this arm the broad
+  // mechanics branch below discards their remedy and prescribes a retry which
+  // re-derives or re-checks the same path. Match the two authored prefixes at
+  // the front: quoted paths and diagnostics later in the reason are untrusted
+  // data and cannot manufacture this outcome.
+  if (
+    r.startsWith('merge failed: refusing to reuse the merge worktree ') ||
+    r.startsWith('merge failed: trident preserved uncommitted work instead of merging:')
+  ) {
+    return {
+      klass: 'merge-worktree-preserved',
+      summary:
+        'The build finished and was approved, but I did not merge it because a merge worktree contains uncommitted work that exists nowhere else.',
+      input_needed:
+        'Inspect the preserved worktree, rescue or commit anything that must survive, then remove that worktree before dispatching the build again. Nothing was force-removed.',
     }
   }
 
