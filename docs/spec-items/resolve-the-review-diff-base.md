@@ -90,12 +90,15 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   without `--end-of-options`**: every one goes through `gitRangeArgv` (`trident/git-range.ts`),
   which has no parameter for the marker. What remains outside it is two NAMED SETS — commands
   inside prompt strings, which an agent runs, and commands in the shell wrappers, which bash
-  runs; **no TypeScript helper can reach either**. They are enumerated by `file:line` with a
+  runs; **no TypeScript helper can reach either**. They are enumerated by file plus a
+  distinctive command-text fragment with a
   reason each in `OUT_OF_REACH`, and **this item states no count of them on purpose**: it said
   "six — four prompt commands and two shell lines" until a merge from `main` added a prompt
   command, the second time that number went stale while the executable list stayed right. A
   count in prose is a copy of a fact; a named set is the fact, and a new member fails the test
-  with its own `file:line` rather than with a number that moved. This bullet
+  with its own command text rather than with a line number that moved. This key cannot
+  distinguish two identical command fragments in the same file, but the multiset comparison
+  still detects either a duplicate or a disappearance. This bullet
   was FALSE at one head: the coverage test searched for `${baseRef}`, `computeDiffLineCount`
   spells it `base_ref`, and it shipped unshielded. **A completeness claim is only as wide as
   the instrument that checks it** — and after three rounds of widening that instrument, the
@@ -364,7 +367,8 @@ built, never inferred from the merge mode.
       own**, asserted as zero and named file by file; and the ones that remain — prompt commands
       in `inner-workflow.mjs` and two shell lines in the wrappers, which a helper cannot reach
       because they are executed by an agent or by bash — each carry the marker in their own
-      command. **The list is `OUT_OF_REACH` in that test, compared against what the scan found,
+      command. **The list is `OUT_OF_REACH` in that test, keyed by file plus distinctive
+      command text and compared against what the scan found,
       and this criterion deliberately states no count of its own**: the count changed on a merge
       from `main` (a new re-plan prompt arrived carrying a bare-name range, repointed here), and
       a number retyped in prose is a second copy of a fact that drifts. Plus,

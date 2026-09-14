@@ -949,17 +949,24 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * remain — four prompt commands, two shell lines"; the merge that added the re-plan prompt
    * made it seven and the prose stayed at six, the SECOND time that number went stale while
    * this list stayed right. **A count in prose is a copy of a fact; a named set is the fact.**
-   * Adding a member now fails with the member's `file:line` and its argument, not with a
-   * number that moved.
+   * Adding a member now fails with the member's command text and its argument, not with a
+   * line number that moves whenever unrelated text is inserted above it.
    */
-  const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; kind: 'prompt-command' | 'shell-wrapper'; why: string }> = [
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 1728, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2462, why: "the planner's resume inspection hint — also a prompt" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2513, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2618, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 6029, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
-    { kind: 'shell-wrapper', file: 'codex-build.sh', line: 827, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { kind: 'shell-wrapper', file: 'codex-review.sh', line: 446, why: 'shell: the standalone reviewer builds its own diff' },
+  interface OutOfReach {
+    file: string
+    /** A distinctive fragment of the command's text; unlike a line number, edits above cannot move it. */
+    anchor: string
+    kind: 'prompt-command' | 'shell-wrapper'
+    why: string
+  }
+  const OUT_OF_REACH: ReadonlyArray<OutOfReach> = [
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', anchor: 'Write the branch diff to a file (e.g.', why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', anchor: 'RESUME — a prior run ALREADY committed progress', why: "the planner's resume inspection hint — also a prompt" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', anchor: 'Work READ-ONLY from the repo of record', why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', anchor: 'git log --no-color --date=short', why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', anchor: 'const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff', why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { kind: 'shell-wrapper', file: 'codex-build.sh', anchor: 'git diff --end-of-options "${BASE_DIFF_REF}..HEAD"', why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
+    { kind: 'shell-wrapper', file: 'codex-review.sh', anchor: 'FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD"', why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {
@@ -1051,6 +1058,28 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     return hits
       .filter((h) => h.excused === null && (!h.attributed || !h.shielded))
       .map((h) => `${h.file}:${h.line} ${h.attributed ? 'UNSHIELDED' : 'UNATTRIBUTABLE'} ${h.text.slice(0, 70)}`)
+  }
+
+  /**
+   * Stable identities for the shielded survivors. Command text is the identity because an
+   * edit elsewhere cannot change it. Two identical fragments in one file are intentionally
+   * indistinguishable here; both remain in the multiset, so adding or removing either fails.
+   */
+  function stableSite(hit: Hit, inventory: ReadonlyArray<OutOfReach>): string {
+    const matches = inventory.filter((site) => site.file === hit.file && hit.text.includes(site.anchor))
+    return matches.length === 1
+      ? `${matches[0]?.file}:${matches[0]?.anchor}`
+      : `${hit.file}:UNARGUED:${hit.text}`
+  }
+
+  function rangeGuardFailures(hits: Hit[], inventory: ReadonlyArray<OutOfReach> = OUT_OF_REACH): string[] {
+    const failures = offenders(hits)
+    const actual = hits.filter((hit) => hit.excused === null).map((hit) => stableSite(hit, inventory)).sort()
+    const expected = inventory.map((site) => `${site.file}:${site.anchor}`).sort()
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      failures.push(`shielded survivor set changed: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`)
+    }
+    return failures
   }
 
   test('A · the TypeScript modules build NO range of their own — the helper does it', () => {
@@ -1173,23 +1202,45 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     for (const c of CALL_SITES) expect({ site: `${c.file} ${c.base}`, argued: c.why.length > 20 }).toEqual({ site: `${c.file} ${c.base}`, argued: true })
   })
 
+  test('a NEW unshielded range fails the survivor guard', () => {
+    const command = 'git diff ${base}..HEAD'
+    const inventory: ReadonlyArray<OutOfReach> = [
+      { file: 'fixture.sh', anchor: command, kind: 'shell-wrapper', why: 'fixture command whose missing shield must fail' },
+    ]
+    expect(rangeGuardFailures(scan('fixture.sh', command), inventory)).not.toEqual([])
+  })
+
+  test('a shielded site that DISAPPEARS fails the survivor guard', () => {
+    const inventory: ReadonlyArray<OutOfReach> = [
+      { file: 'fixture.sh', anchor: 'git diff --end-of-options ${base}..HEAD', kind: 'shell-wrapper', why: 'fixture command that must remain present' },
+    ]
+    expect(rangeGuardFailures([], inventory)).not.toEqual([])
+  })
+
+  test('a shielded site that merely MOVES keeps the same stable identity', () => {
+    const command = 'git diff --end-of-options ${base}..HEAD'
+    const inventory: ReadonlyArray<OutOfReach> = [
+      { file: 'fixture.sh', anchor: command, kind: 'shell-wrapper', why: 'fixture command whose line may move freely' },
+    ]
+    expect(rangeGuardFailures(scan('fixture.sh', command), inventory)).toEqual([])
+    expect(rangeGuardFailures(scan('fixture.sh', `unrelated\nlines\n${command}`), inventory)).toEqual([])
+  })
+
   test('A · every surviving range is shielded in its OWN command, or is argued prose', () => {
     const hits = rangeHits()
-    expect(offenders(hits)).toEqual([])
+    expect(rangeGuardFailures(hits)).toEqual([])
     // The out-of-reach commands are exactly the shielded survivors — so a new one cannot appear
     // without being argued here, and one that disappears cannot go unnoticed. Stated as SETS:
     // the prompt commands (an agent's command line, which no TypeScript helper can reach) and
     // the shell-wrapper commands (bash, likewise). No count appears here or in the prose that
     // describes this list, because a count is a copy that drifts and a set is not.
-    const shielded = hits.filter((h) => h.excused === null).map((h) => `${h.file}:${h.line}`)
-    expect(shielded.sort()).toEqual(OUT_OF_REACH.map((o) => `${o.file}:${o.line}`).sort())
-    for (const o of OUT_OF_REACH) expect({ site: `${o.file}:${o.line}`, argued: o.why.length > 20 }).toEqual({ site: `${o.file}:${o.line}`, argued: true })
-    // THE TWO SETS, named. A member joining either one shows up as its own `file:line`, which
+    for (const o of OUT_OF_REACH) expect({ site: `${o.file}:${o.anchor}`, argued: o.why.length > 20 }).toEqual({ site: `${o.file}:${o.anchor}`, argued: true })
+    // THE TWO SETS, named. A member joining either one shows up as its own command text, which
     // is what the prose can then describe without stating how many there are.
     expect({
       prompts: OUT_OF_REACH.filter((o) => o.kind === 'prompt-command').every((o) => o.file.endsWith('.mjs')),
       wrappers: OUT_OF_REACH.filter((o) => o.kind === 'shell-wrapper').every((o) => o.file.endsWith('.sh')),
-      unclassified: OUT_OF_REACH.filter((o) => o.kind !== 'prompt-command' && o.kind !== 'shell-wrapper').map((o) => `${o.file}:${o.line}`),
+      unclassified: OUT_OF_REACH.filter((o) => o.kind !== 'prompt-command' && o.kind !== 'shell-wrapper').map((o) => `${o.file}:${o.anchor}`),
     }).toEqual({ prompts: true, wrappers: true, unclassified: [] })
     for (const h of hits.filter((x) => x.excused !== null)) {
       expect({ site: `${h.file}:${h.line}`, why: (h.excused ?? '').length > 20 }).toEqual({ site: `${h.file}:${h.line}`, why: true })
