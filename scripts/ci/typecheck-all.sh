@@ -18,7 +18,9 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/../.." || exit 2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$ROOT" || exit 2
 
 discover() {
   find . -name tsconfig.json -not -path '*/node_modules/*' \
@@ -26,12 +28,35 @@ discover() {
     | LC_ALL=C sort
 }
 
+# `--list` IS A QUERY AND MUST NOT PROVISION, and it answers before anything else
+# can print. The matrix is discovered from tsconfig.json files on disk, which does
+# not depend on an installed tree; meanwhile `ci-workflow.test.ts` parses this
+# output AS the matrix, so a line the provisioning or verification step writes to
+# stdout is read as a tsconfig path. That is exactly what happened: the verifier's
+# "OK — N packages…" and two "note —" lines were compared against the files on disk.
 # `--list` prints the matrix (one tsconfig path per line) without running tsc.
 # Used by the CI-config test to prove matrix completeness.
 if [ "${1:-}" = "--list" ]; then
   discover
   exit 0
 fi
+
+# A linked worktree does not inherit gitignored dependencies. Provision its own
+# bun tree before asking tsc anything. The verifier below refuses the known-
+# broken shortcut: a root node_modules symlink gives workspace packages two
+# physical identities.
+if [ ! -d node_modules/.bun ]; then
+  echo "typecheck-all: provisioning worktree dependencies with bun install --frozen-lockfile"
+  if ! bun install --frozen-lockfile; then
+    echo "typecheck-all: REFUSED — worktree dependency installation failed." >&2
+    exit 3
+  fi
+fi
+if ! bun "${SCRIPT_DIR}/verify-workspace-deps.ts" "$ROOT"; then
+  echo "typecheck-all: REFUSED — worktree dependency verification failed." >&2
+  exit 3
+fi
+
 
 fail=0
 count=0
