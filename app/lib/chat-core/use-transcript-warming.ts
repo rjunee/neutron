@@ -1,3 +1,4 @@
+import { installationDeviceId } from '../installation-device';
 /**
  * @neutronai/app — the seam that turns the warmer's schedule into real, warm
  * transcripts.
@@ -50,7 +51,7 @@
 import { useEffect, useMemo } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 
-import { prefixedRandomId, type ConnStatus } from '@neutronai/chat-core';
+import { type ConnStatus } from '@neutronai/chat-core';
 import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types/topic-id.ts';
 
 import { railIdToScope } from '../project-rail-view';
@@ -87,21 +88,6 @@ export const WARM_QUIET_MS = 900;
 /** Hard ceiling on one warm, whatever the transport is doing. */
 export const WARM_TOTAL_BUDGET_MS = 12_000;
 
-/**
- * One device id for every warm this process performs, minted once.
- *
- * The gateway uses the upgrade URL's `device_id` for read-receipt attribution
- * and for its in-memory socket registry only (`app-ws-surface.ts:683`) — nothing
- * is persisted — but a fresh id per scope would still put eight phantom devices
- * in that registry for no reason. A warm never calls `markRead`, so this id
- * never appears in anyone's read aggregate.
- */
-let warmDeviceId: string | null = null;
-function warmerDeviceId(): string {
-  warmDeviceId ??= prefixedRandomId('warm');
-  return warmDeviceId;
-}
-
 /** The app-ws topic for a rail id, using the SHARED derivation — a third
  *  hand-rolled `app:${…}` template is how #395/#398 recurred. */
 function topicForScope(user_id: string, rail_id: string): string {
@@ -122,7 +108,7 @@ export async function warmScopeTranscript(
 ): Promise<void> {
   const projectId = railIdToScope(scope.rail_id);
   const topicId = topicForScope(scope.user_id, scope.rail_id);
-  const deviceId = warmerDeviceId();
+  const deviceId = await installationDeviceId();
   const session = await acquireSession(topicId, async () => {
     const store = await sharedMobileStore();
     return new MobileChatSession({

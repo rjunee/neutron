@@ -39,7 +39,7 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { AgentEngagementMode } from '@neutronai/connect/agent-engagement.ts'
-import { appWsProjectTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { appWsProjectTopicId, sanitizeDeviceId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import {
   type PrivacyMode,
   type BillingMode,
@@ -315,8 +315,25 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
    * `updated_at DESC` order so the most-recently-touched project
    * floats to the top of the list.
    */
-  async list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]> {
+  async list(project_slug: string, user_id?: string, device_id?: string): Promise<ProjectListEntry[]> {
     void project_slug
+    const device = sanitizeDeviceId(device_id)
+    if (user_id !== undefined && device !== null) {
+      await this.db.transaction(async (tx) => {
+        const inserted = tx.runSync(
+          'INSERT OR IGNORE INTO rail_devices (user_id, device_id) VALUES (?, ?)',
+          [user_id, device],
+        )
+        if (inserted.changes === 0) return
+        await tx.run(
+          `INSERT OR IGNORE INTO rail_device_marks (topic_id, device_id, seq)
+           SELECT topic_id, ?, MAX(seq) FROM app_chat_messages
+           WHERE topic_id = ? OR substr(topic_id, 1, length(?) + 1) = ? || ':'
+           GROUP BY topic_id`,
+          [device, `app:${user_id}`, `app:${user_id}`, `app:${user_id}`],
+        )
+      })
+    }
     // 2026-06-03 (onboarding-buttons-only-tweak-later): exclude rows the
     // settings Core soft-deleted (delete_project / merge_projects set
     // `deleted_at`, migration 0053). Without this filter `/api/app/projects`
@@ -359,38 +376,23 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       return {
         ...settings,
         last_activity_at: r.last_activity_at ?? r.updated_at,
-        unread_count: user_id !== undefined ? this.unreadCount(user_id, r.id) : 0,
+        unread_count: user_id !== undefined && device !== null ? this.unreadCount(user_id, r.id, device) : null,
       }
     })
   }
 
-  /**
-   * Per-project unread count: agent messages on the project's chat topic
-   * (`app:<user>:<project>`) with a seq beyond the highest the owner has a READ
-   * receipt for. Honest — derived from the real chat-log + receipt cursor, so a
-   * caught-up project reads 0 (never a fabricated badge). Best-effort: a read
-   * failure (e.g. the chat tables absent in a minimal test DB) degrades to 0.
-   */
-  private unreadCount(user_id: string, project_id: string): number {
+  /** Agent messages beyond this installation's durable mark; null means unknown. */
+  private unreadCount(user_id: string, project_id: string, device_id: string): number {
     const topic = appWsProjectTopicId(user_id, project_id)
-    try {
-      const row = this.db
-        .prepare<{ n: number }, [string, string]>(
-          `SELECT COUNT(*) AS n
-             FROM app_chat_messages m
-            WHERE m.topic_id = ?
-              AND m.role = 'agent'
-              AND m.seq > (
-                SELECT COALESCE(MAX(r.seq), 0)
-                  FROM app_chat_receipts r
-                 WHERE r.topic_id = ? AND r.read_at IS NOT NULL
-              )`,
-        )
-        .get(topic, topic)
-      return row?.n ?? 0
-    } catch {
-      return 0
-    }
+    const row = this.db
+      .prepare<{ n: number }, [string, string, string]>(
+        `SELECT COUNT(*) AS n FROM app_chat_messages m
+         WHERE m.topic_id = ? AND m.role = 'agent'
+           AND m.seq > COALESCE((SELECT seq FROM rail_device_marks
+                                 WHERE topic_id = ? AND device_id = ?), 0)`,
+      )
+      .get(topic, topic, device_id)
+    return row?.n ?? 0
   }
 
   /**

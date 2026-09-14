@@ -80,6 +80,10 @@ describe('orderRailProjects', () => {
 });
 
 describe('railBadgeLabel', () => {
+  it('shows unknown distinctly from caught up', () => {
+    expect(railBadgeLabel(null)).toBe('?');
+    expect(railBadgeLabel(0)).toBeNull();
+  });
   test('nothing unread renders NO badge, not a zero', () => {
     expect(railBadgeLabel(0)).toBeNull();
     expect(railBadgeLabel(NaN)).toBeNull();

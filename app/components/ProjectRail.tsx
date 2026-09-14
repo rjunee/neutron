@@ -160,7 +160,7 @@ function RailItem({
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ selected: isActive }}
-      accessibilityLabel={`Open ${project.name}${hasUnread ? ', unread' : ''}`}
+      accessibilityLabel={`Open ${project.name}${project.unread_count === null ? ', unread count unknown' : hasUnread ? ', unread' : ''}`}
       testID={`rail-item-${project.id}`}
       onPress={() => {
         // A tap the owner made always gets the tick, including on the already-active

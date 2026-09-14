@@ -43,7 +43,7 @@
 /** The ordering only needs these two fields — deliberately narrower than the view. */
 export interface RailOrderable {
   id: string;
-  unread_count: number;
+  unread_count: number | null;
 }
 
 /**
@@ -68,7 +68,7 @@ export function orderRailProjects<T extends RailOrderable>(
   for (const p of movable) {
     // `> 0` rather than truthiness: a count is a number and a NaN from a bad payload
     // must land in `read`, not float a row the owner cannot act on to the top.
-    if (p.unread_count > 0) unread.push(p);
+    if ((p.unread_count ?? 0) > 0) unread.push(p);
     else read.push(p);
   }
 
@@ -88,7 +88,8 @@ export function orderRailProjects<T extends RailOrderable>(
 export const RAIL_BADGE_CAP = 99;
 
 /** `null` when there is nothing to show, so the caller renders no badge at all. */
-export function railBadgeLabel(unread_count: number): string | null {
+export function railBadgeLabel(unread_count: number | null): string | null {
+  if (unread_count === null) return '?';
   if (!(unread_count > 0)) return null;
   return unread_count > RAIL_BADGE_CAP ? `${RAIL_BADGE_CAP}+` : String(unread_count);
 }
