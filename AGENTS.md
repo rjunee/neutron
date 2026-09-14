@@ -65,9 +65,15 @@ not a file.
 must be green before merge.
 
 **Evidence, not assertion.** Every claim about what the code does carries a
-`file:line` read in the current session. An absence claim needs a search with a
-positive control — a grep that finds nothing proves nothing until you have shown
-the same grep finding something.
+`file:line` read in the current session. An absence claim needs a positive
+control that can fail for the same reason the claim could be wrong. For a
+content search, show the same search finding something known to be present. For
+a tracked-file claim, name a ref fetched in the current session and ask git, not
+the filesystem: `git ls-tree -r --name-only origin/main -- <path>`, paired with
+the same command for a known-present tracked path such as `CONTRIBUTING.md`. A
+filesystem search answers only the different question “is the path in this
+working tree?”; a hit beside it proves the search shape, but cannot reveal that
+the checkout is stale, sparse, dirty, or on another ref.
 
 **A guard must be delivered, not published.** A rule that lives only in prose is
 advice to an agent that has never read it; the mechanism that works is a

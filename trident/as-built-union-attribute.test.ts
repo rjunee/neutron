@@ -38,7 +38,9 @@ import {
   presentAsBuiltLogs,
   relevantAttributesPaths,
   resolveTrackedMergeDrivers,
+  trackedFilesAtRef,
   untrackedOverlayAttributes,
+  workingTreeFiles,
 } from './as-built-union-attribute.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -775,6 +777,85 @@ describe('clonedTreeContains', () => {
     const dir = scratch('union-attr-tree-norepo')
     writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
     expect(clonedTreeContains(dir, ['SPEC.md'])).toEqual(['SPEC.md'])
+  })
+})
+
+/**
+ * "IT IS NOT THERE" AND "I COULD NOT LOOK" MUST NOT SHARE A BRANCH (#644), one
+ * level below the rule this issue is about.
+ *
+ * `collectTrackedAttributesFiles` used to read TWO answers out of one `git show`
+ * exit code: nonzero meant `content = null`, commented "not committed — it
+ * reaches no clone". `git show` also exits nonzero when it cannot read the tree
+ * at all, so an UNREADABLE `.gitattributes` was reported as an ABSENT one —
+ * which is what makes a governed repo whose floor could not be read look like a
+ * repo with no floor to enforce. That is the same conflation its sibling
+ * `clonedTreeContains` was hardened against in this very file.
+ *
+ * The fixture removes the committed BLOB while leaving the TREE object intact,
+ * so `ls-tree` still lists the path (it is tracked) and `show` cannot produce its
+ * bytes. The control beside it — a repo that genuinely has no `.gitattributes` —
+ * must still answer `[]` quietly, or "throws on everything" would satisfy this.
+ */
+describe('a tracked attributes file that cannot be READ is not an absent one', () => {
+  it('throws for a tracked-but-unreadable blob, and stays quiet for a genuinely absent one', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { '.gitattributes': `${LOG} merge=union\n`, [LOG]: '# log\n' })
+    const blob = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD:.gitattributes'], {
+      encoding: 'utf8',
+      env: checkAttrEnv(process.env),
+    }).trim()
+    // Positive control for the FIXTURE itself: the path is tracked and readable
+    // right now, so if the removal below stops working this case cannot pass by
+    // accident on a repo that never had the file.
+    expect(collectTrackedAttributesFiles(repo, [LOG])).toEqual([
+      { path: '.gitattributes', content: `${LOG} merge=union\n` },
+    ])
+    rmSync(join(repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2)))
+    // Tracked — `ls-tree` reads the TREE object, which is still there…
+    expect(trackedFilesAtRef(repo, 'HEAD', ['.gitattributes'])).toEqual(['.gitattributes'])
+    // …and unreadable, which must be a failure rather than an empty finding.
+    expect(() => collectTrackedAttributesFiles(repo, [LOG])).toThrow(
+      /could not read \.gitattributes at .* it is tracked there/s,
+    )
+
+    // THE CONTROL THAT MUST SURVIVE: genuinely absent is still a quiet `[]`.
+    const bare = scratchRepo()
+    commitFiles(bare, { [LOG]: '# log\n' })
+    expect(collectTrackedAttributesFiles(bare, [LOG])).toEqual([])
+  })
+})
+
+describe('trackedFilesAtRef', () => {
+  function disagreementRepo(): string {
+    const repo = scratchRepo()
+    commitFiles(repo, { 'ref-only.md': '# committed\n' })
+    rmSync(join(repo, 'ref-only.md'))
+    writeFileSync(join(repo, 'tree-only.md'), '# working tree only\n')
+    return repo
+  }
+
+  it('reports a file absent from the working tree but present in the named ref', () => {
+    const repo = disagreementRepo()
+    expect(existsSync(join(repo, 'ref-only.md'))).toBe(false)
+    expect(trackedFilesAtRef(repo, 'HEAD', ['ref-only.md'])).toEqual(['ref-only.md'])
+  })
+
+  it('reports a file present in the working tree but absent from the named ref', () => {
+    const repo = disagreementRepo()
+    expect(existsSync(join(repo, 'tree-only.md'))).toBe(true)
+    expect(trackedFilesAtRef(repo, 'HEAD', ['tree-only.md'])).toEqual([])
+    expect(workingTreeFiles(repo, ['tree-only.md'])).toEqual(['tree-only.md'])
+  })
+
+  it('distinguishes an unreadable ref from a successful empty answer', () => {
+    const repo = scratchRepo()
+    commitFiles(repo, { 'control.md': '# known present\n' })
+
+    expect(trackedFilesAtRef(repo, 'HEAD', ['missing.md'])).toEqual([])
+    expect(() => trackedFilesAtRef(repo, 'refs/heads/does-not-exist', ['missing.md'])).toThrow(
+      /could not inspect tracked files at ref refs\/heads\/does-not-exist/,
+    )
   })
 })
 
