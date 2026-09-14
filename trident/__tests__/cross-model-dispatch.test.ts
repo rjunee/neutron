@@ -121,6 +121,10 @@ async function runWorkflow(
     missingBuildTrailer?: boolean
     /** Make the build agent return no result at all. */
     nullBuild?: boolean
+    /** Make either initial planner dispatch return no result at all. */
+    nullPlanner?: boolean
+    /** Make either initial planner dispatch reject with an ordinary failure. */
+    throwingPlanner?: boolean
     /** Answers returned by the truth-order probe after the bridge's wait expires. */
     trailerProbe?: Array<{
       trailerBody?: string
@@ -222,6 +226,8 @@ async function runWorkflow(
       return { head: opts.fixLands === true ? 'b'.repeat(40) : '' }
     }
     if (label === 'plan:fable') {
+      if (opts.throwingPlanner === true) throw new Error('planner rejected an ordinary malformed request')
+      if (opts.nullPlanner === true) return null
       // Ralph's planner. `complexity` is the field that splits the build dispatch
       // into `build` and `build_mechanical`, which is the whole point of the test
       // that asks for it.
@@ -294,12 +300,22 @@ async function runWorkflow(
     opts.buildBranch === undefined &&
     opts.missingBuildTrailer !== true &&
     opts.nullBuild !== true &&
+    opts.nullPlanner !== true &&
+    opts.throwingPlanner !== true &&
     args['codexBuildScript'] !== undefined
   ) {
     expect(synthCount).toBeGreaterThan(0)
   }
   return { captured, logs, result }
 }
+
+const failureClass = (result: Record<string, unknown>): 'infrastructure' | 'genuine' =>
+  classifyInnerFailure({
+    verdict: null,
+    checkpoint: String(result['checkpoint']),
+    block_kind: (result['blockKind'] ?? null) as 'infra-only' | null,
+    terminal_cause: String(result['terminalCause']),
+  })
 
 /**
  * ONE CHUNK CALL of the brief transport, parsed back out of the bridge prompt.
@@ -594,6 +610,53 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     args['kimiConfigured'] = false
     const { logs } = await runWorkflow(args)
     expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=3 configuration-accepted=true'))).toBe(true)
+  })
+})
+
+describe('a dead planner reaches the infrastructure retry seam', () => {
+  const memberArgs = (): Record<string, unknown> =>
+    productionArgs(null, {
+      branch: 'trident/a-run',
+      parent_run_id: 'parent-run',
+      wave_task_id: 'task-7',
+    })
+
+  test('a null pinned-member planner result is infrastructure', async () => {
+    const { result, captured } = await runWorkflow(memberArgs(), { nullPlanner: true })
+    expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
+    expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+    expect(result['blockKind']).toBe('infra-only')
+    expect(String(result['terminalCause']).trim()).not.toBe('')
+    expect(failureClass(result)).toBe('infrastructure')
+  })
+
+  test('an ordinary pinned-member planner rejection stays genuine', async () => {
+    const { result, captured } = await runWorkflow(memberArgs(), { throwingPlanner: true })
+    expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
+    expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+    expect(result['blockKind']).toBeUndefined()
+    expect(failureClass(result)).toBe('genuine')
+  })
+
+  test('a null Ralph planner result is infrastructure', async () => {
+    const { result, captured } = await runWorkflow(productionArgs(null, { ralph: true }), {
+      nullPlanner: true,
+    })
+    expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
+    expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+    expect(result['blockKind']).toBe('infra-only')
+    expect(String(result['terminalCause']).trim()).not.toBe('')
+    expect(failureClass(result)).toBe('infrastructure')
+  })
+
+  test('an ordinary Ralph planner rejection stays genuine', async () => {
+    const { result, captured } = await runWorkflow(productionArgs(null, { ralph: true }), {
+      throwingPlanner: true,
+    })
+    expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
+    expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+    expect(result['blockKind']).toBeUndefined()
+    expect(failureClass(result)).toBe('genuine')
   })
 })
 
