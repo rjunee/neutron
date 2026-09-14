@@ -2,7 +2,7 @@
  * @neutronai/app — WORK BOARD row (Work Board Phase 1b; M1 UX redesign).
  *
  * A FLAT one-line row (NOT a card — that's Tasks). Left-to-right: a status dot
- * that reflects the build lifecycle (tap to inspect its worker), the one-line
+ * that reflects the build lifecycle, the one-line
  * title (tap to edit), a phase TAG capsule + a muted `round N` trail for a
  * bound run, then a drag grip / ▶-or-↻ / ✕ action cluster. The completed
  * variant is dimmed with a strikethrough title + a right-aligned "Merged · Jul
@@ -216,6 +216,17 @@ function WorkBoardRowImpl({
     );
   };
 
+  const requestAdvance = (): void => {
+    if (item.status !== 'in_progress') {
+      onAdvance();
+      return;
+    }
+    Alert.alert('Mark this item done?', undefined, [
+      { text: 'Keep in progress', style: 'cancel' },
+      { text: 'Mark done', onPress: onAdvance },
+    ], { cancelable: true });
+  };
+
   // M1 polish (item 4) — mirror the web 2-line model: line 1 = dot + title +
   // actions; line 2 = the card's durable lane tag, refined by run phase when bound.
   const hasStatus = tag !== null;
@@ -230,13 +241,7 @@ function WorkBoardRowImpl({
       testID={`wb-row-${item.id}`}
     >
       <View style={styles.line1}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Inspect worker for ${item.title}`}
-          disabled={busy || onInspect === undefined}
-          onPress={onInspect}
-          style={styles.dotHit}
-        >
+        <View style={styles.dotHit} testID={`wb-status-indicator-${item.id}`}>
           <Animated.View
             style={[
               styles.dot,
@@ -247,7 +252,7 @@ function WorkBoardRowImpl({
               },
             ]}
           />
-        </Pressable>
+        </View>
 
         {editing ? (
           <TextInput
@@ -290,7 +295,20 @@ function WorkBoardRowImpl({
         )}
 
         <View style={styles.actions}>
-          <IconButton label="Advance status" glyph="→" disabled={busy} onPress={onAdvance} />
+          <IconButton
+            label={item.status === 'in_progress' ? 'Mark done' : 'Start progress'}
+            glyph="→"
+            disabled={busy}
+            onPress={requestAdvance}
+          />
+          {onInspect !== undefined ? (
+            <IconButton
+              label={`Inspect worker for ${item.title}`}
+              glyph="⌕"
+              disabled={busy}
+              onPress={onInspect}
+            />
+          ) : null}
           <View
             {...panResponder.panHandlers}
             accessible
