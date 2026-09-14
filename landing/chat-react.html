@@ -97,6 +97,8 @@
     --accent-border: rgba(108,170,255,.4);
     /* Code (inline + block) */
     --code-bg: rgba(255,255,255,.08);
+    --code-inline-fg: #9bd7ff;
+    --code-inline-user-fg: #dcefff;
     --code-block-bg: #0c0e12;
     /* Status: danger/error, warn, info, success */
     /* 4.41 on `--agent-bubble` before this; brightened one step to 4.82. */
@@ -189,6 +191,8 @@
     --accent-flash: rgba(16,100,204,.14);
     --accent-border: rgba(16,100,204,.4);
     --code-bg: rgba(0,0,0,.06);
+    --code-inline-fg: #0b57d0;
+    --code-inline-user-fg: #dcefff;
     --code-block-bg: #f5f5f7;
     /* Darkened from Apple's #d70015 (4.44 on `--agent-bubble`) to the same red
        `--error-fg` already uses, which clears it at 4.57. */
@@ -620,11 +624,13 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em;
     background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
   }
+  .car-md :not(pre) > code { color: var(--code-inline-fg); cursor: pointer; }
+  .car-bubble-user .car-md { --code-inline-fg: var(--code-inline-user-fg); }
   .car-md pre {
     background: var(--code-block-bg); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; overflow-x: auto; margin: 0 0 8px;
   }
-  .car-md pre code { background: none; padding: 0; font-size: .9em; }
+  .car-md pre code { background: none; color: inherit; cursor: text; padding: 0; font-size: .9em; }
   /* FIX #359 — Telegram-style one-tap copy button, top-right of the code
      block. Hidden until hover/focus so it stays non-intrusive; `(hover: none)`
      (touch devices) keeps it always visible since there's no hover to reveal
