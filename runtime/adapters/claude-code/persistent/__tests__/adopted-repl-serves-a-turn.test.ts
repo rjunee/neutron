@@ -39,7 +39,8 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { sink } from '../pool-state.ts'
+import { ReplSession } from '../repl-session.ts'
+import { pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { AdoptableHost, HandleInspection, PtyChild, PtySpawnOpts } from '../pty-host.ts'
@@ -136,6 +137,7 @@ class SurvivingRepl {
  *  {@link SurvivingRepl} the dev-channel answers for. */
 class CountingAdoptableHost implements AdoptableHost {
   spawns = 0
+  kills = 0
   attachHold: Promise<void> | undefined
   releaseAttach: (() => void) | undefined
   closed: string[] = []
@@ -190,6 +192,7 @@ class CountingAdoptableHost implements AdoptableHost {
     // THE LINKAGE. From here the surviving child knows which pane it was taken over
     // through — and its bridge will answer a turn, but not before.
     this.survivor.attachedVia = handle
+    const host = this
     const survivor = this.survivor
     let exited = false
     let resolveExit: (c: number | null) => void = () => {}
@@ -203,10 +206,15 @@ class CountingAdoptableHost implements AdoptableHost {
       write() {},
       writeKey() {},
       kill() {
+        host.kills += 1
         exited = true
         survivor.attachedVia = undefined
         survivor.outputReleased = false
         resolveExit(null)
+      },
+      detach() {
+        survivor.attachedVia = undefined
+        survivor.outputReleased = false
       },
       exited: exitedPromise,
       hasExited: () => exited,
@@ -301,6 +309,40 @@ afterEach(async () => {
 })
 
 describe('the first turn after a gateway restart', () => {
+  it('survives the REAL shutdown walk, then serves the next gateway without a spawn', async () => {
+    const survivor = new SurvivingRepl()
+    const host = new CountingAdoptableHost(survivor)
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(host, registryPath)
+    const key = poolKeyFor(options)
+    writeSurvivorRow(registryPath, survivor.port, key)
+
+    // Model the retiring gateway's live wrapper in the actual pool, then drive the
+    // production shutdown walk. A row-only fixture skips the decision whose behaviour
+    // #518 needs: whether shutdown kills or hands over this child.
+    const retiring = new ReplSession(key, GENERATION, SESSION_ID, CHANNEL, '/tmp/neutron-adopt')
+    retiring.attachChild(await host.attach(HANDLE, {} as PtySpawnOpts))
+    pool.set(key, Promise.resolve(retiring))
+    supervisedBySessionKey.set(key, options)
+
+    await shutdownAllPersistentRepls()
+
+    expect(host.kills).toBe(0)
+    expect(pool.get(key)).toBeUndefined()
+
+    // A production restart gets a fresh module. Reset only that process-local latch,
+    // preserve the row and child, then enter through the next gateway's real substrate.
+    resetBootAdoptionForTests()
+    const nextGateway = createPersistentReplSubstrate(options)
+    const answer = await drain(nextGateway.start(spec('continue the build')))
+
+    expect(answer).toContain(`served by the child in pane ${HANDLE}`)
+    expect(answer).toContain(`pid ${SURVIVOR_PID}`)
+    expect(answer).toContain('continue the build')
+    expect(host.spawns).toBe(0)
+    expect(host.kills).toBe(0)
+  })
+
   it('is served by the REPL that was already running — nothing is spawned', async () => {
     const survivor = new SurvivingRepl()
     const host = new CountingAdoptableHost(survivor)

@@ -171,12 +171,6 @@ function pooledSession(
   return { session, child }
 }
 
-// The sink must be listening for the credential assertion below — the honest surface for
-// "this registration is gone" is a 401 on the child's own credential, not a map lookup.
-beforeAll(async () => {
-  await sink.ensureStarted({ tokenPath: join(mkdtempSync(join(tmpdir(), 'neutron-539-sink-')), 'sink-token') })
-})
-
 afterEach(() => {
   supervisedBySessionKey.clear()
   pool.clear()
@@ -453,6 +447,13 @@ describe('the survival decision FAILS CLOSED — a lock it cannot take is not a 
 
 
 describe('a surviving child is handed OVER, not merely left alone', () => {
+  // The sink must be listening for the credential assertion in this group — the honest
+  // surface for "this registration is gone" is a 401, not a map lookup. Keep this setup
+  // scoped here so listener-free shutdown cases remain runnable in restricted lanes.
+  beforeAll(async () => {
+    await sink.ensureStarted({ tokenPath: join(mkdtempSync(join(tmpdir(), 'neutron-539-sink-')), 'sink-token') })
+  })
+
   /**
    * ARGUS r25. The existing survival cases assert the pane is not killed and its config
    * files survive — right about the PANE, silent about the WRAPPER. The retiring

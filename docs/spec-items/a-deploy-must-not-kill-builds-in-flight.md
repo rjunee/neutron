@@ -26,36 +26,43 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 
 ## Scope of the work landed so far
 
-PR #642 ADVANCES THIS ITEM AND DOES NOT CLOSE IT, and the issue stays open on purpose.
-What it delivers is the reporting half: every launcher this gateway kills on its way down
-is recorded and reported as a deploy/restart rather than as a crash. The item's primary
-behaviour — a deploy that drains or defers, or a workflow that survives its launcher's
-restart — is NOT delivered: every pooled and quarantined launcher is still killed during
-shutdown, for the reasons under criterion 1 below. Criteria 1 and 2 remain unticked; 3 and
-4 are met. The marker moves when the behaviour does; moving the item instead is how work
-disappears.
+PR #642 delivered the reporting half: every launcher this gateway kills on its way down
+is recorded and reported as a deploy/restart rather than as a crash. The prerequisite
+changes then delivered the primary behaviour's missing pieces: herdr became the wired
+out-of-process REPL container, and a findable pane gained shutdown survival plus boot
+adoption. This change pins those halves as one real sequence: the retiring gateway's
+actual shutdown walk leaves the child alive, and the next gateway adopts that same pane
+to serve a turn without launching another `claude`. Criterion 1 is therefore met;
+criterion 2 remains deliberately unticked for its named dual-channel residual; criteria
+3 and 4 remain met.
 
 ## Acceptance
 
-- [ ] **A deploy either drains/defers while a run is in flight, OR the workflow survives its
+- [x] **A deploy either drains/defers while a run is in flight, OR the workflow survives its
       launcher's restart. One of the two, chosen deliberately and pinned by a test.**
-      CHOSEN: *the workflow survives its launcher's restart* — and it is NOT deliverable
-      here, so this box stays open rather than being ticked against a check that does not
-      exist. Why the choice is forced, established 2026-09-12:
-      - **Drain/defer cannot work while the REPL is in the gateway's cgroup.** A deploy ends
-        in `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is
-        SIGKILLed at `TimeoutStopSec` regardless of what our polite layer decides
-        (`gateway/index.ts:1026-1045` says so in as many words). A `hostsLiveWork` gate on
-        `shutdownAllPersistentRepls` would therefore *report* a deferral it cannot deliver.
-      - **Nothing here can make a survivor useful either.** `orphan-adoption.ts` is
-        adopt-or-kill and only kills — verdicts `killed|not-ours|dead|no-pid`
-        (`orphan-adoption.ts:49-53`), no adopt arm, and `spawnResume` terminates the
-        recorded pid before resuming (`orphan-adoption.ts:229`). A pane that survived a
-        restart would be killed by the next boot.
+      CHOSEN AND DELIVERED: *the workflow survives its launcher's restart*. The former
+      blockers below are retained as the decision record, then followed by what overtook
+      them:
+      - **Former cgroup blocker (2026-09-12).** Before herdr was wired, the REPL was a
+        gateway descendant and the unit's `KillMode=control-group` would SIGKILL it at
+        `TimeoutStopSec` regardless of a polite drain decision. A `hostsLiveWork` gate on
+        `shutdownAllPersistentRepls` would therefore have reported a deferral it could not
+        deliver.
+      - **Former adoption blocker (2026-09-12).** Before #539, orphan handling could only
+        terminate a verified process before `--resume`; it had no pane-adoption arm. A
+        process that somehow survived would therefore have been ended by the next boot.
       - **Both halves are milestone-1 work that lands first.** #538 moves the REPL into a
         herdr pane outside this process tree; #539 is explicitly "gating the shutdown kill"
         plus the adopt arm and the boot reconciliation pass. Building a drain here would be
         a mechanism #539 obsoletes, in a tree that forbids dual code paths.
+      - **Those prerequisites have now landed.** `herdr-host.ts` is the wired REPL
+        container; `gateway-shutdown-survival.ts` leaves alive only a pane named by the
+        durable row's exact handle and generation; and `boot-adoption.ts` re-attaches that
+        pane. `adopted-repl-serves-a-turn.test.ts` drives the real
+        `shutdownAllPersistentRepls` walk, then a fresh gateway lifetime's real substrate
+        entry point, and asserts the reply names the surviving pane and pid while the host
+        records zero kills and zero spawns. This is the sequence the earlier marker-only
+        proof lacked.
 - [ ] **Either way the owner is TOLD which happened. A deploy-caused death is never reported
       as a bare "child crashed" / "pooled child exited" — assert the stored reason names
       the deploy.**
