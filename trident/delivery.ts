@@ -39,6 +39,7 @@
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveEscalationBlock } from './escalation-block.ts'
+import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
 import { deriveInfraBlock, deriveTerminalCause } from './infra-block.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 import { isPublishedUnreviewedReason } from './fire-evidence.ts'
@@ -97,6 +98,18 @@ export type FailureClass =
   | 'merge-conflict'
   | 'stale-state'
   | 'merge-mechanics'
+  /**
+   * THE MERGE WAS REFUSED ON SIZE, AND NOTHING BROKE (#618). The pre-merge gate
+   * measured the complete diff and found it above the ceiling the reviewer seat
+   * can be shown in full, so the branch was not landed. Its own class because
+   * the two it would otherwise fall into are both wrong about what happened and
+   * what to do: `merge-mechanics` names a git step that did not fail and
+   * prescribes a retry that re-measures the same diff and refuses again, and the
+   * `unknown` fallback prints the sentence but keeps the same retry advice. The
+   * work is intact and reviewed; what is needed is a smaller change, which is a
+   * decision only the owner makes.
+   */
+  | 'merge-too-large'
   | 'review-unresolved'
   | 'hang'
   | 'infra'
@@ -1115,6 +1128,26 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       klass: 'review-unresolved',
       summary: `The build ran its review rounds but the reviewer still had blocking findings, so I did not merge it.`,
       input_needed: `${saved} Reply to send it back for another fix pass, or take it over.`,
+    }
+  }
+
+  // THE PRE-MERGE SIZE GATE REFUSED (#618) — the diff was measured and is above
+  // the ceiling, so nothing was merged and nothing broke. Checked ahead of the
+  // mechanics arm below, which would otherwise claim a git step failed and
+  // prescribe the one action that cannot work here: a retry re-measures the same
+  // diff and refuses again. Matched through the module that AUTHORS the sentence
+  // (`merge-diff-limit.ts`), anchored at the front, so a reword cannot leave the
+  // writer and this reader disagreeing in silence.
+  if (isMergeDiffTooLargeReason(reason)) {
+    return {
+      klass: 'merge-too-large',
+      summary:
+        'The build finished and was approved, but its diff is larger than I can land as one ' +
+        'reviewable change, so I did not merge it.',
+      input_needed:
+        `${reason}. ${saved} Splitting it is the decision and it is yours: break the work ` +
+        `into smaller cards and dispatch them one at a time — re-running this build produces ` +
+        `the same diff and I will refuse it again.`,
     }
   }
 

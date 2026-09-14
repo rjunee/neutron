@@ -110,6 +110,7 @@ import {
   runWorktreePath,
   TridentBaseDriftHold,
   TridentMergeConflictEscalation,
+  TridentMergeDiffHold,
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
@@ -5360,6 +5361,29 @@ export function buildTridentOrchestrator(
             changed: true,
             waiting: false,
             note: 'done → failed (merge HELD: base drifted since review)',
+          }
+        }
+        // #618 — the diff was MEASURED and is above the ceiling the reviewer
+        // seat can be shown in full, so the merge was refused rather than
+        // landed. Same shape as the #542 hold above and for the same reason:
+        // the refusal text is authored, plain and specific, and the terminal
+        // delivery posts exactly it. Without this arm the reason fell into the
+        // `merge failed:` catch-all below, which `interpretFailure` classifies
+        // as `merge-mechanics` — "a git step failed while landing the branch …
+        // Reply to retry the build". No git step failed, the authored sentence
+        // was discarded, and the retry re-measures the same diff and refuses
+        // again; an unclassified refusal costs whatever the default costs.
+        //
+        // MEASURED ONLY. A hold carrying `measured_bytes === null` says the
+        // diff could not be READ, which is a git command that failed and
+        // nothing at all about its size — that one keeps the mechanics
+        // disposition below, where the retry advice is right.
+        if (err instanceof TridentMergeDiffHold && err.measured_bytes !== null) {
+          return {
+            run: { ...failedRun(doneRun, err.message, true), inner_verdict: 'APPROVE' },
+            changed: true,
+            waiting: false,
+            note: 'done → failed (merge REFUSED: diff above the reviewable size limit)',
           }
         }
         // #342 — a genuinely ambiguous merge conflict escalates a SPECIFIC

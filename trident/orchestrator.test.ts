@@ -4060,6 +4060,51 @@ describe('orchestrator — base-drift hold (#542): a HELD merge fails LOUDLY, no
   })
 })
 
+describe('orchestrator — diff-size refusal (#618) joins the terminal vocabulary', () => {
+  /** A clean, drift-free host whose pre-merge diff is `bytes` long. */
+  const sizedHost = (bytes: number): ((cmd: string[]) => HostCommandResult) => {
+    const SHA = '1111111111111111111111111111111111111111'
+    return (cmd) => {
+      if (cmd.includes('diff') && cmd.includes('--binary')) return ok('x'.repeat(bytes))
+      if (cmd.includes('rev-parse') && cmd.includes('--verify')) return ok(SHA)
+      if (cmd.includes('merge-base')) return ok(SHA)
+      return ok()
+    }
+  }
+
+  // The refusal must arrive at the OWNER as the authored sentence, exactly like
+  // the #542 hold beside it — not wrapped in `merge failed:`, which routes to the
+  // git-mechanics class ("a git step failed … Reply to retry the build"). Nothing
+  // about that is true here and the retry cannot clear it.
+  test('an APPROVE whose diff is over the ceiling fails with the AUTHORED refusal, nothing merged', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: sizedHost(1_048_577),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('1048577')
+    expect(final.failure_reason).not.toContain('merge failed')
+    // The reviewed work is intact; only the landing was refused.
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge --no-ff'))).toBe(false)
+  })
+
+  // THE OTHER DIRECTION, on the same harness: a diff AT the ceiling still lands.
+  // Without this the test above is satisfied by a gate that refuses everything.
+  test('an APPROVE whose diff is exactly at the ceiling still merges (done)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: sizedHost(1_048_576),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge --no-ff'))).toBe(true)
+  })
+})
+
 describe('orchestrator — server-gated verdict provenance', () => {
   test('a self-asserted APPROVE with no recorded argus-approved checkpoint is REJECTED → failed (no merge)', async () => {
     // The workflow's result claims APPROVE, but the recorded provenance checkpoint

@@ -3972,9 +3972,18 @@ describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge
       const isConflictDiff =
         cmd.some((a) => a.startsWith(':2:') || a.startsWith(':3:')) ||
         cmd.filter((a) => /^[0-9a-f]{40}$/.test(a)).length === 2
+      // …AND THE PRE-MERGE SIZE GATE'S DIFF IS NOT A FINGERPRINT PROBE EITHER (#618).
+      // `worktreeFingerprint` probes the WORKING TREE — `git -C <wt> diff` with no
+      // operand and no `--binary`. The size gate reads a REF RANGE in the repo with
+      // `--binary`. Without this clause `failFingerprint: true` also failed the size
+      // gate's read, and the run refused for "the diff could not be measured" before
+      // it ever reached the arbiter — this test asserting the fail-closed fingerprint
+      // behaviour would have been satisfied by a refusal that has nothing to do with
+      // fingerprints. Same defect class as the conflict-diff clause above it.
       const isPlainDiff =
         cmd.includes('diff') &&
         !isConflictDiff &&
+        !cmd.includes('--binary') &&
         !cmd.includes('--cached') &&
         !cmd.includes('--diff-filter=U') &&
         !cmd.includes('--name-only') &&

@@ -156,7 +156,10 @@ case "$BASE_REF" in
 esac
 fi
 : "${CODEX_HOME:=}"
-# Codex's measured input ceiling is in CHARACTERS, not lines. Measured 2026-09-14:
+# Codex's measured input ceiling is in CHARACTERS, not lines. The merge path
+# independently pins the same numeric ceiling in BYTES and refuses above it;
+# ASCII is therefore the exact shared boundary and non-ASCII fails earlier at merge.
+# Measured 2026-09-14:
 # 1,219,586 characters was refused and 878,351 was accepted; 1,048,576 is the
 # named ceiling used here. Tests may lower it without changing the production unit.
 CODEX_INPUT_CHARACTER_LIMIT=1048576

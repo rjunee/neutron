@@ -1115,6 +1115,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     // site is therefore enumerated here with the expression it passes, so a new one — or a
     // changed operand at an existing one — has to be argued rather than merely compile.
     const CALL_SITES: ReadonlyArray<{ file: string; base: string; why: string }> = [
+      { file: 'merge.ts', base: 'base_ref', why: "enforceMergeDiffGate's parameter; both callers qualify it in full at the call site (`refs/remotes/origin/<base>` in pr mode, `refs/heads/<base>` in local mode), and those are enumerated below" },
       { file: 'merge.ts', base: 'base_sha', why: 'the launch-pinned sha — a full object name by construction' },
       { file: 'merge.ts', base: 'base', why: "sideHistory's parameter; its callers are argued at the call site (the arbiter's conflict sides, which must denote what `git rebase <base>` used)" },
       { file: 'mutation-prover.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
@@ -1194,6 +1195,43 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     }
     expect([...new Set(forwardedSeen)].sort()).toEqual([...new Set(FORWARDED.map((f) => `${f.base} ${f.head}`))].sort())
     for (const f of FORWARDED) expect({ pair: `${f.base} ${f.head}`, argued: f.why.length > 20 }).toEqual({ pair: `${f.base} ${f.head}`, argued: true })
+
+    // THE SECOND FORWARDER (#618). `enforceMergeDiffGate` takes the two operands and hands them
+    // to `gitRangeArgv`, so the constructor's call site shows its PARAMETER and says nothing
+    // about what either merge mode passes. Same rule, same reason as `sideHistory` above: an
+    // instrument that stops at the constructor measures the constructor. Read over a BLOCK, not
+    // a line — the pr-mode call is written across several lines and a line-anchored reader
+    // would call it UNREADABLE, which is how the table above got its first two revisions wrong.
+    const GATE_FORWARDED: ReadonlyArray<{ base: string; head: string; why: string }> = [
+      {
+        base: '`refs/remotes/origin/${base}`',
+        head: '`refs/remotes/origin/${branchForGate}`',
+        why: 'pr mode measures the refs GitHub will merge — the remote-tracking pair the explicit-refspec fetch just refreshed, qualified in full so neither resolves against another namespace',
+      },
+      {
+        base: '`refs/heads/${base}`',
+        head: '`refs/heads/${branch}`',
+        why: 'local mode lands local refs, so it measures local refs, qualified in full for the same reason — `main` and `origin/main` are both names git resolves across namespaces',
+      },
+    ]
+    const gateSeen: string[] = []
+    for (let i = 0; i < mergeSrc.length; i += 1) {
+      const line = mergeSrc[i] ?? ''
+      if (!line.includes('enforceMergeDiffGate(') || line.includes('async function enforceMergeDiffGate')) continue
+      const block = mergeSrc.slice(i, i + 8).join(' ')
+      const args = /enforceMergeDiffGate\(([^)]*)\)/.exec(block)?.[1]?.split(',').map((a) => a.trim()) ?? []
+      // (run_host, repo, base_ref, branch_ref) — the last two are the operands.
+      const pair = `${args[2] ?? 'UNREADABLE'} ${args[3] ?? 'UNREADABLE'}`
+      gateSeen.push(pair)
+      expect({ site: `merge.ts:${i + 1}`, operands: pair, argued: GATE_FORWARDED.some((f) => `${f.base} ${f.head}` === pair) }).toEqual({
+        site: `merge.ts:${i + 1}`,
+        operands: pair,
+        argued: true,
+      })
+    }
+    // Both modes, and nothing stale: a deleted call site cannot leave its argument behind.
+    expect([...new Set(gateSeen)].sort()).toEqual([...new Set(GATE_FORWARDED.map((f) => `${f.base} ${f.head}`))].sort())
+    for (const f of GATE_FORWARDED) expect({ pair: `${f.base} ${f.head}`, argued: f.why.length > 20 }).toEqual({ pair: `${f.base} ${f.head}`, argued: true })
 
     // …and the table holds nothing that no longer exists, so a removed call site cannot leave a
     // stale argument behind. Deduplicated, because several sites legitimately pass `baseRef`.
