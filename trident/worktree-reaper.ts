@@ -540,28 +540,6 @@ function candidateRefusal(repo: string, candidate: ReapableCandidate): string | 
 export const MAX_RESTORE_ATTEMPTS = 3
 
 /**
- * The single named reason the sweep does not delete anything (#635). One constant, one
- * non-call-site, so "why is nothing being reaped" has exactly one answer to find.
- *
- * IT SAYS CANDIDATE, NOT REAPABLE, AND THAT IS THE POINT (#547 round 18). It used to open
- * "every gate passed and this ref IS reapable", which is the overclaim this change spent
- * sixteen rounds eliminating from its documents — surviving in the one place the documents
- * never covered: THE STRING AN OPERATOR IS HANDED AT RUNTIME. The sweep evaluates gates 1-10.
- * Gates 11-14 run only at deletion time and any of them can still refuse — a salvage the host
- * rejects makes a ref a permanent candidate that is never deletable. An operator told a ref
- * "IS reapable", then watching it survive, concludes the reaper is broken; the reaper is right
- * and the sentence was wrong. A reason string is not commentary, it is the product.
- */
-export const DEFERRED_PENDING_CLAIMANT_GUARD =
-  'deferred-pending-claimant-guard: this ref is a CANDIDATE — it passed gates 1-10, which is an ' +
-  'upper bound rather than a decision: gates 11-14 (the salvage, the re-measured claim probe, the ' +
-  'compare-and-swap and the repair) are evaluated only at deletion time and any of them can still ' +
-  'refuse. The reap performs no deletions at all until #635 lands (a run whose HEAD does not ' +
-  'resolve must refuse to commit). Nothing deletes these refs today, so shipping the write before ' +
-  'its guard would introduce a destructive operation ahead of the only check that can settle its ' +
-  'failure mode without a race.'
-
-/**
  * REF RETENTION IS DELIBERATELY ZERO, unlike the 24 h a worktree gets. A worktree can
  * hold work that exists nowhere else and no probe can read intent out of it, so age is
  * a stand-in for "somebody may still want this". A ref holds commits, which gate 11
@@ -1516,51 +1494,21 @@ async function reapBranchRefs(
       continue
     }
 
-    // ───────────────────────────────────────────────────────────────────────────────
-    // THE DELETION IS DEFERRED TO #635, AND THIS IS THE ONE PLACE THAT SAYS SO.
-    //
-    // Gates 1-10 above have passed, so this ref is a CANDIDATE and is reported as one — not
-    // "reapable", because gates 11-14 are evaluated only at deletion time and any of them can
-    // still refuse (see the field's own note, and the deferral reason pushed just below). The
-    // destructive half lives in `deleteReapableRef` and the sweep does not call it — one
-    // non-call, named here, and #635 turns this branch into that call.
-    //
-    // WHY, AND WHY IT IS THIS PR'S SCOPE RATHER THAN A FLAG. Nothing deletes these refs
-    // today, so shipping the reap introduces a destructive operation that does not
-    // currently exist — and with it a failure mode whose outcome is a run committing onto
-    // no history at all, its PR a whole-tree diff against unrelated history. "The commits
-    // are never lost" is true and is not the same as "nothing bad happens". The definitive
-    // protection is on the claimant's side (#635: a run whose HEAD does not resolve must
-    // refuse to commit), because that side can settle it with one `rev-parse --verify HEAD`
-    // and no race — and it is not buildable here: the build's commit is the agent running
-    // `git commit` in its worktree, driven by prompt text in `inner-workflow.mjs`, so there
-    // is no function in this lane to guard.
-    //
-    // A change that introduces automation is measured against a world in which that
-    // automation does not exist. Every gate, the measurement and the reporting ship; the
-    // write waits for its guard.
-    //
-    // ZERO WRITES, and that is an improvement rather than merely a smaller change: not
-    // creating salvage refs for deletions that are not happening avoids seeding a namespace
-    // that has no pruner (see the record).
-    // A CANDIDATE, not a decision: gates 1-10 passed. Gates 11-14 are evaluated only at
-    // deletion time (see the field's own note), so a ref listed here can still be refused by
-    // the salvage or by the claim probe when #635 turns this branch into a call.
+    // Gates 1-10 mint the only value the destructive boundary accepts. Gates 11-14 are
+    // deliberately evaluated at the write boundary, after the candidate is recorded, so the
+    // report retains both the pre-write inventory and the final delete-or-refuse outcome.
     report.refs_candidates.push(mintReapableCandidate(repo, ref, sha))
-    report.refs_kept.push({ ref, reason: DEFERRED_PENDING_CLAIMANT_GUARD })
+    await deleteReapableRef(opts, repo, report.refs_candidates.at(-1)!, report, deletionBudget)
     continue
-    // ───────────────────────────────────────────────────────────────────────────────
   }
 }
 
 /**
- * THE DESTRUCTIVE HALF, extracted so the sweep can decline to call it (#635).
+ * THE DESTRUCTIVE HALF, called by the sweep after gates 1-10 mint its input.
  *
  * Everything from the per-sweep deletion budget through the salvage, the claim probe, the
- * atomic compare-and-swap delete and the repair. Exported for two reasons and no others:
- * the sweep's ONE non-call of it is the deferral this PR ships, and the whole sequence stays
- * under test so the code #635 re-enables is code whose coverage never lapsed. There is no
- * flag here and no second path — production reaches this function from nowhere.
+ * atomic compare-and-swap delete and the repair. Exported so the boundary's refusal cases can
+ * be tested directly; production reaches it from the gate chain above.
  *
  * THE PRECONDITIONS ARE CARRIED BY THE ARGUMENTS, NOT BY THE CALLER'S DISCIPLINE. Gates 1-10
  * — the ref is in trident's namespace, no worktree holds it by name or by commit, every

@@ -22,7 +22,6 @@ import {
   DEFAULT_REAP_INTERVAL_MS,
   DEFAULT_WORKTREE_RETENTION_MS,
   deleteReapableRef,
-  DEFERRED_PENDING_CLAIMANT_GUARD,
   MAX_REF_DELETIONS_PER_SWEEP,
   MAX_RESTORE_ATTEMPTS,
   type ReapableCandidate,
@@ -33,51 +32,16 @@ import {
   type WorktreeReapReport,
 } from './worktree-reaper.ts'
 
-/**
- * THE SWEEP PLUS THE DESTRUCTIVE HALF — which production does NOT do, and that is the point.
- *
- * `#606` ships every gate, the measurement and the reporting; the `update-ref -d` itself waits
- * for `#635` (a run whose HEAD does not resolve must refuse to commit), because nothing deletes
- * these refs today and a destructive operation should not arrive ahead of the only check that
- * can settle its failure mode without a race. The sweep therefore records CANDIDATES — refs that
- * pass gates 1-10, an upper bound on what would be deleted rather than a measurement of it — in
- * `refs_candidates`, and calls nothing.
- *
- * Every test below that exercises the salvage, the claim probe, the compare-and-swap delete or
- * the repair drives it through here, so the code `#635` re-enables is code whose coverage never
- * lapsed — which is the whole reason the destructive half was extracted rather than short-
- * circuited. `#635`'s change is to delete the deferral and call this sequence from the sweep.
- *
- * For a refusal case this is a pure passthrough: nothing is reapable, so nothing is called and
- * the behaviour is the sweep's own.
- */
 async function sweepAndReap(opts: Parameters<typeof sweepTridentWorktrees>[0]): Promise<WorktreeReapReport> {
-  const report = await sweepTridentWorktrees(opts)
-  const budget = { attempts: 0 }
-  for (const minted of [...report.refs_candidates]) {
-    // EACH CANDIDATE GOES TO THE REPOSITORY IT WAS MINTED FOR (#547 round 14). This used to
-    // aim every candidate at the FIRST non-empty `listRepoPaths()` entry, which was invisible
-    // while a candidate was `{ ref, sha }` and the attestation was repo-blind. Once the
-    // attestation became repo-bound, that harness silently refused every candidate from the
-    // second repository onward — so a multi-repository sweep's destructive path was not merely
-    // untested, it was WRONG in the stand-in for the call structure #635 restores.
-    //
-    // THE CANDIDATE IS PASSED THROUGH, NOT REBUILT. `deleteReapableRef` only accepts a value
-    // the gate chain minted, so a test that reconstructed `{ repo, ref, sha }` here would be
-    // refused at gate 0 — which is exactly the property the negative tests below pin.
-    await deleteReapableRef(opts, minted.repo, minted, report, budget)
-  }
-  return report
+  return sweepTridentWorktrees(opts)
 }
 
 /**
- * The kept-reason a test means: the LAST one recorded for this ref, skipping the deferral note
- * the sweep always adds for a reapable ref. `find` picked that note up and hid the outcome the
- * test was actually asserting on.
+ * The last kept reason for one ref.
  */
 function keptReasonFor(report: WorktreeReapReport, full: string): string | undefined {
   return report.refs_kept
-    .filter((k) => k.ref === full && k.reason !== DEFERRED_PENDING_CLAIMANT_GUARD)
+    .filter((k) => k.ref === full)
     .at(-1)?.reason
 }
 
@@ -2613,16 +2577,8 @@ describe('branch-ref reap — the refusals (#547)', () => {
   }, 30_000)
 })
 
-describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
-  // `#606` ships every gate, the measurement and the reporting; it performs no deletions.
-  // Nothing deletes these refs today, so shipping the write would introduce a destructive
-  // operation ahead of the only check that can settle its failure mode without a race — and
-  // that check is on the claimant's side (`#635`), where a build's commit is the agent running
-  // `git commit`, so it is not buildable in this lane at all.
-  test('a SWEEP issues NO delete and NO salvage write — zero writes, both pinned', async () => {
-    // BOTH absences are asserted. Pinning only the delete would leave "zero writes" unpinned,
-    // and the salvage half is a real claim: not seeding `refs/trident-reaped/` for deletions
-    // that are not happening is why the deferral is an improvement and not just a smaller change.
+describe('branch-ref reap — production invokes the guarded destructive boundary', () => {
+  test('a sweep salvages and deletes a candidate minted by all ten pre-write gates', async () => {
     const { root, repo } = await makeRepo()
     const branch = 'trident/deferred-not-reaped'
     const sha = await seedRef(repo, branch, 'deferred')
@@ -2637,23 +2593,17 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
       proc_root: makeProc(root),
     })
 
-    // NOT A WRITE OF ANY KIND.
-    expect(writes, `unexpected writes: ${JSON.stringify(writes)}`).toEqual([])
-    expect(report.refs_deleted).toEqual([])
+    expect(writes.length).toBeGreaterThanOrEqual(2)
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}deferred-not-reaped/${sha}` },
+    ])
     expect(report.refs_restored).toEqual([])
     expect(report.refs_restore_failed).toEqual([])
-    // The ref and the salvage namespace are both untouched.
-    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
-    expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
+    expect(await refExists(repo, ref(branch))).toBe(false)
+    expect(await git(repo, 'rev-parse', `${SALVAGE_REF_PREFIX}deferred-not-reaped/${sha}`)).toBe(sha)
 
-    // AND THE DRY-RUN INVENTORY IS THE POINT: it says exactly what #635 will unlock.
     expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
-    expect(
-      report.refs_kept.some(
-        (k) => k.ref === ref(branch) && k.reason === DEFERRED_PENDING_CLAIMANT_GUARD,
-      ),
-      JSON.stringify(report.refs_kept),
-    ).toBe(true)
+    expect(report.refs_kept.some((k) => k.ref === ref(branch))).toBe(false)
   }, 60_000)
 
   test('A CANDIDATE IS AN UPPER BOUND: gate 11 can still refuse one, and the report says so', async () => {
@@ -2703,7 +2653,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(report.refs_candidates.length).toBeGreaterThan(report.refs_deleted.length)
   }, 60_000)
 
-  test('the REASON AN OPERATOR READS says candidate, not reapable', async () => {
+  test('the outcome an operator reads keeps candidate inventory distinct from deletion', async () => {
     // THE ASSERTION THAT WAS MISSING (#547 round 18). The rename tests below inspect the field
     // NAME and the source text; none of them ever read the emitted VALUE. That is exactly how a
     // user-visible string drifts while the suite stays green: the field was renamed
@@ -2722,30 +2672,9 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
       proc_root: makeProc(root),
     })
 
-    const emitted = report.refs_kept.filter((k) => k.ref === ref(branch)).map((k) => k.reason)
-    expect(emitted).toHaveLength(1)
-    const reason = emitted[0] ?? ''
-    // It came from the sweep, not from the test importing a constant.
-    expect(reason).toBe(DEFERRED_PENDING_CLAIMANT_GUARD)
-
-    // WHAT IT MUST SAY: candidate, the gate range, and that the range is an upper bound.
-    expect(reason).toContain('CANDIDATE')
-    expect(reason).toContain('gates 1-10')
-    expect(reason).toContain('upper bound')
-    expect(reason).toContain('#635')
-
-    // WHAT IT MUST NOT SAY. Each of these is a claim the sweep has not established, and the
-    // first two are the exact words that shipped.
-    for (const overclaim of [
-      'IS reapable',
-      'every gate passed',
-      'all gates passed',
-      'all fourteen',
-      'will be deleted',
-      'would be deleted',
-    ]) {
-      expect(reason.toLowerCase(), overclaim).not.toContain(overclaim.toLowerCase())
-    }
+    expect(report.refs_candidates).toHaveLength(1)
+    expect(report.refs_deleted).toHaveLength(1)
+    expect(report.refs_kept.filter((k) => k.ref === ref(branch))).toEqual([])
   }, 60_000)
 
   test('NO emitted reason in the module claims a ref is reapable or will be deleted', () => {
@@ -2786,7 +2715,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(doc).toContain('UPPER BOUND')
   })
 
-  test('THE COMPLEMENT: called directly, the destructive half still does the whole sequence', async () => {
+  test('THE COMPLEMENT: the production sweep does the whole destructive sequence', async () => {
     // Without this the deferral test above would be satisfied by a reaper that can no longer
     // delete anything at all. `deleteReapableRef` is what `#635` re-enables, so it has to be
     // demonstrably intact — salvage written, ref gone, inventory honoured.
@@ -2801,10 +2730,6 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
 
     const report = await sweepTridentWorktrees(opts)
     expect(report.refs_candidates).toEqual([{ repo, ref: ref(branch), sha }])
-    expect(await refExists(repo, ref(branch))).toBe(true)
-
-    await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
-
     expect(report.refs_deleted).toEqual([
       { ref: ref(branch), sha, salvage: `refs/trident-reaped/deferred-but-intact/${sha}` },
     ])
@@ -2812,9 +2737,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/trident-reaped/deferred-but-intact/${sha}`)).toBe(sha)
   }, 60_000)
 
-  test('the sweep has exactly ONE non-call of the destructive half, and it names #635', () => {
-    // One place to find when asking "why is nothing being reaped". The sweep must not reference
-    // `deleteReapableRef` at all — a commented-out call or a guarded one is two answers.
+  test('the sweep has exactly one production call of the destructive half', () => {
     const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
     // Asserted on the CALL, not on the name. The deferral comment inside the sweep names
     // `deleteReapableRef` deliberately — that is how a reader finds the other half — so a
@@ -2823,13 +2746,10 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
       source.indexOf('async function reapBranchRefs('),
       source.indexOf(' * THE DESTRUCTIVE HALF, extracted'),
     )
-    expect(sweep).not.toMatch(/(await |void )deleteReapableRef\s*\(/)
-    expect(sweep.match(/DEFERRED_PENDING_CLAIMANT_GUARD/g) ?? []).toHaveLength(1)
-    // And the whole module calls it from nowhere: production reaches it only once #635 lands.
-    expect(source).not.toMatch(/(await |void )deleteReapableRef\s*\(/)
+    expect(sweep.match(/await deleteReapableRef\s*\(/g) ?? []).toHaveLength(1)
+    expect(source.match(/await deleteReapableRef\s*\(/g) ?? []).toHaveLength(1)
     // POSITIVE CONTROL on the regex, so "no call found" cannot mean "pattern never matches".
     expect('  await deleteReapableRef(opts, repo,').toMatch(/(await |void )deleteReapableRef\s*\(/)
-    expect(DEFERRED_PENDING_CLAIMANT_GUARD).toContain('#635')
   })
 })
 
@@ -3142,6 +3062,7 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
     })
     const minted = onlyCandidate(sweep)
     expect(minted).toEqual({ repo, ref: ref(branch), sha })
+    await git(repo, 'update-ref', ref(branch), sha)
 
     const owners = [owner(branch, { phase: 'failed' })]
     const report = emptyReport()
@@ -3249,19 +3170,7 @@ describe('the attestation covers the repository too, and both object formats (#5
     expect(await git(b.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
 
     // THE COMPLEMENT: the same attestation against the repository it was minted for deletes.
-    const home = emptyReport()
-    await deleteReapableRef(
-      {
-        store: stubStore(a.repo, [], [owner(branch, { phase: 'failed' })]),
-        run_host: spawnCapture,
-        proc_root: procA,
-      },
-      a.repo,
-      mintedForA,
-      home,
-      { attempts: 0 },
-    )
-    expect(home.refs_deleted).toEqual([
+    expect(sweepA.refs_deleted).toEqual([
       { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}same-name-same-sha/${sha}` },
     ])
     expect(await refExists(a.repo, ref(branch))).toBe(false)
@@ -3287,19 +3196,10 @@ describe('the attestation covers the repository too, and both object formats (#5
     })
     const minted = onlyCandidate(sweep)
 
-    const report = emptyReport()
-    await deleteReapableRef(
-      { store: stubStore(alias, [], [owner(branch, { phase: 'failed' })]), run_host: spawnCapture, proc_root: proc },
-      alias,
-      minted,
-      report,
-      { attempts: 0 },
-    )
-
-    expect(report.refs_kept.map((k) => k.reason)).not.toContainEqual(
+    expect(sweep.refs_kept.map((k) => k.reason)).not.toContainEqual(
       expect.stringContaining('not-a-reapable-candidate'),
     )
-    expect(report.refs_deleted).toEqual([
+    expect(sweep.refs_deleted).toEqual([
       { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}symlinked-spelling/${sha}` },
     ])
     expect(await refExists(repo, ref(branch))).toBe(false)
@@ -3583,6 +3483,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const sweep = await sweepTridentWorktrees(opts)
+    await git(repo, 'update-ref', ref(branch), sha)
     return { repo, proc, branch, sha, tree, ownerRow, opts, minted: onlyCandidate(sweep) }
   }
 
@@ -3694,6 +3595,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+    await git(repo, 'update-ref', ref(branch), sha)
 
     const late = join(root, generation)
     mkdirSync(late, { recursive: true })
@@ -3721,6 +3623,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+    await git(repo, 'update-ref', ref(branch), sha)
 
     rmSync(proc, { recursive: true, force: true })
 
@@ -3765,6 +3668,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+    await git(repo, 'update-ref', ref(branch), sha)
 
     rows = []
 
@@ -3797,6 +3701,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+    await git(repo, 'update-ref', ref(branch), sha)
 
     const report = emptyReapReport()
     await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
@@ -3837,6 +3742,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       proc_root: proc,
     }
     const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+    await git(repo, 'update-ref', ref(branch), sha)
 
     const live = join(root, generation)
     mkdirSync(live, { recursive: true })
