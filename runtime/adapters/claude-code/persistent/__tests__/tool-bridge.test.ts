@@ -25,12 +25,14 @@ import {
 } from '../persistent-repl-substrate.ts'
 import { sink } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
+import { setReplTodoSync } from '../repl-sink.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
   setReplToolBridge(undefined) // never leak the global across tests
+  setReplTodoSync(undefined)
 })
 
 /** Echo host that captures the argv of every spawn. */
@@ -227,6 +229,7 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
   let liveCredential = ''
   function registerLiveSession(projectId?: string): void {
     const session = new ReplSession('k', 'gen', LIVE_SESSION_ID, 'chan', '/tmp')
+    session.toolBridgeActive = true
     if (projectId !== undefined) session.projectId = projectId
     sink.register(LIVE_SESSION_ID, session)
     liveCredential = sink.credentialFor(session)
@@ -269,6 +272,45 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     expect(json.result.echoed).toEqual({ query: 'taxes' })
     expect(calls).toEqual([{ tool_name: 'doc_search', args: { query: 'taxes' } }])
   })
+
+  for (const route of ['/tool-call', '/todo-sync'] as const) {
+    for (const enabled of [false, true]) {
+      it(`${route} bridge grant: ${enabled ? 'granted dispatch succeeds' : 'ungranted dispatch is refused'}`, async () => {
+        const calls: unknown[] = []
+        setReplToolBridge({
+          listToolSchemas: () => [{ name: 'note', description: 'write', input_schema: { type: 'object' } }],
+          dispatch: async (input) => {
+            calls.push(input)
+            return { written: true }
+          },
+        })
+        setReplTodoSync(async (input) => { calls.push(input) })
+        const { host, argvs } = makeCapturingHost()
+        const sub = createPersistentReplSubstrate(opts(host, {
+          enableToolBridge: enabled, user_id: 'u-grant', project_id: 'grant-project', credential_identity: 'cred-grant',
+        }))
+        await drain(sub.start(spec('hi')))
+        const credential = bakedChildSinkInfo(argvs[0]!).token
+        const todos = [{ content: 'Write report', status: 'in_progress', activeForm: 'Writing report' }]
+        // A forged body cannot promote the session identified by the credential.
+        const response = await sinkPost(route, {
+          session_id: LIVE_SESSION_ID, toolBridgeActive: true,
+          tool_name: 'note', args: { text: 'report' }, call_id: 'grant-call', todos,
+        }, credential)
+        if (enabled) {
+          expect(response).toEqual({ status: 200, json: route === '/tool-call' ? { ok: true, result: { written: true } } : { status: 'ok' } })
+          expect(calls).toEqual([route === '/tool-call'
+            ? { tool_name: 'note', args: { text: 'report' }, call_id: 'grant-call', project_id: 'grant-project' }
+            : { project_id: 'grant-project', todos }])
+        } else {
+          expect(response).toEqual({ status: 403, json: route === '/tool-call'
+            ? { ok: false, error: 'tool bridge not granted' }
+            : { status: 'forbidden', error: 'tool bridge not granted' } })
+          expect(calls).toEqual([])
+        }
+      })
+    }
+  }
 
   it('/tool-call returns ok:false (not an HTTP fault) when the handler throws', async () => {
     setReplToolBridge(fakeBridge([]))

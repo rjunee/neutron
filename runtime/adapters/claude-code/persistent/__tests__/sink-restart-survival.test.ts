@@ -1350,6 +1350,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
 
     const liveId = 'session-this-gateway-is-driving'
     const live = new ReplSession('key', 'generation-of-the-live-child', liveId, 'chan', dir)
+    live.toolBridgeActive = true
     live.projectId = 'acme'
     s.register(liveId, live)
 
@@ -1383,6 +1384,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
 
     const sessionId = 'session-that-gets-respawned'
     const first = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
+    first.toolBridgeActive = true
     s.register(sessionId, first)
     const firstCredential = s.credentialFor(first)
     expect((await post(s.port, firstCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
@@ -1390,6 +1392,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // The respawn: same id, new incarnation. `unregisterIf` drops the old mapping, and
     // the replacement registers under the same id.
     const second = new ReplSession('key', 'generation-2', sessionId, 'chan', dir)
+    second.toolBridgeActive = true
     s.unregisterIf(sessionId, first)
     s.register(sessionId, second)
     const secondCredential = s.credentialFor(second)
@@ -1415,12 +1418,14 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
 
     const sessionId = 'session-replaced-without-an-unregister'
     const first = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
+    first.toolBridgeActive = true
     s.register(sessionId, first)
     const firstCredential = s.credentialFor(first)
     expect((await post(s.port, firstCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
 
     // The replacement, with NO unregister of any kind in between.
     const second = new ReplSession('key', 'generation-2', sessionId, 'chan', dir)
+    second.toolBridgeActive = true
     s.register(sessionId, second)
     const secondCredential = s.credentialFor(second)
     expect(secondCredential).not.toBe(firstCredential)
@@ -1444,6 +1449,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
 
     const sessionId = 'session-this-gateway-is-driving'
     const live = new ReplSession('key', 'generation-of-the-live-child', sessionId, 'chan', dir)
+    live.toolBridgeActive = true
     live.projectId = 'acme'
     s.register(sessionId, live)
     const credential = s.credentialFor(live)
@@ -1469,6 +1475,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
     const { dispatched } = wireBridgeAndTap()
     const live = new ReplSession('key', 'generation-x', 'the-real-id', 'chan', dir)
+    live.toolBridgeActive = true
     live.projectId = 'acme'
     s.register('the-real-id', live)
 
@@ -1488,6 +1495,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     wireBridgeAndTap()
     const sessionId = 'session-about-to-be-evicted'
     const session = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
+    session.toolBridgeActive = true
     s.register(sessionId, session)
     const credential = s.credentialFor(session)
 
