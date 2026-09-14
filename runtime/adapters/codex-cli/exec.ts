@@ -3,9 +3,10 @@
  *
  * Spawns `codex exec --json "<prompt>"` (with `--resume <id>` when resuming a
  * thread) and streams the JSONL stdout line-by-line. Each parsed envelope is
- * mapped via `event-map.ts` to a substrate `Event` and yielded. Cancellation
- * SIGTERMs the child; the `finally` block always reaps regardless of how the
- * iterator exits (caller cancel, completion, error).
+ * mapped via `event-map.ts` to a substrate `Event` and yielded. The spawn gives
+ * every invocation its own process group. Cancellation and the `finally`
+ * block terminate that entire group, so broker descendants cannot escape when
+ * the CLI leader exits first.
  *
  * The spawn uses `node:child_process` for portability with both Bun and Node
  * test runners. Codex itself is a binary; `--json` switches stdout to JSONL.
@@ -17,6 +18,7 @@ import type { Readable } from 'node:stream'
 
 import type { Event } from '../../events.ts'
 import { mapCodexEvent, newCodexJsonlMapper } from './event-map.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Spawn shim — production binds to `node:child_process.spawn`. Tests inject
@@ -27,8 +29,56 @@ import { mapCodexEvent, newCodexJsonlMapper } from './event-map.ts'
 export type CodexSpawnLike = (
   cmd: string,
   args: ReadonlyArray<string>,
-  opts: { stdio: ['ignore', 'pipe', 'pipe']; env: Record<string, string> },
+  opts: { stdio: ['ignore', 'pipe', 'pipe']; env: Record<string, string>; detached: true },
 ) => ChildProcessByStdio<null, Readable, Readable>
+
+type ProcessSignal = NodeJS.Signals | 0
+type SignalProcess = (pid: number, signal: ProcessSignal) => void
+type ProcessGroupState = 'alive' | 'gone' | 'unknown'
+
+const PROCESS_GROUP_TERM_GRACE_MS = 250
+
+function probeProcessGroup(groupLeaderPid: number, signalProcess: SignalProcess): ProcessGroupState {
+  try {
+    signalProcess(-groupLeaderPid, 0)
+    return 'alive'
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    return code === 'ESRCH' ? 'gone' : 'unknown'
+  }
+}
+
+async function terminateProcessGroup(
+  groupLeaderPid: number | undefined,
+  signalProcess: SignalProcess,
+  wait: (ms: number) => Promise<void>,
+): Promise<void> {
+  // Node supplies the spawned pid before returning a live child. Refuse unsafe
+  // group ids: 0 targets our own group and 1 is init.
+  if (groupLeaderPid === undefined || groupLeaderPid <= 1) return
+
+  try {
+    signalProcess(-groupLeaderPid, 'SIGTERM')
+  } catch (err) {
+    // ESRCH proves the whole group is already gone. Any other failure is
+    // unknown, not absence, and therefore cannot authorize a stronger signal.
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return
+    return
+  }
+
+  await wait(PROCESS_GROUP_TERM_GRACE_MS)
+  switch (probeProcessGroup(groupLeaderPid, signalProcess)) {
+    case 'gone':
+    case 'unknown':
+      return
+    case 'alive':
+      try {
+        signalProcess(-groupLeaderPid, 'SIGKILL')
+      } catch {
+        // Best-effort: the group may have exited between probe and signal.
+      }
+  }
+}
 
 export interface CodexExecOptions {
   prompt: string
@@ -50,7 +100,7 @@ export interface CodexExecOptions {
    * never mutated.
    */
   spawn_env: Record<string, string | undefined>
-  /** AbortSignal — triggers SIGTERM to the child. */
+  /** AbortSignal — triggers cleanup of the invocation process group. */
   signal: AbortSignal
   /** Override the binary path. Default: `codex`. */
   bin?: string
@@ -61,6 +111,10 @@ export interface CodexExecOptions {
    * inject a stub that records argv + env (a self-contained testability seam).
    */
   spawnImpl?: CodexSpawnLike
+  /** Process signal seam used by cleanup tests. Defaults to `process.kill`. */
+  signalProcess?: SignalProcess
+  /** Grace-period seam used by cleanup tests. Defaults to a real timer. */
+  wait?: (ms: number) => Promise<void>
 }
 
 export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Event, void, void> {
@@ -97,6 +151,7 @@ export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Ev
     child = spawnImpl(opts.bin ?? 'codex', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: merged,
+      detached: true,
     })
   } catch (err) {
     yield { kind: 'error', message: `codex spawn failed: ${(err as Error).message}`, retryable: false }
@@ -115,12 +170,19 @@ export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Ev
   }
   child.on('error', onChildError)
 
+  const signalProcess: SignalProcess =
+    opts.signalProcess ?? ((pid, signal) => process.kill(pid, signal))
+  const wait = opts.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  let cleanupPromise: Promise<void> | undefined
+  const cleanup = (): Promise<void> => {
+    cleanupPromise ??= terminateProcessGroup(child.pid, signalProcess, wait)
+    return cleanupPromise
+  }
   const onAbort = (): void => {
-    try {
-      child.kill('SIGTERM')
-    } catch {
-      // best-effort
-    }
+    // An abort must not wait on the group teardown, but a teardown that throws
+    // must still be seen: a bare `void` here discards the rejection, and a kill
+    // that failed is exactly the thing this reaper exists to make observable.
+    fireAndForget('codex-cli.terminate-process-group', cleanup())
   }
   if (opts.signal.aborted) onAbort()
   else opts.signal.addEventListener('abort', onAbort, { once: true })
@@ -280,10 +342,6 @@ export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Ev
   } finally {
     opts.signal.removeEventListener('abort', onAbort)
     child.removeListener('error', onChildError)
-    try {
-      child.kill('SIGTERM')
-    } catch {
-      // best-effort — child may already be dead
-    }
+    await cleanup()
   }
 }
