@@ -8059,6 +8059,16 @@ it is on, one code path.
   echoed as `device=` on `session_open` / `session_close`, so a turn ties back
   to the connection it arrived on. `turn_failed` still rethrows. The `ms` is
   load-bearing: a long turn must read as long rather than as a dead one.
+- `session_close … initiated_by=client|server|unknown close_code=…
+  close_reason=… close_kind=deliberate|unexpected uptime_ms=…` — the close
+  callback records the protocol code/reason and connection lifetime. A peer
+  close frame is client-initiated, an Open shutdown marks each socket before a
+  local `1012 service_restart` close, and an abnormal `1006` with no close frame
+  remains `unknown`; it is never guessed into either side. Normal client
+  teardown and server restart are `deliberate`, while abnormal and liveness
+  failures are `unexpected`. These are additive fields in the existing
+  `[app-ws] event=… k=v` vocabulary, so consumers that select the older identity
+  fields ignore them by default.
 - `message_refused topic=… transport=… reason=…` at every refusal in
   `gateway/http/app-ws-surface.ts` — `malformed_json`, `malformed_envelope`,
   `dispatch_failed`, `missing_bearer`, the auth resolver's own rejection code,

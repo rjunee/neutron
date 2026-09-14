@@ -45,7 +45,7 @@ const PING_FRAME = { v: 1, type: 'ping' } as const
  *  Bun's `WebSocket` both satisfy it; tests pass a fake. */
 export interface SocketLike {
   send(data: string): void
-  close(): void
+  close(code?: number, reason?: string): void
   onopen: ((ev?: unknown) => void) | null
   onmessage: ((ev: { data: unknown }) => void) | null
   onclose: ((ev?: unknown) => void) | null
@@ -249,7 +249,7 @@ export class ChatWsClient {
     this.setStatus('closed')
     if (this.socket !== null) {
       try {
-        this.socket.close()
+        this.socket.close(1000, 'client_teardown')
       } catch {
         /* already closed */
       }
@@ -274,7 +274,7 @@ export class ChatWsClient {
       const stale = this.socket
       this.socket = null
       try {
-        stale.close()
+        stale.close(1000, 'socket_superseded')
       } catch {
         /* already closed */
       }
@@ -302,7 +302,7 @@ export class ChatWsClient {
       if (!this.active || this.closedByUser) {
         this.socket = null
         try {
-          socket.close()
+          socket.close(1000, this.closedByUser ? 'client_teardown' : 'app_inactive')
         } catch {
           /* already closed */
         }
@@ -412,7 +412,7 @@ export class ChatWsClient {
     this.socket = null
     if (dead !== null) {
       try {
-        dead.close()
+        dead.close(4000, 'heartbeat_timeout')
       } catch {
         /* already closed */
       }
