@@ -37,6 +37,8 @@
  * accidental drift is caught before it ships.
  */
 
+import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
+
 /**
  * Claude Code interactive permission mode. Trident profiles use `dontAsk` so
  * would-be prompts fail closed without the all-permissions bypass.
@@ -82,6 +84,23 @@ export interface SubstrateProfile {
   readonly skip_permissions: boolean
   /** Confine file tools to cwd/add-dir and refuse bypass mode. */
   readonly restricted?: boolean
+  /**
+   * Dirs this profile's agents may read BESIDES their cwd. Only meaningful with
+   * `restricted`, which makes cwd + this list the agent's whole readable
+   * filesystem — so every entry is a deliberate widening of the confinement and
+   * belongs here, next to the knob that imposes it.
+   *
+   * WHY IT EXISTS. #734 confined the four Trident profiles and nothing asked
+   * whether a confined agent has to read a file outside its cwd. The launcher
+   * does: `Workflow`'s `scriptPath`, and the shell scripts the build shells out
+   * to, resolve from `import.meta.url` — INSIDE the repository during every test
+   * and dev run, and in the DEPLOYED tree in production. So the confinement was
+   * green everywhere it was measured and refused every fire on the one instance
+   * that matters: three dispatches on 2026-09-14 answered
+   * `scriptPath must be a script path this tool returned, or a file you can
+   * already read`, and each run then sat at `forge-init` until the watchdog.
+   */
+  readonly extra_dirs?: readonly string[]
   /**
    * The unattended prompt policy, and it is NOT one value for every profile —
    * MEASURED against the installed `claude` 2.1.270, not inferred:
@@ -429,6 +448,14 @@ export const PROFILE_ARBITER: SubstrateProfile = {
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
   skip_permissions: false,
   restricted: true,
+  // THE LAUNCHER MUST BE ABLE TO READ THE SCRIPT IT EXISTS TO FIRE, and that
+  // script is not in the repository the build works in — it is in whichever tree
+  // this module was loaded from, which in production is the deployed one. Derived
+  // from `inner-loop.ts`'s own resolution rather than restated, so the two cannot
+  // drift; the same directory holds every script the workflow then shells out to
+  // (`codex-build.sh`, `checkpoint.sh`, `stage-stamp.sh`, `codex-review.sh`,
+  // `worktree-cleanup.sh`, `gh-authed.ts`), which the command gate confines too.
+  extra_dirs: [TRIDENT_SCRIPT_DIR],
   permission_mode: 'acceptEdits',
   // Trident v2's build loop. Without it a run against a PRIVATE repo dies at
   // `fatal: could not read Username for 'https://github.com'` — measured on the

@@ -49,6 +49,8 @@
  * silent success.
  */
 
+import { join } from 'node:path'
+import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import { parseMutationClaim, type MutationClaim } from './mutation-prover.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -479,8 +481,14 @@ export interface BuildWorkflowFirerOptions {
   write_brief_parts?: typeof writeBriefParts
 }
 
-/** The default abs path of the sibling inner-workflow script. */
-export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url))
+/**
+ * The default abs path of the sibling inner-workflow script.
+ *
+ * Built FROM `TRIDENT_SCRIPT_DIR` rather than resolved again here, so the path
+ * the launcher is told to run and the directory the launcher is allowed to read
+ * (`PROFILE_WARM_FIRE.extra_dirs`) cannot be two different answers.
+ */
+export const DEFAULT_INNER_WORKFLOW_PATH = join(TRIDENT_SCRIPT_DIR, 'inner-workflow.mjs')
 
 /** The abs path of the sibling checkpoint-writer script (refactor P10). The
  *  workflow's Bash checkpoint/terminal-result steps invoke it instead of

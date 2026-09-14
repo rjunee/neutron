@@ -169,7 +169,7 @@ async function runSpike(injectYesOnToolPrompt: boolean): Promise<SpikeResult> {
     settingsPath,
     appendSystemPromptFile: RITUAL_PROMPT_FILE,
     model: 'claude-opus-4-8',
-    addDir: replRoot,
+    addDirs: [replRoot],
     // The Write/Edit tools ARE granted — proving DENY (not tool-absence) is what
     // blocks the outside write.
     tools: ['Write', 'Edit'],

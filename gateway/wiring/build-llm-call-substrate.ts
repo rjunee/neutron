@@ -770,6 +770,7 @@ export function buildLlmCallSubstrate(
         // applied here for the narrowed Trident profiles.
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveRestricted = input.profile?.restricted
+        const effectiveExtraDirs = input.profile?.extra_dirs
         const effectivePermissionMode = input.profile?.permission_mode
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
         // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
@@ -843,6 +844,7 @@ export function buildLlmCallSubstrate(
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
         if (effectiveRestricted !== undefined) opts.restricted = effectiveRestricted
+        if (effectiveExtraDirs !== undefined) opts.extra_dirs = effectiveExtraDirs
         if (effectivePermissionMode !== undefined) opts.permission_mode = effectivePermissionMode
         if (effectiveTurnInactivityMs !== undefined) {
           opts.turn_inactivity_ms = effectiveTurnInactivityMs

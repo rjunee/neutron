@@ -123,7 +123,7 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       settingsPath,
       appendSystemPromptFile: PROMPT_FILE,
       model: 'claude-opus-4-8',
-      addDir: cfgDir,
+      addDirs: [cfgDir],
       tools: [],
       skipPermissions: true,
     })
