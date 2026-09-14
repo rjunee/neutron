@@ -41,8 +41,9 @@ import { dirname, join } from 'node:path'
  * DERIVED, THEN MEASURED AGAINST THE THING IT IS ABOUT rather than against a comment:
  * `codex app-server daemon version` (codex-cli 0.154.0) was run against CODEX_HOMEs sized
  * so the derived socket pathname landed on each side of the boundary. A 107-byte pathname
- * connects; a 108-byte pathname fails with `path must be shorter than SUN_LEN`. A raw
- * libc `AF_UNIX` bind agrees exactly (107 binds, 108 gives ENAMETOOLONG).
+ * reaches the connect attempt; a 108-byte pathname fails with `path must be shorter than
+ * SUN_LEN`. Both failures exit 1. A raw libc `AF_UNIX` bind agrees with the pathname
+ * boundary exactly (107 binds, 108 gives ENAMETOOLONG).
  *
  * WHY NO TEST HERE BINDS AT THE BOUNDARY. Neither `node:net` nor `Bun.listen` enforces
  * this rule — both bind pathnames up to 109 bytes on this kernel — so a runtime bind from
@@ -61,7 +62,7 @@ export function codexControlSocketPath(codexHome: string): string {
   return join(codexHome, ...CODEX_CONTROL_SOCKET_PARTS)
 }
 
-/** A configuration refusal, distinct from the Codex CLI's misleading exit status. */
+/** A configuration refusal with stable byte counts, before a Codex subprocess is needed. */
 export class CodexControlSocketPathError extends Error {
   readonly code = 'codex_control_socket_path_too_long'
 
