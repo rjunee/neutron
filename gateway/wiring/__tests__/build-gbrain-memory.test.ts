@@ -906,8 +906,8 @@ describe('buildGBrainMemory', () => {
   test('per-connect key coherence: init guard + serve env share ONE key read within a spawn', async () => {
     // Codex boundary: a resolver that changes value between the two reads within
     // one connect must NOT be observed differently by the init guard (which gates
-    // the `embed --stale` backfill) and the serve `resolveDynamicEnv`. gbrain is
-    // absent in the test env, so a memory op drives a real connect: the client
+    // the `embed --stale` backfill) and the serve `resolveDynamicEnv`. A memory
+    // op drives a real connect against a controlled missing command: the client
     // runs `ensureInitialized` (getKey read #1) then `resolveDynamicEnv` (getKey
     // read #2) before the spawn fails ENOENT. With the per-connect cache the
     // underlying resolver is called EXACTLY ONCE, so both reads agree; the pre-fix
@@ -919,6 +919,11 @@ describe('buildGBrainMemory', () => {
         owner_home: join(home, 'data'),
         project_slug: 'acme',
         env: {},
+        // Establish a deterministic spawn failure instead of inheriting a host
+        // install from the resolver's absolute system-path probes. Returning
+        // null would retain the bare `gbrain` fallback, which can still resolve
+        // through the transport's ambient environment.
+        resolveCommand: () => join(home, 'missing-gbrain'),
         // Flips absent → present between successive calls; the shared read must
         // pin ONE value for the whole connect.
         resolveOpenAiKey: async () => {
@@ -926,7 +931,7 @@ describe('buildGBrainMemory', () => {
           return calls === 1 ? undefined : 'sk-late'
         },
       })
-      // Drive one connect (gbrain absent → the op throws, swallowed).
+      // Drive one connect (the controlled missing command throws, swallowed).
       await wiring.memoryStore.query({ query: 'x', limit: 1 }).catch(() => undefined)
       await wiring.close()
       // Exactly one underlying resolution for the connect → init + serve agreed.
@@ -1064,6 +1069,9 @@ describe('buildGBrainMemory', () => {
             owner_home: join(home, 'data'),
             project_slug: 'acme',
             env: { PATH: join(home, 'empty'), HOME: join(home, 'noinstall') },
+            // The real resolver deliberately probes host-absolute system paths,
+            // so a temporary HOME/PATH alone cannot construct binary absence.
+            resolveCommand: () => null,
           }),
         )
         expect(warnings.some((w) => w.includes('DISABLED'))).toBe(true)
