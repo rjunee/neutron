@@ -36,6 +36,7 @@
  * no version drift to detect mid-session that would leave a REPL to supervise.
  */
 
+import { existsSync } from 'node:fs'
 import {
   HERDR_MAX_FRAME_BYTES,
   HERDR_PROTOCOL_VERSION,
@@ -177,15 +178,56 @@ async function connectUnix(path: string, handlers: SocketHandlers): Promise<Sock
   })
 }
 
+/**
+ * Where herdr puts its socket when nothing tells us otherwise.
+ *
+ * NOT a guess and not a convenience. The env var is injected by herdr into panes it
+ * manages, so "unset" used to be read as "we are not under a pane" and refused. That
+ * inference is wrong for the caller that matters most: the GATEWAY runs as a system
+ * service, never under a pane, and it is the process that has to reach herdr in order
+ * to host a REPL at all. Refusing it there took the whole instance down — every turn
+ * failed instantly with "no socket path" while herdr was running and reachable the
+ * entire time.
+ *
+ * So absence of the env var is not evidence of anything. The question is whether a
+ * socket is THERE, which is a question about the filesystem, and this is the path
+ * herdr uses.
+ */
+export function defaultHerdrSocketPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const configHome = env['XDG_CONFIG_HOME']
+  const base = configHome !== undefined && configHome !== '' ? configHome : joinHome(env)
+  return base === undefined ? undefined : `${base}/herdr/herdr.sock`
+}
+
+function joinHome(env: NodeJS.ProcessEnv): string | undefined {
+  const home = env['HOME']
+  return home !== undefined && home !== '' ? `${home}/.config` : undefined
+}
+
 function resolveSocketPath(opts: HerdrCallOpts): string {
-  const socketPath = opts.socketPath ?? process.env[HERDR_SOCKET_ENV]
-  if (socketPath === undefined || socketPath === '') {
+  // EXPLICIT BEATS ENV BEATS DEFAULT, and each step is a deliberate statement rather
+  // than a fallback chain: a caller that passes one means it; an injected env var means
+  // herdr placed us; the default means nobody said, so look where herdr puts it.
+  const explicit = opts.socketPath ?? process.env[HERDR_SOCKET_ENV]
+  if (explicit !== undefined && explicit !== '') return explicit
+
+  const fallback = defaultHerdrSocketPath()
+  if (fallback === undefined) {
     throw new Error(
-      `herdr: no socket path — set ${HERDR_SOCKET_ENV} or pass socketPath. herdr injects ` +
-        `this into every managed pane, so an empty value means we are not running under one.`,
+      `herdr: no socket path — set ${HERDR_SOCKET_ENV} or pass socketPath, and neither ` +
+        `XDG_CONFIG_HOME nor HOME is set, so there is no default location to try.`,
     )
   }
-  return socketPath
+  // REFUSE ON THE SOCKET, NOT ON THE ENV VAR. This is the whole point of the change:
+  // the failure we can act on is "herdr is not reachable there", and the message names
+  // the path actually tried so an operator can check it.
+  if (!existsSync(fallback)) {
+    throw new Error(
+      `herdr: no socket path — ${HERDR_SOCKET_ENV} is unset and no socket exists at the ` +
+        `default location ${fallback}. Start herdr, or set ${HERDR_SOCKET_ENV}.`,
+    )
+  }
+  return fallback
 }
 
 /**
