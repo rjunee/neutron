@@ -1,3 +1,4 @@
+import { effectivePromptPath, readEffectivePrompt, recordEffectivePrompt } from './effective-prompt.ts'
 /**
  * @neutronai/gateway/wiring — post-onboarding live-agent chat turn.
  *
@@ -973,6 +974,7 @@ export function buildLiveAgentTurn(
    */
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    if (turn.user_text.trim() === '/effective-prompt') return enqueueTurn(turn, topicKey)
     if (
       activeTopics.has(topicKey) &&
       queuedTurnCount.get(topicKey) === 1 &&
@@ -1091,6 +1093,23 @@ export function buildLiveAgentTurn(
   async function runTurnBody(
     turn: LiveAgentTurnRequest,
   ): Promise<LiveAgentTurnResult> {
+    const inspectionPath = effectivePromptPath(input.owner_home, turn.project_id ?? 'general', turn.topic_id)
+    if (turn.user_text.trim() === '/effective-prompt') {
+      let body: string
+      try {
+        const captured = readEffectivePrompt(inspectionPath)
+        body = captured === null
+          ? 'Effective prompt unavailable: no recorded dispatch for this project and topic.'
+          : 'Recorded harness prompt and tool configuration (provider-internal instructions are not exposed):\n' + JSON.stringify(captured, null, 2)
+      } catch {
+        body = 'Effective prompt unavailable: the recorded dispatch could not be read.'
+      }
+      const emitted = await input.buttonStore.emit(buildButtonPrompt({
+        body, options: [], allow_freeform: true, expires_in_ms: REPLY_ROW_TTL_MS, uuid: randomUUID,
+      }), { topic_id: turn.topic_id })
+      sendSafe(turn.send, { type: 'agent_message', body, topic_id: turn.topic_id, prompt_id: emitted.prompt_id })
+      return { outcome: 'replied', reply_prompt_id: emitted.prompt_id }
+    }
     const observed_at = turn.observed_at ?? now()
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
     // On-demand Claude reconnect (2026-07-24): a tap on the auth-reconnect
@@ -1596,7 +1615,9 @@ export function buildLiveAgentTurn(
     // detection). Returns the text, or throws the substrate/abort error.
     const dispatchOnce = async (): Promise<string> => {
       try {
-        return await dispatchSpec(buildSpec(), absoluteCeilingMs, scope, clearAckTimer)
+        const spec = buildSpec()
+        recordEffectivePrompt(inspectionPath, spec, effectiveCold)
+        return await dispatchSpec(spec, absoluteCeilingMs, scope, clearAckTimer)
       } finally {
         clearAckTimer()
       }
@@ -1697,7 +1718,9 @@ export function buildLiveAgentTurn(
       //     (NEVER the misleading "AI connection may need attention" text).
       //   • any other fault → the credential/connection `FAILURE_BODY`.
       if (turn.seed_turn !== true) {
-        if (isAuthInvalid(lastErrMessage)) {
+        if (lastErrMessage.startsWith('prompt_capture_failed:')) {
+          sendSafe(turn.send, { type: 'agent_message', body: lastErrMessage, topic_id: turn.topic_id })
+        } else if (isAuthInvalid(lastErrMessage)) {
           await sendAuthReconnect(input.buttonStore, turn, input.reconnectHandoff !== undefined)
         } else if (isFreezeTimeout(lastErrMessage)) {
           await sendTimeoutRetry(
@@ -2068,6 +2091,7 @@ async function composeFirstTurnPrompt(
       ? memoryIndexFragment
       : null
   const instance_fragments = [
+    `When asked to show your effective prompt, Read ${JSON.stringify(effectivePromptPath(input.owner_home, turn.project_id ?? 'general', turn.topic_id))}. It records the actual harness dispatch, including tools and the initial session prompt. You can also tell the user to send /effective-prompt. Provider-internal instructions are outside this record.`,
     doctrineFragment,
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,

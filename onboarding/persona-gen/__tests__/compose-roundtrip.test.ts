@@ -1,3 +1,4 @@
+import { personaHistory } from '../history.ts'
 /**
  * Persona compose round-trip — line-edit + recommit.
  */
@@ -118,6 +119,9 @@ describe('PersonaComposer compose + applyEdit + commit', () => {
       expect(existsSync(result.paths[0]!)).toBe(true)
       expect(existsSync(result.paths[1]!)).toBe(true)
       expect(existsSync(result.paths[2]!)).toBe(true)
+      const edited = await composer.applyEdit({ draft, file: 'soul', edit: { line: 1, replacement: '# Revised voice' } })
+      await composer.commit(edited)
+      expect(personaHistory(result.paths[0]!).map(row => row.content)).toEqual([null, draft.soul_md, edited.soul_md])
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

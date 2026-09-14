@@ -1,3 +1,4 @@
+import { personaHistory, writePersonaVersion, deletePersonaVersion } from '@neutronai/onboarding/persona-gen/history.ts'
 /**
  * @neutronai/gateway/http — Admin-tab personality editor surface (2026-05-22).
  *
@@ -88,9 +89,8 @@
  *     in parallel.
  */
 
-import { randomUUID } from 'node:crypto'
 import { constants as fsConstants, existsSync } from 'node:fs'
-import { mkdir, open, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
@@ -183,6 +183,17 @@ export function createAdminPersonalitySurface(
       const route = pathname.slice(PATH_PREFIX.length)
       const method = req.method
 
+      if (route === '/history' && method === 'GET') {
+        const name = url.searchParams.get('name')
+        if (!ALLOWED_PERSONA_FILENAMES.includes(name as PersonaFilename)) {
+          return jsonError(403, 'filename_not_allowed', 'Select a persona file')
+        }
+        try {
+          return jsonOk({ versions: personaHistory(personaPath(owner_home, name as PersonaFilename)) })
+        } catch {
+          return jsonError(500, 'read_failed', 'Persona history could not be read')
+        }
+      }
       if (route === '/files') {
         if (method === 'GET') return await handleListFiles(owner_home)
         return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /files`)
@@ -440,17 +451,9 @@ async function handlePatchFile(input: PatchFileInput): Promise<Response> {
       }
 
       await ensureDir(dirname(target))
-      const tmp = `${target}.${randomUUID()}.tmp`
       try {
-        await writeFile(tmp, content, 'utf8')
-        await rename(tmp, target)
+        writePersonaVersion(target, content)
       } catch (err) {
-        // Best-effort cleanup of the temp file on failure.
-        try {
-          await unlink(tmp)
-        } catch {
-          // ignored
-        }
         return jsonError(
           500,
           'write_failed',
@@ -514,7 +517,7 @@ async function runRestartCriticalSection(input: RestartInput): Promise<Response>
   for (const filename of ALLOWED_PERSONA_FILENAMES) {
     const target = personaPath(input.owner_home, filename)
     try {
-      await unlink(target)
+      deletePersonaVersion(target)
       files_deleted.push(filename)
       try {
         input.onReload?.(filename)

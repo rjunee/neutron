@@ -1,3 +1,4 @@
+import { writePersonaVersion } from './history.ts'
 /**
  * @neutronai/onboarding — persona compose orchestrator (P2 S2).
  *
@@ -19,7 +20,7 @@
  * module's concern is the cringe-check loop + persistence.
  */
 
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -380,7 +381,7 @@ function defaultWriter(): { write(path: string, content: string): Promise<void> 
     async write(path: string, content: string): Promise<void> {
       const dir = dirname(path)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      writeFileSync(path, content, 'utf8')
+      writePersonaVersion(path, content)
     },
   }
 }
