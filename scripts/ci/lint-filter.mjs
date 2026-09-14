@@ -15,6 +15,19 @@ const ROOT_PACKAGE_ADVICE = /Use `neutron\/[^`]+` instead of `[^`]+`/
 const WORKING_ROOT_REMEDY =
   'Root support code has no package specifier. Move the helper into the importing workspace and use a workspace-local relative import, or move it into a workspace package and use its `@neutronai/<workspace>/<path>` specifier.'
 
+/**
+ * Filter an `eslint --format json` report down to the rules this gate owns, and
+ * rewrite the root-package advice into a remedy that actually works.
+ *
+ * The authoritative types live in the declaration twin `lint-filter.d.mts`,
+ * which is what lets `lint-filter.test.ts` import this under strict tsc — the
+ * root tsconfig has no `allowJs`, so JSDoc alone does not satisfy it. Same
+ * convention as `void-promise-check.d.mts`. Keep the two in step.
+ *
+ * @param {{filePath: string, messages?: {ruleId: string|null, line: number, column: number, message: string}[]}[]} report
+ *   Parsed `eslint --format json` output.
+ * @returns {{count: number, lines: string[]}} Violation count and one formatted line each.
+ */
 export function formatGatedMessages(report) {
   const lines = []
   for (const file of report) {
