@@ -182,6 +182,9 @@ export class ReplSink {
   private tokenValue: string | undefined
   private tokenPathValue: string | undefined
   private readonly sessions = new Map<string, ReplSession>()
+
+  /** Includes booting sessions, which have not yet resolved their pool promise. */
+  registeredSessions(): readonly ReplSession[] { return [...this.sessions.values()] }
   /** THE AUTHORIZATION INDEX: the credential a child presents → the session it IS.
    *  Keyed by `deriveChildSinkToken(rootToken, childGeneration)`, so a lookup answers
    *  "whose call is this", which a `session_id` lookup cannot (see `handle`). */

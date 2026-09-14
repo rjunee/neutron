@@ -48,8 +48,8 @@ export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
  * PTY byte the `claude` child emits (spinner ticks, streamed tokens, tool output),
  * so an ACTIVELY-working turn keeps resetting the idle clock and runs as long as it
  * needs (a long-but-live build no longer dies at an arbitrary 180s). Only a
- * GENUINELY frozen turn — no PTY output for `DEFAULT_TURN_INACTIVITY_MS` — trips the
- * timeout. Kept modest (~90s) for profile-less internal calls; chat and warm-fire
+ * unclassified turn with no PTY output for `DEFAULT_TURN_INACTIVITY_MS` reaches
+ * timeout policy; a fresh rendered working control spares it. Kept modest (~90s) for profile-less internal calls; chat and warm-fire
  * callers opt into larger windows while retaining a separate absolute ceiling.
  *
  * Historical note: this constant used to be `DEFAULT_TURN_TIMEOUT_MS = 180_000`, a
@@ -60,11 +60,9 @@ export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
  */
 export const DEFAULT_TURN_INACTIVITY_MS = 90_000
 /**
- * ABSOLUTE-CEILING backstop for a single turn (2026-07-01). Even the
- * activity-based watchdog keeps a hard upper bound so a live-but-livelocked child
- * (emitting PTY noise forever without ever settling the turn) cannot run
- * unbounded. Very high — a real turn, however long, settles well under this;
- * `turnAbsoluteCeilingMs` / `spec.turn_absolute_ceiling_ms` override it.
+ * Deadline for unclassified turns. A fresh rendered working control overrides
+ * elapsed time; a live process or arbitrary PTY noise alone does not.
+ * `turnAbsoluteCeilingMs` / `spec.turn_absolute_ceiling_ms` override the duration.
  */
 export const DEFAULT_TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 /** Signature of the `--dangerously-load-development-channels` first-run

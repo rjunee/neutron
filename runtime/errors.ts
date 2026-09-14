@@ -114,7 +114,7 @@ export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, Substra
   channel_wedged: {
     retryable: false,
     description:
-      'The persistent-REPL substrate failed to spawn / bind its control channel — a wedged dev-channel, or a reply sink whose loopback port is held by another process (ISSUES #537). Both are fatal: waiting does not free the port and does not unwedge the child.',
+      'The persistent-REPL substrate is blocked on a captured interactive prompt, or failed to spawn / bind its control channel — a wedged dev-channel, or a reply sink whose loopback port is held by another process (ISSUES #537). These are nonretryable: waiting does not resolve an input prerequisite, free the port, or unwedge the child.',
   },
   turn_timeout: {
     retryable: true,

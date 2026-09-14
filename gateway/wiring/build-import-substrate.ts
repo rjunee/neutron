@@ -64,7 +64,7 @@ import {
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import {
   BINARY_NOT_FOUND_MESSAGE,
-  CHANNEL_WEDGED_MESSAGE,
+  channelWedgeMessage,
   detectBinaryNotFound,
   detectChannelWedged,
   detectCliAuthFailure,
@@ -474,7 +474,7 @@ export function buildImportSubstrate(
                 stampedCode === 'channel_wedged' ||
                 (stampedCode === undefined && detectChannelWedged(ev.message))
               ) {
-                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false, code: 'channel_wedged' }
+                yield { kind: 'error', message: channelWedgeMessage(ev.message), retryable: false, code: 'channel_wedged' }
                 continue
               }
               if (

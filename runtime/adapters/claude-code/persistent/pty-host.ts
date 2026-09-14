@@ -88,6 +88,10 @@ export type PtyExitCause = 'closed-by-us' | 'pane-vanished'
 /** A spawned child attached to a terminal. The lifecycle/supervision logic
  *  consumes exactly this shape regardless of the underlying backend. */
 export interface PtyChild {
+  /** Fresh read of the current rendered screen. Absent means this host cannot
+   * distinguish current UI from byte history; callers must report unknown. */
+  readScreen?: () => Promise<string>
+
   /** OS process id of the spawned child. Under the herdr backend this is the
    *  pane's own foreground pid, which `layout.apply` makes the argv's own pid.
    *  Always a real pid: the host refuses to return a child it could not learn one

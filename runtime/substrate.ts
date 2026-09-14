@@ -83,15 +83,15 @@ export interface Message {
  *   construction default (90s idle window). This is NOT a fixed wall clock —
  *   `session.lastDataAt` advances on every PTY byte the child emits (spinner
  *   ticks, streamed tokens, tool output), so an actively-working turn keeps
- *   resetting the idle clock and runs as long as it needs; only a GENUINELY frozen
- *   turn (no PTY activity for this long) trips. The conversational composer raises
+ *   resetting the idle clock. At expiry the adapter observes the terminal; a
+ *   current working control spares the turn, otherwise timeout remains a policy. The conversational composer raises
  *   it for a COLD first turn / onboarding turn (heavier initial processing) and
  *   keeps it snappy for warm steady-state. Only the persistent-REPL adapter reads
  *   it; other substrates ignore it.
  *
  * - `turn_absolute_ceiling_ms?: number` — per-turn ABSOLUTE-CEILING backstop (ms):
- *   the hard upper bound a single turn can run even while it keeps producing PTY
- *   activity (a live-but-livelocked child). Optional; when unset the persistent CC
+ *   a deadline for a turn whose state cannot be classified. A fresh rendered
+ *   working control overrides the deadline; arbitrary PTY output does not. Optional; when unset the persistent CC
  *   REPL uses its construction default (45min). Coerced ≥ the inactivity window.
  *   Only the persistent-REPL adapter reads it; other substrates ignore it.
  *

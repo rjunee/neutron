@@ -103,8 +103,8 @@
  * clearing and neither needing a human: the ticker is killed by the wrapper on
  * every exit path (three guards, pinned in `codex-build.test.ts`), and — even if
  * one leaked — the reprieve here is refused outright once `since_advance_ms`
- * passes `DEFAULT_MAX_INFLIGHT_MS`, mirroring the orchestrator's "the ceiling
- * outranks every reprieve" rule on the same clock. An endlessly-heartbeating
+ * passes `DEFAULT_MAX_INFLIGHT_MS`, using the same advancement clock as the orchestrator. Positive terminal
+ * work renews that clock before deadline policy; ledger evidence alone does not. An endlessly-heartbeating
  * corpse is released by this module at 2 h whatever the ledger says.
  *
  * WHAT IS DELIBERATELY *NOT* READ HERE: the launcher liveness probe. It answers

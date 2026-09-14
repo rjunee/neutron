@@ -977,7 +977,7 @@ export function buildLlmCallSubstrate(
                 stampedCode === 'channel_wedged' ||
                 (stampedCode === undefined && detectChannelWedged(ev.message))
               ) {
-                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false, code: 'channel_wedged' }
+                yield { kind: 'error', message: channelWedgeMessage(ev.message), retryable: false, code: 'channel_wedged' }
                 continue
               }
               // P0a ROOT-CAUSE FIX (2026-06-26 chat-blocker): a per-turn TIMEOUT
@@ -1644,6 +1644,13 @@ export function detectBinaryNotFound(message: string): boolean {
  * real class stops the failure laundering into a pool cooldown ("all Anthropic
  * credentials are in cooldown") that masks a dead LLM path behind a quota lie.
  */
+/** Captured worker evidence is the actionable cause; do not erase it in the
+ * generic channel-fault translation. Legacy errors keep their existing copy. */
+export function channelWedgeMessage(original: string): string {
+  if (original.startsWith('worker blocked:') || /worker=(?:blocked|working|unknown); observed_at=/.test(original)) return original
+  return CHANNEL_WEDGED_MESSAGE
+}
+
 export const CHANNEL_WEDGED_MESSAGE =
   "Neutron's LLM session channel failed to bind — the persistent-REPL substrate " +
   'could not start its dev-channel MCP before the turn. This is a substrate/spawn ' +

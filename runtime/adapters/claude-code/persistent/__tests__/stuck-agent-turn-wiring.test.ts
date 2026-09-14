@@ -1,3 +1,4 @@
+import { sink } from '../pool-state.ts'
 /**
  * stuck-agent-turn-wiring.test.ts — proves the stuck_agent watchdog is ACTUALLY
  * WIRED at the dispatch site, by driving a REAL turn through the substrate and
@@ -45,7 +46,7 @@ afterEach(async () => {
  * the test a window in which a real turn is genuinely in flight, so it can
  * observe what the dispatch site wrote into the registry mid-turn.
  */
-function makeGatedHost(): { host: PtyHost; releaseReply: () => void; pid: number } {
+function makeGatedHost(readScreen?: () => Promise<string>, ready = true): { host: PtyHost; releaseReply: () => void; pid: number } {
   const PID = 4343
   let openGate: () => void = () => {}
   const gate = new Promise<void>((res) => (openGate = res))
@@ -82,10 +83,13 @@ function makeGatedHost(): { host: PtyHost; releaseReply: () => void; pid: number
           return new Response('not found', { status: 404 })
         },
       })
-      void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: PID })
-      void post('/channel-bound', { session_id: sid })
+      if (ready) {
+        void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: PID })
+        void post('/channel-bound', { session_id: sid })
+      }
       return {
         pid: PID,
+        ...(readScreen === undefined ? {} : { readScreen }),
         write() {},
         resize() {},
         kill() {
@@ -250,4 +254,97 @@ describe('stuck_agent — real dispatch-site wiring (F4 round-2 blocker)', () =>
       clear()
     }
   })
+})
+
+
+describe('worker prompt observation through a real turn', () => {
+  it('returns a nonretryable block with the visible prompt', async () => {
+    const menu = 'Choose an organization\n❯ Alpha\n  Beta\nEnter to select · Esc to cancel'
+    const { host } = makeGatedHost(async () => menu)
+    const substrate = createPersistentReplSubstrate({ ...optsWith(host), turnTimeoutMs: 2000 })
+    const handle = await substrate.start({ prompt: 'work', tools: [], model_preference: ['claude-opus-4-7'] })
+    const events: Array<{ kind: string; message?: string; code?: string; retryable?: boolean }> = []
+    for await (const event of handle.events) events.push(event)
+    const failure = events.find((event) => event.kind === 'error')
+    expect(failure?.code).toBe('channel_wedged')
+    expect(failure?.retryable).toBe(false)
+    expect(failure?.message).toContain(menu)
+  })
+
+  it('a slow working turn survives both inactivity and ceiling, then completes', async () => {
+    let captures = 0
+    const { host, releaseReply } = makeGatedHost(async () => {
+      captures += 1
+      return 'Building… esc to interrupt'
+    })
+    const substrate = createPersistentReplSubstrate({
+      ...optsWith(host), turnTimeoutMs: 200, turnAbsoluteCeilingMs: 300,
+    })
+    const handle = await substrate.start({ prompt: 'slow work', tools: [], model_preference: ['claude-opus-4-7'] })
+    const events: Array<{ kind: string }> = []
+    const drained = (async () => { for await (const event of handle.events) events.push(event) })()
+    expect(await until(() => captures >= 2)).toBe(true)
+    await Bun.sleep(450)
+    expect(events.some((event) => event.kind === 'error')).toBe(false)
+    releaseReply()
+    await drained
+    expect(events.some((event) => event.kind === 'completion')).toBe(true)
+  })
+})
+
+
+it('a readiness failure captures the prompt before termination and does not retry it', async () => {
+  let reads = 0
+  const menu = 'Accessing workspace\n❯ No, exit\n  Yes\nEnter to confirm'
+  const { host } = makeGatedHost(async () => { reads += 1; return menu }, false)
+  const substrate = createPersistentReplSubstrate({
+    ...optsWith(host), assertConfig: { readyBudgetMs: 30, readyIntervalMs: 10 },
+  })
+  const handle = substrate.start({ prompt: 'work', tools: [], model_preference: ['claude-opus-4-7'] })
+  const errors: Array<{ message?: string; code?: string; retryable?: boolean }> = []
+  for await (const event of handle.events) if (event.kind === 'error') errors.push(event)
+  expect(errors).toHaveLength(1)
+  expect(errors[0]?.message).toContain(menu)
+  expect(errors[0]?.code).toBe('channel_wedged')
+  expect(errors[0]?.retryable).toBe(false)
+  expect(reads).toBe(1)
+})
+
+it('a capture completing after the reply cannot fail a settled turn', async () => {
+  let finishCapture: (screen: string) => void = () => {}
+  let capturing = false
+  let captureCount = 0
+  const { host, releaseReply } = makeGatedHost(() => {
+    capturing = true
+    captureCount += 1
+    return new Promise((resolve) => { finishCapture = resolve })
+  })
+  const substrate = createPersistentReplSubstrate({ ...optsWith(host), turnTimeoutMs: 2000 })
+  const handle = substrate.start({ prompt: 'work', tools: [], model_preference: ['claude-opus-4-7'] })
+  const events: Array<{ kind: string }> = []
+  const drained = (async () => { for await (const event of handle.events) events.push(event) })()
+  expect(await until(() => capturing)).toBe(true)
+  await Bun.sleep(1100)
+  expect(captureCount).toBe(1)
+  releaseReply()
+  await drained
+  finishCapture('Choose organization\n❯ Alpha\nEnter to select')
+  await Bun.sleep(20)
+  expect(sink.registeredSessions().every((session) => !session.poisoned)).toBe(true)
+  expect(events.filter((event) => event.kind === 'error')).toHaveLength(0)
+  expect(events.filter((event) => event.kind === 'completion')).toHaveLength(1)
+})
+
+
+it('an unclassified deadline carries its fresh screen with the timeout event', async () => {
+  const { host } = makeGatedHost(async () => 'Unrecognized CLI dialog')
+  const substrate = createPersistentReplSubstrate({ ...optsWith(host), turnTimeoutMs: 200 })
+  const errors: Array<{ message?: string; code?: string }> = []
+  for await (const event of substrate.start({ prompt: 'work', tools: [], model_preference: ['claude-opus-4-7'] }).events) {
+    if (event.kind === 'error') errors.push(event)
+  }
+  expect(errors).toHaveLength(1)
+  expect(errors[0]?.code).toBe('turn_timeout')
+  expect(errors[0]?.message).toContain('worker=unknown')
+  expect(errors[0]?.message).toContain('Unrecognized CLI dialog')
 })

@@ -707,6 +707,21 @@ function interpretTerminalCause(
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = authoredFailureReason((run.failure_reason ?? '').trim())
   const r = reason.toLowerCase()
+  // Anchored before every substring classifier: captured UI is untrusted prose.
+  if (r.startsWith('worker state unknown:')) {
+    return {
+      klass: 'infra',
+      summary: 'The run reached its deadline; whether the worker was blocked or still working could not be established.',
+      input_needed: 'Inspect the saved worker evidence before deciding whether to retry.',
+    }
+  }
+  if (/^(?:inner workflow fire failed: )?worker blocked:/.test(r)) {
+    return {
+      klass: 'infra',
+      summary: 'A worker is waiting at an interactive prompt. The orchestrator stopped this run.',
+      input_needed: 'Inspect the recorded prompt and resolve the prerequisite before retrying.',
+    }
+  }
   const disposition = terminalRunDisposition(run)
   const retry = RETRY_ADVICE
   const saved = PROGRESS_SAVED

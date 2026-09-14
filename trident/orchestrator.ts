@@ -1,3 +1,4 @@
+import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type RunWorkerObservation } from './worker-observation.ts'
 /**
  * @neutronai/trident — the orchestration step (Trident v2 · Work Board Phase 2a
  * EXEC-MODEL rearchitecture).
@@ -422,21 +423,11 @@ export interface BuildTridentOrchestratorOptions {
    */
   max_inflight_ms?: number
   /**
-   * PER-AGENT HANG WATCHDOG (M1 trident-UX hardening, item 2). The PRIMARY
-   * fail-fast reap: a non-terminal run with an in-flight dispatch whose
-   * `last_advanced_at` has not moved for this long — with no harvestable
-   * `inner_result` — is treated as a suspected agent hang (the incident: a
-   * zero-token model hang stalled a run 30+ min with NO error because nothing
-   * detected it) and reaped to `failed`, so it surfaces on the Plan item + the
-   * terminal delivery notification fires instead of sitting silent.
-   *
-   * A HEALTHY build re-stamps `last_advanced_at` on every inner-workflow
-   * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
-   * only a genuinely wedged agent() (or a stalled orphan) does. This is
-   * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (90 min —
-   * `trident/liveness.ts`; this comment said 25 min long after the constant was
-   * raised, which is exactly the kind of drift that makes a reader distrust it).
+   * Deadline for gathering run-scoped evidence after checkpoint silence. A fresh
+   * working terminal renews advancement before this gate; a captured selection
+   * prompt reports blocked before it. Neither absence of checkpoints nor a live
+   * process identifies a prompt. A policy stop without terminal evidence reports
+   * worker state unknown. Default NO_ADVANCE_HANG_MS (90 minutes).
    */
   no_advance_hang_ms?: number
   /**
@@ -542,6 +533,7 @@ export interface BuildTridentOrchestratorOptions {
    * Omitted → the watchdog behaves BYTE-IDENTICALLY to before this seam existed:
    * same decisions, same disclosure strings.
    */
+  observe_run_worker?: RunWorkerObserver
   gather_run_evidence?: RunEvidenceGatherer
   /**
    * THE SETTLE-TIMEOUT EVIDENCE GATE (see `fire-evidence.ts`). Consulted ONLY
@@ -837,20 +829,7 @@ export async function computeDiffLineCount(
   return total
 }
 
-/**
- * Per-agent hang watchdog default (M1 trident-UX hardening, item 2). A
- * non-terminal run whose `last_advanced_at` has not moved for this long while a
- * dispatch is in flight is reaped as a suspected agent hang.
- *
- * 25 min is a deliberate balance (Codex cross-model review [P1]): the ONLY
- * long no-checkpoint window in a HEALTHY build is a single Forge/fix `agent()`
- * step (checkpoints land between phases, not during one), and a large build can
- * legitimately run 15–20 min in that one step — a 15-min threshold would falsely
- * reap it. 25 min clears a normal large build while still catching the exact
- * 30+ min SILENT wedge that motivated this, FAR faster than the old 2h ceiling.
- * A reaped run is recoverable (re-run resumes from the last checkpoint). Tune via
- * `no_advance_hang_ms`.
- */
+/** Deadline used to request run-scoped evidence; see no_advance_hang_ms. */
 
 /**
  * THE TERMINAL REASON FOR A RUN THAT ENDED WITHOUT AN APPROVE.
@@ -5493,7 +5472,7 @@ export function buildTridentOrchestrator(
     return Math.max(0, n - t)
   }
 
-  async function stepCore(run: TridentRun): Promise<AdvanceOutcome> {
+  async function stepCore(run: TridentRun, worker: RunWorkerObservation): Promise<AdvanceOutcome> {
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
@@ -5538,6 +5517,15 @@ export function buildTridentOrchestrator(
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
         return applyResult(run, result)
+      }
+      if (worker.state === 'blocked') {
+        return {
+          run: failedRun(run, `worker blocked: ${worker.detail}`, false),
+          changed: true, waiting: false, note: 'worker reported blocked to orchestrator',
+        }
+      }
+      if (worker.state === 'working') {
+        return { run, changed: true, waiting: true, note: 'worker still working; renew advancement from run-scoped evidence' }
       }
       // (1a-crash) RECOVER, DON'T REAP. The launcher died with no harvestable result,
       //     but the run's continuation state (`branch`, `pr`, `inner_checkpoint`) is on
@@ -5914,17 +5902,9 @@ export function buildTridentOrchestrator(
       }
     }
 
-    // (1b) HANG WATCHDOG (M1 trident-UX hardening, item 2) — the PRIMARY
-    //     fail-fast detector. A dispatch is in flight (subagent_run_id set) with
-    //     NO harvestable result (the harvest above already returned otherwise),
-    //     and `last_advanced_at` has not moved for `noAdvanceHangMs`. A healthy
-    //     build re-stamps that timestamp on every inner-workflow checkpoint, so
-    //     only a genuinely wedged agent() (the zero-token model hang that stalled
-    //     a run 30+ min with no error) — or a stalled orphan that hasn't been
-    //     redispatched — sits here. Reap it to `failed` NOW so the Plan item
-    //     flips to "failed" + the terminal delivery notification fires, rather
-    //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
-    //     orphan recovery so a wedged orphan is reaped instead of redispatched.
+    // (1b) Deadline policy, after the positive blocked/working observations above.
+    // Checkpoints measure phase boundaries, so silence alone cannot identify a
+    // hang. The probes below supply evidence and unclassified stops say unknown.
     if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
       // (1b-0) GATHER THE EVIDENCE BEFORE KILLING ANYTHING. The clock
       //     above measures phase boundaries, not work; a run mid-Forge is stale on
@@ -6139,7 +6119,7 @@ export function buildTridentOrchestrator(
       //     window, but at least one COULD NOT LOOK, so the kill is postponed to the
       //     next tick rather than taken on a blind check. The run is NOT spared: it
       //     is re-examined every tick, and `maxInflightMs` (checked above, and which
-      //     no reprieve crosses) still bounds it, so a permanently blind probe cannot
+      //     no ledger-only reprieve crosses) still bounds it, so a permanently blind probe cannot
       //     make a lane immortal.
       //
       //     SUSPECTED-HANG PATH ONLY. A positive launcher death and the inflight
@@ -6158,25 +6138,22 @@ export function buildTridentOrchestrator(
       fired.delete(run.id)
       redispatched.delete(run.id)
       const mins = Math.round(noAdvanceHangMs / 60_000)
-      // THE REASON PREFIXES ARE UNCHANGED BYTE-FOR-BYTE up to the disclosure suffix.
-      // `delivery.ts` routes the terminal notification by substring
-      // ('suspected agent hang' / 'no progress for' / 'stalled'), and its comment
-      // says the two halves must move together — so the disclosure is APPENDED,
-      // never substituted.
+      // Unknown terminal state has its own delivery classification; a deadline
+      // is a policy stop, not evidence of a prompt or proof that work stopped.
       const reason = overCeiling
-        ? `inner workflow stalled (no terminal result within ${Math.round(maxInflightMs / 60_000)} min)` +
-          ` — ${disclosure}; the 2 h ceiling outranks any liveness reprieve`
+        ? `worker state unknown: no terminal result within ${Math.round(maxInflightMs / 60_000)} min` +
+          ` — ${disclosure}; the 2 h deadline outranks ledger and process-only reprieves`
         : probe === 'dead'
           ? `no progress for ${mins} min and the inner workflow launcher is positively dead` +
             ` — ${disclosure}`
-          : `no progress for ${mins} min — suspected agent hang (inner workflow stopped advancing)` +
+          : `worker state unknown: no checkpoint advancement for ${mins} min` +
             ` — ${disclosure}`
       const reaped = failedRun(run, reason, false)
       return {
         run: reaped,
         changed: true,
         waiting: false,
-        note: `${run.phase} → failed (${overCeiling ? 'inflight ceiling' : probe === 'dead' ? 'launcher dead' : 'suspected hang'})`,
+        note: `${run.phase} → failed (${overCeiling ? 'inflight ceiling' : probe === 'dead' ? 'launcher dead' : 'worker state unknown'})`,
       }
     }
 
@@ -6296,7 +6273,7 @@ export function buildTridentOrchestrator(
       fired.delete(run.id)
       const reaped = failedRun(
         run,
-        `inner workflow stalled (no terminal result within ${Math.round(maxInflightMs / 60_000)} min)`,
+        `worker state unknown: no terminal result within ${Math.round(maxInflightMs / 60_000)} min`,
         false,
       )
       return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (stalled)` }
@@ -6305,7 +6282,17 @@ export function buildTridentOrchestrator(
   }
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
-    const out = await stepCore(run)
+    let worker = unknownWorkerObservation('worker observer unavailable', now())
+    if (!isTerminalPhase(run.phase) && opts.observe_run_worker !== undefined) {
+      try { worker = await opts.observe_run_worker(run) }
+      catch { worker = unknownWorkerObservation('worker observation failed', now()) }
+    }
+    const out = await stepCore(run, worker)
+    if (out.changed && out.run.phase === 'failed' && /worker blocked:|worker state unknown:|no progress for|inner workflow fire failed/.test(out.run.failure_reason ?? '')) {
+      out.run = { ...out.run, failure_reason: `${out.run.failure_reason ?? 'failure cause unknown'}\n${workerEvidence(worker)}` }
+    } else if (out.waiting) {
+      out.note += `; worker=${worker.state}; ${worker.detail}`
+    }
     if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
       const salvaged = await reconcile_stranded(out.run)
       if (salvaged !== null) {
