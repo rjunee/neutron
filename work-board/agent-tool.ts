@@ -158,8 +158,8 @@ function asErrorResult(err: unknown): { ok: false; error: string } {
   throw err
 }
 
-function ok(item: WorkBoardItem | null): { ok: true; item?: WorkBoardItem } {
-  return item === null ? { ok: true } : { ok: true, item }
+function ok(item: WorkBoardItem | null, id: string): { ok: true; item: WorkBoardItem } | { ok: false; error: string } {
+  return item === null ? { ok: false, error: `no such item on this project's board: ${id}` } : { ok: true, item }
 }
 
 /**
@@ -314,7 +314,7 @@ export function registerWorkBoardToolSurface(
           title: item.title,
           kind: 'card_added',
         })
-        return ok(item)
+        return ok(item, item.id)
       } catch (err) {
         return asErrorResult(err)
       }
@@ -389,7 +389,7 @@ export function registerWorkBoardToolSurface(
             kind: 'inline_started',
           })
         }
-        return ok(item)
+        return ok(item, id)
       } catch (err) {
         // A refusal is an ANSWER, not a crash: the store throws when a card is
         // SHELVED (status:'archived') while its build is still live (see
@@ -428,7 +428,7 @@ export function registerWorkBoardToolSurface(
       // so the agent learns why and stops, rather than seeing a tool error and
       // retrying. Completion is reconciled from the run going terminal.
       try {
-        return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
+        return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id), id)
       } catch (err) {
         if (
           err instanceof WorkBoardRunStillLiveError ||
@@ -477,7 +477,15 @@ export function registerWorkBoardToolSurface(
         target.precedes = asString(a.precedes) ?? ''
       }
       try {
-        const result = await store.reorder(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, target)
+        const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+        // Check every supplied reference, including rows created before this rule.
+        // A failed read throws; only a successful scoped miss means unavailable.
+        for (const refId of [id, before, after, asString(a.precedes)]) {
+          if (refId !== undefined && store.get(scope, refId) === null) {
+            return { ok: false, error: `no such item on this project's board: ${refId}` }
+          }
+        }
+        const result = await store.reorder(scope, id, target)
         if (result) {
           const report = dependencySequenceReport(result.dependency_title, result.blocked_title, result.changed)
           chatAck?.post({ project_id: ctx.project_id, item_id: id, title: result.dependency_title,

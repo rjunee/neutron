@@ -154,7 +154,7 @@ describe('work_board_* active-project scoping (P0: named-project builds must NOT
     expect(general.items.length).toBe(1)
   })
 
-  test('update / complete key on the active project scope; a cross-scope write is a no-op', async () => {
+  test('update / complete key on the active project scope; a cross-scope write is refused', async () => {
     const add = registry.get(WORK_BOARD_ADD_TOOL)!
     const created = (await add.handler({ title: 'acme item' }, ctx('owner', 'acme'))) as {
       item: { id: string }
@@ -168,12 +168,12 @@ describe('work_board_* active-project scoping (P0: named-project builds must NOT
     }
     expect(upd.item?.status).toBe('in_progress')
     // …but a General-scoped update for the SAME id cannot SEE it (different board):
-    // the store finds no row in the owner/General scope, so it is a silent no-op
-    // (ok, but no item) and acme's item is untouched.
+    // The scoped miss is refused and the other board stays untouched.
     const crossScope = (await update.handler({ id, status: 'done' }, ctx('owner', null))) as {
       ok: boolean
       item?: { status: string }
     }
+    expect(crossScope.ok).toBe(false)
     expect(crossScope.item).toBeUndefined()
     expect(store.get('acme', id)?.status).toBe('in_progress')
     // Complete in acme scope works.
