@@ -125,7 +125,7 @@ export interface BuildImportSubstrateInput {
    *  Also the instance+role discriminator (`cc-import-*`) the persistent substrate
    *  folds into its warm-pool key (S3 §2). */
   substrate_instance_id: string
-  /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
+  /** Cwd threaded to `createClaudeCodeSubstrateAuto`; Claude start refuses missing or blank values. */
   cwd?: string
   /** S3 §2 — conversational user identity folded into the persistent substrate's
    *  warm-pool key (per-instance owner). Absent ⇒ `_platform`. */

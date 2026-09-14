@@ -103,6 +103,10 @@ export interface SubstrateErrorCodeSpec {
  *   - `all_cooldown` stays retryable (the window passes; the pool recovers).
  */
 export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, SubstrateErrorCodeSpec>> = {
+  spawn_configuration: {
+    retryable: false,
+    description: 'Local REPL launch configuration is missing or cannot be prepared safely; fix the cwd or config access before retrying. This is not a provider or credential failure.',
+  },
   binary_not_found: {
     retryable: false,
     description: 'The substrate binary (e.g. `claude`) is not on PATH — fatal, unreachable.',

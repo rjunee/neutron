@@ -195,7 +195,8 @@ export interface PersistentReplSubstrateOptions {
   substrate_instance_id: string
   /** CWD for the REPL (instance home). DERIVED, not keyed (S3 #104/§2): two turns
    *  for the same (instance,user,project,credential) MUST land on the same warm
-   *  REPL even if a caller computed `cwd` differently. Threaded into the spawn. */
+   *  REPL even if a caller computed `cwd` differently. Missing or blank cwd
+   *  is refused as spawn_configuration at start/spawn; never defaults to the service cwd. */
   cwd?: string
   /** Conversational user identity — per-user warm-pool namespace (S3 §2). One
    *  user-per-instance today (`owner_user_id`); folded into `poolKeyFor` so two

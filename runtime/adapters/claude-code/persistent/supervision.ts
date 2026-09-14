@@ -189,7 +189,7 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
         // still records synchronously, preserving the fire-and-forget timing.
         fireAndForget('supervision.task', (async () => {
           if (pendingKill !== undefined) await pendingKill
-          await getOrSpawnSession(record.sessionKey, options, resumeSpecFor(record), {
+          await getOrSpawnSession(record.sessionKey, { ...options, cwd: record.cwd }, resumeSpecFor(record), {
             sessionId: record.sessionId,
           })
         })())

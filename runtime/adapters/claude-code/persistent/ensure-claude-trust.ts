@@ -30,6 +30,8 @@
  * The write is a read-merge-write so existing config/login state is preserved.
  */
 
+import { withFlockSync } from './registry-lock.ts'
+import { SpawnConfigurationError } from './spawn-configuration-error.ts'
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -67,32 +69,40 @@ export function ensureClaudeTrust(input: EnsureClaudeTrustInput): string {
   if (input.configDir !== undefined && !existsSync(input.configDir)) {
     mkdirSync(input.configDir, { recursive: true })
   }
-  const file = join(dir, '.claude.json')
+  const file = join(realpathSync(dir), '.claude.json')
   const realCwd = resolveRealCwd(input.cwd)
 
-  let config: ClaudeConfig = {}
-  if (existsSync(file)) {
-    try {
-      config = JSON.parse(readFileSync(file, 'utf8')) as ClaudeConfig
-    } catch {
-      config = {}
+  // A separate, stable inode: locking the config itself would lose exclusion
+  // when rename replaces it. Every Neutron seed reads and writes under this lock.
+  return withFlockSync(`${file}.neutron.lock`, () => {
+    let config: ClaudeConfig = {}
+    if (existsSync(file)) {
+      try {
+        config = JSON.parse(readFileSync(file, 'utf8')) as ClaudeConfig
+      } catch {
+        config = {}
+      }
     }
-  }
 
-  config.hasCompletedOnboarding = true
-  config.bypassPermissionsModeAccepted = true
-  const projects = config.projects ?? {}
-  const existing = projects[realCwd] ?? {}
-  projects[realCwd] = {
-    ...existing,
-    hasTrustDialogAccepted: true,
-    hasCompletedProjectOnboarding: true,
-  }
-  config.projects = projects
+    config.hasCompletedOnboarding = true
+    config.bypassPermissionsModeAccepted = true
+    const projects = config.projects ?? {}
+    const existing = projects[realCwd] ?? {}
+    projects[realCwd] = {
+      ...existing,
+      hasTrustDialogAccepted: true,
+      hasCompletedProjectOnboarding: true,
+    }
+    config.projects = projects
 
-  // Atomic write so a concurrent reader never sees a truncated file.
-  const tmp = `${file}.neutron-${process.pid}.tmp`
-  writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 })
-  renameSync(tmp, file)
-  return file
+    // Atomic write so a concurrent reader never sees a truncated file.
+    const tmp = `${file}.neutron-${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 })
+    renameSync(tmp, file)
+    return file
+  }, (acquired) => {
+    if (!acquired) {
+      throw new SpawnConfigurationError('persistent-repl: cannot acquire Claude trust config lock')
+    }
+  })
 }
