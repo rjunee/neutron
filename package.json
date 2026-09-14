@@ -59,6 +59,7 @@
     "start:gateway": "bun run gateway/index.ts",
     "test": "bash scripts/run-tests.sh",
     "test:bun": "bun test",
+    "test:jwt-validator-exports": "bun -e \"await import('@neutronai/jwt-validator/index.ts'); let refused = false; try { await import('@neutronai/jwt-validator/resolve-key.ts') } catch { refused = true } if (!refused) throw new Error('internal subpath resolved')\"",
     "migrate": "bun run migrations/runner.ts"
   },
   "devDependencies": {

@@ -5,7 +5,8 @@
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
-    "./*": "./*"
+    "./index.ts": "./index.ts",
+    "./claims.ts": "./claims.ts"
   },
   "dependencies": {
     "jose": "^5.9.0",
