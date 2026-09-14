@@ -190,11 +190,15 @@ describe('Open board terminate() wiring (§F6a composition boundary)', () => {
     const built = buildTridentCodeBoardBinder(() => undefined)
     // The positive control: a member known to be there, found the same way.
     expect(typeof built.attachRun).toBe('function')
-    expect(typeof built.detachRun).toBe('function')
+    // `detachRun` is OPTIONAL on the type — which is exactly why the production
+    // gate is a `typeof` probe and why `rg '\.detachRun\('` cannot find it, and
+    // therefore why it was nearly deleted as dead code. Assert presence first.
+    expect(built.detachRun).toBeDefined()
     // The payload is the point of #784: `/code stop` dropped pr/pr_url/budget
     // because a 3-arg wrapper was CAST to the 4-arg reconciler. Arity is the
-    // observable that a cast erases, so it is pinned here.
-    expect(built.detachRun.length).toBe(4)
+    // observable a cast erases, so it is pinned here. `?.length` is undefined if
+    // the member vanishes, so this fails for an absent member too.
+    expect(built.detachRun?.length).toBe(4)
   })
 
   test('DELETE of a card bound to a live run cancels it AND fires terminal delivery ONCE through the real chain', async () => {
