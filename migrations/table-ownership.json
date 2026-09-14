@@ -136,6 +136,15 @@
         "Keyed by (ts, pool, account_label) since 0121, so two accounts of one pool",
         "measured in the same millisecond are two rows rather than one overwrite."
       ]
+    },
+    "code_trident_phase_usage": {
+      "owner": "trident/phase-usage.ts",
+      "writers": [
+        "trident/phase-usage.ts"
+      ],
+      "notes": [
+        "Migration 0144 seeds unknown rows for existing runs and installs the run-insert trigger."
+      ]
     }
   }
 }

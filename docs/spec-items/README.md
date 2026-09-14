@@ -54,6 +54,7 @@ branch is cut (standard §3.1, §3.2).
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |
 | [`codex-project-directory-names-its-owner`](codex-project-directory-names-its-owner.md) | Codex project credential directories name their owning project | P2 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
+| [`trident-phase-accounting`](trident-phase-accounting.md) | Store per-phase token and cost accounting for every Trident run | P2 | — |
 
 ### deploy
 

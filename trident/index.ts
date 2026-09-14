@@ -14,6 +14,8 @@
 export const __MODULE__ = '@neutronai/trident' as const
 
 export { TridentRunStore } from './store.ts'
+export { TridentPhaseUsageStore } from './phase-usage.ts'
+export type { PhaseUsageReport, PhaseUsageRow } from './phase-usage.ts'
 export type {
   TridentRun,
   TridentPhase,
