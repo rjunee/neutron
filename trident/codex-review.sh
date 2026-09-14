@@ -49,6 +49,7 @@
 set -uo pipefail
 
 BASE_REF="${1:-main}"
+REV_RANGE_OPERAND_PREDICATE="${NEUTRON_REV_RANGE_OPERAND_PREDICATE:-${BASH_SOURCE[0]%/*}/rev-range-operand.mjs}"
 # ── THE BASE REF: CLASSIFY THE KIND ONCE, THEN APPLY THAT KIND'S ONE RULE ─────
 #
 # WHY A CLASSIFIER AND NOT A CHAIN OF ARMS. This was an `if/elif` chain ordered by the order
@@ -97,24 +98,25 @@ if [ "$(git rev-parse --show-object-format 2>/dev/null)" = "sha256" ]; then
 else
   BASE_REF_OID_WIDTH=40
 fi
+BASE_REF_QUALIFIED=0
+if bun "$REV_RANGE_OPERAND_PREDICATE" "$BASE_REF" "$BASE_REF_OID_WIDTH"; then
+  BASE_REF_QUALIFIED=1
+  :
+else
 case "$BASE_REF" in
-  refs/*) : ;;
   HEAD | HEAD[~^]*)
     if ! BASE_REF=$(git rev-parse --verify --quiet "${BASE_REF}^{commit}"); then
       BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' does not resolve, so the diff would be EMPTY — nothing to review. DEFERRED — do NOT treat as an approval."
+    else
+      BASE_REF_QUALIFIED=1
     fi
     ;;
   *)
-    if [[ "$BASE_REF" =~ ^[0-9a-fA-F]{$BASE_REF_OID_WIDTH}$ ]]; then
-      # KIND 1b — an object name AT THIS REPOSITORY'S WIDTH. Verbatim; its resolvability is
-      # checked at the point of use. A hard-wired 40 refused a legitimate SHA-256 base outright;
-      # accepting both widths let a wrong-width REF capture the base. The width is asked once,
-      # above.
-      :
-    elif [[ "$BASE_REF" == origin/?* ]]; then
+    if [[ "$BASE_REF" == origin/?* ]]; then
       # KIND 3 — exactly one promotion for this kind, and no bare-name probe can reach it.
       if git rev-parse --verify --quiet "refs/remotes/${BASE_REF}^{commit}" >/dev/null 2>&1; then
         BASE_REF="refs/remotes/${BASE_REF}"
+        BASE_REF_QUALIFIED=1
       else
         BASE_REF_REFUSAL="CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND with no refs/remotes/${BASE_REF} behind it — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval."
       fi
@@ -131,6 +133,7 @@ case "$BASE_REF" in
       # no local `main`. `refs/tags/<x>` must still not resolve, or a TAG would be promoted to
       # a remote branch of the same name — the by-kind regression this block exists for.
       BASE_REF="refs/remotes/origin/${BASE_REF}"
+      BASE_REF_QUALIFIED=1
     elif git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
       # KIND 4, TAG-ONLY — REFUSED. A bare word that resolves only as a tag is not a base
       # branch, and it is the least likely thing an operator meant by "the base". This
@@ -143,6 +146,7 @@ case "$BASE_REF" in
       # verbatim" until round eighteen, which is the same unqualified name a tag would capture
       # if one appeared later.
       BASE_REF="refs/heads/${BASE_REF}"
+      BASE_REF_QUALIFIED=1
     else
       # KIND 4 with nothing behind it. Left as-is; the shape assertion at the point of use
       # refuses it, which is where every other refusal is emitted too.
@@ -150,6 +154,7 @@ case "$BASE_REF" in
     fi
     ;;
 esac
+fi
 : "${CODEX_HOME:=}"
 # Codex's measured input ceiling is in CHARACTERS, not lines. Measured 2026-09-14:
 # 1,219,586 characters was refused and 878,351 was accepted; 1,048,576 is the
@@ -414,21 +419,10 @@ else
   # classifier mistake can no longer reach the command. It asserts the PROPERTY, and the
   # classifier above decides the KIND: a `HEAD`-rooted expression has already been resolved to
   # an object name there, so this only has two forms left to admit.
-  case "$BASE_REF" in
-    refs/*) : ;;
-    *)
-      # UPPER OR LOWER. Git accepts an uppercase 40-hex object name — measured: with
-      # `U=$(git rev-parse HEAD | tr a-f A-F)`, `git rev-parse --verify "${U}^{commit}"`
-      # succeeds and `${U}..HEAD` is a valid range. A lowercase-only pattern refused a
-      # legitimate full object name with exit 3, which is the OVER-refusal direction again —
-      # the same one round twenty-six hit in the chain, now in the guard. `diffBaseRef`
-      # already lowercases before matching; this matches its acceptance.
-      if [[ ! "$BASE_REF" =~ ^[0-9a-fA-F]{$BASE_REF_OID_WIDTH}$ ]]; then
-        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval." >&2
-        exit 3
-      fi
-      ;;
-  esac
+  if [ "$BASE_REF_QUALIFIED" -ne 1 ]; then
+    printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a full object name (40 hex, or 64 in a SHA-256 repository). DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+  fi
   if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null 2>&1; then
     # CARRIES THE SAME MARKER the empty-diff refusal below emits, because this IS that case —
     # caught earlier, where the cause can still be named. A consumer greps for the marker.

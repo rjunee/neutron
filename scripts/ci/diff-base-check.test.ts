@@ -39,6 +39,7 @@ import {
 
 const ROOT = join(import.meta.dir, '..', '..')
 const GATE = join(import.meta.dir, 'diff-base-check.mjs')
+const PREDICATE = join(ROOT, 'trident', 'rev-range-operand.mjs')
 
 describe('the matcher finds every shape #546 actually shipped in', () => {
   test('the positive control reproduces EXACTLY its six offenses, at their lines', () => {
@@ -479,7 +480,7 @@ describe('the gate as CI runs it', () => {
     const reverted = src.replace(
       /const RANGE_TAIL = String\.raw`[^`]*`/,
       'const RANGE_TAIL = String.raw`\\.{2,3}`',
-    )
+    ).replace("'../../trident/rev-range-operand.mjs'", JSON.stringify(PREDICATE))
     expect(reverted).not.toBe(src)
 
     // Written OUTSIDE the repository, for two reasons: `scripts/` is a SCAN_ROOT and
