@@ -9,13 +9,20 @@
  *   (b) NOT kill a pid whose cmdline does NOT match (recycled-pid safety).
  *
  * Drives the real `adoptOrKillOrphan` / `registerOrphanKill` / `cmdlineMatchesSession`
- * with injected OS deps — no real `ps`, no real `claude`, no module-global pool.
+ * with injected OS deps, plus real inert child processes for the argv reader.
  */
 
 import { describe, it, expect } from 'bun:test'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { once } from 'node:events'
 import { buildReplArgv } from '../build-repl-argv.ts'
 import {
   adoptOrKillOrphan,
+  defaultReadArgv,
+  identifyOrphanPid,
   cmdlineMatchesSession,
   registerOrphanKill,
   scanTranscriptOwners,
@@ -56,7 +63,7 @@ function deps(over: Partial<OrphanAdoptionDeps> & { killed?: number[] } = {}): {
   let terminateDone = false
   const d: OrphanAdoptionDeps = {
     isPidAlive: over.isPidAlive ?? (() => true),
-    readCmdline: over.readCmdline ?? (() => OURS_CMDLINE),
+    readArgv: over.readArgv ?? (() => OURS_CMDLINE.split(' ')),
     terminatePid:
       over.terminatePid ??
       (async (pid: number) => {
@@ -202,14 +209,14 @@ describe('adoptOrKillOrphan — verdicts', () => {
   })
 
   it('(b) recycled pid (alive, cmdline mismatch) → NOT-OURS, never terminated', async () => {
-    const { deps: d, killed } = deps({ readCmdline: () => RECYCLED_CMDLINE })
+    const { deps: d, killed } = deps({ readArgv: () => RECYCLED_CMDLINE.split(' ') })
     const verdict = await adoptOrKillOrphan(4242, SESSION, d)
     expect(verdict).toBe('not-ours')
     expect(killed).toEqual([]) // recycled-pid safety: we did NOT SIGTERM it
   })
 
   it('(b′) recycled pid running `tail -f OUR-transcript` → NOT-OURS, never terminated (Argus r1 BLOCKER)', async () => {
-    const { deps: d, killed } = deps({ readCmdline: () => RECYCLED_TAIL_TRANSCRIPT })
+    const { deps: d, killed } = deps({ readArgv: () => RECYCLED_TAIL_TRANSCRIPT.split(' ') })
     const verdict = await adoptOrKillOrphan(4242, SESSION, d)
     expect(verdict).toBe('not-ours')
     expect(killed).toEqual([]) // would have been SIGKILLed by the old loose matcher
@@ -219,9 +226,9 @@ describe('adoptOrKillOrphan — verdicts', () => {
     let cmdlineReads = 0
     const { deps: d, killed } = deps({
       isPidAlive: () => false,
-      readCmdline: () => {
+      readArgv: () => {
         cmdlineReads++
-        return OURS_CMDLINE
+        return OURS_CMDLINE.split(' ')
       },
     })
     const verdict = await adoptOrKillOrphan(4242, SESSION, d)
@@ -237,12 +244,12 @@ describe('adoptOrKillOrphan — verdicts', () => {
     expect(await adoptOrKillOrphan(-1, SESSION, d)).toBe('no-pid')
   })
 
-  it('cmdline unreadable (ps failure) → UNREADABLE, distinct from not-ours, still no kill', async () => {
+  it('argv unreadable (read failure) → UNREADABLE, distinct from not-ours, still no kill', async () => {
     // The kill decision is unchanged — neither answer licenses a SIGTERM. What changed
     // with #539 is that a SECOND question is now asked of this verdict ("may something
     // else resume that transcript?"), and there `not-ours` is a positive statement
     // about a stranger while this is the absence of any statement at all.
-    const { deps: d, killed } = deps({ readCmdline: () => undefined })
+    const { deps: d, killed } = deps({ readArgv: () => undefined })
     expect(await adoptOrKillOrphan(4242, SESSION, d)).toBe('unreadable')
     expect(killed).toEqual([])
   })
@@ -256,7 +263,7 @@ describe('registerOrphanKill — cross-restart killChild→spawnResume ordering 
     let terminateDone = false
     const d: OrphanAdoptionDeps = {
       isPidAlive: () => true,
-      readCmdline: () => OURS_CMDLINE,
+      readArgv: () => OURS_CMDLINE.split(' '),
       terminatePid: async (pid) => {
         await Promise.resolve()
         await Promise.resolve()
@@ -295,7 +302,7 @@ describe('registerOrphanKill — cross-restart killChild→spawnResume ordering 
     const killed: number[] = []
     const d: OrphanAdoptionDeps = {
       isPidAlive: () => true,
-      readCmdline: () => RECYCLED_CMDLINE, // pid recycled to an unrelated process
+      readArgv: () => RECYCLED_CMDLINE.split(' '), // pid recycled to an unrelated process
       terminatePid: async (pid) => {
         killed.push(pid)
       },
@@ -413,5 +420,74 @@ describe('scanTranscriptOwners: `none` is a claim about the INSTRUMENT as much a
       psRowFor('/usr/local/bin/claude', 9401),
     ])
     expect(scan).toEqual({ kind: 'owners', pids: [9401] })
+  })
+})
+
+
+describe('structured pid argv (#672)', () => {
+  it('unsupported platforms establish unreadable, even when a vector could match', () => {
+    let reads = 0
+    const readArgv = (pid: number) => defaultReadArgv(pid, 'darwin', () => {
+      reads++
+      return `claude\0--resume\0${SESSION}\0`
+    })
+    const { deps: d } = deps({ readArgv })
+    expect(identifyOrphanPid(4242, SESSION, d)).toBe('unreadable')
+    expect(reads).toBe(0)
+  })
+
+  it('unreadable proc entries establish unreadable, never not-ours', async () => {
+    const { deps: d, killed } = deps({ readArgv: (pid) => defaultReadArgv(pid, 'linux', (path) => {
+      expect(path).toBe('/proc/4242/cmdline')
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    }) })
+    expect(await adoptOrKillOrphan(4242, SESSION, d)).toBe('unreadable')
+    expect(killed).toEqual([])
+  })
+
+  it('empty or unterminated proc data is unreadable; empty arguments survive', () => {
+    for (const raw of ['', `claude\0--resume\0${SESSION}`]) {
+      const { deps: d } = deps({ readArgv: (pid) => defaultReadArgv(pid, 'linux', () => raw) })
+      expect(identifyOrphanPid(4242, SESSION, d)).toBe('unreadable')
+    }
+    const argv = ['claude', '--resume', SESSION, '--tools', '', '--add-dir', '/srv/My Project\nnext']
+    expect(defaultReadArgv(4242, 'linux', () => argv.join('\0') + '\0')).toEqual(argv)
+  })
+
+  it.skipIf(process.platform !== 'linux')('real child: smuggled argv refused; genuine spaced path accepted', async () => {
+    // A local inert executable accepts exactly the launch vector without contacting
+    // a model service. Readiness is emitted by the child after exec, before /proc read.
+    const dir = mkdtempSync(join(tmpdir(), 'argv vector-'))
+    try {
+      const source = join(dir, 'child.c')
+      const binary = join(dir, 'claude')
+      writeFileSync(source, '#include <unistd.h>\nint main(void) { write(1, "ready", 5); for (;;) pause(); }\n')
+      const build = spawnSync('cc', [source, '-o', binary], { encoding: 'utf8' })
+      expect(build.status, build.stderr).toBe(0)
+      for (const argv0 of ['claude --resume', binary]) {
+        const argv = [argv0, '--resume', SESSION, '--tools', '', '--add-dir', '/srv/My Project\nnext']
+        const child = spawn(binary, argv.slice(1), { argv0, stdio: ['ignore', 'pipe', 'pipe'] })
+        try {
+          await once(child.stdout!, 'data')
+          const pid = child.pid!
+          const actual = defaultReadArgv(pid)
+          expect(actual).toEqual(argv)
+          const flattened = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+          expect(flattened.status).toBe(0)
+          // SAME live process: ps accepts the smuggled argv0 and misses the spaced path.
+          expect(cmdlineMatchesSession(flattened.stdout, SESSION)).toBe(argv0 === 'claude --resume')
+          const { deps: d, killed } = deps({ readArgv: defaultReadArgv })
+          expect(identifyOrphanPid(pid, SESSION, d)).toBe(argv0 === binary ? 'ours' : 'not-ours')
+          expect(await adoptOrKillOrphan(pid, SESSION, d)).toBe(argv0 === binary ? 'killed' : 'not-ours')
+          expect(killed).toEqual(argv0 === binary ? [pid] : [])
+        } finally {
+          const exited = once(child, 'exit')
+          child.kill('SIGKILL')
+          await exited
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

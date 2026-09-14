@@ -423,7 +423,7 @@ describe('when the host cannot answer', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => true,
-        readCmdline: () => oursArgv().join(' '),
+        readArgv: () => oursArgv(),
         terminatePid: async (pid) => {
           terminated.push(pid)
         },
@@ -446,9 +446,9 @@ describe('when the host cannot answer', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => true,
-        // `ps` failed, or the process is not ours to inspect. The ABSENCE of a
+        // The argv read failed, or the process is not ours to inspect. The ABSENCE of a
         // finding, which must not be read as a finding of absence.
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async (pid) => {
           terminated.push(pid)
         },
@@ -478,8 +478,8 @@ describe('when the host cannot answer', () => {
     // released that pid (or never had it), so nothing of ours is running under the
     // handle, and the handle written in the same breath is stale with it.
     for (const probe of [
-      { isPidAlive: () => true, readCmdline: () => '/usr/sbin/cupsd -l -f' },
-      { isPidAlive: () => false, readCmdline: () => undefined },
+      { isPidAlive: () => true, readArgv: () => ['/usr/sbin/cupsd', '-l', '-f'] },
+      { isPidAlive: () => false, readArgv: () => undefined },
     ]) {
       const f = fixture()
       f.host.inspectOverride = { kind: 'unavailable', reason: 'socket timeout' }
@@ -513,7 +513,7 @@ describe('a dead pid is not proof the transcript is free', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => false, // the recorded pid IS dead
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async () => {},
       }),
       listProcesses: () => [
@@ -537,7 +537,7 @@ describe('a dead pid is not proof the transcript is free', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => false,
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async () => {},
       }),
       // `ps` failed. Establishes nothing — and must not read as "nobody owns it".
@@ -569,7 +569,7 @@ describe('a dead pid is not proof the transcript is free', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => false,
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async () => {},
       }),
       listProcesses: () => [
@@ -777,7 +777,7 @@ describe('rows that cannot be reconciled at all', () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => true,
-        readCmdline: () => oursArgv().join(' '),
+        readArgv: () => oursArgv(),
         terminatePid: async (pid) => {
           terminated.push(pid)
         },
@@ -805,7 +805,7 @@ describe('rows that cannot be reconciled at all', () => {
       orphanDeps: () => ({
         isPidAlive: () => true,
         // Alive and unreadable: the one answer that establishes nothing.
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async (pid) => {
           terminated.push(pid)
         },
@@ -1786,7 +1786,7 @@ describe("the clear's EARLY RETURNS write nothing either", () => {
       log: () => {},
       orphanDeps: () => ({
         isPidAlive: () => false,
-        readCmdline: () => undefined,
+        readArgv: () => undefined,
         terminatePid: async () => {},
       }),
       listProcesses: () => [],

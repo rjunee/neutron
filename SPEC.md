@@ -164,6 +164,10 @@ A key fenced after loss of ownership evidence remains refused until a gateway
 restart performs fresh reconciliation, even if registry writes recover meanwhile
 (Decisions Log 2026-09-14, "fence duration").
 
+Recorded-pid identity uses structured argv; without a structured reader it stays
+unknown and leaves the process untouched (Decisions Log 2026-09-14,
+"Recorded-pid identity requires structured argv").
+
 ### 2.4 — Memory
 
 **GBrain is the sole durable memory store.** Scribe extracts salient facts as a
@@ -294,6 +298,16 @@ The local wrapper has relinquished its claim and capabilities; recovery requires
 boot reconciliation. This explicitly accepts a gateway restart after a transient
 registry-lock outage rather than automatically restoring service from a matching row.
 The existing fail-closed policy is retained; no automatic reclaim path is introduced.
+
+### 2026-09-14 — Recorded-pid identity requires structured argv (#672).
+
+Linux reads NUL-separated `/proc/<pid>/cmdline`. A flattened process listing
+cannot authorise adoption or termination. Platforms without a structured reader,
+including Darwin, report the existing `unreadable` outcome for recorded-pid
+identity; boot reconciliation remains undecided and leaves that process untouched.
+Structured pane inspection is unaffected. This follows the #672 build task's
+stricter requirement over the filed brief's proposed Darwin string fallback.
+Acceptance lives in `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`.
 
 ### 2026-09-14 — THE REPL HOST IS SELECTED ONCE PER PROCESS: `NEUTRON_REPL_HOST=herdr|bun`, defaulting to herdr. This completes rather than supersedes the 2026-09-12 decision below: that entry retained both backends and deliberately deferred the configuration surface; this entry delivers it after the herdr path was verified.
 

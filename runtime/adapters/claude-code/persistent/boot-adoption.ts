@@ -113,8 +113,8 @@ import {
   identifyOrphanPid,
   scanTranscriptOwners,
   classifyPaneForAdoption,
-  cmdlineMatchesSession,
-  defaultReadCmdline,
+  argvMatchesSession,
+  defaultReadArgv,
   type OrphanAdoptionDeps,
   type OrphanAdoptionVerdict,
   type ProcessListing,
@@ -970,10 +970,10 @@ async function pidFallback(
     deps.orphanDeps?.(record, claudeBasename) ??
     ({
       isPidAlive: defaultIsPidAlive,
-      readCmdline: defaultReadCmdline,
+      readArgv: defaultReadArgv,
       terminatePid: (pid: number) =>
         terminatePidGracefully(pid, () =>
-          cmdlineMatchesSession(defaultReadCmdline(pid), record.sessionId, claudeBasename),
+          argvMatchesSession(defaultReadArgv(pid) ?? [], record.sessionId, claudeBasename),
         ),
     } satisfies OrphanAdoptionDeps)
   const log = deps.log ?? defaultLog

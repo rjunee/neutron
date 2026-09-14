@@ -10,7 +10,7 @@ import { type CwdDriftSupervisedEntry, type CwdDriftTickResult, type CwdProbe, r
 import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watchdog.ts'
 import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
-import { basenameOf, cmdlineMatchesSession, defaultReadCmdline, registerOrphanKill } from './orphan-adoption.ts'
+import { basenameOf, argvMatchesSession, defaultReadArgv, registerOrphanKill } from './orphan-adoption.ts'
 import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withRegistry } from './repl-registry.ts'
@@ -127,7 +127,7 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
             orphanRecord,
             {
               isPidAlive: defaultIsPidAlive,
-              readCmdline: defaultReadCmdline,
+              readArgv: defaultReadArgv,
               // Re-verify identity right before the FORCE kill (Codex P2): the
               // verified orphan may exit during the SIGTERM grace window and the OS
               // may recycle its pid onto an unrelated process before SIGKILL — this
@@ -137,8 +137,8 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
               // the whole point of this module.
               terminatePid: (pid) =>
                 terminatePidGracefully(pid, () =>
-                  cmdlineMatchesSession(
-                    defaultReadCmdline(pid),
+                  argvMatchesSession(
+                    defaultReadArgv(pid) ?? [],
                     orphanRecord?.sessionId ?? '',
                     claudeBasename,
                   ),
