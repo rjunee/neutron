@@ -45,6 +45,7 @@ import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from './delivery.ts'
+import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
 /**
@@ -255,15 +256,7 @@ function buildHarness(opts: {
   // wrapper, fifty scenarios that never meant to exercise the size gate would hold
   // on it, and (measured, before the gate was made fail-closed) a 1,048,577-byte
   // diff answered on stdout alone measured ZERO and merged.
-  const writingHost = async (cmd: string[]): Promise<HostCommandResult> => {
-    const result = await host(cmd)
-    const output = cmd.find((arg) => arg.startsWith('--output='))
-    if (result.ok && output !== undefined) {
-      const target = output.slice('--output='.length)
-      if (!existsSync(target)) writeFileSync(target, result.stdout)
-    }
-    return result
-  }
+  const writingHost = honourDiffOutput(host)
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),

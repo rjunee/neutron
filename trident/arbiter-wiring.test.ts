@@ -35,7 +35,7 @@ import { cleanupAfterMerge } from './git-mode.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import {
   MAX_HISTORY_COMMITS_PER_SIDE,
-  buildMergeCleanupDeps,
+  buildMergeCleanupDeps as buildRealMergeCleanupDeps,
   assembleEvidence,
   conflictEvidence,
   truncationLog,
@@ -46,6 +46,7 @@ import {
   MAX_CONFLICT_ROUNDS,
   type RunHostCommand,
 } from './merge.ts'
+import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
 import { FORGERY_RANGES } from './wrong-base-remedy.ts'
 import {
   ARBITER_EVIDENCE_ALLOWANCE_MIN,
@@ -64,6 +65,18 @@ import { buildForgeConflictResolver } from './conflict-resolver.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+
+/** Every fake host here models `git diff --output=` — see the helper's doc. The
+ *  size gate measures the file that command writes and fails closed when nothing
+ *  wrote one, so without this a suite about merge-conflict ARBITRATION holds on a
+ *  diff-size refusal it has no interest in. */
+function buildMergeCleanupDeps(
+  host: RunHostCommand,
+  ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
+): ReturnType<typeof buildRealMergeCleanupDeps> {
+  return buildRealMergeCleanupDeps(honourDiffOutput(host) as RunHostCommand, ...rest)
+}
+
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 const fail = (stderr = 'boom'): HostCommandResult => ({ ok: false, stdout: '', stderr, exit_code: 1 })

@@ -92,3 +92,42 @@ file measured as zero) and the false/unknown distinction (`:245`, the unmeasured
 refusal rewritten as a measured zero). 406 tests pass across `merge.test.ts` and
 `orchestrator.test.ts`; the rev-range guard (`diff-base-option-shaped`) is green,
 so `--output=` as a FLAG through `gitRangeArgv` does not trip it.
+
+### Review round 2 — the obligation the fail-closed gate creates
+
+Making the gate fail closed moved its evidence off the `run_host` seam: the
+command's return value no longer carries the thing being measured, so any fake
+host that answers on stdout and ignores `--output=` writes no patch file, and the
+gate correctly HOLDS. That is right, and it is also a new obligation on a widely
+used test seam. Filed as its own issue rather than left to be rediscovered.
+
+**Nine suites needed the wrapper**, and the enumeration is the point:
+
+| suite | how it reaches the gate |
+|---|---|
+| `trident/merge.test.ts` | directly — it IS the gate's suite |
+| `trident/orchestrator.test.ts` | the harness's `run_host` |
+| `trident/arbiter-wiring.test.ts` | merge-conflict arbitration; never mentions the gate |
+| `gateway/composition/build-core-modules-trident-arbiter-wiring.test.ts` | the composed orchestrator |
+| `trident/ralph.test.ts` | the orchestrator; mentions no merge symbol at all |
+| `trident/ported-fixes.test.ts` (3 sites) | same, via a copied `driftFreeHost` |
+| `trident/restart-resume.test.ts` (2 sites) | same |
+| `trident/code-command.test.ts` | same |
+| `trident/merge-realgit.test.ts` | **needed nothing** — it drives real git |
+
+`ralph.test.ts` is the one that matters. Grepping the gate's own symbols
+(`buildMergeCleanupDeps`, `cleanupAfterMerge`) does NOT enumerate its callers — it
+missed four suites. The complete set came from running the whole `trident/` +
+`gateway/composition/` surface and bisecting the single red test against a
+reverted `trident/merge.ts`. Four of the suites share a copy-pasted `driftFreeHost`
+fixture, so the same omission existed in four places and a fifth copy would have
+inherited it.
+
+`tests/support/diff-output-host.ts` (`honourDiffOutput`) is the one wrapper they
+all now use, so the next author imports it instead of re-deriving it — and the
+`merge-realgit` row is the tell that the real command needs no help.
+
+`git diff --output=` behaviour, measured rather than assumed: the file it writes
+carries exactly the bytes stdout would have (89 == 89), and git creates the file
+even when the command FAILS (exit 128 leaves a 0-byte file) — which is why
+`result.ok` alone was never evidence that a patch was produced.

@@ -35,6 +35,7 @@ import { CONFLICT_ARBITER_RETRY_OPTION } from '@neutronai/trident/merge.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
 import { buildCoreModules } from './build-core-modules.ts'
+import { honourDiffOutput } from '../../tests/support/diff-output-host.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -76,7 +77,11 @@ type HostRunner = NonNullable<TridentWiring['run_host']>
 function mergingHost(conflictRounds: number): { host: HostRunner; calls: string[] } {
   const calls: string[] = []
   let reported = 0
-  const host: HostRunner = async (cmd) => {
+  // MODELS `git diff --output=` — see `tests/support/diff-output-host.ts`. The
+  // size gate measures the file that command writes and fails closed when nothing
+  // wrote one, so an unwrapped fake holds this arbiter test on a diff-size
+  // refusal it has nothing to do with.
+  const host: HostRunner = honourDiffOutput(async (cmd) => {
     const joined = cmd.join(' ')
     calls.push(joined)
     // The branch name is checked before any git operand use.
@@ -118,7 +123,7 @@ function mergingHost(conflictRounds: number): { host: HostRunner; calls: string[
     if (cmd.includes('rev-parse') || cmd.includes('merge-base')) return ok(HEAD_SHA)
     if (cmd.includes('symbolic-ref')) return ok('origin/main')
     return ok()
-  }
+  }) as HostRunner
   return { host, calls }
 }
 

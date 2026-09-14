@@ -17,6 +17,7 @@ import {
   type RunHostCommand,
 } from './merge.ts'
 import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
+import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
@@ -36,16 +37,7 @@ function buildMergeCleanupDeps(
   host: RunHostCommand,
   ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
 ): ReturnType<typeof buildRealMergeCleanupDeps> {
-  const writing: RunHostCommand = async (cmd, ...args) => {
-    const result = await host(cmd, ...args)
-    const output = cmd.find((arg) => arg.startsWith('--output='))
-    if (result.ok && output !== undefined) {
-      const target = output.slice('--output='.length)
-      if (!existsSync(target)) writeFileSync(target, result.stdout)
-    }
-    return result
-  }
-  return buildRealMergeCleanupDeps(writing, ...rest)
+  return buildRealMergeCleanupDeps(honourDiffOutput(host) as RunHostCommand, ...rest)
 }
 
 function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
