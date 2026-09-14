@@ -809,6 +809,17 @@ async function newExitPath() {
     expect({ total: sites.length, withBlockKind: withBlockKind.length }).toEqual({ total: 12, withBlockKind: 9 })
     // …so three can never carry one, which is the figure `terminal-cause.ts` cites.
     expect(sites.length - withBlockKind.length).toBe(3)
+    // AND WHICH THREE, DERIVED TOO. The docblock does not only cite the NUMBER — it names
+    // the paths ("both publish handoffs and the Ralph re-fire"). A count alone cannot keep
+    // that half honest: three OTHER sites could lose their `blockKind` and the number would
+    // still read 3 while the sentence had gone false. That is precisely how the original
+    // figure in that docblock was wrong when it was written, so the identities are measured
+    // on the same pass as the count rather than remembered beside it.
+    expect(sites.filter((s) => !s.carriesBlockKind).map((s) => s.kind).sort()).toEqual([
+      'handoff-publish',
+      'handoff-publish',
+      'ralph-task-built',
+    ])
   })
 
   test.each([

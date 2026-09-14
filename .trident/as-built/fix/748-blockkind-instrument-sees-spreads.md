@@ -36,3 +36,37 @@ Each doctored source introduces exactly one additional terminal site and expects
 ### Deliberately not changed
 
 `trident/inner-workflow.mjs` was read to enumerate runtime shapes but not modified, as required. No product behavior or specification decision changed. The historical statement in `docs/as-built/a-terminal-cause-on-every-terminal-path.md:541` remains because merged as-built records are immutable; the distinctive-phrase tree search found that historical hit alongside the corrected normative and executable positive controls at `trident/terminal-cause.ts:32` and `trident/inner-workflow-terminal-cause.test.ts:802`.
+
+### Reviewer addendum
+
+Two gaps found on review, both closed here rather than deferred.
+
+**The docblock named the three, but only the count was derived.** The sentence at
+`trident/terminal-cause.ts:31-38` does not just cite a number — it says WHICH paths ("both
+publish handoffs and the Ralph re-fire"). Nothing measured that half, so three *other*
+sites could have lost their `blockKind` and the count would still have read 3 while the
+sentence had gone false. That is exactly the failure this card exists to fix, one level in.
+`the blockKind claim is derived, not remembered` now also asserts the three fieldless sites'
+`terminalCauseKind` values (`handoff-publish`, `handoff-publish`, `ralph-task-built`).
+Mutation: swapping one expected kind to `wave-member-built` reddens that test (1 fail of 73);
+restored, 73 pass.
+
+**"Can never carry" was stronger than a may-carry static instrument.** The scanner models
+three shapes; a fourth way of landing the field (`Object.assign`, a spread of an identifier
+it cannot resolve) would read as absent. The prose at `trident/terminal-cause.ts:44-54` now
+states the modelled list explicitly and scopes the claim to "no modelled shape supplies it"
+rather than to impossibility.
+
+Reviewer-run mutations, each printing its landing line with the file diffed before the run:
+
+| Blinded shape | Landing line | Result |
+|---|---|---|
+| spread arm of `objectCanSupplyBlockKind` → `return false` | `inner-workflow-terminal-cause.test.ts:502` | RED — `sees a conditional spread`, 1/73 |
+| assignment walk → early `return false` | `inner-workflow-terminal-cause.test.ts:483` | RED — `sees an assignment after the literal`, 1/73 |
+| named-property arm → `if (false)` | `inner-workflow-terminal-cause.test.ts:501` | RED — 4/73, including the shipped-source count |
+| both new shapes blinded together | both above | RED — 4/73; the shipped 12/9 figure genuinely depends on the widening, it is not carried by the named-property arm alone |
+
+Note for a future author: the two doctored-shape controls assert an ABSOLUTE total (13/10),
+so they also move if the shipped source's own count changes. That is deliberate here — it
+keeps a shape control from passing for the wrong reason — but it means a legitimate edit to
+`inner-workflow.mjs` reddens four tests, not one.
