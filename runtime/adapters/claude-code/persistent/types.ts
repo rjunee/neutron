@@ -33,6 +33,29 @@ export interface RateLimitBannerNotice {
   matched: string
 }
 
+export interface RateLimitOptionsUnrecognizedNotice {
+  reason: 'rate_limit_options_unrecognized'
+  sessionId: string
+}
+
+export function dispatchRateLimitOptionsUnrecognizedNotice(
+  session: ReplSession,
+  options: PersistentReplSubstrateOptions,
+): void {
+  const message =
+    '🚧 Claude usage-limit picker was not recognised; auto-stop refused to select an unknown option.'
+  session.activeTurn?.channel.push({ kind: 'status', message })
+  process.stderr.write(`[rate-limit-options] unrecognized session=${session.sessionId.slice(0, 8)}\n`)
+  try {
+    options.onRateLimitOptionsUnrecognized?.({
+      reason: 'rate_limit_options_unrecognized',
+      sessionId: session.sessionId,
+    })
+  } catch {
+    // A bad notice hook must never crash the scan tick.
+  }
+}
+
 /** Surface a rate-limit / overload banner notice on the rising edge (row #10).
  *  Notify-only — mirrors {@link surfaceSizeAlert}'s three surfaces: (a) the active
  *  turn's channel if one is in flight (inline visibility), (b) an operator stderr
@@ -258,6 +281,12 @@ export interface PersistentReplSubstrateOptions {
    *  (mirrors `onDeadTurnNotice`). Default: a structured stderr notice + an inline
    *  status push if a turn is in flight. */
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
+  /** Usage-limit picker drift notice. The recognised 2.1.270 picker auto-selects
+   *  its stop row; a picker-family screen without that exact row sends no keys and
+   *  fires this hook. Default: structured stderr + active-turn status. */
+  onRateLimitOptionsUnrecognized?: (
+    notice: RateLimitOptionsUnrecognizedNotice,
+  ) => void | Promise<void>
   /** CLI auth-failure notice sink. Fired on the rising edge when the output scanner
    *  sees an invalid/expired-credential banner in the ring (a 401 `API Error`,
    *  `OAuth access token is invalid`, or `invalid x-api-key`; see

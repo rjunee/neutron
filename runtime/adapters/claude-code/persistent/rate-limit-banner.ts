@@ -12,7 +12,7 @@
  * prompt — there is nothing to press.
  *
  * DISTINCT from the `rate-limit-options-stop` detector (master-table row #4): that
- * one PRESSES `3` on the interactive `/rate-limit-options` ORG-CAP picker; THIS one
+ * one PRESSES `1` on the interactive usage-limit picker; THIS one
  * never sends a keystroke and never auto-retries — it only informs. (Auto-action +
  * auto-retry are explicitly OUT OF SCOPE here; row #4 owns the keystroke.)
  *

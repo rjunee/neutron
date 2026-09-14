@@ -14,7 +14,8 @@ import { RESUME_PICKER_DETECTOR_ID, runResumePickerRecovery } from './resume-pic
 import { findLatestResumableSession } from './session-disk-recovery.ts'
 import type { SizeSeverity } from './session-size-watchdog.ts'
 import { WEDGED_PROMPT_DETECTOR_ID, runWedgedRecovery } from './interactive-prompt-deadlock-detector.ts'
-import { type PersistentReplSubstrateOptions, dispatchRateLimitBannerNotice, dispatchAuthFailureNotice } from './types.ts'
+import { type PersistentReplSubstrateOptions, dispatchRateLimitBannerNotice, dispatchAuthFailureNotice, dispatchRateLimitOptionsUnrecognizedNotice } from './types.ts'
+import { RATE_LIMIT_OPTIONS_UNRECOGNIZED_ID } from './rate-limit-options-detector.ts'
 import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
 import type { ReplSession } from './repl-session.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -90,24 +91,6 @@ export const DISCLAIMER_BOTTOM_N = 200
  *  clear them itself. */
 export const TOOL_USE_QUESTION_RE = /doyouwantto(makethisedit|proceed|runthiscommand|create)/i
 export const TOOL_USE_SELECTOR_RE = /❯1\.yes/i
-/** P1 /rate-limit-options org-cap auto-stop (port row #4). BOTH cues are
- *  required in the bottom-30 lines: the `/rate-limit-options` slash command name
- *  AND option 3's verbatim text `Stop and wait for limit to reset` — a single
- *  cue (a conversational mention or a quoted brief) must not trip it. Matched
- *  against the whitespace-stripped `normalized` view because Ink shreds the
- *  picker across cursor-move escapes (same reason as the disclaimer/tool-use
- *  cues; see pty-text.ts), so the spec substrings are carried here in their
- *  space-free normalized form. */
-export const RATE_LIMIT_OPTIONS_RE = /\/rate-limit-options/i
-export const RATE_LIMIT_STOP_RE = /stopandwaitforlimittoreset/i
-/** Bottom-N window the rate-limit-options detector scans (the legacy harness
- *  RATE_LIMIT_OPTIONS_BOTTOM_N_LINES). LOAD-BEARING positional guard — see the
- *  registration comment for why. */
-export const RATE_LIMIT_OPTIONS_BOTTOM_N = 30
-/** Debounce floor for the rate-limit-options auto-stop (the legacy harness
- *  RATE_LIMIT_OPTIONS_DEDUPE_MS) — suppresses a re-press if the picker
- *  re-renders briefly while the prior `3`+enter is still settling. */
-export const RATE_LIMIT_OPTIONS_DEBOUNCE_MS = 60_000
 /** P1 compact-resume picker (port row #3). CC renders this summary-vs-full menu
  *  when resuming an auto-compacted session. EXACT-STRING ONLY — match one of the
  *  two literal option labels and NOTHING broader. LESSON: a prior broad
@@ -504,6 +487,8 @@ export function runOutputScan(
       // would abort a healthy turn that only echoed a credential string (Argus r1).
       // No keystroke (there is nothing to press — the fix is a reconnect).
       dispatchAuthFailureNotice(session, options, now)
+    } else if (fired.id === RATE_LIMIT_OPTIONS_UNRECOGNIZED_ID) {
+      dispatchRateLimitOptionsUnrecognizedNotice(session, options)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)
     }
