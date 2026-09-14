@@ -15,12 +15,13 @@
  * `project_slug`, `delivery_topic_id`, `ephemeral`, `enableToolBridge`, …) are
  * NOT part of a profile — they stay call args on `BuildLlmCallSubstrateInput`.
  *
- * BEHAVIOUR-PRESERVING (this file is Step 0 — ZERO runtime change): every
- * constant below encodes TODAY's EXACT values byte-for-byte. Today every one of
- * the 8 production sites passes `skip_permissions: true` and NOTHING else
- * security-related, so every profile is exactly `{ skip_permissions: true }`.
- * The reserved fields (`permission_mode` / `claude_config_dir` / `extra_env` /
- * `sandbox`) are SHAPE-ONLY placeholders for the migration: they are `undefined`
+ * Most profiles preserve the original bypass behavior. Trident-family profiles
+ * instead use restricted mode, which confines the file tools to cwd/`--add-dir`
+ * and keeps `--settings` authority. Their prompt policy is NOT uniform: the
+ * profiles whose agents must act take `acceptEdits`, the TOOL-LESS arbiter takes
+ * `dontAsk`. See `permission_mode` below for the measurement that decided it.
+ * The remaining reserved fields (`claude_config_dir` / `extra_env` / `sandbox`)
+ * are SHAPE-ONLY placeholders for the migration: they are `undefined`
  * today and `buildLlmCallSubstrate` applies today's-behaviour defaults when a
  * field is absent. Do NOT add `permission_mode` / `sandbox` RUNTIME behaviour
  * here — those have no `ClaudeCodeSubstrateOptions` field yet and wiring them is
@@ -37,16 +38,14 @@
  */
 
 /**
- * RESERVED (Phase B) — Claude Code permission mode. NOT applied by the factory
- * at Step 0 (no `ClaudeCodeSubstrateOptions.permission_mode` field exists yet).
- * The migration sets this to `'dontAsk'` (fail-closed, headless-safe) as it
- * drops `skip_permissions`. Shape reserved here so Phase B is a constant edit.
+ * Claude Code interactive permission mode. Trident profiles use `dontAsk` so
+ * would-be prompts fail closed without the all-permissions bypass.
  */
 export type SubstratePermissionMode =
-  | 'default'
   | 'acceptEdits'
   | 'plan'
   | 'auto'
+  | 'manual'
   | 'dontAsk'
   | 'bypassPermissions'
 
@@ -77,13 +76,31 @@ export interface SubstrateProfile {
   /**
    * Whether to append `--dangerously-skip-permissions` to the spawned REPL
    * argv (threaded to `ClaudeCodeSubstrateOptions.skip_permissions`). TODAY:
-   * `true` at all 8 production sites — the headless REPL must not block on
-   * interactive prompts. The migration flips this to `false` (paired with
-   * `permission_mode: 'dontAsk'`) so an unmatched tool call fails closed
-   * instead of being auto-approved. REQUIRED (no default) so every profile is
-   * explicit about its grant.
+   * REQUIRED (no default) so every profile is explicit about its grant. Trident
+   * profiles set this false and carry `restricted` + a `permission_mode` instead.
    */
   readonly skip_permissions: boolean
+  /** Confine file tools to cwd/add-dir and refuse bypass mode. */
+  readonly restricted?: boolean
+  /**
+   * The unattended prompt policy, and it is NOT one value for every profile —
+   * MEASURED against the installed `claude` 2.1.270, not inferred:
+   *
+   *   `--restricted --permission-mode dontAsk` denies EVERY tool that would have
+   *   prompted, with no prompt emitted for anything to answer: "Permission to use
+   *   Write has been denied because Claude Code is running in don't ask mode",
+   *   and the same for Bash — INSIDE the agent's own cwd. A profile whose agent
+   *   has to write or run anything is inert under it.
+   *
+   *   `--restricted --permission-mode acceptEdits` runs Write and in-cwd Bash with
+   *   no prompt, and STILL confines: an outside-cwd `Read` is refused by the CLI
+   *   ("--restricted confines the file tools to the working directory") and an
+   *   outside-cwd `cat` is refused by the command gate.
+   *
+   * So the ACTING profiles take `acceptEdits` and the TOOL-LESS arbiter takes
+   * `dontAsk` — it has nothing to allow, so the stricter mode costs it nothing.
+   */
+  readonly permission_mode?: SubstratePermissionMode
   /**
    * Whether a spawn on this profile carries the instance's GitHub credential —
    * `GH_TOKEN` plus the matching git credential helper (`github/credential.ts`
@@ -136,7 +153,6 @@ export interface SubstrateProfile {
    * the factory yet (see file header). Reserving it here means Phase B flips a
    * constant, not the factory + 8 sites.
    */
-  readonly permission_mode?: SubstratePermissionMode
   /**
    * RESERVED (Phase A) — per-profile scoped `CLAUDE_CONFIG_DIR`. `undefined`
    * today. When a profile sets this, the factory threads it to
@@ -272,12 +288,15 @@ export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
  * The disposable per-worktree agent-dispatch / Trident-build substrate
  * (`makeEphemeralSubstrate`: `cc-trident-*`, agent-dispatch family). A FRESH
  * ephemeral REPL rooted at the run's worktree, terminated after its turn.
- * TODAY: `skip_permissions: true`.
+ * Uses restricted mode with `acceptEdits`; it does not bypass. It must still
+ * write and run commands, so it cannot take `dontAsk` (see `permission_mode`).
  *
  * Site: `open/wiring/substrates.ts` (`makeEphemeralSubstrate`).
  */
 export const PROFILE_EPHEMERAL: SubstrateProfile = {
-  skip_permissions: true,
+  skip_permissions: false,
+  restricted: true,
+  permission_mode: 'acceptEdits',
   // disposable Trident / agent-dispatch builds: they commit and push.
   github_credential: true,
   // agent dispatch is explicitly model-parameterised (a brief names its model);
@@ -300,7 +319,9 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
  * Site: `open/composer.ts` (`cc-trident-leakfix` via `makeEphemeralSubstrate`).
  */
 export const PROFILE_LEAK_FIXER: SubstrateProfile = {
-  skip_permissions: true,
+  skip_permissions: false,
+  restricted: true,
+  permission_mode: 'acceptEdits',
   // it rewords a file and `git add`s it; the outer preflight owns every commit and every push.
   github_credential: false,
   // one bounded reword turn — the caller names its model (`[getBestModel()]` by default).
@@ -328,11 +349,8 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * only supposed to read.
  *
  * WHAT THIS DOES NOT DO, STATED PLAINLY — AND WHO CLOSES IT INSTEAD.
- * `skip_permissions: true` still means `--dangerously-skip-permissions`, so the declared `Bash`
- * is UNGATED and "read-only" remains a CONTRACT in the prompt rather than an enforced property.
- * A defecting turn can still WRITE, and the tree it writes to is NOT a throwaway — it is the
- * run's conflicted merge worktree, whose contents become the commit. Dropping the credential
- * stops this turn pushing; it does nothing about its CALLER pushing its edits.
+ * Restricted mode confines any granted file tool to this turn's worktree. This
+ * profile is also tool-less, so its effective local filesystem reach is empty.
  *
  * That half is closed somewhere else entirely, and NOT by this profile: `trident/arbiter.ts`
  * grants NO TOOLS AT ALL, and `--tools` is a real CLI-level gate that survives
@@ -345,15 +363,19 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * `worktreeFingerprint` is kept as labelled defence in depth — it cannot see an asynchronous
  * writer and is not the enforcement of anything.
  *
- * `permission_mode` and `sandbox` are NOT what fixed this and are not needed for it: they are
- * shape-only at Step 0 (see the file header), while the tool grant works today. This profile's
- * own job is narrower and still worth doing — it closes the reach that LEAVES THE MACHINE
+ * The empty tool surface remains the arbiter's primary boundary; `permission_mode` plus
+ * restricted mode add defense in depth. It is the ONE Trident profile that keeps
+ * `dontAsk`: it has no tools to allow, so the mode that denies every would-be
+ * prompt costs it nothing, where it would make an ACTING agent inert. This profile's credential rule
+ * independently closes reach that LEAVES THE MACHINE
  * (`gh pr merge`, `git push`, `gh api`), which a tool grant says nothing about.
  *
  * Site: `open/composer.ts` (`cc-trident-arbiter` via `makeEphemeralSubstrate`).
  */
 export const PROFILE_ARBITER: SubstrateProfile = {
-  skip_permissions: true,
+  skip_permissions: false,
+  restricted: true,
+  permission_mode: 'dontAsk',
   // it INSPECTS and SELECTS; the caller applies every decision. Nothing it is allowed to
   // choose requires a credential, and everything the credential unlocks is forbidden to it.
   github_credential: false,
@@ -365,7 +387,8 @@ export const PROFILE_ARBITER: SubstrateProfile = {
  * The Trident v2 FIRE seam substrate (`cc-trident-fire-*`) — a WARM (non-
  * ephemeral) per-repo REPL that invokes the native `Workflow` tool and survives
  * the launching turn's settle so the detached background workflow keeps running.
- * TODAY: `skip_permissions: true`.
+ * Uses restricted mode with `acceptEdits`; it does not bypass. It must still
+ * write and run commands, so it cannot take `dontAsk` (see `permission_mode`).
  *
  * THE INACTIVITY WINDOW IS THE LOAD-BEARING FIELD HERE, and it is why this
  * profile can no longer be a copy of the others.
@@ -404,7 +427,9 @@ export const PROFILE_ARBITER: SubstrateProfile = {
  * Site: `open/wiring/substrates.ts` (`makeWarmFireSubstrate`).
  */
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
-  skip_permissions: true,
+  skip_permissions: false,
+  restricted: true,
+  permission_mode: 'acceptEdits',
   // Trident v2's build loop. Without it a run against a PRIVATE repo dies at
   // `fatal: could not read Username for 'https://github.com'` — measured on the
   // owner's instance 2026-08-15, where every enterprise dispatch built, committed

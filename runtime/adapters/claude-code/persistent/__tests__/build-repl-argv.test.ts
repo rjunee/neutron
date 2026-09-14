@@ -152,6 +152,31 @@ describe('buildReplArgv', () => {
     )
   })
 
+  it('emits restricted confinement and headless prompt denial independently of bypass', () => {
+    const argv = buildReplArgv({
+      ...base,
+      resume: false,
+      restricted: true,
+      permissionMode: 'dontAsk',
+    })
+    expect(argv).toContain('--restricted')
+    expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+    expect(argv).not.toContain('--dangerously-skip-permissions')
+  })
+
+  // The VALUE is carried through, not a constant. `dontAsk` alone would be
+  // satisfied by a builder that hardcoded it — and the acting Trident profiles
+  // depend on `acceptEdits` specifically, because `dontAsk` denies Write and Bash
+  // inside the agent's own cwd (#630).
+  it('carries the requested permission mode through, not a fixed one', () => {
+    for (const mode of ['acceptEdits', 'dontAsk', 'plan'] as const) {
+      const argv = buildReplArgv({ ...base, resume: false, restricted: true, permissionMode: mode })
+      expect(argv[argv.indexOf('--permission-mode') + 1]).toBe(mode)
+    }
+    // …and nothing is emitted when nothing is asked for.
+    expect(buildReplArgv({ ...base, resume: false })).not.toContain('--permission-mode')
+  })
+
   it('omits --add-dir when not provided', () => {
     const { addDir: _drop, ...noDir } = base
     const argv = buildReplArgv({ ...noDir, resume: false })

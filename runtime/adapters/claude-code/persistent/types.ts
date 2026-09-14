@@ -355,6 +355,10 @@ export interface PersistentReplSubstrateOptions {
   effort?: string
   /** Append `--dangerously-skip-permissions` (managed headless REPLs MUST). */
   skip_permissions?: boolean
+  /** Confine file tools to cwd/add-dir and refuse permission bypass. */
+  restricted?: boolean
+  /** Interactive permission mode; `dontAsk` denies would-be prompts. */
+  permission_mode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**
    * Task 6 (T5 write-containment spike) — when `true`, DO NOT register the
    * `tool-use-approve` auto-approver detector (`spawn.ts`) for this session, so a
