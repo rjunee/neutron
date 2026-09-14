@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+head_oid=$(git rev-parse --verify HEAD 2>/dev/null)
+probe_exit=$?
+if [ "$probe_exit" -ne 0 ]; then
+  branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || printf '%s' '(unknown)')
+  echo "commit refused: HEAD does not resolve for branch '$branch' (git rev-parse --verify HEAD exited $probe_exit)" >&2
+  exit 65
+fi
+
+if [ -z "$head_oid" ]; then
+  echo 'commit refused: HEAD resolution returned no object' >&2
+  exit 66
+fi
+
+case "$head_oid" in
+  *[!0-9a-fA-F]*|'')
+    echo "commit refused: HEAD resolved unexpectedly: '$head_oid'" >&2
+    exit 67
+    ;;
+esac

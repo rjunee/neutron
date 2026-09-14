@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
 // Execute the complete production body, as in inner-workflow-built-head.test.ts.
@@ -15,7 +16,7 @@ const UNKNOWN = { ...COMPLETE, trailerComplete: false, wrapperExitCode: null }
 
 interface Options {
   args?: Record<string, unknown>
-  build?: Record<string, unknown>
+  build?: Record<string, unknown> | Error
   probes?: unknown[]
   head?: string
   plan?: unknown
@@ -36,7 +37,10 @@ async function runWorkflow(opts: Options = {}) {
       if (++probes > 6) throw new Error('fixture probe budget exceeded')
       return opts.probes?.[probes - 1] ?? null
     }
-    if (label === 'forge:build') return builds++ === 0 ? opts.build ?? COMPLETE : COMPLETE
+    if (label === 'forge:build') {
+      if (opts.build instanceof Error) throw opts.build
+      return builds++ === 0 ? opts.build ?? COMPLETE : COMPLETE
+    }
     if (label.startsWith('head-probe-round-')) return { head: opts.head ?? (reviews > 0 ? 'b'.repeat(40) : HEAD) }
     if (label === 'plan:fable') {
       const plan = opts.planWrong ? opts.replan : opts.plan
@@ -113,6 +117,22 @@ describe('G022 current completion consequences', () => {
 })
 
 describe('G021 launcher wrapper and G023 assigned branch', () => {
+  test('a refusing commit wrapper reaches the terminal workflow-threw vocabulary', async () => {
+    const guard = new URL('./commit-with-resolved-head.sh', import.meta.url).pathname
+    const refusal = spawnSync('bash', [guard, BRANCH, '-m', 'must not land'], {
+      cwd: '/tmp',
+      encoding: 'utf8',
+    })
+    expect(refusal.status).toBe(65)
+    expect(refusal.stderr).toContain('HEAD does not resolve')
+
+    const out = await runWorkflow({ build: new Error(refusal.stderr.trim()) })
+
+    expectStopped(out, 'HEAD does not resolve')
+    expect(out.result.terminalCauseKind).toBe('workflow-threw')
+    expect(out.result.checkpoint).toBe('inner-error')
+  })
+
   test('G021 missing wrapper stops before invoking the builder', async () => {
     const out = await runWorkflow({ args: { codexBuildScript: null } })
     expectStopped(out, 'launcher did not thread codexBuildScript')

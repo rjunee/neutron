@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 
 const roots: string[] = []
 const guard = new URL('./commit-with-resolved-head.sh', import.meta.url).pathname
+const hooks = new URL('../.githooks', import.meta.url).pathname
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
@@ -53,6 +54,29 @@ test('a dangling symbolic HEAD is refused before a commit object is created', ()
   expect(result.stderr).toContain('git rev-parse --verify HEAD exited')
   expect(git(repo, 'count-objects', '-v').match(/^count: (\d+)$/m)?.[1]).toBe(looseBefore)
   expect(run(tree, 'git', ['rev-parse', '--verify', 'HEAD']).status).not.toBe(0)
+})
+
+test('a direct git commit that never saw the Forge prompt is refused by the installed hook', () => {
+  const { repo, tree, branch } = fixture()
+  git(repo, 'config', 'core.hooksPath', hooks)
+  git(repo, 'update-ref', '-d', `refs/heads/${branch}`)
+
+  const result = run(tree, 'git', ['commit', '-m', 'must not land'])
+
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain(`commit refused: HEAD does not resolve for branch '${branch}'`)
+  expect(run(tree, 'git', ['rev-parse', '--verify', 'HEAD']).status).not.toBe(0)
+})
+
+test('the installed hook allows an ordinary direct git commit', () => {
+  const { repo, tree, parent } = fixture()
+  git(repo, 'config', 'core.hooksPath', hooks)
+
+  const result = run(tree, 'git', ['commit', '-m', 'ordinary direct commit'])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'rev-list', '--parents', '-1', 'HEAD').split(' ')).toHaveLength(2)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
 
 test('a resolving HEAD still commits with the expected parent, and leaves no scratch file', () => {

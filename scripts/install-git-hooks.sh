@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # scripts/install-git-hooks.sh — point this clone at the versioned hooks in
-# .githooks/ (currently: a pre-push leak gate over commit messages).
+# .githooks/ (a commit-integrity guard and a pre-push leak gate).
 #
 #   bash scripts/install-git-hooks.sh              # install
 #   bash scripts/install-git-hooks.sh --uninstall  # revert to the default hooks
@@ -72,6 +72,7 @@ chmod +x "$ROOT"/.githooks/* 2>/dev/null
 git -C "$ROOT" config core.hooksPath .githooks
 
 echo "hooks: installed — core.hooksPath = .githooks"
+echo "       pre-commit → refuses a commit whose HEAD does not resolve"
 echo "       pre-push  → scripts/ci/leak-gate.sh --messages-only"
 echo "       denylist  → $DENYLIST_PATH"
 echo
