@@ -68,6 +68,16 @@
 # PGLite lane. Membership is content-derived (any test file mentioning
 # `installNativeHarness`), so a new harness suite is isolated automatically.
 #
+# REAL-HTTP ISOLATION LANE
+# ------------------------
+# Tests that open real listeners share the host's ephemeral TCP allocator even
+# though each general chunk runs in a fresh process. At general-lane concurrency
+# that allocator can be exhausted: Bun then reports EADDRINUSE even for `port: 0`,
+# and a later boot test spends its test budget waiting on infrastructure it does
+# not control. Run listener-opening files serially in their own process. The
+# normal 15s per-test budget and fail-fast outcome stay unchanged: this is
+# isolation, not patience or a retry that could hide a broken boot.
+#
 # USAGE
 #   scripts/run-tests.sh                 # run the whole suite, bounded memory
 #
@@ -284,17 +294,24 @@ fi
 # else; the lane runs last, serially, with its own retry budget (see header).
 PGLITE_FILES=()
 DEVICE_FILES=()
+HTTP_FILES=()
 GENERAL_FILES=()
 # One batched grep per lane over the discovered set (well under ARG_MAX for ~1100
 # files). `|| true` so a zero-match grep (exit 1) doesn't trip `set -o pipefail`/`-e`.
 PGLITE_MATCH=""
 DEVICE_MATCH=""
+HTTP_MATCH=""
 if [ "$NO_PGLITE_LANE" != "1" ]; then
   PGLITE_MATCH="$(LC_ALL=C grep -lEi 'pglite' "${FILES[@]}" 2>/dev/null || true)"
 fi
 if [ "$NO_DEVICE_LANE" != "1" ]; then
   DEVICE_MATCH="$(LC_ALL=C grep -lE 'installNativeHarness' "${FILES[@]}" 2>/dev/null || true)"
 fi
+# A direct Bun.serve is the common surface-harness shape. `await boot(` and
+# `await bootSignup(` cover tests that exercise production boot helpers whose
+# listener call lives outside the test file. Content-derived membership means a
+# newly-added real listener joins the lane without an allowlist update.
+HTTP_MATCH="$(LC_ALL=C grep -lE 'Bun[.]serve[[:space:]]*[(]|await[[:space:]]+(boot|bootSignup)[[:space:]]*[(]' "${FILES[@]}" 2>/dev/null || true)"
 for f in "${FILES[@]}"; do
   # PGLite wins a tie: a hypothetical file in both would need the WASM lane's
   # serial execution + retry budget more than it needs DOM isolation.
@@ -303,6 +320,9 @@ for f in "${FILES[@]}"; do
   esac
   case $'\n'"${DEVICE_MATCH}"$'\n' in
     *$'\n'"$f"$'\n'*) DEVICE_FILES+=("$f") ; continue ;;
+  esac
+  case $'\n'"${HTTP_MATCH}"$'\n' in
+    *$'\n'"$f"$'\n'*) HTTP_FILES+=("$f") ; continue ;;
   esac
   GENERAL_FILES+=("$f")
 done
@@ -314,12 +334,12 @@ done
 # slice of what gets VERIFIED. (Sharding earlier would have made each runner
 # blind to a discovery drift affecting files it does not own.)
 #
-# The PGLite and device lanes are split round-robin by index, so each shard gets a
-# proportional share of the slow PGLite files instead of one runner absorbing the
-# entire serial lane. The GENERAL lane is split by ESTIMATED COST instead — see
+# The special lanes are split round-robin by index, so each shard gets a
+# proportional share instead of one runner absorbing an entire serial lane. The
+# GENERAL lane is split by ESTIMATED COST instead — see
 # "WHY THE GENERAL LANE IS WEIGHTED" below.
 #
-# The round-robin cursor CARRIES ACROSS the two round-robin lanes rather than
+# The round-robin cursor CARRIES ACROSS the special lanes rather than
 # resetting to 0 for each one. That is load-bearing for balance, not a tidiness
 # preference: a per-lane reset sends every lane's remainder to the SAME low-index
 # shards, so `max - min` can exceed the partition guard's tolerance
@@ -510,11 +530,10 @@ if [ -n "$SHARD_SPEC" ]; then
     exit 1
   fi
 
-  # --- the two serial lanes: unchanged round-robin ----------------------------
-  # Left on round-robin deliberately. Both are small and both are dominated by a
-  # fixed per-file cost (a WASM compile; a DOM + module-registry install) rather
-  # than by how much migration work the file does, so counting IS the cost model
-  # for them and a proportional spread is exactly right.
+  # --- the special lanes: unchanged round-robin -------------------------------
+  # Left on round-robin deliberately. These lanes are dominated by a fixed
+  # per-file resource (a WASM compile, a DOM/module-registry install, or a real
+  # listener) rather than migration count, so counting is their cost model.
   _shard_cursor=0
   _lane_n=${#PGLITE_FILES[@]}
   _tmp=()
@@ -525,8 +544,13 @@ if [ -n "$SHARD_SPEC" ]; then
   _tmp=()
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
   DEVICE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+  _shard_cursor=$(( _shard_cursor + _lane_n ))
+  _lane_n=${#HTTP_FILES[@]}
+  _tmp=()
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${HTTP_FILES[@]+"${HTTP_FILES[@]}"})
+  HTTP_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
 
-  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device of ${TOTAL} discovered"
+  echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device + ${#HTTP_FILES[@]} real-HTTP of ${TOTAL} discovered"
   # The estimated general-lane cost per shard, printed by every shard so a future
   # imbalance is visible in the log rather than only in the wall-clock.
   if [ -s "$SHARD_WEIGHT_LOG" ]; then
@@ -539,6 +563,7 @@ fi
 
 NPGLITE=${#PGLITE_FILES[@]}
 NDEVICE=${#DEVICE_FILES[@]}
+NHTTP=${#HTTP_FILES[@]}
 GEN_TOTAL=${#GENERAL_FILES[@]}
 
 # Plan-only seam — print exactly what THIS invocation would execute, then stop.
@@ -548,24 +573,27 @@ GEN_TOTAL=${#GENERAL_FILES[@]}
 if [ "${NEUTRON_TEST_PLAN_ONLY:-0}" = "1" ]; then
   echo "declared files: ${TOTAL}"
   echo "run-tests: PLAN-ONLY BEGIN"
-  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"} ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"}
+  printf '%s\n' ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"} ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"} ${HTTP_FILES[@]+"${HTTP_FILES[@]}"}
   echo "run-tests: PLAN-ONLY END"
   exit 0
 fi
 
 # What THIS invocation is accountable for executing. Unsharded this is TOTAL, so
 # the audit below is unchanged; sharded it is this shard's slice.
-SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE + NDEVICE ))
+SHARD_TOTAL=$(( GEN_TOTAL + NPGLITE + NDEVICE + NHTTP ))
 
 # --- 3. Partition + run -------------------------------------------------------
 NCHUNKS=$(( (GEN_TOTAL + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane + ${NDEVICE}-file device lane"
+echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane + ${NDEVICE}-file device lane + ${NHTTP}-file real-HTTP lane"
 echo "run-tests: bun=${BUN} max-concurrency=${CONCURRENCY} timeout=${TIMEOUT}ms jobs=${JOBS}"
 if [ "$NPGLITE" -gt 0 ]; then
   echo "run-tests: PGLite lane → ${NPGLITE} files, serial=${PGLITE_CONCURRENCY}, timeout=${PGLITE_TIMEOUT}ms, retries=${PGLITE_RETRIES}"
 fi
 if [ "$NDEVICE" -gt 0 ]; then
   echo "run-tests: device-harness lane → ${NDEVICE} files, isolated process (DOM + module-alias globals)"
+fi
+if [ "$NHTTP" -gt 0 ]; then
+  echo "run-tests: real-HTTP lane → ${NHTTP} files, isolated process, serial=1, timeout=${TIMEOUT}ms"
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
@@ -638,6 +666,21 @@ run_device_lane() {
   echo "device ${rc} ${NDEVICE} ${ran:-$NDEVICE}" >> "$WORK/results"
 }
 
+# Real listeners contend for the host ephemeral-port allocator across processes,
+# so a fresh chunk alone is insufficient. Serial execution bounds acquisition
+# pressure while retaining the ordinary timeout and fatal-on-failure semantics.
+run_http_lane() {
+  local llog="$WORK/lane-http.log"
+  {
+    echo "==== real-HTTP isolation lane: ${NHTTP} files (own process, max-concurrency=1, timeout=${TIMEOUT}ms) ===="
+    NO_COLOR=1 "$BUN" test "${HTTP_FILES[@]}" --timeout="$TIMEOUT" --max-concurrency=1 2>&1
+  } >"$llog" 2>&1
+  local rc=$?
+  local ran; ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+  cat "$llog"
+  echo "http ${rc} ${NHTTP} ${ran:-$NHTTP}" >> "$WORK/results"
+}
+
 idx=0
 while [ "$idx" -lt "$NCHUNKS" ]; do
   if [ "$JOBS" -le 1 ]; then
@@ -672,6 +715,9 @@ fi
 if [ "$NDEVICE" -gt 0 ]; then
   run_device_lane
 fi
+if [ "$NHTTP" -gt 0 ]; then
+  run_http_lane
+fi
 
 
 # --- 4. Aggregate + coverage audit -------------------------------------------
@@ -686,6 +732,8 @@ while read -r r_idx r_rc r_nfiles r_ran; do
       FAIL_LIST="${FAIL_LIST} PGLite-lane"
     elif [ "$r_idx" = "device" ]; then
       FAIL_LIST="${FAIL_LIST} device-lane"
+    elif [ "$r_idx" = "http" ]; then
+      FAIL_LIST="${FAIL_LIST} real-HTTP-lane"
     else
       FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
     fi
@@ -702,8 +750,12 @@ if [ "$NDEVICE" -gt 0 ]; then
   LANES=$(( LANES + 1 ))
   LANE_DESC="${LANE_DESC} + device lane"
 fi
+if [ "$NHTTP" -gt 0 ]; then
+  LANES=$(( LANES + 1 ))
+  LANE_DESC="${LANE_DESC} + real-HTTP lane"
+fi
 echo "---- run-tests coverage audit ----"
-echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite + ${NDEVICE} device)"
+echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   assigned here: ${SHARD_TOTAL}${SHARD_SPEC:+ (shard ${SHARD_SPEC})}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite + ${NDEVICE} device + ${NHTTP} real-HTTP)"
 echo "lanes: ${LANE_DESC}   failed: ${FAILED_CHUNKS}${FAIL_LIST:+ (${FAIL_LIST# })}"
 if [ "$RAN_TOTAL" -lt "$SHARD_TOTAL" ]; then
   echo "run-tests: FATAL — executed ${RAN_TOTAL} files < ${SHARD_TOTAL} assigned (coverage hole)." >&2

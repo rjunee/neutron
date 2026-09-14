@@ -69,6 +69,20 @@ files still count toward the coverage audit.
 
 No retry budget: unlike the WASM lane these are deterministic, not flaky.
 
+## The real-HTTP isolation lane
+
+Tests that open a real listener share the host's ephemeral TCP allocator, even
+when neighboring chunks run in fresh processes. A concurrent general chunk can
+exhaust that allocator; Bun then reports `EADDRINUSE` for `port: 0`, and a later
+boot test can consume its 15-second budget waiting on infrastructure rather than
+testing boot.
+
+Listener-opening files therefore run after the other special lanes in their own
+process with `--max-concurrency=1`. They retain `NEUTRON_TEST_TIMEOUT`, have no
+retry budget, and fail the run normally. Membership is content-derived from a
+direct `Bun.serve(...)` or an awaited `boot(...)` / `bootSignup(...)` call, so a
+new real-listener test is isolated without adding an allowlist entry.
+
 ### What it looks like when you bypass the lane
 
 Running a whole directory that spans both lanes — `bun test app/__tests__` is
@@ -217,7 +231,7 @@ Three residual non-hermeticities remain, and each needs its own card:
 |---|---|---|
 | `NEUTRON_TEST_CHUNK_SIZE` | `100` | files per general `bun test` process |
 | `NEUTRON_TEST_CONCURRENCY` | physical cores | `--max-concurrency` per process |
-| `NEUTRON_TEST_TIMEOUT` | `15000` | per-test timeout (ms) for general chunks |
+| `NEUTRON_TEST_TIMEOUT` | `15000` | per-test timeout (ms) for general chunks and the real-HTTP lane |
 | `NEUTRON_TEST_JOBS` | `1` | general chunks run **concurrently** (1 = sequential) |
 | `NEUTRON_BUN_BIN` | `bun` | bun binary |
 | `NEUTRON_TEST_PGLITE_RETRIES` | `2` | lane re-runs on transient failure |
@@ -260,7 +274,7 @@ Only do this with headroom; drop `JOBS` first if the box starts swapping.
 > invocation would. See `trident/test-strategy.ts`. Measured
 > 2026-08-15 on the real box: 22.0 min sequential → 11.2 min at `JOBS=8` (an idle-box
 > ceiling) → see `docs/AS_BUILT.md` for the shipped `JOBS=2` figure; the
-> `files executed: 1273` audit is unchanged and the PGLite/device lanes stay serial in
+> `files executed: 1273` audit is unchanged and the PGLite/device/real-HTTP lanes stay serial in
 > every case. A project whose runner exposes no such knobs is run unchanged. Manual
 > invocations of this script are unaffected and still default to `JOBS=1` (sequential).
 
