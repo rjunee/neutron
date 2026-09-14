@@ -1303,6 +1303,9 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // than it did on the report would strand the owner "present" until the
         // TTL, which is the failure direction that produces silence.
         web_presence?.drop(data.conn_id)
+        if (data.opened_at_ms === undefined) {
+          throw new Error('app-ws: close callback preceded open callback')
+        }
         moduleLog.info('session_close', {
           instance: data.project_slug,
           user: data.user_id,
@@ -1316,8 +1319,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           close_reason: reason.length > 0 ? reason : '-',
           close_kind:
             data.close_initiator === 'server' || code === 1000 ? 'deliberate' : 'unexpected',
-          uptime_ms:
-            data.opened_at_ms === undefined ? 0 : Math.max(0, Date.now() - data.opened_at_ms),
+          uptime_ms: Math.max(0, Date.now() - data.opened_at_ms),
         })
       },
     },
