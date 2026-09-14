@@ -105,7 +105,7 @@ import { registerLiveProcessSafe } from '@neutronai/tools/process-registry.ts'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import { startApi5xxDeadTurnWatcher, type DeadTurnNotice } from './api5xx-dead-turn-watcher.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
-import { herdrHost } from './herdr-host.ts'
+import { configuredPtyHost } from './configured-pty-host.ts'
 import {
   adoptOrKillOrphan,
   basenameOf,
@@ -201,7 +201,7 @@ export type RowAdoptionOutcome =
 
 /** Injection seams. Production supplies none of them. */
 export interface BootAdoptionDeps {
-  /** The host to ask. Defaults to `options.ptyHost ?? herdrHost`. */
+  /** The host to ask. Defaults to `options.ptyHost ?? configuredPtyHost`. */
   host?: unknown
   /** `/health` probe. Defaults to the real one. */
   health?: (port: number, opts: { expectedSessionId?: string; timeoutMs?: number }) => Promise<boolean>
@@ -781,11 +781,26 @@ export async function reconcileOwnRepl(
     }
   }
   const record = state.kind === 'absent' ? undefined : normaliseRecord(state.registry[sessionKey])
-  if (record === undefined || record.pane_handle === undefined) {
+  if (record === undefined) return { kind: 'no-handle', sessionKey }
+  if (record.pane_handle === undefined) {
+    // A Bun child has no durable handle. An overlapping restart can still leave
+    // it alive: inspect the transcript owners independently of the old gateway.
+    const scan = scanTranscriptOwners(
+      record.sessionId,
+      deps.listProcesses ?? defaultListProcesses,
+      claudeBasenameFor(options),
+    )
+    if (scan.kind !== 'none') {
+      return {
+        kind: 'undecided',
+        sessionKey,
+        reason: 'a REPL without a pane handle may still own this transcript; stop the previous gateway and retry after its child exits',
+      }
+    }
     return { kind: 'no-handle', sessionKey }
   }
 
-  const hostCandidate = deps.host ?? options.ptyHost ?? herdrHost
+  const hostCandidate = deps.host ?? options.ptyHost ?? configuredPtyHost
   if (!hostSupportsAdoption(hostCandidate as never)) {
     // THE HOST CHANGED UNDER A LIVE PANE, and this is a SUPPORTED configuration change
     // rather than a corner case: the in-process PTY host is a selectable backend

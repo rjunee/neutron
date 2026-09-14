@@ -6,12 +6,8 @@
  * module, no `dlopen`, no `tmux -CC` TTY-coercion. POSIX-only (Linux + macOS). Bun
  * floor ≥ 1.3.5, when `Bun.Terminal` landed.
  *
- * NOT THE DEFAULT, AND NOT WIRED TO A CHOOSER. `spawn.ts` resolves
- * `options.ptyHost ?? herdrHost`: herdr is the only wired backend, and this one is
- * reached by INJECTING it at that seam. It is kept compiling, contract-complete and
- * tested so the option survives at near-zero cost — not so that it is exercised.
- * Building a user-facing switch between a proven path and an unproven one would hide
- * which is which, and that is a decision for after the herdr path is verified live.
+ * The process-start selector can choose this backend; herdr remains the default.
+ * See configured-pty-host.ts and docs/spec-items/repl-substrate-selectable.md.
  *
  * THE TWO BACKENDS ARE NOT INTERCHANGEABLE, and the differences are not incidental —
  * each is something herdr genuinely cannot express. Stated here and in the spec item

@@ -1,8 +1,8 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-09-13 (a gateway restart reconciles project REPLs per substrate, not per registry file — the narrowing and why enumeration would be worse, Decisions Log 2026-09-13; previous: 2026-09-12 (a gateway restart keeps its project REPLs — the shutdown kill is gated on the pane being re-findable, Decisions Log 2026-09-12; previous: 2026-09-12 (the Fable arbiter is wired with its cost capped at one arbitration per rebase, and the REPL substrate becomes selectable — herdr is the default container, the in-process PTY host is retained — Decisions Log 2026-09-12; previous: 2026-09-12 (recurring cross-model work is one-shot headless per call))))
+last_updated: 2026-09-14 (the REPL host is selected once at process start, defaulting to herdr — Decisions Log 2026-09-14; previous: 2026-09-13 (a gateway restart reconciles project REPLs per substrate, not per registry file — Decisions Log 2026-09-13))
 ---
-<!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr is the DEFAULT REPL container, with the in-process PTY host retained as a selectable backend and no chooser yet — Decisions Log 2026-09-12 · migration re-run) -->
+<!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr is the DEFAULT REPL host, with the in-process PTY host selectable once per process — Decisions Log 2026-09-14 · migration re-run) -->
 
 # SPEC.md — Neutron Open
 
@@ -282,6 +282,12 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-09-14 — THE REPL HOST IS SELECTED ONCE PER PROCESS: `NEUTRON_REPL_HOST=herdr|bun`, defaulting to herdr. This completes rather than supersedes the 2026-09-12 decision below: that entry retained both backends and deliberately deferred the configuration surface; this entry delivers it after the herdr path was verified.
+
+- **Process scope is the invariant.** The setting is read once at module initialization. Every session spawned or reconciled by a gateway process uses the same `PtyHost`; changing the environment of a live process cannot redirect a pooled child, its `childByKey` mirror, reply-sink registration, or process-registry handle. Selecting a different host requires restarting the gateway.
+- **A restart may cross hosts, but may not create two transcript owners.** A herdr row carries a pane handle; a Bun row does not. Herdr to Bun uses the recorded pid fallback because Bun cannot inspect a pane. Bun to herdr scans for a live `claude --resume <session-id>` before treating the absent handle as safe. An unavailable or positive scan refuses the new spawn; only a verified empty scan licenses it.
+- **Invalid values refuse boot-time module loading.** There is no silent fallback for a misspelling. The setting vocabulary is exactly `herdr` and `bun`; omission means `herdr`.
 
 ### 2026-09-14 — Run heads and published checkpoints accept either full Git object-name width.
 

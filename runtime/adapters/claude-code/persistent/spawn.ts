@@ -11,7 +11,7 @@ import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-t
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
-import { herdrHost } from './herdr-host.ts'
+import { configuredPtyHost } from './configured-pty-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { SubstrateClassed } from './classify-spawn-error.ts'
@@ -123,7 +123,7 @@ async function spawnSession(
   // TOKEN in plaintext. 4 bytes is guessable/squattable by any same-uid process;
   // the path is also visible in `ps` because `--mcp-config <path>` is on argv.
   const channelName = `neutron-${randomBytes(16).toString('hex')}`
-  const ptyHost = options.ptyHost ?? herdrHost
+  const ptyHost = options.ptyHost ?? configuredPtyHost
   const devChannelPath = options.devChannelPath ?? DEFAULT_DEV_CHANNEL_PATH
   const toolsBridgePath = options.toolsBridgePath ?? DEFAULT_TOOLS_BRIDGE_PATH
   const appendSystemPromptFile = options.appendSystemPromptFile ?? DEFAULT_AGENT_BASE_PROMPT

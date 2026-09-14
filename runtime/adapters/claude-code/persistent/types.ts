@@ -391,12 +391,9 @@ export interface PersistentReplSubstrateOptions {
   enableToolBridge?: boolean
   // --- host / test injection (all optional; production uses defaults) ---
   /**
-   * PTY backend. Default: `HerdrHost` — the REPL is a herdr pane reached over the
-   * socket API (`herdr-host.ts`), and it is the ONLY wired default.
-   *
-   * THIS IS ALSO THE SELECTION SEAM, and deliberately the only one: the in-process
-   * Bun-native host (`bun-terminal-host.ts`) is kept as an option reachable by
-   * injecting it HERE, with no user-facing chooser anywhere.
+   * Internal host injection. Production defaults to the process-start selection
+   * in configured-pty-host.ts (herdr unless configured otherwise).
+   * See docs/spec-items/repl-substrate-selectable.md for the operator contract.
    *
    * READ THIS BEFORE CHOOSING ONE. The two backends are NOT interchangeable:
    *  • EXIT CODES exist under Bun and NOWHERE in herdr, where `exited` always resolves
