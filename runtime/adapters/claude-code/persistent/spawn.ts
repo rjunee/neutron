@@ -30,7 +30,8 @@ import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import {
   type ReplRegistryRecord,
   disownPane,
-  getRecord,
+  normaliseRecord,
+  readRegistryState,
   ownPane,
   patchRecord,
   releasePaneSpawnReservation,
@@ -902,20 +903,38 @@ export async function spawnWithChannelWedgeRespawn(
   throw result.error
 }
 
+class RegistryResumeRefusedError extends Error implements SubstrateClassed {
+  readonly substrateErrorClass = 'repl_unreconciled' as const
+
+  constructor(reason: string) {
+    super(`persistent-repl: registry unreadable (${reason}). Cannot determine which conversation to resume; ` +
+      'this turn was refused to preserve conversation continuity. Retry the turn once the registry is readable.')
+  }
+}
+
 /**
  * Resolve whether a (re)spawn for `sessionKey` should `--resume` a captured
  * session. Reads the persisted registry and routes the record through the
  * (previously-DORMANT) `resolveRespawnStrategy` — the respawn-is-always-resume
  * core. Returns a directive only when the strategy resolves to a resumable
- * `session-id`; otherwise undefined (cold/fresh spawn). Supervision-off
+ * `session-id`; unreadable registry data refuses retryably, while genuine absence
+ * returns undefined (cold/fresh spawn). Supervision-off
  * (`replRegistryPath` unset) always returns undefined → exact S1 behavior.
  */
-function resolveResumeDirective(
+export function resolveResumeDirective(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
 ): ResumeDirective | undefined {
   if (options.replRegistryPath === undefined) return undefined
-  const record = getRecord(options.replRegistryPath, sessionKey)
+  const state = readRegistryState(options.replRegistryPath)
+  if (state.kind === 'absent') return undefined
+  if (state.kind === 'unreadable') {
+    throw new RegistryResumeRefusedError(state.reason)
+  }
+  if (state.droppedKeys.includes(sessionKey)) {
+    throw new RegistryResumeRefusedError('the session row is invalid')
+  }
+  const record = normaliseRecord(state.registry[sessionKey])
   if (record === undefined) return undefined
   const resolutionInput: { session_id?: string; has_session: boolean } = {
     has_session: record.has_session,
