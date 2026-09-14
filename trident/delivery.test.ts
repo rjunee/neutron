@@ -678,6 +678,56 @@ describe('infra-only block delivers as infrastructure', () => {
     expect(interp.input_needed.toLowerCase()).toMatch(/rebase|merge the base branch/)
   })
 
+  /**
+   * #631 — THE PROVENANCE COLUMN MUST NOT COST THE CAUSE-DERIVED ADVICE.
+   *
+   * The two arms above read the MEASURED cause; neither ever depended on a cross-model
+   * observation. When `cross_model_rate_limited` arrived, a first cut branched on `null`
+   * FIRST and returned a bare generic line, which retired both arms for every row written
+   * before the column existed — i.e. the whole existing corpus, since an absent field
+   * decodes `null`. Measured by deleting the column from the fixture above: the two tests
+   * preceding this one reddened.
+   *
+   * So this pins the column and the cause arms as INDEPENDENT, in both directions, with a
+   * control that must survive beside the thing that must not: the rebase sentence is
+   * present for `null` AND for `false`, and only `null` additionally admits it does not
+   * know. `true` is covered in `trident/__tests__/cross-model-rate-limited.test.ts`,
+   * where it correctly outranks the cause arms.
+   */
+  test('an old row (no provenance column) keeps the cause-derived advice, and says it does not know', () => {
+    const absent = interpretFailure(infraRun('PR is conflicting with base'))
+    expect(absent.klass).toBe('infra-blocked')
+    // The control that must SURVIVE.
+    expect(absent.input_needed).toContain('Rebase or merge the base branch')
+    // …and the thing only an absent observation may say.
+    expect(absent.input_needed).toContain('rate limited is unknown')
+    expect(absent.input_needed).not.toContain('balance')
+
+    // A MEASURED `false` keeps the same advice and drops the admission — false and
+    // unknown decline the rate-limit sentence for different reasons and must not read
+    // alike to the owner.
+    const measuredFalse = interpretFailure(
+      infraRun('PR is conflicting with base', {
+        inner_result: JSON.stringify({
+          ok: false,
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: null,
+          blockKind: 'infra-only',
+          crossModelRateLimited: false,
+          terminalCause: 'PR is conflicting with base',
+        }),
+      }),
+    )
+    expect(measuredFalse.input_needed).toContain('Rebase or merge the base branch')
+    expect(measuredFalse.input_needed).not.toContain('rate limited is unknown')
+
+    // The same independence for the other cause arm.
+    expect(interpretFailure(infraRun('required check test has not run')).input_needed).toContain(
+      'Trigger the required check',
+    )
+  })
+
   test('an infra-only stop with NO measured cause stays infra-blocked and generic', () => {
     const run = infraRun(null)
     const interp = interpretFailure(run)
@@ -781,12 +831,13 @@ describe('infra-only block delivers as infrastructure', () => {
       round: 1,
       checkpoint: null,
       blockKind: 'infra-only',
+      crossModelRateLimited: false,
       terminalCause: 'PR is conflicting with base',
     })
     const gated = { phase: 'failed' as const, harvested_at: 1755300000000, inner_result: inner }
 
     test('all three hold → the measured cause', () => {
-      expect(deriveInfraBlock(gated)).toEqual({ cause: 'PR is conflicting with base' })
+      expect(deriveInfraBlock(gated)).toEqual({ cause: 'PR is conflicting with base', cross_model_rate_limited: false })
     })
 
     test('phase is not failed → null', () => {
@@ -810,7 +861,7 @@ describe('infra-only block delivers as infrastructure', () => {
 
     test('infra-only with no measured cause → a block with a null cause, not null', () => {
       const raw = JSON.stringify({ round: 1, blockKind: 'infra-only' })
-      expect(deriveInfraBlock({ ...gated, inner_result: raw })).toEqual({ cause: null })
+      expect(deriveInfraBlock({ ...gated, inner_result: raw })).toEqual({ cause: null, cross_model_rate_limited: null })
     })
   })
 })

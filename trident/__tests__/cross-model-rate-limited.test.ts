@@ -36,7 +36,7 @@
  *   3. A 429 mid-panel does not mark the panel as having reviewed, and is not
  *      re-called instantly by the lane retry.
  *   4. The two halves of every cross-file contract here actually match: the stderr
- *      token, and the token `delivery.ts` keys its advice on.
+ *      token, and the structured observation delivery reads.
  *
  * THE CLI IS EXERCISED AS A SUBPROCESS, not asserted against its own source. Two
  * tests here used to check that a substring existed in the file and executed nothing,
@@ -55,8 +55,11 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import ts from 'typescript'
 
 import { interpretFailure } from '../delivery.ts'
+import { parseInnerResult } from '../inner-loop.ts'
+import { deriveInfraBlock } from '../infra-block.ts'
 import {
   KIMI_RATE_LIMIT_TOKEN,
   RATE_LIMIT_HTTP,
@@ -72,14 +75,6 @@ import { makeTridentRun } from '../testing/make-trident-run.ts'
 import type { TridentRun } from '../store.ts'
 
 const SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
-/** `delivery.ts`'s own source — the seat-label set is read out of it rather than retyped,
- *  so the drift guard below compares the SHIPPED list against the SHIPPED emitter. */
-const DELIVERY_SRC = await Bun.file(new URL('../delivery.ts', import.meta.url)).text()
-/** Six today: two same-family seats plus two off-family choices for each of the two slots.
- *  Pinned as a NUMBER as well as a set, so a slice bug that reads zero labels cannot make
- *  the drift guard pass by comparing two empty sets — which is exactly what it first did. */
-const CROSS_MODEL_SEAT_LABEL_COUNT = 6
-
 /** Brace-match one function out of the workflow source. */
 function grab(name: string): string {
   const at = SRC.indexOf(`function ${name}(`)
@@ -120,6 +115,7 @@ interface Real {
   // does not include `trident/**`, so `bunx tsc --noEmit` never looked at this file —
   // `bunx tsc -p trident/tsconfig.json --noEmit` is the command that matches CI.
   rateLimitedPeer: (name: string, label: string) => Peer
+  crossModelRateLimitProvenance: (slots: Array<{ slot: number | null; key: string | null }>, verdicts: unknown[]) => boolean | null
   crossModelRateLimited: (slot: number | null, verdicts: unknown[], key: string | null) => boolean
   seatRateLimitKey: (group: string) => string | null
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
@@ -148,12 +144,13 @@ function loadReal(): Real {
       grab('rateLimitedPeer'),
       grab('deferredCrossModelPeers'),
       grab('crossModelRateLimited'),
+      grab('crossModelRateLimitProvenance'),
       grab('seatRateLimitKey'),
       grab('crossModelPeerStatus'),
       grab('enforceCrossModelGate'),
       grab('classifyBlock'),
       grab('infraTerminalCause'),
-      'return { deferredCrossModelPeers, rateLimitedPeer, crossModelRateLimited,' +
+      'return { deferredCrossModelPeers, rateLimitedPeer, crossModelRateLimited, crossModelRateLimitProvenance,' +
         ' seatRateLimitKey, crossModelPeerStatus, enforceCrossModelGate, classifyBlock, infraTerminalCause }',
     ].join('\n'),
   ) as () => Real
@@ -177,7 +174,7 @@ function fetchStatus(status: number, body: unknown = { error: 'rate limited' }):
  * `built-never-reviewed`. Getting this wrong is what made the first version of the
  * ordering test unfalsifiable — see the note on that test.
  */
-function infraRun(cause: string, overrides: Partial<TridentRun> = {}): TridentRun {
+function infraRun(cause: string, overrides: Partial<TridentRun> = {}, crossModelRateLimited?: unknown): TridentRun {
   return makeTridentRun({
     id: 'run-1',
     slug: 'add-flag',
@@ -196,6 +193,7 @@ function infraRun(cause: string, overrides: Partial<TridentRun> = {}): TridentRu
       checkpoint: 'argus-request-changes-round-1',
       blockKind: 'infra-only',
       terminalCause: cause,
+      crossModelRateLimited,
     }),
     failure_reason: `review never ran (infra-only) at round 1 of 10: ${cause}`,
     ...overrides,
@@ -952,10 +950,8 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
   })
 
   test('and the ADVICE names both possibilities instead of "retry once healthy"', () => {
-    // BOTH HALVES MOVE TOGETHER: the shape delivery.ts matches is `rateLimitedPeer`'s
-    // whole authored title, anchored at both ends — see the negative cases below for why
-    // it is not the bare status code.
-    const interp = interpretFailure(infraRun(title()))
+    // The observation travels independently of the authored title.
+    const interp = interpretFailure(infraRun(title(), {}, true))
     expect(interp.input_needed).toContain('HTTP 429')
     expect(interp.input_needed).toContain('rate limits')
     expect(interp.input_needed).toContain('balance')
@@ -1000,11 +996,7 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
   })
 
   test('HEADLINE: a probe that ECHOES a prior run\'s title keeps the generic line', () => {
-    // The anchor is what buys this one, and a bare `includes` of the authored PHRASE
-    // would still fail it: `gh pr view` output can contain a previous run's terminal
-    // cause verbatim, and `probeCause` quotes it into a new title. The quoting always
-    // introduces a colon and an em dash before the phrase, neither of which the seat
-    // label may contain — so the both-ends anchor rejects it.
+    // Quoted text supplies no provider observation.
     const echoed =
       'REVIEW DEFERRED — PR readiness could not be read: Kimi K3 cross-model review RATE LIMITED ' +
       '(HTTP 429) — no review was performed'
@@ -1019,11 +1011,7 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
       'PR readiness could not be read: http 429',
       'rate limited (http 429) — no review was performed by something else entirely',
       'HTTP 429',
-      // THE TAIL ANCHOR IS WHAT REJECTS THIS ONE, and it is not hypothetical:
-      // `probeCause` joins the first TWO lines of `gh pr view` output with a SPACE, so a
-      // quoted title on line 1 followed by anything at all on line 2 produces exactly
-      // this shape. Without the `$` the authored sentence would match as a prefix of
-      // arbitrary probe prose.
+      // A suffix remains irrelevant without an observation.
       'Kimi K3 cross-model review RATE LIMITED (HTTP 429) — no review was performed and then the probe said something else',
     ]) {
       expect(interpretFailure(infraRun(cause)).input_needed).toContain('once the infrastructure is healthy')
@@ -1036,7 +1024,7 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
     // exactly the authored shape but carrying a label no seat can produce used to match —
     // and the operator was again sent to check a model provider's balance for something no
     // seat authored. The previous fixtures covered a prefix and a suffix; this is the one
-    // they omitted, and it is why the label is now a CLOSED SET rather than a shape.
+    // they omitted, and now all such prose is irrelevant without the field.
     for (const cause of [
       'GitHub cross-model review RATE LIMITED (HTTP 429) — no review was performed',
       'The registry RATE LIMITED (HTTP 429) — no review was performed',
@@ -1054,57 +1042,7 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
     }
   })
 
-  test('HEADLINE: the matcher\'s label set is EXACTLY what the emitter can produce', () => {
-    // BOTH HALVES MOVE TOGETHER, and this is what makes that true rather than asserted.
-    // The labels are composed in `deferredCrossModelPeers`, a Workflow body with no module
-    // resolution, so `delivery.ts` necessarily restates them. Drift is removed by deriving
-    // the truth HERE — running the real emitter across every route, including groups it
-    // does not recognise — and requiring the two sets to be identical. Add or rename a
-    // seat and this reds, instead of that seat silently losing its advice.
-    const { deferredCrossModelPeers } = loadReal()
-    const emitted = new Set<string>()
-    const groups = ['codex', 'kimi', 'claude', undefined, 'an-unknown-family']
-    for (const g1 of groups) {
-      for (const g2 of groups) {
-        const route = {
-          ...(g1 === undefined ? {} : { codex: { group: g1 } }),
-          ...(g2 === undefined ? {} : { kimi: { group: g2 } }),
-        }
-        for (const peer of deferredCrossModelPeers(
-          { codex: 'deferred', kimi: 'deferred' },
-          route,
-          { codex: true, kimi: true },
-        )) {
-          emitted.add(peer.title.replace(/ RATE LIMITED \(HTTP 429\) — no review was performed$/, ''))
-        }
-      }
-    }
-    // The set delivery.ts matches on, read out of its source so the test cannot drift from
-    // it either.
-    // Sliced from the `= [` rather than from the declaration, because the TYPE ANNOTATION
-    // (`readonly string[]`) contains a `]` of its own — the first version of this test
-    // stopped there and compared an empty set, which is a guard that cannot fail.
-    const declAt = DELIVERY_SRC.indexOf('const CROSS_MODEL_SEAT_LABELS')
-    expect(declAt).toBeGreaterThan(-1)
-    const openAt = DELIVERY_SRC.indexOf('= [', declAt)
-    const block = DELIVERY_SRC.slice(openAt, DELIVERY_SRC.indexOf(']', openAt))
-    const matched = new Set([...block.matchAll(/'([^']+)'/g)].map((m) => m[1] as string))
-    // Non-empty on both sides, or the comparison above proves nothing.
-    expect(matched.size).toBe(CROSS_MODEL_SEAT_LABEL_COUNT)
-    expect(emitted.size).toBe(CROSS_MODEL_SEAT_LABEL_COUNT)
-    expect([...matched].sort()).toEqual([...emitted].sort())
-    // And every one of them really does reach the specific advice.
-    for (const label of emitted) {
-      expect(
-        interpretFailure(infraRun(`${label} RATE LIMITED (HTTP 429) — no review was performed`)).input_needed,
-      ).toContain('rather than assuming either')
-    }
-  })
-
-  test('...and the REAL title from every live seat label still reaches the specific advice', () => {
-    // The anchor must not be so tight that it stops matching what it is for. Walked over
-    // the labels `deferredCrossModelPeers` actually composes, so a label the anchor's
-    // charset cannot express shows up here rather than as a silent fallback in production.
+  test('...and structured observations work with every existing seat label', () => {
     const { deferredCrossModelPeers } = loadReal()
     const routes: Array<[Record<string, unknown>, Record<string, boolean>]> = [
       [{}, { codex: true }],
@@ -1117,9 +1055,9 @@ describe('#542 the terminal reason names the refusal — not "deferred", not "ex
     for (const [route, flags] of routes) {
       for (const peer of deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' }, route, flags)) {
         if (!peer.title.includes('RATE LIMITED')) continue
-        expect({ title: peer.title, advice: interpretFailure(infraRun(peer.title)).input_needed }).toEqual({
+        expect({ title: peer.title, advice: interpretFailure(infraRun(peer.title, {}, true)).input_needed }).toEqual({
           title: peer.title,
-          advice: interpretFailure(infraRun(title())).input_needed,
+          advice: interpretFailure(infraRun(title(), {}, true)).input_needed,
         })
       }
     }
@@ -1199,6 +1137,88 @@ describe('#542 a GENUINE findings-carrying REQUEST_CHANGES is untouched — stil
     ]) {
       const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' }, {}, { codex: true, kimi: true })
       expect(enforceCrossModelGate(synthesis, peers).verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+})
+
+
+describe('#631 structured rate-limit provenance', () => {
+  test('producer aggregation preserves positive, negative and unknown evidence', () => {
+    const { crossModelRateLimitProvenance: observe } = loadReal()
+    const slots = [{ slot: 0, key: 'kimiRateLimited' }, { slot: 1, key: 'codexRateLimited' }]
+    expect(observe(slots, [{ kimiRateLimited: true }, null])).toBe(true)
+    expect(observe(slots, [null, { codexRateLimited: true }])).toBe(true)
+    expect(observe(slots, [{ kimiRateLimited: false }, { codexRateLimited: false }])).toBe(false)
+    expect(observe(slots, [{ kimiRateLimited: false }, {}])).toBeNull()
+    for (const value of [undefined, null, 'true', 'false', 1, 0, {}, []]) {
+      expect(observe([{ slot: 0, key: 'kimiRateLimited' }], [{ kimiRateLimited: value }])).toBeNull()
+    }
+    expect(observe([], [])).toBeNull()
+    expect(observe([{ slot: null, key: 'kimiRateLimited' }], [{ kimiRateLimited: true }])).toBeNull()
+    expect(observe([{ slot: 0, key: null }], [{ kimiRateLimited: true }])).toBeNull()
+    expect(observe([{ slot: 0, key: 'kimiRateLimited' }, { slot: null, key: null }], [{ kimiRateLimited: false }])).toBe(false)
+  })
+
+  test('real round and terminal expressions transport the observation across either routed slot', () => {
+    // Enumerate the actual property assignments, then execute their expressions.
+    // Mutations to the expressions still execute rather than failing a text match.
+    const ast = ts.createSourceFile('inner-workflow.mjs', SRC, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+    const expressions: string[] = []
+    function visit(node: ts.Node): void {
+      if (ts.isPropertyAssignment(node) && node.name.getText(ast) === 'crossModelRateLimited') {
+        expressions.push(node.initializer.getText(ast))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(ast)
+    expect(expressions).toHaveLength(2)
+    const real = loadReal()
+    const emitRound = new Function('crossModelRateLimitProvenance', 'seatRateLimitKey', 'codexSlot', 'kimiSlot', 'slotOneRoute', 'slotTwoRoute', 'verdicts', `return ${expressions[0]}`)
+    const emitTerminal = new Function('synthesis', `return ${expressions[1]}`)
+    for (const slot of [0, 1]) {
+      for (const value of [true, false, null]) {
+        const verdicts: Array<{ kimiRateLimited: boolean | null }> = [{ kimiRateLimited: false }, { kimiRateLimited: false }]
+        verdicts[slot] = { kimiRateLimited: value }
+        const observed = emitRound(real.crossModelRateLimitProvenance, real.seatRateLimitKey, 0, 1, { group: 'kimi' }, { group: 'kimi' }, verdicts)
+        const raw = JSON.stringify({ verdict: 'REQUEST_CHANGES', crossModelRateLimited: emitTerminal({ crossModelRateLimited: observed }) })
+        expect(parseInnerResult(raw)?.cross_model_rate_limited).toBe(value)
+      }
+    }
+    expect(emitTerminal({})).toBeNull()
+  })
+
+  test('decoder and deriver preserve false separately from absent or malformed fields', () => {
+    for (const value of [true, false, undefined, null, 'true', 'false', 1, 0, {}, []]) {
+      const row = infraRun('unrelated message', {}, value)
+      const expected = typeof value === 'boolean' ? value : null
+      expect(parseInnerResult(row.inner_result)?.cross_model_rate_limited).toBe(expected)
+      expect(deriveInfraBlock(row)?.cross_model_rate_limited).toBe(expected)
+    }
+  })
+
+  test('rewording cannot change measured rate-limit advice, including competing cause words', () => {
+    const causes = ['provider refused', 'PR is conflicting with base', 'required check test has not run', 'a completely new message']
+    for (const cause of causes) {
+      const result = interpretFailure(infraRun(cause, {}, true))
+      expect(result.klass).toBe('infra-blocked')
+      expect(result.input_needed).toContain('rate limits AND its balance')
+      expect(result.input_needed).not.toContain('was rate limited is unknown')
+    }
+  })
+
+  test('negative, unknown and old rows have distinct advice even with the exact former title', () => {
+    const cause = loadReal().rateLimitedPeer('Kimi K3', 'Kimi K3 cross-model review').title
+    const negative = interpretFailure(infraRun(cause, {}, false))
+    expect(negative.klass).toBe('infra-blocked')
+    expect(negative.input_needed).toContain('once the infrastructure is healthy')
+    expect(negative.input_needed).not.toContain('was rate limited is unknown')
+    expect(negative.input_needed).not.toContain('balance')
+    for (const value of [undefined, null, 'true', 'false', 1, 0, {}, []]) {
+      const unknown = interpretFailure(infraRun(cause, {}, value))
+      expect(unknown.klass).toBe('infra-blocked')
+      expect(unknown.input_needed).toContain('once the infrastructure is healthy')
+      expect(unknown.input_needed).toContain('was rate limited is unknown')
+      expect(unknown.input_needed).not.toContain('balance')
     }
   })
 })

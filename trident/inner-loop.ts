@@ -308,6 +308,8 @@ export interface InnerResult {
    * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
+  /** Explicit provider observation: null means absent, malformed or unmeasured. */
+  cross_model_rate_limited: boolean | null
   /**
    * WHY THE LOOP STOPPED (#520) — one of the closed {@link TerminalCause} members, or
    * `null` on a row whose terminal result carried no recognisable kind.
@@ -911,6 +913,8 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // here is model-adjacent text that will be shown to the owner, so it is trimmed and
     // clamped on the way in, exactly as `terminal_cause` is.
     escalation: decodeEscalation(p.escalation),
+    cross_model_rate_limited:
+      typeof p.crossModelRateLimited === 'boolean' ? p.crossModelRateLimited : null,
     // THE MEASURED CAUSE (#240). Empty/absent/non-string → null, so the reason falls back
     // to the generic sentence rather than to an empty quotation.
     terminal_cause:

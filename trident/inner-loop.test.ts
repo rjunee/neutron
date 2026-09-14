@@ -185,6 +185,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       // workflow's own gate refuses.
       escalation: null,
       terminal_cause: null,
+      cross_model_rate_limited: null,
       // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
       // a reader must be able to tell "nobody told me" from "I was told it could not be
       // established", which is what `'unknown'` asserts.
@@ -394,6 +395,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       // workflow's own gate refuses.
       escalation: null,
       terminal_cause: null,
+      cross_model_rate_limited: null,
       // #520 — ABSENT DECODES `null`, NOT `'unknown'`. This payload predates the field;
       // a reader must be able to tell "nobody told me" from "I was told it could not be
       // established", which is what `'unknown'` asserts.

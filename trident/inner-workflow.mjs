@@ -6690,6 +6690,16 @@ function crossModelRateLimited(slot, verdicts, rateLimitKey) {
   return Boolean(verdict) && verdict[rateLimitKey] === true
 }
 
+/** The round's cross-model observation, independent of finding prose.
+ * A positive seat suffices; a negative requires every configured seat to say false.
+ * No configured seats, a dead seat or an unsupported provider remains unknown. */
+function crossModelRateLimitProvenance(slots, verdicts) {
+  const observed = slots.filter(({ slot }) => slot !== null).map(({ slot, key }) => verdicts[slot]?.[key])
+  if (observed.some((value) => value === true)) return true
+  if (observed.length > 0 && observed.every((value) => value === false)) return false
+  return null
+}
+
 /**
  * WHICH RATE-LIMIT FIELD THIS SEAT'S VERDICT CARRIES, decided by the MODEL FAMILY the
  * slot resolved to — never by the slot's NAME.
@@ -7603,6 +7613,10 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   return {
     ...answered,
     blockKind: classifyBlock(answered, peers, noReviewRan, panelRejectedWithoutReason),
+    crossModelRateLimited: crossModelRateLimitProvenance([
+      { slot: codexSlot, key: seatRateLimitKey(slotOneRoute.group) },
+      { slot: kimiSlot, key: seatRateLimitKey(slotTwoRoute.group) },
+    ], verdicts),
     reviewRecord,
     escalationClaim,
     escalationClaimVerdict,
@@ -9170,6 +9184,8 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     // for want of exactly this field — and it stays generic wherever it is absent,
     // because a specific message must ship WITH the measured signal, never before it.
     ...(isInfraOnlyStop ? { terminalCause } : {}),
+    // Carry the last round's observation, never reconstruct it from its finding title.
+    crossModelRateLimited: synthesis.crossModelRateLimited ?? null,
     // …AND THE CAUSE IS UNCONDITIONAL, unlike the prose above it (#520). The prose is
     // present only where something MEASURED a sentence worth quoting; the kind is
     // present always, because "which exit was this" always has an answer — and where it

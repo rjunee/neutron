@@ -229,103 +229,6 @@ function wrongBaseGuardEvidence(reason: string): string | null {
  * stderr, and an unanchored match over attacker-shaped text lets a quotation of one refusal
  * reclassify an unrelated failure.
  */
-/**
- * THE CROSS-MODEL RATE-LIMIT CAUSE, matched as an AUTHORED WHOLE rather than by keyword.
- *
- * WHY A BARE `includes('http 429')` WAS WRONG, measured end to end. `interpretFailure`'s
- * own docblock says it: a keyword classifier cannot safely be handed the MEASURED cause,
- * because that text is model/CI prose. `infraTerminalCause` (`inner-workflow.mjs`) takes
- * the first LANE finding's TITLE, and `reviewPreconditionDeferred` builds its title as
- * `REVIEW DEFERRED — PR readiness could not be read: <probeCause(raw)>`, where
- * `probeCause` quotes the first two lines of `gh pr view` stdout+stderr VERBATIM — and
- * `raw` is agent-transcribed. GitHub's secondary rate limit answers 403 OR 429, which
- * this repo already knows (`trident/git-mode.ts` matches `/\bhttp 429\b/` on `gh`
- * output for exactly that reason). So a GitHub refusal produced:
- *
- *   cause: REVIEW DEFERRED — PR readiness could not be read: HTTP 429: You have
- *          exceeded a secondary rate limit …
- *   advice: "check the provider account's rate limits AND its balance"
- *
- * No model provider was involved at any point, and the operator was sent to look at a
- * Kimi or Codex balance. That is the same defect the row this matches exists to remove —
- * a confident sentence about an unmeasured cause — and it was STRICTLY WORSE than the
- * generic line it replaced. Two more vectors reach the same place: the readiness probe's
- * `mode === 'unknown'` arm, and a thrown workflow message quoted as `infraCause`.
- *
- * SO THE SHAPE IS ANCHORED AT BOTH ENDS, the way `PRE_LAUNCH_PREFIX` and
- * `isPublishedUnreviewedReason` already are here, AND THE LABEL IS A CLOSED SET rather
- * than a character class (see `CROSS_MODEL_SEAT_LABELS`). The anchors defeat a quotation
- * that WRAPS the authored sentence — a prefix, because every probe-quoted shape puts a
- * colon or an em dash in front of it, and a suffix, because `probeCause` joins two lines
- * with a space so the sentence can be a prefix of arbitrary prose. The closed label set
- * defeats an exact-shape IMPOSTOR, which the character class did not: `infraCause` hands
- * a thrown workflow message straight through, so `GitHub cross-model review RATE LIMITED
- * (HTTP 429) — no review was performed` used to match.
- *
- * Anything this does not recognise falls back to the generic advice, which is what `main`
- * said before any of this — never wrong, only vague. That is the safe direction, by
- * construction.
- *
- * WHY NOT STRUCTURALLY, which would be better: `deriveInfraBlock` carries only
- * `{ cause }`, and adding a field to the harvested result means editing
- * `parseInnerResult` in `trident/inner-loop.ts`, which this lane does not own. The
- * string is the only channel available here; the anchor is what makes it safe. Carrying
- * the flag as a column is the follow-up.
- *
- * BOTH HALVES MUST MOVE TOGETHER: this pattern is `rateLimitedPeer`'s title in
- * `trident/inner-workflow.mjs` and nothing else. Tests assert the real title matches AND
- * that all three probe-derived shapes above do not.
- */
-/**
- * EVERY SEAT LABEL `rateLimitedPeer` CAN BE GIVEN — the complete set, not a shape.
- *
- * WHY A FINITE SET AND NOT A CHARACTER CLASS. The previous revision anchored both ends
- * but let the label be `[a-z0-9 ()-]+`, which accepts ANY label of that shape rather
- * than only the ones a seat can actually produce. `infraCause` passes a THROWN workflow
- * message through verbatim as a terminal cause, so an exact-shape impostor —
- * `GitHub cross-model review RATE LIMITED (HTTP 429) — no review was performed`, or
- * `The registry RATE LIMITED …` — matched, and the operator was again sent to check a
- * model provider's balance for something no seat authored. Measured, both of them.
- *
- * The anchors closed the PREFIX and SUFFIX vectors (probe prose wrapping the sentence);
- * this closes the SUBSTITUTION vector. With a closed set the absence claim below is
- * TRUE rather than approximately true, which is the whole difference between documenting
- * an intention and having a guard.
- *
- * BOTH HALVES MUST MOVE TOGETHER, AND A TEST IS WHAT MAKES THAT SO. These labels are
- * composed in `deferredCrossModelPeers` (`trident/inner-workflow.mjs`), which is a
- * Workflow body with no module resolution — it cannot import this constant and this file
- * cannot import it, so the list is necessarily restated. What removes the drift risk is
- * that a test ENUMERATES the labels by running the real emitter across every route
- * (including unrecognised groups) and asserts the set is exactly this one, so adding or
- * renaming a seat reds here instead of silently falling back to the generic advice.
- *
- * The fallback direction is safe either way: a label missing from this set produces the
- * generic "retry once the infrastructure is healthy" line, which is what `main` said
- * before any of this and is never wrong, only vague.
- */
-const CROSS_MODEL_SEAT_LABELS: readonly string[] = [
-  'Codex cross-model review',
-  'Kimi K3 cross-model review',
-  'Cross-model review 1 (Claude)',
-  'Cross-model review 1 (Kimi K3)',
-  'Cross-model review 2 (Claude)',
-  'Cross-model review 2 (Codex)',
-]
-
-/**
- * THE CROSS-MODEL RATE-LIMIT CAUSE — one of a CLOSED set of authored sentences.
- *
- * Built from `CROSS_MODEL_SEAT_LABELS` so the matcher and the emitter cannot disagree
- * about what a seat is called, anchored at both ends so no quotation can wrap it, and
- * lowercased to meet the already-lowercased cause. Every metacharacter in a label (the
- * parens) is escaped rather than trusted.
- */
-const CROSS_MODEL_RATE_LIMIT_CAUSE = new RegExp(
-  `^(?:${CROSS_MODEL_SEAT_LABELS.map((l) => l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})` +
-    ' rate limited \\(http 429\\) — no review was performed$',
-)
-
 const PRE_LAUNCH_PREFIX = /^trident infra: /
 const BUILD_NOT_STARTED = 'the build was NOT started'
 
@@ -806,35 +709,32 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     // like the rest of this function, and it only ever changes the ADVICE, never the
     // class. An unrecognised cause gets the honest generic retry line.
     const c = (cause ?? '').toLowerCase()
-    const input_needed = c.includes('conflicting with base')
+    const genericAdvice = `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
+    // THE CAUSE-DERIVED ARMS ARE ORTHOGONAL TO THE PROVENANCE COLUMN, and are computed
+    // FIRST so that a missing observation cannot cost the owner advice that never
+    // depended on one. A conflicting base and an un-run required check are read off the
+    // MEASURED cause; #631 replaced the rate-limit string match with a column and must
+    // not take these two with it. Every row written before the column existed decodes
+    // `null`, so folding `null` into a bare generic line would have silently retired
+    // both arms for the entire existing corpus — measured: removing the column from
+    // `delivery.test.ts`'s infra fixture reddened the two pre-existing advice tests.
+    const causeAdvice = c.includes('conflicting with base')
       ? `Rebase or merge the base branch into the PR branch, then retry. ${notRejected}`
       : /required check .* has not run/.test(c)
         ? `Trigger the required check (or re-run CI on the PR), then retry. ${notRejected}`
-        // A CROSS-MODEL PROVIDER REFUSED THE CALL WITH HTTP 429. The generic line below —
-        // "retry once the infrastructure is healthy" — is not merely vague here, it is
-        // WRONG ADVICE: nothing is unhealthy, the provider declined to serve the request,
-        // and an immediate retry reaches the same refusal. The measured cause says which
-        // seat and how, so the advice can name what to do. The CLASS is untouched, exactly
-        // as this mapping's docblock requires — only the advice changes, and only over a
-        // cause that states the fact.
-        //
-        // AND IT NAMES BOTH POSSIBILITIES RATHER THAN PICKING ONE. 429 does not say
-        // whether this is a per-minute rate limit that clears on its own or an account
-        // with no allowance left; `trident/kimi-usage-probe.ts` excludes 429 from
-        // `isPermanentRejection` for exactly that reason. Telling the owner to top up an
-        // account that was merely throttled, or to wait out a balance that is empty, is a
-        // confident sentence about an unmeasured cause — so this says the bounded retry
-        // runs first and names both things to check if the refusal survives it.
-        //
-        // MATCHED AS AN AUTHORED WHOLE, NOT BY THE STATUS CODE. An earlier revision used
-        // `c.includes('http 429')` and claimed the token was authored "nowhere else";
-        // that absence claim was false and this branch then misrouted a GitHub secondary
-        // rate limit into cross-model-provider advice. See
-        // `CROSS_MODEL_RATE_LIMIT_CAUSE` for the measured chain and why the anchor is
-        // what makes a string channel safe here.
-        : CROSS_MODEL_RATE_LIMIT_CAUSE.test(c)
-          ? `The bounded retry runs first — HTTP 429 does not say whether this is a rate limit that clears on its own or an account with no allowance left. If it is still refusing after that, check the provider account's rate limits AND its balance rather than assuming either. ${notRejected} ${saved}`
-          : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
+        : genericAdvice
+    let input_needed: string
+    if (infra.cross_model_rate_limited === true) {
+      input_needed = `The bounded retry runs first — HTTP 429 does not say whether this is a rate limit that clears on its own or an account with no allowance left. If it is still refusing after that, check the provider account's rate limits AND its balance rather than assuming either. ${notRejected} ${saved}`
+    } else if (infra.cross_model_rate_limited === null) {
+      // FALSE AND UNKNOWN DO NOT SHARE A BRANCH. Both decline the rate-limit sentence —
+      // "I could not find out" is not a licence to assert a provider refusal — but only
+      // `false` is an OBSERVATION, so only `null` says so out loud. Prose cannot supply a
+      // provider observation that nothing measured.
+      input_needed = `${causeAdvice} Whether a cross-model review was rate limited is unknown.`
+    } else {
+      input_needed = causeAdvice
+    }
     return {
       klass: 'infra-blocked',
       summary:
