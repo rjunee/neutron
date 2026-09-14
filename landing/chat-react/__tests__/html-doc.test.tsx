@@ -89,6 +89,11 @@ describe('sanitizeHtmlDoc', () => {
     const out = sanitizeHtmlDoc('<a href="  java\tscript:alert(1)">x</a>')
     expect(out.toLowerCase()).not.toContain('script:alert')
   })
+  it('strips every data: URL, including active SVG payloads', () => {
+    const { sanitizeHtmlDoc } = require('../HtmlDoc.tsx')
+    const out = sanitizeHtmlDoc('<img src="data:image/svg+xml,<svg onload=alert(1)></svg>">')
+    expect(out.toLowerCase()).not.toContain('data:')
+  })
   it('returns empty for empty/blank input', () => {
     const { sanitizeHtmlDoc } = require('../HtmlDoc.tsx')
     expect(sanitizeHtmlDoc('')).toBe('')

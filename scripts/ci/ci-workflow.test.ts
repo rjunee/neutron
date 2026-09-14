@@ -150,8 +150,8 @@ describe('G5 CI typechecks every tsconfig on disk', () => {
  * Parallelised CI (2026-07-28) — guards on the aggregator that keeps the
  * REQUIRED `test` context honest.
  *
- * `test` and `CodeQL` are required status checks on `main` with a strict
- * up-to-date policy. Two ways to break merging on this repo, both silent:
+ * `test` is the sole required status check on `main`, with a strict up-to-date
+ * policy. Two ways to break merging on this repo, both silent:
  *
  *   1. Rename or matrix-ify `test`. The required context then NEVER reports and
  *      every PR blocks forever, with no failing check to point at.
@@ -166,6 +166,11 @@ describe('parallel CI aggregator', () => {
     // Renaming it does not fail anything visibly; it just stops the required
     // check from ever reporting, and merging dies quietly.
     expect(yml).toMatch(/^ {2}test:$/m)
+  })
+
+  test('the load-bearing comment names the same sole required context as the live projection', () => {
+    expect(yml).toContain('`test` is the\n# sole REQUIRED status check on `main`')
+    expect(yml).not.toMatch(/`CodeQL` (?:is|are) (?:a )?REQUIRED status check/i)
   })
 
   test('`test` needs EVERY gate, so none can be silently dropped', () => {
