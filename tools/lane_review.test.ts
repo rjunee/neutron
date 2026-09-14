@@ -11,7 +11,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,6 +20,7 @@ const SCRIPT = fileURLToPath(new URL('./lane_review.sh', import.meta.url))
 
 let repo: string
 let analyzerlessScriptDirectory: string
+let fakeBin: string
 
 // Isolate every git invocation from host config (gpg signing, hook paths).
 const env = () => ({
@@ -30,7 +31,18 @@ const env = () => ({
   GIT_AUTHOR_EMAIL: 'lane-review-test@invalid',
   GIT_COMMITTER_NAME: 'lane-review-test',
   GIT_COMMITTER_EMAIL: 'lane-review-test@invalid',
+  PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+  LANE_REVIEW_CI_RUN: 'MATCH\tcompleted\tsuccess',
 })
+
+function reviewWithCi(ciRun: string, ...args: string[]): { code: number | null; out: string } {
+  const r = spawnSync('bash', [SCRIPT, ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...env(), LANE_REVIEW_CI_RUN: ciRun },
+  })
+  return { code: r.status, out: `${r.stdout}${r.stderr}` }
+}
 
 function git(...args: string[]): string {
   const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: env() })
@@ -75,6 +87,19 @@ function fixtureBranch(name: string, files: Record<string, string>): void {
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'lane-review-'))
   analyzerlessScriptDirectory = mkdtempSync(join(tmpdir(), 'lane-review-no-analyzer-'))
+  fakeBin = mkdtempSync(join(tmpdir(), 'lane-review-bin-'))
+  writeFileSync(join(fakeBin, 'gh'), `#!/usr/bin/env bash
+set -u
+head=''
+for arg in "$@"; do
+  case "$arg" in head_sha=*) head="\${arg#head_sha=}" ;; esac
+done
+response="\${LANE_REVIEW_CI_RUN-}"
+if [ "$response" = EXIT ]; then exit 1; fi
+if [[ "$response" == MATCH* ]]; then response="$head\${response#MATCH}"; fi
+printf '%b\\n' "$response"
+`)
+  chmodSync(join(fakeBin, 'gh'), 0o755)
   copyFileSync(SCRIPT, join(analyzerlessScriptDirectory, 'lane_review.sh'))
   git('init', '-q', '-b', 'main')
   mkdirSync(join(repo, 'src'), { recursive: true })
@@ -420,9 +445,49 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(repo, { recursive: true, force: true })
   rmSync(analyzerlessScriptDirectory, { recursive: true, force: true })
+  rmSync(fakeBin, { recursive: true, force: true })
 })
 
 describe('lane_review.sh fail-closed contract', () => {
+  test('an unreadable workflow-run query is unknown', () => {
+    const { code, out } = reviewWithCi('EXIT', 'feature')
+    expect(code).toBe(2)
+    expect(out).toContain('could not read a workflow run')
+    expect(out).not.toContain('delivers behaviour: yes')
+  })
+
+  test('no workflow run for this head is unknown, never passed or failed', () => {
+    const { code, out } = reviewWithCi('', 'feature')
+    expect(code).toBe(2)
+    expect(out).toContain('CI UNKNOWN')
+    expect(out).toContain('no pull-request workflow run exists')
+    expect(out).not.toContain('delivers behaviour: yes')
+  })
+
+  test('a workflow run returned for another head is unknown before its success is read', () => {
+    const { code, out } = reviewWithCi(`${'f'.repeat(40)}\tcompleted\tsuccess`, 'feature')
+    expect(code).toBe(2)
+    expect(out).toContain('returned run is for a different head')
+    expect(out).not.toContain('CI passed')
+  })
+
+  test('exact-head success passes and exact-head failure remains a finding', () => {
+    const passed = reviewWithCi('MATCH\tcompleted\tsuccess', 'feature')
+    const failed = reviewWithCi('MATCH\tcompleted\tfailure', 'feature')
+    expect(passed.code).toBe(0)
+    expect(passed.out).toContain('CI passed for head')
+    expect(failed.code).toBe(1)
+    expect(failed.out).toContain('FINDING: CI failure')
+    expect(failed.out).not.toContain('delivers behaviour: yes')
+  })
+
+  test('an exact-head run that has not completed is unknown', () => {
+    const { code, out } = reviewWithCi('MATCH\tin_progress\t', 'feature')
+    expect(code).toBe(2)
+    expect(out).toContain('is in_progress')
+    expect(out).not.toContain('delivers behaviour: yes')
+  })
+
   test('T1: an unresolvable ref exits NON-ZERO and names the ref — silence is never approval', () => {
     const { code, out } = review('no-such-branch')
     // The defect: this exited 0. Deleting the fail-closed exit turns this red.

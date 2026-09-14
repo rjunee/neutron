@@ -70,6 +70,38 @@ BASE=$(resolve_ref "$BASE_IN") \
 [ "$BR" != "$BR_IN" ] && echo "=== resolved '$BR_IN' -> '$BR'"
 [ "$BASE" != "$BASE_IN" ] && echo "=== resolved base '$BASE_IN' -> '$BASE'"
 
+# --- CI state ---------------------------------------------------------------
+# Exit 1 already means a completed check found a problem; exit 2 means the
+# reader could not establish an answer. Keep a missing, pending, unreadable, or
+# wrong-head run in that existing unknown outcome instead of treating an empty
+# check set as success. Validate provenance before interpreting the conclusion.
+BR_SHA=$(git rev-parse "$BR^{commit}") \
+  || { echo "lane_review: could not resolve the commit for '$BR' — refusing to answer"; exit 2; }
+if ! ci_run=$(gh api --method GET 'repos/{owner}/{repo}/actions/workflows/ci.yml/runs' \
+  -f "head_sha=$BR_SHA" -f event=pull_request -f per_page=1 \
+  --jq '.workflow_runs[0] | [.head_sha, .status, (.conclusion // "")] | @tsv'); then
+  echo "lane_review: CI UNKNOWN — could not read a workflow run for ${BR_SHA:0:8}"
+  exit 2
+fi
+if [ -z "$ci_run" ]; then
+  echo "lane_review: CI UNKNOWN — no pull-request workflow run exists for ${BR_SHA:0:8}"
+  exit 2
+fi
+IFS=$'\t' read -r ci_head ci_status ci_conclusion <<<"$ci_run"
+if [ "$ci_head" != "$BR_SHA" ]; then
+  echo "lane_review: CI UNKNOWN — returned run is for a different head (wanted ${BR_SHA:0:8})"
+  exit 2
+fi
+if [ "$ci_status" != completed ]; then
+  echo "lane_review: CI UNKNOWN — workflow run for ${BR_SHA:0:8} is ${ci_status:-missing-status}"
+  exit 2
+fi
+if [ "$ci_conclusion" != success ]; then
+  echo "FINDING: CI ${ci_conclusion:-has-no-conclusion} for ${BR_SHA:0:8}."
+  exit 1
+fi
+echo "=== CI passed for head ${BR_SHA:0:8}"
+
 MB=$(git merge-base "$BASE" "$BR") \
   || { echo "lane_review: no merge-base between '$BASE' and '$BR'"; exit 2; }
 
