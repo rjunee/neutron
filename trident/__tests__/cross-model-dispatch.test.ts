@@ -25,7 +25,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
@@ -858,14 +858,17 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const dir = mkdtempSync(join(tmpdir(), 'neutron-codex-detach-'))
     const marker = join(dir, 'completed')
     try {
-      // Scaled reproduction of the real mechanism: the foreground caller is killed
-      // at 50ms, before the 250ms build finishes. `nohup` + backgrounding severs the
-      // wrapper from that caller, exactly as the generated production command does.
-      spawnSync(
+      // Scaled reproduction of the real mechanism: the foreground caller owns a fresh
+      // process group, and that whole group is killed at 50ms, before the 250ms build
+      // finishes. `setsid` moves the backgrounded wrapper out of the doomed group.
+      const caller = spawn(
         'bash',
-        ['-c', `nohup sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
-        { timeout: 50 },
+        ['-c', `nohup setsid sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
+        { detached: true, stdio: 'ignore' },
       )
+      expect(caller.pid).toBeDefined()
+      await Bun.sleep(50)
+      process.kill(-caller.pid!, 'SIGTERM')
       // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: bun's
       // default per-test timeout is 5 s, so a 10 s deadline could never expire — a child
       // that never writes killed the test as a runner timeout ('timed out after 5000ms')
