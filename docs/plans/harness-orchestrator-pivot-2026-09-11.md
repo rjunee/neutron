@@ -67,8 +67,12 @@ What stands between the owner and that, in his words, 2026-09-11:
    we've pivoted to using herdr as the underlying REPL container instead of this opaque
    PTY thing." Hard gate.
 3. **The migration runs.** The private one-time migration tooling is single-use — "expected to
-   be deleted after the cutover" — and was last pushed 2026-08-07. Five weeks of Open drift to
-   re-verify every lane against before `--apply`.
+   be deleted after the cutover." Correction 2026-09-14: it is *current*, not stale — a
+   14-commit hardening branch (adopt-instead-of-duplicate for tasks and reminders, consent at
+   the write site, classification disagreements stop the run, two misleading exit codes
+   fixed) was pushed 2026-09-12 and is open as its PR #3. Open has moved since the last
+   end-to-end preview, so every lane still gets a dry run against current `main` before
+   `--apply`.
 4. **Web/mobile rough edges — post-cutover**, "AS LONG AS TRIDENT WORKS." The one
    exception is the model-switch affordance (§ 3.6), which is daily-use the moment the
    orchestrator exists.
@@ -284,9 +288,14 @@ next starts. "Merged" is not done.
    **merged** with no human touching it.
 4. **The codex persistence spike** (§ 3.3). Its result shapes one adapter.
 5. **Migration.** The private one-time migration tooling, overlay pattern: `export NEUTRON_OPEN=<this
-   checkout>`; `bash scripts/overlay.sh install`; `bun run open/import-the legacy system-cli.ts all`
+   checkout>`; `bash scripts/overlay.sh install`; run the importer CLI's `all` lane
    (**dry run is the default everywhere**) — review — `all --apply`; `bash
-   scripts/overlay.sh remove`. Re-verify every lane against current Open first.
+   scripts/overlay.sh remove`. Seven lanes in dependency order: projects · entities ·
+   documents · memory · history · tasks · reminders. Order of work: land the tooling's open
+   PR #3 (the 2026-09-12 hardening) → dry-run `all` against current `main` → set the
+   destination timezone (`instance_metadata.timezone`) before the reminders lane, which
+   hard-stops `--apply` without it. Known, deliberate gaps: history synthesis is unwired;
+   no lane carries attachments or images.
 6. **Cutover.** Then web/mobile polish, with trident working.
 
 Post-cutover increments, not blockers: pi; further harnesses; the full per-harness
