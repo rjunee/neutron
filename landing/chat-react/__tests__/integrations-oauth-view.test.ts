@@ -28,6 +28,7 @@ function acc(
     kind: 'oauth',
     label,
     connected,
+    connection_state: connected ? 'connected' : 'not_connected',
     scopes: [],
     email,
     connected_at: null,
@@ -61,6 +62,7 @@ describe('oauthAccountStatus', () => {
     )
     expect(oauthAccountStatus(acc('google_calendar#a1', null))).toBe('Connected')
     expect(oauthAccountStatus(acc('google_calendar', null, false))).toBe('Not connected')
+    expect(oauthAccountStatus({ ...acc('google_calendar', null), connected: null, connection_state: 'unknown' })).toBe('Could not determine')
   })
 })
 

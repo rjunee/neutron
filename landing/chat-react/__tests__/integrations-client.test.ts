@@ -24,8 +24,8 @@ function json(body: unknown, status = 200): Response {
 const STATUS_BODY = {
   ok: true,
   scope: {
-    kind: 'cores',
-    description: 'This list covers bundled Core credential slots only.',
+    kind: 'connected_credentials',
+    description: 'This list includes connected credentials plus available bundled Core credential slots.',
   },
   oauth: [
     {
@@ -71,7 +71,7 @@ describe('IntegrationsClient.getStatus', () => {
     expect(calls[0]!.init?.method ?? 'GET').toBe('GET')
     expect((calls[0]!.init?.headers as Record<string, string>).authorization).toBe('Bearer dev:sam')
     expect(res.oauth).toHaveLength(1)
-    expect(res.scope.kind).toBe('cores')
+    expect(res.scope.kind).toBe('connected_credentials')
     expect(res.oauth[0]!.email).toBe('sam@example.com')
     expect(res.oauth[0]!.connected).toBe(true)
     expect(res.api_keys[0]!.label).toBe('openai')

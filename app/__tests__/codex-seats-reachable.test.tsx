@@ -136,7 +136,7 @@ function installFetch(): void {
     if (url.includes('/api/cores/integrations')) {
       return json({
         ok: true,
-        scope: { kind: 'cores', description: 'harness' },
+        scope: { kind: 'connected_credentials', description: 'harness' },
         oauth: [],
         api_keys: [],
       });

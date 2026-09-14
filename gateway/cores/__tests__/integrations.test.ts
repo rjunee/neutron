@@ -168,6 +168,51 @@ test('buildIntegrationsStatus reflects connected OAuth account + stored API key'
   expect(tav?.kind).toBe('api_key')
 })
 
+test('status inventory includes stored non-Core credentials and preserves all three read states', async () => {
+  const b = await makeBench()
+  await b.secrets.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: 'github',
+    plaintext: 'fixture-secret',
+  })
+  const status = await buildIntegrationsStatus({
+    registry: b.registry,
+    tokens: b.tokens,
+    secretsStore: b.secrets,
+    project_slug: OWNER,
+    slug_is_fallback: false,
+  })
+  expect(status.oauth.find((row) => row.label === 'github')).toMatchObject({
+    connected: true,
+    connection_state: 'connected',
+    core_slugs: [],
+  })
+  expect(status.oauth.find((row) => row.label === 'google_calendar')).toMatchObject({
+    connected: false,
+    connection_state: 'not_connected',
+  })
+
+  const failingStore = Object.create(b.secrets) as SecretsStore
+  failingStore.list = async () => { throw new Error('fixture read failure') }
+  const unknown = await buildIntegrationsStatus({
+    registry: b.registry,
+    tokens: new OAuthTokenManager({
+      secretsStore: failingStore,
+      owner_handle: OWNER,
+      client_id: 'cid',
+      client_secret: 'csecret',
+    }),
+    secretsStore: failingStore,
+    project_slug: OWNER,
+    slug_is_fallback: false,
+  })
+  expect(unknown.oauth.find((row) => row.label === 'google_calendar')).toMatchObject({
+    connected: null,
+    connection_state: 'unknown',
+  })
+})
+
 test('setApiKey stores then rotates the value (real state mutation)', async () => {
   const b = await makeBench()
   await setApiKey({

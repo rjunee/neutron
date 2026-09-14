@@ -59,6 +59,7 @@ export function oauthServiceTitle(label: string): string {
 
 /** One-line status for an account row. */
 export function oauthAccountStatus(acc: OAuthAccountIntegration): string {
+  if (acc.connected === null) return 'Could not determine'
   if (!acc.connected) return 'Not connected'
   if (acc.email !== null && acc.email.length > 0) return `Connected as ${acc.email}`
   return 'Connected'
@@ -101,7 +102,7 @@ export function groupOAuthAccounts(
       groups.set(service, group)
     }
     group.accounts.push(acc)
-    if (acc.connected) group.connectedCount += 1
+    if (acc.connected === true) group.connectedCount += 1
     for (const slug of acc.core_slugs) {
       if (!group.coreSlugs.includes(slug)) group.coreSlugs.push(slug)
     }

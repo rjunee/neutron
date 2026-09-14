@@ -160,9 +160,9 @@ export function createCoresIntegrationsSurface(
         return jsonResponse(200, {
           ok: true,
           scope: {
-            kind: 'cores',
+            kind: 'connected_credentials',
             description:
-              'This list covers bundled Core credential slots only. Other connected credentials are not included.',
+              'This list includes connected credentials plus available bundled Core credential slots.',
           },
           ...status,
         })
