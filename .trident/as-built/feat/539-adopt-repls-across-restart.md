@@ -2832,7 +2832,15 @@ environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are
 4. **Renew, or fence.** A claim is kept alive by renewal on the supervision tick; an owner that
    cannot confirm within `SELF_FENCE_AFTER_MS` fences itself without observing a winner.
 5. **Fence before takeover.** `ADOPTION_CLAIM_TAKEOVER_MS` exceeds the self-fence deadline by one
-   watchdog interval, so the loser has stopped before the winner starts.
+   watchdog interval, so the loser has been GIVEN ITS DEADLINE before the winner starts. Stated
+   no wider than its instrument: the constants-ordering case
+   (`adoption-claim-is-a-compare-and-set.test.ts:766`) establishes the ORDERING of the two
+   deadlines, not that the loser's process has actually stopped. Like every lease without a
+   fencing token this assumes the holder is SCHEDULED — a pause longer than one watchdog
+   interval (stop-the-world, SIGSTOP, VM freeze) can let a resumed owner run one already-queued
+   write before its own fence timer fires. The margin is one watchdog interval and it is stated
+   here rather than closed, because closing it needs the pane substrate to honour a fencing
+   token, which herdr does not offer.
 6. **Give the claim back on every path that stops owning.**
 
 #### 5. The walk — divergences, as findings
@@ -2894,9 +2902,23 @@ Two arguments that it is complete, and one that it is not:
 
 - *For:* a capability has to be **installed** by one of these two functions — there is no third
   path that builds a session — and both were read line by line for this table.
-- *For:* the displacing ones are exactly the two that write into a **process-wide map keyed by
-  something two sessions can share** (`sessionId` → credential; `sessionKey` → process record). I
-  grepped for every module-level `Map` the session paths write to; there are no others.
+- *For, and it was WRONG as first written:* the displacing ones write into a **process-wide map
+  keyed by something two sessions can share**. This bullet originally claimed there were exactly
+  two (`sessionId` → credential; `sessionKey` → process record) and that a grep found no others.
+  **It named no grep, and the claim was false.** Arbitration found a third:
+  `childByKey` (`pool-state.ts:695`) is module-level, keyed by the session key, and
+  `boot-adoption.ts` wrote it BEFORE the claim with an unconditional `set`. A losing contender
+  overwrote the winner's entry, and its own give-back then deleted the key — `release`,
+  `releaseWithReason` and `unwind` each delete iff the entry is still the child being released,
+  which after the overwrite it was — so the winner's mirror ended up ABSENT rather than restored.
+  The consequence was bounded and that is why it was a fix-up rather than a blocker: the only
+  production reader that DECIDES on `childByKey` is `supervision.ts:101-103`, where `killChild`
+  finds no mirror and falls through to the cross-restart orphan path, which terminates the row's
+  pid after a cmdline identity check. A degraded kill route, not a second owner. Now written
+  inside `enableAfterClaim`, and pinned by the `childByKey.get(key)` assertion in
+  `__tests__/pane-handle-persistence.test.ts`, which reddens when the `set` is moved back.
+  The lesson is the one this record keeps re-learning: **an absence claim that shows no grep is
+  an assertion, not a finding.**
 - *Against:* "grants an ability" is a judgement, not a property a grep can check. The watchdogs
   were nearly missed because they read like bookkeeping and in fact type into the pane.
 

@@ -2666,7 +2666,6 @@ async function adoptRow(
   }
   scanChild = child
   session.attachChild(child)
-  childByKey.set(sessionKey, child)
   try {
     // THE LIVE-PROCESS REGISTRATION IS ALSO A DISPLACING CAPABILITY, so it waits for the claim
     // too (r63, the second one the capability enumeration found).
@@ -2725,6 +2724,19 @@ async function adoptRow(
       meta: { session_id: record.sessionId, channel: record.channelName },
     })
     session.liveHandle = liveHandle
+    // THE POOL MIRROR IS ALSO A DISPLACING CAPABILITY, and it was the one member of this
+    // class the r63 enumeration missed. `childByKey` is process-wide and keyed by the
+    // SESSION KEY, which two adoption passes for one row share, and the `set` is an
+    // unconditional overwrite. Written before the claim, a losing contender overwrote the
+    // winner's mirror and then its own give-back deleted the key — `release`,
+    // `releaseWithReason` and `unwind` each delete iff the entry is still the child they
+    // are releasing, which after the overwrite it is. Net: the winner's mirror was gone
+    // rather than restored, and `killChild` (`supervision.ts`) then found no mirror and
+    // fell through to the slower cross-restart orphan path. One owner still held, so this
+    // was a degraded kill route rather than a second owner — which is why it is fixed here
+    // rather than having blocked the merge. The exact slot within this function is
+    // immaterial; what matters is that it is inside it.
+    childByKey.set(sessionKey, child)
     // THE SINK REGISTRATION IS A CAPABILITY, AND IT IS THE ONE THAT REVOKES (r63). It belongs
     // behind the claim like the eyes and hands: it is what makes this child's replies
     // acceptable, and taking it displaces whoever held this transcript id. Behind the claim

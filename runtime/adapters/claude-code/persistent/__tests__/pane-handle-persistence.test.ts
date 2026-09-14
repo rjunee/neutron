@@ -1285,6 +1285,15 @@ describe('a refused contender leaves the winner able to be answered', () => {
     // before claiming removed the winner's record and its own release then deleted what it had
     // displaced — leaving a live REPL whose death nothing would report.
     expect(processRegistry.list().filter((r) => r.name === key)).toHaveLength(1)
+    // AND THE POOL MIRROR IS STILL THE WINNER'S CHILD — the fourth representation of
+    // ownership, and the one member of this class the r63 enumeration missed. `childByKey`
+    // is process-wide and keyed by the SESSION KEY, which both passes share, and the `set`
+    // is an unconditional overwrite; written before the claim, the loser overwrote this
+    // entry and its own give-back then deleted the key, because release/releaseWithReason/
+    // unwind each delete iff the entry is still the child being released — which after the
+    // overwrite it was. So the winner's mirror ended up ABSENT rather than restored, and
+    // `killChild` fell through to the slower cross-restart orphan path.
+    expect(childByKey.get(key)).toBe(winner.child)
     // THE CONTROL, so 200 is not simply what this route always answers.
     expect(await authorize('not-a-credential')).toBe(401)
   })

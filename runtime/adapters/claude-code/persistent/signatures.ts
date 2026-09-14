@@ -203,7 +203,8 @@ export const ADOPTION_CLAIM_TAKEOVER_MS = 6 * DEFAULT_WATCHDOG_INTERVAL_MS
  * DERIVED, NOT CHOSEN, and the subtraction is the safety argument. Both this deadline and
  * {@link ADOPTION_CLAIM_TAKEOVER_MS} are measured from the SAME instant — the timestamp a
  * confirmed renewal writes into the row — so subtracting one renewal interval guarantees the
- * old holder has stopped at least a full tick BEFORE any other gateway is entitled to take
+ * old holder has been given its self-fence deadline a full tick BEFORE any other gateway is
+ * entitled to take
  * over. Two independently chosen constants could be reordered by a later edit and the overlap
  * would be an interval in which both gateways serve; this cannot be, and the mutation that
  * makes it longer than the takeover window reds.
