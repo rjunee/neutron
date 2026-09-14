@@ -11,7 +11,9 @@
  * file and this renderer disagree.
  *
  * Run `bun run scripts/spec-items-index.ts` to rewrite the index after adding,
- * retitling or reprioritising an item. Adding a file is enough; nothing else to edit.
+ * retitling or reprioritising an item. The rendered artifact deliberately contains no
+ * whole-queue counts: two branches may each add an item, and neither branch may commit a
+ * cardinality that becomes stale when both land.
  *
  * A SLUG IS IMMUTABLE ONCE MERGED (standard §5 step 1) — identity is the filename, so
  * renaming destroys one item and creates another while every external reference still
@@ -257,11 +259,6 @@ export function renderIndex(items: SpecItem[]): string {
   out.push('destroys one item and creates another while every external reference still points')
   out.push('at the old name. Retitle through the `title:` frontmatter instead.')
   out.push('')
-  const blocks = cutover.length === 1 ? 'blocks' : 'block'
-  const needs = needsSpec.length === 1 ? 'needs' : 'need'
-  out.push(`**${items.length} items.** ${cutover.length} ${blocks} the harness-orchestrator cutover; ${needsSpec.length} still ${needs} a spec.`)
-  out.push('')
-
   if (cutover.length > 0) {
     out.push('## Blocking the cutover')
     out.push('')

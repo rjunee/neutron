@@ -48,6 +48,19 @@ describe('the committed index matches the renderer', () => {
     expect(withExtra).not.toBe(readFileSync(join(DIR, INDEX_FILENAME), 'utf8'))
     expect(withExtra).toContain('not-a-real-item')
   })
+
+  // A committed aggregate is a function of the whole tree. Two branches can each render
+  // the right value and leave the merged tree stale, so no whole-queue count belongs in the
+  // artifact. Per-item rows remain exact and the test above still refuses an omitted item.
+  test('the rendered artifact does not commit a whole-queue count', () => {
+    const rendered = renderIndex([
+      { slug: 'one', title: 'One', group: 'trident', status: 'open', priority: 'P1', cutover: false, needs_spec: false },
+      { slug: 'two', title: 'Two', group: 'trident', status: 'open', priority: 'P1', cutover: false, needs_spec: false },
+    ])
+    expect(rendered).not.toContain('**2 items.**')
+    expect(rendered).toContain('(one.md)')
+    expect(rendered).toContain('(two.md)')
+  })
 })
 
 // The blocker list answers "what is still in the way", but `cutover` answers "does this
@@ -70,7 +83,7 @@ describe('the blocker list is what is still in the way, not what ever gated the 
   // The OTHER half of the conjunction, and the mutant the cases below do not catch on
   // their own: dropping the flag entirely (`i.status === 'open'`) passes every one of them
   // while listing the whole open queue as cutover blockers.
-  test('an open item that does NOT gate the cutover is absent from the list and the count', () => {
+  test('an open item that does NOT gate the cutover is absent from the list', () => {
     const rendered = renderIndex([
       { ...base, slug: 'gates-it', title: 'Gates it', status: 'open' },
       { ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' },
@@ -78,7 +91,6 @@ describe('the blocker list is what is still in the way, not what ever gated the 
     expect(blockerSection(rendered)).not.toContain('unrelated')
     expect(blockerSection(rendered)).toContain('gates-it')
     expect(rendered).toContain('(unrelated.md)') // still an item; only the blocker list drops it
-    expect(rendered).toContain('**2 items.** 1 blocks the harness-orchestrator cutover')
   })
 
   // A tree with open work but nothing gating the cutover must drop the heading, same as
@@ -86,7 +98,6 @@ describe('the blocker list is what is still in the way, not what ever gated the 
   test('no cutover item at all leaves no blocker section', () => {
     const rendered = renderIndex([{ ...base, cutover: false, priority: 'P1', slug: 'unrelated', title: 'Unrelated', status: 'open' }])
     expect(rendered).not.toContain('## Blocking the cutover')
-    expect(rendered).toContain('**1 items.** 0 block the harness-orchestrator cutover')
   })
 
   test('an open cutover item is listed', () => {
@@ -106,23 +117,11 @@ describe('the blocker list is what is still in the way, not what ever gated the 
     expect(rendered).toContain('(abandoned.md)')
   })
 
-  // The count in the summary line is computed from the same list, so it must move too —
-  // a fix applied to the section but not the sentence would leave the prose lying.
-  test('the summary count counts only the open ones', () => {
-    const rendered = renderIndex([
-      { ...base, slug: 'still-open', title: 'Still open', status: 'open' },
-      { ...base, slug: 'landed', title: 'Landed', status: 'done' },
-      { ...base, slug: 'abandoned', title: 'Abandoned', status: 'wont-do' },
-    ])
-    expect(rendered).toContain('**3 items.** 1 blocks the harness-orchestrator cutover')
-  })
-
   // With no open cutover item the heading must be absent entirely, not an empty section
   // captioned "These are the items the cutover is gated on."
   test('all-done leaves no blocker section at all', () => {
     const rendered = renderIndex([{ ...base, slug: 'landed', title: 'Landed', status: 'done' }])
     expect(rendered).not.toContain('## Blocking the cutover')
-    expect(rendered).toContain('**1 items.** 0 block the harness-orchestrator cutover')
   })
 })
 
