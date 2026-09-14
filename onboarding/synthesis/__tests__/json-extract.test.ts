@@ -7,7 +7,10 @@
  * guards.
  */
 import { describe, expect, test } from 'bun:test'
-import { extractJsonObject } from '../json-extract.ts'
+import {
+  extractJsonObject,
+  MAX_SYNTHESIS_RESPONSE_CHARS,
+} from '../json-extract.ts'
 
 describe('extractJsonObject — defensive parsing (K3 golden)', () => {
   test('direct JSON', () => {
@@ -52,5 +55,21 @@ describe('extractJsonObject — defensive parsing (K3 golden)', () => {
 
   test('garbage → null', () => {
     expect(extractJsonObject('this is not JSON at all')).toBeNull()
+  })
+
+  test('refuses oversized model output before fence parsing', () => {
+    const oversized = ' '.repeat(MAX_SYNTHESIS_RESPONSE_CHARS) + '{"overLimit":true}'
+    expect(extractJsonObject(oversized)).toBeNull()
+  })
+
+  test('bounds an oversized unterminated fence before the slow expression', () => {
+    const oversized = '```' + ' '.repeat(500_000) + 'x'
+    expect(extractJsonObject(oversized)).toBeNull()
+  })
+
+  test('preserves legitimate long fenced model output', () => {
+    const value = 'x'.repeat(48 * 1024)
+    const fenced = '```json\n' + JSON.stringify({ value }) + '\n```'
+    expect(extractJsonObject(fenced)).toEqual({ value })
   })
 })
