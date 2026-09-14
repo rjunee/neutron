@@ -12,13 +12,14 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**33 items.** 4 block the harness-orchestrator cutover; 1 still needs a spec.
+**34 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
 These are the items the harness-orchestrator cutover is gated on.
 
 - [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) — Carry a dead run's checkpoint and ralph round into its retry
+- [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
@@ -39,6 +40,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and ralph round into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
+| [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
 | [`checkpoint-write-contention`](checkpoint-write-contention.md) | Checkpoint writes survive build-load contention | P1 | — |
