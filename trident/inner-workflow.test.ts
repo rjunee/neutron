@@ -753,6 +753,13 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     expect(SRC).toContain('git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}')
     expect(SRC).toContain('git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}')
   })
+
+  test('every Forge commit instruction uses the HEAD-resolving wrapper', () => {
+    const pushStep = grabFunction('forgePushStep')
+    expect(pushStep).toContain('bash trident/commit-with-resolved-head.sh ${forgeBranch}')
+    expect(pushStep).toContain('never invoke \\`git commit\\` directly')
+    expect(pushStep.match(/\$\{guardedCommit\}/g)).toHaveLength(3)
+  })
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {
