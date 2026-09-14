@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cleanupAfterMerge } from './git-mode.ts'
@@ -7,7 +7,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import {
   assessBaseDrift,
   baseDriftHoldMessage,
-  buildMergeCleanupDeps,
+  buildMergeCleanupDeps as buildRealMergeCleanupDeps,
   detectBaseBranch,
   reviewedHeadOid,
   shouldHoldForBaseDrift,
@@ -17,8 +17,28 @@ import {
   type RunHostCommand,
 } from './merge.ts'
 import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+
+/**
+ * EVERY FAKE HOST IN THIS FILE MODELS `git diff --output=<path>` (#777).
+ *
+ * The size gate no longer measures the runner's stdout; it measures the file the
+ * command writes. A fake that answers on stdout alone therefore measures ZERO and
+ * ALLOWS — measured: a 1,048,577-byte diff reached `done` through the
+ * orchestrator's own fake. `enforceMergeDiffGate` now treats an unwritten file as
+ * "could not measure" and HOLDS, which is the right direction but would otherwise
+ * hold seventy-odd tests that have nothing to do with the size gate. Wrapping the
+ * host once here keeps those tests measuring what they mean to measure, and keeps
+ * the gate fail-closed for everything that does not write a patch.
+ */
+function buildMergeCleanupDeps(
+  host: RunHostCommand,
+  ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
+): ReturnType<typeof buildRealMergeCleanupDeps> {
+  return buildRealMergeCleanupDeps(honourDiffOutput(host) as RunHostCommand, ...rest)
+}
 
 function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({
@@ -40,11 +60,17 @@ const fail = (stderr = 'boom'): HostCommandResult => ({ ok: false, stdout: '', s
 
 function recordingHost(
   responder: (cmd: string[]) => HostCommandResult = () => ok(),
+  opts: { honour_output?: boolean } = {},
 ): { host: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
   const host: RunHostCommand = async (cmd) => {
     calls.push(cmd)
-    return responder(cmd)
+    const result = responder(cmd)
+    const output = cmd.find((arg) => arg.startsWith('--output='))
+    if (opts.honour_output !== false && result.ok && output !== undefined) {
+      writeFileSync(output.slice('--output='.length), result.stdout)
+    }
+    return result
   }
   return { host, calls }
 }
@@ -76,7 +102,11 @@ describe('pre-merge diff-size gate', () => {
 
   function prGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
     return recordingHost((cmd) => {
-      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      if (cmd.includes('diff') && cmd.includes('--binary')) {
+        const output = cmd.find((arg) => arg.startsWith('--output='))
+        if (output === undefined) return fail('missing bounded diff output')
+        return ok(diff)
+      }
       return noDrift(cmd) ?? ok()
     })
   }
@@ -101,12 +131,40 @@ describe('pre-merge diff-size gate', () => {
     expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
   })
 
+  // "NOTHING WROTE A PATCH" IS NOT "THE PATCH IS ZERO BYTES", AND ONLY ONE OF
+  // THOSE MAY MERGE. The gate stopped reading the command's stdout, so the file is
+  // now the only evidence there is. Measured on the first version of this change:
+  // a host that answered the diff on stdout without honouring `--output=` measured
+  // ZERO, and a 1,048,577-byte diff MERGED. This builds the deps WITHOUT the
+  // output-honouring wrapper above, so it is the real unwritten-file case.
+  test('a host that writes no patch file HOLDS as unmeasurable, and never merges', async () => {
+    const { host, calls } = recordingHost((cmd) => {
+      if (cmd.includes('diff') && cmd.includes('--binary')) return ok('x'.repeat(PINNED_LIMIT_BYTES + 1))
+      return noDrift(cmd) ?? ok()
+    }, { honour_output: false })
+    const error = await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildRealMergeCleanupDeps(host),
+    ).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(TridentMergeDiffHold)
+    // NULL, not a number: this refusal says "I could not find out how big this
+    // diff is", which is a different refusal from "it is too big" and is the only
+    // one of the two whose retry advice is true.
+    expect(error).toMatchObject({ measured_bytes: null })
+    expect((error as Error).message).toContain('could not be measured')
+    expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
+  })
+
   // LOCAL MODE IS A SECOND CALL SITE, AND AN UNTESTED GUARD IS NOT A GUARD.
   // Deleting the local `enforceMergeDiffGate` call left every test above green:
   // the pr-mode cases cannot reach it. These two are what make that deletion red.
   function localGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
     return recordingHost((cmd) => {
-      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      if (cmd.includes('diff') && cmd.includes('--binary')) {
+        const output = cmd.find((arg) => arg.startsWith('--output='))
+        if (output === undefined) return fail('missing bounded diff output')
+        return ok(diff)
+      }
       // `merge --abort` / `rebase --abort` are the stale-state probes; a CLEAN
       // repo fails them (nothing is in progress).
       return cmd.includes('--abort') ? fail('no operation in progress') : ok()
@@ -169,7 +227,8 @@ describe('pre-merge diff-size gate', () => {
       buildMergeCleanupDeps(host),
     )
     expect(calls.filter((c) => c.includes('--binary'))).toEqual([
-      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index',
+        expect.stringMatching(/^--output=.*\/merge\.diff$/), '--end-of-options',
         'refs/remotes/origin/main...refs/remotes/origin/feat-x'],
     ])
   })
@@ -178,7 +237,8 @@ describe('pre-merge diff-size gate', () => {
     const { host, calls } = localGateHost('')
     await cleanupAfterMerge(localRun(), buildMergeCleanupDeps(host, { base_branch: 'main' }))
     expect(calls.filter((c) => c.includes('--binary'))).toEqual([
-      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index',
+        expect.stringMatching(/^--output=.*\/merge\.diff$/), '--end-of-options',
         'refs/heads/main...refs/heads/feat-x'],
     ])
   })

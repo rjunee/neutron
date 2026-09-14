@@ -18,6 +18,7 @@ import { runProgressForItem } from './run-progress.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -332,7 +333,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       // #542 — a host that answers `rev-parse` with '' is a repo the drift gate
       // cannot assess, and pr mode holds on that. Answer as a healthy repo whose
       // base has not moved, so this test exercises the board reconcile it is about.
-      run_host: async (cmd) => ({
+      run_host: honourDiffOutput(async (cmd) => ({
         ok: true,
         stdout:
           (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
@@ -345,7 +346,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
               : '',
         stderr: '',
         exit_code: 0,
-      }),
+      })),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

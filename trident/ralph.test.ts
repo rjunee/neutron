@@ -24,6 +24,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 /** #542 — the base-drift gate has to be able to READ the repo. A host that
@@ -99,7 +100,7 @@ describe('Ralph mode threads through to the inner loop', () => {
     prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async (cmd) => driftFreeHost(cmd),
+      run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

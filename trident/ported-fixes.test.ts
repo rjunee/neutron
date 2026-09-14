@@ -34,6 +34,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { computeTransition } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 /** #542 — the base-drift gate has to be able to READ the repo. A host that
@@ -144,7 +145,7 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async (cmd) => driftFreeHost(cmd),
+      run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
@@ -167,7 +168,7 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async (cmd) => driftFreeHost(cmd),
+      run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       now: () => new Date(0).toISOString(),
@@ -247,7 +248,7 @@ describe('FIX 5 — no phantom-ID race (ambiguous session never auto-terminates)
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async (cmd) => driftFreeHost(cmd),
+      run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       now: () => new Date(0).toISOString(),

@@ -28,6 +28,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -86,7 +87,7 @@ function freshBoot(
     prove_mutation: buildSimMutationProofGate(),
     fire_workflow: s.fire_workflow,
     db_path: join(tmp, 'project.db'),
-    run_host: async (cmd) => driftFreeHost(cmd),
+    run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
   }
@@ -160,7 +161,7 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async (cmd) => driftFreeHost(cmd),
+      run_host: honourDiffOutput(async (cmd) => driftFreeHost(cmd)),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

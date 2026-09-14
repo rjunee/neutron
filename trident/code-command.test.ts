@@ -28,6 +28,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -448,10 +449,10 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async (cmd) => {
+      run_host: honourDiffOutput(async (cmd) => {
         hostCalls.push(cmd)
         return driftFreeHost(cmd)
-      },
+      }),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
