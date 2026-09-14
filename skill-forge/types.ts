@@ -12,7 +12,7 @@ export interface WorkflowStep {
   /**
    * Stable identifier of the action — a tool name, a slash-command, or a
    * sub-phase label (e.g. `doc_search`, `tasks.create`, `forge-fix`). Used
-   * for both display and the dedupe signature, so it must be normalized
+   * as one component of the dedupe signature, so it must be normalized
    * (lower-case, no volatile args).
    */
   action: string
