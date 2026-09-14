@@ -31,3 +31,41 @@ Package resolution continuously maintains the boundary from the `exports` map (`
 ### Deliberately not changed
 
 No source import was rewritten because both currently imported subpaths remain sanctioned. No `typesVersions` map was added, no sibling package was changed, and no product decision in `SPEC.md` or a spec item changed.
+
+### Review round 1 — the proof was a script nothing runs
+
+The narrowing itself is correct and both directions are real: under `"./*": "./*"`
+`@neutronai/jwt-validator/resolve-key.ts` RESOLVES, and under the explicit map it
+does not (`ERR_MODULE_NOT_FOUND` naming the specifier). Verified by mutation
+rather than read.
+
+What did not hold is the instrument. The proof shipped as
+`npm run test:jwt-validator-exports`, a `package.json` script that appears in no
+workflow, in no `scripts/run-tests.sh` line, and in nothing else in the tree — so
+after this merge nothing would ever have run it again and restoring the wildcard
+would have been silent. The as-built cited its mutation result as the evidence,
+which overstates what a never-executed command can establish.
+
+Replaced with `jwt-validator/__tests__/package-exports.test.ts`, which CI's shards
+discover and run. The script is removed rather than left beside it: one armed
+instrument, not two of which one rots. It pins, and each was mutated:
+
+| direction | mutation | result |
+|---|---|---|
+| internals refused | restore `"./*": "./*"` (`package.json:8`) | RED — `resolve-key.ts`, `validator.ts` and the no-wildcard assertion |
+| sanctioned entry survives | drop `"./claims.ts"` (`package.json:8`) | RED — the `claims.ts` resolution case |
+
+The refusal is asserted as a RESOLUTION refusal (`ERR_MODULE_NOT_FOUND` + the
+specifier), not merely "something threw", which a module that failed to evaluate
+would also satisfy.
+
+**No types map disagrees with the runtime map**: this package declares neither
+`types` nor `typesVersions` — consumers import the `.ts` sources directly — so
+there is no second surface still publishing the tree. Pinned so that adding one
+later has to come past the test.
+
+**No consumer relied on a deep path.** Every import in the repository is
+`@neutronai/jwt-validator/index.ts`, `/claims.ts`, or the bare specifier
+(`connect/api/jwt-bearer-middleware.ts:20-21`, `runtime/connect-handlers.ts:27`,
+`open/connect-node-identity.ts:41` and the `connect/__tests__` suite). Nothing in
+the tree had to change, and the consumer suites are green.
