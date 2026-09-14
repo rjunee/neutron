@@ -181,6 +181,7 @@ interface RunOpts {
   integrity?: string | null
   /** PATH holds ONLY the mock bin — no perl, no git, nothing from the system. */
   bareBin?: boolean
+  withPerl?: boolean
   /** Put a `git` on PATH that never returns for `ls-remote`, and delegates otherwise. */
   hangingLsRemote?: boolean
   /**
@@ -384,6 +385,7 @@ function run(opts: RunOpts = {}): RunResult {
 
   const bin = join(dir, 'bin')
   mkdirSync(bin, { recursive: true })
+  if (opts.withPerl) symlinkSync('/usr/bin/perl', join(bin, 'perl'))
   const path =
     opts.codexLoginExit === null || opts.bareBin === true
       ? bin
@@ -2825,8 +2827,11 @@ describe('atomic trailer publication', () => {
   })
 
   test('a concurrent reader never observes a partial trailer', async () => {
+    // This observer is a test instrument outside the build lifetime. Leaving it
+    // in the build claim makes correct teardown kill it before its next poll.
+    // All atomicity assertions remain unchanged.
     const observer =
-      `sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE" > "$HOME/observed.trailer"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
+      `env -u NEUTRON_LANE_CLAIM sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE" > "$HOME/observed.trailer"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
     const r = run({
       authed: true,
       codexLoginExit: 0,
@@ -2988,4 +2993,24 @@ describe('fixture reaping — the suite must not leak its own temp dirs', () => 
     expect(existsSync(survivor)).toBe(false)
     expect(FIXTURE_DIRS.length).toBe(0)
   })
+})
+
+
+test('lane ownership reaches the real Codex shell policy', () => {
+  const r = run({ authed: true, codexLoginExit: 0 })
+  const line = r.codexEnv.split('\n').find((value) => value.startsWith('NEUTRON_LANE_CLAIM='))
+  expect(line).toBeDefined()
+  const raw = line!.slice('NEUTRON_LANE_CLAIM='.length)
+  const claim = JSON.parse(raw) as { id: string; pid: number; start: string; boot: string }
+  expect(claim.id).toMatch(/^[0-9a-f]{32}$/)
+  expect(claim.pid).toBeGreaterThan(1)
+  expect(claim.start).toMatch(/^\d+$/)
+  expect(r.codexArgv).toContain(`shell_environment_policy.set.NEUTRON_LANE_CLAIM='${raw}'`)
+})
+
+test('missing process ownership support joins exit-3 deferral', () => {
+  const r = run({ authed: true, codexLoginExit: 0, bareBin: true, withPerl: true })
+  expect(r.status).toBe(3)
+  expect(r.stderr).toContain('CODEX_BUILD_PROCESS_OWNERSHIP_UNAVAILABLE')
+  expect(r.codexArgv).toBe('')
 })

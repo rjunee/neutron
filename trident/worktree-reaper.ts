@@ -2,7 +2,8 @@
  * Proactive backstop for the two things a Trident run leaks when it ends anywhere
  * other than the merge path: its WORKTREE, and its BRANCH REF.
  *
- * It NEVER forces removal and NEVER kills a process, and it skips the entire sweep
+ * The worktree pass NEVER forces removal; the separate process pass uses pidfds.
+ * The worktree pass skips its sweep
  * when liveness cannot be proven because `/proc` is absent. This mirrors
  * `codex-build.sh`'s `holder_is_live` prior art: unreadable entries owned by other
  * uids are skipped per pid, because every lane in one instance shares the gateway's
@@ -334,7 +335,8 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop'
@@ -1943,8 +1945,33 @@ export function buildWorktreeReaperLoop(
     name: 'trident-worktree-reaper',
     intervalMs: opts.interval_ms ?? DEFAULT_REAP_INTERVAL_MS,
     immediate: true,
-    tick: () => sweepTridentWorktrees(opts).then(logSummaryIfActed),
+    tick: async () => {
+      // Runs in the gateway, independently of the build owner. A stopped lane
+      // cannot disable this tick; a stopped gateway sweeps again at startup.
+      await sweepLaneProcesses(opts)
+      logSummaryIfActed(await sweepTridentWorktrees(opts))
+    },
     ...(timerSeams.setTimer === undefined ? {} : { setTimer: timerSeams.setTimer }),
     ...(timerSeams.clearTimer === undefined ? {} : { clearTimer: timerSeams.clearTimer }),
   })
+}
+
+/** A failed probe is an operational error, never evidence that a lane is dead. */
+export async function sweepLaneProcesses(opts: WorktreeReaperOptions): Promise<void> {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const argv = ['python3', join(here, 'lane-processes.py'), 'sweep']
+  for (const repo of opts.store.listRepoPaths()) argv.push('--repo', repo)
+  for (const run of opts.store.listNonTerminal(Number.MAX_SAFE_INTEGER)) {
+    if (run.worktree) argv.push('--protect', run.worktree)
+  }
+  try {
+    const result = await opts.run_host(argv, here)
+    if (result.exit_code !== 0 || result.timed_out) {
+      log.error('lane_process_sweep_failed', { error: hostText(result) })
+      return
+    }
+    log.info('lane_process_sweep', { report: result.stdout.trim() })
+  } catch (error) {
+    log.error('lane_process_sweep_failed', { error: errText(error) })
+  }
 }

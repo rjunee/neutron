@@ -39,6 +39,8 @@ Requirements:
 - The `claude` CLI (Claude Code), authenticated with your own subscription
   (`claude setup-token`). Neutron runs on your own Claude credentials.
 - `git`.
+- Python 3.9+ and Linux pidfd support for Codex build lanes
+  (`trident/lane-processes.py`).
 
 Get a local instance running from a checkout:
 
