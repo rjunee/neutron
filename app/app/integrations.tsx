@@ -187,11 +187,15 @@ export default function IntegrationsScreen() {
   }, [codexClient]);
 
   // ── GitHub: the token a build pushes and opens pull requests with ──
+  const githubRevision = useRef(0);
   const fetchGitHub = useCallback(async () => {
     if (githubClient === null) return;
+    const revision = githubRevision.current;
     try {
-      setGithub(await githubClient.status());
+      const status = await githubClient.status();
+      if (revision === githubRevision.current) setGithub(status);
     } catch {
+      if (revision !== githubRevision.current) return;
       // Same rule as Codex: an unreachable server reads as "not connected" and
       // writes nothing. It must never look like a credential to supply again.
       //
@@ -240,12 +244,29 @@ export default function IntegrationsScreen() {
     setGithubError(null);
     setGithubCopied(false);
     try {
+      githubRevision.current++;
       setGithub(await githubClient.start());
     } catch (err) {
       // Shown verbatim: "no client id is configured" and "GitHub refused the
       // request" need different things from the owner.
       setGithubError(formatErr(err));
     } finally {
+      githubRevision.current++;
+      setGithubBusy(false);
+    }
+  }, [githubClient, githubBusy]);
+
+  const handleDisconnectGitHub = useCallback(async () => {
+    if (githubClient === null || githubBusy) return;
+    githubRevision.current++;
+    setGithubBusy(true);
+    setGithubError(null);
+    try {
+      setGithub(await githubClient.disconnect());
+    } catch (err) {
+      setGithubError(formatErr(err));
+    } finally {
+      githubRevision.current++;
       setGithubBusy(false);
     }
   }, [githubClient, githubBusy]);
@@ -746,6 +767,18 @@ export default function IntegrationsScreen() {
                       : 'Not connected — builds cannot push or open pull requests'}
               </Text>
             </View>
+            {github !== null && (github.status === 'connected' || github.status === 'awaiting_owner') ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Disconnect GitHub"
+                testID="github-disconnect"
+                disabled={githubBusy}
+                onPress={() => void handleDisconnectGitHub()}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.primaryBtnText}>{githubBusy ? 'Working…' : 'Disconnect'}</Text>
+              </Pressable>
+            ) : null}
             {/* A NEGATIVE gate, matching the status line above and the web
                 sibling's else-branch. The status arrives off the wire and is
                 only CAST to the three-state union, so a status this build has
@@ -773,6 +806,11 @@ export default function IntegrationsScreen() {
               </Pressable>
             ) : null}
           </View>
+
+          <Text style={styles.muted}>
+            Disconnect removes the saved token. Commands already running may still hold it.
+            Revoke it in GitHub settings to invalidate those copies; reconnect here to replace it.
+          </Text>
 
           {github !== null && github.status === 'awaiting_owner' ? (
             <View style={styles.keyBlock}>
