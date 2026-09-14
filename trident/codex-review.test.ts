@@ -96,7 +96,7 @@ function run(opts: RunOpts = {}): {
     // is observable — a silently-truncated diff is invisible from the exit code.
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${opts.mockCodexSilent === true ? '' : 'echo "mock codex review body"\necho "VERDICT: APPROVE"\n'}exit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" >> ${JSON.stringify(join(dir, 'codex-argv.txt'))}\ncat >> ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${opts.mockCodexSilent === true ? '' : 'echo "mock codex review body"\necho "VERDICT: APPROVE"\n'}exit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -408,153 +408,116 @@ describe('exit 0 with an EMPTY final message is DEFERRED, never an approval', ()
   })
 })
 
-describe('trident/codex-review.sh — TRUNCATION is disclosed to the model', () => {
-  /** A diff of `n` numbered lines; line k is uniquely greppable as `+line-k`. */
-  const numberedDiff = (n: number): string =>
-    `diff --git a/x b/x\n${Array.from({ length: n - 1 }, (_, i) => `+line-${i + 1}`).join('\n')}\n`
+describe('trident/codex-review.sh — code coverage is exhaustive and character-budgeted', () => {
+  const block = (path: string, body: string): string =>
+    `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n+${body}\n`
 
-  test('an over-limit diff announces the truncation and the line counts in the PROMPT', () => {
-    // 20-line diff, limit 5. Silently, codex would scope a verdict to "the diff"
-    // having read a quarter of it — an 11k-line PR approved on its first 3000 lines.
-    const { status, codexStdin, stderr } = run({
+  test('a leading prose file cannot consume the window or produce an approval about prose', () => {
+    const prose =
+      block('.trident/as-built/change.md', 'p'.repeat(500)) +
+      block('docs/generated.ts', 'DOCS_MARKER_680') +
+      block('README.md', 'MARKDOWN_MARKER_680') +
+      block('SPEC.md', 'SPEC_MARKER_680')
+    const code = block('src/answer.ts', 'CODE_MARKER_680')
+    const { status, codexStdin, stdout } = run({
       authed: true,
       codexLoginExit: 0,
-      diffFileContent: numberedDiff(20),
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+      diffFileContent: prose + code,
+      env: { NEUTRON_CODEX_DIFF_CHARACTER_LIMIT: '80' },
     })
     expect(status).toBe(0)
-    expect(codexStdin).toContain('TRUNCATED DIFF')
-    // The ACTUAL numbers, not a vague hedge: 5 of 20 shown, 15 withheld.
-    expect(codexStdin).toContain('FIRST 5 lines of a 20-line diff')
-    expect(codexStdin).toContain('remaining 15 lines were NOT provided')
-    // …and the verdict is explicitly re-scoped to what was read.
-    expect(codexStdin).toContain('SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ')
-    expect(codexStdin).toContain('reviewed only the first 5 of 20 lines')
-    // The truncation is also visible to the operator in the wrapper's stderr.
-    expect(stderr).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
-    // Truncation still actually happens: line 4 is in, line 6 is out.
-    expect(codexStdin).toContain('+line-4')
-    expect(codexStdin).not.toContain('+line-6')
+    expect(codexStdin).not.toContain('p'.repeat(100))
+    expect(codexStdin).not.toContain('DOCS_MARKER_680')
+    expect(codexStdin).not.toContain('MARKDOWN_MARKER_680')
+    expect(codexStdin).not.toContain('SPEC_MARKER_680')
+    expect(codexStdin).toContain('CODE_MARKER_680')
+    expect(codexStdin).toContain('reviews 1 of 1 changed code files')
+    expect(stdout).toContain('VERDICT: APPROVE')
   })
 
-  test('a diff AT the limit is not truncated and carries NO truncation notice', () => {
-    // Off-by-one guard: exactly DIFF_LINE_LIMIT lines are fully shown, so claiming
-    // truncation here would teach the model to hedge a review it read in full.
-    const { status, codexStdin, stderr } = run({
+  test('every character chunk is reviewed and aggregate coverage is explicit', () => {
+    const diff = block('src/large.ts', `${'A'.repeat(70)}END_MARKER_680`)
+    const { status, codexStdin } = run({
       authed: true,
       codexLoginExit: 0,
-      diffFileContent: numberedDiff(5),
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+      diffFileContent: diff,
+      env: { NEUTRON_CODEX_DIFF_CHARACTER_LIMIT: '50' },
     })
     expect(status).toBe(0)
-    expect(codexStdin).toContain('+line-4')
-    expect(codexStdin).not.toContain('TRUNCATED')
-    expect(codexStdin).not.toContain('SCOPE YOUR VERDICT')
-    expect(stderr).not.toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(codexStdin).toContain('chunk 1 of 4')
+    expect(codexStdin).toContain('chunk 4 of 4')
+    expect(codexStdin).toContain('END_MARKER_680')
+    expect(codexStdin.match(/reviews 1 of 1 changed code files/g)).toHaveLength(4)
   })
 
-  test('an UNDER-limit diff carries no truncation notice', () => {
-    const { codexStdin } = run({
-      authed: true,
-      codexLoginExit: 0,
-      diffFileContent: numberedDiff(3),
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
-    })
-    expect(codexStdin).not.toContain('TRUNCATED')
+  test('a fitting code diff uses one call and cannot fail from prose filtering', () => {
+    const diff = block('src/small.ts', 'small')
+    const { status, codexStdin } = run({ authed: true, codexLoginExit: 0, diffFileContent: diff })
+    expect(status).toBe(0)
+    expect(codexStdin).toContain('chunk 1 of 1')
+    expect(codexStdin).toContain('small')
   })
 
-  test('a diff whose FINAL line is unterminated is counted in full in the disclosure', () => {
-    // 6 lines, the 6th unterminated, limit 5 → truncated. This pins the re-termination,
-    // not the counter: counting the FILE's newlines (`wc -l < file`) reports 5 for
-    // exactly the shape git writes with "\\ No newline at end of file", and the
-    // disclosure would then read the absurd "the FIRST 5 lines of a 5-line diff".
-    // (The truncation FACT is a string comparison and never depends on this count.)
-    const { codexStdin } = run({
+  test('one requesting chunk makes the aggregate verdict request changes', () => {
+    const diff = block('src/aggregate.ts', `FIRST_MARKER_680${'x'.repeat(100)}LAST_MARKER_680`)
+    const { status, stdout } = run({
       authed: true,
       codexLoginExit: 0,
-      diffFileContent: 'diff --git a/x b/x\n+line-1\n+line-2\n+line-3\n+line-4\n+line-5',
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
-    })
-    expect(codexStdin).toContain('FIRST 5 lines of a 6-line diff')
-  })
-
-  test('TRAILING BLANK lines do not fake a truncation — the whole diff went out', () => {
-    // 4 content lines + 4 trailing blanks, limit 5. Counting the file's lines said
-    // "9" and the prompt asserted content had been WITHHELD from a diff codex was
-    // handed in full — a false hedge on a review that was actually complete.
-    const { codexStdin, stderr } = run({
-      authed: true,
-      codexLoginExit: 0,
-      diffFileContent: 'diff --git a/x b/x\n+line-1\n+line-2\n+line-3\n\n\n\n\n',
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
-    })
-    expect(codexStdin).toContain('+line-3')
-    expect(codexStdin).not.toContain('TRUNCATED')
-    expect(stderr).not.toContain('CODEX_REVIEW_DIFF_TRUNCATED')
-  })
-
-  test('a BROKEN awk cannot silence the disclosure — it degrades to a hedge, it does not fail open', () => {
-    // The line count is cosmetic; the truncation FACT is not. With the count
-    // unavailable the wrapper used to run the `-gt` test on an empty string, print
-    // "integer expression expected", and hand codex a silently-truncated diff with
-    // NO notice at all — exactly the whole-diff-scoped APPROVE this guard exists for.
-    const { status, codexStdin, stderr } = run({
-      authed: true,
-      codexLoginExit: 0,
-      brokenAwk: true,
-      diffFileContent: numberedDiff(20),
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+      diffFileContent: diff,
+      env: {
+        NEUTRON_CODEX_DIFF_CHARACTER_LIMIT: '80',
+        NEUTRON_CODEX_EXEC_CMD:
+          'p=$(cat); if printf "%s" "$p" | grep -q FIRST_MARKER_680; then echo "VERDICT: REQUEST_CHANGES"; else echo "VERDICT: APPROVE"; fi',
+      },
     })
     expect(status).toBe(0)
-    expect(codexStdin).toContain('TRUNCATED DIFF')
-    expect(codexStdin).toContain('SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ')
-    expect(codexStdin).toContain('FIRST 5 lines of a LONGER diff')
-    expect(stderr).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
-    // Still truncated in fact, and no bogus arithmetic leaked into the prompt.
-    expect(codexStdin).not.toContain('+line-6')
-    expect(codexStdin).not.toContain('integer expression expected')
+    expect(stdout.trim().endsWith('VERDICT: REQUEST_CHANGES')).toBe(true)
   })
 
-  test('a broken awk on an UNDER-limit diff still claims nothing (the hedge is not unconditional)', () => {
-    const { codexStdin } = run({
+  test('a prose-only window defers before codex can emit an approving verdict', () => {
+    const { status, stderr, stdout, codexStdin } = run({
       authed: true,
       codexLoginExit: 0,
-      brokenAwk: true,
-      diffFileContent: numberedDiff(3),
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+      diffFileContent: block('docs/only.md', 'prose'),
+      env: { NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; echo "VERDICT: APPROVE"' },
     })
-    expect(codexStdin).not.toContain('TRUNCATED')
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(stdout).not.toContain('VERDICT: APPROVE')
+    expect(codexStdin).toBe('')
   })
 
-  test('a 2MB diff is prepared in seconds, not minutes (the whitespace guard is O(n), not quadratic)', () => {
-    // The guard was `[ -z "${DIFF//[[:space:]]/}" ]`, whose cost in bash is
-    // QUADRATIC — ~4x per doubling — and it runs on EVERY review before codex is
-    // even called: 3.2s on a normal at-cap diff, and on a diff THIS size it does not
-    // finish in two minutes. The `case` form below does it in ~0.12s.
-    const big = `diff --git a/x b/x\n${Array.from({ length: 45_000 }, (_, i) => `+line-${i} some payload text here padding padding`).join('\n')}\n`
-    expect(big.length).toBeGreaterThan(2 * 1024 * 1024)
-    const started = Date.now()
-    const { status } = run({
+  test('an explicit empty exclusion override reviews markdown too', () => {
+    const { status, codexStdin } = run({
       authed: true,
       codexLoginExit: 0,
-      diffFileContent: big,
-      // Above the line count, so the WHOLE 2MB reaches the guard — the cap would
-      // otherwise hide the cost behind the first 3000 lines and this would measure
-      // nothing. A real run pays it on the capped diff, which was already 3.2s.
-      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '50000' },
+      diffFileContent: block('docs/override.md', 'OVERRIDE_MARKER_680'),
+      env: { NEUTRON_CODEX_REVIEW_EXCLUDE_PATHS_FILE: '' },
     })
-    const elapsed = Date.now() - started
     expect(status).toBe(0)
-    // WALL-CLOCK-BOUND-OK: this is a COMPLEXITY assertion about a BASH script, and
-    // elapsed time is the only observable that separates the O(n) `case` form from
-    // the quadratic `${DIFF//[[:space:]]/}` one. Nothing deterministic can replace
-    // it: both forms produce the SAME exit code, the SAME stderr and the SAME prompt
-    // — every other assertion in this file stays green while the wrapper burns half
-    // a minute before codex is even called, which is how the cost went unnoticed in
-    // the first place. The margin is measured, not hoped for: 1.3s on this path
-    // against 22.5s with the quadratic form restored (a mutation run), so the bound
-    // sits 6x above the good path and 3x below the bad one. ISSUES #438.
-    expect(elapsed).toBeLessThan(8_000)
+    expect(codexStdin).toContain('OVERRIDE_MARKER_680')
+  })
+
+  test('an invalid character budget defers before review', () => {
+    const { status, stderr, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_DIFF_CHARACTER_LIMIT: 'lines' },
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_INVALID_BUDGET')
+    expect(codexStdin).toBe('')
+  })
+
+  test('an unreadable exclusion override defers before review', () => {
+    const { status, stderr, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_REVIEW_EXCLUDE_PATHS_FILE: '/does-not-exist' },
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EXCLUDES_UNREADABLE')
+    expect(codexStdin).toBe('')
   })
 })
 

@@ -1,0 +1,6 @@
+# Cross-model review is for executable change. One shell glob per line.
+# Override the whole list with NEUTRON_CODEX_REVIEW_EXCLUDE_PATHS_FILE.
+.trident/**
+docs/**
+*.md
+SPEC.md

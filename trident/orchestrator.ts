@@ -2886,9 +2886,8 @@ export function buildTridentOrchestrator(
     }
     // AND THE FILES NO REVIEWER HAS SEEN COME FIRST.
     //
-    // MEASURED (Argus r16, three reviewers): the artifact is 6,692 lines and the
-    // cross-model reviewer reads the first `ARGUS_DIFF_LINE_LIMIT` (3,000) of it,
-    // reporting `CODEX_REVIEW_DIFF_TRUNCATED`. In default git order — plain
+    // MEASURED (Argus r16, three reviewers, before #680): the artifact was 6,692
+    // lines and the cross-model reviewer read only its first 3,000. In default git order — plain
     // alphabetical — every write-site file of that round (`trident/checkpoint.sh`
     // at line 3,417, `inner-workflow.mjs` at 4,427, `orchestrator.ts` at 5,132,
     // `run-disposition.ts` at 5,851, `store.ts` at 6,360) fell past the window, so

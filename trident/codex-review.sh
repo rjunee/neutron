@@ -151,9 +151,15 @@ case "$BASE_REF" in
     ;;
 esac
 : "${CODEX_HOME:=}"
-# How many lines of diff to hand codex — mirror Argus's oversized-diff guard so a
-# huge diff can't blow the arg length / codex context. Overridable for tests.
-DIFF_LINE_LIMIT="${NEUTRON_CODEX_DIFF_LINE_LIMIT:-3000}"
+# Codex's measured input ceiling is in CHARACTERS, not lines. Measured 2026-09-14:
+# 1,219,586 characters was refused and 878,351 was accepted; 1,048,576 is the
+# named ceiling used here. Tests may lower it without changing the production unit.
+CODEX_INPUT_CHARACTER_LIMIT=1048576
+DIFF_CHARACTER_LIMIT="${NEUTRON_CODEX_DIFF_CHARACTER_LIMIT:-$CODEX_INPUT_CHARACTER_LIMIT}"
+# Prose exclusions are configuration, not parser policy. An explicit empty value
+# disables filtering; a different readable file replaces the shipped defaults.
+DEFAULT_DIFF_EXCLUDE_PATHS_FILE="${BASH_SOURCE[0]%/*}/../config/codex-review-exclude-paths.txt"
+DIFF_EXCLUDE_PATHS_FILE="${NEUTRON_CODEX_REVIEW_EXCLUDE_PATHS_FILE-$DEFAULT_DIFF_EXCLUDE_PATHS_FILE}"
 AUTH_RETRY_DELAY="${NEUTRON_CODEX_AUTH_RETRY_DELAY:-2}"
 
 # =============================================================================
@@ -451,21 +457,30 @@ else
   rm -f "$DIFF_ERR_FILE"
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
-DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
-# The FULL size, for the disclosure text only. The `printf '%s\n'` is what makes the
-# count exact, NOT the choice of counter: `$(...)` already ate FULL_DIFF's trailing
-# newline, and re-terminating it counts a final unterminated line that the FILE's own
-# newline count (`wc -l < "$NEUTRON_CODEX_DIFF_FILE"`, the shape git writes for
-# "\ No newline at end of file") is one short of. Through THIS pipeline `wc -l` counts
-# the same (measured) — the counter is not the load-bearing part and no claim is made
-# for awk over it; the `case` below is what rejects whatever a counter prints if it is
-# not a bare integer.
-# Truncation itself is decided WITHOUT this count (below), so a missing/broken awk
-# degrades the disclosure's NUMBERS and can never silence the disclosure.
-DIFF_TOTAL_LINES=$(printf '%s\n' "$FULL_DIFF" | awk 'END { print NR }' 2>/dev/null)
-case "$DIFF_TOTAL_LINES" in
-  '' | *[!0-9]*) DIFF_TOTAL_LINES='' ;;
+case "$DIFF_CHARACTER_LIMIT" in
+  '' | *[!0-9]* | 0) echo "CODEX_REVIEW_INVALID_BUDGET: character budget must be a positive integer. DEFERRED — do NOT treat as an approval." >&2; exit 3 ;;
 esac
+if [ -n "$DIFF_EXCLUDE_PATHS_FILE" ] && [ ! -r "$DIFF_EXCLUDE_PATHS_FILE" ]; then
+  echo "CODEX_REVIEW_EXCLUDES_UNREADABLE: cannot read configured exclusion list. DEFERRED — do NOT treat as an approval." >&2
+  exit 3
+fi
+if [ -n "$DIFF_EXCLUDE_PATHS_FILE" ]; then
+  DIFF=$(DIFF_EXCLUDE_PATHS_FILE="$DIFF_EXCLUDE_PATHS_FILE" perl -MText::ParseWords -e '
+    my @g; open my $c, "<", $ENV{DIFF_EXCLUDE_PATHS_FILE} or exit 70;
+    while (<$c>) { chomp; s/\r$//; next if /^\s*(?:#|$)/; push @g, $_ }
+    sub excluded { my ($p)=@_; for my $g (@g) { my $r=quotemeta($g); $r=~s{\\\*\\\*}{.*}g; $r=~s{\\\*}{[^/]*}g; $r=~s{\\\?}{.}g; return 1 if $p=~/^$r$/ } 0 }
+    local $/=undef; my $a=<STDIN>//"";
+    for my $b (split /(?=^diff --git )/m,$a) { next unless $b=~/^diff --git (.*)$/m; my @p=shellwords($1); my $p=@p>=2?$p[-1]:""; $p=~s{^b/}{}; print $b unless excluded($p) }
+  ' <<<"$FULL_DIFF")
+  FILTER_EXIT=$?
+  if [ "$FILTER_EXIT" -ne 0 ]; then
+    echo "CODEX_REVIEW_FILTER_FAILED: could not apply the configured prose exclusions. DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+  fi
+else
+  DIFF="$FULL_DIFF"
+fi
+DIFF_TOTAL_FILES=$(printf '%s\n' "$DIFF" | grep -c '^diff --git ' || true)
 
 # A diff that is only WHITESPACE is nothing to review either. `$(...)` already eats
 # trailing newlines, but spaces/tabs survive and would sail past a bare -z test and
@@ -487,44 +502,10 @@ case "$DIFF" in
 esac
 
 # ── TRUNCATION DISCLOSURE ─────────────────────────────────────────────────────
-# The diff is capped at DIFF_LINE_LIMIT lines above. Told nothing, the model scopes
-# its verdict to "the diff" and APPROVEs an 11k-line change on the strength of its
-# first 3000 lines. So when we truncate, SAY SO in the prompt and make the verdict
-# scope itself to what was actually read.
-#
-# TRUNCATION IS A STRING COMPARISON, NOT A LINE COUNT. Comparing what we will send
-# against the whole diff is exact and needs no external tool: it can neither MISS a
-# truncation (a line count that failed to compute used to fail OPEN — silently
-# truncated, no notice) nor INVENT one (trailing blank lines used to inflate the
-# count into a false "content was withheld" claim about a diff delivered in full).
-# The line NUMBERS are cosmetic, so they degrade on their own when awk is unusable.
-TRUNCATION_NOTICE=""
-if [ "$DIFF" != "$FULL_DIFF" ]; then
-  if [ -n "$DIFF_TOTAL_LINES" ]; then
-    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a ${DIFF_TOTAL_LINES}-line diff; the remaining $((DIFF_TOTAL_LINES - DIFF_LINE_LIMIT)) lines were NOT provided"
-    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} lines"
-    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} diff lines to codex." >&2
-  else
-    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a LONGER diff (its total length could not be measured); the rest was NOT provided"
-    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} lines of a longer diff"
-    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} diff lines to codex (total length unmeasurable)." >&2
-  fi
-  TRUNCATION_NOTICE="!! TRUNCATED DIFF — YOU ARE NOT SEEING THE WHOLE CHANGE. You have ONLY ${SEEN} and you cannot request them.
-SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you ${SCOPE}, and NEVER claim the change as a whole is correct or complete. APPROVE means only 'no blocker in the portion I read'.
-"
-fi
-
+# Every character is assigned to exactly one call. Coverage is measured over the
+# complete filtered file set, never inferred from a reviewed prefix.
 REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
 Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.}"
-
-PROMPT="${REVIEW_RUBRIC}
-Respond with your findings, then END with a SINGLE final line, exactly one of:
-  VERDICT: APPROVE
-  VERDICT: REQUEST_CHANGES
-Use REQUEST_CHANGES if there is any evidence-backed blocker.
-${TRUNCATION_NOTICE}
-DIFF (${DIFF_SRC}):
-${DIFF}"
 
 # ── Run the review SYNCHRONOUSLY (never backgrounded) ─────────────────────────
 # `codex exec` is the CLI's non-interactive one-shot form. A test seam
@@ -534,44 +515,52 @@ CODEX_STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/trident-codex-review-stderr.XXXXXX")
 # empty-output message, but the fail-closed gate itself never degrades.
 stamp_stage codex-review-start
 start_stage_heartbeat
-if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
-  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>"$CODEX_STDERR_FILE")
-  CALL_EXIT=$?
-else
-  # Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
-  # diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
-  # ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
-  # PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
-  # moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
-  # opinion" this panelist exists to provide was quietly being served by the weakest
-  # available model. gpt-5.6-sol is the flagship tier with the strongest capability
-  # for this kind of judgement work.
-  #
-  # Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
-  # set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
-  # is deliberate — it substitutes only when UNSET, so an explicit empty value is
-  # respected rather than replaced).
-  REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
-  if [ -n "$REVIEW_MODEL" ]; then
-    set -- --model "$REVIEW_MODEL"
+DIFF_CHARACTERS=${#DIFF}
+CHUNK_TOTAL=$(( (DIFF_CHARACTERS + DIFF_CHARACTER_LIMIT - 1) / DIFF_CHARACTER_LIMIT ))
+CHUNK_NUMBER=1
+CHUNK_OFFSET=0
+REVIEW_OUTPUT=''
+CALL_EXIT=0
+REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
+while [ "$CHUNK_OFFSET" -lt "$DIFF_CHARACTERS" ]; do
+  CHUNK=${DIFF:$CHUNK_OFFSET:$DIFF_CHARACTER_LIMIT}
+  PROMPT="${REVIEW_RUBRIC}
+Respond with your findings, then END with a SINGLE final line, exactly one of:
+  VERDICT: APPROVE
+  VERDICT: REQUEST_CHANGES
+Use REQUEST_CHANGES if there is any evidence-backed blocker.
+COVERAGE: chunk ${CHUNK_NUMBER} of ${CHUNK_TOTAL}; this run reviews ${DIFF_TOTAL_FILES} of ${DIFF_TOTAL_FILES} changed code files across all chunks.
+DIFF (${DIFF_SRC}):
+${CHUNK}"
+  if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
+    CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>>"$CODEX_STDERR_FILE")
+    CALL_EXIT=$?
   else
-    set --
+    if [ -n "$REVIEW_MODEL" ]; then set -- --model "$REVIEW_MODEL"; else set --; fi
+    CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>>"$CODEX_STDERR_FILE")
+    CALL_EXIT=$?
   fi
-  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>"$CODEX_STDERR_FILE")
-  CALL_EXIT=$?
-fi
+  [ "$CALL_EXIT" -eq 0 ] || break
+  case "$CHUNK_OUTPUT" in *[![:space:]]*) ;; *) CALL_EXIT=200; break ;; esac
+  REVIEW_OUTPUT="${REVIEW_OUTPUT}${REVIEW_OUTPUT:+
+}${CHUNK_OUTPUT}"
+  CHUNK_OFFSET=$((CHUNK_OFFSET + DIFF_CHARACTER_LIMIT))
+  CHUNK_NUMBER=$((CHUNK_NUMBER + 1))
+done
 stop_stage_heartbeat
 stamp_stage codex-review-end
 
 # Replay the tool's own stderr so the operator/bridge errFile still sees it
 # (refusal text included).
 if [ "$CODEX_STDERR_FILE" != /dev/null ]; then cat "$CODEX_STDERR_FILE" >&2; fi
-if [ "$CALL_EXIT" -ne 0 ]; then
+if [ "$CALL_EXIT" -ne 0 ] && [ "$CALL_EXIT" -ne 200 ]; then
   [ -n "$REVIEW_OUTPUT" ] && printf '%s\n' "$REVIEW_OUTPUT"
   [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
   echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero (exit $CALL_EXIT). DEFERRED — do NOT treat as an approval." >&2
   exit 5
 fi
+
+if [ "$CALL_EXIT" -eq 200 ]; then REVIEW_OUTPUT=''; fi
 
 # THE NEW GATE — exit 0 alone is NOT an approval. A content-policy refusal arrives as exit 0 +
 # EMPTY final message + the refusal on stderr, indistinguishable by exit code from
@@ -581,6 +570,11 @@ case "$REVIEW_OUTPUT" in
   *[![:space:]]*)
     [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
     printf '%s\n' "$REVIEW_OUTPUT"
+    if printf '%s\n' "$REVIEW_OUTPUT" | grep -q '^VERDICT: REQUEST_CHANGES$'; then
+      printf '%s\n' 'VERDICT: REQUEST_CHANGES'
+    else
+      printf '%s\n' 'VERDICT: APPROVE'
+    fi
     exit 0
     ;;
 esac
