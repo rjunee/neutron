@@ -296,6 +296,7 @@ import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/butt
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
 import { buildTerminalBuildWakeObserver, TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import { buildTerminalDeployWakeObserver, TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS } from '@neutronai/gateway/proactive/terminal-deploy-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
@@ -3051,6 +3052,29 @@ export function buildOpenGraphComposer(
             null,
         })
       }
+      const ownerTopic = appWsTopicId(OWNER_USER_ID)
+      const observeTerminalDeployWake = buildTerminalDeployWakeObserver({
+        llm: liveAgentSubstrate === null ? null : {
+          compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
+            spec.metering_context?.project_id === 'general'
+              ? ownerTopic
+              : `${ownerTopic}:${spec.metering_context?.project_id ?? ''}`,
+            spec,
+            { timeout_ms: opts?.timeout_ms ?? TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS },
+          ),
+        },
+        projectChatScope: (topic_id) =>
+          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : 'general',
+        post: async (topic_id, reply, opts) => {
+          const result = await deliver(topic_id, {
+            body: reply,
+            durability: 'inert',
+            ...(opts.loud ? {} : { notify: 'suppress' as const }),
+          })
+          return result.persisted
+        },
+        logger: log,
+      })
       hostDeployService = createHostDeployService({
         approvals,
         // THE CONTROL PLANE RESOLVES THE REF, not this process. Resolving a
@@ -3106,6 +3130,7 @@ export function buildOpenGraphComposer(
         post_notice: async (topic_id, body) => {
           await deliver(topic_id, { body, durability: 'inert' })
         },
+        on_terminal: observeTerminalDeployWake,
         // THE SEAM A STANDING WINDOW MAY NEVER SKIP. While it was absent the
         // service failed closed and every auto-deploy fell back to asking per
         // sha — safe, but it also made the 72h window the owner granted
