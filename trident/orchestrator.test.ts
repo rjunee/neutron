@@ -249,10 +249,25 @@ function buildHarness(opts: {
     }
     return stubbed ?? ok()
   }
+  // EVERY FAKE HOST HERE MODELS `git diff --output=<path>` (#777). The size gate
+  // measures the file the command writes, not the runner's stdout, and an
+  // unwritten file is "could not measure" — a HOLD, not a zero. Without this one
+  // wrapper, fifty scenarios that never meant to exercise the size gate would hold
+  // on it, and (measured, before the gate was made fail-closed) a 1,048,577-byte
+  // diff answered on stdout alone measured ZERO and merged.
+  const writingHost = async (cmd: string[]): Promise<HostCommandResult> => {
+    const result = await host(cmd)
+    const output = cmd.find((arg) => arg.startsWith('--output='))
+    if (result.ok && output !== undefined) {
+      const target = output.slice('--output='.length)
+      if (!existsSync(target)) writeFileSync(target, result.stdout)
+    }
+    return result
+  }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
-    run_host: host,
+    run_host: writingHost,
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
@@ -4062,10 +4077,20 @@ describe('orchestrator — base-drift hold (#542): a HELD merge fails LOUDLY, no
 
 describe('orchestrator — diff-size refusal (#618) joins the terminal vocabulary', () => {
   /** A clean, drift-free host whose pre-merge diff is `bytes` long. */
+  // THE FAKE MUST MODEL THE COMMAND THAT IS ACTUALLY RUN. The gate measures the
+  // file `git diff --output=<path>` writes, not the runner's stdout (#777), so a
+  // responder that only answers on stdout measures ZERO and merges the very diff
+  // this test exists to refuse. Measured: without this, the 1,048,577-byte case
+  // reached `done`.
   const sizedHost = (bytes: number): ((cmd: string[]) => HostCommandResult) => {
     const SHA = '1111111111111111111111111111111111111111'
     return (cmd) => {
-      if (cmd.includes('diff') && cmd.includes('--binary')) return ok('x'.repeat(bytes))
+      if (cmd.includes('diff') && cmd.includes('--binary')) {
+        const output = cmd.find((arg) => arg.startsWith('--output='))
+        if (output === undefined) return { ok: false, exit_code: 1, stdout: '', stderr: 'unbounded diff read' }
+        writeFileSync(output.slice('--output='.length), 'x'.repeat(bytes))
+        return ok('')
+      }
       if (cmd.includes('rev-parse') && cmd.includes('--verify')) return ok(SHA)
       if (cmd.includes('merge-base')) return ok(SHA)
       return ok()

@@ -7,7 +7,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import {
   assessBaseDrift,
   baseDriftHoldMessage,
-  buildMergeCleanupDeps,
+  buildMergeCleanupDeps as buildRealMergeCleanupDeps,
   detectBaseBranch,
   reviewedHeadOid,
   shouldHoldForBaseDrift,
@@ -19,6 +19,34 @@ import {
 import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+
+/**
+ * EVERY FAKE HOST IN THIS FILE MODELS `git diff --output=<path>` (#777).
+ *
+ * The size gate no longer measures the runner's stdout; it measures the file the
+ * command writes. A fake that answers on stdout alone therefore measures ZERO and
+ * ALLOWS — measured: a 1,048,577-byte diff reached `done` through the
+ * orchestrator's own fake. `enforceMergeDiffGate` now treats an unwritten file as
+ * "could not measure" and HOLDS, which is the right direction but would otherwise
+ * hold seventy-odd tests that have nothing to do with the size gate. Wrapping the
+ * host once here keeps those tests measuring what they mean to measure, and keeps
+ * the gate fail-closed for everything that does not write a patch.
+ */
+function buildMergeCleanupDeps(
+  host: RunHostCommand,
+  ...rest: Parameters<typeof buildRealMergeCleanupDeps> extends [unknown, ...infer R] ? R : never[]
+): ReturnType<typeof buildRealMergeCleanupDeps> {
+  const writing: RunHostCommand = async (cmd, ...args) => {
+    const result = await host(cmd, ...args)
+    const output = cmd.find((arg) => arg.startsWith('--output='))
+    if (result.ok && output !== undefined) {
+      const target = output.slice('--output='.length)
+      if (!existsSync(target)) writeFileSync(target, result.stdout)
+    }
+    return result
+  }
+  return buildRealMergeCleanupDeps(writing, ...rest)
+}
 
 function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({
@@ -40,13 +68,16 @@ const fail = (stderr = 'boom'): HostCommandResult => ({ ok: false, stdout: '', s
 
 function recordingHost(
   responder: (cmd: string[]) => HostCommandResult = () => ok(),
+  opts: { honour_output?: boolean } = {},
 ): { host: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
   const host: RunHostCommand = async (cmd) => {
     calls.push(cmd)
     const result = responder(cmd)
     const output = cmd.find((arg) => arg.startsWith('--output='))
-    if (result.ok && output !== undefined) writeFileSync(output.slice('--output='.length), result.stdout)
+    if (opts.honour_output !== false && result.ok && output !== undefined) {
+      writeFileSync(output.slice('--output='.length), result.stdout)
+    }
     return result
   }
   return { host, calls }
@@ -105,6 +136,30 @@ describe('pre-merge diff-size gate', () => {
     ).catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(TridentMergeDiffHold)
     expect(error).toMatchObject({ measured_bytes: PINNED_LIMIT_BYTES + 1 })
+    expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
+  })
+
+  // "NOTHING WROTE A PATCH" IS NOT "THE PATCH IS ZERO BYTES", AND ONLY ONE OF
+  // THOSE MAY MERGE. The gate stopped reading the command's stdout, so the file is
+  // now the only evidence there is. Measured on the first version of this change:
+  // a host that answered the diff on stdout without honouring `--output=` measured
+  // ZERO, and a 1,048,577-byte diff MERGED. This builds the deps WITHOUT the
+  // output-honouring wrapper above, so it is the real unwritten-file case.
+  test('a host that writes no patch file HOLDS as unmeasurable, and never merges', async () => {
+    const { host, calls } = recordingHost((cmd) => {
+      if (cmd.includes('diff') && cmd.includes('--binary')) return ok('x'.repeat(PINNED_LIMIT_BYTES + 1))
+      return noDrift(cmd) ?? ok()
+    }, { honour_output: false })
+    const error = await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildRealMergeCleanupDeps(host),
+    ).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(TridentMergeDiffHold)
+    // NULL, not a number: this refusal says "I could not find out how big this
+    // diff is", which is a different refusal from "it is too big" and is the only
+    // one of the two whose retry advice is true.
+    expect(error).toMatchObject({ measured_bytes: null })
+    expect((error as Error).message).toContain('could not be measured')
     expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
   })
 

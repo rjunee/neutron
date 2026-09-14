@@ -53,3 +53,42 @@ No approximate pre-check was added, because it could not own the literal byte bo
 shared runner or delivery code changed, and no alternate merge path or feature switch was
 introduced. The exported pure string assessment remains unchanged
 (`trident/merge.ts:181-185`); the production gate no longer supplies it a captured diff.
+
+### Review round 1 — the gate was satisfiable without measuring anything
+
+`enforceMergeDiffGate` stopped reading the command's stdout, so the patch file
+became the ONLY evidence the gate has. It was pre-created empty
+(`writeFileSync(diff_path, '')`) and then `stat`-ed, which made two different
+facts into one state: "the diff is empty" and "nothing wrote a patch". That state
+was ALLOW.
+
+Measured, not reasoned: the #618 vocabulary test failed in CI with `Expected:
+"failed" / Received: "done"` — a 1,048,577-byte diff **merged**. Its fake host
+answered the diff on stdout and never honoured `--output=`, so the gate measured
+zero bytes and let through exactly the diff it exists to refuse.
+
+Fixed by failing closed: the file is no longer pre-created, and `!result.ok ||
+!existsSync(diff_path)` is a MEASUREMENT FAILURE — the `measured_bytes: null`
+refusal — never a zero. This costs a real merge nothing: `git diff --output=`
+always creates the file on success, and the file's size equals the stdout byte
+count exactly (measured on a scratch repo: 89 == 89), so the byte-exact boundary
+is unchanged. `assessMergeDiff` allowed `<= MAX`; this refuses `> MAX`; the
+at-limit and limit+1 cases stay pinned with their measured sizes.
+
+The two refusals stay distinct and only one advises a retry: "could not be
+measured … refusing to merge without the size gate" carries `null`, and
+`orchestrator.ts:5381` still routes on `measured_bytes !== null`.
+
+The fakes now model the command that is actually run. One wrapper in each suite —
+`buildMergeCleanupDeps` in `merge.test.ts`, `writingHost` in the orchestrator
+harness — honours `--output=`, so seventy-odd scenarios that never meant to touch
+the size gate keep measuring what they mean to, while a host that writes no patch
+still holds. The unwritten-file case is pinned directly, built through the REAL
+deps so the wrapper cannot mask it.
+
+Mutations re-run by the reviewer, each RED then GREEN on restore: the boundary
+(`merge.ts:250`, `> MAX` → `> MAX + 1`), the fail-closed check (`:232`, missing
+file measured as zero) and the false/unknown distinction (`:245`, the unmeasured
+refusal rewritten as a measured zero). 406 tests pass across `merge.test.ts` and
+`orchestrator.test.ts`; the rev-range guard (`diff-base-option-shaped`) is green,
+so `--output=` as a FLAG through `gitRangeArgv` does not trip it.

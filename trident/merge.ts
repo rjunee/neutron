@@ -58,7 +58,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -197,7 +197,6 @@ async function enforceMergeDiffGate(
   try {
     diff_dir = mkdtempSync(join(tmpdir(), 'trident-merge-diff-'))
     const diff_path = join(diff_dir, 'merge.diff')
-    writeFileSync(diff_path, '')
     // THROUGH THE ONE RANGE BUILDER (#546), not a hand-rolled argv. An unshielded
     // rev-range operand is an arbitrary-file-write primitive (a base of
     // `--output=<path>` makes `git diff` write that file), and `gitRangeArgv` is
@@ -221,7 +220,16 @@ async function enforceMergeDiffGate(
       }),
       repo,
     )
-    if (!result.ok) measurement_failed = true
+    // AN UNWRITTEN FILE IS "I COULD NOT FIND OUT", NOT "ZERO BYTES". The gate no
+    // longer reads the command's stdout, so the only thing standing between an
+    // unwritten patch and a merge is this check: pre-creating the file (or
+    // stat-ing a missing one as 0) makes "the host produced no patch" and "the
+    // diff is empty" the same state, and that state is ALLOW. Measured: a
+    // responder that returned the diff on stdout without honouring `--output=`
+    // let a 1,048,577-byte diff merge. Real `git diff --output=` always creates
+    // the file on success (measured: size 89 == 89 stdout bytes, exactly), so
+    // this costs a real merge nothing and fails closed for everything else.
+    if (!result.ok || !existsSync(diff_path)) measurement_failed = true
     else measured_bytes = statSync(diff_path).size
   } catch {
     measurement_failed = true
