@@ -531,6 +531,14 @@ export class HerdrHost implements AdoptableHost {
     }
 
     const child: PtyChild = {
+      async readScreen() {
+        const result = await client.call('pane.read', {
+          pane_id: paneId, source: HERDR_READ_SOURCE, lines: herdrReadWindow(54).lines,
+          strip_ansi: true, format: 'text',
+        }) as unknown as { read?: HerdrPaneRead }
+        if (typeof result.read?.text !== 'string') throw new Error('screen capture unavailable')
+        return result.read.text
+      },
       detach,
       pid,
       // THE DURABLE HANDLE. Its presence is what tells the shutdown path this child

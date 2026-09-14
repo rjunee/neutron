@@ -104,7 +104,8 @@
  * every exit path (three guards, pinned in `codex-build.test.ts`), and — even if
  * one leaked — the reprieve here is refused outright once `since_advance_ms`
  * passes `DEFAULT_MAX_INFLIGHT_MS`, mirroring the orchestrator's "the ceiling
- * outranks every reprieve" rule on the same clock. An endlessly-heartbeating
+ * outranks every reprieve" rule on the same clock — a rule an observed working
+ * terminal spares the 90-minute gate under, but never this one. An endlessly-heartbeating
  * corpse is released by this module at 2 h whatever the ledger says.
  *
  * WHAT IS DELIBERATELY *NOT* READ HERE: the launcher liveness probe. It answers

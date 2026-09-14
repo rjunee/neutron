@@ -1,3 +1,6 @@
+import { observeWorkers } from '@neutronai/runtime/adapters/claude-code/persistent/observe-workers.ts'
+import { runWorktreePath } from '@neutronai/trident/merge.ts'
+import { join } from 'node:path'
 /**
  * Core module-graph builders for the production composition.
  *
@@ -671,6 +674,10 @@ export function buildCoreModules(
           // it through a canned stub would let bookkeeping impersonate evidence
           // again, which is the defect this card exists to fix.
           gather_run_evidence: buildRunEvidenceGatherer(),
+          observe_run_worker: (run) => observeWorkers([
+            run.worktree ?? runWorktreePath(run.repo_path, run),
+            join(run.repo_path, '.trident-worktrees', `rebase-${run.id}`),
+          ]),
           // THE SETTLE-TIMEOUT EVIDENCE GATE'S PROBES (`fire-evidence-probes.ts`).
           // UNCONDITIONAL, for the same reason as `gather_run_evidence` above: the
           // orchestrator consults this seam only on the one settle-timeout error

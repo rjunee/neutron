@@ -1150,3 +1150,22 @@ test('collectTokensToString throws aborted-before-dispatch when signal pre-fired
   )
   expect(cancelCalled).toBe(true)
 })
+
+
+test.each([
+  'worker blocked: interactive prompt\n❯ Alpha\nEnter to select',
+  'persistent-repl: spawn failed; worker=unknown; observed_at=2026-09-14T00:00:00Z; last screen: startup output',
+])('worker evidence survives the channel error consumer: %s', async (message) => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first', credentials: [{ id: 'test-key', kind: 'oauth', secret: 'test-secret' }],
+  })
+  const cap = captureFactory()
+  cap.emitError({ retryable: false, message, code: 'channel_wedged' })
+  const sub = buildLlmCallSubstrate({ pool, substrate_instance_id: 'observed', cwd: workdir, substrateFactory: cap.substrateFactory })
+  const events: Event[] = []
+  for await (const event of sub!.start(runSpec()).events) events.push(event)
+  const error = events.find((event) => event.kind === 'error')
+  expect(error?.kind === 'error' && error.message).toBe(message)
+  expect(error?.kind === 'error' && error.retryable).toBe(false)
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+})

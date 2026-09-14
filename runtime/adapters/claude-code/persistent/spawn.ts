@@ -1,3 +1,5 @@
+import { observeSession } from './observe-workers.ts'
+import { describeWorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → spawn.ts
 // Session spawn / resume / turn-inject machinery + the respawn in-flight gate
 // (D2 split).
@@ -552,6 +554,17 @@ async function spawnSession(
       options.assertConfig ?? {},
     )
     if (!assertion.ok) {
+      // Capture before termination while the host can still read the prompt.
+      const observation = await observeSession(session)
+      assertion.detail = `${assertion.detail ?? ''}; ${describeWorkerObservation(observation)}`
+      if (observation.state === 'blocked') {
+        if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
+        sink.unregisterIf(sessionId, session)
+        await terminateChild(child)
+        const error = new Error(`worker blocked: ${assertion.detail}`)
+        Object.assign(error, { substrateErrorClass: 'channel_wedged' })
+        throw error
+      }
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
       sink.unregisterIf(sessionId, session)
       // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw

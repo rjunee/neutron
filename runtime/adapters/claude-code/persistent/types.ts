@@ -455,8 +455,8 @@ export interface PersistentReplSubstrateOptions {
    *  `spec.turn_timeout_ms`. NOT a fixed wall clock — see the constant's doc. */
   turnTimeoutMs?: number
   /** Per-turn ABSOLUTE-CEILING backstop (ms) — the hard upper bound a single turn
-   *  can run even while it keeps producing PTY activity (a live-but-livelocked
-   *  child). Default `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min). Overridable
+   *  can run, which neither PTY activity nor an observed working control outranks
+   *  (a live-but-livelocked child). Default `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min). Overridable
    *  per-turn via `spec.turn_absolute_ceiling_ms`. Always coerced ≥ the inactivity
    *  window. */
   turnAbsoluteCeilingMs?: number

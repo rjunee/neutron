@@ -957,3 +957,27 @@ it('forwards the spawning lane claim through socket creation', async () => {
     else process.env['NEUTRON_LANE_CLAIM'] = previous
   }
 })
+
+
+describe('fresh worker screen observation', () => {
+  it('reads an unchanged screen, then the replacement, through the real host', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'Choose organization\n❯ Alpha\nEnter to select'
+    const { child } = await spawnWithFake(server)
+    try {
+      expect(await child.readScreen!()).toBe(server.screen)
+      server.screen = 'Building… esc to interrupt'
+      expect(await child.readScreen!()).toBe(server.screen)
+    } finally { child.kill() }
+  })
+})
+
+
+it('a malformed fresh screen is unavailable, not an empty success', async () => {
+  const server = new FakeHerdrServer()
+  const { child } = await spawnWithFake(server)
+  try {
+    server.malformMethod('pane.read', { read: {} })
+    await expect(child.readScreen!()).rejects.toThrow('screen capture unavailable')
+  } finally { child.kill() }
+})

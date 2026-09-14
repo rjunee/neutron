@@ -1,3 +1,6 @@
+import { sink } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -255,7 +258,7 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
       const after = new TridentRunStore(db).get('watchdog-alive')!
       expect(probed).toBeGreaterThan(0)
       expect(after.phase).not.toBe('failed')
-      expect(after.failure_reason ?? '').not.toContain('suspected agent hang')
+      expect(after.failure_reason ?? '').not.toContain('worker state unknown:')
       // AND THE CLOCK DID NOT MOVE. The real gatherer answers nothing/nothing/unknown
       // for this run, so the only thing sparing it is the launcher — a SHARED
       // GENERATION, not this run — and a generation-scoped answer must not renew this
@@ -292,7 +295,7 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
 
       const after = new TridentRunStore(db).get(id)!
       expect(after.phase).toBe('failed')
-      expect(after.failure_reason ?? '').toContain('suspected agent hang')
+      expect(after.failure_reason ?? '').toContain('worker state unknown:')
       expect(after.failure_reason ?? '').toMatch(/liveness checked:/)
       expect(after.failure_reason ?? '').toContain('launcher probe=unknown')
       // The three run-scoped clauses, verbatim from `describeRunEvidence`.
@@ -325,7 +328,7 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
 
       const after = new TridentRunStore(db).get(id)!
       expect(after.phase).not.toBe('failed')
-      expect(after.failure_reason ?? '').not.toContain('suspected agent hang')
+      expect(after.failure_reason ?? '').not.toContain('worker state unknown:')
       // AND THE COMPOSED STALENESS CLOCK MOVED. The artifact is RUN-SCOPED evidence, so
       // the spare re-stamps `last_advanced_at` end to end (T4) — this is the phantom
       // staleness fix, observable through the real composition rather than at a seam.
@@ -361,4 +364,31 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
       await mods.tridentModule.shutdown!(instance)
     }
   }, 20_000)
+})
+
+
+test('production composition observes a blocked worktree worker and stores its prompt', async () => {
+  const mods = buildCoreModules(tridentInput())
+  const instance = await mods.tridentModule.init(fakeCtx)
+  const id = 'worker-observer-wiring'
+  const session = new ReplSession('observed-worker', 'worker-generation', 'worker-session', 'worker-channel', '/repo/observed-worktree')
+  // A REAL menu has a sibling option under the selected one — that is what
+  // separates a dialog from the composer's own `❯ <typed text>` line.
+  const menu = 'Choose organization\n❯ Alpha\n  Beta\nEnter to select'
+  session.attachChild({ hasExited: () => false, readScreen: async () => menu } as PtyChild)
+  sink.register(session.sessionId, session)
+  try {
+    await instance.loop.stop()
+    await seedRunning(id, 'launcher-generation')
+    const store = new TridentRunStore(db)
+    await store.update(id, { worktree: session.cwd })
+    await instance.loop.runOnce()
+    const row = store.get(id)!
+    expect(row.phase).toBe('failed')
+    expect(row.failure_reason).toContain('worker blocked:')
+    expect(row.failure_reason).toContain(menu)
+  } finally {
+    sink.unregisterIf(session.sessionId, session)
+    await mods.tridentModule.shutdown!(instance)
+  }
 })

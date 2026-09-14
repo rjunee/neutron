@@ -34,7 +34,9 @@ export const STALLED_WARN_MS = 30 * 60_000
 /**
  * Per-agent hang watchdog default (M1 trident-UX hardening, item 2). A
  * non-terminal run whose `last_advanced_at` has not moved for this long while a
- * dispatch is in flight is reaped as a suspected agent hang.
+ * dispatch is in flight triggers evidence gathering. Unclassified deadline stops
+ * report worker state unknown; a captured prompt reports blocked, and a fresh
+ * working control spares THIS gate — never `DEFAULT_MAX_INFLIGHT_MS`.
  *
  * ⚠️ THIS THRESHOLD KILLED A HEALTHY BUILD ON 2026-08-11 AND IS NOW A STOPGAP.
  * The owner's Email Core P1 build was reaped at 26 minutes — one minute past the
@@ -107,7 +109,7 @@ export const STAGE_HEARTBEAT_CADENCE_MS = 5 * 60_000
  *
  * Three cadences (15 min), not one: a stamp can be delayed by sqlite contention or a
  * slow sweep, and the cost of being generous here is bounded by the 2 h ceiling, which
- * outranks every reprieve.
+ * outranks every reprieve, terminal observations included.
  */
 export const DEAD_LAUNCHER_OVERRIDE_MS = 3 * STAGE_HEARTBEAT_CADENCE_MS
 

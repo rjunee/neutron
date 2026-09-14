@@ -1,3 +1,5 @@
+import { observeSession } from './observe-workers.ts'
+import { describeWorkerObservation, unclassifiedObservation, type WorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → pool.ts
 // The warm pool, the createPersistentReplSubstrate turn driver, ephemeral
 // one-shots, and the dropped-inbound replay sink (D2 split).
@@ -412,7 +414,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // deemed frozen; the composer raises it for a cold/onboarding turn (heavier
       // initial processing) and keeps it snappy for a warm steady-state turn. The
       // absolute ceiling is the hard backstop a live-but-livelocked child can't
-      // exceed. Non-positive values fall back to the construction defaults; the
+      // exceed, with or without a working control. Non-positive values fall back to the construction defaults; the
       // ceiling is coerced ≥ the inactivity window (a ceiling below the idle
       // window would pre-empt the freeze detector).
       const inactivityMs =
@@ -678,8 +680,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         // silently-reading-but-alive pass is never falsely abandoned. The keepalive
         // self-stops the instant the turn settles, the channel closes, or the child
         // exits (a true hang then trips fast via `onDeath`'s error + the idle window
-        // once keepalives cease; the absolute ceiling bounds a live-but-livelocked
-        // child). Unref'd so it can never hold the event loop open; cleared
+        // once keepalives cease; the deadline bounds unclassified turns). Unref'd so it can never hold the event loop open; cleared
         // deterministically once the turn settles below.
         const keepalive = setInterval(() => {
           if (turn.settled || channel.closed) return
@@ -713,13 +714,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         //      touch `lastDataAt`, so an alive-but-frozen child — keepalive still
         //      firing — is correctly detected as frozen here.)
         //   2. ABSOLUTE CEILING — a hard upper bound so a live-but-livelocked child
-        //      (emitting PTY noise forever without ever settling) can't run unbounded.
+        //      (emitting PTY noise, or holding an interrupt control, forever without
+        //      ever settling) can't run unbounded. A working control spares gate 1
+        //      only.
         // Both emit the SAME retryable `turn timeout` error the composer classifies
         // (auto-retry once → Retry affordance) and poison the warm session so the
         // next dispatch respawns a clean REPL.
         const turnStartedAt = Date.now()
         const watchdogTickMs = Math.max(50, Math.min(1_000, Math.floor(inactivityMs / 4)))
-        const failFrozen = (reason: 'inactivity' | 'ceiling'): void => {
+        const failFrozen = (reason: 'inactivity' | 'ceiling', observation: WorkerObservation): void => {
           if (turn.settled) return
           if (REPL_DEBUG && session !== undefined) {
             const r = session.getRecentOutput()
@@ -738,6 +741,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           }
           // O3 — stamp the typed class so the composer's ladder classifies on
           // `code` before its `persistent-repl: turn timeout` regex fallback.
+          // THE PRODUCER LITERAL IS A GOVERNED RATCHET. `g6-error-string-conformance`
+          // extracts `message: 'persistent-repl: turn timeout', retryable: true`
+          // from THIS source text and fails loudly when it is reworded; rewording
+          // it into a template took that pin out (shard 4, three tests) and a
+          // re-pin needs the §2.4 PR-body note + sign-off. The observation is
+          // disclosed on the run record by the orchestrator's own observer
+          // (`observe_run_worker`), which is where #754 needs it, so the turn-level
+          // wording stays put and the evidence is logged rather than spliced in.
+          process.stderr.write(`[repl-timeout:${reason}] ${describeWorkerObservation(observation).slice(0, 1200)}\n`)
           channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true, code: 'turn_timeout' })
           channel.close()
           turn.settle()
@@ -774,47 +786,91 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           channel.close()
           turn.settle()
         }
+        let captureInFlight = false
         const watchdog = setInterval(() => {
-          if (turn.settled || channel.closed) return
-          const nowMs = Date.now()
-          // Auth-invalid is a RECLASSIFICATION of a frozen turn, NOT a fast-fail on
-          // mere presence (Argus r1 BLOCKER). The signal is cleared at THIS turn's
-          // start (before the inject) and re-stamped only if the scanner sees a
-          // credential banner on this turn's output. We consult it ONLY when a
-          // freeze gate below has already tripped AND the turn is CURRENTLY SILENT
-          // — so a healthy turn that merely printed a credential-shaped string but
-          // kept streaming (never froze) never gets the auth verdict; only the real
-          // "banner THEN silence" shape does.
-          const authInvalid = session !== undefined && session.authFailureAt !== undefined
-          // Idle since the later of turn-start and the last PTY byte. Clamping to
-          // `turnStartedAt` means a turn that begins with a stale `lastDataAt`
-          // (e.g. a warm REPL quiet since its prior turn) still gets a full
-          // inactivity window before it can be judged frozen. Computed up front so
-          // BOTH freeze gates share the same silence measure.
-          const lastActivity =
-            session !== undefined ? Math.max(turnStartedAt, session.lastDataAt) : turnStartedAt
-          // The DECISIVE auth guard (Argus r2 BLOCKER): the auth verdict requires
-          // the real "banner THEN silence" shape — the signal latched AND the turn
-          // currently silent (no PTY output for the inactivity window). A turn that
-          // is STILL STREAMING when it trips the absolute ceiling is a livelock, not
-          // an auth freeze; it must get the retryable ceiling-freeze, NEVER the
-          // non-retryable auth verdict + reconnect bubble. (`absoluteCeilingMs` is
-          // coerced ≥ `inactivityMs` at construction, so a genuine post-banner
-          // freeze always trips the inactivity gate below — where `silent` is true
-          // by definition — well before the ceiling; the ceiling's auth branch only
-          // ever engages on the exact-equal-window edge, and only when silent.)
-          const silent = nowMs - lastActivity >= inactivityMs
-          if (nowMs - turnStartedAt >= absoluteCeilingMs) {
-            clearInterval(watchdog)
-            if (authInvalid && silent) failAuthInvalid()
-            else failFrozen('ceiling')
-            return
+          if (turn.settled || channel.closed || captureInFlight || session === undefined) return
+          captureInFlight = true
+          const observedSession = session
+          // Reuse this watchdog's cadence. Await a bounded fresh observation before
+          // applying timeout policy, so the answer and the decision share a sample.
+          //
+          // THE OBSERVER MUST NOT BE ABLE TO DISABLE THE WATCHDOG IT FEEDS. Every
+          // timeout decision now sits DOWNSTREAM of this capture, so a capture that
+          // REJECTS would skip the inactivity gate and the ceiling both, leaving the
+          // turn with no deadline at all — this card's own failure mode, one level
+          // up. A failed capture is therefore degraded to `unknown` (never working,
+          // never blocked) and the policy below runs on it unchanged. The wrapper is
+          // `fireAndForget`, not a bare `void`: a throw in the POLICY is logged and
+          // counted rather than taking the process down with it.
+          const applyTimeoutPolicy = async (): Promise<void> => {
+           try {
+            let observation: WorkerObservation
+            try {
+              observation = await observeSession(observedSession)
+            } catch (err) {
+              observation = unclassifiedObservation(
+                `worker observation failed: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
+            if (turn.settled || channel.closed || observedSession.activeTurn !== turn) return
+            if (observation.state === 'blocked') {
+              turn.settled = true
+              if (!ephemeral) observedSession.poisoned = true
+              channel.push({
+                kind: 'error', code: 'channel_wedged', retryable: false,
+                message: `worker blocked: ${describeWorkerObservation(observation)}`,
+              })
+              channel.close()
+              turn.settle()
+              return
+            }
+            // SPARES THE INACTIVITY WINDOW, NOT THE CEILING — see the same rule in
+            // `trident/orchestrator.ts`. A visible interrupt control proves a turn is
+            // in flight, not that it is progressing, so it must not outrank the
+            // backstop that exists precisely for a child which emits forever.
+            if (observation.state === 'working' && Date.now() - turnStartedAt < absoluteCeilingMs) return
+            const nowMs = Date.now()
+            // Auth-invalid is a RECLASSIFICATION of a frozen turn, NOT a fast-fail on
+            // mere presence (Argus r1 BLOCKER). The signal is cleared at THIS turn's
+            // start (before the inject) and re-stamped only if the scanner sees a
+            // credential banner on this turn's output. We consult it ONLY when a
+            // freeze gate below has already tripped AND the turn is CURRENTLY SILENT
+            // — so a healthy turn that merely printed a credential-shaped string but
+            // kept streaming (never froze) never gets the auth verdict; only the real
+            // "banner THEN silence" shape does.
+            const authInvalid = session !== undefined && session.authFailureAt !== undefined
+            // Idle since the later of turn-start and the last PTY byte. Clamping to
+            // `turnStartedAt` means a turn that begins with a stale `lastDataAt`
+            // (e.g. a warm REPL quiet since its prior turn) still gets a full
+            // inactivity window before it can be judged frozen. Computed up front so
+            // BOTH freeze gates share the same silence measure.
+            const lastActivity =
+              session !== undefined ? Math.max(turnStartedAt, session.lastDataAt) : turnStartedAt
+            // The DECISIVE auth guard (Argus r2 BLOCKER): the auth verdict requires
+            // the real "banner THEN silence" shape — the signal latched AND the turn
+            // currently silent (no PTY output for the inactivity window). A turn that
+            // is STILL STREAMING when it trips the absolute ceiling is a livelock, not
+            // an auth freeze; it must get the retryable ceiling-freeze, NEVER the
+            // non-retryable auth verdict + reconnect bubble. (`absoluteCeilingMs` is
+            // coerced ≥ `inactivityMs` at construction, so a genuine post-banner
+            // freeze always trips the inactivity gate below — where `silent` is true
+            // by definition — well before the ceiling; the ceiling's auth branch only
+            // ever engages on the exact-equal-window edge, and only when silent.)
+            const silent = nowMs - lastActivity >= inactivityMs
+            if (nowMs - turnStartedAt >= absoluteCeilingMs) {
+              clearInterval(watchdog)
+              if (authInvalid && silent) failAuthInvalid()
+              else failFrozen('ceiling', observation)
+              return
+            }
+            if (silent) {
+              clearInterval(watchdog)
+              if (authInvalid) failAuthInvalid()
+              else failFrozen('inactivity', observation)
+            }
+           } finally { captureInFlight = false }
           }
-          if (silent) {
-            clearInterval(watchdog)
-            if (authInvalid) failAuthInvalid()
-            else failFrozen('inactivity')
-          }
+          fireAndForget('persistent-repl.turn-observation', applyTimeoutPolicy())
         }, watchdogTickMs)
         ;(watchdog as { unref?: () => void }).unref?.()
 

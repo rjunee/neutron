@@ -42,6 +42,7 @@ branch is cut (standard §3.1, §3.2).
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
 | [`absence-is-a-question-about-the-ref`](absence-is-a-question-about-the-ref.md) | An absence claim about a tracked file is a question about the ref | P1 | — |
+| [`blocked-is-not-slow`](blocked-is-not-slow.md) | Distinguish blocked workers from slow and unclassified work | P1 | — |
 | [`build-fleet-process-census`](build-fleet-process-census.md) | Count the local build fleet from live processes | P1 | — |
 | [`checkpoint-write-contention`](checkpoint-write-contention.md) | Checkpoint writes survive build-load contention | P1 | — |
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |

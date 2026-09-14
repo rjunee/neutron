@@ -4898,7 +4898,7 @@ describe('orchestrator — fire did not settle → failed', () => {
     expect(store.get(run.id)?.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
   })
 
-  test('NO evidence keeps today\'s failure byte-identical', async () => {
+  test('NO launch evidence keeps today\'s failure byte-identical', async () => {
     const h = buildHarness({
       plan: () => ({ fire: TIMEOUT_FIRE }),
       gather_fire_evidence: async () => ({ kind: 'none', detail: 'nothing' }),
@@ -5842,7 +5842,7 @@ describe('orchestrator — stalled workflow guard', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
-    expect(after?.failure_reason).toContain('stalled')
+    expect(after?.failure_reason).toContain('worker state unknown:')
   })
 })
 
@@ -5872,7 +5872,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
-    expect(after?.failure_reason).toContain('suspected agent hang')
+    expect(after?.failure_reason).toContain('worker state unknown:')
   })
 
   /**
@@ -5910,7 +5910,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
-    expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
+    expect(after?.failure_reason ?? '').not.toContain('worker state unknown:')
     // THE CLOCK MOVED (T4). A spare authorised by RUN-SCOPED evidence — here a stage
     // row inside the window — persists the unmodified snapshot, and `saveIfActive`
     // re-stamps `last_advanced_at` to now() as a matter of course. That is what stops
@@ -5949,7 +5949,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason).toContain('suspected agent hang')
+    expect(after?.failure_reason).toContain('worker state unknown:')
   })
 
   test('ABSENCE IS NOT EVIDENCE: no events, and no reader at all, both still reap', async () => {
@@ -5973,7 +5973,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
       const after = store.get(run.id)
       expect(after?.phase).toBe('failed')
-      expect(after?.failure_reason).toContain('suspected agent hang')
+      expect(after?.failure_reason).toContain('worker state unknown:')
     }
   })
 
@@ -5995,7 +5995,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason).toContain('suspected agent hang')
+    expect(after?.failure_reason).toContain('worker state unknown:')
   })
 
   /**
@@ -6044,7 +6044,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
-    expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
+    expect(after?.failure_reason ?? '').not.toContain('worker state unknown:')
     // The probe was actually CONSULTED — a stand-down that happened for some other
     // reason would pass the assertion above while proving nothing.
     expect(probed).toBeGreaterThan(0)
@@ -6104,7 +6104,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.failure_reason ?? '').toStartWith(
-      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+      'worker state unknown: no checkpoint advancement for 1 min',
     )
   })
 
@@ -6226,7 +6226,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason ?? '').toContain('the 2 h ceiling outranks any liveness reprieve')
+    expect(after?.failure_reason ?? '').toContain('the 2 h deadline outranks ledger and process-only reprieves')
   })
 
   test('NEGATIVE (N2b): the same FRESH evidence with a non-dead probe DOES stand the run down', async () => {
@@ -6303,7 +6303,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.failure_reason ?? '').toStartWith(
-      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+      'worker state unknown: no checkpoint advancement for 1 min',
     )
     // And it says so: no evidence of either kind was available.
     expect(after?.failure_reason ?? '').toContain('newest stage event none, launcher probe=not wired')
@@ -6338,10 +6338,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason ?? '').toContain('inner workflow stalled (no terminal result within 10 min)')
+    expect(after?.failure_reason ?? '').toContain('worker state unknown: no terminal result within 10 min')
     // Disclosed there too, and it names the probe answer it OVERRODE.
     expect(after?.failure_reason ?? '').toContain('launcher probe=alive')
-    expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
+    expect(after?.failure_reason ?? '').toContain('deadline outranks ledger and process-only reprieves')
   })
 
   test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST SPARED TICK', async () => {
@@ -6385,7 +6385,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason ?? '').toContain('suspected agent hang')
+    expect(after?.failure_reason ?? '').toContain('worker state unknown:')
     expect(after?.failure_reason ?? '').toContain('newest stage event 1 min ago')
   })
 
@@ -6405,7 +6405,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
-    expect(after?.failure_reason).toContain('suspected agent hang')
+    expect(after?.failure_reason).toContain('worker state unknown:')
     // Reaped, NOT redispatched.
     expect(h.inputs).toHaveLength(0)
   })
@@ -6540,7 +6540,7 @@ describe('orchestrator — run-scoped hang evidence (three probes)', () => {
     expect(after?.phase).toBe('failed')
     const reason = after?.failure_reason ?? ''
     expect(reason).toStartWith(
-      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+      'worker state unknown: no checkpoint advancement for 1 min',
     )
     expect(reason).toContain('liveness checked:')
     expect(reason).toContain('run process=none observed')
@@ -6582,7 +6582,7 @@ describe('orchestrator — run-scoped hang evidence (three probes)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason ?? '').toContain('suspected agent hang')
+    expect(after?.failure_reason ?? '').toContain('worker state unknown:')
   })
 
   test('A THROWING GATHERER DEFERS, never reaps — its own failure is not evidence of death', async () => {
@@ -6638,8 +6638,8 @@ describe('orchestrator — run-scoped hang evidence (three probes)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
-    expect(after?.failure_reason ?? '').toContain('inner workflow stalled (no terminal result within 2 min)')
-    expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
+    expect(after?.failure_reason ?? '').toContain('worker state unknown: no terminal result within 2 min')
+    expect(after?.failure_reason ?? '').toContain('deadline outranks ledger and process-only reprieves')
     // Disclosed there too — the ceiling reaped THROUGH a blind check, and says so.
     expect(after?.failure_reason ?? '').toContain('run process=unknown (process table unreadable)')
   })
