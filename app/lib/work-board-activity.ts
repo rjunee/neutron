@@ -66,6 +66,8 @@ export interface WorkActivityInput {
   rows: readonly ActivityRow[];
   /** Client clock. */
   now: number;
+  /** Positive evidence that a board item is bound to a non-terminal run. */
+  liveRunInFlight: boolean;
 }
 
 /**
@@ -101,7 +103,10 @@ function turnInFlight(snapshot: ActivitySnapshot | null, rows: readonly Activity
  * news.
  */
 export function workActivityState(input: WorkActivityInput): ActivityState {
-  const { snapshot, rows, now } = input;
+  const { snapshot, rows, now, liveRunInFlight } = input;
+  // The strip describes the whole Work surface. A bound run is independent of
+  // the chat turn, so positive build evidence wins over a stale chat verdict.
+  if (liveRunInFlight) return 'working';
   if (!turnInFlight(snapshot, rows)) return 'idle';
   const eventAge = liveAge(rows, snapshot, now, { realOnly: false });
   // In flight but we have never seen an event: the turn was just injected and the
@@ -124,9 +129,9 @@ export function workActivityLabel(state: ActivityState): string {
     case 'working':
       return 'Working';
     case 'wedged':
-      return 'Stalled — no activity';
+      return 'Chat stalled — no activity';
     case 'dead':
-      return 'Not responding';
+      return 'Chat not responding';
   }
 }
 

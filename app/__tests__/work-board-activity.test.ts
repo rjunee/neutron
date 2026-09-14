@@ -50,12 +50,12 @@ describe('workActivityState', () => {
     // A resting scope's last event can be hours old. Reading those stale clocks
     // as a stall is what would make every quiet project scream.
     const s = snap({ last_event_age_ms: 6 * 3600_000, last_real_activity_age_ms: 6 * 3600_000 });
-    expect(workActivityState({ snapshot: s, rows: [], now: T0 })).toBe('idle');
+    expect(workActivityState({ snapshot: s, rows: [], now: T0, liveRunInFlight: false })).toBe('idle');
   });
 
   it('is working when the snapshot says a turn is in flight and events are fresh', () => {
     const s = snap({ turn_in_flight: true, last_event_age_ms: 500, last_real_activity_age_ms: 500 });
-    expect(workActivityState({ snapshot: s, rows: [], now: T0 })).toBe('working');
+    expect(workActivityState({ snapshot: s, rows: [], now: T0, liveRunInFlight: false })).toBe('working');
   });
 
   it('goes working the instant a live turn_start lands, before any poll', () => {
@@ -63,13 +63,13 @@ describe('workActivityState', () => {
     // poll interval to notice a turn started.
     const s = snap({ turn_in_flight: false });
     const rows = [row({ seq: 1, at: T0 + 10, kind: 'turn_start', label: 'turn started' })];
-    expect(workActivityState({ snapshot: s, rows, now: T0 + 20 })).toBe('working');
+    expect(workActivityState({ snapshot: s, rows, now: T0 + 20, liveRunInFlight: false })).toBe('working');
   });
 
   it('goes idle the instant a live completion lands, before any poll', () => {
     const s = snap({ turn_in_flight: true, last_event_age_ms: 100, last_real_activity_age_ms: 100 });
     const rows = [row({ seq: 9, at: T0 + 10, kind: 'completion', label: 'turn complete' })];
-    expect(workActivityState({ snapshot: s, rows, now: T0 + 20 })).toBe('idle');
+    expect(workActivityState({ snapshot: s, rows, now: T0 + 20, liveRunInFlight: false })).toBe('idle');
   });
 
   it('ignores rows OLDER than the snapshot that produced them', () => {
@@ -77,7 +77,7 @@ describe('workActivityState', () => {
     // Re-reading a stale turn_start would resurrect a turn the server knows ended.
     const s = snap({ turn_in_flight: false, now: T0 });
     const rows = [row({ seq: 1, at: T0 - 5_000, kind: 'turn_start', label: 'turn started' })];
-    expect(workActivityState({ snapshot: s, rows, now: T0 })).toBe('idle');
+    expect(workActivityState({ snapshot: s, rows, now: T0, liveRunInFlight: false })).toBe('idle');
   });
 
   it('does NOT treat an error row as the end of a turn', () => {
@@ -85,7 +85,7 @@ describe('workActivityState', () => {
     // is an end marker, and the snapshot poll is the authority that corrects it.
     const s = snap({ turn_in_flight: true, now: T0 });
     const rows = [row({ seq: 3, at: T0 + 10, kind: 'error', label: 'error' })];
-    expect(workActivityState({ snapshot: s, rows, now: T0 + 20 })).toBe('working');
+    expect(workActivityState({ snapshot: s, rows, now: T0 + 20, liveRunInFlight: false })).toBe('working');
   });
 
   it('reports STALLED, not working, when only keepalives keep arriving', () => {
@@ -104,7 +104,7 @@ describe('workActivityState', () => {
       }),
     ];
     const now = T0 + WEDGE_AFTER_MS + 2_000;
-    expect(workActivityState({ snapshot: s, rows, now })).toBe('wedged');
+    expect(workActivityState({ snapshot: s, rows, now, liveRunInFlight: false })).toBe('wedged');
   });
 
   it('stays working while real tool events keep landing inside the wedge window', () => {
@@ -113,22 +113,40 @@ describe('workActivityState', () => {
       row({ seq: 1, at: T0 + 1, kind: 'turn_start', label: 'turn started' }),
       row({ seq: 2, at: T0 + WEDGE_AFTER_MS - 1_000, kind: 'tool_start', label: 'Bash' }),
     ];
-    expect(workActivityState({ snapshot: s, rows, now: T0 + WEDGE_AFTER_MS })).toBe('working');
+    expect(workActivityState({ snapshot: s, rows, now: T0 + WEDGE_AFTER_MS, liveRunInFlight: false })).toBe('working');
   });
 
   it('reports NOT RESPONDING when even the keepalive stops', () => {
     const s = snap({ turn_in_flight: true, now: T0 });
     const rows = [row({ seq: 1, at: T0 + 1, kind: 'turn_start', label: 'turn started' })];
-    expect(workActivityState({ snapshot: s, rows, now: T0 + DEAD_AFTER_MS + 1_000 })).toBe('dead');
+    expect(workActivityState({ snapshot: s, rows, now: T0 + DEAD_AFTER_MS + 1_000, liveRunInFlight: false })).toBe('dead');
   });
 
   it('is working, not dead, for a turn injected before the first event', () => {
     const s = snap({ turn_in_flight: true, last_event_age_ms: null, last_real_activity_age_ms: null });
-    expect(workActivityState({ snapshot: s, rows: [], now: T0 })).toBe('working');
+    expect(workActivityState({ snapshot: s, rows: [], now: T0, liveRunInFlight: false })).toBe('working');
   });
 
   it('claims nothing before the first snapshot lands', () => {
-    expect(workActivityState({ snapshot: null, rows: [], now: T0 })).toBe('idle');
+    expect(workActivityState({ snapshot: null, rows: [], now: T0, liveRunInFlight: false })).toBe('idle');
+  });
+
+  it('is working when a bound run is live even with no chat activity', () => {
+    expect(workActivityState({ snapshot: null, rows: [], now: T0, liveRunInFlight: true })).toBe('working');
+  });
+
+  it('does not report a stale chat turn as stalled above a live bound run', () => {
+    const s = snap({ turn_in_flight: true, now: T0 });
+    const rows = [
+      row({ seq: 1, at: T0 + 1, kind: 'turn_start', label: 'turn started' }),
+      row({ seq: 2, at: T0 + WEDGE_AFTER_MS + 1_000, kind: 'keepalive', label: 'alive', synthetic: true }),
+    ];
+    expect(workActivityState({
+      snapshot: s,
+      rows,
+      now: T0 + WEDGE_AFTER_MS + 2_000,
+      liveRunInFlight: true,
+    })).toBe('working');
   });
 });
 
@@ -152,6 +170,18 @@ describe('workActivityIndicator — the pulse is a claim, not decoration', () =>
     const dead = workActivityIndicator('dead');
     expect(wedged.visible && wedged.label).not.toBe('Working');
     expect(dead.visible && dead.label).not.toBe('Working');
+    expect(wedged.visible && wedged.label).toBe('Chat stalled — no activity');
+    expect(dead.visible && dead.label).toBe('Chat not responding');
+  });
+});
+
+describe('work board screen — live-run activity wiring', () => {
+  it('feeds the board live-run predicate into the scope classifier', async () => {
+    const src = await Bun.file(
+      new URL('../app/projects/[id]/workboard.tsx', import.meta.url),
+    ).text();
+    expect(src.includes('isLinkedRunning, splitBoard')).toBe(true);
+    expect(src.includes('liveRunInFlight: items.some(isLinkedRunning)')).toBe(true);
   });
 });
 
