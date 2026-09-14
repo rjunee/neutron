@@ -6888,6 +6888,16 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     expect(strategy).toContain('NEUTRON_TEST_JOBS=')
   })
 
+  test('process census budget adds the build about to launch', async () => {
+    for (const live of [0, 4, 8]) {
+      const h = buildHarness({ plan: approve, resolve_active_runs: () => live })
+      const run = await createRun({ repo_path: knobRepo(), slug: `budget-${live}` })
+      const outcome = await h.step(run)
+      expect(outcome.note).toContain(`active_runs=${live + 1} `)
+      expect(outcome.note).toContain(`divisor=${Math.max(4, live + 1)} `)
+    }
+  })
+
   test('threads the detail intermediate block to the firer verbatim', async () => {
     const marker = 'task-2-intermediate-thread-marker'
     const activeRuns = 1_000_000

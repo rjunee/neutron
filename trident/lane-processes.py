@@ -158,6 +158,63 @@ def sweep(repos=(), protected=(), finished=None, grace=1):
     return report
 
 
+def census():
+    """Snapshot same-user build lanes, including surviving children of dead owners.
+
+    Count claims once, but report every confirmed process. No persisted row is
+    used to decide liveness. Unreadable evidence makes the whole count unknown.
+    """
+    lanes = {}
+    errors = []
+    observed = time.time()
+    try:
+        entries = os.listdir('/proc')
+        boot_seconds = next(int(line.split()[1]) for line in
+                            Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+        ticks = os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, StopIteration):
+        return {'status': 'unknown', 'reason': 'process table unavailable', 'lanes': []}
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        pid = int(entry)
+        fd = None
+        try:
+            if os.stat(f'/proc/{pid}').st_uid != os.getuid():
+                continue
+            fd = os.pidfd_open(pid)
+            start, state = birth(pid)
+            if state == 'Z':
+                continue
+            c = environment_claim(pid)
+            argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+            # Exact script argument, never a shell command string mentioning it.
+            wrapper = len(argv) > 1 and os.path.basename(os.fsdecode(argv[0])) in ('bash', 'sh') and os.path.basename(os.fsdecode(argv[1])) == 'codex-build.sh'
+            if c is None and not wrapper:
+                continue
+            env = dict(part.split(b'=', 1) for part in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in part)
+            run_id = os.fsdecode(env.get(b'NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID', b'')) or None
+            cwd = os.readlink(f'/proc/{pid}/cwd')
+            # The handle binds these reads to the original process, not a reused PID.
+            if select.select([fd], [], [], 0)[0]:
+                continue
+            key = c['id'] if c else f'pid:{pid}:{start}'
+            lane = lanes.setdefault(key, {'id': key, 'processes': [], 'run_id': run_id,
+                                         'owner': owner_state(c) if c else 'unknown'})
+            if lane['run_id'] is None:
+                lane['run_id'] = run_id
+            lane['processes'].append({'pid': pid, 'started_at': boot_seconds + int(start) / ticks, 'cwd': cwd})
+        except (FileNotFoundError, ProcessLookupError):
+            pass  # Disappeared during the snapshot: no longer live.
+        except (OSError, ValueError, IndexError):
+            errors.append(f'process {pid} unreadable')
+        finally:
+            if fd is not None:
+                os.close(fd)
+    return {'status': 'unknown' if errors else 'known', 'reason': '; '.join(errors) or None,
+            'observed_at': observed, 'lanes': list(lanes.values())}
+
+
 def run(command):
     # Publish the complete claim through exec before any build code can run.
     c = {'id': uuid.uuid4().hex, 'pid': os.getpid(), 'start': birth(os.getpid())[0], 'boot': boot()}
@@ -172,7 +229,7 @@ def run(command):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['run', 'sweep'])
+    parser.add_argument('mode', choices=['run', 'sweep', 'census'])
     parser.add_argument('--repo', action='append', default=[])
     parser.add_argument('--protect', action='append', default=[])
     args, command = parser.parse_known_args()
@@ -192,7 +249,7 @@ def main():
         return run(command)
     if command:
         parser.error('unexpected sweep arguments')
-    print(json.dumps(sweep(args.repo, args.protect)))
+    print(json.dumps(census() if args.mode == 'census' else sweep(args.repo, args.protect)))
     return 0
 
 

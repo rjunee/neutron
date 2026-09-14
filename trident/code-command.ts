@@ -22,6 +22,7 @@
  * `parseAndExecuteCodeCommand` in a `ChatCommandFilter` at the boot layer.
  */
 
+import { describeBuildFleet } from './active-runs.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
@@ -38,6 +39,7 @@ export type CodeCommand =
   | { kind: 'dispatch'; task: string; board_item_id?: string }
   | { kind: 'stop'; run_ref?: string }
   | { kind: 'help' }
+  | { kind: 'fleet' }
   | { kind: 'unrecognized'; reason: string }
 
 export type CodeCommandErrorCode = 'malformed' | 'unknown_run' | 'backend_error'
@@ -76,6 +78,8 @@ export function parseCodeCommand(raw: string): CodeCommand {
   const sub = (m[1] ?? '').toLowerCase()
   const rest = (m[2] ?? '').trim()
   switch (sub) {
+    case 'fleet':
+      return { kind: 'fleet' }
     case 'help':
       return { kind: 'help' }
     case 'stop':
@@ -196,6 +200,8 @@ export async function executeCodeCommand(
   ctx: TridentCodeContext,
 ): Promise<CodeCommandResponse> {
   switch (cmd.kind) {
+    case 'fleet':
+      return describeBuildFleet(ctx.store)
     case 'help':
       return { text: HELP_TEXT }
     case 'unrecognized':
@@ -352,6 +358,7 @@ const HELP_TEXT = `Code build — \`/code\` cheatsheet (powered by foundational 
 - \`/code <task description>\` — autonomous Forge → Argus → merge loop.
 - \`/code stop\` (alias \`/code cancel\`) — stop the most-recent in-flight build in this project.
 - \`/code stop <run_id>\` — stop a specific run by id (prefix ok).
+- \`/code fleet\` — census the local build lanes from live processes; says UNKNOWN, never zero, when it cannot look.
 
 Governed repos (a \`SPEC.md\` at the root) run the Ralph plan↔task loop automatically.
 

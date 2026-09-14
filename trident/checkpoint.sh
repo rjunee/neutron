@@ -692,8 +692,8 @@ done
 #
 # `phase` is the ONLY column here that drives control flow. `isTerminalPhase(phase)`
 # is what stops the tick driver loading a run (`tick.ts`), what makes
-# `advanceTridentRun`'s step a no-op (`orchestrator.ts`), and what keeps a stopped
-# run out of the active-lane budget (`active-runs.ts`). Cancelling a build does NOT
+# `advanceTridentRun`'s step a no-op (`orchestrator.ts`). The active-lane budget
+# now probes processes independently of phase. Cancelling a build does NOT
 # kill the detached workflow that was building it (rjunee/neutron#177) — the
 # workflow keeps going and keeps checkpointing. Writing `phase` unguarded would
 # therefore let a cancelled run's own orphaned workflow flip `stopped` back to

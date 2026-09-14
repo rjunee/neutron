@@ -1,63 +1,68 @@
-/**
- * @neutronai/trident — how many builds are sharing this box's cores right now.
- *
- * THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it exceeds the
- * planned fan-out (`DEFAULT_BUILD_FANOUT` in `./test-strategy.ts`, which is the constant
- * that carries the guarantee). The composer supplies it to the orchestrator as
- * `resolve_active_runs`; the orchestrator hands the count to `computeTestJobs`.
- *
- * IT LIVES HERE, NOT INLINE IN THE COMPOSER CLOSURE, so it can be tested BEHAVIOURALLY —
- * zero / one / four / over-limit / non-build phases — instead of by asserting on the
- * composer's source text, which is all round 3 shipped.
- */
+/** Local Linux build census. Rows enrich process evidence; they never create it. */
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import type { TridentRun } from './store.ts'
 
-/** The row shape this count needs — nothing but the phase. */
-export interface ActiveRunPhaseRow {
-  readonly phase: string
+export interface FleetLane {
+  id: string
+  run_id: string | null
+  owner: 'live' | 'dead' | 'unknown'
+  processes: { pid: number; started_at: number; cwd: string }[]
+}
+export type FleetSnapshot = {
+  status: 'known' | 'unknown'
+  reason: string | null
+  observed_at?: number
+  lanes: FleetLane[]
 }
 
-/** The store seam, narrowed to the one method this reads. */
-export interface NonTerminalRunSource {
-  listNonTerminal(limit: number): ActiveRunPhaseRow[]
+/** The helper checks pidfds after reading identity, excluding exited/reused PIDs. */
+function runCensus() {
+  return spawnSync('python3', ['-B', fileURLToPath(new URL('./lane-processes.py', import.meta.url)), 'census'], {
+      encoding: 'utf8', timeout: 10_000, maxBuffer: 8 * 1024 * 1024,
+    })
 }
 
-/**
- * How many non-terminal rows are scanned. Deliberately generous: a cap that CLIPPED the
- * count would silently pin every build's budget at its floor, and a budget that is wrong
- * in the quiet direction is the hardest kind to notice.
- */
-export const ACTIVE_BUILD_RUN_SCAN_LIMIT = 200
+export function probeBuildFleet(run = runCensus): FleetSnapshot {
+  try {
+    const result = run()
+    if (result.error || result.status !== 0) throw new Error('process census unavailable')
+    const value = JSON.parse(result.stdout) as FleetSnapshot
+    if (!['known', 'unknown'].includes(value.status) || !Array.isArray(value.lanes)) {
+      throw new Error('invalid process census')
+    }
+    return value
+  } catch {
+    return { status: 'unknown', reason: 'process census unavailable', lanes: [] }
+  }
+}
 
-/** The phases that actually run a test suite. */
-const BUILD_PHASES = new Set(['forge-init', 'forge-fix'])
+/** Unknown throws into the launcher's existing planned-fan-out fallback. */
+export function countActiveBuildRuns(probe = probeBuildFleet): number {
+  const snapshot = probe()
+  if (snapshot.status === 'unknown') throw new Error(snapshot.reason ?? 'process census unknown')
+  return snapshot.lanes.length
+}
 
-/**
- * Count the runs currently in a BUILD phase, INCLUDING the one asking. The divisor is
- * "builds sharing these cores", and the launching run is one of them.
- *
- * ONLY THE BUILD PHASES COUNT. A run parked in `ralph-plan`/`ralph-task` (planning) or
- * `argus` (review) is burning tokens, not cores; counting it would raise the divisor and
- * starve the one build that IS running tests.
- *
- * IT OVER-COUNTS, AND THAT IS THE SAFE DIRECTION — round-3 review, correctly. A phase is
- * a RUN-LIFETIME marker, not a suite window: in pr mode `orchestrator.ts`'s
- * publish-requested branch returns without touching `phase`, so a run stays `forge-init`
- * through publish, the review re-fire and its fix rounds until `state-machine.ts` moves
- * it at harvest. This therefore reads "runs somewhere in their build lifetime", which is
- * ≥ the number executing a suite right now. The consequence is a LARGER divisor, i.e.
- * FEWER jobs — degradation toward the runner's own sequential default, never
- * oversubscription — and it cannot bite at all below `DEFAULT_BUILD_FANOUT`, because the
- * divisor is `max(FANOUT, active_runs)`. Narrowing it needs a phase that moves on
- * publish, which is a state-machine change and not a budgeting one.
- *
- * What round 4 DOES fix is the invisibility: the launcher now logs `active_runs`, the
- * `divisor` and the chosen `jobs` on every fire (`buildTestStrategyDetail`), so a box
- * pinned at the floor says so instead of looking healthy.
- *
- * NEVER SWALLOWS A STORE FAILURE. `orchestrator.launch()` catches it and falls back to
- * `active = 1` (which still divides by the constant fan-out); catching it in two places
- * would mean neither obviously owns the degradation.
- */
-export function countActiveBuildRuns(store: NonTerminalRunSource): number {
-  return store.listNonTerminal(ACTIVE_BUILD_RUN_SCAN_LIMIT).filter((run) => BUILD_PHASES.has(run.phase)).length
+/** `/code fleet`: all local same-user lane claims, including ones without rows. */
+export function describeBuildFleet(store: { get(id: string): Pick<TridentRun, 'id' | 'pr'> | null }, probe = probeBuildFleet) {
+  const snapshot = probe()
+  const lines = [snapshot.status === 'known'
+    ? `Running build lanes: ${snapshot.lanes.length}`
+    : `Running build lanes: UNKNOWN (${snapshot.reason})`,
+  'Scope: local same-user lane claims and unclaimed Codex build wrappers. Cost: unavailable (#554).']
+  try {
+    for (const lane of snapshot.lanes) {
+      const run = lane.run_id ? store.get(lane.run_id) : null
+      lines.push(`Lane ${lane.id} | run ${run?.id ?? lane.run_id ?? 'untracked'} | PR ${run?.pr ?? 'unknown'} | owner ${lane.owner}`)
+      for (const proc of lane.processes) {
+        lines.push(`  PID ${proc.pid} | since ${new Date(proc.started_at * 1000).toISOString()} | ${proc.cwd}`)
+      }
+    }
+  } catch {
+    return { text: `${lines.join('\n')}\nRun metadata: UNKNOWN`, data: snapshot,
+      error: { code: 'backend_error' as const, message: 'run metadata unavailable' } }
+  }
+  return { text: lines.join('\n'), data: snapshot,
+    ...(snapshot.status === 'unknown' ? { error: { code: 'backend_error' as const, message: snapshot.reason ?? 'process census unknown' } } : {}) }
 }

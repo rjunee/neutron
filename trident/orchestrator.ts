@@ -250,10 +250,9 @@ export interface BuildTridentOrchestratorOptions {
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
   /**
-   * The count of trident runs currently IN A BUILD PHASE (`forge-init`/`forge-fix`),
-   * INCLUDING the one launching — the live test-running fan-out. Wired from the run
-   * store in `gateway/composition/build-core-modules.ts` (the orchestrator holds no
-   * store; the composer does).
+   * The process census of already-running local build lanes. The launch budget
+   * adds one slot for the build about to start. Wired in
+   * `gateway/composition/build-core-modules.ts`; rows do not establish liveness.
    *
    * Consumed by `computeTestJobs` as its RAISE-ONLY term. The bound itself comes from
    * the CONSTANT `DEFAULT_BUILD_FANOUT`, because a launch-time snapshot cannot bound a
@@ -262,8 +261,8 @@ export interface BuildTridentOrchestratorOptions {
    * divided the same box again (read `computeTestJobs`'s docblock). This count only
    * shrinks the budget FURTHER, when more builds than planned are genuinely running.
    *
-   * BEST-EFFORT: a throwing resolver or a non-finite result degrades to 1
-   * (sequential-safe) and NEVER fails the launch. And it must actually be WIRED —
+   * BEST-EFFORT: a throwing resolver or a non-finite result budgets against
+   * the planned fan-out and NEVER fails the launch. And it must actually be WIRED —
    * `resolve_phase_models` is the history here: a complete seam whose producer was
    * missing shipped an inert feature that no test could catch, because every piece
    * worked in isolation.
@@ -4592,9 +4591,16 @@ export function buildTridentOrchestrator(
       if (opts.resolve_active_runs) {
         try {
           const n = opts.resolve_active_runs()
-          if (Number.isFinite(n) && n >= 1) active = Math.floor(n)
+          // ZERO IS AN ANSWER, NOT A MISSING ONE. The census counts the builds ALREADY
+          // running; the one launching is not among them, so `0` means "this box is
+          // otherwise idle" and must take the `+ 1` path like every other count. Gating
+          // on `n >= 1` routed it to the catch-block default instead, which happens to
+          // land on the same number today and would stop doing so the moment `active`
+          // means anything below `DEFAULT_BUILD_FANOUT`. A census failure is the `catch`
+          // below, and nothing else.
+          if (Number.isFinite(n) && n >= 0) active = Math.floor(n) + 1
         } catch {
-          // A store hiccup costs the RAISE-ONLY term, not the whole block, and not the
+          // An unavailable census costs the RAISE-ONLY term, not the whole block, and not the
           // bound: `computeTestJobs` still divides by the constant fan-out, so a lost
           // count means "assume the planned fan-out" rather than "assume an idle box".
           // The build also still gets its stage-1 gate and its full-suite rule. The
