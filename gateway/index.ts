@@ -84,7 +84,7 @@ export type {
 import type { GatewayModuleGraph } from './module-graph.ts'
 import { sdNotify } from './sd-notify.ts'
 import { fireAndForget, installProcessSafetyNet } from '@neutronai/logger/fire-and-forget.ts'
-import { createLogger } from '@neutronai/logger'
+import { createLogger, type Logger } from '@neutronai/logger'
 
 const log = createLogger('gateway')
 
@@ -270,6 +270,81 @@ export async function drainRealmodeCleanups(
     } catch (err) {
       log.error('realmode_cleanup_threw', { error: errText(err) })
     }
+  }
+}
+
+/**
+ * How long the listener's graceful drain may take before the shutdown stops
+ * waiting for it and closes the sockets itself.
+ *
+ * NOT A TUNING KNOB — it is the difference between a shutdown that runs and one
+ * that does not. `Bun.serve().stop(false)` waits for open connections, and the
+ * gateway serves its app WebSocket from the SAME listener (`websocket:
+ * websocketHandler`). A WebSocket is not an in-flight request that completes; it
+ * is open until the client leaves, and the owner's web app and phone hold one
+ * continuously. So the graceful stop does not drain slowly — it does not return.
+ *
+ * MEASURED 2026-09-14, eight deploys: every single shutdown took exactly 30.0s
+ * (01:23:15→45, 02:45:19→49, 03:43:29→59, 06:36:53→07:23, 08:07:21→51,
+ * 10:05:36→06:06, 19:00:20→50, 20:20:20→50) and emitted ZERO shutdown log lines,
+ * because `await boundServer.stop(opts)` was the first statement and never
+ * returned. Nothing below it has ever run in production: not the module graph's
+ * shutdown, not the REPL pool teardown, not `drainRealmodeCleanups`, not
+ * `db.close()`. The database has been SIGKILLed open on every deploy.
+ *
+ * No test caught it because `stop()` auto-forces under `NODE_ENV='test'` (see
+ * the handle below), so the suite can only ever exercise the branch that works.
+ *
+ * Three seconds is well inside systemd's 30s `TimeoutStopSec` and leaves the
+ * rest of the shutdown its own budget, which is the thing that actually needs
+ * the time.
+ */
+export const LISTENER_DRAIN_BUDGET_MS = 3_000
+
+/**
+ * Stop the HTTP listener, gracefully if it can be done promptly and forcefully
+ * if it cannot. Resolves either way, and says which branch it took.
+ *
+ * The graceful attempt is not abandoned on the deadline — it is left to settle
+ * with its rejection absorbed, because the forceful stop that follows is what
+ * releases the socket and a late rejection from the first must not surface as an
+ * unhandled one after the shutdown has moved on.
+ */
+export async function stopListenerWithinBudget(
+  server: Pick<BootServer, 'stop'>,
+  opts: { force?: boolean } | undefined,
+  budgetMs: number,
+  log: Pick<Logger, 'info' | 'error'>,
+  setTimer: (fn: () => void, ms: number) => unknown = (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (h: unknown) => void = (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+): Promise<void> {
+  // An explicit force is the caller saying "do not wait" — honour it directly
+  // rather than spending the budget first.
+  if (opts?.force === true) {
+    await server.stop(opts)
+    log.info('http_listener_stopped', { drain: 'forced_by_caller' })
+    return
+  }
+  let timer: unknown = null
+  const graceful = server.stop(opts)
+  graceful.catch(() => {})
+  const deadline = new Promise<'deadline'>((resolve) => {
+    timer = setTimer(() => resolve('deadline'), budgetMs)
+  })
+  const outcome = await Promise.race([graceful.then(() => 'drained' as const), deadline])
+  clearTimer(timer)
+  if (outcome === 'drained') {
+    log.info('http_listener_stopped', { drain: 'graceful' })
+    return
+  }
+  // The drain did not finish inside its budget. Something is holding a
+  // connection open — on this instance, always the owner's own app socket.
+  log.info('http_listener_drain_timed_out', { budget_ms: budgetMs, action: 'closing_connections' })
+  try {
+    await server.stop({ force: true })
+    log.info('http_listener_stopped', { drain: 'forced_after_budget' })
+  } catch (err) {
+    log.error('http_listener_force_stop_failed', { error: errText(err) })
   }
 }
 
@@ -984,6 +1059,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   log.info(loopRegistry.bootLine(project_slug, DORMANT_LOOPS))
 
   let shuttingDown = false
+
   const shutdown = async (opts?: { force?: boolean }): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
@@ -993,8 +1069,12 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // opts.force is threaded through to boundServer.stop so test callers can
     // forcefully close idle keep-alive sockets without changing production
     // graceful-drain semantics.
+    // FIRST LINE OF THE SHUTDOWN, and it exists so this path can never again be
+    // invisible: for eight deploys the only evidence that shutdown() had been
+    // entered at all was systemd's own kill line 30 seconds later.
+    log.info('shutdown_started', { forced: opts?.force === true })
     try {
-      await boundServer.stop(opts)
+      await stopListenerWithinBudget(boundServer, opts, LISTENER_DRAIN_BUDGET_MS, log)
     } catch (err) {
       log.error('http_listener_stop_failed', { error: errText(err) })
     }
