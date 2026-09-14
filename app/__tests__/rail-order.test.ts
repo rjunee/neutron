@@ -80,7 +80,7 @@ describe('orderRailProjects', () => {
 });
 
 describe('railBadgeLabel', () => {
-  it('shows unknown distinctly from caught up', () => {
+  test('shows unknown distinctly from caught up', () => {
     expect(railBadgeLabel(null)).toBe('?');
     expect(railBadgeLabel(0)).toBeNull();
   });
