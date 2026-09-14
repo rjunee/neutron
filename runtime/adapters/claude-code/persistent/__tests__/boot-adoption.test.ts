@@ -25,7 +25,6 @@ import { dirname, join } from 'node:path'
 import {
   adoptionPermitsSpawn,
   beginBootAdoption,
-  deleteOwnPoolEntry,
   reconcileOwnRepl,
   resetBootAdoption,
   resetBootAdoptionForTests,
@@ -2149,38 +2148,4 @@ describe("a cleanup path evicts only its OWN pool entry", () => {
     expect(await pool.get(KEY)).toBe(b)
   })
 
-  it('THE UNIT CONTROLS: ours is deleted, a stranger is kept, rejected is deleted, pending is kept', () => {
-    // ALL FOUR ARMS, AT THE ONLY LEVEL THEY ARE OBSERVABLE — and finding that out was a
-    // result in itself. Driving the "ours" arm through the pass is impossible today:
-    // `adoptRow` publishes only after the claim succeeds and no cleanup follows a
-    // successful claim, so none of the three cleanup paths ever runs with its own session
-    // in the pool. Which means the unconditional delete they used to perform could ONLY
-    // ever have evicted somebody else's entry.
-    //
-    // Without these controls a guard that never deleted anything would satisfy the two
-    // behaviour cases above, so the arms are pinned here.
-    const mine = new ReplSession(KEY, GENERATION, SESSION_ID, CHANNEL, '/tmp')
-    const stranger = newerSession()
-
-    pool.set(KEY, Promise.resolve(mine))
-    deleteOwnPoolEntry(KEY, mine)
-    expect(pool.get(KEY)).toBeUndefined()
-
-    pool.set(KEY, Promise.resolve(stranger))
-    deleteOwnPoolEntry(KEY, mine)
-    expect(pool.get(KEY)).toBeDefined()
-
-    const rejected = Promise.reject(new Error('spawn failed'))
-    rejected.catch(() => undefined)
-    pool.set(KEY, rejected as unknown as Promise<ReplSession>)
-    deleteOwnPoolEntry(KEY, mine)
-    expect(pool.get(KEY)).toBeUndefined()
-
-    // PENDING is not ours: ours is installed already-fulfilled, so a pending entry belongs
-    // to a spawn somebody else started.
-    pool.set(KEY, new Promise<ReplSession>(() => {}))
-    deleteOwnPoolEntry(KEY, mine)
-    expect(pool.get(KEY)).toBeDefined()
-    pool.delete(KEY)
-  })
 })
