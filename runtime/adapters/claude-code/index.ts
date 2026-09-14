@@ -508,9 +508,12 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
 
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
-  // `--resume` respawn) + heartbeat run once per registry.
+  // `--resume` respawn) + heartbeat run once per registry. Disposable one-turn
+  // substrates are deliberately excluded: their spawn path strips these same
+  // supervision fields because they must never be respawned or resumed, and a
+  // heartbeat rooted in their short-lived cwd would outlive the removed worktree.
   const home = resolved.home
-  if (home !== undefined) {
+  if (home !== undefined && options.ephemeral !== true) {
     const paths = deriveReplSupervisionPaths(home)
     // Create the state dir up-front: registry-lock opens `<dir>/.registry.lock`
     // and the heartbeat opens `<dir>/.heartbeat` with O_WRONLY|O_CREAT, both of
@@ -569,7 +572,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     // key is a no-op (`logger/index.ts` — `onceFired.get(subsystem)?.delete`),
     // so this costs nothing on the overwhelmingly common armed path.
     log.clearOnce(`supervision-off:${options.substrate_instance_id}`)
-  } else {
+  } else if (home === undefined) {
     // SUPERVISION IS OFF, AND IT SAYS SO. Reaching here means neither a `cwd`
     // nor `NEUTRON_HOME` carried a non-blank value, so there is nowhere to put
     // a per-instance registry and the whole block above is skipped: no
