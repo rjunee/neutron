@@ -89,6 +89,26 @@ Both directions are covered on the same call: 107 bytes accepted, 108 refused
 over-bound case also asserts that NOTHING is returned, so a truncating
 implementation cannot pass by handing back a prefix.
 
+### A guard whose literal moved — re-derived, not re-pointed
+
+`trident/codex-rotation.test.ts:889` ("a per-project override bypasses rotation
+entirely") retyped the override dir as `projects/<project_id>`. The hashed key made
+that spelling stale, and the build lane never ran this suite.
+
+The PROPERTY it protects is untouched: with BOTH global seats cooled,
+`resolveActiveCodexHome` must return the PROJECT home rather than anything rotation
+would have picked. So the expectation is now DERIVED through the production helper
+(`codexProjectHome(codexHome, 'pinned')`) instead of being retyped — which also means
+it cannot drift from the key derivation a second time — and the two negative
+assertions beside it (not the global home, not the `accounts/work` slot home) still
+carry the discrimination. The test states what changed and why it is not a
+re-pointed literal.
+
+Swept for others: every `codex*.test.ts` in `trident/` plus
+`gateway/http/codex-credential-surface.test.ts` — 334 pass / 0 fail. The only other
+`join(..., 'projects', ...)` in the tree is the helper's own composition
+(`trident/codex-auth.ts:276`).
+
 ### Deliberately not done
 
 No truncation anywhere, no fallback path, no feature flag, no change to the kernel
