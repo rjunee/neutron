@@ -25,6 +25,13 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
+const REQUIRED_CODEX_AUTH_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'OPENAI_KEY',
+  'OPENAI_AUTH_TOKEN',
+  'OPENAI_API_TOKEN',
+  'CODEX_ACCESS_TOKEN',
+] as const
 // Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH that contains
 // nothing at all, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
@@ -50,6 +57,8 @@ interface RunOpts {
    * computed — the disclosure must still fire (fail SAFE, never fail open).
    */
   brokenAwk?: boolean
+  /** Run a fixture copy whose sibling auth vocabulary is absent. */
+  missingAuthVocabulary?: boolean
   env?: Record<string, string>
 }
 
@@ -111,7 +120,14 @@ function run(opts: RunOpts = {}): {
   }
   // The cwd is a bare temp dir, NOT a git repo — so the `git diff` fallback yields
   // nothing and every test that needs a diff must hand one over explicitly.
-  const res = spawnSync(BASH, [SCRIPT, 'main'], { cwd: dir, encoding: 'utf8', env })
+  let script = SCRIPT
+  if (opts.missingAuthVocabulary === true) {
+    const isolatedTrident = join(dir, 'isolated', 'trident')
+    mkdirSync(isolatedTrident, { recursive: true })
+    script = join(isolatedTrident, 'codex-review.sh')
+    writeFileSync(script, readFileSync(SCRIPT))
+  }
+  const res = spawnSync(BASH, [script, 'main'], { cwd: dir, encoding: 'utf8', env })
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -183,19 +199,42 @@ describe('trident/codex-review.sh — exit-code contract', () => {
     expect(stderr).not.toContain('EMPTY_DIFF')
   })
 
-  test('scrubs OPENAI_API_KEY before running codex → subscription OAuth only, never a metered key (Codex [P1])', () => {
-    // With OPENAI_API_KEY set in the env, the wrapper must unset it so codex uses
-    // the CODEX_HOME OAuth. The exec cmd fails if the key survived into codex's env.
-    const { status } = run({
+  test('scrubs the full Codex auth vocabulary before running codex', () => {
+    const seeded = Object.fromEntries(
+      REQUIRED_CODEX_AUTH_ENV_VARS.map((name) => [name, `must-not-survive-${name}`]),
+    )
+    const { status, stdout } = run({
       authed: true,
       codexLoginExit: 0,
       env: {
-        OPENAI_API_KEY: 'sk-metered-should-be-scrubbed',
-        NEUTRON_CODEX_EXEC_CMD:
-          'cat >/dev/null; if [ -n "$OPENAI_API_KEY" ]; then exit 8; fi; echo "VERDICT: APPROVE"',
+        ...seeded,
+        CODEX_SCRUB_CONTROL: 'control-survives',
+        NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; env; echo "VERDICT: APPROVE"',
       },
     })
     expect(status).toBe(0)
+    expect(stdout).toContain('CODEX_SCRUB_CONTROL=control-survives')
+    for (const name of REQUIRED_CODEX_AUTH_ENV_VARS) {
+      expect(stdout).not.toContain(`${name}=`)
+    }
+  })
+
+  test('an absent auth vocabulary defers before a metered key can reach codex', () => {
+    const { status, stderr, stdout, codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      missingAuthVocabulary: true,
+      env: {
+        OPENAI_API_KEY: 'must-not-reach-child',
+        NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; env; echo "VERDICT: APPROVE"',
+      },
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_AUTH_ENV_VARS_UNREADABLE')
+    expect(stderr).toContain('DEFERRED')
+    expect(stdout).not.toContain('OPENAI_API_KEY=')
+    expect(stdout).not.toContain('VERDICT: APPROVE')
+    expect(codexArgv).toBe('')
   })
 
   test('configured + authed but the review CALL fails → exit 5 (DEFERRED)', () => {

@@ -255,10 +255,17 @@ export CODEX_HOME
 # This review MUST use the ChatGPT-subscription OAuth persisted under CODEX_HOME.
 # The codex CLI PREFERS OPENAI_API_KEY over persisted OAuth, and the gateway
 # process may carry one in its env (it also backs gbrain embeddings + the GPT
-# adapter), which would silently bill a metered key. Scrub the API-key variants so
+# adapter), which would silently bill a metered key. Scrub every shared auth variant so
 # codex falls back to the CODEX_HOME OAuth for BOTH the precheck and the review
 # (Codex review [P1]).
-unset OPENAI_API_KEY OPENAI_KEY 2>/dev/null || true
+CODEX_AUTH_ENV_VARS_FILE="${BASH_SOURCE[0]%/*}/../config/codex-cli-auth-env-vars.txt"
+if [ ! -r "$CODEX_AUTH_ENV_VARS_FILE" ]; then
+  echo "CODEX_REVIEW_AUTH_ENV_VARS_UNREADABLE: cannot read the Codex authentication environment vocabulary. DEFERRED — do NOT treat as an approval." >&2
+  exit 3
+fi
+while IFS= read -r codex_auth_env_var || [ -n "$codex_auth_env_var" ]; do
+  unset "$codex_auth_env_var"
+done < "$CODEX_AUTH_ENV_VARS_FILE"
 
 # ── NOT CONNECTED: the codex CLI itself is absent (best-effort install skipped) ─
 if ! command -v codex >/dev/null 2>&1; then

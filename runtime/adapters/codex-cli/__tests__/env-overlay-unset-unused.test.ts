@@ -183,13 +183,19 @@ function ensureUnset(key: string): () => void {
 }
 
 describe('ISSUES #67 — codex-cli env-overlay unset unused auth vars', () => {
-  test('codex_oauth path: host OPENAI_API_KEY + OPENAI_AUTH_TOKEN + OPENAI_API_TOKEN do NOT leak into the spawn env', async () => {
+  test('codex_oauth path: every required auth variable is removed and a control survives', async () => {
     // Seed CODEX_HOME with an auth.json so the OAuth path resolves.
     writeFileSync(join(codex_home, 'auth.json'), '{"access_token":"test-oauth"}')
+    const required = [
+      'OPENAI_API_KEY',
+      'OPENAI_KEY',
+      'OPENAI_AUTH_TOKEN',
+      'OPENAI_API_TOKEN',
+      'CODEX_ACCESS_TOKEN',
+    ] as const
     const restoreEnv = stubEnv({
-      OPENAI_API_KEY: 'host-api-key-DO-NOT-USE',
-      OPENAI_AUTH_TOKEN: 'host-auth-token-DO-NOT-USE',
-      OPENAI_API_TOKEN: 'host-api-token-DO-NOT-USE',
+      ...Object.fromEntries(required.map((name) => [name, `must-not-survive-${name}`])),
+      CODEX_SCRUB_CONTROL: 'control-survives',
     })
     try {
       const { spawnImpl, seen } = captureSpawn()
@@ -205,12 +211,8 @@ describe('ISSUES #67 — codex-cli env-overlay unset unused auth vars', () => {
       const env = seen[0]!.env
       // CODEX_HOME survives — it's the per-spawn intent, not an auth credential.
       expect(env['CODEX_HOME']).toBe(codex_home)
-      // All three OPENAI_* host vars are gone — they would otherwise inherit
-      // via the parentEnv merge and the codex binary would prefer
-      // OPENAI_API_KEY over the persisted OAuth file.
-      expect(env['OPENAI_API_KEY']).toBeUndefined()
-      expect(env['OPENAI_AUTH_TOKEN']).toBeUndefined()
-      expect(env['OPENAI_API_TOKEN']).toBeUndefined()
+      expect(env['CODEX_SCRUB_CONTROL']).toBe('control-survives')
+      for (const name of required) expect(env[name]).toBeUndefined()
     } finally {
       restoreEnv()
     }

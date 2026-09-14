@@ -70,18 +70,15 @@ forbidding a metered key while `runtime/adapters/codex-cli/auth.ts:86` documents
 So both surfaces forbid the same thing — an **ambient** key silently billing — and
 differ only on whether a **deliberately configured** one is allowed. It is allowed for
 a self-hoster's own gateway turns; it is forbidden here, because this surface spends
-the owner's subscription seat, which is what `trident/codex-review.sh:145-152` states
-in capitals. The criteria below are scoped to this surface and assert nothing about
+the owner's subscription seat, which `trident/codex-review.sh` states under its hard
+billing contract. The criteria below are scoped to this surface and assert nothing about
 the adapter's.
 
-> **One real discrepancy, filed as #645 rather than carried here.** There are three
-> scrub lists and none is a superset: `trident/codex-review.sh:152` and
-> `trident/codex-build.sh:850` unset `OPENAI_API_KEY`/`OPENAI_KEY`;
-> `CODEX_CLI_AUTH_ENV_VARS` covers
-> `OPENAI_API_KEY`/`OPENAI_AUTH_TOKEN`/`OPENAI_API_TOKEN` (`auth.ts:37-41`). The
-> intersection is one variable, so `OPENAI_KEY` survives the adapter's scrub and two
-> token variants survive both wrappers'. One shared list read by every call site is
-> the fix, and it is a change against the adapter, not this one.
+> **The discrepancy filed as #645 is resolved.** `config/codex-cli-auth-env-vars.txt`
+> owns the union once; the adapter and both shell wrappers read it. The wrapper
+> behavior is exercised at `trident/codex-review.test.ts` and
+> `trident/codex-build.test.ts`, and the adapter behavior at
+> `runtime/adapters/codex-cli/__tests__/env-overlay-unset-unused.test.ts`.
 
 ## What the adapter owns
 
@@ -106,13 +103,10 @@ the adapter's.
    the codex CLI prefers an inherited `OPENAI_API_KEY` over persisted OAuth, so the
    adapter scrubs the **union of every recognised credential variable** from every
    child's environment: `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`,
-   `OPENAI_API_TOKEN`. That is wider than either list in the tree today — the
-   wrappers unset the first two under their HARD BILLING CONTRACT header
-   (`trident/codex-review.sh:145-152`), `auth.ts:24-33` names the last two as
-   variants the spawn must not inherit — and it is deliberately wider, because the
+   `OPENAI_API_TOKEN`, and the CLI's `CODEX_ACCESS_TOKEN`. The wrappers and adapter all consume the same vocabulary,
+   deliberately wide because the
    cost of scrubbing a variable codex ignores is zero and the cost of missing one is
-   a silently metered bill. #645 unifies the lists; this contract does not depend on
-   it landing first.
+   a silently metered bill.
 5. **One account, one `CODEX_HOME`. The bounded subject is THE ADAPTER, observed at the
    spawn boundary — not the turn.** The adapter uses the `CODEX_HOME` the wrappers resolve
    and **itself** materialises an account's `auth.json` nowhere else: no copy, hard link,
@@ -311,7 +305,8 @@ form; the "kills:" note names what the earlier form let through.
       rejects key-only files and accepts OAuth-plus-key passes a suite built the other
       way, and bills.
       (ii) seed the **union of every recognised credential variable** in the parent —
-      `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — and
+      `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN`,
+      `CODEX_ACCESS_TOKEN` — and
       assert **not one** reaches the process that execs codex. Read **the environment
       object handed to the spawn, captured at the spawn boundary** — never the config (the
       file being correct is what the broken implementation gets right), and **not

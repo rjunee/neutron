@@ -1,9 +1,33 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { CODEX_CLI_AUTH_ENV_VARS, resolveCodexAuth } from './auth.ts'
+
+const REQUIRED_CODEX_AUTH_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'OPENAI_KEY',
+  'OPENAI_AUTH_TOKEN',
+  'OPENAI_API_TOKEN',
+  'CODEX_ACCESS_TOKEN',
+] as const
+
+test('one Codex auth vocabulary feeds the adapter and both wrappers', () => {
+  expect(CODEX_CLI_AUTH_ENV_VARS).toEqual(REQUIRED_CODEX_AUTH_ENV_VARS)
+  const repoRoot = join(import.meta.dir, '../../..')
+  for (const wrapper of ['codex-review.sh', 'codex-build.sh']) {
+    const source = readFileSync(join(repoRoot, 'trident', wrapper), 'utf8')
+    expect(source).toContain('../config/codex-cli-auth-env-vars.txt')
+    expect(source).not.toMatch(/unset\s+OPENAI_/u)
+  }
+
+  // A newly hand-maintained shell scrub in trident is a divergence, even in a
+  // wrapper this test does not know by name.
+  for (const name of readdirSync(join(repoRoot, 'trident')).filter((name) => name.endsWith('.sh'))) {
+    expect(readFileSync(join(repoRoot, 'trident', name), 'utf8')).not.toMatch(/unset[^\n]*OPENAI_/u)
+  }
+})
 
 describe('codex-cli auth', () => {
   test('OPENAI_API_KEY wins over persisted OAuth', async () => {

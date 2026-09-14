@@ -17,6 +17,7 @@
  * back to the adapter index so `exec.ts` can spawn `codex` with the right env.
  */
 
+import { readFileSync } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -32,13 +33,14 @@ export type CodexAuthSource = 'codex_oauth' | 'api_key'
  * deleting the informal variants too matches PR #332's three-Anthropic-vars
  * defense-in-depth pattern. The list is the single source of truth; the
  * resolver below and the regression suite both consume it so adding a
- * future variant flips both sites at once.
+ * future variant flips the adapter and both shell wrappers at once.
  */
-export const CODEX_CLI_AUTH_ENV_VARS = [
-  'OPENAI_API_KEY',
-  'OPENAI_AUTH_TOKEN',
-  'OPENAI_API_TOKEN',
-] as const
+const AUTH_ENV_VARS_FILE = new URL('../../../config/codex-cli-auth-env-vars.txt', import.meta.url)
+
+/** Shared with both shell wrappers; one non-empty environment-variable name per line. */
+export const CODEX_CLI_AUTH_ENV_VARS: readonly string[] = readFileSync(AUTH_ENV_VARS_FILE, 'utf8')
+  .split(/\r?\n/u)
+  .filter((name) => name.length > 0)
 
 export interface CodexResolvedAuth {
   source: CodexAuthSource

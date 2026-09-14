@@ -877,7 +877,14 @@ export CODEX_HOME
 # PREFERS OPENAI_API_KEY over the persisted OAuth, and the gateway process may carry
 # one (it also backs gbrain embeddings + the GPT adapter). A build is far more
 # tokens than a review, so an accidental metered key costs correspondingly more.
-unset OPENAI_API_KEY OPENAI_KEY 2>/dev/null || true
+CODEX_AUTH_ENV_VARS_FILE="${BASH_SOURCE[0]%/*}/../config/codex-cli-auth-env-vars.txt"
+if [ ! -r "$CODEX_AUTH_ENV_VARS_FILE" ]; then
+  echo "CODEX_BUILD_AUTH_ENV_VARS_UNREADABLE: cannot read the Codex authentication environment vocabulary. DEFERRED — the build cannot run safely." >&2
+  exit 3
+fi
+while IFS= read -r codex_auth_env_var || [ -n "$codex_auth_env_var" ]; do
+  unset "$codex_auth_env_var"
+done < "$CODEX_AUTH_ENV_VARS_FILE"
 
 # ── NOT CONNECTED: the codex CLI itself is absent ─────────────────────────────
 if ! command -v codex >/dev/null 2>&1; then

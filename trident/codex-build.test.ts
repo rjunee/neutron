@@ -29,18 +29,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +40,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
 const CHECKPOINT_SCRIPT = join(HERE, 'checkpoint.sh')
 const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
+const REQUIRED_CODEX_AUTH_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'OPENAI_KEY',
+  'OPENAI_AUTH_TOKEN',
+  'OPENAI_API_TOKEN',
+  'CODEX_ACCESS_TOKEN',
+] as const
 
 /**
  * The WORKFLOW'S OWN receipt function, lifted out of the script that composes the
@@ -257,6 +253,8 @@ interface RunOpts {
   /** No `gh` on PATH at all. */
   noGh?: boolean
   env?: Record<string, string>
+  /** Run a fixture copy whose sibling auth vocabulary is absent. */
+  missingAuthVocabulary?: boolean
   /** Extra argv for the script (defaults to the branch name). */
   branch?: string
   /**
@@ -628,12 +626,26 @@ exit 1
   // `$3` cannot be passed without `$2` occupying its slot, so a merge mode with no base
   // sends an EMPTY base — which is the wrapper's documented "no last-resort diff", not
   // a guessed one.
+  let script = SCRIPT
+  if (opts.missingAuthVocabulary === true) {
+    const isolatedTrident = join(dir, 'isolated', 'trident')
+    mkdirSync(isolatedTrident, { recursive: true })
+    script = join(isolatedTrident, 'codex-build.sh')
+    writeFileSync(script, SCRIPT_TEXT)
+    // THE ONLY THING THIS FIXTURE MAY REMOVE IS THE AUTH VOCABULARY. The wrapper
+    // re-execs itself through a sibling `lane-processes.py` before it reaches any
+    // of its own guards (#623), so an isolated copy without that sibling dies at
+    // the re-exec with a bare exit 2 — and the case would then pass or fail for a
+    // reason that has nothing to do with the vocabulary it is named for. Copy the
+    // sibling so the absence under test is the only absence.
+    copyFileSync(join(dirname(SCRIPT), 'lane-processes.py'), join(isolatedTrident, 'lane-processes.py'))
+  }
   const argv =
     opts.mergeMode !== undefined
-      ? [SCRIPT, branch, opts.base ?? '', opts.mergeMode]
+      ? [script, branch, opts.base ?? '', opts.mergeMode]
       : opts.base === undefined
-        ? [SCRIPT, branch]
-        : [SCRIPT, branch, opts.base]
+        ? [script, branch]
+        : [script, branch, opts.base]
   // THE SIGNAL FIXTURE. The wrapper has to be killed WHILE it is inside the real
   // `codex exec`, and the thing under assertion is the number a SUPERVISOR records
   // for it — so the supervisor is a real `sh` of the same shape inner-workflow.mjs
@@ -2290,21 +2302,44 @@ describe('the BRIEF is what codex is asked to build', () => {
     60_000,
   )
 
-  test('a metered API key is scrubbed before the build runs — subscription OAuth only', () => {
+  test('the full Codex auth vocabulary is scrubbed before the build runs', () => {
     // A build is far more tokens than a review, so an accidental metered key is
     // correspondingly more expensive. The CLI PREFERS OPENAI_API_KEY over the
     // persisted OAuth, so it has to be unset before codex is reached. The seam runs
     // in the script's own environment, which is what makes the scrub observable.
+    const seeded = Object.fromEntries(
+      REQUIRED_CODEX_AUTH_ENV_VARS.map((name) => [name, `must-not-survive-${name}`]),
+    )
     const { stdout } = run({
       authed: true,
       codexLoginExit: 0,
       env: {
-        OPENAI_API_KEY: 'sk-should-not-survive',
-        NEUTRON_CODEX_BUILD_EXEC_CMD: 'cat >/dev/null; printf "KEY=[%s]\\n" "${OPENAI_API_KEY:-}"',
+        ...seeded,
+        CODEX_SCRUB_CONTROL: 'control-survives',
+        NEUTRON_CODEX_BUILD_EXEC_CMD: 'cat >/dev/null; env',
       },
     })
-    expect(stdout).toContain('KEY=[]')
-    expect(stdout).not.toContain('sk-should-not-survive')
+    expect(stdout).toContain('CODEX_SCRUB_CONTROL=control-survives')
+    for (const name of REQUIRED_CODEX_AUTH_ENV_VARS) {
+      expect(stdout).not.toContain(`${name}=`)
+    }
+  })
+
+  test('an absent auth vocabulary defers before a metered key can reach codex', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      missingAuthVocabulary: true,
+      env: {
+        OPENAI_API_KEY: 'must-not-reach-child',
+        NEUTRON_CODEX_BUILD_EXEC_CMD: 'cat >/dev/null; env',
+      },
+    })
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_AUTH_ENV_VARS_UNREADABLE')
+    expect(r.stderr).toContain('DEFERRED')
+    expect(r.stdout).not.toContain('OPENAI_API_KEY=')
+    expect(r.codexArgv).toBe('')
   })
 })
 
