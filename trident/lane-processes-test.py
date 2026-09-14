@@ -209,7 +209,25 @@ class LaneProcesses(unittest.TestCase):
         reports = {'first': lanes.sweep([str(self.root)], grace=.02)}
         self.assert_survives(p, fd, 'first sweep: existing root', reports)
         root.rmdir()
-        reports['second'] = lanes.sweep([str(self.root)[:-1] + 'x'], grace=.02)
+        # THE NEAR MISS HAS TO ACTUALLY MISS (#739). This was written as
+        # `str(self.root)[:-1] + 'x'` -- the root with its last character REPLACED by
+        # 'x'. mkdtemp draws its suffix from 37 characters and 'x' is one of them, so
+        # one run in 37 produced the root ITSELF: the sweep was handed the real
+        # repository, whose wf_ root this test has just removed, and correctly reaped
+        # the child. Two CI runs died that way and the assertion could only say the
+        # process had exited. Appending cannot collide -- a strict extension of a path
+        # is never that path -- and the inequality is asserted rather than reasoned
+        # about, so a future rewrite of this line cannot quietly reintroduce it.
+        unrelated = str(self.root) + 'x'
+        self.assertNotEqual(unrelated, str(self.root))
+        # …and say WHY the child survives this sweep, rather than only that it did.
+        # The removed root makes it eligible for its OWN repository -- proved on the
+        # line below -- so the survival is the prefix mismatch doing its job and
+        # nothing else. A survival with no stated cause is what let the collision
+        # read as a flake for two CI runs.
+        self.assertFalse(lanes.deleted_root(p.pid, [unrelated], []))
+        self.assertTrue(lanes.deleted_root(p.pid, [str(self.root)], []))
+        reports['second'] = lanes.sweep([unrelated], grace=.02)
         self.assert_survives(p, fd, 'second sweep: unrelated repo', reports)
 
     def test_recreated_root_and_unknown_root_survive(self):
