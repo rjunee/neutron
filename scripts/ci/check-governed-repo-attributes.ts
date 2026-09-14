@@ -158,6 +158,31 @@ function guardMigrationOrdinalCollisions(): void {
 
 guardMigrationOrdinalCollisions()
 
+/**
+ * CHANGED-LITERAL PROSE DRIFT — the mechanically checkable subset of the root
+ * rule requiring a prose sweep when a guard changes. The checker compares the
+ * branch diff with origin/main and refuses newly added Markdown assertions of a
+ * literal value that the same diff replaced in a named JS/TS constant.
+ *
+ * It runs here because `layering` is an unconditional required job with full
+ * history. Keeping the spawn in this already-wired entry point means the check
+ * cannot exist as a package script that CI never calls.
+ */
+function guardChangedLiteralProse(): void {
+  const here = import.meta.dir
+  const ownRepoRoot = resolve(here, '../..')
+  if (resolve(root) !== ownRepoRoot) return
+
+  const guard = Bun.spawnSync(['bun', join(here, 'stale-prose-guard.ts')], {
+    cwd: ownRepoRoot,
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  if (guard.exitCode !== 0) process.exit(guard.exitCode)
+}
+
+guardChangedLiteralProse()
+
 /** Is `SPEC.md` in the tree a fresh clone would get, even if not checked out? */
 function specIsCommitted(dir: string): boolean {
   return clonedTreeContains(dir, ['SPEC.md']).length > 0
