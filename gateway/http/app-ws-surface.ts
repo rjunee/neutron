@@ -345,6 +345,10 @@ export interface AppWsSocketData {
    * directly rather than trusting it.)
    */
   conn_id: string
+  /** Wall clock captured by `open` for close uptime diagnostics. */
+  opened_at_ms?: number
+  /** Set before this process initiates a close; absent peer closes are client-originated. */
+  close_initiator?: 'server'
   /**
    * P5.2 — project_id captured at upgrade time from the query string.
    * Stashed here so subsequent outbound envelopes can echo it back
@@ -399,6 +403,8 @@ export interface AppWsSurface {
   websocket: WebSocketHandler<AppWsSocketData>
   /** Surface exposes the underlying adapter so wiring can register it on the router. */
   adapter: AppWsAdapter
+  /** Deliberately close every live app socket, attributing process teardown. */
+  closeConnections: (reason?: string) => void
 }
 
 export interface CreateAppWsSurfaceOptions {
@@ -570,9 +576,16 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const claim_button_prompt = opts.claim_button_prompt
   const on_client_timezone = opts.on_client_timezone
   const web_presence = opts.web_presence
+  const liveSockets = new Set<ServerWebSocket<AppWsSocketData>>()
 
   return {
     adapter,
+    closeConnections: (reason = 'service_restart') => {
+      for (const ws of liveSockets) {
+        ws.data.close_initiator = 'server'
+        ws.close(1012, reason)
+      }
+    },
     handler: async (req, server) => {
       const url = new URL(req.url)
       const pathname = url.pathname
@@ -691,6 +704,8 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
       async open(ws: ServerWebSocket<AppWsSocketData>): Promise<void> {
         const data = ws.data
         if (data === undefined || data.surface !== 'app_ws') return
+        data.opened_at_ms = Date.now()
+        liveSockets.add(ws)
         const send = (env: AppWsOutbound): void => {
           // T10 / Sprint-18 pattern (landing/server.ts): when
           // `ws.send` returns 0 the underlying socket is closed.
@@ -1274,9 +1289,10 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           ws.send(JSON.stringify({ v: 1, type: 'error', code: 'dispatch_failed', message: reason }))
         }
       },
-      async close(ws): Promise<void> {
+      async close(ws, code, reason): Promise<void> {
         const data = ws.data
         if (data === undefined || data.surface !== 'app_ws') return
+        liveSockets.delete(ws)
         const send = data.send
         if (send !== undefined) {
           registry.unregister(data.channel_topic_id, send)
@@ -1294,6 +1310,14 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           project: data.project_id ?? '-',
           platform: data.platform ?? '-',
           device: data.device_id ?? '-',
+          initiated_by:
+            data.close_initiator === 'server' ? 'server' : code === 1006 ? 'unknown' : 'client',
+          close_code: code,
+          close_reason: reason.length > 0 ? reason : '-',
+          close_kind:
+            data.close_initiator === 'server' || code === 1000 ? 'deliberate' : 'unexpected',
+          uptime_ms:
+            data.opened_at_ms === undefined ? 0 : Math.max(0, Date.now() - data.opened_at_ms),
         })
       },
     },

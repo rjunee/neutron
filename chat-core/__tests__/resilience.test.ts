@@ -30,13 +30,15 @@ class FakeSocket implements SocketLike {
   onclose: ((ev?: unknown) => void) | null = null
   onerror: ((ev?: unknown) => void) | null = null
   readonly sent: string[] = []
+  readonly closeArgs: Array<[number | undefined, string | undefined]> = []
   closed = false
   send(data: string): void {
     if (this.closed) throw new Error('closed')
     this.sent.push(data)
   }
-  close(): void {
+  close(code?: number, reason?: string): void {
     this.closed = true
+    this.closeArgs.push([code, reason])
   }
   fireOpen(): void {
     this.onopen?.()
@@ -158,6 +160,7 @@ describe('W5 GAP-1 — heartbeat detects a half-open socket', () => {
     // Still no pong → after the deadline the socket is force-closed …
     clock.advance(10_000)
     expect(sockets[0]!.closed).toBe(true)
+    expect(sockets[0]!.closeArgs).toEqual([[4000, 'heartbeat_timeout']])
     expect(client.getStatus()).toBe('reconnecting')
 
     // … and a reconnect is scheduled. Run it → a fresh socket opens.

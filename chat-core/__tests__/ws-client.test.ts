@@ -10,13 +10,15 @@ class FakeSocket implements SocketLike {
   onclose: ((ev?: unknown) => void) | null = null
   onerror: ((ev?: unknown) => void) | null = null
   readonly sent: string[] = []
+  readonly closeArgs: Array<[number | undefined, string | undefined]> = []
   closed = false
   send(data: string): void {
     if (this.closed) throw new Error('closed')
     this.sent.push(data)
   }
-  close(): void {
+  close(code?: number, reason?: string): void {
     this.closed = true
+    this.closeArgs.push([code, reason])
   }
   fireOpen(): void {
     this.onopen?.()
@@ -248,6 +250,7 @@ describe('ChatWsClient — AppState awareness', () => {
     sockets[0]!.fireOpen()
     client.close()
     expect(client.getStatus()).toBe('closed')
+    expect(sockets[0]!.closeArgs).toEqual([[1000, 'client_teardown']])
     sockets[0]!.fireClose()
     expect(timers.pendingCount()).toBe(0)
     expect(sockets.length).toBe(1)

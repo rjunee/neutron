@@ -1473,6 +1473,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       }
     },
   })
+  cleanups.push(() => appWsSurface.closeConnections('service_restart'))
 
   // X5 — trident terminal delivery + the board terminator now post through
   // `channelRouter.send` (built above with the app-ws adapter registered).
