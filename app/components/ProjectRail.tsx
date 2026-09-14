@@ -66,8 +66,12 @@ export interface ProjectRailProps {
   onOpenActivity?: (projectId: string) => void;
   /** Test seam — overrides the async reduce-motion probe. */
   reduceMotionOverride?: boolean;
-  /** Visible refresh outcome; cache use and failures must never look fresh. */
-  notice?: { kind: 'cached' | 'failed'; text: string } | null;
+  /**
+   * Visible refresh outcome; cache use and failures must never look fresh. `label` is
+   * what the 72-point strip can actually render; `text` is the whole sentence, which
+   * goes to the accessibility layer rather than into a column eleven characters wide.
+   */
+  notice?: { kind: 'cached' | 'failed'; label: string; text: string } | null;
 }
 
 /** The corner activity dot. Pulses (work) under motion; static otherwise. */
@@ -341,10 +345,12 @@ export function ProjectRail({
       {notice !== null && notice !== undefined ? (
         <Text
           accessibilityRole={notice.kind === 'failed' ? 'alert' : 'text'}
+          accessibilityLabel={notice.text}
+          numberOfLines={1}
           testID={`project-rail-${notice.kind}-notice`}
           style={[styles.refreshNotice, notice.kind === 'failed' && styles.refreshFailure]}
         >
-          {notice.text}
+          {notice.label}
         </Text>
       ) : null}
       <ScrollView

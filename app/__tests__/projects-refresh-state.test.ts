@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { ProjectsClientError } from '../lib/projects-client';
 import {
   INITIAL_PROJECTS_REFRESH_STATE,
+  MAX_RAIL_LABEL_CHARS,
   projectsRefreshFailed,
   projectsRefreshNotice,
   projectsRefreshSucceeded,
@@ -75,6 +76,7 @@ describe('what the rail is told to show', () => {
     const cached = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), failure('network', 0));
     expect(projectsRefreshNotice(cached)).toEqual({
       kind: 'cached',
+      label: cached.kind === 'cached' ? cached.label : '',
       text: cached.kind === 'cached' ? cached.notice : '',
     });
   });
@@ -90,5 +92,36 @@ describe('what the rail is told to show', () => {
     const cached = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), failure('network', 0));
     expect(notice?.kind).not.toBe(projectsRefreshNotice(cached)?.kind);
     expect(notice?.text).not.toBe(projectsRefreshNotice(cached)?.text);
+  });
+});
+
+describe('the strip can actually show it', () => {
+  // THE RAIL IS 72 POINTS WIDE. A `textContent`-contains assertion passes whether the
+  // notice reads as one line or as a tower of two-letter lines that pushes the project
+  // list off the screen, so the bound is asserted here where it can be seen.
+  const cached = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), failure('network', 0));
+  const rejected = projectsRefreshFailed(
+    projectsRefreshSucceeded([PROJECT]),
+    failure('missing_bearer', 401),
+  );
+  const unreachable = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), new Error('boom'));
+
+  it('gives every outcome a label the 72-point strip can render on one line', () => {
+    for (const state of [cached, rejected, unreachable]) {
+      const notice = projectsRefreshNotice(state);
+      expect(notice).not.toBeNull();
+      expect(notice?.label.length).toBeLessThanOrEqual(MAX_RAIL_LABEL_CHARS);
+      expect(notice?.label.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps the whole sentence for the accessibility layer, not just the label', () => {
+    expect(projectsRefreshNotice(rejected)?.text).toContain('Sign in again');
+    expect(projectsRefreshNotice(rejected)?.text.length).toBeGreaterThan(MAX_RAIL_LABEL_CHARS);
+  });
+
+  it('gives a rejected session and an unreachable server DIFFERENT labels — the remedies differ', () => {
+    expect(projectsRefreshNotice(rejected)?.label).not.toBe(projectsRefreshNotice(unreachable)?.label);
+    expect(projectsRefreshNotice(cached)?.label).not.toBe(projectsRefreshNotice(rejected)?.label);
   });
 });

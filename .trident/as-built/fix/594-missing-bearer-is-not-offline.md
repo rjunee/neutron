@@ -42,11 +42,34 @@ other assertion in the file.
 
 ### Verification
 
-- `bun test app/__tests__/projects-refresh-state.test.ts app/__tests__/projects-fetch.test.ts app/__tests__/rail-idle-dot-not-painted.test.tsx` — 21 pass, 0 fail.
+- `bun test app/__tests__/projects-refresh-state.test.ts app/__tests__/projects-fetch.test.ts app/__tests__/rail-idle-dot-not-painted.test.tsx` — 24 pass, 0 fail.
 - Running the whole of `app/__tests__/` in ONE process fails 177 tests on this branch and 175 on `origin/main`; the rail render files fail wholesale there in both. That instrument is not measuring this change — CI shards through `scripts/run-tests.sh`, which is the run that counts.
 - `bun run --cwd app typecheck` — green.
 - Targeted Expo lint for the five touched source and test files — green.
 - Package-wide Expo lint reaches one unchanged base-branch error at `app/app/projects/[id]/cores/dtc-analytics.tsx:279`; the file has no diff from `origin/main`, and `git show origin/main:app/app/projects/[id]/cores/dtc-analytics.tsx` shows the same line.
+
+### The strip has to be able to SHOW it
+
+The first draft rendered the whole sentence into the rail. The rail is 72 points wide
+(`app/components/ProjectRail.tsx`, `RAIL_WIDTH = 72`) at caption size 11
+(`app/lib/theme.ts:219`) — about eleven characters a line. "Projects could not refresh
+because your session was not accepted. Sign in again." would have rendered as a tower of
+two-letter lines above the project list, on the device the owner uses daily. The render
+test could not see it: `textContent` contains the sentence whether it lays out as one
+line or as thirty.
+
+So each outcome now carries a LABEL the strip can render on one line — `Offline`,
+`Sign in`, `No refresh` — and the sentence travels on `accessibilityLabel`, where the
+length is free. A rejected session and an unreachable server keep different words,
+because the remedies differ. The bound itself is a constant, `MAX_RAIL_LABEL_CHARS`
+(`app/lib/projects-refresh-state.ts:17`), asserted for every outcome — a bound that only
+lives in a reviewer's head is not a bound.
+
+| Mutation | Landed | Red evidence | Restored |
+|---|---|---|---|
+| the strip renders the sentence again | `app/components/ProjectRail.tsx:353` | both render cases red | 9 pass |
+| every outcome shares one label | `app/lib/projects-refresh-state.ts:76` | the differing-labels case red | 11 pass |
+| a label too long for the strip | `app/lib/projects-refresh-state.ts:76` | the one-line bound red | 11 pass |
 
 ### Symptom site or root cause — plainly
 
@@ -60,6 +83,18 @@ that could not find out was rendered identically to one that had an answer, and 
 filed issue says in its own words that no static read can settle whether the upstream fix
 was the cause. This change does not claim to settle it either; it makes the next
 occurrence legible on the device instead of silent, which is the only thing that can.
+
+### Not verified, and worth its own issue
+
+There is NO persisted projects list across app launches — `grep -rn 'AsyncStorage|persist'`
+over `app/lib/projects.ts` and `app/lib/projects-rail-live.ts` finds nothing, and nothing
+under `app/lib/` remembers a list. `cached` is therefore reachable only WITHIN a session,
+after at least one successful fetch. A cold launch with no network shows `No refresh`,
+never `Offline — showing saved projects.` That is not a regression — nothing was persisted
+before either — but the state's name promises more than the app can currently deliver.
+
+The filed issue's own acceptance is a live sign-in on the reporter's device. Nothing here
+establishes that, and this record does not claim it.
 
 ### Deliberately not changed
 

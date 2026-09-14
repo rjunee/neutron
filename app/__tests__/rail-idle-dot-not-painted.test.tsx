@@ -67,7 +67,7 @@ async function mountRail(
     ['acme', 'attention'],
     ['birch', 'idle'],
   ],
-  notice?: { kind: 'cached' | 'failed'; text: string },
+  notice?: { kind: 'cached' | 'failed'; label: string; text: string },
 ) {
   return mountScreen(
     createElement(ProjectRail, {
@@ -91,11 +91,15 @@ describe('project-list refresh notice', () => {
   it('renders deliberate cache use as a visible saved-list notice', async () => {
     const screen = await mountRail('willow', [], {
       kind: 'cached',
+      label: 'Offline',
       text: 'Offline — showing saved projects.',
     });
-    expect(screen.byTestId('project-rail-cached-notice')?.textContent).toContain(
-      'showing saved projects',
-    );
+    const notice = screen.byTestId('project-rail-cached-notice');
+    // THE STRIP SHOWS THE LABEL, NOT THE SENTENCE. At 72 points and caption size a
+    // sentence wraps to a tower of two-letter lines and pushes the project list off
+    // the screen, so the sentence travels on the accessibility layer instead.
+    expect(notice?.textContent).toBe('Offline');
+    expect(notice?.getAttribute('aria-label')).toContain('showing saved projects');
     screen.unmount();
   });
 
@@ -113,10 +117,12 @@ describe('project-list refresh notice', () => {
   it('renders a refresh failure through the alert channel', async () => {
     const screen = await mountRail('willow', [], {
       kind: 'failed',
-      text: 'Projects could not refresh.',
+      label: 'Sign in',
+      text: 'Projects could not refresh because your session was not accepted.',
     });
     const notice = screen.byTestId('project-rail-failed-notice');
-    expect(notice?.textContent).toContain('could not refresh');
+    expect(notice?.textContent).toBe('Sign in');
+    expect(notice?.getAttribute('aria-label')).toContain('could not refresh');
     expect(notice?.getAttribute('role')).toBe('alert');
     screen.unmount();
   });

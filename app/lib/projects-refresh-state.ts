@@ -4,8 +4,17 @@ import type { Project } from './projects';
 export type ProjectsRefreshState =
   | { kind: 'loading'; projects: readonly Project[] }
   | { kind: 'fresh'; projects: readonly Project[] }
-  | { kind: 'cached'; projects: readonly Project[]; notice: string }
-  | { kind: 'failed'; projects: readonly Project[]; notice: string };
+  | { kind: 'cached'; projects: readonly Project[]; notice: string; label: string }
+  | { kind: 'failed'; projects: readonly Project[]; notice: string; label: string };
+
+/**
+ * THE RAIL IS 72 POINTS WIDE (`app/components/ProjectRail.tsx`, `RAIL_WIDTH`), and at
+ * the caption size that is about eleven characters per line. A sentence rendered there
+ * becomes a tower of two-letter lines that pushes the project list off the screen — so
+ * the strip gets a LABEL and the screen reader gets the sentence. Anything longer than
+ * this is not a notice, it is a wall.
+ */
+export const MAX_RAIL_LABEL_CHARS = 11;
 
 /**
  * What the rail must SHOW for a refresh outcome, or `null` when there is nothing to
@@ -16,9 +25,9 @@ export type ProjectsRefreshState =
  */
 export function projectsRefreshNotice(
   state: ProjectsRefreshState,
-): { kind: 'cached' | 'failed'; text: string } | null {
+): { kind: 'cached' | 'failed'; label: string; text: string } | null {
   return state.kind === 'cached' || state.kind === 'failed'
-    ? { kind: state.kind, text: state.notice }
+    ? { kind: state.kind, label: state.label, text: state.notice }
     : null;
 }
 
@@ -49,14 +58,22 @@ export function projectsRefreshFailed(
     return {
       kind: 'cached',
       projects: previous.projects,
+      label: 'Offline',
       notice: 'Offline — showing saved projects.',
     };
   }
 
   const code = error instanceof ProjectsClientError ? error.code : null;
-  const notice =
-    code === 'missing_bearer' || code === 'unauthorized'
-      ? 'Projects could not refresh because your session was not accepted. Sign in again.'
-      : 'Projects could not refresh. Try again.';
-  return { kind: 'failed', projects: previous.projects, notice };
+  const rejected = code === 'missing_bearer' || code === 'unauthorized';
+  const notice = rejected
+    ? 'Projects could not refresh because your session was not accepted. Sign in again.'
+    : 'Projects could not refresh. Try again.';
+  // A rejected session and an unreachable server need DIFFERENT remedies, so they get
+  // different words in the strip too, not one shared "failed".
+  return {
+    kind: 'failed',
+    projects: previous.projects,
+    label: rejected ? 'Sign in' : 'No refresh',
+    notice,
+  };
 }
