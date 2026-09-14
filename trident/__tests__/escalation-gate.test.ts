@@ -17,7 +17,7 @@
  *     value that merely happens to equal it here. Revert the gate and these go red —
  *     which is the only thing that makes them measurements.
  *  2. `false`, `threw` and `succeeded-with-impossible-output` ARE ALL UNKNOWN, and none
- *     may share a branch with a definite answer. A finding with no key is not a NEW
+ *     may share a branch with a definite answer. A finding with no identity is not a NEW
  *     finding; an unreadable finding list is not an EMPTY one; an uncountable round is
  *     not a round with ZERO blockers. Each of those has its own test, because each of
  *     them is a silent way for a gate to stop gating.
@@ -31,27 +31,25 @@ import {
 } from '../testing/load-escalation-gate.ts'
 
 /** A finding in the shape `VERDICT_SCHEMA` asks for. */
-const f = (key: string, severity = 'blocker'): GateFinding => ({
-  severity,
-  title: 'a title that is free text and must never be the identity',
-  evidence: 'file.ts:10',
-  key,
-})
+const f = (identity: string, severity = 'blocker'): GateFinding => {
+  const [file = '', symbol = '', ...rule] = identity.split(':')
+  return { severity, title: 'a title that is free text and must never be the identity', evidence: 'file.ts:10', file, symbol, rule: rule.join(':'), line: 10 }
+}
 
 /**
  * THE RECORDED SHAPE OF RUN 36b95167 — three findings that recur in every round.
  * Titles are the item's own words for them.
  */
 const RECURRING: GateFinding[] = [
-  { severity: 'blocker', title: 'row/rail lockstep test is tautological', evidence: 'a.ts:1', key: 'app/rail.ts:rowRailLockstep:tautological-test' },
-  { severity: 'blocker', title: 'inline_active used as an out-of-spec proxy', evidence: 'b.ts:2', key: 'work-board/store.ts:inlineActive:out-of-spec-proxy' },
-  { severity: 'major', title: 'the research/dispatch path is untouched', evidence: 'c.ts:3', key: 'agent-dispatch/start.ts:research:untouched-path' },
+  f('app/rail.ts:rowRailLockstep:tautological-test'),
+  f('work-board/store.ts:inlineActive:out-of-spec-proxy'),
+  f('agent-dispatch/start.ts:research:untouched-path', 'major'),
 ]
 
 /** The item's recorded blocker+major totals for the nine rounds of `36b95167`. */
 const RECORDED_BLOCKING_COUNTS = [4, 2, 6, 4, 2, 4, 4, 4, 5]
 
-describe('finding identity — the prerequisite, and it is a KEY, never a title', () => {
+describe('finding identity — constructed from named fields, never a title', () => {
   test('the extraction MATCHED — every assertion below is vacuous otherwise', () => {
     // Asserted first and alone. A `loadEscalationGate` that silently returned an object
     // of undefineds would make every test below pass against nothing.
@@ -70,7 +68,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     }
   })
 
-  test('a reviewer-emitted `file:symbol:rule` key IS the identity, verbatim', () => {
+  test('reviewer-emitted `file`, `symbol`, and `rule` construct the identity', () => {
     const { findingIdentity } = loadEscalationGate()
     // CASE IS CONTENT, so the key comes back exactly as written. This used to assert the
     // lower-cased form, which is what made the collision below possible.
@@ -169,8 +167,8 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     const leaky = 'src/a.ts:handler:token-ghp_SECRETSECRETSECRET'
     const d = decideEscalation({
       round: 2,
-      previousFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key: leaky }],
-      currentFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key: leaky }],
+      previousFindings: [f(leaky)],
+      currentFindings: [f(leaky)],
       blockingCounts: [1, 1],
       claim: null,
       replansUsed: 0,
@@ -187,9 +185,9 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     const { decideEscalation } = loadEscalationGate()
     // A run with many repeats would otherwise put an unbounded model-authored string into
     // a persisted column and the chat message.
-    const many = Array.from({ length: 80 }, (_, i) => ({
-      severity: 'blocker', title: 't', evidence: 'e', key: `src/file${i}.ts:symbol${i}:some-long-rule-name-${i}`,
-    }))
+    const many = Array.from({ length: 80 }, (_, i) =>
+      f(`src/file${i}.ts:symbol${i}:some-long-rule-name-${i}`),
+    )
     const d = decideEscalation({
       round: 2,
       previousFindings: many,
@@ -212,8 +210,8 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     const key = 'src/a.ts:handler:missing-auth'
     const d = decideEscalation({
       round: 2,
-      previousFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key }],
-      currentFindings: [{ severity: 'blocker', title: 't', evidence: 'e', key }],
+      previousFindings: [f(key)],
+      currentFindings: [f(key)],
       blockingCounts: [1, 1],
       claim: null,
       replansUsed: 0,
@@ -222,7 +220,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(String(d.evidence)).toContain(key)
   })
 
-  test('HEADLINE: an EMPTY SEGMENT makes the key undecidable — it is not deleted', () => {
+  test('HEADLINE: an EMPTY NAMED FIELD is undecidable', () => {
     const { findingIdentity, repeatVerdict } = loadEscalationGate()
     // THE FOURTH INSTANCE OF ONE MISTAKE IN THIS FUNCTION, and the subtlest: the empty
     // segment was FILTERED OUT, and that filter was itself a CLAIM — that an empty
@@ -230,7 +228,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     // reviewer-authored free-text key. `a.ts:sym::rule` and `a.ts:sym:rule` collapsed to
     // one identity, so two keys written differently read as one finding surviving a fix
     // round and the run escalated while CONVERGING.
-    const doubled = f('a.ts:sym::rule')
+    const doubled = f('a.ts::rule')
     const plain = f('a.ts:sym:rule')
     expect(findingIdentity(doubled)).toBe('')
     expect(findingIdentity(doubled)).not.toBe(findingIdentity(plain))
@@ -241,12 +239,8 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     // going, and the arithmetic and the cap are both still behind it.
     expect(repeatVerdict([doubled], [doubled]).outcome).toBe('undecidable')
 
-    // THE OVER-STRICT DIRECTION, asserted rather than left as a side effect. A trailing
-    // colon states four things, one of which is nothing — refusing it costs a repeat this
-    // gate might otherwise have proven, and accepting it would mean choosing which of the
-    // reviewer's segments to ignore.
-    expect(findingIdentity(f('a.ts:sym:rule:'))).toBe('')
-    expect(findingIdentity(f(':a.ts:sym:rule'))).toBe('')
+    // Delimiters inside a named field are content; field boundaries no longer need parsing.
+    expect(findingIdentity(f('a.ts:sym:rule:'))).toBe('a.ts:sym:rule:')
   })
 
   test('CONTROL: a well-formed key still produces a STABLE identity across rounds', () => {
@@ -319,7 +313,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     }
   })
 
-  test('CONTROL: the SAME key is still the same finding, and spelling still normalises', () => {
+  test('CONTROL: the SAME named fields are still the same finding', () => {
     const { findingIdentity, repeatVerdict } = loadEscalationGate()
     // Without this, a version that returned a fresh identity for every call — never
     // matching anything — would pass the test above.
@@ -330,28 +324,14 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     expect(repeatVerdict([same], [same]).outcome).toBe('repeat')
   })
 
-  test('a line number in a key fails SAFE — it under-fires, it does not escalate', () => {
-    // The format forbids a line number in a key (`VERDICT_SCHEMA` and all three prompts
-    // say so, and say the line belongs in `evidence`), but a model can disobey. This pins
-    // which way that breaks, because the two directions are not equally bad:
-    //
-    //   OVER-FIRING stops a run that was CONVERGING and reports `not-converging` about
-    //   it — the one way this gate is worse than the round cap it replaced, and
-    //   indistinguishable to an operator reading the escalation.
-    //   UNDER-FIRING merely fails to prove a repeat: the run continues, the no-progress
-    //   arithmetic still watches it, and the cap is still behind that.
-    //
-    // So a moved line now reads as two findings rather than one, and NOTHING escalates.
+  test('line movement and prose rewording do not change named-field identity', () => {
+    // Both volatile values change while the three identity fields stay fixed.
     const { findingIdentity, repeatVerdict } = loadEscalationGate()
-    const r1 = f('a/b.ts:12:sym:rule')
-    const r2 = f('a/b.ts:40:sym:rule')
-    expect(findingIdentity(r1)).not.toBe(findingIdentity(r2))
+    const r1 = { ...f('a/b.ts:sym:rule'), line: 12, title: 'first wording' }
+    const r2 = { ...f('a/b.ts:sym:rule'), line: 40, title: 'entirely new prose' }
+    expect(findingIdentity(r1)).toBe(findingIdentity(r2))
     const verdict = repeatVerdict([r1], [r2])
-    expect(verdict.outcome).not.toBe('repeat')
-    // Specifically NOT the undecidable answer either — both keys were perfectly readable,
-    // they just describe two things. Saying "I could not tell" would be a second lie, and
-    // `undecidable` is the answer that keeps a finding out of BOTH definite buckets.
-    expect(verdict.outcome).toBe('none')
+    expect(verdict.outcome).toBe('repeat')
   })
 
   test('IDENTITY IS NOT THE TITLE — the same words are NOT the same finding', () => {
@@ -361,7 +341,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     // this". Two findings with IDENTICAL titles and no keys are UNDECIDABLE, not equal…
     const sameTitleNoKey = { severity: 'blocker', title: 'identical prose', evidence: 'x:1' }
     expect(findingIdentity(sameTitleNoKey)).toBe('')
-    // …and two findings with DIFFERENT titles but one key are the SAME finding, which is
+    // …and two findings with DIFFERENT titles but one named field set are the SAME finding.
     // the half a title matcher gets wrong in the expensive direction.
     expect(findingIdentity({ ...f('a:b:c'), title: 'worded one way' })).toBe(
       findingIdentity({ ...f('a:b:c'), title: 'worded completely differently' }),
@@ -373,7 +353,7 @@ describe('finding identity — the prerequisite, and it is a KEY, never a title'
     // Each of these is a DIFFERENT way of not knowing. If any returned a distinct
     // non-empty string, two unkeyed findings would read as two different findings and the
     // repeat gate would report "no repeat" for a round it never understood.
-    for (const bad of [null, undefined, 'a string', 42, [], { key: 42 }, f(''), f('bare'), f('a:b')]) {
+    for (const bad of [null, undefined, 'a string', 42, [], { key: 'a:b:c' }, f(''), f('bare'), f('a:b')]) {
       expect(findingIdentity(bad)).toBe('')
     }
   })
@@ -657,15 +637,15 @@ describe('the DECISION — what the fix loop does with all of it', () => {
 
 describe('what the gate is allowed to look at — the findings the FIX ROUND was asked to fix', () => {
   test('it is `isCodeWorkFinding`, the WHOLE predicate, and not a second copy of it', () => {
-    const { eligibleFixFindings } = loadEscalationGate()
+    const { eligibleFixFindings, findingIdentity } = loadEscalationGate()
     const kept = eligibleFixFindings([
       f('a:b:c'),
       f('d:e:f', 'major'),
       f('g:h:i', 'nit'),
       f('j:k:l', 'minor'),
-      { severity: 'blocker', key: 'm:n:o', kind: 'lane' },
-      { severity: 'blocker', key: 'p:q:r', kind: 'suite' },
-      { severity: 'blocker', key: 's:t:u', advisory: true },
+      { ...f('m:n:o'), kind: 'lane' },
+      { ...f('p:q:r'), kind: 'suite' },
+      { ...f('s:t:u'), advisory: true },
     ])
     // A recurring NIT or MINOR is not a failure to converge — the loop never spent a
     // round on it (`classifyBlock` exits on a round whose findings are all non-blocking).
@@ -678,7 +658,7 @@ describe('what the gate is allowed to look at — the findings the FIX ROUND was
     // "fixing is not working" — the thing this gate measures. This test states which
     // side of the line each kind falls on so that a change to the shared predicate
     // shows up here rather than silently widening or narrowing what can escalate.
-    expect((kept ?? []).map((x) => (x as GateFinding).key)).toEqual(['a:b:c', 'd:e:f', 'p:q:r'])
+    expect((kept ?? []).map((x) => findingIdentity(x))).toEqual(['a:b:c', 'd:e:f', 'p:q:r'])
   })
 
   test('a non-array stays UNREADABLE rather than becoming an empty round', () => {
@@ -710,32 +690,16 @@ describe('what is asserted from the SOURCE, and why only these two things are', 
   //
   // TWO THINGS SURVIVE, because neither has any behaviour to execute:
 
-  test('the review SCHEMA requires a finding key and offers the escalate channel', () => {
+  test('the review SCHEMA requires named identity fields and offers the escalate channel', () => {
     // A schema is DATA handed to the model, not code this process runs: nothing in a
     // test can execute it, and the run under test never validates against it (the
     // harness supplies replies directly). The literal IS the deliverable here — without
     // a reviewer-emitted identity the repeat gate is a matcher over free text, which the
     // spec item rules out — so a literal is the honest thing to assert.
-    expect(WORKFLOW_SRC).toContain("required: ['severity', 'title', 'evidence', 'key'],")
+    expect(WORKFLOW_SRC).toContain("required: ['severity', 'title', 'evidence', 'file', 'symbol', 'rule', 'line'],")
     expect(WORKFLOW_SRC).toContain("required: ['kind', 'whatIsMissing'],")
     expect(WORKFLOW_SRC).toContain("enum: ['design-gap', 'missing-dependency'],")
-    // AND THE KEY'S GRAMMAR, which became load-bearing when identity stopped subtracting.
-    // Nothing in the code removes a line number from a key any more — deliberately, since
-    // doing so collided two different defects and escalated a converging run — so the ONLY
-    // thing keeping line numbers out of keys is this instruction and the matching ones in
-    // the three prompts. A schema is data handed to the model and is never validated in
-    // process, so the literal IS the mechanism here.
-    expect(WORKFLOW_SRC).toContain('NEVER put a line number in a key')
-    // Case became content when the lower-casing was removed, so the model has to be told
-    // to keep the key byte-identical between rounds — otherwise a reworded capitalisation
-    // silently stops matching. Same grammar move as the line number: make the stable
-    // thing explicit rather than subtract the volatile thing afterwards.
-    expect(WORKFLOW_SRC).toContain('including CASE')
-    // …said to the two panel seats and the synthesis seat as well, not only in the schema:
-    // a panelist's key is carried through UNCHANGED, so a line number admitted there
-    // reaches the gate no matter what the synthesis schema says.
-    expect(WORKFLOW_SRC.match(/NEVER put a line number in a key/g) ?? []).toHaveLength(3)
-    expect(WORKFLOW_SRC).toContain('Do NOT put a line number in a key')
+    expect(WORKFLOW_SRC).toContain('line and prose never enter identity')
   })
 
   test('the claim is read off the SEAT’s own reply, not off the merged findings', () => {

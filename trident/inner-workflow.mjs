@@ -881,33 +881,18 @@ const VERDICT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        // `key` IS REQUIRED, and that is the whole prerequisite of the repeat-finding
-        // gate. Without a reviewer-emitted identity, "is this the same finding as last
-        // round?" is a question about two free-text titles, and a model that rewords its
-        // own sentence between rounds defeats any matcher built on them. The gate
-        // therefore reads THIS field and nothing else: a finding that omits it is
-        // UNDECIDABLE, never "new" (see `findingIdentity`).
-        required: ['severity', 'title', 'evidence', 'key'],
+        // Identity is STRUCTURED, not reviewer-concatenated: line movement and prose
+        // rewording therefore cannot alter the three fields the repeat gate reads.
+        // Omitting any named part remains UNDECIDABLE, never "new".
+        required: ['severity', 'title', 'evidence', 'file', 'symbol', 'rule', 'line'],
         properties: {
           severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'nit'] },
           title: { type: 'string' },
           evidence: { type: 'string', description: 'file:line or concrete repro — verify-before-assert' },
-          key: {
-            type: 'string',
-            description:
-              'STABLE IDENTITY for this finding, as `file:symbol:rule` — e.g. ' +
-              '`trident/inner-loop.ts:parseInnerResult:tautological-test`. The SAME defect must ' +
-              'get the SAME key on every round, even if you word the title differently; a ' +
-              'different defect must get a different key. NEVER put a line number in a key — a ' +
-              'fix round moves lines, so a key carrying one stops matching itself next round ' +
-              'and the defect reads as two. The line belongs in `evidence`. Every other ' +
-              'segment is compared EXACTLY — including CASE, because `src/Foo.ts` and ' +
-              '`src/foo.ts` can be different files — so write the path and symbol exactly as ' +
-              'they appear in the repo and keep the key byte-identical between rounds. ' +
-              'Numbers that identify the defect (a status code, an error number) are welcome ' +
-              'and are what tells two findings apart. This is machine-read to decide whether ' +
-              'a finding survived a fix round.',
-          },
+          file: { type: 'string', description: 'Repository-relative file, or `review` when no file is named.' },
+          symbol: { type: 'string', description: 'Named symbol, or a stable short defect slug.' },
+          rule: { type: 'string', description: 'Stable rule violated by this finding.' },
+          line: { type: ['integer', 'null'], description: 'Evidence line only; never part of finding identity.' },
         },
       },
     },
@@ -3570,116 +3555,19 @@ function redactedRepeatedKeys(keys) {
 const WHAT_IS_MISSING_MAX = 500
 
 /**
- * THE STABLE IDENTITY OF ONE FINDING, or '' meaning UNDECIDABLE.
+ * Construct one stable identity from the schema's NAMED fields, or return '' for
+ * UNDECIDABLE. `title`, `evidence`, and `line` are deliberately unread: prose may be
+ * reworded and a fix moves lines. A legacy concatenated `key` is deliberately unread too;
+ * accepting it would create two identity paths whose answers could disagree.
  *
- * '' IS NOT "DIFFERENT FROM EVERY OTHER FINDING". It is "this round could not tell
- * me what this finding is", and the caller must keep it out of BOTH definite
- * answers — a finding with no key can neither prove a repeat nor prove there was
- * none. Collapsing it into "new finding" is exactly how a repeat-finding gate
- * silently stops gating.
- *
- * READ FROM `key` AND NOWHERE ELSE. Deriving a fingerprint from the title is the
- * thing the spec item explicitly rules out: with free-text titles "same finding" is
- * not machine-decidable, and a model that rewords its own sentence between rounds
- * would defeat it while the gate reported green. `VERDICT_SCHEMA` makes `key`
- * required, so a reviewer that answers the schema always supplies one; a finding
- * this FILE authored (a lane blocker, a CI advisory, a suite blocker) carries none
- * and is therefore undecidable by construction — which is honest, because none of
- * them is a reviewer's judgement about the plan.
- *
- * NORMALISED ONLY FOR SPELLING, NEVER FOR CONTENT, and the line between the two is
- * narrower than it looks. Exactly two things survive, and each is a fact about the
- * NOTATION rather than about the content it denotes:
- *
- *   - whitespace around a segment, in EVERY slot — a key is a token and the space beside
- *     it is transport noise;
- *   - a leading './' on the PATH SEGMENT ONLY — `./a/b.ts` and `a/b.ts` are the same file.
- *     Nowhere else: `./` inside a symbol or a rule is two characters the reviewer chose.
- *
- * At least THREE segments are required — a bare word or a `file:line` pair is not a
- * `file:symbol:rule` identity, and accepting one would let a title masquerade as a key.
- *
- * CASE IS PRESERVED, and it did not used to be. Lower-casing the whole key was the same
- * mistake as the numeric strip below, in a different dimension: on a case-sensitive
- * filesystem `src/Foo.ts:Handler:missing-auth` and `src/foo.ts:handler:missing-auth` can
- * name genuinely different files and genuinely different symbols, and collapsing them made
- * `repeatVerdict` report a repeat and escalate a run that was converging — the over-fire
- * direction, the one way this gate is worse than the cap it replaced. Collapsing internal
- * whitespace runs went with it, for the same reason: a filename may legitimately contain
- * two consecutive spaces.
- *
- * THE GENERAL RULE, since this file has now got it wrong twice: EVERY NORMALISATION IS A
- * CLAIM THAT THE DISCARDED DIFFERENCE COULD NOT HAVE BEEN MEANINGFUL, and for an identity
- * derived from free text that claim is almost never safe. The move that works is the
- * GRAMMAR one — the line number is excluded because it lives in `evidence`, not because
- * this function subtracts it. What remains above survives only because each is a fact
- * about the notation rather than about the content it denotes.
- *
- * NOTHING IS SUBTRACTED FROM THE KEY, and that is a correction. This function used to
- * DROP every purely-numeric segment, anywhere in the key, on the theory that a numeric
- * segment is a line number a fix round would move. But a numeric segment is not a line
- * number — it is whatever the reviewer put there. `api.ts:handler:401:missing-auth` and
- * `api.ts:handler:403:missing-auth` are two DIFFERENT defects that both normalised to
- * `api.ts:handler:missing-auth`, so the gate read them as ONE finding surviving a fix
- * round and escalated a run that was converging. Status codes, error numbers, exit codes,
- * CWE ids and ports are all ordinary content in the `rule` slot.
- *
- * THE ASYMMETRY IS THE WHOLE ARGUMENT, and it decides which way to fail when a reviewer
- * disobeys the format and puts a line number in a key anyway:
- *
- *   - OVER-FIRING (two different findings read as one) STOPS A RUN THAT WAS CONVERGING,
- *     and reports `not-converging` about it. That is the one way this gate can be WORSE
- *     than the round cap it replaced — the cap only ever stopped a run that could not
- *     converge — and the two are indistinguishable to an operator reading the escalation.
- *   - UNDER-FIRING (one finding at a moved line read as two) merely fails to prove a
- *     repeat. The run keeps going, the no-progress arithmetic still watches it, and the
- *     round cap is still behind that.
- *
- * So the line number is excluded by the GRAMMAR rather than by subtraction: `VERDICT_SCHEMA`
- * and all three prompts specify `file:symbol:rule` and say the line belongs in `evidence`.
- * A key that carries one anyway simply fails to match next round, which is the safe half.
+ * Empty or non-string named fields are undecidable. Case and field content are preserved;
+ * only surrounding transport whitespace and a leading `./` on the file are notation.
  */
 function findingIdentity(f) {
   if (f === null || typeof f !== 'object' || Array.isArray(f)) return ''
-  if (typeof f.key !== 'string') return ''
-  const segments = f.key
-    .split(':')
-    // TRIM EVERY SEGMENT: whitespace around a token really is transport noise in every
-    // slot. This also covers whitespace around the whole key, so an outer `.trim()` beside
-    // it is dead work (mutation-checked: removing it changed nothing).
-    .map((seg) => seg.trim())
-    // …AND STRIP `./` FROM THE PATH SEGMENT ONLY. `./a/b.ts` and `a/b.ts` name the same
-    // file, which makes this a fact about PATH NOTATION — and therefore a fact about
-    // segment zero and about nothing else. Applied to every segment it silently equated
-    // `a.ts:sym:./rule` with `a.ts:sym:rule`, two keys a reviewer chose to write
-    // differently, and `repeatVerdict` called them one finding surviving a fix round.
-    .map((seg, i) => (i === 0 ? seg.replace(/^\.\//, '') : seg))
-  // AN EMPTY SEGMENT MAKES THE KEY UNDECIDABLE — IT IS NOT DELETED. This used to
-  // `.filter(seg => seg !== '')`, and that filter was itself a CLAIM: that an empty
-  // segment could not have been meaningful. It is not one I can make about a
-  // reviewer-authored free-text key. `a.ts:sym::rule` and `a.ts:sym:rule` collapsed to one
-  // identity, so `repeatVerdict` reported a repeat on two keys written differently and
-  // escalated a run that was CONVERGING — the fourth time in this one function that a
-  // normalisation discarded content, and the fourth time in the over-fire direction.
-  //
-  // `''` IS THE ANSWER THE FUNCTION ALREADY GIVES when it cannot read a key, and it is the
-  // fail-safe half: an undecidable identity fails to PROVE a repeat, the run keeps going,
-  // and the no-progress arithmetic and the round cap are both still behind it.
-  //
-  // IT ALSO DISSOLVES THE CASE THE OLD FILTER POSITION WAS REASONING ABOUT. A leading
-  // colon (`:a.ts:sym:rule`) used to need the strip applied after filtering so that
-  // "segment zero" still meant the file. Now such a key is simply undecidable — a key with
-  // a leading colon is malformed, and saying so is better than silently repairing it into
-  // a confident identity.
-  //
-  // THE OVER-STRICT DIRECTION IS DELIBERATE AND STATED: a TRAILING colon
-  // (`a.ts:sym:rule:`) is undecidable too. `''.split(':')` yields a trailing empty
-  // segment, so that key states four things and one of them is nothing. Refusing it costs
-  // a repeat this gate might otherwise have proven; accepting it would mean deciding which
-  // of the reviewer's four segments to ignore, which is the very move this whole sequence
-  // has been removing.
+  if (typeof f.file !== 'string' || typeof f.symbol !== 'string' || typeof f.rule !== 'string') return ''
+  const segments = [f.file.trim().replace(/^\.\//, ''), f.symbol.trim(), f.rule.trim()]
   if (segments.some((seg) => seg === '')) return ''
-  if (segments.length < 3) return ''
   return segments.join(':')
 }
 
@@ -3715,9 +3603,9 @@ function roundIdentity(findings) {
  *
  *  - 'repeat'      → at least one identity is in BOTH rounds. A finding that survived
  *                    a round of fixing is proof that fixing is not working.
- *  - 'none'        → both lists were readable, every finding in both carried a key,
- *                    and no key is shared. This is the ONLY definite negative.
- *  - 'undecidable' → a list was unreadable, or a finding carried no key. The gate
+ *  - 'none'        → both lists were readable, every finding in both carried named identity,
+ *                    and no identity is shared. This is the ONLY definite negative.
+ *  - 'undecidable' → a list was unreadable, or a finding lacked named identity. The gate
  *                    could not determine the answer, which is NOT the same as
  *                    determining there was no repeat. The caller must fall back to
  *                    the identity-free `progressVerdict`, never to "carry on".
@@ -3735,7 +3623,7 @@ function repeatVerdict(previousFindings, currentFindings) {
     return {
       outcome: 'undecidable',
       repeated: [],
-      reason: `${unknown} finding(s) across the two rounds carried no stable key`,
+      reason: `${unknown} finding(s) across the two rounds carried no stable named identity`,
     }
   }
   return { outcome: 'none', repeated: [], reason: '' }
@@ -7200,10 +7088,10 @@ function codexReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${diffBase} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
+- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/file/symbol/rule/line). Keep file, symbol, and rule STABLE across rounds for the same defect; the build constructs identity from those named fields. When no file is named use file='review' and a stable short defect slug for symbol. Put the evidence line only in line and evidence; line and prose never enter identity.
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>, key:'codex:review:deferred'}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, the call FAILED/timed out, or the model REFUSED the prompt on content policy (CODEX_REVIEW_REFUSED — codex exits 0 with an EMPTY final message)). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>, file:'review', symbol:'codex', rule:'deferred', line:null}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 
@@ -7224,9 +7112,9 @@ function kimiReviewerPrompt(diffFile) {
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"; if grep -q ${shSingleQuote(KIMI_RATE_LIMIT_TOKEN)} ${shSingleQuote(errFile)}; then echo "KIMI_RATE_LIMITED=1"; else echo "KIMI_RATE_LIMITED=0"; fi
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/key). Every finding needs a \`key\` too — a STABLE \`file:symbol:rule\` identity for the defect (e.g. \`trident/merge.ts:mergeLocal:unchecked-exit\`), the SAME on every round for the same defect, because the build machine-reads it to decide whether a finding survived a fix round; when the review names no file, use \`review:<short-slug-of-the-defect>:<rule>\`. NEVER put a line number in a key — a fix round moves lines, so a key carrying one stops matching itself next round; the line goes in \`evidence\`. Numbers that IDENTIFY the defect (a status code, an error number) belong in the rule and are compared exactly.
+- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence/file/symbol/rule/line). Keep file, symbol, and rule STABLE across rounds for the same defect; the build constructs identity from those named fields. When no file is named use file='review' and a stable short defect slug for symbol. Put the evidence line only in line and evidence; line and prose never enter identity.
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
-- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major', key='kimi:review:deferred'. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
+- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, returned no answer text, or the provider refused it with HTTP 429). Return verdict='REQUEST_CHANGES' with ONE finding, evidence=<tail of ${errFile}>, severity='major', file='review', symbol='kimi', rule:'deferred', line:null. TITLE IT BY WHAT THE KIMI_RATE_LIMITED LINE SAYS, not by guesswork: if it is 1 the title is 'Kimi review NOT PERFORMED — provider refused with HTTP 429' (nothing failed and nothing timed out, so do NOT write 'deferred' or 'failed', and do NOT claim the account is out of credit — 429 does not say which); if it is 0 the title is 'Kimi review deferred'. NEVER report APPROVE for either, and NEVER substitute your own review for it.
 - kimiRateLimited: copy the KIMI_RATE_LIMITED line VERBATIM — 1 → true, 0 → false. It is a grep result, NOT your judgement call and NOT something to infer from the error text: it says whether the provider REFUSED the call with HTTP 429 rather than the call failing. It says nothing about WHY it was refused and you must not guess. The status still blocks either way; this only decides whether the run reports a refusal or a transport fault, so reporting it wrongly sends the operator to the wrong place.
 Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
 }
@@ -7542,7 +7430,7 @@ Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying AS
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
-EVERY finding you return needs a STABLE \`key\` — \`file:symbol:rule\`. Carry a panelist's key through UNCHANGED; when two panelists describe ONE defect, merge them under ONE key; invent a key only for a finding that arrived without one, and use \`review:<short-slug-of-the-defect>:<rule>\` when no file is named. The SAME defect must get the SAME key on every round even if you word the title differently, because the build machine-reads these to decide whether a finding survived a fix round. Do NOT put a line number in a key.
+EVERY finding you return needs STABLE named \`file\`, \`symbol\`, and \`rule\` fields. Carry those fields through unchanged; when two panelists describe one defect, merge them under one field set. Use file='review' and a stable short defect slug for symbol when no file is named. Put the evidence line in \`line\` and \`evidence\`; neither line nor prose enters identity.
 ESCALATE INSTEAD OF ASKING FOR A FIX when the findings are not about the code at all:
 - \`design-gap\` — the PLAN is wrong: no amount of editing this diff removes the finding, because the plan asked for the thing being flagged (a test the execution spec itself specified, an approach the spec chose).
 - \`missing-dependency\` — this card needs work that lives OUTSIDE it and must land first.

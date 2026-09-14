@@ -32,9 +32,10 @@ TRIGGERS (a run must escalate when ANY fires):
     only trigger — a self-declared exit is an escape hatch an agent can learn to pull.
 (b) REPEAT-FINDING — a finding that survives a fix round means fixing is not working. This is the HARD
     gate: it is arithmetic and requires no agent to be honest. Would have fired at ROUND 2 here, saving
-    seven rounds. PREREQUISITE: findings need STABLE IDENTITY (a reviewer-emitted key such as
-    `file:symbol:rule`, or a normalised fingerprint) — today they are free-text titles and "same
-    finding" is not machine-decidable. That prerequisite is part of this item, not an assumption of it.
+    seven rounds. PREREQUISITE: findings need STABLE IDENTITY constructed from required named
+    `file`, `symbol`, and `rule` fields. `line` and free-text prose are excluded by structure, so line
+    movement and rewording cannot change identity. That prerequisite is part of this item, not an
+    assumption of it.
 (c) NO-PROGRESS — blocker+major count not strictly decreasing across two rounds (real data: 4, 2, 6, 4,
     2, 4, 4, 4, 5 → fires round 3). Needs no finding identity, which is its only virtue; noisy, because
     a round can legitimately fix three findings and surface two.
@@ -69,13 +70,12 @@ Built on branch `fix/review-loop-stop-and-escalate`; record at
       the identities this item introduces. The counterfactual is the only satisfiable
       reading — criterion 2 says as much when it calls identity a prerequisite of the item
       rather than an assumption of it.
-- [x] Findings have STABLE IDENTITY (a reviewer-emitted key such as `file:symbol:rule`, or
-      a normalised fingerprint). This is a prerequisite of the item, not an assumption of
-      it: with free-text titles "same finding" is not machine-decidable, so a
-      repeat-finding gate built on titles does not satisfy this.
-      Built as the reviewer-emitted key ONLY, with no title-derived fallback: a fallback
-      would make the gate look like it worked on unkeyed findings while a reword defeated
-      it. An unkeyed finding is UNDECIDABLE, never a fresh one.
+- [x] Findings have STABLE IDENTITY constructed from required named `file`, `symbol`, and
+      `rule` fields. This is a prerequisite of the item, not an assumption of it: with
+      free-text titles "same finding" is not machine-decidable, so a repeat-finding gate
+      built on titles does not satisfy this. `line` is a separate evidence field and does
+      not enter identity. There is no legacy-key or title-derived fallback: a finding
+      missing any identity field is UNDECIDABLE, never a fresh one.
 - [x] The REPEAT-FINDING gate is arithmetic and requires no agent to be honest. A
       self-declared `design-gap` / `missing-dependency` exit exists too, but is never the
       ONLY trigger — assert the arithmetic gate fires with the self-declaration suppressed.

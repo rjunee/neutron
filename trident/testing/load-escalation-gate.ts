@@ -76,7 +76,10 @@ export interface GateFinding {
   severity?: unknown
   title?: unknown
   evidence?: unknown
-  key?: unknown
+  file?: unknown
+  symbol?: unknown
+  rule?: unknown
+  line?: unknown
   kind?: unknown
   advisory?: unknown
 }

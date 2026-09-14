@@ -26,7 +26,10 @@ interface Finding {
   severity: string
   title: string
   evidence: string
-  key: string
+  file: string
+  symbol: string
+  rule: string
+  line: number
 }
 
 /** One scripted review round: what the synthesis seat answers. */
@@ -77,12 +80,10 @@ interface Captured {
  *  measurement rather than a shape check. */
 const REPLAN_SPEC_MARKER = 'REPLAN_SPEC_MARKER_7Q4Z'
 
-const finding = (key: string, severity = 'blocker'): Finding => ({
-  severity,
-  title: `free-text title for ${key}, deliberately reworded between rounds`,
-  evidence: 'x.ts:1',
-  key,
-})
+const finding = (identity: string, severity = 'blocker'): Finding => {
+  const [file = '', symbol = '', ...rule] = identity.split(':')
+  return { severity, title: `free-text title for ${identity}, deliberately reworded between rounds`, evidence: 'x.ts:1', file, symbol, rule: rule.join(':'), line: 1 }
+}
 
 /**
  * Execute the REAL workflow body with mocked runtime globals.
@@ -807,7 +808,7 @@ describe('an APPROVE round is CONVERGENCE, not a failure to converge', () => {
         // round IS bought; `blockingFindingCount` does not count it, so the round records
         // a count of 0. That combination is what produces the `[0,0]` series — an
         // all-minor round would simply have been approved at round 1 and never reached it.
-        { findings: [{ severity: 'weird', title: 't', evidence: 'e', key: 'a:b:c' } as never] },
+        { findings: [{ ...finding('a:b:c'), severity: 'weird' } as never] },
         { findings: [], verdict: 'APPROVE' },
       ],
     })
@@ -838,7 +839,7 @@ describe('a round that did NOT judge the code is kept out of the ledger', () => 
         // code work (unknown severity is fail-closed) so round 1 is a genuine 'code'
         // round, while `blockingFindingCount` does not count it — which is what lets the
         // dead seat's own lane blocker raise the count on round 2.
-        { findings: [{ severity: 'weird', title: 't', evidence: 'e', key: 'a:b:c' } as never] },
+        { findings: [{ ...finding('a:b:c'), severity: 'weird' } as never] },
         { findings: [] },
       ],
     })
