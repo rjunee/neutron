@@ -29,7 +29,7 @@ function rec(over: Partial<ReplRegistryRecord> & { sessionKey: string }): ReplRe
   return {
     sessionId: `uuid-${over.sessionKey}`,
     cwd: '/home/x',
-    channelName: 'neutron-x',
+    channelName: 'neutron-b0e72132defeb950c497e493442fe84d',
     has_session: true,
     ...over,
   }
@@ -80,7 +80,7 @@ describe('repl-registry — pure (de)serialization', () => {
   })
 
   it('backfills sessionKey from the map key when the field is absent', () => {
-    const raw = JSON.stringify({ k1: { sessionId: 'u', cwd: '/c', channelName: 'n', has_session: true } })
+    const raw = JSON.stringify({ k1: { sessionId: 'u', cwd: '/c', channelName: 'neutron-7b8b965ad4bca0e41ab51de7b31363a1', has_session: true } })
     const parsed = parseRegistryContents(raw)
     if (parsed.kind === 'loaded') expect(parsed.registry.k1?.sessionKey).toBe('k1')
   })

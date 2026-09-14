@@ -10,9 +10,29 @@
 import { describe, expect, test } from 'bun:test'
 
 import { SUBSTRATE_ERROR_CODES } from '../../../../errors.ts'
-import { classifySpawnError } from '../classify-spawn-error.ts'
+import { classifySpawnError, classifyThrownSpawnError } from '../classify-spawn-error.ts'
 
 describe('classifySpawnError', () => {
+  test('#539 — the boot-adoption refusal is STAMPED, so it never cools a credential', () => {
+    // The producer-side stamp is what keeps this out of the credential ladder. An
+    // UNSTAMPED retryable error maps to a 429-shaped pool cooldown
+    // (`mapStatusForPoolCooldown(null, true)` in the composer), so a refusal that has
+    // nothing to do with the credential would park a healthy one after five turns.
+    const message =
+      'persistent-repl: refusing to resume session inst user proj cred — a previous REPL for it may ' +
+      'still be running and could not be accounted for (the herdr socket did not answer). Starting a ' +
+      'second process on one transcript corrupts it, so this turn fails instead. It retries on the next turn.'
+    expect(classifySpawnError(message)).toBe('repl_unreconciled')
+    // Retryable, because the next turn re-probes: a transient failure to see the pane
+    // costs one turn rather than the session.
+    expect(SUBSTRATE_ERROR_CODES.repl_unreconciled.retryable).toBe(true)
+  })
+
+  test('a refusal is NOT confused with the channel classes that share its prefix', () => {
+    expect(classifySpawnError('persistent-repl: channel not ready')).toBe('channel_wedged')
+    expect(classifySpawnError('persistent-repl: spawn failed (dead-child; )')).toBe('channel_wedged')
+  })
+
   test('missing `claude` binary shapes → binary_not_found', () => {
     expect(classifySpawnError('Executable not found in $PATH: "claude"')).toBe('binary_not_found')
     expect(classifySpawnError('Error: spawn claude ENOENT')).toBe('binary_not_found')
@@ -64,5 +84,51 @@ describe('classifySpawnError', () => {
   test('an ordinary retryable turn error is unclassified (undefined → composer ladder decides)', () => {
     expect(classifySpawnError('persistent-repl: REPL process exited')).toBeUndefined()
     expect(classifySpawnError('some transient inner hiccup')).toBeUndefined()
+  })
+})
+
+describe('#539 r42 — BOTH refusal verbs join the same class', () => {
+  test('classifies the boot-adoption gate\'s refusal', () => {
+    expect(classifySpawnError('persistent-repl: refusing to resume session abc — a previous REPL')).toBe(
+      'repl_unreconciled',
+    )
+  })
+
+  test('classifies the ownership-unrecorded refusal, which shipped unmatched', () => {
+    // THE PROSE FALLBACK, kept even though the thrower now stamps its own class: a
+    // consumer that only ever sees the message (the composer's regex ladder) would
+    // otherwise map this to a synthetic 429 and cool a healthy credential.
+    expect(
+      classifySpawnError(
+        'persistent-repl: refusing to serve session abc — its pane w9:p7 could not be RECORDED as owned',
+      ),
+    ).toBe('repl_unreconciled')
+  })
+
+  test('prefers what a thrower STAMPED over what it wrote', () => {
+    const stamped = Object.assign(new Error('something the regexes have never seen'), {
+      substrateErrorClass: 'repl_unreconciled' as const,
+    })
+    expect(classifyThrownSpawnError(stamped)).toBe('repl_unreconciled')
+    // ...and still falls back to prose for the many failures that arrive as bare strings.
+    expect(classifyThrownSpawnError(new Error('Executable not found in $PATH: "claude"'))).toBe(
+      'binary_not_found',
+    )
+    expect(classifyThrownSpawnError('an ordinary crash')).toBeUndefined()
+  })
+
+  test('a stamp that is not a taxonomy member is ignored, not trusted', () => {
+    // The consumer does `SUBSTRATE_ERROR_CODES[code].retryable`, so trusting an arbitrary
+    // string would throw INSIDE the catch handling a spawn failure — turning a handled
+    // refusal into an unhandled crash on the turn path. An unrecognised stamp falls back to
+    // the message, which is the same disposition as never having been stamped at all.
+    const bogus = Object.assign(new Error('Executable not found in $PATH: "claude"'), {
+      substrateErrorClass: 'not_a_real_class',
+    })
+    expect(classifyThrownSpawnError(bogus)).toBe('binary_not_found')
+    const bogusAndUnmatched = Object.assign(new Error('nothing recognisable'), {
+      substrateErrorClass: 'not_a_real_class',
+    })
+    expect(classifyThrownSpawnError(bogusAndUnmatched)).toBeUndefined()
   })
 })

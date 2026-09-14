@@ -21,7 +21,7 @@ function record(over: Partial<ReplRegistryRecord> = {}): ReplRegistryRecord {
     sessionKey: 'instance-a /home/a',
     sessionId: 'uuid-1234-5678',
     cwd: '/home/a',
-    channelName: 'neutron-abcd',
+    channelName: 'neutron-c0051787554ad6c366843171e67f6c37',
     has_session: true,
     ...over,
   }

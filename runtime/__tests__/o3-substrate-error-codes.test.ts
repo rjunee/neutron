@@ -31,6 +31,7 @@ const ALL_CLASSES: readonly SubstrateErrorClass[] = [
   'no_credentials',
   'all_cooldown',
   'oauth_refresh',
+  'repl_unreconciled',
 ]
 
 describe('SUBSTRATE_ERROR_CODES — registered code table', () => {

@@ -71,6 +71,7 @@ export type SubstrateErrorClass =
   | 'no_credentials'
   | 'all_cooldown'
   | 'oauth_refresh'
+  | 'repl_unreconciled'
 
 export type Event =
   | { kind: 'token'; text: string }

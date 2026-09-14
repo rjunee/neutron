@@ -44,6 +44,7 @@
  * with zero rework (brief § 8).
  */
 
+import { noteLocalOwnership } from './local-ownership.ts'
 import { createLogger } from '@neutronai/logger'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
@@ -169,6 +170,20 @@ export interface GatewayShutdownKillEntry {
   identity?: ProcessIdentity
 }
 
+/** The spawn-time properties {@link ReplRegistryRecord.reuse} carries. A nested
+ *  object rather than three top-level fields: they are one fact about one child —
+ *  what it was spawned as — and they are read as a set or not at all. */
+export interface ReplReuseProperties {
+  /** `session.toolSurface`: the `--tools` value as a stable comma-joined key. An
+   *  EMPTY STRING IS A REAL VALUE here (`--tools ""`, the default-deny surface an
+   *  untrusted-content REPL gets), never a missing one. */
+  tool_surface: string
+  /** `session.toolBridgeActive`: was the native-MCP tool bridge attached at spawn. */
+  tool_bridge: boolean
+  /** `session.authFingerprint`: see {@link ReplRegistryRecord.reuse}. */
+  auth_fingerprint: string
+}
+
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
   /** Pool key — opaque; follows S3 re-namespacing. */
@@ -187,6 +202,58 @@ export interface ReplRegistryRecord {
   pid?: number
   /** Dev-channel HTTP port — `/health` liveness probe target. */
   devchannel_port?: number
+  /**
+   * #539 — THE DURABLE HANDLE FOR THIS CHILD'S TERMINAL: the herdr pane id, written
+   * at spawn, read at the next gateway's boot so a REPL that OUTLIVED its gateway can
+   * be found again instead of being spawned over.
+   *
+   * PRESENT ONLY WHERE THE CHILD OUTLIVES US. A `BunTerminalHost` child is a child of
+   * the gateway process and dies with it, so it has no handle and this stays absent —
+   * `PtyChild.paneHandle` carries the same fact at runtime and this is its persisted
+   * form. Absence therefore means "nothing survives for anyone to adopt", which is
+   * exactly what the shutdown path needs in order to keep killing what it must.
+   *
+   * IT IS CLEARED WHEN A SPAWN REPLACES THE CHILD WITH ONE THAT HAS NO HANDLE
+   * (`spawn.ts`), not merely left alone. A row that keeps a handle from a previous,
+   * differently-hosted incarnation would send the next boot chasing a pane id that
+   * names nothing — or, after a herdr server restarted its pane numbering from
+   * scratch, names somebody else's pane. A handle is a claim about the CURRENT child
+   * and must not outlive it.
+   *
+   * IT IS NOT AN IDENTITY. Nothing may adopt on the strength of this field alone: the
+   * pane it names has to be re-verified (`orphan-adoption.ts` matches the pane's live
+   * argv against this row's `sessionId` AND `channelName`, and the dev-channel's
+   * `/health` has to answer with this row's session id). A pane id is an identifier
+   * the herdr server issues and can reissue across its own restart, which is the same
+   * recycling hazard a pid has and is answered the same way.
+   */
+  pane_handle?: string
+  /**
+   * #539 — THE THREE SPAWN-TIME PROPERTIES THE WARM-REUSE GUARDS COMPARE AGAINST,
+   * persisted so a RE-ADOPTED session can answer them.
+   *
+   * WITHOUT THIS THE ADOPTION IS POINTLESS. `getOrSpawnSession` refuses to serve a
+   * turn on a warm REPL whose tool surface, bridge attachment or credential
+   * fingerprint differ from the request's, and EVICTS it. A session rebuilt from a
+   * registry row knows none of the three, so all three compare unequal and the very
+   * first turn after the restart destroys the REPL that was just re-adopted — a
+   * feature that works right up until something uses it.
+   *
+   * THEY ARE PROPERTIES OF THE CHILD, WRITTEN BY THE SPAWN THAT MADE IT, in the same
+   * write as its pid, generation and pane handle. That is what keeps them from
+   * drifting: one child, one row, one write, and a respawn replaces all of it.
+   *
+   * ON `auth_fingerprint` SPECIFICALLY, since it is derived from a secret: it is the
+   * first 16 hex chars of `sha256(<the env auth secret>)` (`authFingerprintFor`) —
+   * never the secret, and already the form the in-memory guard compares. The file it
+   * lands in is written 0600 in the instance state dir, which is the SAME directory
+   * as `sinkTokenPath` — the actual reply-sink secret. So the marginal exposure is a
+   * truncated hash stored beside the plaintext key it is a hash of; what it buys is
+   * that a rotated token still EVICTS (fingerprints differ) instead of being
+   * unanswerable. Empty string where the instance has no env auth secret (the
+   * interactive-login model), which is exactly what the in-memory guard holds there.
+   */
+  reuse?: ReplReuseProperties
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
@@ -236,6 +303,64 @@ export interface ReplRegistryRecord {
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
+  /**
+   * #539 — THE ADOPTION CLAIM: epoch ms an incarnation took this row for a boot
+   * adoption, with {@link ReplRegistryRecord.adoption_claim_by} naming which one.
+   *
+   * WHY A VERIFICATION IS NOT A CLAIM. `claimRowOrUnwind` compares `(pane_handle,
+   * child_generation)` under the flock and then releases it before publishing — and a
+   * comparison leaves no trace. So two incarnations could each take the lock in turn, each
+   * find the row UNCHANGED precisely because the other had only read it, and each publish
+   * an attached wrapper on the same pane: two owners of one live transcript. Neither the
+   * generation (restored from this row, so identical for both) nor the pid (the same
+   * pane's process) can tell them apart. Only a write can.
+   *
+   * SAME SHAPE AS `respawn_in_flight_at`, deliberately: that field solves the same
+   * problem — exactly one actor per key across processes — with a marker plus a TTL, and
+   * one idiom for one problem is worth more than a second mechanism.
+   *
+   * THE TTL IS WHAT STOPS A CRASH WEDGING THE KEY. A claimant that dies between marking
+   * and publishing would otherwise make this row unadoptable forever. It is generous on
+   * purpose: being generous costs a bounded refusal (one cold `--resume`), being tight
+   * costs a spurious double adoption, and only the second breaks an invariant.
+   */
+  adoption_claim_at?: number
+  /** The incarnation that holds the claim — see {@link ReplRegistryRecord.adoption_claim_at}. */
+  adoption_claim_by?: string
+  /**
+   * THE OS PROCESS OF THE GATEWAY HOLDING THE CLAIM, so a claimant's death can be
+   * established rather than waited out (#539).
+   *
+   * The renewal threshold alone answers "has this claim been refreshed recently", and after
+   * a CRASH that answer is yes for up to a threshold's worth of seconds — during which the
+   * next gateway refuses to adopt a pane whose owner is already gone. That is the headline
+   * behaviour of this item paying for its own safety mechanism. A pid turns the common case
+   * into a positive finding: `ESRCH` means gone, and gone means adoptable NOW.
+   *
+   * IT ONLY EVER ACCELERATES. `alive` and "could not ask" both fall back to the threshold,
+   * so a recycled pid costs a bounded wait and never a takeover — the direction that
+   * matters, since the opposite would hand a live pane to a second owner.
+   */
+  adoption_claim_pid?: number
+  /**
+   * #539 r47 — A SPAWN RESERVATION on this session key: "I am about to start a
+   * `claude --resume` for this transcript."
+   *
+   * WHY A SECOND MARKER RATHER THAN THE PANE CLAIM. A pane cannot be claimed before it
+   * exists, and the spawn becomes capable of corrupting the transcript the INSTANT the
+   * process starts — it appends through startup and readiness, and killing the loser
+   * afterwards does not unwrite what it appended. The claim covers "who drives this pane";
+   * this covers the window before a pane exists at all.
+   *
+   * WHY NOT `respawn_in_flight_at`, which is the same idiom. That field means "a respawn has
+   * been dispatched and has not completed", and `decideWedgeAction` reads it to suppress a
+   * duplicate respawn. Stamping it on every FRESH spawn would change what that gate means on
+   * every first turn. Same shape — marker, holder, pid, TTL, compare-and-set under the flock
+   * — different fact, so a different field.
+   */
+  spawn_reservation_at?: number
+  spawn_reservation_by?: string
+  spawn_reservation_pid?: number
   /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
    *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
    *  or a deploy). Written just before each kill, read back so the death is reported as
@@ -315,6 +440,34 @@ export function serializeRegistry(registry: ReplRegistry): string {
   return JSON.stringify(registry, null, 2)
 }
 
+/**
+ * The generated dev-channel form, and the ONLY one a row may carry.
+ *
+ * `spawn.ts` emits `` `neutron-${randomBytes(16).toString('hex')}` `` — 32 lowercase hex
+ * characters, always. Checked against what the spawner actually produces rather than
+ * against a guess about it.
+ */
+const GENERATED_CHANNEL_NAME = /^neutron-[0-9a-f]{32}$/
+
+/**
+ * WHY `channelName` IS THE ONE FIELD WITH A SHAPE (#539, Argus r27).
+ *
+ * `typeof x === 'string'` was enough while every channel name in the system had been
+ * generated in-process moments earlier. Adoption changed that: it is the first path that
+ * takes this value from DISK and feeds it to `replSessionConfigPaths`, which builds
+ * `join(tmpdir(), 'neutron-repl-' + channelName)` — and the child-exit path UNLINKS what
+ * those paths point at. A row carrying `x/../../../some/dir` therefore turns "the registry
+ * is garbage" into "files outside the temp directory get deleted", which is a far worse
+ * failure than the one it starts from.
+ *
+ * A row that fails this is DROPPED, and since round twenty a dropped TARGET row surfaces
+ * as `unreadable` rather than reading as absence — so the malformed row becomes a REFUSAL
+ * rather than a deletion. That is the two rounds composing: the shape check makes the bad
+ * value visible and specific here, `readRegistryState` makes the consequence safe, and
+ * `replSessionConfigPaths` enforces LEXICAL containment so no future caller can bypass
+ * it, and `unlinkSessionConfigs` checks the filesystem at the moment it deletes — which is
+ * the only place a symlinked directory is visible at all.
+ */
 function isMinimalRecord(raw: unknown): boolean {
   if (raw === null || typeof raw !== 'object') return false
   const r = raw as Record<string, unknown>
@@ -322,11 +475,214 @@ function isMinimalRecord(raw: unknown): boolean {
     typeof r.sessionId === 'string' &&
     typeof r.cwd === 'string' &&
     typeof r.channelName === 'string' &&
+    GENERATED_CHANNEL_NAME.test(r.channelName) &&
     typeof r.has_session === 'boolean'
   )
 }
 
+// ─── Pane ownership: the handle and its claim, which are ONE fact ──────────
+
+/**
+ * TAKING, KEEPING AND GIVING UP A PANE — the four mutations that may touch
+ * `pane_handle` / `adoption_claim_*`, and the only ones (#539, Argus r40).
+ *
+ * THE DEFECT THESE EXIST FOR was a scope error, not a bug. The claim was built into the
+ * ADOPTION path, and ownership is not a property of how a session came to exist. So:
+ *
+ *   - a FRESH SPAWN wrote a pane handle and no claim, leaving a row that was owned and
+ *     unclaimed — an adopter starting while that gateway was alive read an unclaimed row,
+ *     claimed it, attached and published. Two live wrappers on one pane, and the spawner
+ *     could not even notice, because renewal returns immediately for a session with no
+ *     claim of its own;
+ *   - a REPLACEMENT SPAWN dropped the dead child's `pane_handle` and INHERITED its
+ *     `adoption_claim_*`, so the row asserted ownership on behalf of a child that no
+ *     longer existed, and a restart inside the takeover window refused adoption on the
+ *     strength of it.
+ *
+ * Both are the same sibling-field shape: two fields describing one fact, writable
+ * independently. **Four careful call sites is what produced them**, so the fields are not
+ * written directly any more — `__tests__/pane-ownership-is-one-fact.test.ts` fails the
+ * build if any other module names them as object keys.
+ *
+ * THE INVARIANT IS DIRECTIONAL, and stating it precisely matters because the obvious
+ * symmetric version is wrong:
+ *
+ *   - a row whose pane is being SERVED by a live session carries THAT session's claim;
+ *   - writing or clearing a handle carries its claim with it, so no claim can outlive the
+ *     child it was taken for;
+ *   - but a handle with NO claim is a legitimate, load-bearing state: it is precisely
+ *     "this pane is alive and nobody is serving it", which is what a surviving shutdown
+ *     leaves behind and what the next boot adopts. {@link handOverPane} produces it
+ *     deliberately.
+ */
+export interface PaneOwner {
+  /** The durable terminal handle this child is running in. */
+  readonly handle: string
+  /** The child generation the handle belongs to — written together, always. */
+  readonly generation: string
+  /** The claiming gateway's per-pass identity. */
+  readonly claimant: string
+  readonly now: number
+  /** The claiming gateway's OS process, so its death can be established rather than
+   *  waited out. */
+  readonly pid: number
+}
+
+/** TAKE a spawn reservation on this key — see `spawn_reservation_at`. Written through the
+ *  funnel like every other ownership field, so the same source-level check covers it. */
+export function reservePaneSpawn(
+  prev: ReplRegistryRecord,
+  args: { readonly by: string; readonly now: number; readonly pid: number },
+): ReplRegistryRecord {
+  // THE RESERVATION IS NOTED HERE, and this one is not redundant (r59): a reserver id belongs
+  // to a spawn in flight, not to a session — there is no `ReplSession` yet to carry it, which
+  // is the whole point of reserving BEFORE the spawn. Released in `releaseSpawnReservation`.
+  noteLocalOwnership(args.by)
+  return {
+    ...prev,
+    spawn_reservation_at: args.now,
+    spawn_reservation_by: args.by,
+    spawn_reservation_pid: args.pid,
+  }
+}
+
+/** GIVE THE RESERVATION BACK, CAS'd on it still being ours — a reservation released by
+ *  somebody else's pass would hand the key to a third. */
+export function releasePaneSpawnReservation(
+  prev: ReplRegistryRecord,
+  by: string,
+): ReplRegistryRecord | undefined {
+  if (prev.spawn_reservation_by !== by) return undefined
+  const {
+    spawn_reservation_at: _a,
+    spawn_reservation_by: _b,
+    spawn_reservation_pid: _p,
+    ...rest
+  } = prev
+  return rest
+}
+
+/** TAKE (or keep) ownership: the handle, its generation and this gateway's claim, in one
+ *  write. There is no ordering in which the row is owned but unclaimed. */
+export function ownPane(prev: ReplRegistryRecord, owner: PaneOwner): ReplRegistryRecord {
+  // NO LOCAL NOTE HERE (r59). A claim always lands on a `ReplSession`, whose `paneClaimBy`
+  // accessor IS this process's register of what it holds — and M169 proved this line added
+  // nothing: removing it reddened nothing, because the session had already noted the id. Two
+  // mechanisms for one fact is the defect family this branch keeps finding; the owner keeps
+  // the fact, and a row write is not an owner.
+  return {
+    ...prev,
+    pane_handle: owner.handle,
+    child_generation: owner.generation,
+    adoption_claim_at: owner.now,
+    adoption_claim_by: owner.claimant,
+    adoption_claim_pid: owner.pid,
+  }
+}
+
+/** GIVE UP ownership because the pane is gone or is not ours to describe: the handle and
+ *  the claim leave together. The generation stays — it identifies the child for the
+ *  crash/shutdown records that must outlive it. */
+export function disownPane(prev: ReplRegistryRecord): ReplRegistryRecord {
+  // NO LOCAL DROP HERE, DELIBERATELY (r59). This helper clears whatever claim the ROW carries,
+  // and one of its callers (`clearPaneHandle`, for a pane that is provably gone) legitimately
+  // clears a claim this process does not own. Dropping from the process-wide register there
+  // would erase ANOTHER in-process gateway's ownership evidence and re-open the very defect
+  // this register exists to close. The drop belongs to the owner — `ReplSession.paneClaimBy`.
+  const {
+    pane_handle: _h,
+    adoption_claim_at: _a,
+    adoption_claim_by: _b,
+    adoption_claim_pid: _p,
+    ...rest
+  } = prev
+  return rest
+}
+
+/** HAND OVER: stop owning a pane that is STILL RUNNING, so the next construction can
+ *  adopt it. The handle stays on purpose — see the invariant note above. CAS'd, so a
+ *  gateway can only ever release its own claim. */
+export function handOverPane(
+  prev: ReplRegistryRecord,
+  claimant: string,
+): ReplRegistryRecord | undefined {
+  if (prev.adoption_claim_by !== claimant) return undefined
+  const { adoption_claim_at: _a, adoption_claim_by: _b, adoption_claim_pid: _p, ...rest } = prev
+  return rest
+}
+
+/** KEEP ownership alive: refresh the claim in place, CAS'd on it still being ours. The
+ *  handle is untouched because nothing about the pane changed. */
+export function refreshPaneClaim(
+  prev: ReplRegistryRecord,
+  claimant: string,
+  now: number,
+  pid: number,
+): ReplRegistryRecord | undefined {
+  if (prev.adoption_claim_by !== claimant) return undefined
+  // Likewise no local note: a renewal renews a claim its session already holds.
+  return { ...prev, adoption_claim_at: now, adoption_claim_pid: pid }
+}
+
 // ─── Disk-touching wrappers ────────────────────────────────────────────────
+
+/**
+ * THE READ THAT DISTINGUISHES "THERE IS NOTHING" FROM "I COULD NOT LOOK" (#539, Argus
+ * r19).
+ *
+ * `loadRegistry` answers `{}` for all three of: a genuinely absent file (ENOENT, the
+ * steady-state cold boot), a non-ENOENT read failure, and malformed JSON. It KNOWS the
+ * difference internally and tells nobody — and the mutation path already compensates
+ * (`loadRegistryForMutation` returns `skipSave` for exactly the read-failure case,
+ * because a write over a registry you could not read is a write over someone's data).
+ * The read path had no such compensation, and two decisions came to rest on it: a cold
+ * spawn licensed by "no row" and a pane CLOSED because "no row names it".
+ *
+ * Both of those are the branch's oldest named defect — false and unknown sharing a
+ * branch — at the bottom of the stack where every guard above reads through.
+ *
+ * `loadRegistry`'s own contract is deliberately UNCHANGED: it has many callers, and
+ * migrating them wholesale is a far larger diff than the two decisions that need this.
+ * Callers that only ever ask "give me what is there" are correct with `{}`; callers that
+ * DECIDE something on absence must use this instead.
+ *
+ * THE BOUNDARY THAT MUST NOT MOVE: ENOENT is a TRUE absence. A cold boot has no registry
+ * file, and if a missing file began refusing spawns nothing would ever start. `absent` is
+ * permission; `unreadable` is refusal.
+ */
+export function readRegistryState(
+  path: string,
+):
+  | { kind: 'loaded'; registry: ReplRegistry; droppedKeys: readonly string[] }
+  | { kind: 'absent' }
+  | { kind: 'unreadable'; reason: string } {
+  let contents: string
+  try {
+    contents = readFileSync(path, 'utf8')
+  } catch (e) {
+    // ENOENT on the read itself, not a separate `existsSync` — the same reasoning
+    // `loadRegistry` documents: a pre-check has a TOCTOU gap and collapses every stat
+    // error into "absent", which is the exact conflation this function exists to undo.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return { kind: 'unreadable', reason: `read-error: ${(e as Error).message}` }
+  }
+  // DROPPED ROWS ARE REPORTED, NOT SWALLOWED (Argus r20). `parseRegistryContents`
+  // discards individual schema-invalid rows and still answers `loaded` — deliberate, and
+  // right for a whole-file read. But for a caller asking about ONE key it reproduces the
+  // very collapse this function exists to undo, one level down: a well-formed file whose
+  // target row has `has_session: "true"` parses, the row is discarded, and the key simply
+  // is not there. `absent` again, from a row that was UNREADABLE.
+  //
+  // The keys come back so the caller can ask the only question that matters to it — was
+  // MY key dropped? A drop on somebody else's key says nothing about mine.
+  const droppedKeys: string[] = []
+  const result = parseRegistryContents(contents, (key) => droppedKeys.push(key))
+  if (result.kind === 'loaded') return { kind: 'loaded', registry: result.registry, droppedKeys }
+  // WE GOT BYTES AND COULD NOT MAKE SENSE OF THEM. For the MUTATION path that is safe to
+  // rebuild from (the original is sidecar-preserved). For a DECISION it is not: the rows
+  // that file held are unknown, so it establishes nothing about what owns a transcript.
+  return { kind: 'unreadable', reason: result.kind === 'corrupt' ? result.reason : 'unparseable registry' }
+}
 
 /** Load the registry file. Returns `{}` on absent or corrupt (the steady-state
  *  cold-boot case). Corruption is logged via `onCorrupt` so the caller can
@@ -426,7 +782,15 @@ export function saveRegistry(path: string, registry: ReplRegistry): void {
  * returns the loaded object untouched.
  */
 export function getRecord(path: string, sessionKey: string): ReplRegistryRecord | undefined {
-  const record = loadRegistry(path)[sessionKey]
+  return normaliseRecord(loadRegistry(path)[sessionKey])
+}
+
+/** The normalisation `getRecord` applies, as a pure function, so a caller that obtained
+ *  the registry another way (see {@link readRegistryState}) gets the SAME record rather
+ *  than a subtly different one. One rule, one place. */
+export function normaliseRecord(
+  record: ReplRegistryRecord | undefined,
+): ReplRegistryRecord | undefined {
   if (record === undefined) return undefined
   if (record.model === undefined) return record
   if (typeof record.model === 'string' && record.model.trim() !== '') return record
@@ -591,6 +955,21 @@ export interface WithRegistryOptions {
    *  `defaultDropRowHandler`'s loud log + best-effort sidecar. Same
    *  additive-only contract as `onCorrupt`. */
   onDropRow?: (key: string, raw: unknown, rawContents: string) => void
+  /**
+   * DID THE WRITE LAND — reported once per invocation, inside the flock (#539, Argus r48).
+   *
+   * `withRegistry` has THREE ways to decline to persist, and for most of its life only one of
+   * them was visible: the lock (through `onOutcome`, because round fifteen needed it). The
+   * other two were not surfaced at all — an unreadable registry makes
+   * `loadRegistryForMutation` set `skipSave` while this function still returns the mutator's
+   * result, and a thrown open or save leaves the caller to guess. **A caller whose correctness
+   * depends on the write LANDING could not distinguish any of them from success**, which is
+   * the false-and-unknown collapse this branch has paid for at five sites now.
+   *
+   * So they are enumerated here, in one place, and {@link withOwnedRegistry} folds the lock and
+   * the throw in beside them so an ownership write gets a single answer.
+   */
+  onPersist?: (outcome: { saved: boolean; why?: 'registry-unreadable' | 'caller-skipped' }) => void
 }
 
 /**
@@ -615,10 +994,65 @@ export interface WithRegistryOptions {
  * would risk turning a momentary hiccup into permanent, unrecoverable loss).
  * See `loadRegistryForMutation`.
  */
+/**
+ * Read the registry UNDER THE LOCK, without writing it back (#539).
+ *
+ * WHY THIS IS NOT `getRecord`. `getRecord` takes no lock at all, so a caller that
+ * reads with it and then ACTS on what it read has its decision ordered against a
+ * concurrent writer by nothing whatsoever. For a caller whose action is "leave a
+ * process running", that is the difference between a decision and a guess: the
+ * gateway-shutdown survival gate (`gateway-shutdown-survival.ts`) must not leave a
+ * pane alive on the strength of a row another incarnation has already replaced.
+ * Taking the same flock every writer takes serialises the two — the writer's change
+ * lands strictly before or strictly after the decision, never inside it.
+ *
+ * It does NOT save, which is the whole point of having it rather than a `withRegistry`
+ * whose mutate returns its input: a byte-identical rewrite of every row is a write
+ * this path has no business performing while the process is shutting down.
+ *
+ * `onOutcome` IS PASSED STRAIGHT THROUGH, and a caller whose correctness argument rests
+ * on the lock must consume it. `withFlockSync` runs its callback UNGUARDED in two
+ * states — no FFI, and `flock` returning nonzero — because for a generic helper running
+ * unguarded beats skipping the operation. Both are indistinguishable from success to
+ * anyone who does not ask. Taking the lock is not the same as HOLDING it, and this
+ * helper reports which happened rather than implying the stronger one.
+ */
+export function withRegistryRead<T>(
+  path: string,
+  read: (registry: ReplRegistry) => T,
+  onOutcome?: (acquired: boolean) => void,
+): T {
+  return withFlockSync(registryLockPath(path), () => read(loadRegistry(path)), onOutcome)
+}
+
+/**
+ * Read-modify-write the registry under the flock.
+ *
+ * `onOutcome` REPORTS WHETHER THE LOCK WAS ACTUALLY HELD while the mutation ran,
+ * forwarded straight to `withFlockSync`. Optional, so no existing caller changes — but a
+ * caller whose correctness argument rests on atomicity must consume it, because a
+ * compare-and-set is only a compare-and-set while the lock holds. Run unguarded (no FFI,
+ * or `flock` returning nonzero, both of which `withFlockSync` deliberately allows) two
+ * incarnations can read the same row, both find it matching, and both write.
+ * `boot-adoption.ts`'s row claim is exactly such a caller: without this it could publish
+ * two attached owners of one live transcript, the single outcome that module exists to
+ * prevent.
+ */
 export function withRegistry<T>(
   path: string,
-  mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T },
+  mutate: (registry: ReplRegistry) => {
+    registry: ReplRegistry
+    result: T
+    /** Ask for NO WRITE AT ALL. A callback that decides not to act must be able to say
+     *  so: returning the registry unchanged still SAVES it, and the snapshot it saves
+     *  was loaded before the callback ran — so a concurrent writer's newer row is
+     *  silently dropped. That is a lost update performed by a caller that refused to
+     *  act, which is the opposite of what refusing is for. Optional, so no existing
+     *  caller changes. */
+    skipSave?: true
+  },
   options: WithRegistryOptions = {},
+  onOutcome?: (acquired: boolean) => void,
 ): T {
   const mandatoryOnCorrupt = defaultCorruptHandler(path)
   const mandatoryOnDropRow = defaultDropRowHandler(path)
@@ -644,12 +1078,151 @@ export function withRegistry<T>(
       log.error('caller-supplied onDropRow callback threw (ignored)', { error: String(e) })
     }
   }
-  return withFlockSync(registryLockPath(path), () => {
-    const { registry: current, skipSave } = loadRegistryForMutation(path, onCorrupt, onDropRow)
-    const { registry, result } = mutate(current)
-    if (!skipSave) saveRegistry(path, registry)
-    return result
-  })
+  return withFlockSync(
+    registryLockPath(path),
+    () => {
+      const { registry: current, skipSave: corruptSkip } = loadRegistryForMutation(
+        path,
+        onCorrupt,
+        onDropRow,
+      )
+      const { registry, result, skipSave: callerSkip } = mutate(current)
+      // REPORTED BEFORE THE SAVE IS ATTEMPTED, and separately from it: a throw from
+      // `saveRegistry` propagates, and `withOwnedRegistry` turns that into its own decline —
+      // so this hook says which of the two SKIPS applied, and silence past here means the save
+      // was attempted.
+      if (corruptSkip === true) options.onPersist?.({ saved: false, why: 'registry-unreadable' })
+      else if (callerSkip === true) options.onPersist?.({ saved: false, why: 'caller-skipped' })
+      // EITHER skip suppresses the write, and they are different facts: the corrupt-path
+      // skip protects a file this module could not parse, the caller's skip protects a
+      // file another WRITER may have changed under a lock we did not hold.
+      if (corruptSkip !== true && callerSkip !== true) {
+        saveRegistry(path, registry)
+        options.onPersist?.({ saved: true })
+      }
+      return result
+    },
+    onOutcome,
+  )
+}
+
+/**
+ * THE ENTRY POINT FOR A WRITE WHOSE CORRECTNESS RESTS ON THE LOCK (#539, Argus r41).
+ *
+ * WHY THIS EXISTS RATHER THAN A RULE. Six writes in this subsystem are only correct while
+ * the flock is held, and four of them had already been fixed one at a time — rounds
+ * fifteen, eighteen, twenty-one — each by adding `if (!acquired) return skipSave` inside
+ * the callback. Round forty's structural work then ADDED TWO NEW ownership writes, and
+ * both shipped without the check: written after the rule existed, by someone who knew it.
+ * **A rule that has to be remembered at every new call site is not a mechanism**, and the
+ * audit table that records what was checked cannot make the next write obey anything.
+ *
+ * So the disposition for a failed acquisition is a REQUIRED PARAMETER. `mutate` runs only
+ * when the lock was actually held; `onUnlocked` is what happens when it was not, and there
+ * is no way to call this without saying. A caller reaching for plain {@link withRegistry}
+ * for an ownership transition is now visible at the call site instead of invisible by
+ * omission.
+ *
+ * WHY NOT INVERT `withRegistry`'S OWN DEFAULT, which was the alternative on the table. The
+ * callers were enumerated rather than guessed — ten registry writes at the time of the
+ * split, six lock-critical (the claim, the renewal, the give-back, the handle clear, the
+ * fresh-spawn ownership write and the child-exit disown) and four lock-INDIFFERENT
+ * (`upsertRecord`, `patchRecord`, `removeRecord`, `clearRespawnInFlight`), whose losses are
+ * bounded degradations rather than invariant breaks. **The six now come through here, so
+ * what is left below is the indifferent four** — which is the shape the decision was made
+ * to produce. Inverting the default would instead have put the "unguarded is fine" opt-in on
+ * the three generic helpers, which between them carry ten transitive callers and are
+ * exactly the path a future ownership-ish field would travel through — the same failure
+ * mode, one level up and harder to see. And `withFlockSync` reports `acquired: false` when
+ * the FFI is simply UNAVAILABLE, not only when `flock` fails, so inverting the default
+ * would silently convert that fallback from "write unguarded" to "write nothing at all"
+ * for every registry write in such an environment. Six explicit sites beat a global
+ * behavioural change with a silent failure mode.
+ */
+export type OwnedWriteDecline = 'lock-not-acquired' | 'registry-unreadable' | 'caller-skipped' | 'threw'
+
+/**
+ * WHAT AN OWNERSHIP WRITE ACTUALLY DID — the value a caller whose correctness depends on the
+ * write landing has to be able to ask for (#539, Argus r48).
+ *
+ * `persisted` is the whole point: before this existed, a caller could not tell a saved write
+ * from an unacquired lock, from an unreadable registry, from a throw. `result` is still the
+ * mutator's (or the decline disposition's) value, so existing call shapes are unchanged.
+ */
+export interface OwnedWrite<T> {
+  /** Bytes actually reached the file. */
+  readonly persisted: boolean
+  /**
+   * THE ENVIRONMENT STOPPED US — the lock, an unreadable registry, or a throw.
+   *
+   * DISTINCT FROM `!persisted`, and the distinction is the whole reason this is not a
+   * boolean: a mutator that returns `skipSave` DECIDED not to write (a refusing claim, a
+   * row that moved, a CAS that did not match), and its result is authoritative. Only these
+   * three mean "your decision could not be recorded, so do not act on it". Collapsing them
+   * turned every deliberate refusal into a lock failure the first time I wrote this.
+   */
+  readonly prevented: boolean
+  readonly why?: OwnedWriteDecline
+  /** The thrown error's text, when `why` is `'threw'` — so a caller that reports "I could not
+   *  ask at all" as its own distinct fact keeps the detail it used to get from its own catch. */
+  readonly error?: string
+  readonly result: T
+}
+
+export function withOwnedRegistry<T>(
+  path: string,
+  /** Runs ONLY with the lock held. Same shape as {@link withRegistry}'s mutator. */
+  mutate: (registry: ReplRegistry) => { registry: ReplRegistry; result: T; skipSave?: true },
+  /** What this caller does when the write DID NOT LAND — for any of the four reasons in
+   *  {@link OwnedWriteDecline}. Required, so the disposition is a decision rather than an
+   *  omission; nothing is written in those cases. */
+  onNotPersisted: () => T,
+): OwnedWrite<T> {
+  let acquired = false
+  let persisted = false
+  let why: OwnedWriteDecline | undefined
+  try {
+    const result = withRegistry(
+      path,
+      (registry) => {
+        // BEFORE ANY READ OR WRITE. An unacquired lock means the snapshot below may already
+        // be stale, so even reading it to decide is unsound: `withRegistry` is a
+        // whole-registry read-modify-write, and saving a snapshot taken without the lock
+        // drops any row a concurrent gateway wrote in between.
+        if (!acquired) {
+          why = 'lock-not-acquired'
+          return { registry, result: onNotPersisted(), skipSave: true as const }
+        }
+        return mutate(registry)
+      },
+      {
+        onPersist: (outcome) => {
+          persisted = outcome.saved
+          // The lock decline is decided above and is the more specific fact, so it wins.
+          if (!outcome.saved && why === undefined) why = outcome.why
+        },
+      },
+      (ok) => {
+        acquired = ok
+      },
+    )
+    if (persisted) return { persisted: true, prevented: false, result }
+    const decline = why ?? 'caller-skipped'
+    return { persisted: false, prevented: decline !== 'caller-skipped', why: decline, result }
+  } catch (e) {
+    // A THROWN OPEN OR SAVE IS A DECLINE, NOT AN EXCEPTION for these callers. Every ownership
+    // write has a disposition for "the write did not land", and a throw is one more way for
+    // that to be true — routing it through the same arm is what stops it being caught and
+    // dropped somewhere further out, which is exactly what happened at the fresh-spawn site.
+    log.error('ownership write threw; treated as NOT PERSISTED', { error: String(e), path })
+    return {
+      persisted: false,
+      prevented: true,
+      why: 'threw',
+      error: e instanceof Error ? e.message : String(e),
+      result: onNotPersisted(),
+    }
+  }
 }
 
 /** Upsert one record (lock-guarded). Merges onto any existing row so a

@@ -11,6 +11,7 @@ import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watc
 import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, cmdlineMatchesSession, defaultReadCmdline, registerOrphanKill } from './orphan-adoption.ts'
+import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
@@ -477,6 +478,58 @@ export async function runReplWatchdogTick(
   const results: Array<{ sessionKey: string; action: string; respawned: boolean }> = []
 
   for (const sessionKey of keys) {
+    // #539 — RENEW THIS GATEWAY'S ADOPTION CLAIM FIRST, before anything in this tick can
+    // decide to respawn or alert. The claim is what stops a second gateway attaching to a
+    // pane this one is serving, and it is deliberately NOT a time-since-adoption TTL: it
+    // expires when it stops being refreshed, so THIS loop is the thing that makes an
+    // unexpired claim mean a live owner.
+    //
+    // WHY THIS TICK CARRIES IT, with the consequences stated rather than discovered later:
+    //   - it already visits exactly the sessions this gateway owns, at a cadence
+    //     (`DEFAULT_WATCHDOG_INTERVAL_MS`) the takeover threshold is a multiple of;
+    //   - it is gated by `awaitBootAdoption`, so nothing renews a claim before the pass
+    //     that takes it has settled;
+    //   - it has an in-flight gate, so a slow tick SKIPS rather than queues — which is why
+    //     the threshold allows six missed ticks instead of one;
+    //   - and a gateway wedged badly enough that this loop stops running loses its claims.
+    //     That is the correct outcome and not an accident: a gateway that cannot tick cannot
+    //     serve that REPL either, and the pane is better off adopted by one that can.
+    //
+    // AND THE ANSWER IS HANDLED EXHAUSTIVELY (Argus r46). This call used to return `void`, so
+    // the body below ran even when the renewal had just FENCED this key — probing with the
+    // snapshot loaded before the fencing, and, if that probe called the new owner's session
+    // unhealthy, emitting a crash notice, patching the winner's row and attempting a respawn.
+    // A gateway that had just concluded it does not own the pane would declare the rightful
+    // owner crashed and respawn over it. The switch is exhaustive so a future arm cannot
+    // default into "carry on": the compiler names it instead.
+    const ownership = renewOwnAdoptionClaim(registryPath, sessionKey, now)
+    switch (ownership.kind) {
+      case 'fenced':
+        // NOTHING BELOW RUNS FOR THIS KEY. Not "probe but do not act": the probe's own
+        // verdict is what turns a fenced tick from inert into destructive, so the boundary is
+        // before it.
+        continue
+      case 'proceed':
+        break
+      default: {
+        const unreachable: never = ownership
+        throw new Error(
+          `supervision: unhandled ownership outcome ${JSON.stringify(unreachable)} for ${sessionKey.slice(0, 32)}`,
+        )
+      }
+    }
+    // STILL VALID AFTER A SUCCESSFUL RENEWAL, enumerated rather than assumed (r31's
+    // per-structure question, applied to a control-flow boundary):
+    //   - `record` — the pre-loop snapshot. A renewal writes ONLY `adoption_claim_at` and
+    //     `adoption_claim_pid`, and nothing below reads either: the probe uses pid /
+    //     devchannel_port / sessionId, `decideWedgeAction` uses first_ready_at, capped_at,
+    //     respawn_in_flight_at and last_respawn_at, and the crash sink uses child_generation
+    //     and child_crash_notified_at. So the snapshot is stale only in fields nobody here
+    //     consults.
+    //   - the POOLED SESSION — read below through `pool`, and a fence removes it; unreachable
+    //     after `continue`.
+    //   - `keyOptions` — `supervisedBySessionKey` is not touched by fencing, and a fenced key
+    //     never reaches it.
     const record = registry[sessionKey]
     const probe = await probeReplLiveness(sessionKey, record, healthProbe, isPidAlive)
     const verdict = detectReplWedged(probe)
@@ -712,9 +765,19 @@ export function startReplWatchdog(
   // in-process replay never fired because the gateway itself went down. Fire-and-
   // forget with the default anti-thundering-herd stagger; errors are swallowed so
   // a poisoned entry can't block watchdog startup.
-  fireAndForget('supervision.drainPendingRespawns', drainPendingRespawns(options), (e) => {
-    log.error('boot_drain_error', { error: String(e) })
-  })
+  //
+  // #539 — BEHIND THE BOOT-ADOPTION GATE, because a replay is a turn and a turn
+  // spawns. A drain that ran before the surviving REPLs were reconciled would
+  // cold-`--resume` transcripts whose panes are still alive — two owners, on exactly
+  // the keys that were mid-work when the gateway went down. The gate resolves
+  // immediately when nothing is being reconciled.
+  fireAndForget(
+    'supervision.drainPendingRespawns',
+    awaitBootAdoption(registryPath).then(() => drainPendingRespawns(options)),
+    (e) => {
+      log.error('boot_drain_error', { error: String(e) })
+    },
+  )
 
   // Per-registry tick gate (Argus r3 MINOR 3): scoped to THIS watchdog so a slow
   // tick for one instance's registry never serializes another instance's tick in a
@@ -725,8 +788,19 @@ export function startReplWatchdog(
     // in-flight gate: skip if a prior tick is still running (the work can take
     // longer than the cadence; double-firing would race the respawn).
     if (!tickGate.claim()) return
-    fireAndForget('supervision.runReplWatchdogTick', runReplWatchdogTick(options, wopts)
-      .finally(() => tickGate.release()), (e) => log.error('tick_error', { error: String(e) }))
+    fireAndForget(
+      'supervision.runReplWatchdogTick',
+      // #539 — THE FIRST TICK WAITS FOR BOOT ADOPTION. A tick probes liveness and
+      // RESPAWNS what looks dead, and a REPL that is mid-adoption is not yet in the
+      // pool: probing it in that window reads as a session with no child, and the
+      // respawn it triggers would spawn over a pane that is about to be re-adopted.
+      // After the pass has settled this resolves instantly, so it costs the steady
+      // state nothing.
+      awaitBootAdoption(registryPath)
+        .then(() => runReplWatchdogTick(options, wopts))
+        .finally(() => tickGate.release()),
+      (e) => log.error('tick_error', { error: String(e) }),
+    )
   }
   const handle = setIntervalFn(tick, intervalMs)
 

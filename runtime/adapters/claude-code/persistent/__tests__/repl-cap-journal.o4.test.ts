@@ -51,7 +51,7 @@ function seedAtCapThreshold(registryPath: string, sessionKey: string): void {
     sessionKey,
     sessionId: 'sess-1',
     cwd: '/tmp/x',
-    channelName: 'chan-1',
+    channelName: 'neutron-15ab0d54e889689d70965ba3f945b480',
     has_session: true,
     recent_respawns: recent,
   })
@@ -94,7 +94,7 @@ test('O4 — a session BELOW the cap threshold does not trip and emits NOTHING',
     sessionKey,
     sessionId: 'sess-2',
     cwd: '/tmp/y',
-    channelName: 'chan-2',
+    channelName: 'neutron-070d600074db48cb0c3db6b4fcfea971',
     has_session: true,
     recent_respawns: [],
   })

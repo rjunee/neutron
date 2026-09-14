@@ -522,7 +522,7 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
         sessionKey: orphanKey,
         sessionId: 'persisted-session',
         cwd: '/tmp',
-        channelName: 'persisted-channel',
+        channelName: 'neutron-545878cb0e74add10eb391e3e5c31084',
         has_session: true,
         pid: 999_999,
         child_generation: generationKey,

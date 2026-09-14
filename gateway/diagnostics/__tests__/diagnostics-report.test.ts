@@ -78,7 +78,7 @@ describe('composeDiagnostics', () => {
           records: {
             'sess-a': {
               sessionId: 'uuid-a',
-              channelName: 'chan-a',
+              channelName: 'neutron-be77dcd3f8beed51e719be16826f2df4',
               has_session: true,
               model: 'sonnet',
               first_ready_at: FIXED_NOW - 5000,

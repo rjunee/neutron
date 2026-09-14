@@ -8,6 +8,7 @@ import type { TokenUsage } from '../../../events.ts'
 import { type Key, encodeKey, encodeKeys } from './keystrokes.ts'
 import type { PtyChild } from './pty-host.ts'
 import { severityForBannerDetectorId } from './rate-limit-banner.ts'
+import { isHeldLocally } from './local-ownership.ts'
 import { patchRecord } from './repl-registry.ts'
 import { RESUME_PICKER_DETECTOR_ID, runResumePickerRecovery } from './resume-picker-detector.ts'
 import { findLatestResumableSession } from './session-disk-recovery.ts'
@@ -166,6 +167,206 @@ export const CONTEXT_RESET_COMMAND = '/clear'
 /** A respawn-in-flight stamp older than this is treated as stale (the prior
  *  respawn crashed before clearing it) and a new respawn may proceed. */
 export const RESPAWN_IN_FLIGHT_TTL_MS = 90_000
+/**
+ * #539 — HOW LONG A BOOT-ADOPTION CLAIM SURVIVES WITHOUT BEING RENEWED, expressed as a
+ * multiple of the cadence that renews it. The two numbers are related on purpose: chosen
+ * independently, a threshold under one renewal interval expires every claim before its
+ * owner can refresh it, and one over-long hides a dead owner for minutes.
+ *
+ * WHY IT IS NOT A TIME-SINCE-ADOPTION TTL, which is what this was for one round. A bare
+ * age answers "how long ago did somebody claim this", and the question being asked is
+ * "is that somebody still alive". Those coincide only while nothing keeps them in step —
+ * so a perfectly healthy owner's claim aged out at ninety seconds and the NEXT gateway to
+ * boot was entitled to overwrite it and attach a second wrapper to a pane already being
+ * served. The invariant, defeated by the clock rather than by a race.
+ *
+ * SIX TICKS OF SLACK, so a single slow or skipped tick never hands a live pane away —
+ * the supervision tick has an in-flight gate and drops a tick whose predecessor is still
+ * running, which is common under load and says nothing about ownership. A gateway that
+ * misses six consecutive ticks is not serving that REPL either way.
+ */
+export const ADOPTION_CLAIM_TAKEOVER_MS = 6 * DEFAULT_WATCHDOG_INTERVAL_MS
+
+/**
+ * #539 r44 — WHEN A LEASE HOLDER MUST STOP SERVING ON ITS OWN EVIDENCE, having failed to
+ * confirm a renewal for this long.
+ *
+ * WHY A SELF-DEADLINE EXISTS AT ALL. Round thirty-nine made the loser fence when its renewal
+ * came back `not-ours` — i.e. when it SAW the takeover. It cannot rely on seeing it: the same
+ * failure that costs a gateway the lease (an unacquired lock, an unwritable registry, a
+ * vanished row, a throw) is the failure that stops it learning anything about who took over.
+ * A renewal that keeps answering `unwritable` never becomes `not-ours`, so the old holder
+ * served forever while the new one served too. **A lease holder has to be safe on the
+ * strength of what it knows about ITSELF**, and the only thing it reliably knows is when it
+ * last CONFIRMED a renewal.
+ *
+ * DERIVED, NOT CHOSEN, and the subtraction is the safety argument. Both this deadline and
+ * {@link ADOPTION_CLAIM_TAKEOVER_MS} are measured from the SAME instant — the timestamp a
+ * confirmed renewal writes into the row — so subtracting one renewal interval guarantees the
+ * old holder has been given its self-fence deadline a full tick BEFORE any other gateway is
+ * entitled to take
+ * over. Two independently chosen constants could be reordered by a later edit and the overlap
+ * would be an interval in which both gateways serve; this cannot be, and the mutation that
+ * makes it longer than the takeover window reds.
+ */
+export const SELF_FENCE_AFTER_MS = ADOPTION_CLAIM_TAKEOVER_MS - DEFAULT_WATCHDOG_INTERVAL_MS
+
+/**
+ * IS ANOTHER GATEWAY'S CLAIM ON THIS ROW STILL LIVE — **one predicate, every claimant**
+ * (#539, Argus r45).
+ *
+ * WHY IT IS SHARED RATHER THAN INLINE. Round forty gave the fresh spawn a claim; it did not
+ * give it a CONTEST. The spawn wrote ownership unconditionally under the lock, so two
+ * gateways reconciling the same resumable row both spawned `--resume` panes and both
+ * published: A recorded claim A, B took the lock and replaced it with claim B, and both
+ * served one transcript until a later renewal happened to fence A. **Participating in the
+ * protocol means contending for the claim, not merely writing one** — and two copies of the
+ * predicate is how the adoption path and the spawn path would drift apart later, so there is
+ * one.
+ *
+ * THE RULE: a claim blocks only while it is somebody ELSE'S, recent, and its process is not
+ * provably gone. `gone` overrides recency (a crashed gateway's pane is adoptable at once);
+ * `alive` and "could not ask" both defer to {@link ADOPTION_CLAIM_TAKEOVER_MS}, so an
+ * unanswerable question costs a bounded wait rather than a second owner.
+ *
+ * OUR OWN PROCESS'S EARLIER CLAIM DOES NOT BLOCK US, and that exception is load-bearing
+ * rather than a convenience. A replacement spawn runs while the row may still carry the DEAD
+ * child's claim — its claimant id is different (one is minted per spawn) and its pid is this
+ * process, which is alive — so without this the predicate would refuse a respawn on the
+ * strength of a claim held by a child that just exited, and the gateway would kill its own
+ * replacement.
+ *
+ * THE LAST SENTENCE OF THIS PARAGRAPH USED TO READ: "a claim stamped with our pid cannot belong
+ * to a competitor: pids are unique per host, and a same-pid claim on this key can only be our
+ * own earlier session for it." **That is false, and it was the load-bearing assumption of both
+ * predicates** (r59, found by a whole-branch review). Pids are unique per host and per LIVE
+ * process; they say nothing about how many logical gateways run inside one process, and this
+ * repo supports two. The exception is now conditioned on whether a live owner in this process
+ * actually holds that id — see `local-ownership.ts`.
+ */
+/**
+ * #539 r47 — HOW LONG A SPAWN RESERVATION HOLDS A SESSION KEY, derived from the claim's own
+ * takeover window.
+ *
+ * Derived rather than chosen, for the reason the self-fencing deadline is: a reservation must
+ * comfortably outlive the slowest spawn (herdr connect, layout, readiness handshake) and must
+ * not outlive the window in which another gateway would be entitled to take the pane anyway —
+ * so the claim's window is exactly the right ceiling, and one constant cannot be reordered
+ * against itself by a later edit.
+ *
+ * A reservation whose holder dies expires on this deadline, and — like the claim — a holder
+ * whose PROCESS is provably gone expires at once rather than waiting it out.
+ */
+export const SPAWN_RESERVATION_TTL_MS = ADOPTION_CLAIM_TAKEOVER_MS
+
+/**
+ * Is somebody else's spawn reservation on this key still live (#539 r47)?
+ *
+ * The same three-part rule as {@link paneClaimBlocksUs}, over the reservation's own fields:
+ * ours never blocks us, our own process's never blocks us (a retry after a spawn that died
+ * without releasing must not refuse itself), a provably dead holder never blocks us, and
+ * otherwise the TTL decides.
+ */
+export function spawnReservationBlocksUs(
+  row: { spawn_reservation_at?: number; spawn_reservation_by?: string; spawn_reservation_pid?: number },
+  args: {
+    readonly ours: string
+    readonly now: number
+    readonly ourPid: number
+    readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+    /** Injected for the same reason `liveness` is: two logical gateways in one test process
+     *  share a pid, and this is the fact that separates them. Defaults to the process-wide
+     *  register the ownership funnel maintains. */
+    readonly heldLocally?: (id: string) => boolean
+  },
+): boolean {
+  const by = row.spawn_reservation_by
+  if (by === undefined || by === args.ours) return false
+  const pid = row.spawn_reservation_pid
+  // SAME PID IS NOT SAME OWNER (r59) — see {@link paneClaimBlocksUs} for the whole argument.
+  // A reservation is the stronger of the two: it exists to stop two `claude --resume` processes
+  // reaching one transcript, and two logical gateways in ONE process is a supported deployment,
+  // so the old shortcut disabled the guard exactly where it is most needed.
+  if (pid !== undefined && pid === args.ourPid && !(args.heldLocally ?? isHeldLocally)(by)) {
+    return false
+  }
+  const at = row.spawn_reservation_at
+  const recent = at !== undefined && args.now - at < SPAWN_RESERVATION_TTL_MS
+  if (!recent) return false
+  const liveness = pid === undefined ? 'unknown' : (args.liveness ?? probeClaimantLiveness)(pid)
+  return liveness !== 'gone'
+}
+
+export function paneClaimBlocksUs(
+  row: { adoption_claim_at?: number; adoption_claim_by?: string; adoption_claim_pid?: number },
+  args: {
+    /** This pass's own claim identity — a row already claimed BY US never blocks us. */
+    readonly ours: string
+    readonly now: number
+    /** This gateway's pid, for the same-process exception above. */
+    readonly ourPid: number
+    /** Injected so a case can reach the `gone` branch; two incarnations in one test process
+     *  share a pid, so the real probe can only ever answer `alive`. */
+    readonly liveness?: (pid: number) => 'alive' | 'gone' | 'unknown'
+    /** Does a live owner in THIS process hold that claimant id? Defaults to the register the
+     *  ownership funnel maintains; injected by cases that construct two gateways. */
+    readonly heldLocally?: (id: string) => boolean
+  },
+): boolean {
+  const by = row.adoption_claim_by
+  // IDENTITY IS THE CLAIMANT ID. Only this line answers "is this claim mine".
+  if (by === undefined || by === args.ours) return false
+  const pid = row.adoption_claim_pid
+  // AND THE PID IS EVIDENCE ABOUT LIVENESS, NOT ABOUT IDENTITY (r59). This used to read
+  // `pid === args.ourPid` alone — any claim stamped with this process's pid was treated as
+  // ours — and that is false in the deployment this repo explicitly supports: two logical
+  // gateways in one process. The second boot passed this predicate, overwrote the first's
+  // claim and replaced its pool entry while the first was still serving.
+  //
+  // What the shortcut was really covering is a claim of our OWN earlier incarnation that was
+  // never released (a child that exited without giving it back). That claim's id is one no
+  // live owner in this process holds, which is exactly what `isHeldLocally` answers — and a
+  // recycled pid from a dead process answers the same way, correctly. See
+  // `local-ownership.ts` for the four-case table.
+  if (pid !== undefined && pid === args.ourPid && !(args.heldLocally ?? isHeldLocally)(by)) {
+    return false
+  }
+  const at = row.adoption_claim_at
+  const recent = at !== undefined && args.now - at < ADOPTION_CLAIM_TAKEOVER_MS
+  if (!recent) return false
+  const liveness = pid === undefined ? 'unknown' : (args.liveness ?? probeClaimantLiveness)(pid)
+  return liveness !== 'gone'
+}
+
+/**
+ * IS THE PROCESS THAT HOLDS A CLAIM STILL THERE — three answers, because two would be a
+ * defect (#539).
+ *
+ * {@link defaultIsPidAlive} cannot be used for this. It answers `false` for a genuine
+ * ESRCH *and* for an EPERM — a process alive under another uid — and for every other
+ * error besides, so "gone" and "I could not ask" share a branch. Here that collapse would
+ * license the takeover of a pane whose owner is alive and serving it, which is the exact
+ * outcome the claim exists to prevent.
+ *
+ * Only `gone` accelerates anything. `alive` and `unknown` both defer to the renewal
+ * threshold, so an unreadable answer costs a bounded wait rather than a second owner.
+ */
+export function probeClaimantLiveness(
+  pid: number,
+  kill: (pid: number, signal: 0) => true = process.kill.bind(process),
+): 'alive' | 'gone' | 'unknown' {
+  if (!Number.isInteger(pid) || pid <= 0) return 'unknown'
+  try {
+    kill(pid, 0)
+    return 'alive'
+  } catch (e) {
+    const code = (e as { code?: string } | undefined)?.code
+    if (code === 'ESRCH') return 'gone'
+    // EPERM means the process EXISTS and belongs to somebody else. Anything else is a
+    // question we could not ask.
+    return code === 'EPERM' ? 'alive' : 'unknown'
+  }
+}
 /** Rolling window for the respawn-rate cap. */
 export const RESPAWN_CAP_WINDOW_MS = 60 * 60 * 1000
 /** Max respawns per `RESPAWN_CAP_WINDOW_MS` before the hard cap trips (auto-

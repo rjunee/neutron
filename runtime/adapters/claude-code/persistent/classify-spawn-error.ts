@@ -14,6 +14,7 @@
  * the shape-matching lives here alongside the producer.
  */
 
+import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import type { SubstrateErrorClass } from '../../../events.ts'
 
 /**
@@ -50,5 +51,54 @@ export function classifySpawnError(message: string): SubstrateErrorClass | undef
   // ladder re-attempts forever — ~1 bind budget per attempt, indefinitely.
   if (/^repl-sink: could not bind/i.test(message)) return 'channel_wedged'
   if (/persistent-repl:\s*channel not ready/i.test(message)) return 'channel_wedged'
+  // #539 — the boot-adoption gate refused to start a REPL because a previous one for
+  // this key could not be accounted for. STAMPED, not left to the message regexes
+  // downstream, for the reason this file's header gives and one more specific to the
+  // consumer: an UNSTAMPED retryable error is mapped by the composer to a 429-shaped
+  // pool cooldown (`mapStatusForPoolCooldown(null, true)`), so a refusal that has
+  // nothing to do with the credential would cool it — and park it for an hour after
+  // five. Every stamped class except `rate_limited`/`http_status` skips the cooldown.
+  //
+  // #539 r42 — BOTH REFUSAL VERBS. `refusing to RESUME` is the boot-adoption gate (a
+  // previous REPL for this key could not be accounted for); `refusing to SERVE` is the
+  // spawn that could not durably RECORD its pane's ownership. They are the same class and
+  // the same disposition, and the second one shipped unmatched — classified `undefined`,
+  // which `pool.ts` emits as an unstamped `retryable: true`, which the composer maps to a
+  // synthetic 429 and a credential cooldown. **A local registry-lock failure spending the
+  // owner's provider capacity**, because a new refusal was added without joining the
+  // vocabulary that already existed for it.
+  if (/persistent-repl:\s*refusing to (?:resume|serve) session/i.test(message)) {
+    return 'repl_unreconciled'
+  }
   return undefined
+}
+
+/**
+ * The same classification for a THROWN error — preferring what the thrower SAID over what
+ * it wrote (#539 r42).
+ *
+ * A producer that knows its own class should not have to encode it in prose and hope a
+ * regex downstream still matches: that makes "the refusal fired" and "its wording is still
+ * recognised" one fact, and the wording is the half that drifts. An error carrying
+ * {@link SubstrateClassed.substrateErrorClass} is believed outright; everything else falls
+ * back to the message matcher above, which is still the only option for the many failures
+ * that arrive as bare strings from elsewhere.
+ */
+export interface SubstrateClassed {
+  readonly substrateErrorClass: SubstrateErrorClass
+}
+
+export function classifyThrownSpawnError(err: unknown): SubstrateErrorClass | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const stamped = (err as Partial<SubstrateClassed>).substrateErrorClass
+    // VALIDATED AGAINST THE TAXONOMY, not merely typeof-checked. The consumer does
+    // `SUBSTRATE_ERROR_CODES[code].retryable`, so a value that is a string but not a member
+    // would throw INSIDE the catch that is handling a spawn failure — turning a handled
+    // refusal into an unhandled crash on the turn path. Anything unrecognised falls through
+    // to the message matcher, which is the same disposition as never having been stamped.
+    if (typeof stamped === 'string' && Object.hasOwn(SUBSTRATE_ERROR_CODES, stamped)) {
+      return stamped
+    }
+  }
+  return classifySpawnError(err instanceof Error ? err.message : String(err))
 }

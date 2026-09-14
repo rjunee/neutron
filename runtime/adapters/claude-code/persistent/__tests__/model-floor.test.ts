@@ -698,7 +698,7 @@ describe('the frontier-model floor holds at the spawn chokepoint', () => {
       sessionKey,
       sessionId,
       cwd: options.cwd!,
-      channelName: 'seeded',
+      channelName: 'neutron-c0d22d2bc2480944a2ed4102d84abc5e',
       has_session: true,
       model: LIVE_HAIKU_ID,
     })

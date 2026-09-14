@@ -1029,8 +1029,33 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // systemd's KillMode=control-group is the guarantee layer (covers
     // crash / SIGKILL / hung drain); this is the polite layer that also
     // protects non-systemd deployments (Open self-host on macOS, dev
-    // runs). Continuity is unaffected — the next turn `--resume`s the
-    // captured session transcript.
+    // runs).
+    //
+    // #539 — IT NO LONGER KILLS EVERY CHILD, and the exception is narrow. A
+    // herdr-hosted REPL is a pane of the HERDR SERVER: it is in neither this
+    // process tree nor this cgroup, so the cgroup guarantee above never
+    // covered it and this polite kill was the only thing ending it. It is
+    // now left ALIVE ONLY IF a persisted registry row names its exact pane
+    // and its exact generation, which is precisely the state that lets the
+    // next construction of that substrate find it again and either re-adopt
+    // it or close it (`gateway-shutdown-survival.ts`, `boot-adoption.ts`).
+    //
+    // THE CONVERSE DOES NOT HOLD, and this comment used to assert it. A
+    // matching row is NECESSARY for survival and not sufficient: a spawn
+    // still settling when the shutdown reaches the pool is killed when it
+    // resolves, whatever row it went on to write (#674) — the conservative
+    // direction, costing one `--resume`. "Every other child is killed
+    // exactly as before" was also here, and it is true by accident and
+    // misleading on purpose: a late-settling child WITH a matching row is
+    // killed too, so it is not "every other". `SPEC.md` §2.3 and the
+    // 2026-09-12 Decisions Log entry state both halves; this is the file a
+    // reader comes to for what the shutdown does, so it has to agree.
+    //
+    // Continuity WAS "the next turn `--resume`s the captured transcript",
+    // which is still what happens for everything that is killed here. For a
+    // survivor it is stronger and different in kind: the same process keeps
+    // running with its conversation in memory, and the owner's `herdr
+    // session attach` view of it is uninterrupted.
     //
     // Timing note (Argus PR#438 minor 9, revised #518): worst case this
     // drain USED to exceed the unit's TimeoutStopSec=30, because the pool

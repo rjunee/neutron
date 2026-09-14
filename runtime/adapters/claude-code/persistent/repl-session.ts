@@ -2,8 +2,11 @@
 // The ReplSession warm-REPL class + child-termination / env / http-health
 // helpers (D2 split).
 
+import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
 import { createHash, randomBytes } from 'node:crypto'
-import { unlinkSync } from 'node:fs'
+import { realpathSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import type { Api5xxWatcherHandle } from './api5xx-dead-turn-watcher.ts'
 import { OutputScanner } from './output-scan.ts'
@@ -185,6 +188,70 @@ export class ReplSession {
    *  nonce makes a turn-id from a prior (killed) incarnation un-matchable against
    *  this one, closing the cross-resume turnId collision (Argus r6). One
    *  `ReplSession` == one incarnation == one nonce. */
+  /**
+   * #539 — THE CLAIM THIS SESSION HOLDS ON ITS PANE, if it owns one.
+   *
+   * Named for the PANE and not for adoption, because round forty found the scope error
+   * behind two defects at once: ownership is not a property of how a session came to
+   * exist. A freshly spawned session owns its pane exactly as an adopted one does, and
+   * while this was `adoptionClaimBy` only the adoption path set it — so a spawner held a
+   * pane it had not claimed, an adopter could take it while it was being served, and the
+   * spawner could not notice, because renewal returns immediately for a session with no
+   * claim.
+   *
+   * Carried on the session because the paths that STOP OWNING a pane — `unwind`, both
+   * `release` variants, the shutdown survival branch, the fence and the child-exit
+   * teardown — are the paths that must give it back, and only the session travels to all
+   * of them.
+   */
+  /** THE BACKING FIELD, and the accessor below is not decoration (r59). This field IS this
+   *  process's record of which claim ids it holds, so the process-wide register the ownership
+   *  predicates consult is maintained BY the assignment rather than beside it: every path that
+   *  stops owning a pane already clears this field, and there is no sixth place to forget. */
+  #paneClaimBy: string | undefined
+  get paneClaimBy(): string | undefined {
+    return this.#paneClaimBy
+  }
+  set paneClaimBy(next: string | undefined) {
+    // DROPPED ON THE INTENT, not on the durable write succeeding. The row release can be
+    // prevented (an unacquired lock), and then the row still names this id — but the owner is
+    // gone either way, and the worst a premature drop costs is that this process may later
+    // overwrite a stale claim of its OWN, which is the one claim it is entitled to overwrite.
+    // Leaving it would instead refuse this process's own replacement for the takeover window.
+    if (this.#paneClaimBy !== undefined && this.#paneClaimBy !== next) {
+      dropLocalOwnership(this.#paneClaimBy)
+    }
+    this.#paneClaimBy = next
+    noteLocalOwnership(next)
+  }
+  /**
+   * #539 r44 — WHEN THIS SESSION LAST CONFIRMED that it still owns its pane: the moment a
+   * compare-and-set actually succeeded, not the moment one was attempted.
+   *
+   * The distinction is the whole point. A renewal that fails — an unacquired lock, an
+   * unwritable registry, a row that vanished, a throw — tells this gateway nothing about who
+   * owns the pane now, so it cannot be treated as evidence of anything except the absence of
+   * evidence. Past {@link SELF_FENCE_AFTER_MS} without a confirmation, this session stops
+   * serving on its own account, WITHOUT needing to observe the winner.
+   */
+  paneClaimConfirmedAt?: number
+  /** #539 r49 — the autonomous self-fence timer's cancel handle. Cleared by every path that
+   *  stops owning the pane, so a retired session leaves no timer behind. */
+  /**
+   * #539 r55 — THE POOL PROMISE THIS SESSION WAS PUBLISHED UNDER.
+   *
+   * The teardown's identity guard needs to name WHICH object and AS OF WHEN, and the second
+   * half is what three rounds of this guard kept missing. Bound inside the exit callback,
+   * `pool.get(key)` means "whatever is registered now" — a tautology that deletes a
+   * replacement installed before the callback ran. Bound HERE, at the moment this session was
+   * published, it means "the entry that is mine", which is the only thing a teardown may
+   * remove.
+   *
+   * `undefined` until published: a session that never entered the pool owns no entry, and its
+   * teardown must delete nothing.
+   */
+  pooledAs: Promise<ReplSession> | undefined
+  selfFenceTimer: { cancel: () => void } | undefined
   private readonly incarnation: string = randomBytes(4).toString('hex')
 
   /** Mint this incarnation's next turn-id as `<incarnation>:<seq>` — globally
@@ -201,6 +268,34 @@ export class ReplSession {
    *  reset is needed before the next one to isolate per-turn context. */
   turnsServedThisIncarnation(): number {
     return this.turnSeq
+  }
+
+  /**
+   * Was this session RE-ADOPTED from a still-running REPL a previous gateway
+   * spawned (#539), rather than spawned by this process?
+   *
+   * The child is the same process it always was; what is new is the object watching
+   * it. Everything in-memory therefore starts empty — the ring, the detector latches,
+   * the turn counter — while the REPL itself carries a full conversation and a screen
+   * full of whatever it was doing. Anything that infers the CHILD's history from this
+   * object's counters is wrong for exactly this session, which is what the flag is
+   * for; {@link mayHoldPriorContext} is the one such inference in the tree.
+   */
+  adopted = false
+
+  /**
+   * Might this REPL's context already contain a previous turn?
+   *
+   * `turnSeq > 0` answers it for a session this process spawned: a fresh child's
+   * conversation is empty until we inject into it. It answers it WRONGLY for an
+   * adopted one, whose child has been serving turns since before this object
+   * existed — and the consumer is the per-turn context reset
+   * (`reset_context_per_turn`, the import profile), where a wrong `false` skips the
+   * `/clear` and runs an isolated-by-contract turn on top of the previous one's
+   * transcript. The counter is not the fact; "could there be anything in there" is.
+   */
+  mayHoldPriorContext(): boolean {
+    return this.turnSeq > 0 || this.adopted
   }
 
   constructor(
@@ -262,7 +357,30 @@ export class ReplSession {
     this.channelBound = true
   }
 
+  /**
+   * #539 r49 — THIS SESSION HAS BEEN FENCED: it no longer owns its pane.
+   *
+   * Set by `fenceLostSession`, and consulted on the INBOUND path as well as the outbound
+   * one. Fencing detaches the wrapper, which stops this gateway reading the pane or typing
+   * into it — but a reply already in flight arrives over the sink, not over the pane, and
+   * the sink authorises on the credential alone. A fenced session accepting that reply would
+   * complete a turn using output produced on a pane another gateway now owns.
+   */
+  fenced = false
+
   onReply(text: string, turnId?: string): void {
+    // FENCED SESSIONS ACCEPT NOTHING (r49). This is round forty-seven's "claim before you are
+    // capable" applied to the inbound direction: capability is not only what this wrapper can
+    // WRITE to the pane, it is also what it will ACT on from it. The self-fencing timer closes
+    // the window in which this can happen; this check is what makes the remainder harmless
+    // rather than merely unlikely.
+    if (this.fenced) {
+      process.stderr.write(
+        `[repl-sink] dropped reply for a FENCED session=${this.sessionId.slice(0, 8)}: this gateway no ` +
+          'longer owns that pane, so the reply belongs to whoever does\n',
+      )
+      return
+    }
     const t = this.activeTurn
     // Accept a reply ONLY if its turn-id correlates to the CURRENT turn (Argus
     // r5 / r6 / Codex GPT-5 BLOCKER — see `ActiveTurn.turnId`). The
@@ -433,12 +551,93 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
   return !defaultIsPidAlive(pid)
 }
 
-/** Unlink a session's temp config files (`neutron-repl-*-mcp.json` +
- *  `*-settings.json`). Best-effort + idempotent (ENOENT ignored), so it is safe to
- *  call from both the dispose path and the child-exit handler. Without this, every
- *  ephemeral one-shot leaves two permanent files in `tmpdir()` (Argus r5). */
+/**
+ * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`).
+ * Best-effort + idempotent (ENOENT ignored), so it is safe to call from both the dispose
+ * path and the child-exit handler. Without this, every ephemeral one-shot leaves two
+ * permanent files in `tmpdir()` (Argus r5).
+ *
+ * THE FILESYSTEM CHECK LIVES HERE, NOT IN THE PATH BUILDER (#539, Argus r28).
+ * `replSessionConfigPaths` resolves its path textually — it is a pure builder called at
+ * SPAWN time, before the directory exists, so a `realpath` there would throw on a
+ * legitimate first spawn. Its lexical check answers a real question ("could this string
+ * ever name something outside the temp dir") and only that one. It cannot answer the
+ * other: `/tmp/neutron-repl-<32hex>` passes every lexical test while BEING A SYMLINK to
+ * somewhere else, and this is the site that follows it.
+ *
+ * WHICH PRIMITIVE, AND WHY. `realpathSync` on the DIRECTORY, then the same
+ * beneath-`tmpdir()` test. That resolves every symlinked component — the check is about
+ * where the directory really is, not what its name looks like. It is the same shape as
+ * `registry-lock.ts`'s `O_NOFOLLOW` + `fstat`: ask where the thing LANDED, not what the
+ * name pointed at when you looked.
+ *
+ * THE TOCTOU WINDOW IS NOT CLOSED, and saying so is the point. Between `realpathSync` and
+ * `unlinkSync` the directory could be replaced by a symlink. Closing that needs an
+ * `openat`-style handle-relative unlink that Node does not expose; what this removes is
+ * the durable case — a symlink already in place when cleanup runs — and it leaves the
+ * racing case, which requires an attacker timing a swap into a window of microseconds in a
+ * directory they must already be able to write.
+ *
+ * REFUSING IS NOT FREE, AND IT IS LOGGED AS THE LEAK IT IS. A path that fails this check
+ * is a credential file we meant to delete and did not, so the residual is a RETAINED
+ * plaintext credential file rather than a deleted stranger's file. That is the right
+ * direction to fail in and it still has a cost, which is why it is said out loud rather
+ * than swallowed by the existing best-effort catch.
+ */
 export function unlinkSessionConfigs(session: ReplSession): void {
+  // BOTH SIDES OF THE COMPARISON MUST BE REAL PATHS (Argus r45). This resolved the child
+  // with `realpathSync` and the ROOT only lexically, so wherever `tmpdir()` itself contains
+  // a symlink the two are measured in different spaces and EVERY legitimate directory reads
+  // as "outside": with `TMPDIR=/var/run` the gate compared `root=/var/run` against
+  // `real=/run` and skipped cleanup on all of them — retaining the plaintext credential
+  // files it exists to remove. Not hypothetical off Linux either: macOS resolves `/var` to
+  // `/private/var`, so the ordinary temp path aliases there.
+  //
+  // THE OVER-STRICT DIRECTION, which round thirty-four asked to be pinned and which the
+  // control could not see, because the control only ever ran under this runner's plain temp
+  // root. A control is only as good as the environment it runs in, and the environment is
+  // not visible in the code — so there is now an explicitly ALIASED-root case.
+  let root: string
+  try {
+    root = realpathSync(resolve(tmpdir()))
+  } catch {
+    // The temp root cannot be resolved at all. Fail CLOSED rather than fall back to a
+    // lexical root: an unresolvable root makes every comparison meaningless, and deleting on
+    // the strength of a comparison we could not make is the one direction this check exists
+    // to refuse. The cost is the same retained-credential residual documented above.
+    root = resolve(tmpdir())
+  }
   for (const p of session.configPaths) {
+    let real: string
+    try {
+      // The DIRECTORY, not the file: the file may legitimately not exist yet, and it is
+      // the directory component that a symlink would redirect.
+      real = realpathSync(dirname(p))
+    } catch {
+      // The directory is gone — so is anything we would have deleted in it.
+      continue
+    }
+    // `=== root` IS REJECTED HERE TOO (Argus r34). This read `real !== root && !…` — so a
+    // directory that resolved to the temp ROOT satisfied neither disjunct and the unlink
+    // ran, while `replSessionConfigPaths` explicitly refuses that same equality. The
+    // stricter check was the one that only BUILDS paths and the looser one the one that
+    // DELETES, which is backwards: a backstop must be at least as strict as the thing it
+    // backs up. The whole reason the filesystem check lives here is to hold when the
+    // builder is bypassed — so it has to hold for the case the builder already refuses.
+    //
+    // No caller needs the root accepted: every path this function receives is nested under
+    // `neutron-repl-<channel>/`, so a directory resolving to `tmpdir()` itself means
+    // something has gone wrong upstream, and deleting a `session-*.json` sitting loose in
+    // the temp root would be deleting a file that is not ours.
+    if (real === root || !real.startsWith(root + sep)) {
+      process.stderr.write(
+        `[repl] REFUSING to unlink ${p}: its directory resolves to ${real}, outside the temp ` +
+          'directory — a symlinked component would make this delete a file we do not own. The ' +
+          'config file is LEFT IN PLACE, which means a plaintext credential file is retained ' +
+          'rather than removed. That is the safer direction and it is not free.\n',
+      )
+      continue
+    }
     try {
       unlinkSync(p)
     } catch {

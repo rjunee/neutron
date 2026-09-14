@@ -44,13 +44,183 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import type { HandleInspection } from './pty-host.ts'
 
 /** Verdict for one orphan-adoption attempt. */
 export type OrphanAdoptionVerdict =
   | 'killed' // pid was verified-ours → terminated before the resume spawns
-  | 'not-ours' // pid alive but cmdline does not match → recycled/unrelated → untouched
+  | 'not-ours' // pid alive AND its cmdline was read AND it is somebody else's → untouched
+  | 'unreadable' // pid alive but its cmdline could NOT be read → nothing established
   | 'dead' // pid not alive → nothing to adopt
   | 'no-pid' // record carried no usable pid → nothing to do
+
+/**
+ * WHY `unreadable` IS SEPARATE FROM `not-ours`, added with #539's adopt arm.
+ *
+ * For the KILL decision the two are identical and always were: neither licenses a
+ * SIGTERM, which is why one value served both for as long as killing was the only
+ * thing this module decided. They are opposite answers to a DIFFERENT question, and
+ * #539 asks it — "may something else now resume this transcript?".
+ *
+ *   - `not-ours` is a POSITIVE statement: the kernel showed us a command line and it
+ *     belongs to somebody else, so our child released that pid and is gone.
+ *   - `unreadable` is the ABSENCE of a statement: `ps` failed, or the process is not
+ *     ours to look at. Our child may be alive and holding the transcript.
+ *
+ * Collapsed, the second silently inherits the first's licence and a second `claude`
+ * starts on a live transcript — the exact false/unknown conflation this tree keeps
+ * paying for. The kill path is unchanged: it treats both as "do not touch".
+ */
+// ───────────────────────────────────────────────────────────────────────────
+// #539 — THE ADOPT ARM.
+//
+// Everything above this line is adopt-OR-KILL that only ever kills: the module was
+// written when a surviving REPL was a hazard to be removed, because nothing could
+// re-attach to one. Under the herdr host a REPL is a pane of the herdr SERVER and
+// genuinely outlives a gateway restart, so the same identity question now has a
+// second useful answer — keep it, and take it back.
+//
+// THE TWO DIRECTIONS ARE NOT THE SAME CLAIM, and this is why the verdict below is
+// not a boolean:
+//   - to ADOPT, we must establish that the process under the handle IS the child
+//     this row describes. Getting that wrong attaches the pool to a stranger's
+//     terminal and types into it.
+//   - to CLOSE, we must establish that the process under the handle owns a
+//     transcript we are about to give to somebody else. Getting THAT wrong kills a
+//     process that was never ours.
+//   - and `unknown` establishes NEITHER, so it licenses neither act. It is a verdict
+//     of its own, not a quiet member of one of the other two.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * What should happen to the pane a registry row names (#539). Derived ONLY from
+ * evidence the host reported; this function performs no IO and decides nothing about
+ * timing.
+ */
+export type PaneAdoptionVerdict =
+  /** The pane is live and running THE CHILD THIS ROW DESCRIBES — our claude, on our
+   *  transcript, wired to our dev-channel. Re-attach to it. */
+  | { readonly kind: 'adopt'; readonly pid?: number }
+  /**
+   * The pane is live and running a `claude` ON OUR TRANSCRIPT that is NOT our child —
+   * no `server:<channelName>` for this row's channel, so nothing we spawned. It must
+   * be closed before anything resumes that transcript, because the one-owner-per-
+   * transcript invariant is enforced ONLY by ending the other owner
+   * (`session-respawn.ts`, `spawn.ts`).
+   *
+   * THE SHAPE THAT PRODUCES IT IS NOT HYPOTHETICAL: herdr's own native agent restore
+   * (`[session] resume_agents_on_restore`, which DEFAULTS TO TRUE) relaunches a
+   * claude pane as exactly `["claude", "--resume", <id>]` — read in herdr's source,
+   * `src/agent_resume.rs` `plan()`, in the 0.9.0 tree available on this box; the
+   * installed server is 0.8.2, so the line numbers are not cited as if they were the
+   * running binary's. That relaunch carries NONE of our flags: no `--mcp-config`, no
+   * dev-channel, no per-child credential. It is on our transcript and it can never
+   * answer a turn.
+   *
+   * WHICH IS WHY THE CHANNEL TOKEN IS THE DISCRIMINATOR AND THE FLAG SPELLING IS NOT.
+   * herdr uses the same `--resume <id>` spelling we do, so no amount of parsing the
+   * resume flag separates the two; the dev-channel name does, because only a spawn of
+   * ours passes it. Turning herdr's native resume OFF makes this arm RARE; this arm is
+   * what makes it SAFE, and configuration alone would be a rule living in a file
+   * nobody re-reads.
+   */
+  | { readonly kind: 'close-foreign-owner'; readonly reason: string }
+  /** The pane is live and is NOT running a claude on our transcript — a recycled
+   *  pane id, or the owner's own work. LEFT UNTOUCHED: the recycled-identifier safety
+   *  rule this module exists for, applied to a pane id instead of a pid. */
+  | { readonly kind: 'leave-not-ours'; readonly reason: string }
+  /** The host positively reports the handle names nothing. Nothing to adopt, nothing
+   *  to close, and the row's handle can be cleared. */
+  | { readonly kind: 'gone' }
+  /** The pane EXISTS but the host could report no argv for it, so neither direction
+   *  is established. Distinct from `leave-not-ours`, which is a finding about the
+   *  process; this is the absence of one. */
+  | { readonly kind: 'unverifiable'; readonly reason: string }
+  /** The host could not be asked at all. Says nothing about the pane. */
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/** The row fields the classifier needs. Deliberately narrow so a test supplies a
+ *  literal rather than a whole registry record. */
+export interface PaneAdoptionRecord {
+  /** The session UUID the surviving child is resuming — matched as the VALUE of
+   *  `--resume`/`--session-id`. */
+  readonly sessionId: string
+  /** The dev-channel name this row's child was spawned with — matched as the VALUE
+   *  of `--dangerously-load-development-channels`, i.e. `server:<channelName>`. */
+  readonly channelName: string
+}
+
+/**
+ * Does this argv carry OUR dev-channel — `--dangerously-load-development-channels
+ * server:<channelName>`, exactly as `buildReplArgv` pushes it?
+ *
+ * THE VALUE AFTER THE FLAG, NEVER A SUBSTRING, for the same reason
+ * {@link cmdlineMatchesSession} insists on it: the channel name also appears in the
+ * `--mcp-config` and `--settings` PATHS on the same command line
+ * (`neutron-repl-<channel>/session-mcp.json`), so a substring test would be satisfied
+ * by a process that merely has our config files open.
+ *
+ * WHAT IT ADDS OVER THE SESSION MATCH, and why both are required to adopt: the
+ * session id says WHICH TRANSCRIPT a process is attached to, and the channel name
+ * says WHICH SPAWN it came from. A `claude --resume <our uuid>` that somebody else
+ * started is on our transcript and is not our child — it has no dev-channel we can
+ * inject into and no credential the sink will authorise, so adopting it would put a
+ * REPL in the pool that can never answer a turn. Pure — no IO.
+ */
+export function argvCarriesChannel(argv: readonly string[], channelName: string): boolean {
+  if (channelName === '') return false
+  const want = `server:${channelName}`
+  for (let i = 0; i + 1 < argv.length; i++) {
+    if (argv[i] === '--dangerously-load-development-channels' && argv[i + 1] === want) return true
+  }
+  return false
+}
+
+/**
+ * Classify what the host found under a row's pane handle (#539).
+ *
+ * PURE, and it consumes only what a host can honestly report — which is what makes
+ * the adopt verdict falsifiable. Every `adopt` is the conjunction of two positive
+ * matches against argv the HOST supplied (`pane.process_info`, measured to carry the
+ * child's real argv vector), so a pane running anything else, or a pane the host
+ * could not sample, cannot reach it. The caller then adds a THIRD, independent
+ * probe before it acts — the dev-channel's `/health` answering with this row's
+ * session id — so adoption never rests on one authority.
+ */
+export function classifyPaneForAdoption(
+  inspection: HandleInspection,
+  record: PaneAdoptionRecord,
+  claudeBasename: string = 'claude',
+): PaneAdoptionVerdict {
+  if (inspection.kind === 'gone') return { kind: 'gone' }
+  if (inspection.kind === 'unavailable') {
+    return { kind: 'unavailable', reason: inspection.reason }
+  }
+  if (inspection.argv.length === 0) {
+    return {
+      kind: 'unverifiable',
+      reason: 'the host reported no foreground argv for this pane — nothing identifies what is in it',
+    }
+  }
+  const onOurTranscript = argvMatchesSession(inspection.argv, record.sessionId, claudeBasename)
+  if (!onOurTranscript) {
+    return {
+      kind: 'leave-not-ours',
+      reason: `pane runs ${JSON.stringify(inspection.argv[0] ?? '')} which is not a claude on session ${record.sessionId.slice(0, 8)}`,
+    }
+  }
+  if (!argvCarriesChannel(inspection.argv, record.channelName)) {
+    return {
+      kind: 'close-foreign-owner',
+      reason:
+        `pane runs a claude on session ${record.sessionId.slice(0, 8)} but WITHOUT this row's dev-channel ` +
+        `(server:${record.channelName.slice(0, 16)}…) — it is not the child this row describes, and two ` +
+        'processes must never own one transcript',
+    }
+  }
+  return { kind: 'adopt', ...(inspection.pid !== undefined ? { pid: inspection.pid } : {}) }
+}
+
 
 /** Injected side-effect surface so the identity check is fully unit-testable
  *  without touching the real OS / process table. */
@@ -144,18 +314,64 @@ export function cmdlineMatchesSession(
   sessionId: string,
   claudeBasename: string = 'claude',
 ): boolean {
-  if (!cmdline || !sessionId) return false
+  if (!cmdline) return false
   const tokens = cmdline.trim().split(/\s+/).filter((t) => t.length > 0)
-  // Need at least `<claude> --resume <id>` (or `--session-id`): 3 tokens.
-  if (tokens.length < 3) return false
+  return argvMatchesSession(tokens, sessionId, claudeBasename)
+}
+
+/**
+ * The same question as {@link cmdlineMatchesSession}, asked of the STRUCTURED argv —
+ * and this is the form to use wherever the vector is in hand (#539, Argus r7 BLOCKER).
+ *
+ * WHY THE ARRAY IS NOT AN OPTIMISATION. `classifyPaneForAdoption` used to flatten the
+ * host's argv with `join(' ')` and hand the string to `cmdlineMatchesSession`, which
+ * re-split it on whitespace. Flatten-then-reparse is LOSSY, and the loss lands exactly
+ * on this gate's first rule. POSIX lets a process choose any argv[0], so
+ *
+ *     argv = ['claude --resume', '<uuid>', '--dangerously-load-…', 'server:<chan>']
+ *
+ * flattens to a string whose `tokens[0]` is `'claude'` — passing the basename gate —
+ * while the REAL argv[0] is `'claude --resume'`, which is not a claude binary at all.
+ * The consequence is the one this module exists to prevent: the gateway attaches to,
+ * or closes, a pane belonging to somebody else. Matching the array element-wise means
+ * there is no reparse to fool.
+ *
+ * WHITESPACE INSIDE AN ELEMENT IS ORDINARY, AND MUST NOT BE REFUSED (Argus r12). An
+ * earlier revision of this function rejected any argv carrying a space, tab or newline
+ * in any element, justified by an enumeration of what `buildReplArgv` emits — "a binary
+ * path, bare flags, a uuid and `server:<channel>`". That enumeration was wrong.
+ * `buildReplArgv` also pushes `--mcp-config`, `--settings`,
+ * `--append-system-prompt-file` and `--add-dir`, each with a caller-supplied filesystem
+ * PATH, and the binary itself comes from `options.claude_bin` / `CLAUDE_BIN`. A project
+ * at `/srv/My Project` or a claude installed under a spaced path produces a perfectly
+ * ordinary argv with a space in it, and the rule then answered `unverifiable` for our
+ * own live, correct child — every boot, because nothing about the situation changes.
+ *
+ * The rule was also unnecessary, which is why it is removed rather than narrowed. The
+ * attack it was added for is a flattened argv whose `tokens[0]` reads as `claude` while
+ * the real `argv[0]` is `'claude --resume'`. {@link argv0IsClaude} already refuses that
+ * with no whitespace rule at all: {@link basenameOf} splits on `/` and nothing else, so
+ * `basenameOf('claude --resume')` is `'claude --resume'` — not `'claude'` — while
+ * `basenameOf('/opt/my dir/claude')` is `'claude'`. The basename is what separates the
+ * smuggled case from the legitimate one; the space never was. The whitespace rule was
+ * the STRING form's constraint promoted to a place it does not belong.
+ *
+ * Pure — no IO. ALL must hold: argv[0] is a genuine `claudeBasename` invocation; and
+ * `sessionId` is the element IMMEDIATELY after a `--resume`/`--session-id` element.
+ */
+export function argvMatchesSession(
+  argv: readonly string[],
+  sessionId: string,
+  claudeBasename: string = 'claude',
+): boolean {
+  if (!sessionId) return false
+  // Need at least `<claude> --resume <id>` (or `--session-id`): 3 elements.
+  if (argv.length < 3) return false
   // (1) argv[0] must be a genuine claude invocation — excludes tail/vim/less/etc.
-  if (!argv0IsClaude(tokens, claudeBasename)) return false
+  if (!argv0IsClaude(argv, claudeBasename)) return false
   // (2) sessionId must be the VALUE immediately following --resume / --session-id.
-  for (let i = 1; i + 1 < tokens.length; i++) {
-    if (
-      (tokens[i] === '--resume' || tokens[i] === '--session-id') &&
-      tokens[i + 1] === sessionId
-    ) {
+  for (let i = 1; i + 1 < argv.length; i++) {
+    if ((argv[i] === '--resume' || argv[i] === '--session-id') && argv[i + 1] === sessionId) {
       return true
     }
   }
@@ -180,12 +396,146 @@ export function defaultReadCmdline(pid: number): string | undefined {
 }
 
 /**
+ * WHO, IF ANYONE, IS RUNNING A `claude` ON THIS TRANSCRIPT — asked of every process,
+ * not of one remembered pid (#539).
+ *
+ * THE QUESTION A SPAWN ACTUALLY NEEDS. "Is the recorded pid still ours?" answers
+ * something narrower, and an earlier revision of the boot-adoption fallback read a
+ * `dead` answer to THAT question as permission to resume the transcript. The gap is
+ * real and this tree's own spec item names it: a pane can be relaunched under a NEW
+ * pid — herdr's native restore does exactly that, `claude --resume <id>` — leaving the
+ * RECORDED pid genuinely dead while a live process owns the transcript. Authorising a
+ * second `--resume` there produces the two-owner corruption the whole item exists to
+ * prevent, and it does so via a guard that looked correct.
+ *
+ * So the instrument is scoped to the TRANSCRIPT: every live process, filtered by the
+ * same exact-shape matcher the kill gate uses ({@link cmdlineMatchesSession}), so a
+ * `tail -f …/<uuid>.jsonl` or an editor with it open is not mistaken for an owner.
+ *
+ * THREE ANSWERS, AND THE THIRD IS NOT THE FIRST. `none` means the scan RAN and found
+ * nobody; `unknown` means it could not be performed and establishes nothing. A caller
+ * that treats `unknown` as `none` has rebuilt the bug above in a new place.
+ *
+ * WHAT THE INSTRUMENT CAN SEE, measured rather than assumed (2026-09-13, this box):
+ * `ps -eo pid=,command=` piped (not a tty) emits FULL command lines — the live REPL
+ * children's 603-character argv arrives whole, and the longest line in a full listing
+ * was 1,368 characters. A truncating `ps` would silently answer `none` for a process
+ * whose `--resume <uuid>` fell off the end, which is why this is recorded here.
+ */
+export type TranscriptOwnerScan =
+  /** The scan ran, the instrument could have seen an owner, and there is none. The
+   *  ONLY answer that licenses clearing a handle or resuming a transcript. */
+  | { readonly kind: 'none' }
+  /** At least one live process is. Their pids, for the message a caller writes. */
+  | { readonly kind: 'owners'; readonly pids: readonly number[] }
+  /** The scan could not be performed. Establishes NOTHING — never read as `none`. */
+  | { readonly kind: 'unknown'; readonly reason: string }
+
+/** One live process, as {@link scanTranscriptOwners} needs it. */
+export interface ProcessListing {
+  readonly pid: number
+  readonly cmdline: string
+}
+
+/**
+ * Every process on this machine, as `pid` + full command line — or `undefined` when the
+ * listing could not be taken, which is a different thing from an empty machine.
+ *
+ * `ps -eo pid=,command=` on darwin and Linux alike (the same portability argument
+ * {@link defaultReadCmdline} makes for the single-pid form). A non-zero exit, a throw,
+ * or empty output all answer `undefined`: the SAFE direction, because the caller's rule
+ * for "I could not look" is to establish nothing.
+ */
+export function defaultListProcesses(): ProcessListing[] | undefined {
+  try {
+    const res = spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8', timeout: 5_000, maxBuffer: 16 * 1024 * 1024 })
+    if (res.status !== 0) return undefined
+    const out = (res.stdout ?? '').trim()
+    if (out.length === 0) return undefined
+    const rows: ProcessListing[] = []
+    for (const line of out.split('\n')) {
+      const trimmed = line.trim()
+      const sep = trimmed.indexOf(' ')
+      if (sep <= 0) continue
+      const pid = Number(trimmed.slice(0, sep))
+      if (!Number.isInteger(pid) || pid <= 0) continue
+      rows.push({ pid, cmdline: trimmed.slice(sep + 1) })
+    }
+    return rows.length > 0 ? rows : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** See {@link TranscriptOwnerScan}. Pure given the listing; the IO is the injected
+ *  `listProcesses`. */
+export function scanTranscriptOwners(
+  sessionId: string,
+  listProcesses: () => ProcessListing[] | undefined,
+  claudeBasename: string = 'claude',
+): TranscriptOwnerScan {
+  if (sessionId === '') {
+    return { kind: 'unknown', reason: 'no session id to look for' }
+  }
+  let listing: ProcessListing[] | undefined
+  try {
+    listing = listProcesses()
+  } catch (e) {
+    return { kind: 'unknown', reason: `the process listing threw: ${e instanceof Error ? e.message : String(e)}` }
+  }
+  if (listing === undefined) {
+    return { kind: 'unknown', reason: 'the process listing could not be taken' }
+  }
+  const owners: number[] = []
+  const ambiguous: number[] = []
+  for (const row of listing) {
+    if (cmdlineMatchesSession(row.cmdline, sessionId, claudeBasename)) {
+      owners.push(row.pid)
+      continue
+    }
+    // `none` MUST MEAN "THE INSTRUMENT COULD HAVE SEEN AN OWNER IF THERE WERE ONE"
+    // (Argus r17). `ps` renders an argv VECTOR as a flat string, and the strict matcher
+    // re-splits it on whitespace — so a supported spaced binary path,
+    // `/opt/my tools/claude --resume <uuid>`, tokenises with `tokens[0]` = `/opt/my`,
+    // basename `my`, and the live owner is invisible. Answering `none` there is a
+    // POSITIVE ABSENCE drawn from an instrument that cannot see the shape, and the
+    // caller clears the durable handle and licenses a cold spawn onto a transcript that
+    // already has a `claude` on it: two owners, reached by an absence claim rather than
+    // a presence one.
+    //
+    // THE DISCRIMINATOR INVERTS THE SUBSTRING TEST'S USUAL WEAKNESS. This file's header
+    // is right that "the cmdline contains the uuid" is far too weak to license a KILL or
+    // an ADOPT — a `tail -f …/<uuid>.jsonl` satisfies it. That same weakness is exactly
+    // what makes it strong enough to refuse a claim of ABSENCE: if the uuid is on that
+    // command line at all, this scan cannot honestly say the transcript is unowned. The
+    // `tail` trips it and costs a refusal, which is the direction to be wrong in.
+    if (row.cmdline.includes(sessionId)) ambiguous.push(row.pid)
+  }
+  // A STRICT MATCH OUTRANKS AN AMBIGUOUS ONE: `owners` is the strongest statement
+  // available and it is already the safe direction — it refuses the spawn either way.
+  if (owners.length > 0) return { kind: 'owners', pids: owners }
+  if (ambiguous.length > 0) {
+    return {
+      kind: 'unknown',
+      reason:
+        `pid(s) ${ambiguous.join(', ')} carry session ${sessionId.slice(0, 8)} on their command line but do ` +
+        'not parse as our exact launch shape — the listing is flattened, so a spaced binary or config path ' +
+        'renders ambiguously and this scan cannot tell an owner from a bystander. Refusing to report absence.',
+    }
+  }
+  return { kind: 'none' }
+}
+
+/**
  * Identity-checked adopt-or-kill for a recorded registry pid (ISSUES #105).
  *
  *   - `no-pid`   — `pid` is undefined / not a positive integer.
  *   - `dead`     — `pid` is not alive (the common crash path); nothing to kill.
- *   - `not-ours` — `pid` is alive but its cmdline does NOT match the session
- *                  (recycled / unrelated) → LEFT UNTOUCHED (the safety invariant).
+ *   - `not-ours` — `pid` is alive, its cmdline WAS read, and it does not match the
+ *                  session (recycled / unrelated) → LEFT UNTOUCHED (the safety
+ *                  invariant).
+ *   - `unreadable` — `pid` is alive and its cmdline could not be read at all → LEFT
+ *                  UNTOUCHED, and nothing is established either way.
  *   - `killed`   — `pid` is alive AND verified-ours → `terminatePid` awaited.
  *
  * The caller (`makeReplRespawnDeps.killChild`) registers the returned promise so
@@ -205,6 +555,40 @@ export async function adoptOrKillOrphan(
   claudeBasename: string = 'claude',
 ): Promise<OrphanAdoptionVerdict> {
   const log = deps.log ?? (() => {})
+  const identity = identifyOrphanPid(pid, sessionId, deps, claudeBasename)
+  if (identity !== 'ours') return identity
+
+  log(
+    `orphan-adoption: pid ${String(pid)} verified-ours for session ${sessionId.slice(0, 8)} — ` +
+      `terminating orphan before resume`,
+  )
+  await deps.terminatePid(pid as number)
+  return 'killed'
+}
+
+/**
+ * WHAT THE PROCESS TABLE SAYS ABOUT A RECORDED PID — with NO side effect.
+ *
+ * SPLIT OUT BECAUSE THE IDENTITY QUESTION AND THE KILL DECISION ARE NOT THE SAME
+ * QUESTION, and #539 asks the first without wanting the second. The boot-adoption pass
+ * uses this to answer "does something still own this transcript?" in situations where
+ * killing would be WRONG — a herdr that did not answer one probe says nothing about the
+ * REPL behind it, and terminating a healthy REPL because a socket blinked destroys
+ * exactly what the adoption feature exists to preserve. The kill path is this plus one
+ * more step, which is how the two cannot drift: one matcher, one liveness probe, one
+ * set of rules about recycled pids.
+ *
+ * Pure with respect to the PROCESS: it only probes and reads. `'ours'` means the pid is
+ * alive and is our `claude` for this session; every other value is exactly what
+ * {@link OrphanAdoptionVerdict} documents.
+ */
+export function identifyOrphanPid(
+  pid: number | undefined,
+  sessionId: string,
+  deps: Pick<OrphanAdoptionDeps, 'isPidAlive' | 'readCmdline' | 'log'>,
+  claudeBasename: string = 'claude',
+): 'ours' | 'not-ours' | 'unreadable' | 'dead' | 'no-pid' {
+  const log = deps.log ?? (() => {})
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return 'no-pid'
 
   if (!deps.isPidAlive(pid)) {
@@ -213,6 +597,15 @@ export async function adoptOrKillOrphan(
   }
 
   const cmdline = deps.readCmdline(pid)
+  if (cmdline === undefined) {
+    // ALIVE, AND WE COULD NOT LOOK. Not a finding about the process — a failure to
+    // make one. Never killed, and never reported as absence.
+    log(
+      `orphan-adoption: pid ${pid} is alive but its cmdline could not be read — nothing is ` +
+        `established about it (session ${sessionId.slice(0, 8)})`,
+    )
+    return 'unreadable'
+  }
   if (!cmdlineMatchesSession(cmdline, sessionId, claudeBasename)) {
     // Recycled or unrelated process — DO NOT kill. The whole point of #105.
     log(
@@ -221,13 +614,7 @@ export async function adoptOrKillOrphan(
     )
     return 'not-ours'
   }
-
-  log(
-    `orphan-adoption: pid ${pid} verified-ours for session ${sessionId.slice(0, 8)} — ` +
-      `terminating orphan before resume`,
-  )
-  await deps.terminatePid(pid)
-  return 'killed'
+  return 'ours'
 }
 
 /**

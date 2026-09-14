@@ -434,14 +434,53 @@ export class ReplSink {
    */
   register(sessionId: string, session: ReplSession): void {
     const displaced = this.sessions.get(sessionId)
-    if (displaced !== undefined) this.byCredential.delete(this.credentialFor(displaced))
+    // A REGISTRATION MAY NOT REVOKE A LIVE SESSION'S AUTHORIZATION (#539, Argus r63).
+    //
+    // Registering does not merely ADD an ability — displacement DELETES the credential of
+    // whatever held this id, so a session that never wins anything can still take the
+    // winner's authorization away. That is what happened: a losing adoption contender
+    // registered under an id the winner already held, wiping its credential; the contender's
+    // own release then unregistered what was left, and the winner's first reply got a 401
+    // from a sink that had never heard of it.
+    //
+    // The ordering fix (register only behind a successful claim or reservation) is the
+    // primary remedy; this is the guard that makes the rule structural rather than a property
+    // of two call sites. A displaced session whose CHILD IS STILL ALIVE is a session that has
+    // not stopped serving, so taking its credential is a revocation, not a replacement — and
+    // every legitimate replacement on this branch displaces a child that has already exited
+    // (a resume respawn awaits the old child's termination; an eviction awaits it; a
+    // quarantined child is replaced under a FRESH session id, not this one).
+    //
+    // WHAT THE GUARD IS, AND WHAT IT IS NOT — because the first version of this fix refused to
+    // displace a LIVE session and that was wrong, caught by three existing cases within the
+    // hour. A legitimate TAKEOVER displaces a live session by construction: the winner of the
+    // row claim is entitled to this transcript id, and the loser it displaces is still alive
+    // until its own renewal fences it. Refusing there would make a claim unwinnable whenever
+    // the previous owner was merely stalled — which is the case the takeover threshold exists
+    // to serve.
+    //
+    // So the rule is not "never revoke": it is **only an owner may register**, and that is
+    // enforced by ORDERING at the two call sites (behind the claim, behind the reservation),
+    // which is where ownership is established. What this method still owes is that a
+    // displacement removes only what belongs to the session it displaces — the identity rule
+    // the pool entry and the handle mirror carry.
+    if (displaced !== undefined && displaced !== session) this.deleteCredentialIf(displaced)
     this.sessions.set(sessionId, session)
     this.byCredential.set(this.credentialFor(session), session)
   }
 
+  /** Drop a credential entry only if it still points at `session` — the same identity rule the
+   *  pool entry and the handle mirror carry (r63). Two sessions can derive the SAME credential
+   *  when they share a `childGeneration` (an adoption of the same pane), and an unguarded
+   *  delete then strips the mapping that belongs to whoever holds it now. */
+  private deleteCredentialIf(session: ReplSession): void {
+    const credential = this.credentialFor(session)
+    if (this.byCredential.get(credential) === session) this.byCredential.delete(credential)
+  }
+
   unregister(sessionId: string): void {
     const session = this.sessions.get(sessionId)
-    if (session !== undefined) this.byCredential.delete(this.credentialFor(session))
+    if (session !== undefined) this.deleteCredentialIf(session)
     this.sessions.delete(sessionId)
   }
 
@@ -452,7 +491,10 @@ export class ReplSink {
   unregisterIf(sessionId: string, session: ReplSession): void {
     if (this.sessions.get(sessionId) !== session) return
     this.sessions.delete(sessionId)
-    this.byCredential.delete(this.credentialFor(session))
+    // IDENTITY-GUARDED ON THE CREDENTIAL TOO (r63): the id mapping being ours does not make
+    // the credential mapping ours. Same derived credential, different session — see
+    // `deleteCredentialIf`.
+    this.deleteCredentialIf(session)
   }
 
   private async handle(req: Request): Promise<Response> {

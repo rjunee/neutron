@@ -289,6 +289,12 @@ export interface HerdrPaneRead {
 export interface HerdrPaneInfo {
   readonly pane_id: string
   readonly scroll?: { readonly viewport_rows: number } | null
+  /** The pane's label — what {@link HERDR_REPL_PANE_LABEL} put there at spawn.
+   *  NULLABLE in herdr's own schema and measured as absent on panes nobody
+   *  labelled, so it is REPORTED but never gated on: a REPL whose label herdr
+   *  dropped on a restore is still the REPL, and a stranger's pane could carry any
+   *  label at all. Identity comes from the argv (`pane.process_info`), not here. */
+  readonly label?: string | null
 }
 
 /** One entry of `pane.process_info.foreground_processes`. */

@@ -1047,3 +1047,75 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     expect(elapsed).toBeGreaterThan(400)
   })
 })
+
+describe('a malformed error STAMP cannot crash the error path (#539 r43)', () => {
+  /**
+   * The stamp added at r42 lets a producer name its own `SubstrateErrorClass` instead of
+   * encoding it in prose. It joined a LOOKUP TABLE, and both consumers do
+   * `SUBSTRATE_ERROR_CODES[code].retryable` — so a stamp that is a string but not a member
+   * throws `TypeError: undefined is not an object` INSIDE the catch that is handling the
+   * original failure. Two consequences, and the second is worse than the first: the real
+   * error is lost, and `channel.close()` is skipped, so the stream never terminates.
+   *
+   * A PLUGGABLE HOST IS THE REALISTIC SOURCE (#540 keeps the PTY host selectable), which is
+   * why this is driven through `host.spawn` rather than by calling the classifier: what has
+   * to hold is that a foreign object claiming to be a classification cannot take the turn
+   * path down with it.
+   */
+  const bogusStampHost = (stamp: unknown): PtyHost => ({
+    async spawn(): Promise<PtyChild> {
+      throw Object.assign(new Error('the host refused for reasons of its own'), {
+        substrateErrorClass: stamp,
+      })
+    },
+  })
+
+  it('a stamp that is not a taxonomy member yields an ordinary error event, and the stream CLOSES', async () => {
+    const handle = createPersistentReplSubstrate(baseOptions(bogusStampHost('not_a_real_class'))).start(
+      spec('hi'),
+    )
+    const events: Event[] = []
+    // Drained to COMPLETION on purpose — not via the helper that throws on the first error.
+    // The iterator finishing is what `channel.close()` looks like from out here, and a
+    // TypeError inside the catch would skip it: the loop would hang instead of ending, and
+    // this case would time out rather than fail on an assertion.
+    for await (const ev of handle.events) events.push(ev)
+
+    const errs = events.filter((e) => e.kind === 'error')
+    expect(errs).toHaveLength(1)
+    const err = errs[0]
+    // THE ORIGINAL FAILURE SURVIVES — it is not replaced by a TypeError about the stamp.
+    expect(err?.kind === 'error' && err.message).toMatch(/the host refused for reasons of its own/i)
+    // UNSTAMPED, because a value that claims to be a classification and is not one is not
+    // one. The default disposition applies.
+    expect(err?.kind === 'error' && err.code).toBeUndefined()
+    expect(err?.kind === 'error' && err.retryable).toBe(true)
+  })
+
+  it('...and a VALID stamp still classifies as itself', async () => {
+    // The positive control: validation that rejected everything would pass the case above
+    // and silently un-stamp every real refusal, putting the credential cooldown back.
+    const handle = createPersistentReplSubstrate(
+      baseOptions(bogusStampHost('repl_unreconciled')),
+    ).start(spec('hi'))
+    const events: Event[] = []
+    for await (const ev of handle.events) events.push(ev)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.code).toBe('repl_unreconciled')
+    expect(err?.kind === 'error' && err.retryable).toBe(true)
+  })
+
+  it('...and an error with no stamp at all is unchanged', async () => {
+    const plain: PtyHost = {
+      async spawn(): Promise<PtyChild> {
+        throw new Error('an ordinary spawn crash')
+      },
+    }
+    const handle = createPersistentReplSubstrate(baseOptions(plain)).start(spec('hi'))
+    const events: Event[] = []
+    for await (const ev of handle.events) events.push(ev)
+    const err = events.find((e) => e.kind === 'error')
+    expect(err?.kind === 'error' && err.code).toBeUndefined()
+    expect(err?.kind === 'error' && err.retryable).toBe(true)
+  })
+})
