@@ -40,7 +40,7 @@ import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import { paneClaimBlocksUs } from '../signatures.ts'
 import type { ReplSession } from '../repl-session.ts'
-import { fenceLostSession, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
+import { beginBootAdoption, fenceLostSession, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { registerSupervisedSubstrate, runReplWatchdogTick } from '../supervision.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
 import { childByKey, pool, sink } from '../pool-state.ts'
@@ -1240,7 +1240,7 @@ describe('a refused contender leaves the winner able to be answered', () => {
     return resp.status
   }
 
-  it('an overlapping ADOPTER that loses the claim does not strip the winner\'s credential', async () => {
+  it.each(['direct', 'boot gate'] as const)('an overlapping ADOPTER via %s leaves the winner credential intact', async (entry) => {
     const registryPath = join(scratch(), 'repl-registry.json')
     const options = optionsFor(echoHost('w9:p-auth'), registryPath)
     const key = poolKeyFor(options)
@@ -1268,13 +1268,33 @@ describe('a refused contender leaves the winner able to be answered', () => {
       pid: 4242,
     })
     resetBootAdoptionForTests()
-    const outcome = await reconcileOwnRepl(options, key, {
+    const deps = {
       host: adopter,
       health: async () => true,
       log: () => {},
       claimantPid: process.pid + 1,
-    })
+    }
+    let outcome
+    if (entry === 'direct') {
+      outcome = await reconcileOwnRepl(options, key, deps)
+    } else {
+      const held = adopter.holdInspect()
+      const first = beginBootAdoption(options, key, deps)
+      await held.entered
+      const second = beginBootAdoption(options, key, deps)
+      // Release even under mutation so failed assertions cannot strand a pass.
+      held.release()
+      const results = await Promise.all([first, second])
+      expect(second).toBe(first)
+      expect(adopter.inspections).toHaveLength(1)
+      expect(results[1]).toBe(results[0])
+      outcome = results[0]!
+      // An undecided pass frees its slot: a later attempt must really inspect again.
+      expect((await beginBootAdoption(options, key, deps)).kind).toBe('undecided')
+      expect(adopter.inspections).toHaveLength(2)
+    }
     expect(outcome.kind).toBe('undecided')
+    if (outcome.kind === 'undecided') expect(outcome.reason).toContain('another incarnation holds the adoption claim')
 
     // AND THE WINNER CAN STILL BE ANSWERED. This is the assertion the race cases were missing:
     // ownership was never in doubt here — authorization was.

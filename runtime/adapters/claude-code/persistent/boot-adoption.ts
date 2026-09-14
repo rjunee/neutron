@@ -1381,6 +1381,14 @@ export function renewAdoptionClaim(
  * disposition, not a second vocabulary every consumer would have to learn — the argument
  * the shutdown latch already makes three lines further down.
  *
+ * Duration decision (#685): keep the key fenced until gateway restart, including
+ * when registry writes recover and the row still names the old claimant. Fencing
+ * has revoked the local claim and detached the wrapper; a matching row alone does
+ * not restore its capabilities. Recovery must run fresh boot reconciliation in a
+ * new gateway process. This deliberately costs a restart after a transient outage.
+ * `resetBootAdoption` clears the map during teardown, but the one-way shutdown latch
+ * still prevents that process from adopting again.
+ *
  * Flat rather than per-registry because `pool` is, and this mirrors `pool`'s granularity:
  * a fenced key names a session this process must stop serving, and that is exactly the
  * thing `pool` is keyed by.

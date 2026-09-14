@@ -547,7 +547,7 @@ async function spawnSession(
     )
     if (!assertion.ok) {
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
-      sink.unregister(sessionId)
+      sink.unregisterIf(sessionId, session)
       // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw
       // the TYPED error and DON'T pool.delete here — the wrapper holds the pool
       // entry and either retries on the same key or propagates the cap, so deleting

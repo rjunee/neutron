@@ -160,6 +160,10 @@ reconciled nor reaped by anything — the supervision tick skips a key it has no
 options for (`unregistered-skip`) rather than actuating it under another
 substrate's identity.
 
+A key fenced after loss of ownership evidence remains refused until a gateway
+restart performs fresh reconciliation, even if registry writes recover meanwhile
+(Decisions Log 2026-09-14, "fence duration").
+
 ### 2.4 — Memory
 
 **GBrain is the sole durable memory store.** Scribe extracts salient facts as a
@@ -282,6 +286,14 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-09-14 — Fence duration: retain refusal until gateway restart (#685).
+
+Registry recovery and a row still naming the old claimant do not clear a self-fence.
+The local wrapper has relinquished its claim and capabilities; recovery requires fresh
+boot reconciliation. This explicitly accepts a gateway restart after a transient
+registry-lock outage rather than automatically restoring service from a matching row.
+The existing fail-closed policy is retained; no automatic reclaim path is introduced.
 
 ### 2026-09-14 — THE REPL HOST IS SELECTED ONCE PER PROCESS: `NEUTRON_REPL_HOST=herdr|bun`, defaulting to herdr. This completes rather than supersedes the 2026-09-12 decision below: that entry retained both backends and deliberately deferred the configuration surface; this entry delivers it after the herdr path was verified.
 
