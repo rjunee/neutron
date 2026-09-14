@@ -29,8 +29,8 @@
  *
  * AND WHY NOT `blockKind`, WHICH IS ALREADY A CLOSED SET ON THE SAME RESULT. Because it
  * answers a narrower question and only sometimes. It describes what kind of BLOCK a
- * review verdict was — and 4 of the 12 terminal paths are not review verdicts and emit no
- * `blockKind` at all (the throw, both publish handoffs and the Ralph re-fire) — DERIVED,
+ * review verdict was — and 3 of the 12 terminal paths can never carry a `blockKind` (both
+ * publish handoffs and the Ralph re-fire) — DERIVED,
  * not counted by hand: `inner-workflow-terminal-cause.test.ts` (`the blockKind claim is
  * derived, not remembered`) measures it, because the figure in this sentence was wrong
  * when it was written. Widening it to carry "the workflow threw" or
@@ -40,15 +40,11 @@
  * on it. A second meaning in that field is how a value that licenses a claim starts
  * licensing it for rows that never earned it.
  *
- * AND THE 4 COUNTS WHAT THE LITERALS NAME, WHICH IS NOT QUITE WHAT THE ROWS CARRY — said
- * here because the derivation above reads as the stronger claim and it is not. The throw
- * path's literal names no `blockKind` property, so it is still one of the four; the row it
- * writes can nonetheless CARRY one, by two shapes a property-name count cannot see — an
- * assignment after the literal (an awaited-trailer deferral) and a conditional spread
- * inside it (#624: a throw whose SITE measured `infra-only`, i.e. a build agent that
- * returned null). Read the 4 as "four literals assert none of their own", never as "four
- * exits can never carry one". The narrow rule above is untouched by that: a kind still
- * only travels when something MEASURED it, and never because this catch invented one.
+ * The measurement follows every shape this workflow uses to put that field on a terminal
+ * result: a named property, a conditional spread, and an assignment after the literal.
+ * The throw can therefore carry one when its site measured `infra-only`; ordinary throws
+ * keep it absent. A kind still travels only when something MEASURED it, never because this
+ * catch invented one.
  *
  * `'unknown'` IS A MEMBER, AND THAT IS THE POINT. A classifier whose vocabulary
  * cannot say "I could not establish which of these it was" has to pick a
