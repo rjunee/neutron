@@ -129,7 +129,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * Two things changed rather than one, because raising a timeout alone would be
  * exactly the "make the red go away" move this file exists to argue against:
  *
- *   1. the work itself dropped ~27% (see {@link couldNameIdentityVar}), and
+ *   1. the original prefilter reduced work; regex semantics now also require
+ *      parsing slash-containing sources (see {@link couldNameIdentityVar}), and
  *   2. the budget went to 5 minutes — enough that a 30× contention factor over
  *      the measured cost still passes.
  *
@@ -181,12 +182,10 @@ const TREE_BUDGET_MS = 300_000
  * rather than as a sentence — the sentences would still be sitting here,
  * describing a checker that no longer exists.
  */
-const READ_PATTERNS: ReadonlyArray<RegExp> = [
-  /\bNEUTRON_HOME\b/,
-  /\bOWNER_HOME\b/,
-  /\bNEUTRON_DB_PATH\b/,
-  /\bOWNER_HOME_KEY\b/,
-]
+const IDENTITY_NAMES = ['NEUTRON_HOME', 'OWNER_HOME', 'NEUTRON_DB_PATH', 'OWNER_HOME_KEY']
+const READ_PATTERNS: ReadonlyArray<RegExp> = IDENTITY_NAMES.map(
+  (name) => new RegExp(`\\b${name}\\b`),
+)
 
 /**
  * Every non-test TypeScript file that names one of the three identity
@@ -239,6 +238,173 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'NOT a reader — compactHomePath rewrites the literal {{OWNER_HOME}} TEMPLATE PLACEHOLDER to ~ for display. It never touches process.env.',
   'migrations/runner.ts':
     'NOT a reader of its own — names NEUTRON_HOME in the migrate-owner refusal message (telling the operator which variable let a build workspace inherit the live home) and NEUTRON_HOME/NEUTRON_DB_PATH in comments describing which file the server opens. The resolution itself is delegated to migrations/db-path.ts, which is registered above.',
+  // Broad regex matches: conservative membership, not evidence of an env read.
+  'agent-dispatch/command.ts':
+    'Broad regex literal at agent-dispatch/command.ts:71 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'app/app/projects/[id]/cores/dtc-analytics.tsx':
+    'Broad regex literal at app/app/projects/[id]/cores/dtc-analytics.tsx:109 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'app/lib/auth-helpers.ts':
+    'Broad regex literal at app/lib/auth-helpers.ts:218 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'app/lib/integrations-view.ts':
+    'Broad regex literal at app/lib/integrations-view.ts:64 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'app/lib/last-tab-storage.ts':
+    'Broad regex literal at app/lib/last-tab-storage.ts:44 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'auth/credential-scope-reconcile.ts':
+    'Broad regex literal at auth/credential-scope-reconcile.ts:254 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'channels/adapters/app-ws/auth.ts':
+    'Broad regex literal at channels/adapters/app-ws/auth.ts:250 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'channels/adapters/app-ws/envelope.ts':
+    'Broad regex literal at channels/adapters/app-ws/envelope.ts:396 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'channels/adapters/telegram/index.ts':
+    'Broad regex literal at channels/adapters/telegram/index.ts:443 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'chat-core/search.ts':
+    'Broad regex literal at chat-core/search.ts:86 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'connect/local-slug.ts':
+    'Broad regex literal at connect/local-slug.ts:54 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'connect/shared-project-memory-mirror.ts':
+    'Broad regex literal at connect/shared-project-memory-mirror.ts:113 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'contracts/default-emoji.ts':
+    'Broad regex literal at contracts/default-emoji.ts:226 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/calendar/src/chat-commands.ts':
+    'Broad regex literal at cores/free/calendar/src/chat-commands.ts:119 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/calendar/src/pre-meeting-brief-queue-store.ts':
+    'Broad regex literal at cores/free/calendar/src/pre-meeting-brief-queue-store.ts:423 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/code-gen/src/worktree-resolver.ts':
+    'Broad regex literal at cores/free/code-gen/src/worktree-resolver.ts:165 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/email/src/mime.ts':
+    'Broad regex literal at cores/free/email/src/mime.ts:52 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/email/src/pipeline/migrate.ts':
+    'Broad regex literal at cores/free/email/src/pipeline/migrate.ts:55 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/reminders/src/chat-commands.ts':
+    'Broad regex literal at cores/free/reminders/src/chat-commands.ts:224 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/research/src/render-markdown.ts':
+    'Broad regex literal at cores/free/research/src/render-markdown.ts:130 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/research/src/research-orchestrator.ts':
+    'Broad regex literal at cores/free/research/src/research-orchestrator.ts:669 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/research/src/vault-search.ts':
+    'Broad regex literal at cores/free/research/src/vault-search.ts:185 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/runtime/loader.ts':
+    'Broad regex literal at cores/runtime/loader.ts:72 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'doc-search/chunk.ts':
+    'Broad regex literal at doc-search/chunk.ts:220 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'doc-search/projects.ts':
+    'Broad regex literal at doc-search/projects.ts:16 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'doc-search/query.ts':
+    'Broad regex literal at doc-search/query.ts:27 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'doc-search/walk.ts':
+    'Broad regex literal at doc-search/walk.ts:151 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/cores/oauth-reconnect-notice.ts':
+    'Broad regex literal at gateway/cores/oauth-reconnect-notice.ts:149 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/app-launcher-surface.ts':
+    'Broad regex literal at gateway/http/app-launcher-surface.ts:221 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/app-projects-surface.ts':
+    'Broad regex literal at gateway/http/app-projects-surface.ts:270 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/app-reminders-surface.ts':
+    'Broad regex literal at gateway/http/app-reminders-surface.ts:686 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/app-tasks-surface.ts':
+    'Broad regex literal at gateway/http/app-tasks-surface.ts:480 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/chat-topics-surface.ts':
+    'Broad regex literal at gateway/http/chat-topics-surface.ts:215 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/cores-oauth-surface.ts':
+    'Broad regex literal at gateway/http/cores-oauth-surface.ts:665 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/cores-surface.ts':
+    'Broad regex literal at gateway/http/cores-surface.ts:487 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/project-credentials-surface.ts':
+    'Broad regex literal at gateway/http/project-credentials-surface.ts:381 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/http/work-board-surface.ts':
+    'Broad regex literal at gateway/http/work-board-surface.ts:710 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/projects/enumerate.ts':
+    'Broad regex literal at gateway/projects/enumerate.ts:20 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/push/chat-message-push.ts':
+    'Broad regex literal at gateway/push/chat-message-push.ts:113 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/storage/binary-store.ts':
+    'Broad regex literal at gateway/storage/binary-store.ts:454 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'gateway/upload/import-upload-handler.ts':
+    'Broad regex literal at gateway/upload/import-upload-handler.ts:219 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'landing/chat-react/ChatApp.tsx':
+    'Broad regex literal at landing/chat-react/ChatApp.tsx:2108 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'landing/chat-react/config.ts':
+    'Broad regex literal at landing/chat-react/config.ts:199 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'landing/chat-react/doc-link-nav.ts':
+    'Broad regex literal at landing/chat-react/doc-link-nav.ts:32 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'landing/chat-react/integrations-oauth-view.ts':
+    'Broad regex literal at landing/chat-react/integrations-oauth-view.ts:56 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'migrations/scope-rekey.ts':
+    'Broad regex literal at migrations/scope-rekey.ts:398 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/archetypes/compose.ts':
+    'Broad regex literal at onboarding/archetypes/compose.ts:92 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/archetypes/library.ts':
+    'Broad regex literal at onboarding/archetypes/library.ts:277 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/interview/engine-internals.ts':
+    'Broad regex literal at onboarding/interview/engine-internals.ts:1416 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/interview/engine.ts':
+    'Broad regex literal at onboarding/interview/engine.ts:2182 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/interview/extract-agent-name.ts':
+    'Broad regex literal at onboarding/interview/extract-agent-name.ts:195 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/interview/final-handoff-config.ts':
+    'Broad regex literal at onboarding/interview/final-handoff-config.ts:105 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/interview/import-source-copy.ts':
+    'Broad regex literal at onboarding/interview/import-source-copy.ts:121 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/profile-pic/fallback-gallery.ts':
+    'Broad regex literal at onboarding/profile-pic/fallback-gallery.ts:161 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/profile-pic/storage.ts':
+    'Broad regex literal at onboarding/profile-pic/storage.ts:738 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/synthesis/prepass.ts':
+    'Broad regex literal at onboarding/synthesis/prepass.ts:217 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/synthesis/synthesis-session.ts':
+    'Broad regex literal at onboarding/synthesis/synthesis-session.ts:966 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/wow-moment/actions/07-overnight-pass.ts':
+    'Broad regex literal at onboarding/wow-moment/actions/07-overnight-pass.ts:34 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'onboarding/wow-moment/project-identity.ts':
+    'Broad regex literal at onboarding/wow-moment/project-identity.ts:46 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'open/activity-inspector.ts':
+    'Broad regex literal at open/activity-inspector.ts:841 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'open/chat-topics-surface.ts':
+    'Broad regex literal at open/chat-topics-surface.ts:106 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'open/host-deploy-preconditions.ts':
+    'Broad regex literal at open/host-deploy-preconditions.ts:39 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'open/host-deploy.ts':
+    'Broad regex literal at open/host-deploy.ts:117 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'open/project-rail.ts':
+    'Broad regex literal at open/project-rail.ts:46 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'reminders/rituals.ts':
+    'Broad regex literal at reminders/rituals.ts:99 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/adapters/claude-code/persistent/hooks/pipeline-guard.ts':
+    'Broad regex literal at runtime/adapters/claude-code/persistent/hooks/pipeline-guard.ts:82 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/adapters/claude-code/persistent/model-floor.ts':
+    'Broad regex literal at runtime/adapters/claude-code/persistent/model-floor.ts:174 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/auto-link.ts':
+    'Broad regex literal at runtime/auto-link.ts:400 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/entity-format.ts':
+    'Broad regex literal at runtime/entity-format.ts:152 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/entity-slug.ts':
+    'Broad regex literal at runtime/entity-slug.ts:35 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/slug-grammar.ts':
+    'Broad regex literal at runtime/slug-grammar.ts:160 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'scribe/reflect/jaccard.ts':
+    'Broad regex literal at scribe/reflect/jaccard.ts:116 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'scribe/reflect/reflect-pass.ts':
+    'Broad regex literal at scribe/reflect/reflect-pass.ts:1097 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'scripts/spec-items-index.ts':
+    'Broad regex literal at scripts/spec-items-index.ts:99 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'skill-forge/command.ts':
+    'Broad regex literal at skill-forge/command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'skill-forge/distiller.ts':
+    'Broad regex literal at skill-forge/distiller.ts:25 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/as-built-log.ts':
+    'Broad regex literal at trident/as-built-log.ts:305 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/code-command.ts':
+    'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/mutation-prover.ts':
+    'Broad regex literal at trident/mutation-prover.ts:1050 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/slugify-task.ts':
+    'Broad regex literal at trident/slugify-task.ts:20 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/wrong-base-remedy.ts':
+    'Broad regex literal at trident/wrong-base-remedy.ts:282 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'wire-types/doc-links.ts':
+    'Broad regex literal at wire-types/doc-links.ts:148 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'work-board/spec-doc.ts':
+    'Broad regex literal at work-board/spec-doc.ts:116 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
 }
 
 /**
@@ -250,9 +416,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
  * about, so the check is widened rather than the sentence narrowed: the repo
  * has 191 such files (the web client and the mobile app among them), and a
  * client that grows a read of one of these variables is exactly the kind of new
- * reader nobody would think to look for. None name the variables today, so
- * widening costs zero registry rows and closes the hole before it has anything
- * in it.
+ * reader nobody would think to look for. Compiled regex matching also registers broad patterns in client files;
+ * the registry records those conservative matches explicitly.
  */
 const TS_PATHSPECS: ReadonlyArray<string> = ['*.ts', '*.tsx', '*.mts', '*.cts']
 
@@ -405,6 +570,26 @@ function matchesIdentityName(text: string): boolean {
 const JSX_ENTITY_SHAPE = /&(#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/
 
 /**
+ * Probe literal semantics on the identity names, retaining raw references such
+ * as placeholder patterns. This is not regex intersection: patterns requiring
+ * surrounding context can still miss unless their raw text names the variable.
+ * Unsupported/invalid patterns conservatively require a registry annotation.
+ */
+function regexNamesIdentityVar(text: string): boolean {
+  if (matchesIdentityName(text)) return true
+  const end = text.lastIndexOf('/')
+  try {
+    const pattern = new RegExp(text.slice(1, end), text.slice(end + 1))
+    return IDENTITY_NAMES.some((name) => {
+      pattern.lastIndex = 0
+      return pattern.test(name)
+    })
+  } catch {
+    return true
+  }
+}
+
+/**
  * Named entities that can spell a character appearing in one of the
  * {@link READ_PATTERNS} names.
  *
@@ -471,47 +656,14 @@ function decodeJsxEntities(text: string): string {
 }
 
 /**
- * Can this source POSSIBLY name an identity variable once the parser has cooked
- * it? A `false` here is a parse skipped, and it is the only reason this guard
- * fits inside a per-test budget on a contended box.
- *
- * SOUND, not heuristic, and the argument matters because a wrong prefilter is a
- * silent false negative — the exact defect class this file exists to end. The
- * walk in {@link namesIdentityVar} reads ONLY cooked program text: identifier
- * `.text`, string/template `.text`, JSX text, regex `.text`. Every one of those
- * is built from the source bytes, so there are exactly TWO ways a value the walk
- * matches can hold a character the source does not literally contain, and this
- * predicate has one arm for each:
- *
- *   1. A LANGUAGE ESCAPE — `\u`, `\u{…}`, `\x`, an octal escape, or a
- *      `\`-newline line continuation. Every one of them contains a BACKSLASH.
- *   2. A JSX CHARACTER REFERENCE in JSX text or a JSX attribute value, which
- *      {@link decodeJsxEntities} translates because TypeScript does not. Every
- *      one of them matches {@link JSX_ENTITY_SHAPE}. This arm was ADDED after a
- *      cross-model review; the fuller account, including what the report got
- *      wrong about it, is on {@link decodeJsxEntities}.
- *
- * So a file with no backslash, no entity shape, and none of the four names in its
- * raw bytes cannot produce a match under any parse, and skipping it changes no
- * answer.
- *
- * Two fixtures below are the pins that keep this honest rather than merely
- * argued — `a UNICODE-ESCAPED identifier is the same property` for arm 1 and
- * `a JSX CHARACTER REFERENCE spells the name` for arm 2. Drop either arm and the
- * matching test goes red rather than the audited tree quietly shrinking.
- *
- * MEASURED on this tree: 719 of the 1160 audited files (62%) skip the parser,
- * and the file's standalone wall clock goes from 2.85 / 2.93 / 3.80 s to
- * 2.10 / 2.13 / 2.28 s (three runs each, same box, same commit — measured when
- * arm 1 was the only arm). Adding arm 2 moved the skip count by FIVE files
- * (724 -> 719): four `.tsx` screens carrying one `&apos;` each in user-facing
- * copy, and one HTML-escaping helper holding the five standard escapes. That is
- * the whole cost of the soundness. The
- * remaining cost is the blind-file probe, which parses every candidate a second
- * time on purpose — see the note on its budget below.
+ * Escapes and JSX entities can hide cooked names; regex syntax can hide matches.
+ * Every regex literal contains a slash, so slash-free sources may still skip the
+ * parser when neither of the cooked-text cases nor a raw name is present.
  */
 function couldNameIdentityVar(src: string): boolean {
-  return matchesIdentityName(src) || src.includes('\\') || JSX_ENTITY_SHAPE.test(src)
+  return (
+    matchesIdentityName(src) || src.includes('\\') || JSX_ENTITY_SHAPE.test(src) || src.includes('/')
+  )
 }
 
 export function namesIdentityVar(src: string, fileName = 'probe.ts'): boolean {
@@ -574,7 +726,7 @@ export function namesIdentityVar(src: string, fileName = 'probe.ts'): boolean {
     // identity variable is exactly the kind of reference this registry wants
     // annotated, and it is the shape a future reader could most easily hide in.
     if (ts.isRegularExpressionLiteral(node)) {
-      if (matchesIdentityName(node.text)) found = true
+      if (regexNamesIdentityVar(node.text)) found = true
       return
     }
     ts.forEachChild(node, visit)
@@ -1086,6 +1238,39 @@ describe('the detector itself, pinned against the forms that fooled earlier vers
     expect(namesIdentityVar(`const h = process.env.${escapedName}`)).toBe(true)
   })
 
+  test('regex semantics detect hidden names and preserve legitimate literals', () => {
+    for (const name of IDENTITY_NAMES) {
+      const hidden = name.replaceAll('_', '[_]')
+      const source = `const r = /^${hidden}$/g`
+      expect(matchesIdentityName(source)).toBe(false)
+      expect(new RegExp(`^${hidden}$`).test(name)).toBe(true)
+      expect(namesIdentityVar(source)).toBe(true)
+    }
+    expect(namesIdentityVar('const r = /NEUTRON' + '\\' + 'u005FHOME/')).toBe(true)
+    expect(namesIdentityVar('const r = /^owner[_]home$/i')).toBe(true)
+    expect(namesIdentityVar('const r = /^OWNER[_]HOME$/y')).toBe(true)
+    expect(namesIdentityVar('const r = /NEUTRON_HOME/')).toBe(true)
+    expect(namesIdentityVar('const r = /^{{OWNER_HOME}}$/')).toBe(true)
+    expect(namesIdentityVar('const r = /prefixNEUTRON_HOME/')).toBe(false)
+    expect(namesIdentityVar('const r = /^PATH$/')).toBe(false)
+    expect(namesIdentityVar('const r = /[/]/')).toBe(false)
+    expect(namesIdentityVar('const r = /NEUTRON[_]HOME/z')).toBe(true)
+  })
+
+  test('regex-only fixture readers leave stale and require registration', () => {
+    const sources: Array<[string, string]> = [
+      ['hidden.ts', 'const r = /NEUTRON[_]HOME/'],
+      ['plain.ts', 'const r = /NEUTRON_HOME/'],
+      ['legitimate.ts', 'const r = /^PATH$/'],
+    ]
+    const readers = sources
+      .filter(([path, body]) => namesIdentityVar(body, path))
+      .map(([path]) => path)
+    expect(readers).toEqual(['hidden.ts', 'plain.ts'])
+    expect(['hidden.ts', 'plain.ts'].filter((path) => !readers.includes(path))).toEqual([])
+    expect(readers.filter((path) => path !== 'plain.ts')).toEqual(['hidden.ts'])
+  })
+
   test('the spellings this detector CANNOT see are pinned, so the stated limit is a check', () => {
     // FAILING-BY-DESIGN, so the boundary lives in the suite instead of only in
     // prose. If a future change makes any of these detectable, the assertion
@@ -1093,8 +1278,8 @@ describe('the detector itself, pinned against the forms that fooled earlier vers
     // the check move together, which is the entire point of this file.
     //
     // The limit is a CLASS: the walk reads cooked text off ONE node at a time,
-    // so a spelling no single node contains whole is invisible, however plainly
-    // it names the variable at runtime. An earlier draft of the docblock in
+    // so non-regex spellings split across nodes remain invisible even when
+    // they name the variable at runtime. An earlier draft of the docblock in
     // `config/index.ts` called the computed key "the only residual limit left";
     // a reviewer measured four more, which is why they are all here.
 
@@ -1107,12 +1292,10 @@ describe('the detector itself, pinned against the forms that fooled earlier vers
     const concat = "'NEUTRON' + '" + '_HOME' + "'"
     expect(namesIdentityVar(`const h = process.env[${concat}]\n`)).toBe(false)
 
-    // 3. A REGEX whose PATTERN matches the name at runtime while the `.text` the
-    // parser exposes does not contain it — a character class, and an escape.
-    expect(namesIdentityVar('const r = /NEUTRON[_]HOME/\n')).toBe(false)
-    expect(namesIdentityVar('const r = /NEUTRON' + '\\' + 'u005FHOME/\n')).toBe(false)
+    // Candidate probing does not synthesize surrounding context.
+    expect(namesIdentityVar('const r = /^prefixNEUTRON[_]HOME$/')).toBe(false)
 
-    // 4. A JSX name SPLIT across text and an expression container, which renders
+    // 3. A JSX name SPLIT across text and an expression container, which renders
     // as the variable's name and arrives as three separate nodes.
     expect(namesIdentityVar(`export const D = () => <p>NEUTRON{'_'}HOME</p>\n`, 'probe.tsx')).toBe(
       false,

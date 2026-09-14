@@ -570,20 +570,15 @@ export function resolveIdentityConfig(env: EnvBag = process.env): IdentityConfig
  * THE RESIDUAL LIMIT IS A CLASS, NOT ONE CASE, and it is stated as a class
  * because an earlier draft of this paragraph called a computed key "the only
  * residual limit left" and a reviewer measured three more. What the detector
- * reads is COOKED PROGRAM TEXT — identifier, string and template `.text`, JSX
- * text and attributes after entity decoding, and regex `.text`. So any spelling
- * that no single one of those nodes contains WHOLE is invisible to it, however
- * plainly it names the variable at runtime. Measured on this tree, each with a
- * passing positive control in the same run: `env[someVar]` (a computed key),
- * `env['NEUTRON' + '_HOME']` (a concatenation, whose two literals are separate
- * nodes), `` /NEUTRON[_]HOME/ `` and a regex spelling the same character with a
- * `_` escape (a regex whose PATTERN matches the name at RUNTIME while its
- * `.text` — the only form the parser exposes — does not contain it; note that
- * the plain `` /NEUTRON_HOME/ `` IS detected, measured, because there the raw
- * pattern does contain the name), and
- * `<p>NEUTRON{'_'}HOME</p>` (a JSX split across text and an expression). All
- * five are pinned as failing-by-design fixtures in the suite, so the boundary is
- * a check rather than a sentence and cannot move without a test going red.
+ * reads is cooked identifier/string/template text and decoded JSX text. Regex
+ * literals are additionally compiled and tested against the four identity names,
+ * while retaining raw matching for references such as template placeholders.
+ * Character classes and escaped separators are therefore detected. Broad regexes
+ * also match these candidates and require conservative registry annotations.
+ * Computed keys, concatenations and split JSX still cannot be assembled by the
+ * single-node walk. Candidate probing does not synthesize surrounding context:
+ * a pattern requiring a prefix or suffix can still escape detection when its raw
+ * text hides the name. These limits are pinned in the suite.
  *
  * That class is narrow and it is deliberate: widening it means evaluating the
  * program instead of parsing it. What the parser DOES buy is the class of miss
