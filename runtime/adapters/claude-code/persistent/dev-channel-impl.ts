@@ -62,6 +62,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { TurnIdEcho } from './turn-id-echo.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { deliverReply, replyToolResultText } from './reply-delivery.ts'
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
@@ -198,8 +199,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         const replyBody: Record<string, unknown> = { session_id: SESSION_ID, text }
         if (turnId !== undefined) replyBody['turn_id'] = turnId
-        await postToSink('/reply', replyBody)
-        return { content: [{ type: 'text', text: 'delivered' }] }
+        const delivery = await deliverReply(
+          `http://127.0.0.1:${SINK_PORT}/reply`,
+          SINK_TOKEN,
+          replyBody,
+        )
+        return { content: [{ type: 'text', text: replyToolResultText(delivery) }] }
       }
       case 'send_typing': {
         await postToSink('/typing', { session_id: SESSION_ID })
