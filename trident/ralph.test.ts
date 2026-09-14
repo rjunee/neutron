@@ -24,7 +24,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 /** #542 — the base-drift gate has to be able to READ the repo. A host that

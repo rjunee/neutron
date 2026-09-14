@@ -124,7 +124,7 @@ reverted `trident/merge.ts`. Four of the suites share a copy-pasted `driftFreeHo
 fixture, so the same omission existed in four places and a fifth copy would have
 inherited it.
 
-`tests/support/diff-output-host.ts` (`honourDiffOutput`) is the one wrapper they
+`trident/testing/diff-output-host.ts` (`honourDiffOutput`) is the one wrapper they
 all now use, so the next author imports it instead of re-deriving it — and the
 `merge-realgit` row is the tell that the real command needs no help.
 

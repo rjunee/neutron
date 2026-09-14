@@ -45,7 +45,7 @@ import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from './delivery.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
 /**

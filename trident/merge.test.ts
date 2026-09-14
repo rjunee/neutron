@@ -17,7 +17,7 @@ import {
   type RunHostCommand,
 } from './merge.ts'
 import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 

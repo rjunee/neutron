@@ -46,7 +46,7 @@ import {
   MAX_CONFLICT_ROUNDS,
   type RunHostCommand,
 } from './merge.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { FORGERY_RANGES } from './wrong-base-remedy.ts'
 import {
   ARBITER_EVIDENCE_ALLOWANCE_MIN,

@@ -18,7 +18,7 @@ import { runProgressForItem } from './run-progress.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 let tmp: string
 let db: ProjectDb

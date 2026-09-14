@@ -34,7 +34,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { computeTransition } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
-import { honourDiffOutput } from '../tests/support/diff-output-host.ts'
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 /** #542 — the base-drift gate has to be able to READ the repo. A host that
