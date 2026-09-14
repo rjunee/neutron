@@ -668,6 +668,38 @@ export class WorkBoardStore {
     }
   }
 
+  /** Restore a completed card to its stored active-lane ordinal. Active siblings
+   * keep their relative order; only their integer ranks are compacted around the
+   * insertion. A non-positive/non-integer legacy value has no trustworthy prior
+   * ordinal, so it is placed first rather than silently collapsed into append. */
+  private async restoreActivePosition(
+    tx: ProjectDb,
+    project_slug: string,
+    id: string,
+    storedPosition: number,
+  ): Promise<void> {
+    const ids = tx
+      .prepare<{ id: string }, [string, string]>(
+        `SELECT id FROM work_board_items
+          WHERE project_slug = ? AND id != ? AND status NOT IN ('done', 'archived')
+          ORDER BY sort_order ASC, id ASC`,
+      )
+      .all(project_slug, id)
+      .map((row) => row.id)
+    const insertAt = Number.isSafeInteger(storedPosition) && storedPosition > 0
+      ? Math.min(storedPosition - 1, ids.length)
+      : 0
+    ids.splice(insertAt, 0, id)
+    const ts = this.now()
+    for (let i = 0; i < ids.length; i++) {
+      await tx.run(
+        `UPDATE work_board_items SET sort_order = ?, updated_at = ?
+          WHERE project_slug = ? AND id = ?`,
+        [i + 1, ts, project_slug, ids[i]!],
+      )
+    }
+  }
+
   /**
    * Append a new item at the END of the board (highest `sort_order`).
    * Wrapped in a transaction so the `MAX(sort_order)+1` read-compute-write
@@ -843,19 +875,17 @@ export class WorkBoardStore {
    * change is treated as a REAL transition (loads the current row): it stamps
    * `completed_at` only on a genuine →done transition (a repeated `done` does
    * NOT refresh it / re-sort the completed history), and on a re-open OFF done
-   * it NULLs `completed_at` AND re-appends the item to the END of the active
-   * lane (a `sort_order` = MAX+1) so its stale completed-row position can't
-   * collide with the renumbered active items. The status path runs in a
-   * transaction because the reopen read-compute-write (MAX `sort_order`) must
-   * be atomic. Scoped by `project_slug`. Any REAL transition into a terminal
+   * it NULLs `completed_at` and restores the card's stored active-lane ordinal,
+   * compacting active sibling ranks without changing their relative order. The
+   * status path runs in a transaction because restoration is a multi-row
+   * read-compute-write. Scoped by `project_slug`. Any REAL transition into a terminal
    * status ('done'/'failed'/'archived') unconditionally clears `inline_active` —
    * overriding an explicit patch value — for parity with attachRun/detachRun.
    *
    * A genuine →'archived' (SHELVED) transition NEVER stamps `completed_at`
    * (shelved ≠ shipped) and is REFUSED while the card's bound run is still live
    * — see the guard below. Shelving OFF done nulls `completed_at`, and leaving
-   * archived re-appends the card to the END of the active lane, both through
-   * the same re-open branch.
+   * archived still appends the card to the END of the active lane.
    */
   async update(
     project_slug: string,
@@ -1023,23 +1053,25 @@ export class WorkBoardStore {
           push('completed_at', this.now())
         } else if (current.status === 'done' || current.status === 'archived') {
           // Coming OFF done or OFF the shelf (including done→archived): clear any
-          // completion datestamp — a shelved card must never carry one — and
-          // re-append to the active lane end so the stale done/shelved-row
-          // sort_order can't collide with the renumbered active lane. Harmless on
-          // done→archived, where the appended sort_order is simply unused until
-          // the card is un-shelved.
+          // completion datestamp — a shelved card must never carry one.
           push('completed_at', null)
           // A completed card retains its terminal run only while it is history,
           // so recovered alerts remain visible there. Reopening/shelving starts
           // a new lifecycle and must not derive progress from the old run.
           if (current.status === 'done') push('linked_run_id', null)
-          const max = tx
-            .prepare<{ next: number }, [string]>(
-              `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
-                 FROM work_board_items WHERE project_slug = ?`,
-            )
-            .get(project_slug)
-          push('sort_order', max?.next ?? 1)
+          if (current.status === 'done' && patch.status !== 'archived') {
+            await this.restoreActivePosition(tx, project_slug, id, current.sort_order)
+          } else {
+            // Unshelving retains its established append rule. A done→archived
+            // transition also takes a fresh inactive rank for later unshelving.
+            const max = tx
+              .prepare<{ next: number }, [string]>(
+                `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
+                   FROM work_board_items WHERE project_slug = ?`,
+              )
+              .get(project_slug)
+            push('sort_order', max?.next ?? 1)
+          }
           // ...and drop the durable PR provenance with it. `pr`/`pr_url` describe
           // the run that FINISHED this card; a card re-opened by hand has not
           // shipped, so the old `#NNN` must not ride along into the new attempt.
@@ -1238,8 +1270,8 @@ export class WorkBoardStore {
    * `linked_run_id` (→ the fork `⑂` icon) and move the item to `in_progress`,
    * all in ONE transaction with ONE `onChange` push. A sub-agent supersedes
    * any inline marker, so `inline_active` is cleared. Re-opening a `done` item
-   * (re-dispatch) nulls `completed_at` + re-appends it to the active lane so
-   * its stale completed-row `sort_order` can't collide. Returns the bound row
+   * (re-dispatch) nulls `completed_at` and restores its stored active-lane
+   * ordinal without changing sibling priority. Returns the bound row
    * (or null if the id no longer exists).
    *
    * A fresh binding also CLEARS the durable PR provenance (`pr`/`pr_url`): a
@@ -1264,16 +1296,9 @@ export class WorkBoardStore {
       ]
       const params: (string | number | null)[] = [run_id]
       if (current.status === 'done') {
-        // Re-open OFF done: clear the datestamp + re-append to the active lane.
+        // Re-open OFF done: clear the datestamp + restore the prior ordinal.
         sets.push('completed_at = NULL')
-        const max = tx
-          .prepare<{ next: number }, [string]>(
-            `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
-               FROM work_board_items WHERE project_slug = ?`,
-          )
-          .get(project_slug)
-        sets.push('sort_order = ?')
-        params.push(max?.next ?? 1)
+        await this.restoreActivePosition(tx, project_slug, id, current.sort_order)
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, id)
