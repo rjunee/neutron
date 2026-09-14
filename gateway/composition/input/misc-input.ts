@@ -101,8 +101,8 @@ export interface MiscCompositionInput {
      * on_run_terminal. The composer wires buildTerminalBuildWakeObserver here —
      * the SAME value it registers at both terminate() chokepoints — so a
      * loop-reaped, a cancelled, and a codegen-cancelled build all wake the agent
-     * through one chain (§F6a). Claim-first (`agent_waked_at` single writer), so
-     * a second site observing the same row composes no duplicate turn.
+     * through one chain (§F6a). The gateway retries pending rows and writes
+     * agent_waked_at only after the project decision is durably posted.
      */
     on_terminal_wake?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**

@@ -63,6 +63,10 @@ const EXPECTED_RUNNING_LOOPS = [
   // P0-4), so the reflect-consolidation loop always arms.
   'reflect-consolidation',
   'reminders',
+  // #796 — gateway-owned sweep admitting worker questions the project REPL could
+  // not take yet. Must outlive the worker, the REPL and a restart, or the
+  // question is silently dropped — the failure the routing change prevents.
+  'terminal-build-decisions',
   'trident',
   // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
   'trident-liveness',

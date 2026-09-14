@@ -1789,8 +1789,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    red dot + "Failed" tag + the run's `failure_reason` one-liner + the ▶/↻ retry —
 >    instead of the old revert-to-upcoming-and-unlink (which lost the failure).
 > 3. **Terminal builds announce in chat.** The tick loop's terminal delivery
->    (`trident/delivery.ts`) posts "✅ `<slug>` — build done, merged" / "❌ `<slug>` —
->    build failed: `<reason>`" to the originating chat via the run's `channel_kind`.
+>    (`trident/delivery.ts`) posts "✅ `<title>` — merged and deployed" / an
+>    INTERPRETED failure line (#352: `❌ <title> — <plain-language summary>`, never
+>    a raw `build failed: <reason>`) to the originating chat via the run's
+>    `channel_kind`. Since #796 the announce carries the EVIDENCE only: the
+>    owner-directed ask (`input_needed`, "Reply to retry the build…") is withheld
+>    (`composeTerminalDelivery(run, { include_advice: false })`) and belongs to the
+>    project decision turn, which consults the arbiter before deciding whether the
+>    owner is needed at all.
 >    On Open (app_socket) delivery now goes through the durable **app-ws adapter**
 >    sink (`open/composer.ts` → `trident.delivery_sink`) — the bare `ChannelRouter`
 >    has no app_socket adapter, so completions were silently dropped. Board-dispatched
@@ -8602,6 +8608,16 @@ flag; built unconditionally so the manage surface works even on an LLM-less box.
     find one by typing `/skills`, i.e. by already suspecting it existed. Gate:
     `open/__tests__/open-skill-forge-wiring.test.ts` asserts the durable turn lands in
     the owner's topic (mutation-verified — deleting the `deliver` call fails it).
+- **Proposal routing (#796) is ADDITIVE to that delivery, not a replacement.** The
+  terminal project decision turn also reads `skill_forge_list` and may raise a
+  persisted proposal itself; the button-backed notifier above is unchanged. A
+  branch that removed the notifier send was rebased onto #820 and the removal
+  dropped — the proposal keeps its own decision surface, and the routing change
+  governs build questions, not this one. Terminal build results remain pending
+  until their project decision is durably posted; the gateway's supervised
+  `terminal-build-decisions` loop revisits them every minute and on terminal
+  transitions, so restart and unavailable admission leave rows pending rather
+  than dropping the question.
 
 ## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
 

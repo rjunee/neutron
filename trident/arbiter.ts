@@ -60,7 +60,7 @@ export type ArbitrationOutcome =
   | { kind: 'owner-only'; question: string }
   /**
    * The caller MUST fall back to its existing escalation behaviour (today's
-   * chat path). An unavailable arbiter never blocks a run and never guesses.
+   * project decision path). An unavailable arbiter never guesses.
    */
   | { kind: 'unavailable'; reason: string }
 

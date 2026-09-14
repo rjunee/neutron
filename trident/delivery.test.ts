@@ -1050,6 +1050,49 @@ describe('buildTridentDelivery.onTerminal', () => {
     expect(sent[0]!.topic.channel_kind).toBe('app_socket')
   })
 
+  /**
+   * #796 vs #352 — THE ANNOUNCE KEEPS THE EVIDENCE AND SHEDS ONLY THE ASK.
+   *
+   * The routing change moves the owner-directed question ("Reply to retry the
+   * build…") to the project decision turn, which consults the arbiter before
+   * involving the owner. It does NOT move the interpreted reason: the decision
+   * turn is a model turn whose text is free-form, so if the announce stops
+   * carrying the summary the owner has no deterministic account of the failure
+   * at all. Both halves are asserted together here so neither can be satisfied
+   * by silencing the message.
+   */
+  test('#796 the failed announce carries the interpreted evidence without the ask', async () => {
+    const { sink, sent } = recordingSink()
+    const run = runWith({ phase: 'failed', chat_id: '1', failure_reason: 'sub-agent crashed' })
+    // CONTROL: the composer's own output DOES carry the ask, so the absence
+    // below is a removal by the delivery path, not an interpretation that never
+    // produced one.
+    const full = composeTerminalDelivery(run)!
+    expect(full.text).toContain(interpretFailure(run).input_needed)
+    await buildTridentDelivery({ sink }).onTerminal(run)
+    expect(sent.length).toBe(1)
+    expect(sent[0]!.text).toContain('❌')
+    expect(sent[0]!.text).toContain(interpretFailure(run).summary)
+    expect(sent[0]!.text).not.toContain(interpretFailure(run).input_needed)
+  })
+
+  test('#796 a `done` announce is untouched by the advice split', async () => {
+    const { sink, sent } = recordingSink()
+    const run = runWith({ phase: 'done', chat_id: '1' })
+    await buildTridentDelivery({ sink }).onTerminal(run)
+    expect(sent[0]!.text).toBe(composeTerminalDelivery(run)!.text)
+  })
+
+  test('#796 include_advice only removes the ask — the rest is byte-identical', () => {
+    const run = runWith({ phase: 'failed', chat_id: '1', failure_reason: 'sub-agent crashed' })
+    const withAdvice = composeTerminalDelivery(run)!.text
+    const without = composeTerminalDelivery(run, { include_advice: false })!.text
+    const interp = interpretFailure(run)
+    expect(withAdvice).not.toBe(without)
+    expect(withAdvice.replace(`\n${interp.input_needed}`, '')).toBe(without)
+    expect(composeTerminalDelivery(run, {})!.text).toBe(withAdvice)
+  })
+
   test('a custom composer returning null suppresses the post', async () => {
     const { sink, sent } = recordingSink()
     const hook = buildTridentDelivery({ sink, compose: () => null })

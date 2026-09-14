@@ -49,7 +49,7 @@
  * api.anthropic.com.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -59,9 +59,12 @@ import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { SkillForgeProposalsStore } from '@neutronai/skill-forge/proposals-store.ts'
+import { SYSTEM_SPEAKER_USER_ID } from '@neutronai/channels/button-store.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
-import type { TridentRun } from '@neutronai/trident/store.ts'
+import { SupervisedLoop } from '@neutronai/loop'
+import type { Event } from '@neutronai/runtime/events.ts'
+import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -154,6 +157,18 @@ function skillForgePromptsInOwnerChat(): Array<{ body: string; options_json: str
     .all(appWsTopicId(OWNER_USER_ID), 'skill-forge-proposal:%')
 }
 
+/** System-authored turns in the owner topic — what the project decision turn posts. */
+function systemTurnsInOwnerChat(): Array<{ body: string }> {
+  return db
+    .raw()
+    .query<{ body: string }, [string, string]>(
+      `SELECT body FROM button_prompts
+        WHERE topic_id = ? AND resolution_speaker_user_id = ?
+        ORDER BY created_at ASC`,
+    )
+    .all(appWsTopicId(OWNER_USER_ID), SYSTEM_SPEAKER_USER_ID)
+}
+
 describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
   test('a credentialed boot threads skill_forge.backend + the trident auto-propose trigger', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-skillforge-test'
@@ -191,7 +206,6 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     cleanup(composition)
   }, 20_000)
 
-  // ── THE DELIVERY GATE — a proposal must ARRIVE, not merely be logged ────────
   test('the proposal is DELIVERED as a durable turn in the owner chat, with no client connected', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-skillforge-test'
     const composer = buildOpenGraphComposer({ env: process.env })
@@ -230,14 +244,50 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     cleanup(composition)
   }, 20_000)
 
+  test('the project can offer a persisted skill after receiving the worker result', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-skillforge-test'
+    let sweep: SupervisedLoop | undefined
+    const start = SupervisedLoop.prototype.start
+    const capture = spyOn(SupervisedLoop.prototype, 'start').mockImplementation(function(this: SupervisedLoop) {
+      if (this.describe().name === 'terminal-build-decisions') sweep = this
+      return start.call(this)
+    })
+    const composition = await buildOpenGraphComposer({ env: process.env, substrateFactory: () => ({
+      start: (spec) => ({
+        events: (async function* (): AsyncGenerator<Event> {
+          expect(spec.prompt).toContain('skill_forge_list')
+          const proposals = await new SkillForgeProposalsStore({ db }).listPending()
+          expect(proposals).toHaveLength(1)
+          yield { kind: 'token', text: `Project asks: save ${proposals[0]!.proposed_name}?` }
+          yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'mock' }
+        })(), respondToTool: async () => {}, cancel: async () => {}, tool_resolution: 'internal',
+      }),
+    }) })({ db, project_slug: 'owner' })
+    capture.mockRestore()
+    try {
+      const runs = new TridentRunStore(db)
+      const run = await runs.create({ slug: 'skill-question', project_slug: 'owner', repo_path: '/tmp/repo',
+        task: doneRun().task, chat_id: appWsTopicId(OWNER_USER_ID), channel_kind: 'app_socket' })
+      await runs.update(run.id, { phase: 'done' })
+      await composition.trident!.on_run_terminal!(runs.get(run.id)!)
+      expect(systemTurnsInOwnerChat()).toEqual([])
+      await sweep!.runOnce()
+      const proposals = await composition.skill_forge!.backend.listPending()
+      expect(systemTurnsInOwnerChat().map(r => r.body)).toEqual([`Project asks: save ${proposals[0]!.proposed_name}?`])
+      expect(runs.agentWakeCompleted(run.id)).toBe(true)
+    } finally {
+      for (const stop of composition.realmode_cleanups ?? []) await stop()
+    }
+  }, 20_000)
+
   test('a re-run of the SAME workflow re-notifies zero times (one offer, not one per run)', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-skillforge-test'
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
 
     // Three terminal `done` runs of the same workflow. The signature dedupe in
-    // `SkillForge.onWorkflowCompleted` returns early on 2 and 3, so the owner is
-    // offered the skill ONCE — a repeated habit must not become a repeated ping.
+    // `SkillForge.onWorkflowCompleted` returns early on 2 and 3, leaving one
+    // pending proposal for the project conversation.
     await composition.trident!.on_run_terminal!(doneRun({ id: 'run-1' }))
     await composition.trident!.on_run_terminal!(doneRun({ id: 'run-2' }))
     await composition.trident!.on_run_terminal!(doneRun({ id: 'run-3' }))

@@ -52,6 +52,41 @@ describe('claimAgentWake', () => {
     expect(await store.claimAgentWake('missing')).toBe(false)
   })
 
+  // EACH ROW THIS RETURNS COSTS THE OWNER ONE DECISION TURN, so the sweep's
+  // reach is a product decision, not a query detail. Unbounded, the first boot
+  // after 0127 shipped would have driven 152 of them at once — every run that
+  // went terminal between 2026-08-07 and 2026-08-22, none from the last day.
+  test('the pending sweep is bounded, and drains oldest first', async () => {
+    const store = new TridentRunStore(db)
+    const ids: string[] = []
+    for (let i = 0; i < 8; i++) {
+      const run = await store.create({
+        slug: `wake-backlog-${i}`, project_slug: 't1', repo_path: '/r', task: 't',
+        chat_id: 'app:owner:t1',
+      })
+      // A FULL SNAPSHOT SAVE, because `last_advanced_at` is not a patchable field
+      // and the ordering under test is entirely about it. Spacing the stamps by a
+      // second means the ASC the sweep relies on is being read from the column and
+      // not from an incidental insertion order.
+      await store.save({
+        ...run,
+        phase: 'done',
+        last_advanced_at: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+      })
+      ids.push(run.id)
+    }
+
+    const swept = store.listPendingAgentWakes(3)
+    expect(swept).toHaveLength(3)
+    // Oldest first: the bound must not be a window that strands the head of the
+    // queue behind rows that keep arriving.
+    expect(swept.map((r) => r.id)).toEqual(ids.slice(0, 3))
+
+    // …and the queue genuinely drains rather than re-serving the same three.
+    for (const run of swept) await store.claimAgentWake(run.id)
+    expect(store.listPendingAgentWakes(3).map((r) => r.id)).toEqual(ids.slice(3, 6))
+  })
+
   test('claim survives a full snapshot save', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'wake-save', project_slug: 't1', repo_path: '/r', task: 't' })

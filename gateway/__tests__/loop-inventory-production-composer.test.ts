@@ -51,7 +51,16 @@ const OWNER = 'loop-inventory-composer-owner'
 /** The loops the GATEWAY GRAPH starts itself (no Open-composer loops here). */
 const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'trident-watch', 'watchdog'] as const
 /** Loops the OPEN COMPOSER starts — absent from a gateway-only registry. */
-const OPEN_COMPOSER_LOOPS = ['chunked-upload-sweeper', 'dispatch-lifecycle-watchdog'] as const
+// Loops the OPEN composer registers, which must therefore be ABSENT from the
+// gateway graph's own registry. #796 adds `terminal-build-decisions` (the sweep
+// that admits terminal build results the project REPL could not take yet) — it
+// is registered in `open/composer.ts`, not by `composeProductionGraph`, so it
+// belongs on this side of the boundary and nowhere in EXPECTED_GATEWAY_LOOPS.
+const OPEN_COMPOSER_LOOPS = [
+  'chunked-upload-sweeper',
+  'dispatch-lifecycle-watchdog',
+  'terminal-build-decisions',
+] as const
 /** The exact set of D-7 dormant loops (built, never started). */
 const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
 

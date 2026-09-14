@@ -54,6 +54,8 @@ test('escalation → independent orchestrator decision → persisted precedence 
   expect(board.list(scope).map((x) => x.id)).toEqual(before.map((x) => x.id))
   let calls = 0
   const observe = buildTerminalBuildWakeObserver({
+    wakeCompleted: () => false,
+    arbitrate: async () => ({ kind: 'decision', option_id: 'investigate', reasoning: 'Read the dependency spec.' }),
     claimWake: async () => true, boardItemIdForRun: async () => blocked.id, projectChatScope: () => scope,
     llm: { compose: async (spec) => {
       // This is the decision boundary: the fake orchestrator selects from board/spec

@@ -118,6 +118,7 @@ function branchTree(): string {
     '0125_code_trident_runs_base_sha.sql',
     '0127_code_trident_runs_agent_waked_at.sql',
     '0130_work_board_items_archived_status.sql',
+    ...DEPENDENT_TAIL,
     ...REBUILD_FILES,
   ]) {
     rmSync(join(dir, file))
@@ -179,10 +180,22 @@ function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
     cpSync(join(REAL_TREE, file), join(dir, file))
   }
   rmSync(join(dir, PENDING_FILE))
+  for (const file of DEPENDENT_TAIL) rmSync(join(dir, file))
   for (const file of REBUILD_FILES) rmSync(join(dir, file))
   for (const [from, to] of renames) renameSync(join(dir, from), join(dir, to))
   return dir
 }
+
+/**
+ * Migrations that READ `agent_waked_at` and so cannot outlive `0127` in a fixture.
+ * Exactly the rule `treeWithoutPendingFile` states above, applied to the DML half of
+ * the chain rather than the rebuild half: `0143` backfills that column, so a tree that
+ * holds `0127` back and keeps `0143` fails with `no such column: agent_waked_at` from
+ * inside the fixture — a release that never existed, failing for its own reason rather
+ * than the runner's.
+ */
+const DEPENDENT_TAIL = ['0143_backfill_agent_waked_at.sql']
+const DEPENDENT_TAIL_NAME = 'backfill_agent_waked_at'
 
 /** The migration held back so the boot under test always has something to apply. */
 const PENDING_FILE = '0127_code_trident_runs_agent_waked_at.sql'
@@ -724,7 +737,7 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
   // Every migration this fixture's release predates — `0127`, the `0131` repair, and
   // `0138`, which is the one that has to SURVIVE the repair: 0131 runs late here, and
   // its rebuild drops the columns 0136/0137 added, which 0138 then names.
-  expect(result.applied).toEqual([127, 131, 138])
+  expect(result.applied).toEqual([127, 131, 138, 143])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   // THE DEFECT THIS FIXTURE NOW PINS. A late 0131 deletes these three columns and the
   // wave-child UNIQUE index and still reports success; 0138's restore block puts the
@@ -776,7 +789,7 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
   // No other row was collapsed, dropped or duplicated by the pass.
   const namesAfter = ledger(db).map((r) => r.name)
   expect(new Set(namesAfter)).toEqual(
-    new Set([...namesBefore, PENDING_NAME, REPAIR_NAME, REVIEW_NOT_RUN_NAME]),
+    new Set([...namesBefore, PENDING_NAME, DEPENDENT_TAIL_NAME, REPAIR_NAME, REVIEW_NOT_RUN_NAME]),
   )
   expect(namesAfter).toHaveLength(new Set(namesAfter).size)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name LIKE '_migrations_%'").get()).toBeNull()
@@ -831,7 +844,7 @@ test('CASE 5c — the collapse adopts provenance from ONE row, never a column at
   expect(before[0]?.applied_by_commit).toBeNull()
   expect(before[1]?.applied_by_commit).toBe('d'.repeat(40))
 
-  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138, 143])
 
   const after = db
     .query<
@@ -924,7 +937,7 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
 
   // And the remedy the message points at actually works: drop the view, boot.
   db.exec('DROP VIEW _migrations_version_keyed')
-  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138, 143])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   db.close()
 })
@@ -976,7 +989,7 @@ test('CASE 6b — a real TABLE at the rekey scratch name is REFUSED, never dropp
   // The remedy works, and note WHICH remedy: the operator moves their own table out of
   // the way. The runner never does it for them.
   db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
-  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138, 143])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   expect(
     db.query<{ payload: string }, []>('SELECT payload FROM operator_kept_this').all(),
@@ -1505,6 +1518,7 @@ test('CASE 8c — a shipped entry does NOT speak on a database that recorded the
   const TAIL = [
     '0125_code_trident_runs_base_sha.sql',
     PENDING_FILE,
+    ...DEPENDENT_TAIL,
     RENUMBERED_FILE,
     ...REBUILD_FILES,
   ]

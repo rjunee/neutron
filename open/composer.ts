@@ -4339,21 +4339,14 @@ export function buildOpenGraphComposer(
       projectId !== null && projectId.length > 0
         ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
         : appWsTopicId(OWNER_USER_ID)
-    // #335 WIRING — the terminal-build wake observer, constructed ONCE and
-    // registered at ALL THREE composeTerminalHook sites (both terminator binds
-    // below + the tick loop via `trident.on_terminal_wake`), so a cancelled build
-    // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
-    // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
-    // boot-replay / a second site observing the same row compose ZERO duplicate
-    // turns. The callback returns without waiting for its queued decision.
-    // Board reconcile and skill-forge run first; reconciliation has usually
-    // detached `linked_run_id`, so the prompt's "Board item id" is commonly
-    // "none" (a module-supported shape) — the wake turn still carries run id /
-    // branch / task and has board tools to locate the item. Accepted tradeoff.
-    // The wake observer must stay on a tool-bridge-enabled substrate with
-    // channel-turn grants; `open-terminal-build-wake-wiring.test.ts` pins it.
+    // Terminal rows remain pending until the project decision is durably posted.
+    // The observer serializes each run; the gateway sweep retries after restart.
     const observeTerminalBuildWake = buildTerminalBuildWakeObserver({
+      wakeCompleted: (id) => boardRunStore.agentWakeCompleted(id),
       claimWake: (id) => boardRunStore.claimAgentWake(id),
+      arbitrate: (input) => tridentArbiter?.(input) ?? Promise.resolve({
+        kind: 'unavailable', reason: 'arbiter substrate unavailable',
+      }),
       boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
       // Resolve at invocation after the shared chat runner has been constructed.
       // Its queue admits the wake before the timeout starts, on the project REPL.
@@ -4379,9 +4372,20 @@ export function buildOpenGraphComposer(
     })
     // A board tool may terminate a run from the very chat turn the wake queues
     // behind. Return the terminal hook immediately so that turn can settle.
-    const terminalBuildWake = async (run: TridentRun): Promise<void> => {
-      fireAndForget('composer.terminalBuildDecision', observeTerminalBuildWake(run))
+    const terminalBuildWake = async (_run: TridentRun): Promise<void> => {
+      terminalDecisionRetry.wake()
     }
+    const terminalDecisionRetry = new SupervisedLoop({
+      name: 'terminal-build-decisions', intervalMs: 60_000,
+      tick: async () => {
+        for (const run of boardRunStore.listPendingAgentWakes()) {
+          await observeTerminalBuildWake(run)
+        }
+      },
+    })
+    loopRegistry.register(terminalDecisionRetry.describe())
+    terminalDecisionRetry.start()
+    realmodeCleanups.push(() => terminalDecisionRetry.stop())
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -6104,8 +6108,7 @@ export function buildOpenGraphComposer(
     // and `approve`/`merge`/`skip-review` cannot even enter the option set
     // (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated on the SAME
     // live-credential predicate as the resolver: an arbiter can only run where
-    // builds run. Absent → a resolver escalation posts its question to chat,
-    // exactly as before.
+    // builds run. Unavailability remains evidence for the project decision turn.
     //
     // CREDENTIAL-FREE BY PROFILE, not by prompt — the `PROFILE_LEAK_FIXER` rule
     // fourteen lines below, and this turn needs it MORE than that one does. On the

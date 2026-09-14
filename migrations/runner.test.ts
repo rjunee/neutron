@@ -207,6 +207,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     // the merge, rather than producing a silently wrong union the way a COUNT
     // would.
     142,
+    143,
   ])
   expect(result.skipped).toEqual([])
 
