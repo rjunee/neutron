@@ -52,6 +52,7 @@ import {
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
+import type { RunWorkerObservation } from '@neutronai/trident/worker-observation.ts'
 
 /**
  * The minimal trident-run surface the board needs (M1 trident-UX hardening):
@@ -176,6 +177,8 @@ export interface WorkBoardSurfaceOptions {
   auth: AppWsAuthResolver
   /** Trident run access for live progress (item 1) + delete-cancels-run (item 3). */
   trident_runs?: TridentRunAccess
+  /** Read-only, exact-run worker observation for the item dot inspector. */
+  inspect_worker?: (run: TridentRun) => Promise<RunWorkerObservation>
   /** Injectable clock (ms) for the run-progress derivation; defaults to wall-clock. */
   now?: () => number
   /** Sync peek into the composer's shared repo-web-url cache, so a bound item's
@@ -364,6 +367,9 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       if (action === 'start' && method === 'POST') {
         return handleStart(store, scope, project_id, item_id, trident_runs, startBuild, startResearch)
       }
+      if (action === 'worker' && method === 'GET') {
+        return handleWorker(store, scope, item_id, trident_runs, opts.inspect_worker)
+      }
       if (action === 'complete' && method === 'POST') {
         return handleComplete(store, scope, project_id, item_id, deriveOne)
       }
@@ -377,6 +383,48 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       )
     },
   }
+}
+
+export type WorkBoardWorkerResult =
+  | { state: 'running'; run_id: string; worker_state: 'working' | 'blocked'; detail: string; screen: string }
+  | { state: 'finished'; run_id: string | null; phase: TridentPhase | null }
+  | { state: 'unknown'; run_id: string | null; detail: string }
+
+async function handleWorker(
+  store: WorkBoardStore,
+  scope: string,
+  item_id: string,
+  runs: TridentRunAccess | undefined,
+  inspect: ((run: TridentRun) => Promise<RunWorkerObservation>) | undefined,
+): Promise<Response> {
+  const item = store.get(scope, item_id)
+  if (item === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  const runId = item.linked_run_id
+  if (runId === null || runId.length === 0) {
+    const terminalItem = item.status === 'done' || item.status === 'failed' || item.status === 'blocked'
+    const result: WorkBoardWorkerResult = terminalItem
+      ? { state: 'finished', run_id: null, phase: null }
+      : { state: 'unknown', run_id: null, detail: 'This item has no linked worker.' }
+    return jsonOk(result)
+  }
+  const run = runs?.get(runId) ?? null
+  if (run === null) {
+    return jsonOk({ state: 'unknown', run_id: runId, detail: 'The linked worker could not be resolved.' } satisfies WorkBoardWorkerResult)
+  }
+  if (isTerminalPhase(run.phase)) {
+    return jsonOk({ state: 'finished', run_id: runId, phase: run.phase } satisfies WorkBoardWorkerResult)
+  }
+  if (inspect === undefined) {
+    return jsonOk({ state: 'unknown', run_id: runId, detail: 'Worker inspection is unavailable.' } satisfies WorkBoardWorkerResult)
+  }
+  const observation = await inspect(run)
+  if (observation.state === 'unknown') {
+    return jsonOk({ state: 'unknown', run_id: runId, detail: observation.detail } satisfies WorkBoardWorkerResult)
+  }
+  return jsonOk({
+    state: 'running', run_id: runId, worker_state: observation.state,
+    detail: observation.detail, screen: observation.screen,
+  } satisfies WorkBoardWorkerResult)
 }
 
 async function handleCreate(
@@ -587,9 +635,8 @@ async function handleComplete(
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
   // 409, not 500: the store REFUSES to complete an item whose build is still
   // live, and that is a legitimate answer about state rather than a fault. This is
-  // the path the board row's pulsing dot takes — its click advances status, so on
-  // an in-progress item it lands here and used to assert a running build had
-  // finished (2026-08-11). The client shows the message.
+  // the path the row's separate advance control takes. The inspector dot no longer
+  // mutates status; this guard still protects every other completion caller.
   try {
     const item = await store.complete(project_slug, item_id)
     return jsonOk({ item: deriveOne(item), project_id })

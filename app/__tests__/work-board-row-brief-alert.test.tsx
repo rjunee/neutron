@@ -74,6 +74,24 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it("the dot calls this row's inspector callback, while status advance has its own control", async () => {
+    const opened: string[] = [];
+    const advanced: string[] = [];
+    const row = item({ id: 'item-a', title: 'Item A' });
+    const screen = await mountScreen(createElement(WorkBoardRow, {
+      item: row, busy: false, index: 0, laneCount: 1,
+      onInspect: () => opened.push(row.id), onAdvance: () => advanced.push(row.id),
+      onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+    }));
+    await screen.press('Inspect worker for Item A');
+    expect(opened).toEqual(['item-a']);
+    expect(opened).not.toContain('item-b');
+    expect(advanced).toEqual([]);
+    await screen.press('Advance status');
+    expect(advanced).toEqual(['item-a']);
+    screen.unmount();
+  });
+
   it('renders a surviving alert on a live row with the non-failure tone', async () => {
     const screen = await mountScreen(createElement(WorkBoardRow, {
       item: item(),

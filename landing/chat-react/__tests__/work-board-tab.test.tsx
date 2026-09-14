@@ -868,12 +868,12 @@ describe('WorkBoardTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    const dots = Array.from(
-      container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-dot'),
+    const advances = Array.from(
+      container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) [aria-label="Advance status"]'),
     ) as HTMLButtonElement[]
     // First row is upcoming → PATCH to in_progress.
     await act(async () => {
-      dots[0]!.click()
+      advances[0]!.click()
       await tick()
       await tick()
     })
@@ -881,16 +881,40 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(patched!.status).toBe('in_progress')
 
     // Second row is in_progress → /complete.
-    const dots2 = Array.from(
-      container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-dot'),
+    const advances2 = Array.from(
+      container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) [aria-label="Advance status"]'),
     ) as HTMLButtonElement[]
     await act(async () => {
-      dots2[1]!.click()
+      advances2[1]!.click()
       await tick()
       await tick()
     })
     expect(completed).toBe(true)
 
+    await act(async () => root.unmount())
+  })
+
+  it("each dot opens its own worker and never the sibling's", async () => {
+    const requested: string[] = []
+    const rows = [
+      item({ id: 'a', title: 'Item A', status: 'in_progress', linked_run_id: 'run-a' }),
+      item({ id: 'b', title: 'Item B', status: 'in_progress', linked_run_id: 'run-b' }),
+    ]
+    const handler: Handler = (url, init) => {
+      if (url.endsWith('/work-board') && (init?.method ?? 'GET') === 'GET') return jsonRes({ ok: true, items: rows, project_id: PROJECT })
+      const match = url.match(/\/work-board\/(a|b)\/worker$/)
+      if (match !== null) {
+        requested.push(match[1]!)
+        return jsonRes({ state: 'running', run_id: `run-${match[1]}`, worker_state: 'working', detail: '', screen: `screen:${match[1]}` })
+      }
+      return null
+    }
+    const { container, root, act } = await mount(handler)
+    const dots = Array.from(container.querySelectorAll('.cwb-dot')) as HTMLButtonElement[]
+    await act(async () => { dots[0]!.click(); await tick(); await tick() })
+    expect(requested).toEqual(['a'])
+    expect(container.querySelector('[data-testid="work-worker-screen"]')?.textContent).toBe('screen:a')
+    expect(container.textContent).not.toContain('screen:b')
     await act(async () => root.unmount())
   })
 

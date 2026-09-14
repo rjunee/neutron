@@ -62,6 +62,7 @@ import {
   type RunPhaseLabel,
   type RunProgress,
   type WorkBoardItem,
+  type WorkBoardWorkerResult,
   type WorkBoardStatus,
 } from './work-board-client.ts'
 
@@ -477,6 +478,7 @@ export function WorkBoardTab({
   // Drag-to-reorder state: the row being dragged + the row it's hovering over.
   const [dragId, setDragId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const [workerInspector, setWorkerInspector] = useState<{ item: WorkBoardItem; result: WorkBoardWorkerResult | null; error: string | null } | null>(null)
 
   // Monotonic guard so a slow list fetch can't land after a newer one (rapid
   // project switches / StrictMode double-invoke).
@@ -719,6 +721,17 @@ export function WorkBoardTab({
     [onOpenDoc, projectId],
   )
 
+  const inspectWorker = useCallback((item: WorkBoardItem): void => {
+    setWorkerInspector({ item, result: null, error: null })
+    void client.worker(projectId, item.id).then((result) => {
+      if (aliveRef.current) setWorkerInspector((open) => open?.item.id === item.id ? { item, result, error: null } : open)
+    }).catch((err: unknown) => {
+      if (aliveRef.current) setWorkerInspector((open) => open?.item.id === item.id
+        ? { item, result: null, error: err instanceof Error ? err.message : 'Could not inspect worker.' }
+        : open)
+    })
+  }, [client, projectId])
+
   // Item 4 — open the INLINE confirm (rendered within the item's own row, not a
   // screen-takeover modal) instead of deleting immediately. Prevents an
   // accidental click from cancelling an expensive running build. Only ONE row can
@@ -822,6 +835,18 @@ export function WorkBoardTab({
 
   return (
     <div className="cwb">
+      {workerInspector !== null ? (
+        <div className="car-actin-backdrop" onClick={() => setWorkerInspector(null)} data-testid="work-worker-backdrop">
+          <aside className="car-actin" role="dialog" aria-modal="true" aria-label={`Worker for ${workerInspector.item.title}`} onClick={(e) => e.stopPropagation()} data-testid="work-worker-inspector">
+            <header className="car-actin-head"><div className="car-actin-title"><span className="car-actin-scope">{workerInspector.item.title}</span></div><button type="button" className="car-actin-close" onClick={() => setWorkerInspector(null)} aria-label="Close worker inspector">✕</button></header>
+            {workerInspector.error !== null ? <p className="car-actin-empty">{workerInspector.error}</p>
+              : workerInspector.result === null ? <p className="car-actin-empty">Reading worker…</p>
+              : workerInspector.result.state === 'running' ? <><p className="car-actin-empty">Worker is {workerInspector.result.worker_state}.</p><pre className="car-actin-list" data-testid="work-worker-screen">{workerInspector.result.screen || workerInspector.result.detail}</pre></>
+              : workerInspector.result.state === 'finished' ? <p className="car-actin-empty" data-testid="work-worker-finished">This worker has finished.</p>
+              : <p className="car-actin-empty" data-testid="work-worker-unknown">Cannot determine which worker: {workerInspector.result.detail}</p>}
+          </aside>
+        </div>
+      ) : null}
       {actionError !== null ? <div className="cwb-error">{actionError}</div> : null}
 
       <div className="cwb-list" aria-label="Work">
@@ -851,6 +876,7 @@ export function WorkBoardTab({
                   dragging={dragId === it.id}
                   dragOver={dragOverId === it.id && dragId !== it.id}
                   onAdvance={() => advanceStatus(it)}
+                  onInspect={() => inspectWorker(it)}
                   onStartEdit={() => {
                     setEditingId(it.id)
                     setEditTitle(it.title)
@@ -1025,6 +1051,7 @@ function WorkBoardRow({
   dragging,
   dragOver,
   onAdvance,
+  onInspect,
   onStartEdit,
   onChangeEdit,
   onSaveEdit,
@@ -1051,6 +1078,7 @@ function WorkBoardRow({
   dragging: boolean
   dragOver: boolean
   onAdvance: () => void
+  onInspect: () => void
   onStartEdit: () => void
   onChangeEdit: (v: string) => void
   onSaveEdit: () => void
@@ -1115,10 +1143,10 @@ function WorkBoardRow({
         <button
           type="button"
           className={`cwb-dot ${dot.cls}${dot.pulse ? ' cwb-dot-pulse' : ''}`}
-          onClick={onAdvance}
+          onClick={onInspect}
           disabled={busy}
-          title={`${statusLabel(item.status)} — advance`}
-          aria-label={`${statusLabel(item.status)}. Advance status`}
+          title="Inspect this item's worker"
+          aria-label={`Inspect worker for ${item.title}`}
         />
         {editing ? (
           <input
@@ -1170,6 +1198,7 @@ function WorkBoardRow({
           />
         ) : (
           <div className="cwb-actions">
+            <button type="button" className="cwb-btn cwb-btn-icon" onClick={onAdvance} disabled={busy} title="Advance status" aria-label="Advance status">→</button>
             <button
               type="button"
               className="cwb-drag"

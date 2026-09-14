@@ -76,6 +76,13 @@ function make(res: { status: number; body: unknown }) {
 }
 
 describe('WorkBoardClient', () => {
+  it('reads the exact item worker endpoint', async () => {
+    const { client, calls } = make({ status: 200, body: { state: 'running', run_id: 'run-a', worker_state: 'working', detail: '', screen: 'A' } });
+    expect(await client.worker('p', 'item-a')).toMatchObject({ state: 'running', run_id: 'run-a' });
+    expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/p/work-board/item-a/worker`);
+    expect(calls[0]!.method).toBe('GET');
+  });
+
   it('list GETs the board with the bearer', async () => {
     const { client, calls } = make({ status: 200, body: { ok: true, items: [item()], project_id: 'p' } });
     const items = await client.list('p');

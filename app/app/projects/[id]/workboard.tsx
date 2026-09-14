@@ -43,6 +43,7 @@ import {
   ActivityIndicator,
   Animated,
   Easing,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -72,6 +73,7 @@ import {
   WorkBoardClient,
   docPathFromDesignRef,
   type WorkBoardItem,
+  type WorkBoardWorkerResult,
 } from '../../../lib/work-board-client';
 import { boardErrorCopy, dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
@@ -144,6 +146,7 @@ function WorkBoardBody({
   const [newTitle, setNewTitle] = useState('');
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [workerInspector, setWorkerInspector] = useState<{ item: WorkBoardItem; result: WorkBoardWorkerResult | null; error: string | null } | null>(null);
 
   // Scope liveness. All three pieces are REACT STATE, not refs or module
   // closures: `reactCompiler` memoizes render sub-expressions that have no
@@ -344,6 +347,17 @@ function WorkBoardBody({
     [router, railId],
   );
 
+  const inspectWorker = useCallback((item: WorkBoardItem): void => {
+    setWorkerInspector({ item, result: null, error: null });
+    client.worker(projectId, item.id).then((result) => {
+      setWorkerInspector((open) => open?.item.id === item.id ? { item, result, error: null } : open);
+    }).catch((err: unknown) => {
+      setWorkerInspector((open) => open?.item.id === item.id
+        ? { item, result: null, error: err instanceof Error ? err.message : 'Could not inspect worker.' }
+        : open);
+    });
+  }, [client, projectId]);
+
   // Three-way: `archived` (SHELVED) is its own bucket — it is neither active
   // (the server already excluded it from the active lane, and re-adding it here
   // would make it drag-reorderable again) nor completed (it never counts as
@@ -353,6 +367,18 @@ function WorkBoardBody({
 
   return (
     <View style={styles.container}>
+      <Modal transparent visible={workerInspector !== null} animationType="slide" onRequestClose={() => setWorkerInspector(null)}>
+        <View style={styles.inspectorBackdrop}>
+          <View style={styles.inspectorPanel} accessible testID="work-worker-inspector">
+            <View style={styles.inspectorHeader}>
+              <Text style={styles.inspectorTitle}>{workerInspector?.item.title ?? ''}</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Close worker inspector" onPress={() => setWorkerInspector(null)}><Text style={styles.inspectorTitle}>✕</Text></Pressable>
+            </View>
+            <Text style={styles.inspectorText}>{workerInspector?.error ?? (workerInspector?.result === null || workerInspector === null ? 'Reading worker…' : workerInspector.result.state === 'running' ? `Worker is ${workerInspector.result.worker_state}.` : workerInspector.result.state === 'finished' ? 'This worker has finished.' : `Cannot determine which worker: ${workerInspector.result.detail}`)}</Text>
+            {workerInspector?.result?.state === 'running' ? <ScrollView><Text style={styles.inspectorScreen} testID="work-worker-screen">{workerInspector.result.screen || workerInspector.result.detail}</Text></ScrollView> : null}
+          </View>
+        </View>
+      </Modal>
       {indicator.visible ? (
         <WorkActivityStrip
           label={indicator.label}
@@ -408,6 +434,7 @@ function WorkBoardBody({
                     : client.update(projectId, it.id, { status: 'in_progress' }),
                 )
               }
+              onInspect={() => inspectWorker(it)}
               onRename={(title) =>
                 runMutation(it.id, client.update(projectId, it.id, { title }))
               }
@@ -683,4 +710,10 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   completedList: { maxHeight: SPACING.xxl * 8 },
+  inspectorBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
+  inspectorPanel: { maxHeight: '75%', backgroundColor: THEME.surface, padding: SPACING.lg, borderTopLeftRadius: SPACING.lg, borderTopRightRadius: SPACING.lg },
+  inspectorHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
+  inspectorTitle: { color: THEME.text_primary, fontSize: TYPOGRAPHY.body.fontSize, fontWeight: '600' },
+  inspectorText: { color: THEME.text_secondary, marginBottom: SPACING.md },
+  inspectorScreen: { color: THEME.text_primary, fontFamily: 'monospace', fontSize: TYPOGRAPHY.body_small.fontSize },
 });

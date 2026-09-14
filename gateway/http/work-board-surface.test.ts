@@ -415,6 +415,45 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
   })
 })
 
+describe('work-board HTTP surface — exact item worker inspector', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test("item A resolves A's worker and never B's", async () => {
+    const a = await store.create(SCOPE, { title: 'A' })
+    const b = await store.create(SCOPE, { title: 'B' })
+    await store.bindRun(SCOPE, a.id, 'run-a')
+    await store.bindRun(SCOPE, b.id, 'run-b')
+    const { access } = fakeRunAccess({
+      'run-a': fakeRun({ id: 'run-a', project_slug: SCOPE, worktree: '/repo/a' }),
+      'run-b': fakeRun({ id: 'run-b', project_slug: SCOPE, worktree: '/repo/b' }),
+    })
+    const inspected: string[] = []
+    const s = createWorkBoardSurface({
+      store, auth, trident_runs: access,
+      inspect_worker: async (run) => {
+        inspected.push(run.id)
+        return { state: 'working', observed_at: '2026-09-14T00:00:00Z', detail: run.worktree ?? '', screen: `screen:${run.id}` }
+      },
+    })
+    const res = await s.handler(req('GET', `/api/app/projects/proj1/work-board/${a.id}/worker`))
+    expect(await res!.json()).toMatchObject({ state: 'running', run_id: 'run-a', screen: 'screen:run-a' })
+    expect(inspected).toEqual(['run-a'])
+    expect(inspected).not.toContain('run-b')
+  })
+
+  test('finished and unresolved workers remain distinct', async () => {
+    const done = await store.create(SCOPE, { title: 'Done', status: 'done' })
+    const unknown = await store.create(SCOPE, { title: 'Unknown' })
+    await store.bindRun(SCOPE, unknown.id, 'missing-run')
+    const { access } = fakeRunAccess({})
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const doneRes = await s.handler(req('GET', `/api/app/projects/proj1/work-board/${done.id}/worker`))
+    const unknownRes = await s.handler(req('GET', `/api/app/projects/proj1/work-board/${unknown.id}/worker`))
+    expect(await doneRes!.json()).toMatchObject({ state: 'finished', run_id: null })
+    expect(await unknownRes!.json()).toMatchObject({ state: 'unknown', run_id: 'missing-run' })
+  })
+})
+
 describe('work-board HTTP surface — DELETE reason + plan-doc disposition', () => {
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
 
