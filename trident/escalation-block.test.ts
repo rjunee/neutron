@@ -271,7 +271,7 @@ describe('the OWNER sees two different words', () => {
     // schema-valid — and it was recorded as REVIEW_NOT_RUN, which is how a resume
     // re-Forges a whole round against the same wrong plan with no finding to answer. The
     // card's own headline case, reopened by the card's own remedy.
-    const withFindings = JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', key: 'a:b:c' }])
+    const withFindings = JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', file: 'a', symbol: 'b', rule: 'c', line: 1 }])
     for (const kind of ['design-gap', 'missing-dependency', 'not-converging'] as const) {
       const result = parseInnerResult(escalatingResult({ blockKind: kind, escalation: { kind, whatIsMissing: 'x', triggers: [], evidence: '', round: 2 } }))!
       expect(recordedTerminalVerdict(result, withFindings)).toBe('REQUEST_CHANGES')
@@ -296,7 +296,7 @@ describe('the OWNER sees two different words', () => {
     expect(recordedTerminalVerdict(codeResult, '[]')).toBe('REVIEW_NOT_RUN')
     // …and the same row WITH findings is a rejection, so the control is not vacuous.
     expect(
-      recordedTerminalVerdict(codeResult, JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', key: 'a:b:c' }])),
+      recordedTerminalVerdict(codeResult, JSON.stringify([{ severity: 'blocker', title: 't', evidence: 'e', file: 'a', symbol: 'b', rule: 'c', line: 1 }])),
     ).toBe('REQUEST_CHANGES')
   })
 
