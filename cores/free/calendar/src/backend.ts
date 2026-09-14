@@ -932,7 +932,11 @@ export function buildGoogleCalendarClient(
  * grows past the stub.
  */
 export function parseAgenda(description: string | undefined): string[] {
-  if (description === undefined || description.trim().length === 0) return []
+  if (description === undefined) return []
+  // 8 KiB is ample for a human-authored event description. Refuse provider
+  // payloads above it before either the line-split or agenda expressions run.
+  if (description.length > MAX_CALENDAR_DESCRIPTION_CHARS) return []
+  if (description.trim().length === 0) return []
   const lines = description.split(/\r?\n/)
   const out: string[] = []
   for (const line of lines) {
@@ -945,6 +949,8 @@ export function parseAgenda(description: string | undefined): string[] {
   }
   return out
 }
+
+export const MAX_CALENDAR_DESCRIPTION_CHARS = 8 * 1024
 
 /**
  * Compute the integer minute duration of an event. Returns 0 if either

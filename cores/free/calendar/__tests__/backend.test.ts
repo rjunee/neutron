@@ -9,6 +9,7 @@ import {
   durationMinutes,
   parseAgenda,
 } from '../index.ts'
+import { MAX_CALENDAR_DESCRIPTION_CHARS } from '../src/backend.ts'
 
 describe('buildInMemoryCalendarClient', () => {
   test('list compares timestamps by instant — non-UTC offsets do not break the window filter', async () => {
@@ -230,6 +231,12 @@ describe('buildInMemoryCalendarClient', () => {
 })
 
 describe('parseAgenda', () => {
+  test('refuses an oversized provider description and preserves ordinary parsing', () => {
+    const oversized = `- ${'x'.repeat(MAX_CALENDAR_DESCRIPTION_CHARS)}`
+    expect(parseAgenda(oversized)).toEqual([])
+    expect(parseAgenda('- ordinary item')).toEqual(['ordinary item'])
+  })
+
   test('returns an empty array on missing or empty description', () => {
     expect(parseAgenda(undefined)).toEqual([])
     expect(parseAgenda('')).toEqual([])

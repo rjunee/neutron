@@ -138,6 +138,12 @@ export function stripBoilerplate(compiledTruth: string, title: string): string {
   const kept: string[] = []
   for (const line of compiledTruth.split('\n')) {
     const t = line.trim()
+    // Generated headings and body markers are short. Preserve an oversized
+    // 8 KiB prose line verbatim without running either classification regex.
+    if (t.length > MAX_COMPILED_TRUTH_LINE_CHARS) {
+      kept.push(line)
+      continue
+    }
     // (i) generated title H1 whose label EQUALS the entity title — drop. Any
     // other H1 (a hand-authored factual heading) is KEPT.
     const h1 = /^#\s+(.*\S)\s*$/.exec(t)
@@ -150,6 +156,8 @@ export function stripBoilerplate(compiledTruth: string, title: string): string {
   }
   return kept.join('\n')
 }
+
+export const MAX_COMPILED_TRUTH_LINE_CHARS = 8 * 1024
 
 /** The scoring token set for a candidate: its title tokens (always kept as
  *  discriminators) UNION the tokens of its boilerplate-stripped compiled-truth. */

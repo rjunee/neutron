@@ -20,18 +20,25 @@
  * `entity-writer` re-validates a pre-normalised slug against.
  */
 export const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*$/
+export const MAX_ENTITY_NAME_CHARS = 256
 
 /**
  * Lower-case, replace non-alphanumeric runs with hyphens, strip leading/
- * trailing hyphens, cap at 80 chars. Returns `null` when the result doesn't
- * match {@link SLUG_REGEX} (e.g. empty input, or input with no alphanumerics).
+ * trailing hyphens, cap at 80 chars. Returns `null` for an input longer than
+ * {@link MAX_ENTITY_NAME_CHARS}, and when the result doesn't match
+ * {@link SLUG_REGEX} (e.g. empty input, or input with no alphanumerics).
  *
- * The 80-char cap guards against a rare LLM-extracted multi-KB "name" blowing
- * up the filesystem; the post-cap trailing-hyphen strip keeps the capped slug
- * grammar-valid.
+ * A rare LLM-extracted multi-KB "name" is now REFUSED at the input bound rather
+ * than normalised and then capped (#712): the normalisation ran over the whole
+ * input first, so the 80-char output cap bounded the filesystem but not the work.
+ * The 80-char cap still applies to everything that passes the bound, and the
+ * post-cap trailing-hyphen strip keeps the capped slug grammar-valid.
  */
 export function entitySlugify(input: string): string | null {
   if (typeof input !== 'string') return null
+  // Entity slugs store at most 80 characters; 256 leaves room for ordinary
+  // descriptive names while refusing pathological input before normalization.
+  if (input.length > MAX_ENTITY_NAME_CHARS) return null
   const replaced = input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   if (replaced.length === 0) return null
   if (!SLUG_REGEX.test(replaced)) return null

@@ -24,6 +24,7 @@ import {
   isMergeSafeCluster,
   DEFAULT_JACCARD_THRESHOLD,
   MIN_DISTINGUISHING_TOKENS,
+  MAX_COMPILED_TRUTH_LINE_CHARS,
   type DedupCandidate,
 } from '../reflect/jaccard.ts'
 
@@ -60,6 +61,18 @@ describe('tokenize', () => {
 })
 
 describe('stripBoilerplate (generated-only)', () => {
+  test('preserves an oversized H1 without running H1 classification and still strips an ordinary H1', () => {
+    const oversized = `# ${' '.repeat(MAX_COMPILED_TRUTH_LINE_CHARS)}Acme`
+    expect(stripBoilerplate(oversized, 'Acme')).toBe(oversized)
+    expect(stripBoilerplate('# Acme', 'Acme')).toBe('')
+  })
+
+  test('preserves an oversized generated-body line and still strips its ordinary form', () => {
+    const oversized = `Mentioned in chat (kind:${' '.repeat(MAX_COMPILED_TRUTH_LINE_CHARS)}company).`
+    expect(stripBoilerplate(oversized, 'Acme')).toBe(oversized)
+    expect(stripBoilerplate('Mentioned in chat (kind: company).', 'Acme')).toBe('')
+  })
+
   test('strips the generated title H1 (label == title) but KEEPS a factual heading', () => {
     const stripped = stripBoilerplate('# Acme\n\n## Acquired by Globex', 'Acme')
     const toks = tokenize(stripped)

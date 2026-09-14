@@ -10,6 +10,7 @@ import {
   packageNameToSlug,
   readCorePackage,
 } from '../index.ts'
+import { MAX_PACKAGE_NAME_CHARS } from '../loader.ts'
 
 let tmp: string
 
@@ -59,6 +60,13 @@ function writeCore(
 }
 
 describe('packageNameToSlug', () => {
+  test('rejects an overlong package name and preserves ordinary normalization', () => {
+    expect(() => packageNameToSlug('a'.repeat(MAX_PACKAGE_NAME_CHARS + 1))).toThrow(
+      expect.objectContaining({ code: 'manifest_invalid' }),
+    )
+    expect(packageNameToSlug('@scope/Some-Pkg')).toBe('some_pkg')
+  })
+
   test('strips @scope/ prefix and lowercases', () => {
     expect(packageNameToSlug('@neutronai/dtc-analytics')).toBe('dtc_analytics')
     expect(packageNameToSlug('@scope/Some-Pkg')).toBe('some_pkg')

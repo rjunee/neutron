@@ -52,9 +52,15 @@ import {
   type GraphSnapshot,
   type SharedProjectGraphSource,
 } from '../shared-project-memory-mirror.ts'
+import { MAX_MIRROR_SOURCE_CHARS } from '../shared-project-memory-mirror.ts'
 import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const RECEIVING = 'owner-host' // the host / owner instance slug
+
+test('mirroredSlug refuses an oversized authority before normalization and preserves ordinary input', () => {
+  expect(() => mirroredSlug('x'.repeat(MAX_MIRROR_SOURCE_CHARS + 1), 'page')).toThrow(RangeError)
+  expect(mirroredSlug('project@host', 'page')).toBe('mirror-project-host-page')
+})
 
 // ─── GBrain brain boot helper (real PGLite engine) ───────────────────────────
 
