@@ -25,6 +25,8 @@ function harness(error?: Error) {
   const specs: AgentSpec[] = [], optsSeen: Array<{ timeout_ms?: number } | undefined> = []
   const claims: string[] = [], posts: boolean[] = [], logs: unknown[] = []
   const deps: TerminalBuildWakeDeps = {
+    wakeCompleted: () => false,
+    arbitrate: async () => ({ kind: 'owner-only', question: 'Which behavior?' }),
     claimWake: async (id) => { claims.push(id); return true }, boardItemIdForRun: async () => 'board-9',
     llm: { compose: async (spec, opts) => { specs.push(spec); optsSeen.push(opts); if (error) throw error; return 'Acted.' } },
     projectChatScope: () => 'acme-scope',
@@ -117,10 +119,11 @@ describe('terminal build wake', () => {
   })
   test('redelivery after lost claim makes no duplicate turn', async () => {
     const h = harness(); let won = true
-    h.deps.claimWake = async (id) => { h.claims.push(id); const result = won; won = false; return result }
+    h.deps.wakeCompleted = () => !won
+    h.deps.claimWake = async (id) => { h.claims.push(id); won = false; return true }
     const observe = buildTerminalBuildWakeObserver(h.deps), terminal = run()
     await observe(terminal); await observe(terminal)
-    expect(h.claims).toHaveLength(2); expect(h.specs).toHaveLength(1); expect(h.posts).toHaveLength(1)
+    expect(h.claims).toHaveLength(1); expect(h.specs).toHaveLength(1); expect(h.posts).toHaveLength(1)
   })
   test('no chat, non-terminal, and unavailable substrate never claim', async () => {
     const h = harness(); const observe = buildTerminalBuildWakeObserver(h.deps)
@@ -131,10 +134,10 @@ describe('terminal build wake', () => {
     const h = harness(); h.deps.boardItemIdForRun = async () => null
     await buildTerminalBuildWakeObserver(h.deps)(run()); expect(h.specs[0]!.prompt).toContain('Board item id: none')
   })
-  test('post-claim compose failure is logged, not thrown', async () => {
+  test('compose failure stays pending and is logged, not thrown', async () => {
     const h = harness(new Error('substrate broke'))
     await expect(buildTerminalBuildWakeObserver(h.deps)(run())).resolves.toBeUndefined()
-    expect(h.claims).toHaveLength(1); expect(h.posts).toHaveLength(0); expect(h.logs[0]).toMatchObject({ error: 'substrate broke' })
+    expect(h.claims).toHaveLength(0); expect(h.posts).toHaveLength(0); expect(h.logs[0]).toMatchObject({ error: 'substrate broke' })
   })
   test('prompt renders only positive PR and omits null failure', () => {
     for (const pr of [0, null]) {

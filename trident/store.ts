@@ -1486,17 +1486,23 @@ export class TridentRunStore {
     return won ? this.get(id) : null
   }
 
-  /**
-   * TERMINAL AGENT-WAKE CLAIM (migration 0127) — atomically claim the right to
-   * dispatch this run's ONE terminal agent-wake turn. Returns true exactly once
-   * per run (the winning claim); false when already claimed, when the run is not
-   * terminal, or when the id does not exist — so redelivery, retry, and a
-   * gateway boot that re-runs terminal observers can never fan out duplicate
-   * agent turns. SINGLE WRITER of `agent_waked_at`: the column is DELIBERATELY
-   * absent from `TridentRun`, `TridentRunUpdate`, `update()`, `save()` and
-   * `saveIfActive()` (same ownership discipline as `crash_recoveries`), so no
-   * full-snapshot save can ever un-claim a delivered wake.
-   */
+  /** Terminal rows are the durable inbox; completion is written only after admission. */
+  listPendingAgentWakes(): TridentRun[] {
+    return this.db.prepare<TridentRunDbRow, []>(
+      `SELECT ${COLS} FROM code_trident_runs
+       WHERE phase IN ${TERMINAL_PHASE_SQL} AND agent_waked_at IS NULL
+         AND chat_id <> ''
+       ORDER BY last_advanced_at ASC`,
+    ).all().map(rowToRun)
+  }
+
+  agentWakeCompleted(id: string): boolean {
+    return this.db.prepare<{ completed: number }, [string]>(
+      'SELECT agent_waked_at IS NOT NULL AS completed FROM code_trident_runs WHERE id = ?',
+    ).get(id)?.completed === 1
+  }
+
+  /** Single writer of the completion stamp, excluded from snapshot saves. */
   async claimAgentWake(id: string): Promise<boolean> {
     return this.db.transaction((tx) => {
       const res = tx.runSync(

@@ -337,8 +337,8 @@ export interface BuildTridentOrchestratorOptions {
    * arbiter asked to adjudicate something it cannot see, or cannot legally choose,
    * is worse than one that is not asked.
    *
-   * ABSENT → byte-identical to today: a resolver escalation aborts the rebase and
-   * posts its specific question. So does `{kind:'unavailable'}`.
+   * ABSENT: a resolver escalation aborts the rebase and returns its specific
+   * question to the project decision turn. So does `{kind:'unavailable'}`.
    */
   arbitrate?: TridentArbiter
   /**

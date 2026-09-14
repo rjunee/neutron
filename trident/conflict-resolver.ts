@@ -33,8 +33,8 @@
  *   - `RESOLVED`         → conflicts staged, tests green → `{ resolved: true }`.
  *   - `ESCALATE: <q>`    → the conflict is genuinely ambiguous (two builds
  *                          changed the SAME behaviour incompatibly) → the merge
- *                          fails with that SPECIFIC question, which the terminal
- *                          delivery posts to chat (never a raw "merge failed").
+ *                          fails with that specific question, which the project
+ *                          conversation receives as evidence.
  *
  * BOUNDED: a single turn with a wall-clock timeout (default 8 min, safely under
  * the merge path's own budget), a FILE+SHELL tool grant (Read/Glob/Grep/Edit/

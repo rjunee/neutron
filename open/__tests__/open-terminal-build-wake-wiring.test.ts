@@ -2,19 +2,20 @@
  * Terminal-build wake wiring at the Open composition boundary.
  *
  * The DELETE-card test boots the full composition and proves the board
- * terminator invokes the claim-first observer: the run is stopped, its raw
- * `agent_waked_at` claim is written, and exactly one discriminating wake reply
+ * terminator wakes the durable decision loop: the run is stopped, its raw
+ * `agent_waked_at` completion is written, and exactly one discriminating wake reply
  * reaches the originating socket. The source-scoped assertions cover the
  * codegen bind, tick-loop pass, and single construction using the honest
  * coverage precedent established by `codegen-cancel-composition.test.ts`.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { SupervisedLoop } from '@neutronai/loop'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
@@ -52,7 +53,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 function recordingSubstrate(opts: ClaudeCodeSubstrateOptions): Substrate {
   return {
     start(spec: AgentSpec): SessionHandle {
+      if (opts.substrate_instance_id.includes('arbiter')) decisionOrder.push('arbiter')
       if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) {
+        decisionOrder.push('project')
         wakeDispatches.push({
           instance_id: opts.substrate_instance_id,
           project_id: opts.project_id,
@@ -61,8 +64,11 @@ function recordingSubstrate(opts: ClaudeCodeSubstrateOptions): Substrate {
         })
       }
       async function* events(): AsyncGenerator<Event> {
-        if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) await wakeGate
-        yield { kind: 'token', text: spec.prompt.includes('[TERMINAL BUILD WAKE]') ? 'WAKE-ACT-1' : 'ok' }
+        if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) {
+          await wakeGate
+          if (failWake) throw new Error('project temporarily unavailable')
+        }
+        yield { kind: 'token', text: spec.prompt.includes('[TERMINAL BUILD WAKE]') ? wakeReply : 'ok' }
         if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) wakeFinished = true
         yield {
           kind: 'completion',
@@ -96,9 +102,15 @@ let harness: Harness | null = null
 let releaseWake: (() => void) | undefined
 let wakeGate: Promise<void> | undefined
 let wakeFinished = false
+let failWake = false
+let wakeReply = 'WAKE-ACT-1'
+const decisionOrder: string[] = []
 
 beforeEach(() => {
   wakeDispatches.length = 0
+  decisionOrder.length = 0
+  failWake = false
+  wakeReply = 'WAKE-ACT-1'
   wakeGate = undefined
   releaseWake = undefined
   wakeFinished = false
@@ -277,6 +289,11 @@ describe('Open terminal-build wake observer wiring', () => {
       await observe!({ ...run, phase: 'failed' })
       await waitFor(() => wakeDispatches.length === 1)
       expect(wakeFinished).toBe(false)
+      expect(runs.agentWakeCompleted(run.id)).toBe(false)
+      expect(runs.listPendingAgentWakes().map(r => r.id)).toContain(run.id)
+      const decisionLoop = composition.loop_registry!.list().find(loop => loop.name === 'terminal-build-decisions')
+      expect(decisionLoop?.isActive?.()).toBe(true)
+      expect(decisionLoop?.cadenceMs).toBe(60_000)
       releaseWake!()
       await waitFor(() => wakeFinished)
       const replies = () => db.all<{ topic_id: string }>(
@@ -291,6 +308,41 @@ describe('Open terminal-build wake observer wiring', () => {
       expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
     } finally {
       releaseWake?.()
+      for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
+      db.close()
+    }
+  }, 30_000)
+
+  test('the armed gateway sweep re-admits persisted questions without another terminal event', async () => {
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+    const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+    await seedProject(db, 'acme')
+    const runs = new TridentRunStore(db)
+    const run = await runs.create({ slug: 'restart-question', project_slug: workBoardScopeKey('owner', 'acme'),
+      repo_path: '/tmp/repo', task: 'Which behavior?', chat_id: 'app:owner', channel_kind: 'app_socket' })
+    await runs.update(run.id, { phase: 'failed', failure_reason: 'Worker asks: Which behavior?' })
+    let sweep: SupervisedLoop | undefined
+    const start = SupervisedLoop.prototype.start
+    const capture = spyOn(SupervisedLoop.prototype, 'start').mockImplementation(function(this: SupervisedLoop) {
+      if (this.describe().name === 'terminal-build-decisions') sweep = this
+      return start.call(this)
+    })
+    const composition = await buildOpenGraphComposer({ env: process.env, ownerBearer: OWNER_BEARER,
+      substrateFactory: recordingSubstrate })({ db, project_slug: 'owner' })
+    capture.mockRestore()
+    try {
+      expect(sweep?.describe().isActive?.()).toBe(true)
+      failWake = true
+      await sweep!.runOnce()
+      expect(runs.listPendingAgentWakes().map(r => r.id)).toEqual([run.id])
+      failWake = false
+      wakeReply = 'Project asks: Which behavior should remain?'
+      await sweep!.runOnce()
+      expect(runs.agentWakeCompleted(run.id)).toBe(true)
+      expect(decisionOrder).toEqual(['arbiter', 'project', 'arbiter', 'project'])
+      expect(db.all<{ topic_id: string }>('SELECT topic_id FROM button_prompts WHERE body = ?', [wakeReply]))
+        .toEqual([{ topic_id: 'app:owner' }])
+    } finally {
       for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
       db.close()
     }

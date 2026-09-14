@@ -1789,8 +1789,9 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    red dot + "Failed" tag + the run's `failure_reason` one-liner + the ▶/↻ retry —
 >    instead of the old revert-to-upcoming-and-unlink (which lost the failure).
 > 3. **Terminal builds announce in chat.** The tick loop's terminal delivery
->    (`trident/delivery.ts`) posts "✅ `<slug>` — build done, merged" / "❌ `<slug>` —
->    build failed: `<reason>`" to the originating chat via the run's `channel_kind`.
+>    (`trident/delivery.ts`) posts completion or passive stopped status to the
+>    originating chat. Failure evidence goes to the project decision turn, which
+>    consults the arbiter before deciding whether owner input is needed.
 >    On Open (app_socket) delivery now goes through the durable **app-ws adapter**
 >    sink (`open/composer.ts` → `trident.delivery_sink`) — the bare `ChannelRouter`
 >    has no app_socket adapter, so completions were silently dropped. Board-dispatched
@@ -8579,29 +8580,12 @@ flag; built unconditionally so the manage surface works even on an LLM-less box.
   (`skill-forge/command.ts`, a `ChatCommandFilter` chained into `buildLandingStack`
   alongside the Cores filters). Both call the SAME `SkillForgeBackend` — the agent can
   list / approve / decline exactly what the owner can.
-- **Notifier — the proposal is DELIVERED into the owner's chat.** The composer's
-  `ProposalNotifier` posts the proposal message through `deliver(topic, envelope)`
-  (`gateway/http/deliver.ts`, the ONE out-of-turn delivery seam) on the owner's bare
-  `app:<owner>` topic, at **`durability: 'inert'`** — an already-resolved agent history
-  turn (speaker `__system__`), the same shape the `/api/app/system-notice` route and the
-  proactive brief use. `'inert'` and not the transient `'none'` pill because a proposal
-  is produced when a Trident run *finishes*, exactly when nobody is watching; a live-only
-  bubble would be gone by the time he opened the app. It is a **system notice, not the
-  owner speaking** — it does not route through chat/send and spends no model turn.
-  Delivery is **additive**: the row is persisted before notify and `forge.ts` swallows a
-  notify throw (`proposal_persisted_but_notify_failed`), so the `skill_forge_proposals`
-  row stays the source of truth and `/skills list` is unchanged. **One message per
-  proposal, and a run yields at most one** — `onWorkflowCompleted` creates a single
-  proposal and returns early on a duplicate `workflowSignature`, so a repeated workflow
-  re-notifies zero times. The message quotes the real decision surface
-  (`/skills approve|decline <id>`) with the proposal's own id.
-  - *Superseded:* this notifier was previously a `log.info`-only sink, justified by
-    "Open is WS-native + single-owner, no Telegram channel". That premise expired when
-    F5 landed `deliver` — Open **does** have an out-of-turn channel. The log-only sink
-    meant a proposal was drafted, persisted, and never announced: the owner could only
-    find one by typing `/skills`, i.e. by already suspecting it existed. Gate:
-    `open/__tests__/open-skill-forge-wiring.test.ts` asserts the durable turn lands in
-    the owner's topic (mutation-verified — deleting the `deliver` call fails it).
+- **Proposal routing (#796).** The proposal remains in the Skill Forge store.
+  The terminal project decision turn reads `skill_forge_list` and decides whether
+  to offer it to the owner. The notifier does not send an automatic chat offer.
+  Terminal results remain pending until their project decision is durably posted;
+  the gateway's supervised retry loop revisits them every minute and on terminal
+  transitions. Restart and unavailable admission leave those rows pending.
 
 ## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
 

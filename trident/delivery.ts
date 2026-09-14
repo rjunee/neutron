@@ -1443,8 +1443,12 @@ export function buildTridentDelivery(
       const channel_kind = run.channel_kind ?? fallback_channel_kind
       const topic = topicForRun(run, channel_kind)
       if (topic === null) return
-      const composed = compose(run)
-      if (composed === null) return
+      const result = compose(run)
+      if (result === null) return
+      // Failure evidence and advice belong to the project decision turn.
+      const composed = run.phase === 'failed'
+        ? { text: '🛑 Build stopped; the project conversation has the result for investigation.' }
+        : result
       const message: OutgoingMessage = { topic, text: composed.text }
       if (composed.inline_choices !== undefined && composed.inline_choices.length > 0) {
         message.inline_choices = composed.inline_choices
