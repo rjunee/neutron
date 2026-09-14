@@ -350,7 +350,7 @@ export class ReminderStore {
     return true
   }
 
-  /** Mark a reminder fired. Used by the tick loop after the dispatch returns. */
+  /** Mark a reminder fired after an affirmative delivery observation. */
   async markFired(id: string, fired_at = Date.now() / 1000): Promise<void> {
     await this.db.run(
       `UPDATE reminders SET status = 'fired', fired_at = ? WHERE id = ? AND status = 'pending'`,
@@ -369,8 +369,8 @@ export class ReminderStore {
    *
    * Returns `true` iff the row was advanced (was `pending` AND recurring —
    * a coarse `recurrence` label OR a cron `recurrence_spec`). Returns `false`
-   * for one-shot rows or already-fired/cancelled rows — caller should fall
-   * back to `markFired` on `false`.
+   * for one-shot rows or already-fired/cancelled rows. A refusal does not
+   * establish delivery and must not manufacture a fired stamp.
    */
   async advanceRecurrence(id: string, next_fire_at: number): Promise<boolean> {
     const before = this.get(id)

@@ -61,7 +61,7 @@ async function startHarness(): Promise<Harness> {
     topic_handler: async () => {},
     approval_notifier: { notify: async () => undefined },
     watchdog_notifier: { notify: async () => undefined },
-    reminder_dispatcher: { dispatch: async () => undefined },
+    reminder_dispatcher: { dispatch: async () => ({ state: 'delivered' }) },
     heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
     platform: STUB_PLATFORM,
   })

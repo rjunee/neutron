@@ -4346,14 +4346,17 @@ per-project `reminders` table. Three parts:
     `0 */6 * * *`). This is the M2-cutover parity target: real cron reminders
     migrate verbatim.
 - **Tick loop** (`reminders/tick.ts`) — a single-flight `setInterval` that
-  claims each due row BEFORE dispatch (crash-safe at-most-once, #319) and
-  advances it. Both cadence kinds resolve through ONE `computeNextFire(reminder,
+  persists each attempt BEFORE dispatch in `reminder_delivery` and records
+  delivered, known-not-delivered, or not-yet-known observations. Only affirmative
+  durable outbound acceptance earns a fired stamp. Five attempts or one hour
+  bound retries across restarts; uncertainty may produce a duplicate within that
+  budget. Exhaustion retains the observation and advances recurring schedules
+  without a delivery stamp. Both cadence kinds resolve through ONE `computeNextFire(reminder,
   now, tz)`: a cron spec computes the next DST-correct wall-clock instant
   strictly after now (via `@neutronai/cron`'s `cron-standard.ts` evaluator — the
   classic-crontab sibling of the systemd-`OnCalendar` parser in `calendar.ts`,
   with Vixie dom/dow OR semantics and spring-forward gap-skip); a coarse label
-  uses the fixed delta. A corrupt cron fires once then retires so it can't wedge
-  the loop.
+  uses the fixed delta. A corrupt cron degrades to a one-shot with the same bounded delivery policy.
   - **Which clock "9pm" means (ISSUES #40).** A cron cadence is resolved in the
     OWNER's zone, read per fire from `instance_metadata.timezone` via
     `readOwnerTimezone` — the same source and the same resolve-at-invocation
@@ -4379,7 +4382,7 @@ per-project `reminders` table. Three parts:
     ONE more time at the old (wrong) hour; `advanceRecurrence` then recomputes in
     the owner's zone and every later occurrence is correct. Nothing is dropped or
     rewritten. `fire_at` is deliberately NOT backfilled at boot: it doubles as
-    the owner's manual reschedule/snooze slot (see `revertRecurrenceAdvance`), so
+    the owner's manual reschedule/snooze slot (protected by the settlement occurrence check), so
     a boot-time recompute would clobber a deliberate one-off move. An owner who
     doesn't want to wait out a long cadence can reschedule or recreate that
     reminder to correct it immediately.
