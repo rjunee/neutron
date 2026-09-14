@@ -55,8 +55,8 @@ describe('encodeKeys', () => {
   })
 
   test('numbered-option auto-stop: digit then enter', () => {
-    // /rate-limit-options "Stop and wait" = option 3 → "3" + Enter.
-    expect(encodeKeys(['3', 'enter'])).toBe('3\r')
+    // The measured usage-limit picker has "Stop and wait" at option 1.
+    expect(encodeKeys(['1', 'enter'])).toBe('1\r')
   })
 
   test('double-escape recovery sequence', () => {

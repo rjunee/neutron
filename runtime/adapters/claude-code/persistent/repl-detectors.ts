@@ -20,15 +20,12 @@ import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detect
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
 import type { ReplSession } from './repl-session.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
+import { createRateLimitOptionsDetectors } from './rate-limit-options-detector.ts'
 import {
   COMPACT_RESUME_FULL_RE,
   COMPACT_RESUME_SUMMARY_RE,
   DEV_CHANNEL_DISCLAIMER_RE,
   DISCLAIMER_BOTTOM_N,
-  RATE_LIMIT_OPTIONS_BOTTOM_N,
-  RATE_LIMIT_OPTIONS_DEBOUNCE_MS,
-  RATE_LIMIT_OPTIONS_RE,
-  RATE_LIMIT_STOP_RE,
   TOOL_USE_QUESTION_RE,
   TOOL_USE_SELECTOR_RE,
 } from './signatures.ts'
@@ -99,24 +96,22 @@ export function registerReplDetectors(
       keys: ['1', 'enter'],
     })
   }
-  // P1: /rate-limit-options org-cap auto-stop (master-table row #4). When the
-  // Claude org hits its monthly usage cap, CC injects an interactive picker that
-  // blocks the REPL until an option is chosen. Ryan 2026-05-23 directive: "I need
-  // you to handle when this pane appears. Just select stop and wait for limit to
-  // reset." Option 3 = "Stop and wait for limit to reset", so `3`+`enter` selects
-  // it (position-independent — pressing `3` highlights option 3 regardless of the
-  // cursor's resting row).
+  // P1: usage-limit auto-stop (master-table row #4). Claude Code 2.1.270 renders
+  // the stop choice as option 1 and does NOT render the `/rate-limit-options`
+  // command name. Register mutually-exclusive recognised/unrecognised detectors:
+  // the measured picker selects 1; a picker in the same family whose stop row has
+  // changed is notify-only, so screen drift is loud instead of silently accepted.
   //
-  // The positional bottom-30 guard (`RATE_LIMIT_OPTIONS_BOTTOM_N`) is LOAD-
-  // BEARING and unique to this detector: pressing `3` STOPS CC, so NO new output
+  // The positional bottom-30 guard is LOAD-BEARING and unique to this detector:
+  // pressing `1` STOPS CC, so NO new output
   // scrolls the picker text away afterward — it just sits in the ring until the
   // monthly cap resets. Without the bottom-N window the stale picker text would
   // satisfy `present` on every later tick and `select-stop` would re-inject
-  // `3`+Enter into the dead input for days (the legacy harness PR #132 r1). Once CC has
+  // `1`+Enter into the dead input for days (the legacy harness PR #132 r1). Once CC has
   // stopped, idle whitespace / a shell prompt pushes the picker text up past the
   // bottom-30 threshold, which lets the detector correctly STOP firing. The
   // framework's bottom-N windowing (`buildDetectorContext`) provides this guard;
-  // the latch + debounce-before-await make the `3`+enter fire-once per rising
+  // the latch + debounce-before-await make the `1`+enter fire-once per rising
   // edge (invariant §4) so a transport failure can't double-send.
   //
   // The the legacy harness "cheap viewport pre-check gates the recapture" lesson (Argus PR
@@ -124,14 +119,7 @@ export function registerReplDetectors(
   // captures/min) is architecturally obviated here: Neutron's ring is an
   // in-memory byte log, so the bottom-N read (`bottomNLines`) is already the
   // cheap viewport check — there is no separate scrollback recapture to gate.
-  session.scanner.register({
-    id: 'rate-limit-options-stop',
-    bottomN: RATE_LIMIT_OPTIONS_BOTTOM_N,
-    debounceMs: RATE_LIMIT_OPTIONS_DEBOUNCE_MS,
-    present: (ctx) =>
-      RATE_LIMIT_OPTIONS_RE.test(ctx.normalized) && RATE_LIMIT_STOP_RE.test(ctx.normalized),
-    keys: ['3', 'enter'],
-  })
+  for (const detector of createRateLimitOptionsDetectors()) session.scanner.register(detector)
   // P1: clear CC's compact-resume picker (the summary-vs-full menu shown when
   // resuming an auto-compacted session). EXACT-STRING match on one of the two
   // literal option labels — NOTHING broader. A prior broad
@@ -164,7 +152,7 @@ export function registerReplDetectors(
   // in the normal path — this is a pure safety net for if it ever appears.
   session.scanner.register(createResumePickerDetector())
   // P2: rate-limit / overload BANNER alert (master-table row #10). DISTINCT from
-  // the `rate-limit-options-stop` detector above — that PRESSES `3` on the
+  // the `rate-limit-options-stop` detector above — that PRESSES `1` on the
   // interactive ORG-CAP picker; THIS passively notices the temporary / usage-cap
   // BANNER CC prints and edge-fires a NOTIFY-ONLY alert (no keystroke, no
   // auto-retry — those are row #4's job). One detector per severity, so the

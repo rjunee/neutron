@@ -9,7 +9,16 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import {
+  RATE_LIMIT_OPTIONS_STOP_ID,
+  RATE_LIMIT_OPTIONS_UNRECOGNIZED_ID,
+  createRateLimitOptionsDetectors,
+} from '../rate-limit-options-detector.ts'
 import { OutputScanner, stripDocQuotes, DEFAULT_BOTTOM_N } from '../output-scan.ts'
+import { runOutputScan } from '../signatures.ts'
+import type { PtyChild } from '../pty-host.ts'
+import type { ReplSession } from '../repl-session.ts'
+import type { RateLimitOptionsUnrecognizedNotice } from '../types.ts'
 
 /** A detector that fires `keys` when `needle` appears in the normalized view. */
 function sigDetector(id: string, needle: string, extra: Record<string, unknown> = {}) {
@@ -216,47 +225,30 @@ describe('OutputScanner — registration', () => {
     expect(s.scan(live, 6001).map((f) => f.id)).toEqual(['tool-use-approve']) // past floor
   })
 
-  test('P1 rate-limit-options-stop: both cues in bottom-N fire 3+enter; doc-quoted slash does NOT', () => {
-    // Mirrors the substrate registration (port row #4): the `/rate-limit-options`
-    // slash command name AND option 3's verbatim `Stop and wait for limit to
-    // reset`, both matched on the normalized (whitespace-stripped) view, within
-    // the bottom-30 window. `3`+`enter` selects "Stop and wait" (position-
-    // independent). Ryan 2026-05-23 directive.
-    const OPTIONS = /\/rate-limit-options/i
-    const STOP = /stopandwaitforlimittoreset/i
+  test('P1 usage-limit picker: measured frame stops; changed stop row is unrecognised', () => {
     const mk = () => {
       const s = new OutputScanner()
-      s.register({
-        id: 'rate-limit-options-stop',
-        bottomN: 30,
-        debounceMs: 60_000,
-        present: (ctx: { normalized: string }) => OPTIONS.test(ctx.normalized) && STOP.test(ctx.normalized),
-        keys: ['3', 'enter'] as const,
-      })
+      for (const detector of createRateLimitOptionsDetectors()) s.register(detector)
       return s
     }
 
-    // BOTH cues present (Ink shreds the picker across cursor moves) → fires
-    // `3`+`enter`.
+    // Raw frame transcribed from Claude Code 2.1.270. The command name is absent
+    // and Stop is option 1, so the production detector must fire `1`+Enter.
     const live =
-      'You[8G hit your[16G org limit\n/rate-limit-options\n  1. Upgrade\n  2. Switch model\n❯ 3. Stop and wait for limit to reset'
+      'What do you want to do?\n\n❯ 1. Stop and wait for limit to reset\n  2. Switch to usage credits\n  3. Upgrade your plan\n\nEnter to confirm · Esc to cancel'
     const fired = mk().scan(live, 0)
-    expect(fired.map((f) => f.id)).toEqual(['rate-limit-options-stop'])
-    expect(fired[0]?.keys).toEqual(['3', 'enter'])
+    expect(fired.map((f) => f.id)).toEqual([RATE_LIMIT_OPTIONS_STOP_ID])
+    expect(fired[0]?.keys).toEqual(['1', 'enter'])
 
-    // A doc-quote of the slash command (the option-3 line still present, e.g. a
-    // brief or this very PR) does NOT fire: stripDocQuotes blanks the inline-
-    // backtick span so `/rate-limit-options` never reaches the normalized view.
-    const quoted =
-      'CC injects the `/rate-limit-options` picker; we auto-press\nStop and wait for limit to reset (option 3).'
-    expect(mk().scan(quoted, 0).length).toBe(0)
-    // Fenced quote of both cues also does NOT fire (whole block dropped).
-    const fenced = '```\n/rate-limit-options\nStop and wait for limit to reset\n```'
-    expect(mk().scan(fenced, 0).length).toBe(0)
+    // The picker family remains recognisable, but its stop row changed. This
+    // emits a notify-only unrecognised outcome and never guesses a keystroke.
+    const changed = live.replace('1. Stop and wait for limit to reset', '1. Pause until usage resets')
+    const unknown = mk().scan(changed, 0)
+    expect(unknown.map((f) => f.id)).toEqual([RATE_LIMIT_OPTIONS_UNRECOGNIZED_ID])
+    expect(unknown[0]?.keys).toBeUndefined()
 
-    // Single cue only — slash command with no option-3 text (a conversational
-    // mention) does NOT fire.
-    expect(mk().scan('run /rate-limit-options to see your usage', 0).length).toBe(0)
+    // Normal conversation containing a usage phrase is not picker chrome.
+    expect(mk().scan('You can upgrade your plan later.', 0).length).toBe(0)
 
     // Fire-once: debounce stamped BEFORE return, so an identical next frame is
     // latched and a re-arm within 60s is suppressed by the floor.
@@ -266,7 +258,44 @@ describe('OutputScanner — registration', () => {
     expect(s.scan('idle prompt', 2).length).toBe(0) // falling edge clears latch
     expect(s.scan(live, 30_000).length).toBe(0) // rising edge but within 60s floor
     expect(s.scan('idle prompt', 61_000).length).toBe(0) // falling edge again
-    expect(s.scan(live, 61_001).map((f) => f.id)).toEqual(['rate-limit-options-stop']) // past floor
+    expect(s.scan(live, 61_001).map((f) => f.id)).toEqual([RATE_LIMIT_OPTIONS_STOP_ID]) // past floor
+  })
+
+  test('P1 unrecognised usage-limit picker is surfaced and sends no key', () => {
+    const statuses: unknown[] = []
+    const notices: RateLimitOptionsUnrecognizedNotice[] = []
+    const writes: string[] = []
+    const session = {
+      sessionId: '12345678-rest',
+      ring: { text: () => '' },
+      scanner: { scan: () => [{ id: RATE_LIMIT_OPTIONS_UNRECOGNIZED_ID }] },
+      activeTurn: { channel: { push: (event: unknown) => statuses.push(event) } },
+    } as unknown as ReplSession
+    const child = { write: (text: string) => writes.push(text) } as unknown as PtyChild
+
+    runOutputScan(
+      session,
+      child,
+      {
+        substrate_instance_id: 'test-instance',
+        onRateLimitOptionsUnrecognized: (notice) => {
+          notices.push(notice)
+        },
+      },
+      0,
+    )
+
+    expect(writes).toEqual([])
+    expect(statuses).toEqual([
+      {
+        kind: 'status',
+        message:
+          '🚧 Claude usage-limit picker was not recognised; auto-stop refused to select an unknown option.',
+      },
+    ])
+    expect(notices).toEqual([
+      { reason: 'rate_limit_options_unrecognized', sessionId: '12345678-rest' },
+    ])
   })
 
   test('the disclaimer-style detector: a single Enter on the rising edge', () => {
