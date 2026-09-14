@@ -67,6 +67,7 @@ async function mountRail(
     ['acme', 'attention'],
     ['birch', 'idle'],
   ],
+  notice?: { kind: 'cached' | 'failed'; text: string },
 ) {
   return mountScreen(
     createElement(ProjectRail, {
@@ -81,9 +82,34 @@ async function mountRail(
         opened.push(id);
       },
       reduceMotionOverride: true,
+      notice,
     }),
   );
 }
+
+describe('project-list refresh notice', () => {
+  it('renders deliberate cache use as a visible saved-list notice', async () => {
+    const screen = await mountRail('willow', [], {
+      kind: 'cached',
+      text: 'Offline — showing saved projects.',
+    });
+    expect(screen.byTestId('project-rail-cached-notice')?.textContent).toContain(
+      'showing saved projects',
+    );
+    screen.unmount();
+  });
+
+  it('renders a refresh failure through the alert channel', async () => {
+    const screen = await mountRail('willow', [], {
+      kind: 'failed',
+      text: 'Projects could not refresh.',
+    });
+    const notice = screen.byTestId('project-rail-failed-notice');
+    expect(notice?.textContent).toContain('could not refresh');
+    expect(notice?.getAttribute('role')).toBe('alert');
+    screen.unmount();
+  });
+});
 
 describe('a rail row with no activity', () => {
   it('draws no dot at all — the hollow resting ring is gone', async () => {

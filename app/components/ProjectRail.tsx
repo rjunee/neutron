@@ -66,6 +66,8 @@ export interface ProjectRailProps {
   onOpenActivity?: (projectId: string) => void;
   /** Test seam — overrides the async reduce-motion probe. */
   reduceMotionOverride?: boolean;
+  /** Visible refresh outcome; cache use and failures must never look fresh. */
+  notice?: { kind: 'cached' | 'failed'; text: string } | null;
 }
 
 /** The corner activity dot. Pulses (work) under motion; static otherwise. */
@@ -313,6 +315,7 @@ export function ProjectRail({
   onCreate,
   onOpenActivity,
   reduceMotionOverride,
+  notice,
 }: ProjectRailProps) {
   // No-op default so a rail rendered without the inspector wired still shows a dot
   // that does nothing, rather than throwing on tap.
@@ -335,6 +338,15 @@ export function ProjectRail({
 
   return (
     <View style={styles.rail} testID="project-rail">
+      {notice !== null && notice !== undefined ? (
+        <Text
+          accessibilityRole={notice.kind === 'failed' ? 'alert' : 'text'}
+          testID={`project-rail-${notice.kind}-notice`}
+          style={[styles.refreshNotice, notice.kind === 'failed' && styles.refreshFailure]}
+        >
+          {notice.text}
+        </Text>
+      ) : null}
       <ScrollView
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -389,6 +401,14 @@ const styles = StyleSheet.create({
     borderRightWidth: 1,
     borderRightColor: THEME.hairline,
   },
+  refreshNotice: {
+    ...TYPOGRAPHY.caption,
+    color: THEME.text_muted,
+    paddingHorizontal: SPACING.xs,
+    paddingTop: SPACING.xs,
+    textAlign: 'center',
+  },
+  refreshFailure: { color: THEME.danger },
   railContent: {
     alignItems: 'center',
     paddingVertical: SPACING.sm,
