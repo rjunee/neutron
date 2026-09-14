@@ -14,7 +14,7 @@
  *     `<embed>`, `<base>`, `<meta>`, `<link>`, `<frame>`/`<frameset>`,
  *     `<applet>`;
  *   - strips EVERY inline event handler (`on*` attribute) from all elements;
- *   - neutralizes `javascript:` / `vbscript:` / `data:text/html` URLs on
+ *   - neutralizes `javascript:` / `vbscript:` / `data:` URLs on
  *     href/src/action/xlink:href;
  *   - keeps `<style>` blocks (head + body) and inline `style` attributes so the
  *     page keeps its CSS.
@@ -77,7 +77,7 @@ function isDangerousUrl(value: string): boolean {
   return (
     normalized.startsWith('javascript:') ||
     normalized.startsWith('vbscript:') ||
-    normalized.startsWith('data:text/html')
+    normalized.startsWith('data:')
   )
 }
 

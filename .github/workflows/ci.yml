@@ -164,8 +164,8 @@ name: ci
 # as pushing to the repo. Vendoring `gbrain` is what would close it properly, by
 # putting the content in the tree under review instead of behind a fetch.
 #
-# THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` and
-# `CodeQL` are REQUIRED status checks on `main` with a strict up-to-date policy.
+# THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` is the
+# sole REQUIRED status check on `main`, with a strict up-to-date policy.
 # A required context that never reports blocks every PR forever, so the shards
 # are named `shard` and `test` is an AGGREGATOR that needs them all. Renaming
 # `test`, or making it anything other than a job that fails when any gate fails,
