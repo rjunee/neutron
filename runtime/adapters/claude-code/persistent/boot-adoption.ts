@@ -1281,22 +1281,10 @@ function rowStillNames(
  * evicts **B's** entry. B's child is alive, its row names it, and the map every turn
  * resolves through no longer has it.
  *
- * THE PATTERN IS `child-exit-wiring.ts`'s, INCLUDING THE REJECTION ARM: a pooled promise
- * that REJECTED owns no child, so deleting it is right and dropping that arm would wedge a
- * rejected entry under the key forever.
- *
- * SYNCHRONOUS, VIA `Bun.peek`, AND THAT IS A DELIBERATE DIFFERENCE FROM THE MODEL.
- * `child-exit-wiring` awaits the pooled promise; two of this module's three cleanup paths
- * (`release`, `releaseWithReason`) are synchronous by contract — `release` is called from
- * `claimRowOrUnwind`'s `publish`, which is `() => RowAdoptionOutcome` — so awaiting there
- * would ripple through the claim's signature. `Bun.peek` is the same synchronous-mirror
- * read `pool.ts`'s shutdown partition already uses on this map, and using ONE form at all
- * three sites is the point: a mixed approach would be this branch's sibling pattern again,
- * with two sites guarded one way and the third another.
- *
- * A PENDING entry is not ours. Ours is installed as `Promise.resolve(session)` — already
- * fulfilled — so anything still pending under this key belongs to a spawn somebody else
- * started, and is left alone.
+ * THE PATTERN IS `child-exit-wiring.ts`'s: the session remembers the exact promise under
+ * which it was published, and cleanup compares the map against that promise. Promise
+ * settlement says nothing about ownership: fulfilled, rejected, and pending entries all
+ * follow the same identity rule.
  *
  * WORTH KNOWING WHAT THE "OURS" ARM IS FOR. Measured while testing this: none of the
  * three cleanup paths currently runs with this pass's OWN session in the pool —
@@ -1309,16 +1297,8 @@ function rowStillNames(
  * only level where all four arms are observable.
  */
 export function deleteOwnPoolEntry(sessionKey: string, session: ReplSession): void {
-  const pooled = pool.get(sessionKey)
-  if (pooled === undefined) return
-  const status = Bun.peek.status(pooled)
-  if (status === 'rejected') {
-    // Owns no child. Deleting it is the point — see the note above.
-    pool.delete(sessionKey)
-    return
-  }
-  if (status !== 'fulfilled') return
-  if ((Bun.peek(pooled) as ReplSession) === session) pool.delete(sessionKey)
+  const ownEntry = session.pooledAs
+  if (ownEntry !== undefined && pool.get(sessionKey) === ownEntry) pool.delete(sessionKey)
 }
 
 /**
