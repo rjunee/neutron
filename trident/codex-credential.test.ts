@@ -24,7 +24,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
-import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
+import { codexAuthPath, codexProjectHome, readMaterializedAuth } from './codex-auth.ts'
 import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
   buildRunCodexHomeResolver,
@@ -141,7 +141,7 @@ describe('CodexCredentialService', () => {
 
 describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () => {
   const PID = 'proj-alpha'
-  const projectHome = (): string => join(codexHome, 'projects', PID)
+  const projectHome = (): string => codexProjectHome(codexHome, PID)
 
   test('connect defaults to GLOBAL scope', async () => {
     const svc = newService()

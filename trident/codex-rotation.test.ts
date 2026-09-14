@@ -17,7 +17,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { asOwnerHandle, ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
-import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
+import { codexAuthPath, codexProjectHome, readMaterializedAuth } from './codex-auth.ts'
 import {
   CODEX_CREDENTIAL_SERVICE,
   CodexCredentialService,
@@ -878,7 +878,15 @@ describe('the multi-seat credential service', () => {
       rotation.setCooldown(OWNER, s, { cooling_until: NOW + 86_400_000, cooling_reason: 'long-window' })
     }
     const home = svc.resolveActiveCodexHome(OWNER, 'pinned')
-    expect(home).toBe(join(codexHome, 'projects', 'pinned'))
+    // WHAT CHANGED, AND WHY THIS IS NOT A RE-POINTED LITERAL (#637). This line used to
+    // retype the override dir as `projects/<project_id>`. The project segment is now a
+    // fixed-width 128-bit digest, so that spelling is stale — but the PROPERTY this test
+    // exists for is untouched: with BOTH global seats cooled, the override resolves to
+    // the PROJECT home rather than to anything rotation would have picked. So the
+    // expectation is derived through the production helper instead of being retyped,
+    // which also means it cannot drift from the key derivation again, and the two
+    // negative assertions below still carry the discrimination.
+    expect(home).toBe(codexProjectHome(codexHome, 'pinned'))
     expect(home).not.toBe(codexHome)
     expect(home).not.toBe(join(codexHome, 'accounts', 'work'))
   })

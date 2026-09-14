@@ -28,8 +28,78 @@
  * layers the `ProjectCredentialStore` persistence on top.
  */
 
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+
+/**
+ * THE PATHNAME BUDGET FOR A UNIX SOCKET, MEASURED AGAINST THE SUBJECT (#637).
+ *
+ * Linux gives `sockaddr_un.sun_path` 108 bytes and a pathname socket must carry its
+ * terminating NUL inside that array, so 107 bytes is the payload and it cannot be tuned.
+ *
+ * DERIVED, THEN MEASURED AGAINST THE THING IT IS ABOUT rather than against a comment:
+ * `codex app-server daemon version` (codex-cli 0.154.0) was run against CODEX_HOMEs sized
+ * so the derived socket pathname landed on each side of the boundary. A 107-byte pathname
+ * connects; a 108-byte pathname fails with `path must be shorter than SUN_LEN`. A raw
+ * libc `AF_UNIX` bind agrees exactly (107 binds, 108 gives ENAMETOOLONG).
+ *
+ * WHY NO TEST HERE BINDS AT THE BOUNDARY. Neither `node:net` nor `Bun.listen` enforces
+ * this rule — both bind pathnames up to 109 bytes on this kernel — so a runtime bind from
+ * this test suite is a WIDER instrument than Codex and cannot witness the boundary. The
+ * byte count is therefore the guard, and the number above is what the subject was
+ * measured to do.
+ */
+export const CODEX_CONTROL_SOCKET_PATH_MAX_BYTES = 107
+/** 128 bits encoded as 22 base64url characters: fixed-width without padding. */
+const CODEX_PROJECT_KEY_BYTES = 16
+/** Verified against codex-cli 0.154.0: the daemon names this exact path under CODEX_HOME. */
+const CODEX_CONTROL_SOCKET_PARTS = ['app-server-control', 'app-server-control.sock'] as const
+
+/** The control socket path `codex app-server daemon` derives from CODEX_HOME. */
+export function codexControlSocketPath(codexHome: string): string {
+  return join(codexHome, ...CODEX_CONTROL_SOCKET_PARTS)
+}
+
+/** A configuration refusal, distinct from the Codex CLI's misleading exit status. */
+export class CodexControlSocketPathError extends Error {
+  readonly code = 'codex_control_socket_path_too_long'
+
+  constructor(actualBytes: number) {
+    super(
+      `Codex CODEX_HOME is too long: its app-server control socket path is ${actualBytes} bytes; ` +
+        `the Linux maximum is ${CODEX_CONTROL_SOCKET_PATH_MAX_BYTES} bytes (108-byte sun_path including NUL)`,
+    )
+    this.name = 'CodexControlSocketPathError'
+  }
+}
+
+/**
+ * Return `codexHome` only when Codex's derived control socket can bind — THE GATE ANY
+ * CALLER ABOUT TO START `codex app-server` MUST PASS THROUGH, and the only place this
+ * bound is enforced.
+ *
+ * WHY NOT INSIDE `resolveCodexHome` / `codexProjectHome`, WHICH IS WHERE IT FIRST WENT.
+ * A CODEX_HOME is used for two unrelated things: materializing `auth.json` (every caller
+ * in this tree today) and deriving a daemon control socket (no caller in this tree today
+ * — see SPEC.md, which records that `codex app-server daemon start` refuses on this
+ * install for want of a managed standalone distribution). Only the second needs a socket.
+ * Enforcing the bound at directory resolution charged the first for the second: MEASURED,
+ * a 26-byte owner home — `<home>/neutron`, the `resolveNeutronHome` default — made
+ * `codexProjectHome` throw, which is the one call behind `connect`, `status`,
+ * `refreshSeatLiveness` and `resolveActiveCodexHome` for a PROJECT-scoped seat. A
+ * project-scoped Codex credential that works today would have stopped working, on a box
+ * where nothing binds a socket at all. Refusing a thing is only better than a silent
+ * failure when the thing was going to be attempted.
+ *
+ * The FIXED-WIDTH project key below is the half that is unconditional, because it costs
+ * nothing and is what actually buys the headroom (a UUID-shaped id: 114 bytes → 93).
+ */
+export function assertCodexControlSocketPath(codexHome: string): string {
+  const bytes = Buffer.byteLength(codexControlSocketPath(codexHome), 'utf8')
+  if (bytes > CODEX_CONTROL_SOCKET_PATH_MAX_BYTES) throw new CodexControlSocketPathError(bytes)
+  return codexHome
+}
 
 /** The `~/.codex/auth.json` shape the Codex CLI reads (subscription mode). */
 export interface CodexAuthFile {
@@ -174,23 +244,36 @@ export function validateCodexSubscriptionAuth(
  * The Codex subscription is a GLOBAL, trident-wide credential (trident runs
  * across ANY project), so this global dir is the primary/default. A per-project
  * OVERRIDE materializes to `codexProjectHome(globalHome, project_id)` — a nested
- * `<global>/projects/<project_id>` dir — so a project's override auth.json never
- * collides with the global one and the resolver can pick project → global.
+ * `<global>/projects/<project-key>` dir — so a project's override auth.json does
+ * not collide with the global one and the resolver can pick project → global.
  */
 export function resolveCodexHome(opts: { owner_home: string }): string {
   return join(opts.owner_home, '.codex')
 }
 
 /**
- * The per-project OVERRIDE CODEX_HOME nested under the global codex dir. The
- * `project_id` is sanitized to `[A-Za-z0-9_.-]` (defence-in-depth against path
- * traversal — the credential surface already sanitizes it, but this helper is
- * also reachable from the service directly). An empty/invalid id falls back to
- * the global dir (no override).
+ * The per-project OVERRIDE CODEX_HOME nested under the global codex dir. Every
+ * non-empty project id becomes a fixed-width 128-bit digest. That loses the
+ * human-readable directory name, but bounds the segment for identifiers of any
+ * length with collision-resistant project keys and without truncating the input.
+ *
+ * THIS FUNCTION IS TOTAL — it never refuses, because an `auth.json` directory does not
+ * need a bindable socket and every caller of it wants only that. The socket bound is
+ * enforced by {@link assertCodexControlSocketPath}, which is what a daemon caller calls.
+ * An empty id falls back to the global dir.
  */
-export function codexProjectHome(globalCodexHome: string, project_id: string | null | undefined): string {
+export function codexProjectHome(
+  globalCodexHome: string,
+  project_id: string | null | undefined,
+): string {
   const pid = (project_id ?? '').replace(/[^A-Za-z0-9_.-]/g, '').trim()
-  return pid.length > 0 ? join(globalCodexHome, 'projects', pid) : globalCodexHome
+  if (pid.length === 0) return globalCodexHome
+  const key = createHash('sha256')
+    .update(pid)
+    .digest()
+    .subarray(0, CODEX_PROJECT_KEY_BYTES)
+    .toString('base64url')
+  return join(globalCodexHome, 'projects', key)
 }
 
 /** The absolute `auth.json` path inside a CODEX_HOME. */

@@ -2858,8 +2858,13 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   (`resolveCodexHome({ owner_home })` = `<owner_home>/.codex/auth.json`, mode 0600)
   — the SAME path the trident loop threads into the inner workflow
   (`build-core-modules.ts` reads `trident.codex_home` from the composer). A project
-  override writes to a nested per-project dir
-  (`codexProjectHome(globalHome, project_id)` = `<owner_home>/.codex/projects/<id>/auth.json`).
+  override writes to a nested per-project dir whose key is a fixed-width 128-bit
+  digest (`codexProjectHome(globalHome, project_id)` =
+  `<owner_home>/.codex/projects/<22-char-key>/auth.json`), which keeps that segment
+  fixed-width whatever the project id. Both resolvers are TOTAL — an `auth.json`
+  dir needs no bindable socket. The Linux 107-byte control-socket bound is enforced
+  by `assertCodexControlSocketPath`, the gate a caller about to start
+  `codex app-server` passes through; it refuses and never truncates.
   `CodexCredentialService.resolveActiveCodexHome(owner, project_id)` is the
   trident-review resolver (project override → global → `null`) with self-healing
   re-materialization; a boot-time `ensureMaterialized` self-heals the GLOBAL file.

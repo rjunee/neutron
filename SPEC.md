@@ -1,6 +1,8 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
 last_updated: 2026-09-14 (Trident agents are cwd-confined instead of bypassing permissions — Decisions Log 2026-09-14; previous: the REPL host is selected once at process start, defaulting to herdr — Decisions Log 2026-09-14)
+
+last_updated: 2026-09-14 (Codex project-home keys are fixed-width and every derived control socket is bound-checked — Decisions Log 2026-09-14; previous: the REPL host is selected once at process start, defaulting to herdr — Decisions Log 2026-09-14)
 ---
 <!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr is the DEFAULT REPL host, with the in-process PTY host selectable once per process — Decisions Log 2026-09-14 · migration re-run) -->
 
@@ -292,6 +294,25 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-09-14 — CODEX PROJECT-HOME KEYS ARE FIXED-WIDTH, AND EVERY DERIVED CONTROL SOCKET PATH IS BOUND-CHECKED (#637).
+
+Linux gives `sockaddr_un.sun_path` 108 bytes including its terminating NUL, so the
+pathname payload is 107 bytes and cannot be tuned upward. Measured against the
+subject rather than asserted: codex-cli 0.154.0 connects a 107-byte derived socket
+pathname and answers `path must be shorter than SUN_LEN` at 108. Per-project
+`CODEX_HOME` now uses a 22-character base64url encoding of a 128-bit SHA-256
+prefix instead of the human-readable project identifier. The shorter fixed segment
+costs directory readability during debugging, but its size is independent of
+project-id length, and it is what buys the headroom (a UUID-shaped id: 114 bytes →
+93). Hashing cannot constrain an arbitrary parent path, so the bound is enforced —
+never by truncation — by `assertCodexControlSocketPath`, the gate a caller about to
+start `codex app-server` passes through. It is deliberately NOT enforced at
+`resolveCodexHome`/`codexProjectHome`: those resolve an `auth.json` directory,
+which needs no bindable socket, and enforcing there made an ordinary 26-byte owner
+home break project-scoped Codex credentials on a box that binds no socket at all.
+Spec item:
+[`docs/spec-items/codex-control-socket-path-fits-sun-len.md`](docs/spec-items/codex-control-socket-path-fits-sun-len.md).
 
 ### 2026-09-14 — Fence duration: retain refusal until gateway restart (#685).
 
