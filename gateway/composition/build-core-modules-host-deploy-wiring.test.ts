@@ -67,6 +67,7 @@ function stubService(): HostDeployToolService {
       enabled: false,
       reason: 'no control-plane endpoint is configured on this instance',
       default_ref: 'origin/main',
+      last_deploy: null,
     }),
     request: async () => ({
       status: 'unavailable',

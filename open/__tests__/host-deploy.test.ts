@@ -1670,6 +1670,31 @@ describe('a refused contract gate is a NORMAL outcome', () => {
     expect(out!.body).not.toContain('Error')
     expect(out!.body).not.toContain('stack')
   })
+
+  test('the durable status preserves a refused guard reason beyond the chat detail cap', async () => {
+    const blockingPath = 'migrations/the-blocking-hand-edit.json'
+    const h = harness({
+      dispatch: async () => ({
+        ok: false,
+        detail: `${'diagnostic '.repeat(50)}deploy preconditions failed: ${blockingPath} DIVERGES`,
+      }),
+    })
+    expect(h.service.status().last_deploy).toBeNull()
+
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+    const out = await answer(h, h.approveValue())
+
+    expect(out!.body.length).toBeLessThan(700)
+    expect(out!.body).not.toContain(blockingPath)
+    expect(h.service.status().last_deploy).toEqual({
+      outcome: 'refused',
+      ref: 'origin/main',
+      sha: TARGET_SHA,
+      attempted_at_ms: nowMs,
+      detail: expect.stringContaining(blockingPath),
+    })
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,13 @@ export interface HostDeployToolService {
     enabled: boolean
     reason: string | null
     default_ref: string
+    last_deploy: {
+      outcome: 'accepted' | 'refused' | 'errored' | 'timed_out'
+      ref: string
+      sha: string
+      attempted_at_ms: number
+      detail: string
+    } | null
   }
   request(input: { ref?: string; topic_id?: string | null }): Promise<
     | {
@@ -151,8 +158,26 @@ const statusOutputSchema: JsonSchemaDocument = {
       description: 'Why host deploys are disabled on this instance, and what would enable them.',
     },
     default_ref: { type: 'string' },
+    last_deploy: {
+      type: ['object', 'null'],
+      description:
+        'The most recent authenticated deploy attempt. Null means no terminal attempt is recorded; ' +
+        'a refusal includes the host reason so the requesting agent does not have to infer from silence.',
+      properties: {
+        outcome: {
+          type: 'string',
+          description: "One of 'accepted', 'refused', 'errored', or 'timed_out'.",
+        },
+        ref: { type: 'string' },
+        sha: { type: 'string' },
+        attempted_at_ms: { type: 'number' },
+        detail: { type: 'string' },
+      },
+      required: ['outcome', 'ref', 'sha', 'attempted_at_ms', 'detail'],
+      additionalProperties: false,
+    },
   },
-  required: ['enabled', 'reason', 'default_ref'],
+  required: ['enabled', 'reason', 'default_ref', 'last_deploy'],
 }
 
 const windowRequestInputSchema: JsonSchemaDocument = {
@@ -342,6 +367,7 @@ export function registerHostDeployToolSurface(
           enabled: false,
           reason: 'host deploys are not wired on this instance',
           default_ref: '',
+          last_deploy: null,
         }
       }
       return svc.status()
