@@ -58,7 +58,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createLogger } from '@neutronai/logger'
@@ -190,27 +191,44 @@ async function enforceMergeDiffGate(
   base_ref: string,
   branch_ref: string,
 ): Promise<void> {
-  // THROUGH THE ONE RANGE BUILDER (#546), not a hand-rolled argv. An unshielded
-  // rev-range operand is an arbitrary-file-write primitive (a base of
-  // `--output=<path>` makes `git diff` write that file), and `gitRangeArgv` is
-  // the only place `--end-of-options` can be put in the position that works —
-  // the marker is not a parameter there, so it cannot be omitted. This is also
-  // the constructor the `diff-base-option-shaped` gate enumerates: a range built
-  // by hand here reds it even when the marker happens to be spelled correctly,
-  // because the property that gate asserts is "no module outside the helper
-  // builds a range at all".
-  const result = await run_host(
-    gitRangeArgv({
-      repo_path: repo,
-      subcommand: 'diff',
-      flags: ['--binary', '--no-ext-diff', '--full-index'],
-      base: base_ref,
-      head: branch_ref,
-      dots: '...',
-    }),
-    repo,
-  )
-  if (!result.ok) {
+  let diff_dir: string | null = null
+  let measured_bytes: number | null = null
+  let measurement_failed = false
+  try {
+    diff_dir = mkdtempSync(join(tmpdir(), 'trident-merge-diff-'))
+    const diff_path = join(diff_dir, 'merge.diff')
+    writeFileSync(diff_path, '')
+    // THROUGH THE ONE RANGE BUILDER (#546), not a hand-rolled argv. An unshielded
+    // rev-range operand is an arbitrary-file-write primitive (a base of
+    // `--output=<path>` makes `git diff` write that file), and `gitRangeArgv` is
+    // the only place `--end-of-options` can be put in the position that works —
+    // the marker is not a parameter there, so it cannot be omitted. This is also
+    // the constructor the `diff-base-option-shaped` gate enumerates: a range built
+    // by hand here reds it even when the marker happens to be spelled correctly,
+    // because the property that gate asserts is "no module outside the helper
+    // builds a range at all".
+    const result = await run_host(
+      gitRangeArgv({
+        repo_path: repo,
+        subcommand: 'diff',
+        // Keep the complete patch out of the runner's captured stdout. The file
+        // is private and short-lived; stat gives the exact byte count without
+        // materialising the pathological payload in this process's heap.
+        flags: ['--binary', '--no-ext-diff', '--full-index', `--output=${diff_path}`],
+        base: base_ref,
+        head: branch_ref,
+        dots: '...',
+      }),
+      repo,
+    )
+    if (!result.ok) measurement_failed = true
+    else measured_bytes = statSync(diff_path).size
+  } catch {
+    measurement_failed = true
+  } finally {
+    if (diff_dir !== null) rmSync(diff_dir, { recursive: true, force: true })
+  }
+  if (measurement_failed || measured_bytes === null) {
     throw new TridentMergeDiffHold(
       // NOT WRITTEN AS A RANGE. The two refs are named with a word between
       // them rather than `...`: the rev-range guard reads the SOURCE, and a
@@ -221,8 +239,9 @@ async function enforceMergeDiffGate(
       null,
     )
   }
-  const assessment = assessMergeDiff(result.stdout)
-  if (!assessment.allow) throw new TridentMergeDiffHold(assessment.reason, assessment.measured_bytes)
+  if (measured_bytes > MERGE_DIFF_BYTES_MAX) {
+    throw new TridentMergeDiffHold(mergeDiffTooLargeReason(measured_bytes), measured_bytes)
+  }
 }
 
 /**

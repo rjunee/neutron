@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cleanupAfterMerge } from './git-mode.ts'
@@ -44,7 +44,10 @@ function recordingHost(
   const calls: string[][] = []
   const host: RunHostCommand = async (cmd) => {
     calls.push(cmd)
-    return responder(cmd)
+    const result = responder(cmd)
+    const output = cmd.find((arg) => arg.startsWith('--output='))
+    if (result.ok && output !== undefined) writeFileSync(output.slice('--output='.length), result.stdout)
+    return result
   }
   return { host, calls }
 }
@@ -76,7 +79,11 @@ describe('pre-merge diff-size gate', () => {
 
   function prGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
     return recordingHost((cmd) => {
-      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      if (cmd.includes('diff') && cmd.includes('--binary')) {
+        const output = cmd.find((arg) => arg.startsWith('--output='))
+        if (output === undefined) return fail('missing bounded diff output')
+        return ok(diff)
+      }
       return noDrift(cmd) ?? ok()
     })
   }
@@ -106,7 +113,11 @@ describe('pre-merge diff-size gate', () => {
   // the pr-mode cases cannot reach it. These two are what make that deletion red.
   function localGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
     return recordingHost((cmd) => {
-      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      if (cmd.includes('diff') && cmd.includes('--binary')) {
+        const output = cmd.find((arg) => arg.startsWith('--output='))
+        if (output === undefined) return fail('missing bounded diff output')
+        return ok(diff)
+      }
       // `merge --abort` / `rebase --abort` are the stale-state probes; a CLEAN
       // repo fails them (nothing is in progress).
       return cmd.includes('--abort') ? fail('no operation in progress') : ok()
@@ -169,7 +180,8 @@ describe('pre-merge diff-size gate', () => {
       buildMergeCleanupDeps(host),
     )
     expect(calls.filter((c) => c.includes('--binary'))).toEqual([
-      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index',
+        expect.stringMatching(/^--output=.*\/merge\.diff$/), '--end-of-options',
         'refs/remotes/origin/main...refs/remotes/origin/feat-x'],
     ])
   })
@@ -178,7 +190,8 @@ describe('pre-merge diff-size gate', () => {
     const { host, calls } = localGateHost('')
     await cleanupAfterMerge(localRun(), buildMergeCleanupDeps(host, { base_branch: 'main' }))
     expect(calls.filter((c) => c.includes('--binary'))).toEqual([
-      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index',
+        expect.stringMatching(/^--output=.*\/merge\.diff$/), '--end-of-options',
         'refs/heads/main...refs/heads/feat-x'],
     ])
   })
