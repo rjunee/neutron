@@ -144,7 +144,7 @@ test('GET /api/cores/integrations lists OAuth + API-key slots with status (no Go
   expect(JSON.stringify(body)).not.toContain('tvly-1')
 })
 
-test('GET /api/cores/integrations declares that a connected GitHub credential is outside its Core-only scope', async () => {
+test('GET /api/cores/integrations shows a connected credential outside the Core catalogue', async () => {
   const b = await makeBench()
   const githubSecret = 'github-secret-positive-control'
   await b.secrets.put({
@@ -157,20 +157,49 @@ test('GET /api/cores/integrations declares that a connected GitHub credential is
   const res = await authed(b.base, '/api/cores/integrations')
   const body = (await res.json()) as {
     scope: { kind: string; description: string }
-    oauth: Array<{ label: string; connected: boolean }>
-    api_keys: Array<{ label: string; connected: boolean }>
+    oauth: Array<{ label: string; connected: boolean | null; connection_state: string }>
+    api_keys: Array<{ label: string; connected: boolean | null; connection_state: string }>
   }
   const serialized = JSON.stringify(body)
 
-  expect(body.scope.kind).toBe('cores')
-  expect(body.scope.description).toContain('bundled Core credential slots only')
-  expect(body.scope.description).toContain('Other connected credentials are not included')
-  expect(body.oauth.some(({ label }) => label === 'github')).toBe(false)
+  expect(body.scope.kind).toBe('connected_credentials')
+  expect(body.oauth.find(({ label }) => label === 'github')).toMatchObject({
+    connected: true,
+    connection_state: 'connected',
+  })
   expect(body.oauth.some(({ label }) => label === 'gmail_compose')).toBe(true)
   expect(body.oauth.some(({ label }) => label === 'google_calendar')).toBe(true)
   expect(body.api_keys.some(({ label }) => label === 'tavily')).toBe(true)
   expect(JSON.stringify({ value: githubSecret })).toContain(githubSecret)
   expect(serialized).not.toContain(githubSecret)
+})
+
+test('GET /api/cores/integrations keeps a genuinely absent credential distinct', async () => {
+  const b = await makeBench()
+  const body = (await (await authed(b.base, '/api/cores/integrations')).json()) as {
+    oauth: Array<{ label: string; connected: boolean | null; connection_state: string }>
+  }
+  expect(body.oauth.find(({ label }) => label === 'google_calendar')).toMatchObject({
+    connected: false,
+    connection_state: 'not_connected',
+  })
+})
+
+test('GET /api/cores/integrations reports unknown when credential inventory cannot be read', async () => {
+  const b = await makeBench()
+  b.secrets.list = async () => { throw new Error('fixture read failure') }
+  const body = (await (await authed(b.base, '/api/cores/integrations')).json()) as {
+    oauth: Array<{ label: string; connected: boolean | null; connection_state: string }>
+    api_keys: Array<{ label: string; connected: boolean | null; connection_state: string }>
+  }
+  expect(body.oauth.find(({ label }) => label === 'google_calendar')).toMatchObject({
+    connected: null,
+    connection_state: 'unknown',
+  })
+  expect(body.api_keys.find(({ label }) => label === 'tavily')).toMatchObject({
+    connected: null,
+    connection_state: 'unknown',
+  })
 })
 
 test('POST then DELETE /api/cores/api-keys/tavily mutates stored state (no Google client wired)', async () => {

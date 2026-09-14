@@ -123,8 +123,12 @@ export interface OrphanedCredentialsSummary {
 }
 
 /** A per-Core Google OAuth account slot + its live connection status. */
-export interface OAuthAccountIntegration extends OAuthTokenStatus {
+export type ConnectionState = 'connected' | 'not_connected' | 'unknown'
+
+export interface OAuthAccountIntegration extends Omit<OAuthTokenStatus, 'connected'> {
   kind: 'oauth'
+  connected: boolean | null
+  connection_state: ConnectionState
   /** Manifest-declared scope string for the label. */
   scope: string
   /** Every bundled Core slug that declares this label. */
@@ -152,7 +156,8 @@ export interface ApiKeyIntegration {
   /** UX copy the Core declares for the paste flow. */
   install_prompt: string
   /** `true` when a secret is currently stored for this label. */
-  connected: boolean
+  connected: boolean | null
+  connection_state: ConnectionState
   /** See {@link OAuthAccountIntegration.orphaned}. */
   orphaned: boolean
 }
@@ -427,33 +432,85 @@ export async function buildIntegrationsStatus(
       ? buildOrphanAnnotation(input.db, input.project_slug, input.slug_is_fallback)
       : NO_ORPHANS
 
+  // The inventory is anchored in the store, not only in manifests. This is the
+  // read that makes credentials owned by another subsystem (for example GitHub)
+  // visible even when no Core declares their label.
+  let credentialRows: Awaited<ReturnType<SecretsStore['list']>> | null = null
+  try {
+    credentialRows = await input.secretsStore.list({
+      owner_handle: asOwnerHandle(input.project_slug),
+    })
+    for (const row of credentialRows) {
+      if (row.kind === 'oauth_token') {
+        if (row.label.endsWith(refreshLabel('')) || row.label.endsWith(metaLabel(''))) continue
+        const service = parseGrantLabel(row.label).service
+        if (!oauthSlots.has(service)) oauthSlots.set(service, { scope: '', core_slugs: [] })
+      } else if (row.kind === 'byo_api_key') {
+        const declared = [...apiKeySlots].find(([id, slot]) => slotSecretsLabel(id, slot) === row.label)
+        if (declared === undefined && !apiKeySlots.has(row.label)) {
+          apiKeySlots.set(row.label, {
+            name: row.label,
+            core_slugs: [],
+            required: false,
+            install_prompt: '',
+          })
+        }
+      }
+    }
+  } catch {
+    // Keep the declared inventory, but mark its state unknown below. A failed
+    // credential read must never be translated into "not connected".
+  }
+
   // One row per CONNECTED ACCOUNT. A service the owner has connected three
   // accounts to shows three rows, each independently disconnectable; a service
   // with none shows its single disconnected row so a Connect action can render.
   const oauth: OAuthAccountIntegration[] = []
   for (const [service, slot] of oauthSlots) {
-    const grants = await input.tokens.listGrants(service)
+    let grants: Awaited<ReturnType<OAuthTokenManager['listGrants']>> = []
+    try {
+      grants = await input.tokens.listGrants(service)
+    } catch {
+      grants = []
+    }
     const labels = grants.length > 0 ? grants.map((g) => g.label) : [service]
     for (const label of labels) {
-      const status = await input.tokens.getStatus(label)
+      let status: OAuthTokenStatus | null = null
+      try {
+        status = await input.tokens.getStatus(label)
+      } catch {
+        status = null
+      }
+      const connected = credentialRows === null || status === null ? null : status.connected
       oauth.push({
         kind: 'oauth',
-        ...status,
+        ...(status ?? {
+          label,
+          service,
+          account_key: parseGrantLabel(label).account_key,
+          scopes: [],
+          email: null,
+          connected_at: null,
+          last_refresh_at: null,
+          last_refresh_outcome: null,
+          expires_at: null,
+        }),
+        connected,
+        connection_state:
+          connected === null ? 'unknown' : connected ? 'connected' : 'not_connected',
         scope: slot.scope,
         core_slugs: slot.core_slugs,
         // A connected slot is never orphaned: a fresh boot-handle credential
         // wins the slot, and the stale twin stays visible in the summary.
-        orphaned: !status.connected && orphans.services.has(status.service),
+        orphaned: connected === false && orphans.services.has(service),
       })
     }
   }
 
   // One list() read (no decrypt) → label-presence set for every api-key.
-  const rows = await input.secretsStore.list({
-    owner_handle: asOwnerHandle(input.project_slug),
-    kind: 'byo_api_key',
-  })
-  const present = new Set(rows.map((r) => r.label))
+  const present = new Set(
+    (credentialRows ?? []).filter((row) => row.kind === 'byo_api_key').map((row) => row.label),
+  )
 
   const api_keys: ApiKeyIntegration[] = []
   for (const [id, slot] of apiKeySlots) {
@@ -461,7 +518,7 @@ export async function buildIntegrationsStatus(
     // Presence is checked against the SECRETS label (which may differ from
     // the public id for system slots), so an onboarding-set OpenAI key shows
     // as connected here too.
-    const connected = present.has(storageLabel)
+    const connected = credentialRows === null ? null : present.has(storageLabel)
     api_keys.push({
       kind: 'api_key',
       label: id,
@@ -470,7 +527,9 @@ export async function buildIntegrationsStatus(
       required: slot.required,
       install_prompt: slot.install_prompt,
       connected,
-      orphaned: !connected && orphans.apiKeyLabels.has(storageLabel),
+      connection_state:
+        connected === null ? 'unknown' : connected ? 'connected' : 'not_connected',
+      orphaned: connected === false && orphans.apiKeyLabels.has(storageLabel),
     })
   }
 

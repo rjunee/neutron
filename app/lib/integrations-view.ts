@@ -22,7 +22,7 @@ export interface IntegrationRow {
   kind: 'oauth' | 'api_key';
   /** Human-facing title (the label, e.g. `google_calendar`). */
   title: string;
-  connected: boolean;
+  connected: boolean | null;
   /** One-line status, e.g. "Connected as a@b.com" / "Not connected". */
   statusLabel: string;
   /** Secondary detail line (cores using it, or the paste prompt). */
@@ -65,7 +65,9 @@ function oauthTitle(label: string): string {
 }
 
 export function oauthRow(account: OAuthAccountIntegration): IntegrationRow {
-  const statusLabel = account.connected
+  const statusLabel = account.connected === null
+    ? 'Could not determine'
+    : account.connected
     ? account.email !== null
       ? `Connected as ${account.email}`
       : 'Connected'
@@ -85,11 +87,11 @@ export function oauthRow(account: OAuthAccountIntegration): IntegrationRow {
 }
 
 export function apiKeyRow(slot: ApiKeyIntegration): IntegrationRow {
-  const statusLabel = slot.connected ? 'Key stored' : 'No key';
+  const statusLabel = slot.connected === null ? 'Could not determine' : slot.connected ? 'Key stored' : 'No key';
   // Prefer the Core's paste-prompt copy when not connected; fall back to
   // which Cores use it once a key is stored.
   const detail =
-    !slot.connected && slot.install_prompt.length > 0
+    slot.connected === false && slot.install_prompt.length > 0
       ? slot.install_prompt
       : coresDetail(slot.core_slugs);
   return {
@@ -117,7 +119,7 @@ export function summarizeIntegrations(
   return {
     oauth,
     apiKeys,
-    connectedCount: all.filter((r) => r.connected).length,
+    connectedCount: all.filter((r) => r.connected === true).length,
     totalCount: all.length,
   };
 }

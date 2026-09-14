@@ -47,7 +47,7 @@ import {
 /** OAuth label status — mirrors `OAuthStatusLabel` in the mobile client. */
 export interface OAuthStatusLabel {
   label: string
-  connected: boolean
+  connected: boolean | null
   scopes: string[]
   email: string | null
   connected_at: number | null
@@ -59,6 +59,8 @@ export interface OAuthStatusLabel {
 /** A per-Core Google OAuth account slot + its live connection status. */
 export interface OAuthAccountIntegration extends OAuthStatusLabel {
   kind: 'oauth'
+  connected: boolean | null
+  connection_state: 'connected' | 'not_connected' | 'unknown'
   scope: string
   core_slugs: string[]
 }
@@ -71,13 +73,14 @@ export interface ApiKeyIntegration {
   core_slugs: string[]
   required: boolean
   install_prompt: string
-  connected: boolean
+  connected: boolean | null
+  connection_state: 'connected' | 'not_connected' | 'unknown'
 }
 
 export interface IntegrationsResponse {
   ok: boolean
   scope: {
-    kind: 'cores'
+    kind: 'connected_credentials'
     description: string
   }
   oauth: OAuthAccountIntegration[]

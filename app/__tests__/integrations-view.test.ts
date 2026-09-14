@@ -17,8 +17,8 @@ import {
 const RESPONSE: IntegrationsResponse = {
   ok: true,
   scope: {
-    kind: 'cores',
-    description: 'This list covers bundled Core credential slots only.',
+    kind: 'connected_credentials',
+    description: 'This list includes connected credentials plus available bundled Core credential slots.',
   },
   oauth: [
     {
@@ -27,6 +27,7 @@ const RESPONSE: IntegrationsResponse = {
       scope: 'https://www.googleapis.com/auth/calendar',
       core_slugs: ['calendar_core'],
       connected: true,
+      connection_state: 'connected',
       email: 'me@example.com',
       scopes: ['https://www.googleapis.com/auth/calendar'],
       connected_at: 1,
@@ -40,6 +41,7 @@ const RESPONSE: IntegrationsResponse = {
       scope: 'https://www.googleapis.com/auth/gmail.compose',
       core_slugs: ['email_core'],
       connected: false,
+      connection_state: 'not_connected',
       email: null,
       scopes: [],
       connected_at: null,
@@ -57,6 +59,7 @@ const RESPONSE: IntegrationsResponse = {
       required: false,
       install_prompt: 'Paste your Tavily API key',
       connected: false,
+      connection_state: 'not_connected',
     },
   ],
 };
@@ -74,6 +77,15 @@ describe('oauthRow', () => {
     const row = oauthRow(RESPONSE.oauth[1]!);
     expect(row.connected).toBe(false);
     expect(row.statusLabel).toBe('Not connected');
+  });
+
+  test('failed status read does not render as not connected', () => {
+    const row = oauthRow({
+      ...RESPONSE.oauth[0]!,
+      connected: null,
+      connection_state: 'unknown',
+    });
+    expect(row.statusLabel).toBe('Could not determine');
   });
 });
 
@@ -105,8 +117,8 @@ describe('summarizeIntegrations', () => {
   test('reflects a stored key + second connected account', () => {
     const view = summarizeIntegrations({
       ...RESPONSE,
-      oauth: RESPONSE.oauth.map((o) => ({ ...o, connected: true })),
-      api_keys: RESPONSE.api_keys.map((k) => ({ ...k, connected: true })),
+      oauth: RESPONSE.oauth.map((o) => ({ ...o, connected: true, connection_state: 'connected' as const })),
+      api_keys: RESPONSE.api_keys.map((k) => ({ ...k, connected: true, connection_state: 'connected' as const })),
     });
     expect(view.connectedCount).toBe(3);
     expect(view.totalCount).toBe(3);
@@ -119,6 +131,7 @@ describe('oauthRow title — composite labels must not leak a hash to the owner'
     scope: 'https://www.googleapis.com/auth/calendar',
     core_slugs: ['calendar_core'],
     connected: true,
+    connection_state: 'connected' as const,
     scopes: ['https://www.googleapis.com/auth/calendar'],
     connected_at: 1,
     last_refresh_at: null,
