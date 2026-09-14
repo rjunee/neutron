@@ -65,8 +65,8 @@ Two things to read *before* trusting anything below:
   rules L1–L4 are being moved toward. Most are not enforced yet and each line says so on its own
   `Protects:` line, so the contract is never mistaken for the present behaviour.
 
-Deep build history belongs in `docs/AS_BUILT.md`, which no branch may edit — stage one entry under
-`.trident/as-built/` instead (see `CONTRIBUTING.md`).
+Build history through 2026-09-12 remains in frozen `docs/AS_BUILT.md`; later changes add one
+immutable record under `docs/as-built/` in the PR that earns it (see `CONTRIBUTING.md`).
 
 ## Boot path
 
@@ -6722,9 +6722,9 @@ calls `detectRalphMode`) is PR-5.
 > to it, and the record for a change that lands after that date is its own file
 > under `docs/as-built/` (`docs/as-built/README.md`). Two separate files do not
 > conflict with each other, so there is nothing left for either driver to merge.
-> Concretely: `trident/as-built-appender.ts:161` writes `docs/as-built/<slug>.md`
-> instead of rewriting the log; `scripts/ci/as-built-write-guard.sh:226` FAILS any
-> branch whose diff touches the frozen path; and the tracked
+> Concretely: each branch adds `docs/as-built/<slug>.md` directly;
+> `scripts/ci/as-built-write-guard.sh` FAILS a diff that touches the frozen path
+> or an existing shard while allowing a new well-formed shard; and the tracked
 > `docs/AS_BUILT.md merge=union` line is DELETED from `.gitattributes` — union can
 > never report a conflict, which was right for an append-only file and dangerous
 > on a frozen one, so `scripts/ci/check-governed-repo-attributes.ts` now fails if

@@ -82,6 +82,8 @@ describe('as-built write guard (real git)', () => {
   let violationSha = ''
   let renameSha = ''
   let recordSha = ''
+  let editedRecordSha = ''
+  let malformedRecordSha = ''
   let foldedMainSha = ''
 
   beforeAll(() => {
@@ -90,19 +92,14 @@ describe('as-built write guard (real git)', () => {
     // The base carries the freeze note, which is the precondition the guard
     // reads before it vetoes anything.
     writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
+    mkdirSync(join(repo, 'docs', 'as-built'), { recursive: true })
+    writeFileSync(join(repo, 'docs', 'as-built', 'existing.md'), '## 2026-01-02 — existing\n\nHistory.\n')
     writeFileSync(join(repo, 'code.ts'), 'export const value = 1\n')
     git(repo, 'add', '-A')
     commit(repo, 'base')
     baseSha = git(repo, 'rev-parse', 'HEAD')
 
     git(repo, 'switch', '-q', '-c', 'clean', baseSha)
-    mkdirSync(join(repo, '.trident', 'as-built', 'trident'), {
-      recursive: true,
-    })
-    writeFileSync(
-      join(repo, '.trident', 'as-built', 'trident', 'some-branch.md'),
-      '## 2026-08-18 — staged entry\n\nClean branch entry.\n',
-    )
     writeFileSync(join(repo, 'code.ts'), 'export const value = 2\n')
     git(repo, 'add', '-A')
     commit(repo, 'clean branch')
@@ -118,11 +115,23 @@ describe('as-built write guard (real git)', () => {
     mkdirSync(join(repo, 'docs', 'as-built'), { recursive: true })
     writeFileSync(
       join(repo, 'docs', 'as-built', 'a-shipped-change.md'),
-      '## 2026-09-12 — a shipped change\n\nRecorded in its own file.\n',
+      '## 2026-09-12 — a shipped change\n\n```md\n## quoted example is not an entry\n```\n',
     )
     git(repo, 'add', '-A')
     commit(repo, 'record a change')
     recordSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'edits-record', baseSha)
+    writeFileSync(join(repo, 'docs', 'as-built', 'existing.md'), '## 2026-01-02 — existing\n\nRewritten.\n')
+    git(repo, 'add', '-A')
+    commit(repo, 'rewrite an existing record')
+    editedRecordSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'malformed-record', baseSha)
+    writeFileSync(join(repo, 'docs', 'as-built', 'bad.md'), 'prose before any heading\n')
+    git(repo, 'add', '-A')
+    commit(repo, 'add malformed record')
+    malformedRecordSha = git(repo, 'rev-parse', 'HEAD')
 
     git(repo, 'switch', '-q', '-c', 'rename-away', baseSha)
     git(repo, 'mv', 'docs/AS_BUILT.md', 'docs/RENAMED.md')
@@ -140,7 +149,7 @@ describe('as-built write guard (real git)', () => {
     rmSync(repo, { recursive: true, force: true })
   })
 
-  test('a clean branch stages its entry and passes', () => {
+  test('a clean branch with no as-built write passes', () => {
     const result = runGuard(repo, baseSha, cleanSha)
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('as-built-write-guard: OK')
@@ -158,8 +167,7 @@ describe('as-built write guard (real git)', () => {
     expect(result.stderr).toContain('FAILED')
     expect(result.stderr).toContain('docs/AS_BUILT.md')
     expect(result.stderr).toContain('FROZEN')
-    expect(result.stderr).toContain('.trident/as-built/')
-    expect(result.stderr).toContain('docs/as-built/README.md')
+    expect(result.stderr).toContain('docs/as-built/<slug>.md')
   }, 30_000)
 
   test('…and FAILS the build', () => {
@@ -187,6 +195,49 @@ describe('as-built write guard (real git)', () => {
     const result = runGuard(repo, baseSha, recordSha)
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('as-built-write-guard: OK')
+  }, 30_000)
+
+  test('two real branches adding distinct shards both merge without conflict', () => {
+    const mergeRepo = mkdtempSync(join(tmpdir(), 'as-built-two-branches-'))
+    try {
+      git(mergeRepo, 'init', '-q', '--initial-branch=main')
+      mkdirSync(join(mergeRepo, 'docs', 'as-built'), { recursive: true })
+      writeFileSync(join(mergeRepo, 'docs', 'as-built', 'README.md'), '# records\n')
+      git(mergeRepo, 'add', '-A')
+      commit(mergeRepo, 'base')
+      const base = git(mergeRepo, 'rev-parse', 'HEAD')
+
+      git(mergeRepo, 'switch', '-q', '-c', 'change-a', base)
+      writeFileSync(join(mergeRepo, 'docs', 'as-built', 'change-a.md'), '## 2026-09-14 — change a\n')
+      git(mergeRepo, 'add', '-A')
+      commit(mergeRepo, 'record change a')
+
+      git(mergeRepo, 'switch', '-q', '-c', 'change-b', base)
+      writeFileSync(join(mergeRepo, 'docs', 'as-built', 'change-b.md'), '## 2026-09-14 — change b\n')
+      git(mergeRepo, 'add', '-A')
+      commit(mergeRepo, 'record change b')
+
+      git(mergeRepo, 'switch', '-q', 'main')
+      git(mergeRepo, '-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', 'merge', '--no-edit', 'change-a')
+      git(mergeRepo, '-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', 'merge', '--no-edit', 'change-b')
+      expect(readFileSync(join(mergeRepo, 'docs', 'as-built', 'change-a.md'), 'utf8')).toContain('change a')
+      expect(readFileSync(join(mergeRepo, 'docs', 'as-built', 'change-b.md'), 'utf8')).toContain('change b')
+      expect(git(mergeRepo, 'diff', '--name-only', '--diff-filter=U')).toBe('')
+    } finally {
+      rmSync(mergeRepo, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('a branch editing another change\'s existing shard is refused', () => {
+    const result = runGuard(repo, baseSha, editedRecordSha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('edits existing record docs/as-built/existing.md')
+  }, 30_000)
+
+  test('a newly added shard must have exactly one valid top-level entry heading', () => {
+    const result = runGuard(repo, baseSha, malformedRecordSha)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('exactly one')
   }, 30_000)
 
   test('renaming docs/AS_BUILT.md away is a write too, and fails', () => {

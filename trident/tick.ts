@@ -40,11 +40,9 @@
 import { deployRestartKillReason, undeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
-import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
-import { changeSignatureEntries, type MergeMode, type TridentRun, type TridentRunStore } from './store.ts'
+import { changeSignatureEntries, type TridentRun, type TridentRunStore } from './store.ts'
 import { LIVENESS_PROBE_INTERVAL_MS } from './liveness.ts'
-import { detectBaseBranch, type RunHostCommand } from './merge.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
 import { createLogger } from '@neutronai/logger'
 
@@ -178,18 +176,6 @@ export interface TridentDeadLauncherLatch {
   (session_key: string, failure_reason: string): Promise<void>
 }
 
-/** As-built catch-up fold — at most one call per repository per tick. */
-export interface TridentAsBuiltFold {
-  (repo_path: string, merge_mode: MergeMode): Promise<FoldStagedAsBuiltEntriesResult>
-}
-
-/** Build the production per-repo catch-up while keeping the task-2 appender unchanged. */
-export function buildAsBuiltCatchup(run_host: RunHostCommand, base_branch?: string): TridentAsBuiltFold {
-  return async (repo_path, merge_mode) => {
-    const base = base_branch ?? (await detectBaseBranch(run_host, repo_path))
-    return foldStagedAsBuiltEntries(run_host, repo_path, merge_mode, base)
-  }
-}
 
 /**
  * A compact signature of a run's OBSERVABLE progress. Two ticks that yield the
@@ -334,14 +320,6 @@ export interface TridentTickOptions {
    */
   liveness_interval_ms?: number
   /**
-   * AS-BUILT ONE-WRITER (T2) self-heal. When supplied, arms a bounded per-repo
-   * catch-up for post-merge folds that missed their window (merge-queue-delayed PR
-   * landings, credential blinks, restarts); without it, the durable staging queue
-   * would accrete instead of self-healing. The catch-up shares the ordinary tick's
-   * single-flight and cadence rather than introducing another timer.
-   */
-  fold_staged_as_built?: TridentAsBuiltFold
-  /**
    * DISPATCH-HOLD SELF-DRAIN. When supplied, the tick calls it once per sweep
    * (production wires `buildDispatchHoldSweep`'s function, the same one the
    * terminal observer chain calls).
@@ -413,8 +391,6 @@ export class TridentTickLoop {
   private readonly latchLauncherDead: TridentDeadLauncherLatch | null
   /** null unless BOTH seams are supplied and the cadence is enabled. */
   private readonly livenessLoop: SupervisedLoop | null
-  /** null when catch-up is not production-wired. */
-  private readonly foldStagedAsBuilt: TridentAsBuiltFold | null
   private readonly drainDispatchHolds: (() => Promise<void>) | null
   /** Floor between two hold drains; see the option's docblock for the cost. */
   private readonly drainHoldsMinIntervalMs: number
@@ -503,7 +479,6 @@ export class TridentTickLoop {
               })
             },
           })
-    this.foldStagedAsBuilt = options.fold_staged_as_built ?? null
     this.drainDispatchHolds = options.drain_dispatch_holds ?? null
     this.drainHoldsMinIntervalMs =
       options.drain_dispatch_holds_min_interval_ms ?? DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS
@@ -723,32 +698,6 @@ export class TridentTickLoop {
     }
   }
 
-  /** Fold queued as-built entries once per recent repository. */
-  private async asBuiltBody(): Promise<void> {
-    const fold = this.foldStagedAsBuilt
-    if (fold === null) return
-    let repos: { repo_path: string; merge_mode: MergeMode }[]
-    try {
-      repos = this.store.listDistinctRepos()
-    } catch (err) {
-      log.error('as_built_catchup_failed', {
-        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-      })
-      return
-    }
-    for (const { repo_path, merge_mode } of repos) {
-      try {
-        const res = await fold(repo_path, merge_mode)
-        if (res.folded > 0) log.info('as_built_catchup_folded', { repo: repo_path, folded: res.folded })
-        if (!res.ok) log.warn('as_built_catchup_deferred', { repo: repo_path, reason: res.reason })
-      } catch (err) {
-        log.error('as_built_catchup_failed', {
-          repo: repo_path,
-          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        })
-      }
-    }
-  }
 
   /**
    * The change-watcher tick: ONE store query, compare, maybe wake. It never
@@ -985,13 +934,8 @@ export class TridentTickLoop {
           })
         }
       }
-      // The catch-up shares this tick's single-flight/cadence and is independently
-      // failure-contained per repository. Terminal runs are intentionally included
-      // by listDistinctRepos: a missed post-merge fold belongs to a run already done.
-      await this.asBuiltBody()
-      // The hold queue's per-cadence drain, failure-contained exactly like the
-      // as-built catch-up: a sweep that throws must not cost the tick its
-      // baseline settle.
+      // The hold queue's per-cadence drain is failure-contained: a sweep that
+      // throws must not cost the tick its baseline settle.
       // RATE-LIMITED, not per-tick: the change watcher can wake this loop every
       // 2 s, and each drained hold costs an uncached `gh` call plus a 15 s-bounded
       // worktree probe. The floor is measured from the last drain that RAN.

@@ -145,7 +145,6 @@ export interface LogEntry {
   /** Heading line + body, verbatim, as lines. */
   lines: string[]
 }
-
 export interface ParsedLog {
   preamble: string[]
   entries: LogEntry[]
@@ -289,110 +288,4 @@ export function explainDuplicateEntryHeadings(
   out.push('   changes that happen to share a title, give each its own heading —')
   out.push('   deleting a body to satisfy this gate loses history.')
   return out.join('\n')
-}
-
-/** The canonical form required of newly staged as-built entries. */
-export const AS_BUILT_ENTRY_HEADING = /^## \d{4}-\d{2}-\d{2} — .+/
-
-/** Where a promoted record lives. One file per change; see `docs/as-built/README.md`. */
-export const AS_BUILT_DIR = 'docs/as-built'
-
-/**
- * A filename this directory may carry. Deliberately narrow: the name is derived from a branch
- * name, which may legally contain `/`, and a `/` here would silently create a subdirectory that
- * `promoteStagedEntries` would then not see when it checks for collisions.
- */
-const SHARD_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-
-export type ShardResult =
-  | { ok: true; name: string; text: string; suffixed: boolean }
-  | { ok: false; reason: string }
-
-/**
- * Validate one staged entry and decide the file it becomes under {@link AS_BUILT_DIR}.
- *
- * Pure, so the rule is testable without a repo: the caller reads the staged file and writes the
- * result. `taken` is every name already present in the directory — the caller passes the ones it
- * has just chosen too, so two entries promoted in the same pass cannot both claim one name.
- *
- * THE COLLISION IS RESOLVED ON THE FILENAME, NOT ON THE HEADING, AND THAT IS THE WHOLE DIFFERENCE
- * FROM THE MONOLITH. When both records lived in one file, two identical `## ` headings were one
- * ambiguous key, so the incoming entry was RETITLED with a ` (n)` suffix to keep the key unique.
- * Here the key is the path: two files may carry the same heading without either becoming
- * ambiguous, and retitling a record to fit a filesystem would corrupt what it says. So the TITLE
- * is preserved verbatim and the NAME takes the first free `-2`, `-3`, … suffix.
- */
-export function shardStagedEntry(stagedPath: string, entry: string, taken: ReadonlySet<string>): ShardResult {
-  const slug = stagedPath.split('/').at(-1)!.replace(/\.md$/, '')
-  if (!SHARD_NAME.test(slug)) {
-    return { ok: false, reason: `'${slug}' is not a usable record name; expected [A-Za-z0-9._-] with no leading dot` }
-  }
-
-  const parsed = parseLog(entry)
-  const preambleContent = parsed.preamble.find((line) => line.trim() !== '')
-  if (preambleContent !== undefined) {
-    return { ok: false, reason: `content before the '## ' heading: '${preambleContent}'` }
-  }
-
-  if (parsed.entries.length !== 1) {
-    const offendingLine =
-      parsed.entries[1]?.lines[0]?.trimEnd() ??
-      entry.split('\n').find((line) => line.trim() !== '') ??
-      '(empty input)'
-    return {
-      ok: false,
-      reason: `must be exactly one entry; found ${parsed.entries.length}; offending line: '${offendingLine}'`,
-    }
-  }
-
-  const staged = parsed.entries[0]!
-  const heading = staged.lines[0]!.trimEnd()
-  if (!AS_BUILT_ENTRY_HEADING.test(heading)) {
-    return { ok: false, reason: `heading '${heading}' does not match '## YYYY-MM-DD — title'` }
-  }
-
-  let name = `${slug}.md`
-  let suffixed = false
-  if (taken.has(name)) {
-    let n = 2
-    while (taken.has(`${slug}-${n}.md`)) n += 1
-    name = `${slug}-${n}.md`
-    suffixed = true
-  }
-
-  // The heading is the file's first line and the body follows it verbatim; only trailing blank
-  // lines are normalised away, so the file ends in exactly one newline whatever the branch wrote.
-  const lines = [...staged.lines]
-  while (lines.length > 0 && lines.at(-1)!.trim() === '') lines.pop()
-  return { ok: true, name, text: `${lines.join('\n')}\n`, suffixed }
-}
-
-/**
- * Shard staged entries in landing order, accumulating the names each one claims.
- *
- * A malformed entry is REFUSED by index rather than aborting the pass: its well-formed siblings
- * still land, and the malformed staging file stays queued as the durable repair signal.
- */
-export function shardStagedEntries(
-  entries: readonly { path: string; text: string }[],
-  existing: ReadonlySet<string>,
-): {
-  shards: { index: number; name: string; text: string; suffixed: boolean }[]
-  refused: { index: number; reason: string }[]
-} {
-  const taken = new Set(existing)
-  const shards: { index: number; name: string; text: string; suffixed: boolean }[] = []
-  const refused: { index: number; reason: string }[] = []
-
-  for (const [index, entry] of entries.entries()) {
-    const result = shardStagedEntry(entry.path, entry.text, taken)
-    if (result.ok) {
-      taken.add(result.name)
-      shards.push({ index, name: result.name, text: result.text, suffixed: result.suffixed })
-    } else {
-      refused.push({ index, reason: result.reason })
-    }
-  }
-
-  return { shards, refused }
 }

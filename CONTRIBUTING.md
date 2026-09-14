@@ -125,41 +125,18 @@ you publish it:
 LEAK_GATE_PR_BODY="$(cat pr-body.md)" bash scripts/ci/leak-gate.sh --messages-only
 ```
 
-### The as-built log has ONE writer (anyone)
+### As-built records are immutable shards
 
-`docs/AS_BUILT.md` is the canonical, newest-first build log and the **only**
-place to read it. It has one entry per merged change, headed
-`## YYYY-MM-DD — title`.
+`docs/AS_BUILT.md` is frozen history and must never be edited. New records are
+one file per change under `docs/as-built/`, written directly by the PR that earns
+them. A branch adds `docs/as-built/<slug>.md`; it does not edit another change's
+existing shard.
 
-Do not edit `docs/AS_BUILT.md` on a branch or PR, ever. Every build prepending
-at the same offset made any two open PRs conflict by construction, and GitHub
-never runs merge drivers server-side, so no local driver could fix the
-mergeability check.
-
-CI *warns* on a PR whose diff touches the file; it does not fail it. The guard was
-written as a hard failure and downgraded to advisory on 2026-08-19 after the
-premise was measured against the live backlog: of 45 open PRs, 31 touched
-`docs/AS_BUILT.md` and 34 had conflicts, but **zero were blocked solely by this
-file** — every conflicting branch had a real code conflict elsewhere, and the
-`merge=union` attribute this repo ships was doing its job. A hard failure would
-have refused 31 of 45 open PRs to eliminate a conflict class blocking none of
-them. The detection still earns its place (6 of 34 co-conflicted here, and it is
-what will say so if the union attribute ever stops working), but it earns a
-warning, not a veto. See `scripts/ci/as-built-write-guard.sh`, which carries the
-measurement and the one-line change that restores the veto.
-
-Instead, stage exactly one entry as `.trident/as-built/<branch>.md`, mirroring
-the branch name as directories under `.trident/as-built/` just as
-`.trident/plans/` does. That gives every branch a unique path, so concurrent PRs
-cannot collide. The first non-blank line must be a single
-`## YYYY-MM-DD — title` heading (with spaces around the em dash), followed by
-the body. Put nothing above the heading and exactly one entry in the file.
-
-After the merge lands, the outer loop folds every staged entry directly into
-`docs/AS_BUILT.md` on main, oldest-landed first so the newest ends topmost, and
-deletes each consumed staging file in the same commit. A colliding heading is
-retitled with the first free ` (n)` suffix. The staging directory is a consumed
-queue, never a second place to read the log.
+Each new file starts with exactly one `## YYYY-MM-DD — title` heading (with
+spaces around the em dash), followed by the evidence and decisions for that
+change. Distinct shard paths let concurrent PRs carry their records without
+sharing an insertion point. `scripts/ci/as-built-write-guard.sh` enforces both
+sides: frozen history is immutable, while a new well-formed shard is allowed.
 
 ## Pull requests
 

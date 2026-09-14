@@ -63,7 +63,6 @@ import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import {
-  buildAsBuiltCatchup,
   TridentTickLoop,
   type TridentDeadLauncherLatch,
   type TridentLivenessProbe,
@@ -624,8 +623,8 @@ export function buildCoreModules(
         // THE PROACTIVE WORKTREE REAPER. Teardown previously fired only on the merge
         // path, so every other terminal path leaked its worktree — measured at 161
         // worktrees / 84 `wf_*` holders, and 42% of run failures. Wired ONLY on this
-        // branch for the same reason as `fold_staged_as_built` below: the stub branch
-        // runs no builds, so it creates no worktrees to reap.
+        // real-orchestrator branch because the stub branch runs no builds, so it
+        // creates no worktrees to reap.
         reaper = buildWorktreeReaperLoop({
           store,
           run_host: runHost,
@@ -830,14 +829,9 @@ export function buildCoreModules(
           store,
           step: orchestrator.step,
           on_terminal,
-          // AS-BUILT ONE-WRITER (T2) self-heal — the bounded per-repo catch-up folds
-          // staged entries whose landing the post-merge pass missed (delayed merge-queue
-          // landings, credential blinks, restarts). Wired ONLY here: the stub branch
-          // runs no builds, so it has nothing staged to fold.
-          fold_staged_as_built: buildAsBuiltCatchup(runHost),
           // THE HOLD QUEUE'S SECOND TRIGGER. Wired ONLY on the real-orchestrator
-          // branch, for the same reason as `fold_staged_as_built`: the stub branch
-          // dispatches nothing, so it has nothing queued to drain.
+          // branch: the stub branch dispatches nothing, so it has nothing queued
+          // to drain.
           ...(tridentWiring?.drain_dispatch_holds !== undefined
             ? { drain_dispatch_holds: tridentWiring.drain_dispatch_holds }
             : {}),
