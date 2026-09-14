@@ -27,7 +27,7 @@ import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
 import { buildTridentTerminator } from './terminate.ts'
-import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
+import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
 import {
   dispatchBoardBoundBuild,
@@ -307,9 +307,10 @@ async function executeStop(
   // reconciled (marked failed, retry binding preserved), exactly as the board
   // DELETE path does (Codex r6). So run the NON-delivery board-reconcile observer
   // under a NO-OP delivery hook: the card reconciles without a second chat post.
+  const detachRun = ctx.work_board.detachRun
   const reconcile =
-    typeof ctx.work_board.detachRun === 'function'
-      ? buildBoardReconcileObserver(ctx.work_board as TridentBoardReconciler)
+    typeof detachRun === 'function'
+      ? buildBoardReconcileObserver({ detachRun })
       : null
   const observer =
     reconcile !== null ? composeTerminalHook({ onTerminal: async (): Promise<void> => {} }, [reconcile]) : null

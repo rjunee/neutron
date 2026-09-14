@@ -564,6 +564,22 @@ import { createLogger } from '@neutronai/logger'
 
 const log = createLogger('open-composer')
 
+/** The production `/code` board boundary. Resolve lazily because the canonical
+ * board store is composed after the chat-command filter that consumes it. */
+export function buildTridentCodeBoardBinder(
+  resolve: () => TridentBoardBinder | undefined,
+): TridentBoardBinder {
+  return {
+    get: (slug, id) => resolve()?.get(slug, id) ?? null,
+    attachRun: async (slug, id, run_id) => {
+      await resolve()?.attachRun(slug, id, run_id)
+    },
+    detachRun: async (slug, run_id, outcome, pr_info) => {
+      await resolve()?.detachRun?.(slug, run_id, outcome, pr_info)
+    },
+  }
+}
+
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
@@ -2109,15 +2125,9 @@ export function buildOpenGraphComposer(
     // long after composition), which is what lets it reach the canonical
     // `workBoardStore` through the SAME late-bound holder the agent-dispatch
     // binder uses — the store is constructed later (it needs `appWsRegistry`).
-    const tridentCodeBoardBinder: TridentBoardBinder = {
-      get: (slug, id) => dispatchBoardHolder.deref((s) => s.get(slug, id)) ?? null,
-      attachRun: async (slug, id, run_id) => {
-        await dispatchBoardHolder.deref((s) => s.attachRun(slug, id, run_id))
-      },
-      detachRun: async (slug, run_id, outcome) => {
-        await dispatchBoardHolder.deref((s) => s.detachRun(slug, run_id, outcome))
-      },
-    }
+    const tridentCodeBoardBinder = buildTridentCodeBoardBinder(
+      () => dispatchBoardHolder.deref((s) => s),
+    )
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
