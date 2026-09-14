@@ -29,18 +29,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -643,6 +632,13 @@ exit 1
     mkdirSync(isolatedTrident, { recursive: true })
     script = join(isolatedTrident, 'codex-build.sh')
     writeFileSync(script, SCRIPT_TEXT)
+    // THE ONLY THING THIS FIXTURE MAY REMOVE IS THE AUTH VOCABULARY. The wrapper
+    // re-execs itself through a sibling `lane-processes.py` before it reaches any
+    // of its own guards (#623), so an isolated copy without that sibling dies at
+    // the re-exec with a bare exit 2 — and the case would then pass or fail for a
+    // reason that has nothing to do with the vocabulary it is named for. Copy the
+    // sibling so the absence under test is the only absence.
+    copyFileSync(join(dirname(SCRIPT), 'lane-processes.py'), join(isolatedTrident, 'lane-processes.py'))
   }
   const argv =
     opts.mergeMode !== undefined
