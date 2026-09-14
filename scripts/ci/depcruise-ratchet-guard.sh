@@ -29,7 +29,7 @@
 #   DEPCRUISE_RATCHET_MAIN_REF git ref for "main" (default: origin/main)
 #   NEUTRON_BUN_BIN            bun binary (default: bun)
 #
-# EXIT: 0 = baseline did not grow (or a skip case), 1 = baseline GREW, 2 = usage.
+# EXIT: 0 = baseline did not grow (or a skip case), 1 = baseline GREW, 2 = usage / the guard could not evaluate.
 
 set -uo pipefail
 
@@ -64,8 +64,10 @@ fi
 # the rest). --depth=1 is ONLY for a checkout that is ALREADY shallow
 # (actions/checkout depth-1 in CI), where it makes origin/main resolvable
 # without downloading history the guard will not use.
+source "$HERE/git-history.sh"
+shallow="$(read_shallowness)" || exit 2
 if [ "$MAIN_REF" = "origin/main" ]; then
-  if [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+  if [ "$shallow" = "true" ]; then
     git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
   else
     git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true
@@ -89,8 +91,9 @@ if ! git show "$MAIN_REF:$BASELINE_REL" > "$MAIN_BASELINE" 2>/dev/null; then
   # T3: name shallowness rather than leaving a true-but-useless message. An
   # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
   # history simply not being present — the distinction cost hours to find once.
-  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
-    echo "depcruise-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
+  shallow="$(read_shallowness)" || exit 2
+  if [ "$shallow" = "true" ]; then
+    echo "depcruise-ratchet-guard: the checkout is SHALLOW (git reports shallow history), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
   fi
   echo "depcruise-ratchet-guard: $MAIN_REF has no $BASELINE_REL (bootstrap) or is unreachable — skipping."
   exit 0

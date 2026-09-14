@@ -104,9 +104,17 @@ fi
 # repo a red shard that read as a broken guard. So: try to FETCH what we were
 # given before judging it, and refuse only if the remote cannot produce it
 # either. Fail-closed is preserved; only the false refusal goes away.
+source "$HERE/git-history.sh"
+
 ensure_commit() {
   git -C "$ROOT" rev-parse --verify --quiet "${1}^{commit}" >/dev/null && return 0
-  git -C "$ROOT" fetch --quiet --depth=1 origin "$1" >/dev/null 2>&1 || true
+  local shallow
+  shallow="$(read_shallowness)" || return 2
+  if [ "$shallow" = "true" ]; then
+    git -C "$ROOT" fetch --quiet --depth=1 origin "$1" >/dev/null 2>&1 || true
+  else
+    git -C "$ROOT" fetch --quiet origin "$1" >/dev/null 2>&1 || true
+  fi
   git -C "$ROOT" rev-parse --verify --quiet "${1}^{commit}" >/dev/null
 }
 
@@ -114,11 +122,19 @@ ensure_commit() {
 # MERGE BASE, and depth-1 fetches of two individual commits share no ancestor —
 # the shas resolve and the diff then fails, which is how the first version of this
 # fix still reddened the shard. Deepen once when the checkout is shallow so a base
-# exists; on a full clone this is a no-op.
+# can be trusted. A successful fetch alone is insufficient: remeasure before
+# the three-dot diff, and refuse if any graft remains. Full clones do no deep fetch.
 ensure_history() {
-  [ -f "$(git -C "$ROOT" rev-parse --git-dir)/shallow" ] || return 0
+  local shallow
+  shallow="$(read_shallowness)" || return 2
+  [ "$shallow" = "true" ] || return 0
   git -C "$ROOT" fetch --quiet --unshallow origin >/dev/null 2>&1 ||
     git -C "$ROOT" fetch --quiet --deepen=200 origin >/dev/null 2>&1 || true
+  shallow="$(read_shallowness)" || return 2
+  if [ "$shallow" != "false" ]; then
+    echo "as-built-write-guard: checkout remains SHALLOW; cannot trust the merge base." >&2
+    return 2
+  fi
 }
 
 if ! ensure_commit "${GUARD_BASE_SHA}"; then
@@ -131,7 +147,7 @@ if ! ensure_commit "${GUARD_HEAD_SHA}"; then
   exit 2
 fi
 
-ensure_history
+ensure_history || exit 2
 
 if ! changed_paths="$(git -C "$ROOT" diff --name-status --no-renames "${GUARD_BASE_SHA}...${GUARD_HEAD_SHA}" -- docs/AS_BUILT.md docs/as-built/ 2>/dev/null)"; then
   echo "as-built-write-guard: diff for GUARD_BASE_SHA '${GUARD_BASE_SHA}' and GUARD_HEAD_SHA '${GUARD_HEAD_SHA}' failed; the guard REFUSES to skip." >&2

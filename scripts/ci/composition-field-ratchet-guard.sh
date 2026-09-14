@@ -66,8 +66,10 @@ fi
 # the rest). --depth=1 is ONLY for a checkout that is ALREADY shallow
 # (actions/checkout depth-1 in CI), where it makes origin/main resolvable
 # without downloading history the guard will not use.
+source "$HERE/git-history.sh"
+shallow="$(read_shallowness)" || exit 2
 if [ "$MAIN_REF" = "origin/main" ]; then
-  if [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+  if [ "$shallow" = "true" ]; then
     git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
   else
     git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true
@@ -92,8 +94,9 @@ if ! git show "$MAIN_REF:$INVENTORY_REL" > "$MAIN_INVENTORY" 2>/dev/null; then
   # T3: name shallowness rather than leaving a true-but-useless message. An
   # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
   # history simply not being present — the distinction cost hours to find once.
-  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
-    echo "composition-field-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
+  shallow="$(read_shallowness)" || exit 2
+  if [ "$shallow" = "true" ]; then
+    echo "composition-field-ratchet-guard: the checkout is SHALLOW (git reports shallow history), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
   fi
   echo "composition-field-ratchet-guard: $MAIN_REF has no $INVENTORY_REL (bootstrap) or is unreachable — skipping."
   exit 0
