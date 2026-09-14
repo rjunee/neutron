@@ -21,6 +21,7 @@ import {
   activityRowFromToolTap,
   commandLabelForShellTool,
   BODY_MAX,
+  COMMAND_LABEL_MAX,
   humanizeToolName,
   DEAD_AFTER_MS,
   deriveInspectorState,
@@ -507,6 +508,19 @@ describe('activityRowFromSubstrateEvent — mapping the raw stream', () => {
     expect(activityRowFromSubstrateEvent({ kind: 'not_a_real_kind' })).toBeNull()
   })
 
+  it('names a live shell row for its command verb and falls back when args are unreadable', () => {
+    expect(
+      activityRowFromSubstrateEvent({
+        kind: 'tool_call',
+        tool_name: 'shell',
+        args: { command: 'cd /work/tree && FOO=bar grep -R needle .' },
+      }),
+    ).toEqual({ kind: 'tool_start', label: 'grep' })
+    expect(
+      activityRowFromSubstrateEvent({ kind: 'tool_call', tool_name: 'shell', args: {} }),
+    ).toEqual({ kind: 'tool_start', label: 'shell' })
+  })
+
   it('truncates and flattens long detail so one row cannot bloat a WS frame', () => {
     const row = activityRowFromSubstrateEvent({
       kind: 'error',
@@ -560,19 +574,25 @@ describe('activityRowFromToolTap — the Pre/PostToolUse hook rows', () => {
   it('names the meaningful shell command, table-driven over real prefixes', () => {
     const cases: Array<[string, string]> = [
       ['FOO=bar BAZ=qux grep -R needle .', 'grep'],
-      ['cd /work/tree && bun test --watch=false', 'bun test'],
-      ['set -euo pipefail; git --no-pager rebase main', 'git rebase'],
+      ['cd /work/tree && bun test --watch=false', 'bun'],
+      ['set -euo pipefail; git --no-pager rebase main', 'git'],
       ['grep --color=never needle file | head -20', 'grep'],
       ['for f in *.ts; do rg --files "$f"; done', 'rg'],
-      ['while true; do npm run build --silent; done', 'npm run build'],
-      ['if bun test --coverage; then echo ok; fi', 'bun test'],
+      ['while true; do npm run build --silent; done', 'npm'],
+      ['if bun test --coverage; then echo ok; fi', 'bun'],
       ['bash scripts/release/build.sh --fast', 'build.sh'],
-      ['git --no-pager rebase --onto main old', 'git rebase'],
+      ['git --no-pager rebase --onto main old', 'git'],
     ]
     for (const [command, expected] of cases) {
       expect(commandLabelForShellTool('Bash', command)).toBe(expected)
       expect(commandLabelForShellTool('Bash', command)).not.toContain('--')
     }
+  })
+
+  it('clips a long command word to the phone-row bound', () => {
+    const label = commandLabelForShellTool('Bash', 'a'.repeat(COMMAND_LABEL_MAX + 10))
+    expect(label).toHaveLength(COMMAND_LABEL_MAX)
+    expect(label?.endsWith('…')).toBe(true)
   })
 
   it('falls back to the shell tool when reduction would be a guess', () => {

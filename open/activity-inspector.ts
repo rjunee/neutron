@@ -448,6 +448,7 @@ export function activityRowFromSubstrateEvent(ev: {
   text?: string
   message?: string
   tool_name?: string
+  args?: unknown
   keepalive?: boolean
 }): ActivityRowInput | null {
   switch (ev.kind) {
@@ -459,13 +460,13 @@ export function activityRowFromSubstrateEvent(ev: {
       return withBody({ kind: 'thinking', label: 'thinking' }, ev.text ?? '')
     case 'tool_call': {
       const named = humanizeToolName(ev.tool_name ?? 'tool')
-      // No arguments on this tap, so a shell call cannot be classified here and
-      // is left non-write (fails closed); a named write tool still counts.
+      const command = shellCommandFromEventArgs(ev.args)
+      const shellLabel = commandLabelForShellTool(named.label, command)
       return {
         kind: 'tool_start',
-        label: named.label,
+        label: shellLabel ?? named.label,
         ...sourceOf(named),
-        ...(isWriteClassTool(ev.tool_name ?? '') ? { write_class: true } : {}),
+        ...(isWriteClassTool(ev.tool_name ?? '', command) ? { write_class: true } : {}),
       }
     }
     case 'tool_result_ack':
@@ -655,8 +656,14 @@ export function activityRowFromToolTap(input: {
 }
 
 const SHELL_TOOLS = new Set(['bash', 'shell', 'sh', 'zsh'])
-const MULTIPLEXERS = new Set(['bun', 'git', 'npm', 'pnpm', 'yarn', 'gh', 'docker'])
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'python', 'python3', 'ruby'])
+
+/**
+ * Maximum inline command-label width. The typing label shares one phone row with
+ * the spinner, so 24 characters keeps the command to a compact word; the final
+ * character is reserved for the ellipsis when clipping is needed.
+ */
+export const COMMAND_LABEL_MAX = 24
 
 /** Tools whose whole purpose is to modify a file. Matched on the HUMANISED name
  *  (lower-cased), so an MCP-namespaced `mcp__x__edit_file` classifies too. */
@@ -819,14 +826,22 @@ export function isWriteClassTool(tool_name: string, args?: string): boolean {
   return false
 }
 
-/** Best-effort inline label for a shell call. Ambiguous control flow stays generic. */
+/** Read the command without conflating unavailable/malformed arguments with an empty command. */
+function shellCommandFromEventArgs(args: unknown): string | undefined {
+  if (typeof args === 'string') return args
+  if (args === null || typeof args !== 'object') return undefined
+  const command = (args as { command?: unknown }).command
+  return typeof command === 'string' ? command : undefined
+}
+
+/** Best-effort one-word label for a shell call. Ambiguous control flow stays generic. */
 export function commandLabelForShellTool(tool: string, command: string | undefined): string | null {
   if (!SHELL_TOOLS.has(tool.toLowerCase()) || command === undefined) return null
   let s = command.trim()
   if (s === '' || /^(case|function|select)\b/.test(s)) return null
   s = s.replace(/^\(+\s*/, '')
-  s = s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
   s = s.replace(/^cd\s+(?:'[^']*'|"[^"]*"|\S+)\s*&&\s*/, '')
+  s = s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
   s = s.replace(/^set\s+(?:-[A-Za-z]+|-[A-Za-z]+\s+\S+|\+\S+)(?:\s+\S+)*?\s*;\s*/, '')
   if (/^(for|while)\b/.test(s)) {
     const match = s.match(/\bdo\s+([^;|&]+)/)
@@ -845,18 +860,12 @@ export function commandLabelForShellTool(tool: string, command: string | undefin
   first = first.split('/').pop() ?? first
   if (INTERPRETERS.has(first) && tokens[0] !== undefined && !tokens[0].startsWith('-')) {
     const script = tokens[0].split('/').pop()!
-    if (/\.[A-Za-z0-9]+$/.test(script)) return script
+    if (/\.[A-Za-z0-9]+$/.test(script)) first = script
   }
-  if (MULTIPLEXERS.has(first)) {
-    const meaningful = tokens.filter((t) => !t.startsWith('-'))
-    let sub = meaningful[0]
-    if (first === 'npm' && sub === 'run') sub = meaningful[1] === undefined ? 'run' : `run ${meaningful[1]}`
-    if (first === 'docker' && sub === 'compose') sub = 'compose'
-    if (sub === undefined) return null
-    const label = `${first} ${sub}`
-    return label.split(/\s+/).slice(0, 3).join(' ')
-  }
-  return first.length > 0 && !/[$`{}]/.test(first) ? first : null
+  if (first.length === 0 || /[$`{}]/.test(first)) return null
+  return first.length > COMMAND_LABEL_MAX
+    ? `${first.slice(0, COMMAND_LABEL_MAX - 1)}…`
+    : first
 }
 
 /** The label every assistant-message row carries, from either source. Shared so the
