@@ -99,7 +99,7 @@ describe('app-connect-auth session gate (ISSUES #84)', () => {
     // Defense-in-depth: even a structurally-valid claim bound to a DIFFERENT
     // instance is rejected before any mutation.
     const { handler, calls } = gatedSurface({
-      claim: { project_slug: 'mallory', user_id: 'u-mallory' },
+      claim: { project_slug: 'mallory', user_id: 'u-mallory', session_id: 'session-one' },
       project_slug: OWNER,
     })
     const res = await handler(
@@ -111,11 +111,13 @@ describe('app-connect-auth session gate (ISSUES #84)', () => {
 
   test('authenticated GET /callback with a valid code → 302 connected (flow still works)', async () => {
     const { handler, calls } = gatedSurface({
-      claim: { project_slug: OWNER, user_id: 'u1' },
+      claim: { project_slug: OWNER, user_id: 'u1', session_id: 'session-one' },
     })
-    const res = await handler(
-      req('/api/app/connect/auth/callback?connect_code=c1.s1', 'GET'),
-    )
+    const start = await handler(req('/api/app/connect/auth/start', 'POST'))
+    const { auth_url } = await start!.json() as { auth_url: string }
+    const callback = new URL(new URL(auth_url).searchParams.get('return_url')!)
+    callback.searchParams.set('connect_code', 'c1.s1')
+    const res = await handler(new Request(callback.toString()))
     expect(res!.status).toBe(302)
     expect(res!.headers.get('location')).toContain('connect=connected')
     expect(calls.connectViaRedeem).toBe(1)
@@ -123,7 +125,7 @@ describe('app-connect-auth session gate (ISSUES #84)', () => {
 
   test('authenticated POST /disconnect → 200 ok, credential cleared (flow still works)', async () => {
     const { handler, calls } = gatedSurface({
-      claim: { project_slug: OWNER, user_id: 'u1' },
+      claim: { project_slug: OWNER, user_id: 'u1', session_id: 'session-one' },
     })
     const res = await handler(req('/api/app/connect/auth/disconnect', 'POST'))
     expect(res!.status).toBe(200)
@@ -133,7 +135,7 @@ describe('app-connect-auth session gate (ISSUES #84)', () => {
 
   test('authenticated GET /status → 200 with connection state (flow still works)', async () => {
     const { handler, calls } = gatedSurface({
-      claim: { project_slug: OWNER, user_id: 'u1' },
+      claim: { project_slug: OWNER, user_id: 'u1', session_id: 'session-one' },
     })
     const res = await handler(req('/api/app/connect/auth/status', 'GET'))
     expect(res!.status).toBe(200)

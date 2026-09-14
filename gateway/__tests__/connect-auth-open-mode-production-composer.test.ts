@@ -1,32 +1,8 @@
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /**
- * M2.5 (Argus r1 BLOCKER #2) — production-composer reachability guard for the
- * Open-mode connect auth surface + the federated shared-projects path.
- *
- * The headline M2.5 deliverable (Open client surface + FederatedTokenStore +
- * open workspace-source resolver) shipped in r1 instantiated NOWHERE outside
- * unit tests — `gateway/composition.ts` + `gateway/http/compose.ts` were
- * untouched, so on a real Open box the 4 endpoints 404'd and the landing panel
- * hid itself. This test is the closing guard: it boots the production graph in
- * the SAME shape `gateway/index.ts` does at boot in 'open' mode and asserts:
- *
- *   1. `GET  /api/app/connect/auth/status`     → 200 {connected:false}
- *   2. `POST /api/app/connect/auth/start`      → 200 {auth_url} at the
- *                                                      identity service
- *   3. `GET  /api/app/connect/auth/callback`   → 302 (not 404)
- *   4. `POST /api/app/connect/auth/disconnect` → 200 {ok:true}
- *
- * (A fifth test used to live here proving the shared-projects resolver fans
- * out over a federated JWT via the open-mode `openResolveBaseUrl` path. It
- * was deleted alongside `gateway/connect/open-instance-source-resolver.ts` /
- * `syndication-relay.ts` in the wave-1 dead-code kill (refactor plan §K1):
- * `composition.ts` never actually wires that resolver into the production
- * graph, so the test only ever exercised `buildSharedProjectsResolver` in
- * isolation, not a reachable path.)
- *
- * A future refactor that drops `app_connect_auth_surface` from
- * `composeProductionGraph` / `composeHttpHandler`, or that reverts the
- * open-mode resolver to the managed-hardcoded path, MUST fail this test.
+ * Route composition integration test for an explicitly injected connect surface.
+ * This harness constructs the surface itself; it does not prove Open boot wiring.
+ * The verified session ID below is fixture-owned, not supplied by Open boot.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -86,10 +62,7 @@ async function startHarness(): Promise<Harness> {
   const db = ProjectDb.open(join(tmp, 'owner.db'))
 
   const secrets = new SecretsStore({ data_dir: tmp, db })
-  // Construct the FederatedTokenStore exactly as the open-mode boot block
-  // does — with NO credential present yet (the user connects later). This is
-  // the boot-guard requirement: the store + surface are wired even before the
-  // first OAuth completes, so `/status` answers `not-connected` instead of 404.
+  // Inject an empty store to exercise the route before the first connection.
   const store = new FederatedTokenStore({
     secrets,
     owner_handle: INTERNAL_HANDLE,
@@ -103,7 +76,7 @@ async function startHarness(): Promise<Harness> {
     // yields a claim; everything else is unauthenticated.
     resolveUserClaim: async (req) => {
       const slug = readSessionCookie(req, COOKIE_SECRET, Date.now())
-      return slug === OWNER ? { project_slug: slug, user_id: 'u-open' } : null
+      return slug === OWNER ? { project_slug: slug, user_id: 'u-open', session_id: 'session-one' } : null
     },
     project_slug: OWNER,
   })

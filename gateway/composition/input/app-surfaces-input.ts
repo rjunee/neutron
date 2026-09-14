@@ -170,9 +170,9 @@ export interface AppSurfacesCompositionInput {
    *
    * Managed deployments leave this UNSET — they mint a per-instance
    * connect token in-process and never run the federated client path.
-   * The boot shell only wires this when `deployment_mode === 'open'` (see
-   * `gateway/index.ts`). When unset the routes are unmounted; the landing
-   * panel's `/status` fetch 404s and the panel hides itself.
+   * No production boot composer supplies this slot yet. Future wiring must
+   * supply a verified login-session ID to the surface's claim resolver.
+   * When unset the routes are unmounted.
    *
    * Surface factory: the app-level connect auth surface in `gateway/http/`.
    * Per docs/plans/2026-06-01-m2.5-open-clients-managed-workspaces-plan.md.
