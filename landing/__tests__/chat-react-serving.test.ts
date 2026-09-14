@@ -12,6 +12,11 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createLandingServer } from '../server.ts'
+// Regression setup for #656: load one of the browser bundle's transitive modules
+// into this `bun test` process before the server performs its lazy build. The old
+// in-process Bun.build then reads that graph through stale test-loader resolver
+// state and returns no bundle; the fresh build process must remain independent.
+import { activityPath } from '../chat-react/activity-client.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const STATIC_DIR = dirname(HERE) // the landing/ package dir (has chat-react.html + chat-react/)
@@ -77,6 +82,7 @@ describe('SPA client-route catch-all — doc-link deep-link 404 fix', () => {
 
 describe('GET /chat-react.js', () => {
   test('bundles the React/assistant-ui client on first request', async () => {
+    expect(activityPath('')).toBe('/api/app/activity')
     const res = await get('http://x.test/chat-react.js')
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('javascript')

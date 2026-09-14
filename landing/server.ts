@@ -646,6 +646,46 @@ export const CHAT_REACT_BUNDLE_BUILD_OPTIONS = {
 } as const satisfies Partial<Parameters<typeof Bun.build>[0]>
 
 /**
+ * Run the development fallback build in a fresh Bun process.
+ *
+ * `bun test` retains resolver directory descriptors and module-loader state for
+ * every test file sharing its process. Calling the in-process build API after a
+ * test has imported part of the browser graph can then make the bundler read
+ * through stale resolver state. A child process owns a new descriptor table and
+ * resolver, which is also the production build CLI's normal execution model.
+ */
+async function buildChatReactBundle(entrypoint: string): Promise<{
+  success: boolean
+  output: string | null
+  logs: string[]
+}> {
+  const child = Bun.spawn([
+    process.execPath,
+    'build',
+    entrypoint,
+    '--target=browser',
+    '--format=esm',
+    '--minify',
+    '--sourcemap=none',
+    '--define',
+    'process.env.NODE_ENV="production"',
+  ], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [exitCode, output, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  return {
+    success: exitCode === 0 && output.length > 0,
+    output: exitCode === 0 && output.length > 0 ? output : null,
+    logs: stderr.trim() === '' ? [] : stderr.trim().split('\n'),
+  }
+}
+
+/**
  * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
  * plus the rest of the landing HTTP routes. Chat moved to the unified
  * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
@@ -814,11 +854,8 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     if (chat_react_js_cache !== null) return chat_react_js_cache
     if (!existsSync(chat_react_entry_path)) return null
     try {
-      const result = await Bun.build({
-        entrypoints: [chat_react_entry_path],
-        ...CHAT_REACT_BUNDLE_BUILD_OPTIONS,
-      })
-      if (!result.success || result.outputs.length === 0) {
+      const result = await buildChatReactBundle(chat_react_entry_path)
+      if (!result.success || result.output === null) {
         // O4 — VISIBILITY ONLY: the web chat client silently 404s when this
         // bundle build fails (return null → /chat-react.js 404). Journal it on
         // the failure EDGE (latched) so a persistently-broken bundle doesn't
@@ -837,9 +874,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         }
         return null
       }
-      const out = result.outputs[0]
-      if (out === undefined) return null
-      chat_react_js_cache = await out.text()
+      chat_react_js_cache = result.output
       chat_react_build_failed_latched = false // successful build clears the edge
       return chat_react_js_cache
     } catch (err) {
