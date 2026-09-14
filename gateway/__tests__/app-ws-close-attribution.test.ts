@@ -70,6 +70,15 @@ afterEach(() => {
 })
 
 describe('app-ws close attribution', () => {
+  it('refuses to report an uptime when close precedes open', async () => {
+    const { surface, ws } = harness()
+
+    await expect(surface.websocket.close?.(ws, 1006, '')).rejects.toThrow(
+      'app-ws: close callback preceded open callback',
+    )
+    expect(lines).toEqual([])
+  })
+
   it('records a peer close as client-initiated and deliberate', async () => {
     const { surface, ws } = harness()
     await open(surface, ws)
