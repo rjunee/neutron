@@ -90,8 +90,13 @@ import {
   fetchProjects,
   projectCardInteractivity,
   sortProjectsByActivity,
-  type Project,
 } from '../../../lib/projects';
+import {
+  INITIAL_PROJECTS_REFRESH_STATE,
+  projectsRefreshFailed,
+  projectsRefreshNotice,
+  projectsRefreshSucceeded,
+} from '../../../lib/projects-refresh-state';
 import { startProjectsRailLive, type RailProject } from '../../../lib/projects-rail-live';
 import { projectShellContent } from '../../../lib/project-shell-content';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
@@ -282,8 +287,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // The rail's project SET comes from the HTTP list; its per-project rail state
   // (`activity` dot / `live_runs` badge) is overlaid live from the app-ws
   // `projects_changed` frame (PR-1 #180) — the composer is the single source of
-  // truth, mirroring the web rail. `railProjects` is null until the first fetch.
-  const [railProjects, setRailProjects] = useState<Project[] | null>(null);
+  // truth, mirroring the web rail. Refresh state distinguishes fresh data,
+  // deliberate offline retention, and a surfaced failure.
+  const [railRefresh, setRailRefresh] = useState(INITIAL_PROJECTS_REFRESH_STATE);
+  const railProjects = railRefresh.projects;
   const [railOverlay, setRailOverlay] = useState<ReadonlyMap<string, RailOverlayEntry>>(
     () => new Map(),
   );
@@ -294,11 +301,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
     let cancelled = false;
     fetchProjects({ base_url: config.base_url, token: user.token })
       .then(({ projects }) => {
-        if (!cancelled) setRailProjects(projects);
+        if (!cancelled) setRailRefresh(projectsRefreshSucceeded(projects));
       })
-      .catch(() => {
-        // Non-fatal: the rail falls back to the current project alone.
-        if (!cancelled) setRailProjects(null);
+      .catch((error: unknown) => {
+        if (!cancelled) setRailRefresh((previous) => projectsRefreshFailed(previous, error));
       });
     return () => {
       cancelled = true;
@@ -313,7 +319,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // project, so ask once, here, for the window the owner switches within.
   // Failures are silent by design — an un-warmed project simply resolves its
   // own on arrival, exactly as before.
-  const railIds = useMemo(() => (railProjects ?? []).map((p) => p.id), [railProjects]);
+  const railIds = useMemo(() => railProjects.map((p) => p.id), [railProjects]);
   // A stable dependency for the effect below. The rail list refetches on every
   // switch and hands back a fresh array even when the projects are identical,
   // so keying the prefetch on the CONTENT is what keeps it a once-per-session
@@ -500,7 +506,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // to the name the already-loaded rail list carries for this id. Both sources are
   // the real name; '' is the honest last resort, never a fabricated placeholder
   // (ISSUES #393).
-  const railEntry = (railProjects ?? []).find((p) => p.id === project_id);
+  const railEntry = railProjects.find((p) => p.id === project_id);
   const scopeName = project?.name ?? railEntry?.name ?? '';
   const scopeEmoji = (project?.emoji ?? railEntry?.emoji ?? '').length > 0
     ? (project?.emoji ?? railEntry?.emoji ?? '')
@@ -510,7 +516,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // the minimal rail shape. Seed with the current project so the rail is never
   // empty on first paint (before the HTTP list resolves).
   const railList: RailProjectView[] = (() => {
-    const navigable = (railProjects ?? []).filter((p) => projectCardInteractivity(p).navigable);
+    const navigable = railProjects.filter((p) => projectCardInteractivity(p).navigable);
     const views: RailProjectView[] = sortProjectsByActivity(navigable).map((p) => ({
       id: p.id,
       name: p.name,
@@ -729,6 +735,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         <View style={styles.railBody}>
           <ProjectRail
             projects={railList}
+            notice={projectsRefreshNotice(railRefresh)}
             overlay={railOverlay}
             activeProjectId={project_id}
             onSelect={onRailSelect}
