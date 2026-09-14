@@ -165,7 +165,6 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     expect(store.get(r.id)?.status).toBe('pending')
     // Tick 2: post accepted → row flips to fired.
     now += 30_000
-    now += 30_000
     expect((await loop.runOnce()).fired).toBe(1)
     expect(store.get(r.id)?.status).toBe('fired')
     expect(attempts).toBe(2)
