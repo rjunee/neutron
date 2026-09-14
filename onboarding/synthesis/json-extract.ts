@@ -24,7 +24,12 @@
  *
  * Exported for unit testing.
  */
+export const MAX_SYNTHESIS_RESPONSE_CHARS = 64 * 1024
+
 export function extractJsonObject(text: string): unknown {
+  // Synthesis requests at most 4,096 completion tokens. A 64 KiB character
+  // envelope preserves legitimate responses while bounding fence parsing.
+  if (text.length > MAX_SYNTHESIS_RESPONSE_CHARS) return null
   const trimmed = text.trim()
   if (trimmed.length === 0) return null
   // Direct JSON
