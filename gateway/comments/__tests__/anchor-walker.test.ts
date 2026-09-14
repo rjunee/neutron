@@ -835,16 +835,19 @@ describe('anchor walker — DocStore wiring smoke test', () => {
     expect(seen[1]!.op).toBe('move')
     expect(seen[1]!.path).toBe('b.md')
     expect(seen[1]!.from_path).toBe('a.md')
-    await store.deleteDoc(PROJECT_ID, 'b.md')
+    const realDateNow = Date.now
+    Date.now = () => 1_700_000_000_123
+    try {
+      await store.deleteDoc(PROJECT_ID, 'b.md')
+    } finally {
+      Date.now = realDateNow
+    }
     expect(seen.length).toBe(3)
     expect(seen[2]!.op).toBe('delete')
     expect(seen[2]!.path).toBe('b.md')
-    // Argus r1 IMPORTANT #2 — DocStore.deleteDoc now passes Date.now()
-    // for new_modified_at (the deleter's "effective mtime") instead of
-    // null so the materialiser's stale-event filter can suppress a
-    // slow deleter that races a fresher writer.
-    expect(seen[2]!.mtime).not.toBeNull()
-    expect(Number.isFinite(seen[2]!.mtime as number)).toBe(true)
+    // The omitted clock option follows the production default, Date.now(),
+    // for the deleter's effective mtime.
+    expect(seen[2]!.mtime).toBe(1_700_000_000_123)
     rmSync(tmp, { recursive: true, force: true })
   })
 
@@ -972,31 +975,12 @@ describe('Argus r1 IMPORTANT #2 — delete event stamped with finite mtime, supp
 })
 
 describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anchor live', () => {
-  // SKIPPED 2026-07-28, tracked as ISSUES #408 — nondeterministic by
-  // construction, not merely slow.
-  //
-  // The invariant is `writer_mtime > delete_time`, and the materialiser's
-  // max-mtime-wins fold treats EQUAL as stale. `delete_time` is `Date.now()`
-  // inside `DocStore.deleteDoc`; `writer_mtime` comes from the FILESYSTEM via
-  // `fstat`. Nothing in the test can force an order between those two clocks,
-  // so the assertion is a bet on timing. Measured 2/5 locally on the original
-  // (50ms-sleep) form and 5/12 on a signal-based rewrite; it reddened `main`
-  // twice in one night, once in each form.
-  //
-  // Two attempts at a deterministic rewrite are recorded in #408 along with
-  // why each failed. A real fix needs a production seam — an injectable clock
-  // in `DocStore` so both stamps can be FORCED into a known order — which is a
-  // deliberate change to shipping code and does not belong in an unsupervised
-  // test repair. Skipped rather than left flaky, because a test that reddens
-  // main at random trains people to merge past red, which is worse than a
-  // visible, tracked gap.
-  //
   // The REGRESSION it guards is real and still worth guarding: pre-fix,
   // `delete_time` was sampled at the hook site instead of before the slow
   // `recordCommit()`, so the deleter's event out-stamped a concurrent writer's
   // and the anchor flipped dead while the file existed. #408 carries that
   // context so the guard can be rebuilt rather than lost.
-  it.skip('a writer recreating the doc during the deleter\'s post-unlink awaits keeps the anchor live', async () => {
+  it('a writer recreating the doc during the deleter\'s post-unlink awaits keeps the anchor live', async () => {
     // Production race shape (DocStore has no per-path mutex):
     //
     //   T0: deleteDoc(r.md) starts, awaits ensureVersioningInit
@@ -1018,11 +1002,9 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
     // After the fix, stamp(deleter)=T3 < stamp(writer)=T5, the writer's event
     // wins, and the anchor stays live.
     //
-    // The slow versionStore stub deterministically opens the L613-L645 window
-    // wide enough for the concurrent writer to land its rename + fstat inside
-    // it. Without the slow stub, recordCommit short-circuits to a no-op and
-    // the window is sub-millisecond — too tight to be a stable regression
-    // guard.
+    // A controlled versionStore commit opens the post-unlink window until the
+    // concurrent writer has landed its rename + stat + hook. This orders the
+    // real operations without elapsed-time sleeps.
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-walker-race-'))
     const owner_home = join(tmp, 'home')
     const docsRoot = join(owner_home, 'Projects', PROJECT_ID, 'docs')
@@ -1047,14 +1029,27 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
     })
     const walker = new AnchorWalker({ commentStore, owner_home })
 
-    // Slow VersionStore stub: every commit() resolves after 50ms. This
-    // widens the L613-L645 window inside DocStore.deleteDoc enough for the
-    // concurrent writer to interleave deterministically.
-    const slowVersionStore = {
+    // The second commit belongs to deleteDoc. Hold it after unlink until the
+    // writer's real rename + stat + hook have completed, then let the slower
+    // deleter emit its hook last.
+    let commitCount = 0
+    let releaseDeleteCommit!: () => void
+    const deleteCommitReleased = new Promise<void>((resolve) => {
+      releaseDeleteCommit = resolve
+    })
+    let deleteCommitEntered!: () => void
+    const atDeleteCommit = new Promise<void>((resolve) => {
+      deleteCommitEntered = resolve
+    })
+    const controlledVersionStore = {
       isGitAvailable: async () => true,
       ensureInit: async () => true,
       commit: async () => {
-        await new Promise<void>((resolve) => setTimeout(resolve, 50))
+        commitCount += 1
+        if (commitCount === 2) {
+          deleteCommitEntered()
+          await deleteCommitReleased
+        }
       },
     } as unknown as import('../../git/doc-version-store.ts').DocVersionStore
 
@@ -1062,7 +1057,11 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
     const { DocStore } = await import('../../http/doc-store.ts')
     const docStore = new DocStore({
       owner_home,
-      versionStore: slowVersionStore,
+      versionStore: controlledVersionStore,
+      now: () =>
+        seenHooks.some((hook) => hook.op === 'write')
+          ? 9_000_000_000_000_000
+          : 1,
       onMutationSuccess: async (input) => {
         seenHooks.push({ op: input.op, stamp: input.new_modified_at })
         await walker.handle({
@@ -1103,35 +1102,19 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
     // delete). With OCC set the writer would 409 cleanly, so the race only
     // matters for the no-OCC case.
     const deleterP = docStore.deleteDoc(PROJECT_ID, 'r.md')
-    // Gate the writer on the deleter's unlink rather than launching both at
-    // the same instant. Previously the two ops were fired simultaneously, so
-    // the writer's temp-file write (which sets the mtime the writer later
-    // fstat's — rename preserves it) could land BEFORE the deleter's unlink.
-    // That made writer_mtime < delete_time on a fast host, the materialiser
-    // dropped the writer's anchor_relocated as stale, and the anchor flaked
-    // DEAD even though r.md existed at the end of the race — a wall-clock
-    // ordering dependency, not a real regression. Waiting for the unlink
-    // pins writer_mtime strictly after delete_time. The concurrency this
-    // test guards is unchanged: the deleter is still mid-flight inside its
-    // slow 50ms recordCommit() window (the L613-L645 gap) when the writer
-    // lands its rename + hook — exactly the T4/T5 interleaving above.
-    const raceDeadline = Date.now() + 2000
-    while (existsSync(join(docsRoot, 'r.md'))) {
-      if (Date.now() >= raceDeadline) {
-        throw new Error('deleter did not unlink r.md within 2000ms')
-      }
-      await new Promise((r) => setTimeout(r, 1))
-    }
+    await atDeleteCommit
+    expect(existsSync(join(docsRoot, 'r.md'))).toBe(false)
     const writerP = docStore.writeDoc({
       project_id: PROJECT_ID,
       path: 'r.md',
       content: body,
     })
-    await Promise.allSettled([deleterP, writerP])
+    await writerP
+    releaseDeleteCommit()
+    await deleterP
 
-    // The two ops MAY race in either order; one may reject (writer's fstat
-    // ENOENTs if the deleter unlinks between the writer's rename and stat,
-    // for instance). The regression invariant we guard is:
+    // The controlled commit barrier forces the writer to finish while the
+    // deleter remains in its post-unlink work. The regression invariant is:
     //
     //   "if the file exists at the end of the race, the anchor stays live"
     //
@@ -1146,21 +1129,10 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
       include_dead: true,
     })
     expect(result.threads.length).toBe(1)
-    if (fileExists) {
-      // Writer landed last → anchor must be live (the regression: pre-fix
-      // it could flip dead even though the file exists).
-      expect(result.threads[0]!.anchor.status).toBe('live')
-      // Structural assertion: deleter's stamp was sampled at unlink time,
-      // not at hook-call time, so it must be ≤ the writer's fstat-mtime.
-      const deleterStamp = seenHooks.find((h) => h.op === 'delete')?.stamp ?? null
-      const writerStamp = seenHooks.find((h) => h.op === 'write')?.stamp ?? null
-      if (deleterStamp !== null && writerStamp !== null) {
-        expect(deleterStamp).toBeLessThanOrEqual(writerStamp)
-      }
-    } else {
-      // Deleter landed last — the anchor correctly resolves to dead.
-      expect(result.threads[0]!.anchor.status).toBe('dead')
-    }
+    expect(fileExists).toBe(true)
+    expect(seenHooks.map((hook) => hook.op)).toEqual(['write', 'delete'])
+    expect(seenHooks.find((hook) => hook.op === 'delete')?.stamp).toBe(1)
+    expect(result.threads[0]!.anchor.status).toBe('live')
 
     commentStore.closeAll()
     rmSync(tmp, { recursive: true, force: true })
