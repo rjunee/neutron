@@ -3204,6 +3204,19 @@ export function buildOpenGraphComposer(
               log: (m) => log.info('ritual_registration', { detail: m }),
             })
             ritualRegistration = registration
+            const ritualApprovalSweeper = new SupervisedLoop({
+              name: 'ritual-approval-sweeper',
+              intervalMs: 60_000,
+              immediate: true,
+              tick: async () => {
+                if (await isOnboardingActive(OWNER_USER_ID)) return
+                await registration.sweepPendingApprovals()
+              },
+            })
+            loopRegistry.register(ritualApprovalSweeper.describe())
+            realmodeCleanups.push(() => ritualApprovalSweeper.stop())
+            ritualApprovalSweeper.start()
+
             // THE REACHABILITY FIX. Seeding + `registerBundledRituals` above make
             // the three bundled defs KNOWN — registration is NOT approval, and
             // until now nothing ever REQUESTED approval for them. The approval

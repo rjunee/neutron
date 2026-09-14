@@ -50,6 +50,7 @@ import { VALUE_BYTE_CAP } from '@neutronai/channels/button-primitive.ts'
 import type { ApprovalManager } from '@neutronai/tools/approval.ts'
 
 import {
+  computeRitualContentHash,
   createRitualApprovalCheck,
   requestRitualApproval,
   ritualApprovalToolName,
@@ -59,6 +60,8 @@ import {
 import { isRitualScheduleConflict, type ReminderStore } from './store.ts'
 import {
   GATED_WRITE_TOOLS,
+  RITUAL_MODEL_TIER,
+  RITUAL_TIMEOUT_MS,
   validateRitualDef,
   type RitualEgress,
   type RitualDef,
@@ -217,7 +220,8 @@ export interface RitualStatusRow {
   scope: RitualScope
   tool_surface: readonly string[]
   egress: RitualEgress
-  approval: 'approved' | 'pending' | 'denied' | 'none'
+  approval: 'approved' | 'pending' | 'denied' | 'expired' | 'none'
+  expiry_reason?: string
   scheduled: boolean
 }
 
@@ -400,6 +404,7 @@ export interface RitualRegistrationService {
    */
   reapprove(id: string): Promise<RitualProposalResult>
   handleOwnerButtonAnswer(input: RitualOwnerAnswerInput): Promise<{ body: string } | null>
+  sweepPendingApprovals(): Promise<void>
   status(): RitualStatusRow[]
 }
 
@@ -742,6 +747,41 @@ export function createRitualRegistrationService(
     })
   }
 
+  async function sweepPendingApprovals(): Promise<void> {
+    for (const row of approvals.listPending(project_slug)) {
+      const match = /^(ritual|ritual-egress):(.+)$/.exec(row.tool_name)
+      if (match === null) continue
+      try {
+        await approvals.reraisePending(row.id, (current, attempt) => {
+          try {
+            const def = registry.get(match[2]!)
+            const schedule = readSchedule(match[2]!)
+            if (!def || !schedule) return null
+            const prompt = readAndValidateLivePrompt(def)
+            const cadence = cadenceFor(schedule)
+            const hash = computeRitualContentHash({ prompt, cadence,
+              tool_surface: def.tool_surface, scope: def.scope,
+              model_tier: RITUAL_MODEL_TIER, timeout_ms: RITUAL_TIMEOUT_MS })
+            if (JSON.parse(current.args_json).content_hash !== hash) return null
+            const egress = match[1] === 'ritual-egress'
+            const p: RitualRegistrationEmit = {
+              body: egress ? renderEgressGrantBody(def) : renderRitualApprovalBody({ def, prompt, cadence, schedule }),
+              options: [
+                { label: 'Approve', body: egress ? 'Approve network egress' : 'Approve this ritual', value: `rap:${uuidToToken(row.id)}:a` },
+                { label: 'Deny', body: egress ? 'Deny network egress' : 'Deny this ritual', value: `rap:${uuidToToken(row.id)}:d` },
+              ],
+              idempotency_key: `ritual-reminder:${row.id}:${attempt}`,
+              metadata: { kind: egress ? 'ritual-egress-approval' : 'ritual-approval', ritual_id: def.id },
+            }
+            return () => emit(p)
+          } catch { return null }
+        })
+      } catch (err) {
+        log(`ritual approval reminder failed id=${row.id}: ${(err as Error).message}`)
+      }
+    }
+  }
+
   async function requestApprovalAndEmit(args: {
     def: RitualDef
     normalized: string
@@ -1015,6 +1055,7 @@ export function createRitualRegistrationService(
     const rows: RitualStatusRow[] = []
     for (const def of registry.list()) {
       let approval: RitualStatusRow['approval'] = 'none'
+      let expiry_reason: string | undefined
       const schedule = readSchedule(def.id)
       if (schedule !== null) {
         try {
@@ -1052,6 +1093,12 @@ export function createRitualRegistrationService(
               : undefined
           if (latestContent?.status === 'denied' || latestEgress?.status === 'denied') {
             approval = 'denied'
+          } else {
+            const expired = [latestContent, latestEgress].find((r) => r?.status === 'expired')
+            if (expired) {
+              approval = 'expired'
+              expiry_reason = JSON.parse(expired.args_json).expiry_reason ?? 'Approval expired'
+            }
           }
         } catch {
           /* best-effort — a query failure leaves approval='none' */
@@ -1070,13 +1117,14 @@ export function createRitualRegistrationService(
         tool_surface: [...def.tool_surface],
         egress: def.egress,
         approval,
+        ...(expiry_reason === undefined ? {} : { expiry_reason }),
         scheduled,
       })
     }
     return rows
   }
 
-  return { propose, enable, reapprove, handleOwnerButtonAnswer, status }
+  return { propose, enable, reapprove, sweepPendingApprovals, handleOwnerButtonAnswer, status }
 }
 
 // ── Schedule validation ──────────────────────────────────────────────────────

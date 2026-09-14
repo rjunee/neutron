@@ -98,8 +98,8 @@ export interface EnableBundledRitualsResult {
   /** Ids newly enabled — a def.json was written and an approval prompt emitted. */
   enabled: string[]
   /**
-   * Ids already enabled AND still holding a usable approval state (approved,
-   * pending, or deliberately denied) — NOT re-prompted.
+   * Ids already enabled with an existing approval state (approved,
+   * pending, expired, or deliberately denied) — NOT re-prompted.
    */
   already_enabled: string[]
   /**
@@ -197,11 +197,11 @@ export async function enableBundledRitualsAtBoot(
       // constant. Before this, such a ritual had a def.json (so the sweep skipped
       // it) and no valid grant (so every fire refused 'unapproved'): no prompt, no
       // brief, and nothing the owner could see. `status()` recomputes approval
-      // against the LIVE bytes, so it distinguishes the four states, and only
+      // against the LIVE bytes, so it distinguishes the approval states, and only
       // 'none' — no grant for the live hash, nothing pending, nothing denied —
       // earns a fresh prompt.
       //
-      // 'pending' is left alone (the prompt is already in front of him) and
+      // 'pending' is handled by the periodic age sweep; 'expired' stays expired, and
       // 'denied' STAYS denied (re-asking a ritual the owner declined would be the
       // sweep arguing with him).
       if (existsSync(join(rituals_dir, `${def.id}.def.json`))) {

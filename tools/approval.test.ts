@@ -329,3 +329,134 @@ describe('revokeApproved', () => {
     expect(await mgr.revokeApproved('nope')).toBe(false)
   })
 })
+
+describe('daily approval reminders', () => {
+  const day = 86_400_000
+  let now: number
+  let manager: ApprovalManager
+  let sent: number[]
+  const render = (_row: ApprovalRow, attempt: number) => async () => { sent.push(attempt) }
+  async function seed(requested_at: string | number = 1000) {
+    await db.run(`INSERT INTO tool_approvals
+      (id, project_slug, tool_name, args_json, status, requested_at)
+      VALUES ('daily', 'p', 'ritual:daily', '{"content_hash":"original"}', 'pending', ?)`, [requested_at])
+  }
+  beforeEach(() => {
+    now = 1_000_000
+    sent = []
+    manager = new ApprovalManager(db, recordingNotifier(), { now: () => now })
+  })
+  test('daily boundary, concurrent sweeps, restart, three reminders then retained expiry', async () => {
+    await seed()
+    now += day - 1
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    now++
+    expect(await Promise.all([manager.reraisePending('daily', render), manager.reraisePending('daily', render)]))
+      .toEqual(['raised', 'skipped'])
+    manager = new ApprovalManager(db, recordingNotifier(), { now: () => now })
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    for (let i = 0; i < 2; i++) {
+      now += day
+      expect(await manager.reraisePending('daily', render)).toBe('raised')
+    }
+    now += day
+    expect(await manager.reraisePending('daily', render)).toBe('expired')
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    expect(sent).toEqual([1, 2, 3])
+    expect(manager.get('daily')?.status).toBe('expired')
+    expect(JSON.parse(manager.get('daily')!.args_json)).toMatchObject({
+      content_hash: 'original', reraise_count: 3, expiry_reason: 'No answer after three daily reminders',
+    })
+  })
+  test.each(['approved', 'denied'] as const)('answer before selected row is dispatched: %s', async (decision) => {
+    await seed()
+    const selected = manager.listPending('p')[0]!
+    now += day
+    await manager.respondApproval(selected.id, decision, 'owner')
+    expect(await manager.reraisePending(selected.id, render)).toBe('skipped')
+    expect(sent).toEqual([])
+    expect(manager.get(selected.id)?.status).toBe(decision)
+    expect(JSON.parse(manager.get(selected.id)!.args_json)).toEqual({ content_hash: 'original' })
+  })
+  test('answer queued during reservation wins before delivery starts', async () => {
+    await seed()
+    now += day
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const merge = manager.mergeArgs.bind(manager)
+    manager.mergeArgs = async (id, patch) => {
+      await merge(id, patch)
+      entered()
+      await gate
+    }
+    const sending = manager.reraisePending('daily', render)
+    await started
+    const answering = manager.respondApproval('daily', 'approved', 'owner')
+    release()
+    await answering
+    expect(await sending).toBe('skipped')
+    expect(sent).toEqual([])
+  })
+  test('answer during asynchronous delivery serializes behind send, then forbids later reminders', async () => {
+    await seed()
+    now += day
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const sending = manager.reraisePending('daily', () => async () => {
+      entered()
+      await gate
+      expect(manager.get('daily')?.status).toBe('pending')
+      sent.push(1)
+    })
+    await started
+    const answering = manager.respondApproval('daily', 'denied', 'owner')
+    await new Promise((r) => setTimeout(r, 5))
+    expect(manager.get('daily')?.status).toBe('pending')
+    release()
+    await sending
+    expect(await answering).toBe(true)
+    now += day
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    expect(sent).toEqual([1])
+  })
+  test.each(['unreadable', -1, 1e20])('unknown or impossible request age expires: %s', async (stamp) => {
+    await seed(stamp)
+    expect(await manager.reraisePending('daily', render)).toBe('expired')
+    expect(sent).toEqual([])
+    expect(JSON.parse(manager.get('daily')!.args_json).expiry_reason).toContain('unreadable')
+  })
+  test.each([{ last_raised_at: null }, { reraise_count: -1 }, { reraise_count: '2' }])('unreadable history expires: %j', async (patch) => {
+    await seed()
+    await manager.mergeArgs('daily', patch)
+    expect(await manager.reraisePending('daily', render)).toBe('expired')
+    expect(sent).toEqual([])
+  })
+  test('missing request timestamp is not fresh', async () => {
+    await seed()
+    const get = manager.get.bind(manager)
+    manager.get = (id) => ({ ...get(id)!, requested_at: undefined as unknown as number })
+    expect(await manager.reraisePending('daily', render)).toBe('expired')
+    expect(get('daily')?.status).toBe('expired')
+    expect(sent).toEqual([])
+  })
+  test('cancellation during reservation prevents delivery', async () => {
+    await seed()
+    now += day
+    const merge = manager.mergeArgs.bind(manager)
+    manager.mergeArgs = async (id, patch) => { await merge(id, patch); await manager.cancelPending(id) }
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    expect(sent).toEqual([])
+  })
+  test('failed delivery consumes its durable attempt and does not block an answer', async () => {
+    await seed()
+    now += day
+    await expect(manager.reraisePending('daily', () => async () => { throw new Error('offline') })).rejects.toThrow('offline')
+    expect(await manager.reraisePending('daily', render)).toBe('skipped')
+    expect(JSON.parse(manager.get('daily')!.args_json).reraise_count).toBe(1)
+    expect(await manager.respondApproval('daily', 'approved', 'owner')).toBe(true)
+  })
+})

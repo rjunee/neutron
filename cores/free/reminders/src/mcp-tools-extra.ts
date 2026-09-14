@@ -127,12 +127,9 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
     },
   })
 
-  // #510 — the way BACK to a pending approval. The boot sweep deliberately leaves a
-  // 'pending' grant alone on the stated ground that "the prompt is already in front
-  // of him" — true for about as long as it takes the chat to scroll. A pending
-  // approval the owner never answered then has no surface at all: `rituals_status`
-  // can SAY it is pending, but the only tappable buttons are in a message from days
-  // ago. `kaizen` sat pending from 2026-08-03 and never once fired.
+  // Explicit owner-requested reapproval mints new grants. Automatic daily
+  // reminders preserve the original grant and are bounded by its stored history.
+  // See reminders/ritual-registration.ts sweepPendingApprovals.
   //
   // WRITE capability, not read: this mints fresh grant rows and posts a message.
   const rituals_reapprove = guard.wrapToolHandler<RitualReapproveInput, RitualProposeResult>({

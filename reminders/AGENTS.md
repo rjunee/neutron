@@ -58,7 +58,10 @@ fire-time text is composed at fire time, never pre-rendered.
   share one `requestApprovalAndEmit` tail: `renderRitualApprovalBody` (the
   security-carrying rendering), content-hash-bound grant, full rollback on any
   emit failure. `handleOwnerButtonAnswer` is the turn-start capture +
-  schedule-on-approve. Surfaced as the reminders-Core `rituals_propose` /
+  schedule-on-approve. `sweepPendingApprovals()` re-renders original grants under
+  the bounded age policy in `ApprovalManager`; its supervised caller lives in
+  `open/composer.ts`. Expired grants retain their reasons in `status()`.
+  Surfaced as the reminders-Core `rituals_propose` /
   `rituals_enable` / `rituals_status` MCP tools.
 - `bundled-rituals.ts` + `rituals/*.md` (`morning-brief`, `evening-wrap`,
   `kaizen`) — seeded copy-if-absent into `<owner_home>/rituals/`, registered
