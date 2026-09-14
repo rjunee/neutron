@@ -866,7 +866,14 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
         ['-c', `nohup sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
         { timeout: 50 },
       )
-      await Bun.sleep(400)
+      // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: bun's
+      // default per-test timeout is 5 s, so a 10 s deadline could never expire — a child
+      // that never writes killed the test as a runner timeout ('timed out after 5000ms')
+      // and this named assertion never ran. 3 s is 12x the fixture's 250 ms child delay
+      // and still leaves 2 s of the runner's budget, so a real failure fails HERE, by name.
+      const deadline = Date.now() + 3_000
+      while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(10)
+      expect(existsSync(marker)).toBe(true)
       expect(readFileSync(marker, 'utf8')).toBe('done')
 
       const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
