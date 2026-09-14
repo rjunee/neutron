@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**34 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
+**35 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -43,6 +43,7 @@ branch is cut (standard §3.1, §3.2).
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
+| [`absence-is-a-question-about-the-ref`](absence-is-a-question-about-the-ref.md) | An absence claim about a tracked file is a question about the ref | P1 | — |
 | [`checkpoint-write-contention`](checkpoint-write-contention.md) | Checkpoint writes survive build-load contention | P1 | — |
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
 | [`dead-lane-process-reaping`](dead-lane-process-reaping.md) | Reap child processes left by dead build lanes | P1 | — |
