@@ -79,8 +79,17 @@ export interface BuildReplArgvInput {
    * forgets still gets the pin; `''` → deliberately unpinned, flag omitted.
    */
   effort?: string
-  /** Optional extra allowed dir → `--add-dir`. Typically the instance home. */
-  addDir?: string
+  /**
+   * Allowed dirs beyond the cwd → one `--add-dir` per entry. The cwd is always
+   * the first, and a confined REPL (`restricted`) can read NOTHING else.
+   *
+   * A LIST, not a single dir, because a confined agent can legitimately need a
+   * second one: the trident launcher must read the workflow script it exists to
+   * fire, and that script ships in the DEPLOYED tree, not in the repository the
+   * build works in. Duplicates and blanks are dropped so callers can concatenate
+   * without checking.
+   */
+  addDirs?: readonly string[]
   /**
    * When true, append `--dangerously-skip-permissions`. Managed headless
    * REPLs MUST set this (there is no human to approve tool calls); Open-tier
@@ -159,8 +168,8 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
     argv.push('--permission-mode', input.permissionMode)
   }
   argv.push('--append-system-prompt-file', input.appendSystemPromptFile)
-  if (input.addDir !== undefined) {
-    argv.push('--add-dir', input.addDir)
+  for (const dir of new Set((input.addDirs ?? []).filter((d) => d !== ''))) {
+    argv.push('--add-dir', dir)
   }
   if (input.autocompactTokens !== undefined) {
     argv.push('--autocompact', String(input.autocompactTokens))

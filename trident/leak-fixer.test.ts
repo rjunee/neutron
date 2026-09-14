@@ -281,7 +281,7 @@ describe('buildLeakPreflightFixer', () => {
           settingsPath: '/tmp/settings.json',
           appendSystemPromptFile: '/tmp/agent.md',
           model: spec.model_preference[0] ?? 'opus',
-          addDir: cwd,
+          addDirs: [cwd],
           tools: spec.tools.map((t) => t.name),
           skipPermissions: true,
         })

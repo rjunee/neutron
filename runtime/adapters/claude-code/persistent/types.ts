@@ -358,6 +358,12 @@ export interface PersistentReplSubstrateOptions {
   skip_permissions?: boolean
   /** Confine file tools to cwd/add-dir and refuse permission bypass. */
   restricted?: boolean
+  /**
+   * Dirs this spawn may read BESIDES its cwd → one `--add-dir` each. Only
+   * meaningful together with `restricted`, which is what makes the list the
+   * agent's whole readable filesystem.
+   */
+  extra_dirs?: readonly string[]
   /** Interactive permission mode; `dontAsk` denies would-be prompts. */
   permission_mode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**

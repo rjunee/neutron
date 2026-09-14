@@ -28,6 +28,8 @@ import {
   buildLlmCallSubstrate,
   type BuildLlmCallSubstrateInput,
 } from '../build-llm-call-substrate.ts'
+import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
+import { DEFAULT_INNER_WORKFLOW_PATH } from '@neutronai/trident/inner-loop.ts'
 import {
   PROFILE_TOOLLESS_UTILITY,
   PROFILE_WARM_CHAT,
@@ -192,6 +194,7 @@ test('every profile records the expected bypass, confinement, credential, and mo
       expect({ ...profile }, name).toEqual({
         skip_permissions: false,
         restricted: true,
+        extra_dirs: [TRIDENT_SCRIPT_DIR],
         permission_mode: 'acceptEdits',
         github_credential: true,
         frontier_model_floor: false,
@@ -440,4 +443,43 @@ test('append_system_prompt_file threads onto ClaudeCodeSubstrateOptions.appendSy
 test('absent append_system_prompt_file leaves appendSystemPromptFile unset (default persona)', async () => {
   const opts = await resolveOpts({ substrate_instance_id: 'no-append', cwd: '/w' })
   expect('appendSystemPromptFile' in opts).toBe(false)
+})
+
+/** `--add-dir <dir>` grants `dir` and everything beneath it. Normalised for a
+ *  trailing slash so a widened dir reads as widened here rather than as a miss —
+ *  the two tests below must fail for their OWN reasons, not for this one's. */
+const isUnder = (path: string, dir: string): boolean =>
+  path === dir || path.startsWith(dir.endsWith('/') ? dir : `${dir}/`)
+
+// THE GUARD #734 DID NOT HAVE, and the reason all three dispatches on 2026-09-14
+// were refused: it confined the trident substrates to their cwd without asking
+// whether a confined agent must read anything outside it. The launcher must, and
+// the file is the one it exists to run.
+//
+// This asserts the RELATION between two independently-resolved facts — the path
+// handed to `Workflow` and the directories the spawn declares readable — rather
+// than either value, because both are correct in isolation and the defect lives
+// only in the gap. It is armed in every environment: in the repo the two agree
+// trivially, and in a deployment they agree only because both derive from
+// `TRIDENT_SCRIPT_DIR`. Emptying `extra_dirs` fails it.
+test('the fire launcher may read the workflow script it is told to run', () => {
+  const allowed = PROFILE_WARM_FIRE.extra_dirs ?? []
+  // The build's cwd is the repository being BUILT and cannot be assumed to
+  // contain trident/ at all (see CHECKPOINT_SCRIPT_PATH's docblock), so the
+  // script has to be reachable through a declared dir, never through the cwd.
+  const reachable = allowed.some((dir) => isUnder(DEFAULT_INNER_WORKFLOW_PATH, dir))
+  expect(
+    reachable,
+    `PROFILE_WARM_FIRE confines the launcher to ${JSON.stringify(allowed)}, which cannot read ${DEFAULT_INNER_WORKFLOW_PATH}`,
+  ).toBe(true)
+})
+
+// The non-vacuity control: the relation above would also hold if the profile
+// simply listed the whole filesystem. It does not — it names exactly the one
+// directory, and a confined launcher still cannot read an unrelated path.
+test('the fire launcher is confined to that one directory, not widened to the tree', () => {
+  expect(PROFILE_WARM_FIRE.restricted).toBe(true)
+  expect(PROFILE_WARM_FIRE.extra_dirs).toEqual([TRIDENT_SCRIPT_DIR])
+  const outside = '/etc/shadow'
+  expect((PROFILE_WARM_FIRE.extra_dirs ?? []).some((dir) => isUnder(outside, dir))).toBe(false)
 })

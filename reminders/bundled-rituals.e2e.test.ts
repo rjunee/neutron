@@ -215,7 +215,7 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     settingsPath,
     appendSystemPromptFile: DEFAULT_AGENT_BASE_PROMPT,
     model: 'claude-opus-4-8',
-    addDir: fixtureHome,
+    addDirs: [fixtureHome],
     tools,
     skipPermissions: true,
   })

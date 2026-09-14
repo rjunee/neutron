@@ -103,6 +103,8 @@ export interface ClaudeCodeSubstrateOptions {
   skip_permissions?: boolean
   /** Enable Claude Code restricted mode for cwd/add-dir file confinement. */
   restricted?: boolean
+  /** Dirs readable BESIDES the cwd when `restricted` confines the file tools. */
+  extra_dirs?: readonly string[]
   /** Interactive permission mode; `dontAsk` denies would-be prompts. */
   permission_mode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**
@@ -454,6 +456,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
   if (options.restricted !== undefined) p.restricted = options.restricted
+  if (options.extra_dirs !== undefined) p.extra_dirs = options.extra_dirs
   if (options.permission_mode !== undefined) p.permission_mode = options.permission_mode
   if (options.env !== undefined) p.env = options.env
   // Thread the per-instance config dir so the interactive-Max-login child can

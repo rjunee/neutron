@@ -266,7 +266,9 @@ async function spawnSession(
     appendSystemPromptFile,
     model,
     effort,
-    addDir: cwd,
+    // The cwd FIRST, then whatever else this spawn declared. Under `--restricted`
+    // this list is the agent's entire readable filesystem.
+    addDirs: [cwd, ...(options.extra_dirs ?? [])],
     tools: toolSurface,
     // Token budget upstream; omit it for older CLIs that reject the option.
     ...(supportsAutocompact(claudeBin) ? { autocompactTokens: 300000 } : {}),

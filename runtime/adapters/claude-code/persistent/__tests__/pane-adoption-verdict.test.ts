@@ -224,7 +224,7 @@ describe('the argv is matched as a VECTOR, because flattening it defeats the bin
       mcpConfigPath: `/srv/My Project/.neutron/neutron-repl-${CHANNEL}/session-mcp.json`,
       settingsPath: `/srv/My Project/.neutron/neutron-repl-${CHANNEL}/settings.json`,
       appendSystemPromptFile: '/srv/My Project/.neutron/system-prompt.md',
-      addDir: '/srv/My Project',
+      addDirs: ['/srv/My Project'],
       model: 'claude-opus-5',
     })
     // The premise, asserted rather than assumed: this argv really does carry whitespace.

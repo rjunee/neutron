@@ -20,7 +20,7 @@ const base = {
   settingsPath: '/tmp/x-settings.json',
   appendSystemPromptFile: '/p/repl-agent-base.md',
   model: 'claude-opus-4-7',
-  addDir: '/srv/neutron/owners/acme',
+  addDirs: ['/srv/neutron/owners/acme'],
 }
 
 describe('buildReplArgv', () => {
@@ -178,9 +178,25 @@ describe('buildReplArgv', () => {
   })
 
   it('omits --add-dir when not provided', () => {
-    const { addDir: _drop, ...noDir } = base
+    const { addDirs: _drop, ...noDir } = base
     const argv = buildReplArgv({ ...noDir, resume: false })
     expect(argv).not.toContain('--add-dir')
+  })
+
+  // A CONFINED AGENT CAN NEED A SECOND DIRECTORY. The trident launcher's cwd is
+  // the repository being BUILT; the script it is told to run ships in the tree
+  // this code was DEPLOYED from. One `--add-dir` could not express both, and the
+  // launcher was refused its own script on every fire (#734 → 2026-09-14).
+  it('emits one --add-dir per entry, in order', () => {
+    const argv = buildReplArgv({ ...base, addDirs: ['/srv/repo', '/opt/app/trident'], resume: false })
+    const dirs = argv.flatMap((a, i) => (a === '--add-dir' ? [argv[i + 1]] : []))
+    expect(dirs).toEqual(['/srv/repo', '/opt/app/trident'])
+  })
+
+  it('drops duplicate and empty dirs rather than emitting a bare or repeated flag', () => {
+    const argv = buildReplArgv({ ...base, addDirs: ['/srv/repo', '/srv/repo', ''], resume: false })
+    const dirs = argv.flatMap((a, i) => (a === '--add-dir' ? [argv[i + 1]] : []))
+    expect(dirs).toEqual(['/srv/repo'])
   })
 
   // SECURITY-CRITICAL (Codex-r1-P1): the persistent path MUST honor `tools: []`
