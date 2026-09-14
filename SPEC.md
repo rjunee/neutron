@@ -36,6 +36,10 @@ which is why it is no longer inside this file (Decisions Log 2026-09-12). An
 owner-directed change to the body, like that split, is recorded in the log by the
 agent that made it.
 
+Project-scoped Codex credential access verifies the full project id recorded in
+its directory. Existing unmarked directories require explicit offline migration
+before use (Decisions Log 2026-09-14, #742).
+
 ## Canonical doc set
 
 | Concern | Doc |
@@ -303,6 +307,17 @@ existing readiness assertion retains its transport role and captures evidence
 before terminating a failed spawn. This supersedes any earlier claim that elapsed
 time alone establishes a hang. Acceptance: `docs/spec-items/blocked-is-not-slow.md`.
 
+### 2026-09-14 — Codex project credential directories name their owner (#742).
+
+The fixed-width key remains a location, and each project credential directory
+records its full owning project id. Service access refuses missing, unreadable or
+mismatched ownership before using credential material. Existing unmarked project
+directories require explicit offline migration with independently confirmed
+identity, preserving live credential bytes; this deliberately pauses affected
+overrides until migration rather than guessing ownership from a hash or an account.
+Global subscriptions retain their existing behavior. This adds ownership checking
+to the service without changing the total path derivation or socket budget from
+the #637 decision below. Acceptance: `docs/spec-items/codex-project-directory-names-its-owner.md`.
 
 ### 2026-09-14 — TRIDENT AGENTS ARE CONFINED TO THEIR CWD INSTEAD OF BYPASSING PERMISSIONS, AND THE PROMPT POLICY IS NOT ONE VALUE FOR ALL OF THEM. Trident-family profiles drop `--dangerously-skip-permissions` and take Claude Code `--restricted`, which confines the file tools to the spawn's cwd plus explicit `--add-dir` directories, keeps `--settings` authoritative while ignoring user/project/local settings files, and refuses `bypassPermissions` outright (the two flags together exit 1). The prompt policy then SPLITS by what the agent must do, and the split is measured rather than reasoned: under `--restricted --permission-mode dontAsk` the installed `claude` 2.1.270 denies Write AND Bash *inside the agent's own cwd* ("Permission to use Write has been denied because Claude Code is running in don't ask mode"), so an ACTING profile is inert under it. The acting profiles (`PROFILE_EPHEMERAL`, `PROFILE_LEAK_FIXER`, `PROFILE_WARM_FIRE`) therefore take `acceptEdits`, which runs in-cwd writes and commands with no prompt while confinement still holds — an outside-cwd `Read` is refused by the CLI and an outside-cwd `cat` by the command gate. The TOOL-LESS arbiter keeps `dontAsk`, which costs it nothing. **Named residual:** under `acceptEdits` a shell command the CLI does not recognise as confined (an interpreter one-liner, say) escalates to an approval prompt rather than being refused, and the substrate's `tool-use-approve` detector answers prompts — so a Bash-granted Trident agent can still reach outside its cwd by that route. Confinement of the FILE tools and of recognised read commands is enforced by the CLI and is not subject to that. This narrows only Trident-family profiles; trusted conversational profiles retain their existing policy. GitHub issue #630.
 

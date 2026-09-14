@@ -61,6 +61,7 @@ import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type 
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
+import { CodexProjectOwnerError } from './codex-project-owner.ts'
 import {
   appendFileSync,
   existsSync,
@@ -3753,8 +3754,9 @@ export function buildTridentOrchestrator(
       if (opts.resolve_codex_home !== undefined) {
         try {
           codexHome = opts.resolve_codex_home(run) ?? codexHome
-        } catch {
-          // Optional peer resolution is best-effort, exactly as on the build path.
+        } catch (error) {
+          if (error instanceof CodexProjectOwnerError) throw error
+          // Other optional peer resolution failures retain the existing fallback.
         }
       }
       let kimiConfigured = false

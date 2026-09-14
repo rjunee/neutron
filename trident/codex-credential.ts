@@ -29,7 +29,6 @@ import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import {
   codexProbeSubject,
-  codexProjectHome,
   deriveCodexStatus,
   materializeCodexAuth,
   readAccountId,
@@ -39,6 +38,7 @@ import {
   type CodexProbeVerdict,
   type CodexStatusDetail,
 } from './codex-auth.ts'
+import { ownedCodexProjectHome } from './codex-project-owner.ts'
 import { probeCodexSeat, type CodexProbeDeps, type CodexProbeOutcome } from './codex-probe.ts'
 import {
   DEFAULT_SLOT,
@@ -383,7 +383,7 @@ export class CodexCredentialService {
 
   /** The CODEX_HOME dir for a given scope/project (global default or override). */
   private homeFor(scope: CredentialScope, project_id: string): string {
-    return scope === 'project' ? codexProjectHome(this.codexHome, project_id) : this.codexHome
+    return scope === 'project' ? ownedCodexProjectHome(this.codexHome, project_id ?? '') : this.codexHome
   }
 
   /**
@@ -432,6 +432,7 @@ export class CodexCredentialService {
     // typed was accepted by the surface, carried through `connectAccount`, and
     // then dropped on the floor by this delegation.
     const supplied = typeof opts?.label === 'string' && opts.label.trim().length > 0 ? opts.label.trim() : null
+    this.homeFor(scope, project_id)
     await this.store.set(owner_slug, {
       service: CODEX_CREDENTIAL_SERVICE,
       plaintext: v.normalized,
@@ -450,7 +451,8 @@ export class CodexCredentialService {
   }
 
   /**
-   * Read-only connection status for the admin panel / `codex_status` tool.
+   * Connection status for the admin panel / `codex_status` tool. A missing
+   * project directory is created with its owner marker; credential bytes are not written.
    * Resolves project → global → unset (the store resolver): when `project_id` is
    * supplied and that project has an override it reports the override; otherwise
    * the global default. `scope` names which supplied it.
@@ -460,7 +462,7 @@ export class CodexCredentialService {
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     const stored = resolved?.plaintext ?? null
     const scope = resolved?.scope ?? null
-    const home = scope === 'project' ? codexProjectHome(this.codexHome, project_id) : this.codexHome
+    const home = scope === 'project' ? ownedCodexProjectHome(this.codexHome, project_id ?? '') : this.codexHome
     const materialized = readMaterializedAuth(home) !== null
     // WHICH SEAT THIS READING IS ABOUT. A project override is its own seat and is
     // out of rotation entirely; the global default IS the `default` slot's row
@@ -502,7 +504,7 @@ export class CodexCredentialService {
    * read. It is withdrawn by evidence, not by the clock: a reconnect clears it,
    * and so does a later `ok` from this same probe (see `retractRevocation`).
    *
-   * NEVER THROWS and never rejects: it is awaited on a read-only status path and
+   * Ownership refusals reject before probing; probe failures are contained. It is awaited on a status path and
    * fired-and-forgotten elsewhere.
    */
   async refreshSeatLiveness(owner_slug: OwnerHandle, target?: CodexTarget): Promise<void> {
@@ -513,7 +515,7 @@ export class CodexCredentialService {
       // Only a REAL override is a separate seat; a fallback to the global default
       // is the `default` slot, probed by the loop below.
       if (resolved !== null && resolved.scope === 'project') {
-        const home = codexProjectHome(this.codexHome, project_id)
+        const home = ownedCodexProjectHome(this.codexHome, project_id ?? '')
         jobs.push(
           this.probeSeat(owner_slug, projectSeatKey(project_id), this.liveAuthFor(home, resolved.plaintext), null),
         )
@@ -720,6 +722,7 @@ export class CodexCredentialService {
    */
   async disconnect(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
     const { scope, project_id } = this.normalizeTarget(target)
+    this.homeFor(scope, project_id)
     const removed = await this.store.delete(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     removeCodexAuth(this.homeFor(scope, project_id))
     return { ok: removed }
@@ -740,7 +743,7 @@ export class CodexCredentialService {
     // nothing about the override can be perturbed by pool state.
     const override = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     if (override !== null && override.scope === 'project') {
-      const home = codexProjectHome(this.codexHome, project_id)
+      const home = ownedCodexProjectHome(this.codexHome, project_id ?? '')
       this.selfHealAndHarvestBack(owner_slug, CODEX_CREDENTIAL_SERVICE, home, override.plaintext, {
         scope: 'project',
         project_id: project_id ?? '',

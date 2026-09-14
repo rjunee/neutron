@@ -47,6 +47,7 @@ import { ProjectCredentialValidationError } from '@neutronai/project-credentials
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
+import { CodexProjectOwnerError } from '@neutronai/trident/codex-project-owner.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
 
 export interface CodexCredentialSurfaceOptions {
@@ -103,104 +104,109 @@ export function createCodexCredentialSurface(
       const rawAccount = url.searchParams.get('account')
       const isGlobal = target.scope !== 'project'
 
-      switch (req.method) {
-        case 'GET': {
-          // Status resolves project → global for the override route (effective
-          // credential for this project); global route reports the global default.
-          // The legacy top-level fields are kept verbatim so existing clients keep
-          // working; `accounts` / `active` / `next` are additive.
-          // ASK THE SERVER FIRST. Everything below is a read of stored bytes, and
-          // stored bytes cannot show a token that was revoked server-side — the
-          // state this route reported as `connected` for days while every build
-          // died on `refresh_token_invalidated`. The probe is TTL-cached per seat
-          // (so a polling pane makes at most one request a minute), bounded at 3s,
-          // and never throws: an unreachable endpoint leaves this answer exactly
-          // as it was before.
-          await service.refreshSeatLiveness(owner_slug, target)
-          const status = service.status(owner_slug, target)
-          if (!isGlobal) return jsonOk({ ...status })
-          const { accounts, next } = service.accountsView(owner_slug)
-          // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT —
-          // and the rule lives on the SERVICE, so this route and the
-          // `codex_status` agent tool cannot drift into different answers about
-          // the same pool. See `CodexCredentialService.poolStatus`.
-          return jsonOk({
-            ...service.poolStatus(owner_slug, accounts),
-            accounts,
-            active: next?.slot ?? null,
-            next: next?.slot ?? null,
-            exhausted: next?.exhausted ?? false,
-          })
-        }
-        case 'POST': {
-          const body = (await readJsonBody(req)) as Record<string, unknown> | null
-          if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
-          // Accept `auth` (canonical) or `auth_json` / `value` aliases.
-          const pasted = body['auth'] ?? body['auth_json'] ?? body['value']
-          if (!isGlobal) {
-            const result = await service.connect(owner_slug, pasted, target)
+      try {
+        switch (req.method) {
+          case 'GET': {
+            // Status resolves project → global for the override route (effective
+            // credential for this project); global route reports the global default.
+            // The legacy top-level fields are kept verbatim so existing clients keep
+            // working; `accounts` / `active` / `next` are additive.
+            // ASK THE SERVER FIRST. Everything below is a read of stored bytes, and
+            // stored bytes cannot show a token that was revoked server-side — the
+            // state this route reported as `connected` for days while every build
+            // died on `refresh_token_invalidated`. The probe is TTL-cached per seat
+            // (so a polling pane makes at most one request a minute), bounded at 3s,
+            // contains probe failures: an unreachable endpoint leaves this answer exactly
+            // as it was before.
+            await service.refreshSeatLiveness(owner_slug, target)
+            const status = service.status(owner_slug, target)
+            if (!isGlobal) return jsonOk({ ...status })
+            const { accounts, next } = service.accountsView(owner_slug)
+            // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT —
+            // and the rule lives on the SERVICE, so this route and the
+            // `codex_status` agent tool cannot drift into different answers about
+            // the same pool. See `CodexCredentialService.poolStatus`.
+            return jsonOk({
+              ...service.poolStatus(owner_slug, accounts),
+              accounts,
+              active: next?.slot ?? null,
+              next: next?.slot ?? null,
+              exhausted: next?.exhausted ?? false,
+            })
+          }
+          case 'POST': {
+            const body = (await readJsonBody(req)) as Record<string, unknown> | null
+            if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
+            // Accept `auth` (canonical) or `auth_json` / `value` aliases.
+            const pasted = body['auth'] ?? body['auth_json'] ?? body['value']
+            if (!isGlobal) {
+              const result = await service.connect(owner_slug, pasted, target)
+              if (!result.ok) {
+                return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
+              }
+              return jsonOk({ status: result.status, mode: result.mode, scope: result.scope }, 201)
+            }
+            const requested = body['account'] ?? rawAccount ?? undefined
+            const label = typeof body['label'] === 'string' ? (body['label'] as string) : null
+            // A label the store refuses (over its length ceiling) is a BAD REQUEST,
+            // not a server fault. The store throws a typed validation error and,
+            // unmapped, it escaped as a 500 — telling the owner the instance had
+            // broken when he had simply typed too long a name, and giving him
+            // nothing to correct. The sibling credentials surface has always mapped
+            // this; only this route had missed it.
+            let result: Awaited<ReturnType<typeof service.connectAccount>>
+            try {
+              result = await service.connectAccount(owner_slug, pasted, {
+                ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
+                label,
+              })
+            } catch (err) {
+              if (err instanceof ProjectCredentialValidationError) {
+                return jsonError(400, err.code, err.message)
+              }
+              throw err
+            }
             if (!result.ok) {
               return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
             }
-            return jsonOk({ status: result.status, mode: result.mode, scope: result.scope }, 201)
+            return jsonOk(
+              {
+                status: result.status,
+                mode: result.mode,
+                scope: result.scope,
+                account: result.slot,
+                // So a client can say what it did rather than what it intended.
+                replaced: result.replaced ?? false,
+              },
+              201,
+            )
           }
-          const requested = body['account'] ?? rawAccount ?? undefined
-          const label = typeof body['label'] === 'string' ? (body['label'] as string) : null
-          // A label the store refuses (over its length ceiling) is a BAD REQUEST,
-          // not a server fault. The store throws a typed validation error and,
-          // unmapped, it escaped as a 500 — telling the owner the instance had
-          // broken when he had simply typed too long a name, and giving him
-          // nothing to correct. The sibling credentials surface has always mapped
-          // this; only this route had missed it.
-          let result: Awaited<ReturnType<typeof service.connectAccount>>
-          try {
-            result = await service.connectAccount(owner_slug, pasted, {
-              ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
-              label,
-            })
-          } catch (err) {
-            if (err instanceof ProjectCredentialValidationError) {
-              return jsonError(400, err.code, err.message)
+          case 'DELETE': {
+            // `?account=<slot>` removes ONE seat. An UNQUALIFIED delete removes them
+            // ALL, because that is what the single "Disconnect Codex" button in the
+            // shipped clients means. Removing only the first seat would leave the
+            // named seats stored and still selectable by trident while telling the
+            // owner Codex was disconnected.
+            if (isGlobal && rawAccount !== null) {
+              const { ok } = await service.removeAccount(owner_slug, rawAccount)
+              if (!ok) return jsonError(404, 'codex_not_connected', 'no such Codex account to disconnect')
+              return jsonOk({ disconnected: true, account: rawAccount })
             }
-            throw err
-          }
-          if (!result.ok) {
-            return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
-          }
-          return jsonOk(
-            {
-              status: result.status,
-              mode: result.mode,
-              scope: result.scope,
-              account: result.slot,
-              // So a client can say what it did rather than what it intended.
-              replaced: result.replaced ?? false,
-            },
-            201,
-          )
-        }
-        case 'DELETE': {
-          // `?account=<slot>` removes ONE seat. An UNQUALIFIED delete removes them
-          // ALL, because that is what the single "Disconnect Codex" button in the
-          // shipped clients means. Removing only the first seat would leave the
-          // named seats stored and still selectable by trident while telling the
-          // owner Codex was disconnected.
-          if (isGlobal && rawAccount !== null) {
-            const { ok } = await service.removeAccount(owner_slug, rawAccount)
-            if (!ok) return jsonError(404, 'codex_not_connected', 'no such Codex account to disconnect')
-            return jsonOk({ disconnected: true, account: rawAccount })
-          }
-          if (isGlobal) {
-            const { ok, removed } = await service.disconnectAllAccounts(owner_slug)
+            if (isGlobal) {
+              const { ok, removed } = await service.disconnectAllAccounts(owner_slug)
+              if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
+              return jsonOk({ disconnected: true, scope: target.scope, accounts: removed })
+            }
+            const { ok } = await service.disconnect(owner_slug, target)
             if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
-            return jsonOk({ disconnected: true, scope: target.scope, accounts: removed })
+            return jsonOk({ disconnected: true, scope: target.scope })
           }
-          const { ok } = await service.disconnect(owner_slug, target)
-          if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
-          return jsonOk({ disconnected: true, scope: target.scope })
+          default:
+            return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on /codex-auth`)
         }
-        default:
-          return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on /codex-auth`)
+      } catch (error) {
+        if (error instanceof CodexProjectOwnerError) return jsonError(409, error.code, error.message)
+        throw error
       }
     },
   }
