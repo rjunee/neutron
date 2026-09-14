@@ -18,7 +18,9 @@
  * post-spawn-assertion, completion bridge) end to end.
  */
 
-import { describe, it, expect, afterEach } from 'bun:test'
+import { describe, it, expect, afterEach, spyOn } from 'bun:test'
+import { herdrHost } from '../herdr-host.ts'
+import { bunTerminalHost } from '../bun-terminal-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -1118,4 +1120,24 @@ describe('a malformed error STAMP cannot crash the error path (#539 r43)', () =>
     expect(err?.kind === 'error' && err.code).toBeUndefined()
     expect(err?.kind === 'error' && err.retryable).toBe(true)
   })
+})
+
+// Run in separate processes with NEUTRON_REPL_HOST=herdr and =bun.
+it('configured production host carries a complete REPL turn', async () => {
+  const selected = process.env['NEUTRON_REPL_HOST'] === 'bun' ? bunTerminalHost : herdrHost
+  const other = selected === bunTerminalHost ? herdrHost : bunTerminalHost
+  const fake = makeFakeReplHost((_history, incoming) => `selected:${incoming}`)
+  const used = spyOn(selected, 'spawn').mockImplementation(fake.host.spawn)
+  const wrong = spyOn(other, 'spawn').mockImplementation(async () => { throw new Error('wrong backend') })
+  try {
+    const options = baseOptions(fake.host)
+    delete options.ptyHost
+    const result = await drain(await createPersistentReplSubstrate(options).start(spec('hello')))
+    expect(result.text).toBe('selected:hello')
+    expect(used).toHaveBeenCalledTimes(1)
+    expect(wrong).toHaveBeenCalledTimes(0)
+  } finally {
+    used.mockRestore()
+    wrong.mockRestore()
+  }
 })

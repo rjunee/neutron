@@ -7,12 +7,8 @@
  * Sprint-2 watchdogs) talks ONLY to `PtyHost` — never to a specific multiplexer
  * or PTY library. That keeps the substrate portable.
  *
- * § herdr step 2b — THE WIRED BACKEND IS NOW OUT-OF-PROCESS. `spawn.ts` resolves
- * `options.ptyHost ?? herdrHost`: herdr is the REPL container, reached over its
- * unix-socket API, and it is the ONLY wired default. The in-process Bun-native
- * backend (`bun-terminal-host.ts`, `Bun.spawn({ terminal })`) is KEPT as an option
- * reachable by injecting it at that seam — kept compiling, contract-complete and
- * tested, but deliberately not exposed through a user-facing chooser.
+ * The process-start selector defaults to herdr and can select the Bun host.
+ * See configured-pty-host.ts and docs/spec-items/repl-substrate-selectable.md.
  *
  * THE TWO BACKENDS ARE NOT INTERCHANGEABLE. Read this before assuming a caller that
  * works on one works on the other; `bun-terminal-host.ts` states the same list from

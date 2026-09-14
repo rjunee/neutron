@@ -8,7 +8,8 @@ legacy_ref: "GitHub issue #538 (herdr step 2b)"
 ---
 
 A `HerdrHost` implements the `PtyHost` interface over herdr's unix-socket API and
-becomes the **only wired backend**: `spawn.ts` resolves `options.ptyHost ?? herdrHost`.
+is the default selected backend. Issue #540 subsequently wired the retained Bun host
+through the process-start selector recorded in SPEC.md's 2026-09-14 decision.
 
 **SCOPE CHANGE, and this item does not carry it on its own authority — see SPEC.md
 Decisions Log 2026-09-12, "THE REPL SUBSTRATE BECOMES SELECTABLE".** This item first
@@ -21,10 +22,9 @@ host" to "make the REPL substrate selectable".
 
 A WORK ITEM CANNOT OVERRIDE AN AUTHORITY, which is why that entry exists: for one round
 the reversal lived only here and in the as-built while `AGENTS.md` and the pivot entry
-both still read as absolutes. The file is restored, adapted to the interface as it now
-stands, and kept tested — but **not wired to a chooser**, because a switch between a
-proven path and an unproven one hides which is which. A user-facing selector is
-explicitly OUT of scope here and waits on the herdr path being verified live.
+both still read as absolutes. The file was restored, adapted to the interface and kept
+tested. SPEC.md's later 2026-09-14 decision now wires it through a process-start selector
+after the herdr path was verified.
 
 **THE TWO BACKENDS ARE NOT INTERCHANGEABLE**, and that is the real cost of keeping both.
 Stated here, at the selection seam (`types.ts`'s `ptyHost`), in `pty-host.ts` and in
@@ -158,10 +158,10 @@ not-new. That is accepted and recorded here rather than hidden.
 
 ## Acceptance
 
-- [ ] **`HerdrHost` is the only WIRED backend, and `bun-terminal-host.ts` is kept as an
-      injectable option — compiling, contract-complete and TESTED, with no surviving
+- [ ] **`HerdrHost` is the DEFAULT backend, and `bun-terminal-host.ts` is kept as a
+      process-selectable option — compiling, contract-complete and TESTED, with no surviving
       mutation left standing under that claim.** Not deleted (the
-      scope change above), and not put behind a chooser either. What makes the option
+      scope change above). What makes the option
       live rather than a supported-looking dead export — the failure this branch has now
       removed twice — is that the contract it claims is asserted: a real pty, a real pid,
       a REAL exit code, an accumulating `onScreen`, an honest `submitLine`, and the
@@ -213,9 +213,8 @@ not-new. That is accepted and recorded here rather than hidden.
       produces no shrink to count.
       `exitCause` is deliberately ABSENT under Bun: both its values name herdr mechanisms,
       and `undefined` means "not known", which is the truth.
-      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
-      and `rg -n "ptyHost \?\?" runtime/adapters/claude-code/persistent/spawn.ts` shows
-      `herdrHost` as the sole default.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts runtime/adapters/claude-code/persistent/__tests__/configured-pty-host.test.ts`
+      and `rg -n "configuredPtyHost" runtime/adapters/claude-code/persistent/{spawn.ts,boot-adoption.ts}` shows the shared process-start choice.
 - [ ] **A SHARED requirement is asserted from ONE suite, run against every backend.**
       The readiness gate (`beginOutput`) belongs to the interface: `spawn.ts` cannot
       assign `scanChild` until `await spawn(...)` returns and releases output only after
@@ -1234,7 +1233,7 @@ not-new. That is accepted and recorded here rather than hidden.
       deletion was reversed — so `AGENTS.md` was left carrying "there is no second
       backend and no flag to select one, so do not write code against it", which is now
       false in a file the next agent reads first. Corrected to say what is actually true:
-      herdr is the only WIRED default, the Bun host is an injectable option, write
+      herdr is the DEFAULT, the Bun host is process-selectable, write
       against `PtyHost` and never against either by name, and the two are not
       interchangeable.
       verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is the restored backend and its test, an archive, an explicitly dated historical note, or the divergence note; none asserts either backend is the sole one
