@@ -79,4 +79,7 @@ the checkout is stale, sparse, dirty, or on another ref.
 advice to an agent that has never read it; the mechanism that works is a
 machine-checked refusal arriving at the moment of the mistake. If you narrow or
 remove a guard, grep for every document asserting the old rule and fix them in the
-same change — see `docs/agent-legible-architecture.md` § 1.
+same change — see `docs/agent-legible-architecture.md` § 1. CI checks the narrow
+mechanical subset where a diff replaces a named JS/TS constant's literal while
+new Markdown asserts the old value; semantic and cross-document contradictions
+still require the authored grep.
