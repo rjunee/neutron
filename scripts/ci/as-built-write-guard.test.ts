@@ -85,6 +85,7 @@ describe('as-built write guard (real git)', () => {
   let editedRecordSha = ''
   let malformedRecordSha = ''
   let foldedMainSha = ''
+  let readmeEditSha = ''
 
   beforeAll(() => {
     git(repo, 'init', '-q', '--initial-branch=main')
@@ -94,6 +95,7 @@ describe('as-built write guard (real git)', () => {
     writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), FROZEN_LOG)
     mkdirSync(join(repo, 'docs', 'as-built'), { recursive: true })
     writeFileSync(join(repo, 'docs', 'as-built', 'existing.md'), '## 2026-01-02 — existing\n\nHistory.\n')
+    writeFileSync(join(repo, 'docs', 'as-built', 'README.md'), '# docs/as-built/\n\nHow this directory works.\n')
     writeFileSync(join(repo, 'code.ts'), 'export const value = 1\n')
     git(repo, 'add', '-A')
     commit(repo, 'base')
@@ -104,6 +106,12 @@ describe('as-built write guard (real git)', () => {
     git(repo, 'add', '-A')
     commit(repo, 'clean branch')
     cleanSha = git(repo, 'rev-parse', 'HEAD')
+
+    git(repo, 'switch', '-q', '-c', 'readme-edit', baseSha)
+    writeFileSync(join(repo, 'docs', 'as-built', 'README.md'), '# docs/as-built/\n\nRevised convention.\n')
+    git(repo, 'add', '-A')
+    commit(repo, 'edit the directory readme')
+    readmeEditSha = git(repo, 'rev-parse', 'HEAD')
 
     git(repo, 'switch', '-q', '-c', 'violation', baseSha)
     writeFileSync(join(repo, 'docs', 'AS_BUILT.md'), `${FROZEN_LOG}\n## 2026-09-13 — branch write\n\nnope\n`)
@@ -226,6 +234,16 @@ describe('as-built write guard (real git)', () => {
     } finally {
       rmSync(mergeRepo, { recursive: true, force: true })
     }
+  }, 30_000)
+
+  test('editing docs/as-built/README.md is ALLOWED — it documents the directory, it is not a record', () => {
+    // Found by CI: this guard's own PR edits README.md to describe the new convention,
+    // and the shard rule refused it with "merged as-built shards are immutable". A README
+    // carries no entry heading, is not named for a branch or spec item, and is MEANT to
+    // change when the convention does. Its complement below keeps real shards immutable,
+    // so the pair states the boundary rather than just widening the rule.
+    const result = runGuard(repo, baseSha, readmeEditSha)
+    expect(result.status).toBe(0)
   }, 30_000)
 
   test('a branch editing another change\'s existing shard is refused', () => {

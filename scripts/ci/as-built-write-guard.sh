@@ -230,6 +230,12 @@ while IFS=$'\t' read -r status path; do
   [ -n "$status" ] || continue
   [ "$path" != 'docs/AS_BUILT.md' ] || continue
   case "$path" in
+    # README.md is the DIRECTORY'S documentation, not a record of a change. It has no
+    # entry heading, it is not named for a branch or spec item, and it is the one file
+    # in here that legitimately gets edited as the convention it describes changes —
+    # this guard's own PR edits it. Treating it as an immutable shard refused that PR
+    # with "merged as-built shards are immutable", which is how the case was found.
+    docs/as-built/README.md) continue ;;
     docs/as-built/*.md) ;;
     *) continue ;;
   esac
