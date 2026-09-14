@@ -2006,20 +2006,38 @@ describe('the terminal result emits terminalCause for infra-only stops only', ()
    *
    * This used to assert the opposite (`failureResult` must carry NO `terminalCause`), on
    * the reasoning that a crash is not a measured infra-only stop. Half of that is right and
-   * is still pinned below: a crash has no BLOCK KIND, so it must never claim the code was
-   * judged or that "review never ran". But the thrown MESSAGE is a measurement — the
-   * workflow composed it at the point the fact was known — and dropping it is what left run
-   * 3d2696c3 ("forge:build completed without a full local commit OID") reported to the
-   * operator as "…without Argus APPROVE" on a path Argus never reached.
+   * is still pinned below: a crash the catch cannot classify has no BLOCK KIND, so it must
+   * never claim the code was judged or that "review never ran". But the thrown MESSAGE is a
+   * measurement — the workflow composed it at the point the fact was known — and dropping it
+   * is what left run 3d2696c3 ("forge:build completed without a full local commit OID")
+   * reported to the operator as "…without Argus APPROVE" on a path Argus never reached.
+   *
+   * #624 NARROWED "no block kind" TO "NO FABRICATED BLOCK KIND", and the difference is the
+   * whole property. A throw SITE can measure a class the catch cannot — a null build agent
+   * is an infrastructure death with no build to judge — so it stamps the error it throws and
+   * the catch carries that value structurally. What must never happen is this catch ASSERTING
+   * a kind of its own: every throw it cannot classify would then arrive at
+   * `classifyInnerFailure` as infrastructure and be replayed by the auto-retry, which is the
+   * opposite failure from the one #624 fixed and the more expensive one.
    */
-  test('the THROWN-workflow failure result carries the message, and no block kind', () => {
+  test('the THROWN-workflow failure result carries the message, and only a MEASURED block kind', () => {
     const failure = SRC.slice(SRC.indexOf('const failureResult = {'), SRC.indexOf('\n  }', SRC.indexOf('const failureResult = {')))
     // The thrown text, through the same redact + cap helper every other cause uses…
     expect(failure).toContain('terminalCause: infraCause(thrownMessage)')
-    // …and NOT a fabricated block kind: that field is what licenses the outer loop's
-    // "review never ran (infra-only)" sentence, and a crash measured no such thing.
-    // (The PROPERTY, not the word — the comment beside it names the field on purpose.)
-    expect(failure).not.toContain('blockKind:')
+    // …and NO block kind this literal invented: a kind spelled here is one the catch
+    // asserted about an exit it did not measure.
+    expect(failure).not.toMatch(/blockKind:\s*'/)
+    // The ONE way a kind leaves this catch, and it is conditional by construction: absent
+    // unless the throw site stamped one.
+    expect(failure).toContain('...(thrownBlockKind === null ? {} : { blockKind: thrownBlockKind }),')
+    // AND THE DERIVATION IS WHERE THE GUARD LIVES. Mutating this line to an unconditional
+    // 'infra-only' hands every genuine crash — a build committed on the wrong branch, a
+    // refused resume — to the infrastructure auto-retry. That direction is driven end to end
+    // in `cross-model-dispatch.test.ts` ('a build reported on the WRONG BRANCH…'); the
+    // source pin here is what stops the derivation being quietly widened.
+    expect(SRC).toContain(
+      "const thrownBlockKind = err != null && err.blockKind === 'infra-only' ? 'infra-only' : null",
+    )
     // The message reported to the log and the message persisted are ONE value, so the
     // transcript and the row cannot disagree about why the run died.
     expect(SRC).toContain('log(`trident-v2 inner THREW: ${thrownMessage}`)')

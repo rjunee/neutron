@@ -769,6 +769,18 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(result['ok']).toBe(false)
     expect(result['checkpoint']).toBe('inner-error')
     expect(result['blockKind']).toBe('infra-only')
+    // THE AS-PRODUCED RESULT FIRST, and only then the rewording. `classifyInnerFailure`
+    // needs BOTH the class and a cause that survives redaction with something left to
+    // read, so a stamp riding on an empty `terminalCause` still classifies `genuine` and
+    // the retry never fires. Asserting only the substituted sentence below could not see
+    // that; this asserts the sentence the workflow actually composed.
+    expect(String(result['terminalCause']).trim()).not.toBe('')
+    expect(classifyInnerFailure({
+      verdict: null,
+      checkpoint: String(result['checkpoint']),
+      block_kind: result['blockKind'] as 'infra-only',
+      terminal_cause: String(result['terminalCause']),
+    })).toBe('infrastructure')
 
     result['terminalCause'] = 'the build transport returned no usable result'
     expect(classifyInnerFailure({
@@ -1099,6 +1111,20 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(logs.some((l) => l.includes('trident/some-other-branch'))).toBe(true)
     // No reviewer was paid to read a diff the merge cannot land.
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+    // THE CONTROL THAT MUST SURVIVE THE #624 STAMP — the other direction of it. This
+    // throw measured no block class, so none travels out with the result: a build that
+    // committed on the wrong branch is a GENUINE defect, and stamping it `infra-only`
+    // would hand it to the outer loop's infrastructure auto-retry to replay. Widening
+    // the terminal catch's `err.blockKind === 'infra-only'` guard to stamp every throw
+    // turns this red.
+    expect(result['terminalCauseKind']).toBe('workflow-threw')
+    expect(result['blockKind']).toBeUndefined()
+    expect(classifyInnerFailure({
+      verdict: null,
+      checkpoint: String(result['checkpoint']),
+      block_kind: (result['blockKind'] ?? null) as null,
+      terminal_cause: String(result['terminalCause']),
+    })).toBe('genuine')
   })
 
   test('a Ralph task tagged [mechanical] goes to codex too — one row, both build phases', async () => {

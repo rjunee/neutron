@@ -42,6 +42,32 @@ trident/infra-retry.test.ts` passed 71 tests; `bash scripts/ci/typecheck-all.sh`
 TypeScript configurations; `bash scripts/ci/lint.sh` passed every reported gate; and
 `git diff --check` passed.
 
+### The guard this change had to narrow, and the direction it had to add
+
+`trident/__tests__/ci-gate.test.ts` already pinned the throw path's terminal literal with
+`expect(failure).not.toContain('blockKind:')` — "a crash measured no such thing". A stamped
+throw violates that assertion literally, and the first cut of this change left it in place,
+so the PR was red on its own CI shard. The property the assertion was defending is narrower
+than the sentence it was written as: what must never happen is this CATCH asserting a kind
+about an exit it did not measure. The guard now pins exactly that — no quoted kind inside
+the literal, the conditional spread as the ONE way a kind leaves, and the derivation line
+itself — and each of the three is mutation-proven red.
+
+The complement was also missing entirely: nothing anywhere failed when the terminal catch
+was mutated to stamp `infra-only` on EVERY throw. Measured, not assumed —
+`const thrownBlockKind = 'infra-only'` over the whole `trident/` suite produced no failure
+beyond the one already red. That direction is the expensive one: it would hand a genuine
+crash (a build committed on the wrong branch, a refused resume) to the infrastructure
+auto-retry to replay. It is now driven end to end on the wrong-branch fixture
+(`trident/__tests__/cross-model-dispatch.test.ts`, 'a build reported on the WRONG BRANCH…'),
+which asserts `terminalCauseKind: 'workflow-threw'`, no `blockKind`, and `genuine` out of
+the production classifier.
+
+The null-build case also now runs the classifier on the AS-PRODUCED result before rewording
+it. `classifyInnerFailure` needs the class AND a cause that survives redaction with
+something left to read, so a stamp riding on an empty `terminalCause` would still classify
+`genuine`; asserting only a substituted sentence could not see that.
+
 ### Decisions and deliberate exclusions
 
 The change stamps the existing block class instead of adding a message token to the closed
