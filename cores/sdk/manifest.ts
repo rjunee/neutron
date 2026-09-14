@@ -48,14 +48,54 @@ import { z } from 'zod'
  * rests on the known set + the fact that no legacy manifest exists.)
  */
 
+function isLowerAlpha(char: string | undefined): boolean {
+  return char !== undefined && char >= 'a' && char <= 'z'
+}
+
+function isLowerAlphaDigitOrUnderscore(char: string | undefined): boolean {
+  return (
+    isLowerAlpha(char) ||
+    (char !== undefined && char >= '0' && char <= '9') ||
+    char === '_'
+  )
+}
+
+/** Linear validator for the open `<verb>:<resource>` grammar documented above. */
+function isCapabilityFormat(value: string): boolean {
+  const colon = value.indexOf(':')
+  if (colon <= 0 || colon !== value.lastIndexOf(':') || !isLowerAlpha(value[0])) return false
+
+  // Verb separators must each be followed by a basic identifier character.
+  for (let i = 1; i < colon; i += 1) {
+    const char = value[i]
+    if (isLowerAlphaDigitOrUnderscore(char)) continue
+    if ((char === '.' || char === '-') && isLowerAlphaDigitOrUnderscore(value[i + 1])) continue
+    return false
+  }
+
+  const resourceStart = colon + 1
+  if (!isLowerAlpha(value[resourceStart])) return false
+  let sawResourceSeparator = false
+  for (let i = resourceStart + 1; i < value.length; i += 1) {
+    const char = value[i]
+    if (isLowerAlphaDigitOrUnderscore(char)) continue
+    if (char !== '.' && char !== '-' && char !== '/') return false
+    // The former grammar allowed `/` only after a `.` or `-` introduced the
+    // resource suffix, and required at least one character after that first
+    // separator. Preserve both details without backtracking.
+    if (char === '/' && !sawResourceSeparator) return false
+    if (!sawResourceSeparator) {
+      if (i === value.length - 1) return false
+      sawResourceSeparator = true
+    }
+  }
+  return true
+}
+
 export const CapabilitySchema = z
   .string()
   .min(1)
-  // Lowercase-only — case-insensitive matching used to silently
-  // accept `Read:Gmail` here, then fail in core-sdk's exact-string
-  // capability check. Drop the /i flag so both validators reject the
-  // same casing.
-  .regex(/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*:[a-z][a-z0-9_]*(?:[.-][a-z0-9_.\-/]+)*$/, {
+  .refine(isCapabilityFormat, {
     message: 'capability must match <verb>:<resource> with lowercase identifiers',
   })
 
