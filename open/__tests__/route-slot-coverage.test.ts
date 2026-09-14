@@ -53,6 +53,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import type { Server } from 'bun'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -77,6 +78,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
+const FAKE_SERVER = {} as unknown as Server<unknown>
 
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
@@ -96,6 +98,7 @@ const SAVED_ENV_KEYS = [
 
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
+let adminRespawnProbe: { recoveryStatus: number; recoveryBody: string; controlStatus: number }
 
 /**
  * A substrate that answers immediately and starts no `claude` process. The graph
@@ -179,6 +182,24 @@ async function probeComposedSurfaces(): Promise<void> {
     const seen = new Map<string, boolean>()
     for (const slot of declared) seen.set(slot.rung, fields[slot.composition] !== undefined)
     served = seen
+    if (graph.fetch === undefined) throw new Error('Open composition did not expose graph.fetch')
+    const recovery = await graph.fetch(
+      new Request('http://instance.test/admin/respawn-session?session=wedged-repl', {
+        method: 'POST',
+      }),
+      FAKE_SERVER,
+    )
+    const control = await graph.fetch(
+      new Request('http://instance.test/admin/definitely-not-a-recovery-route', {
+        method: 'POST',
+      }),
+      FAKE_SERVER,
+    )
+    adminRespawnProbe = {
+      recoveryStatus: recovery.status,
+      recoveryBody: await recovery.text(),
+      controlStatus: control.status,
+    }
   } finally {
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
@@ -236,6 +257,14 @@ afterAll(() => {
 })
 
 describe('route-slot coverage — every declared surface, against the composed product', () => {
+  test('the documented admin respawn route reaches its auth gate, unlike an invented sibling', () => {
+    expect(adminRespawnProbe).toEqual({
+      recoveryStatus: 403,
+      recoveryBody: JSON.stringify({ ok: false, error: 'forbidden' }),
+      controlStatus: 404,
+    })
+  })
+
   test('the probe is alive', () => {
     // Without this, a probe that composed nothing (a renamed field, a graph that
     // failed to build, an empty registry) would report every surface as absent —

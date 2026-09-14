@@ -101,6 +101,11 @@ export const MIN_EXPECTED_MOUNTED_SLOTS = 20
  */
 export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
   {
+    rung: 'admin-respawn',
+    composition: 'admin_respawn_handler',
+    serves: 'POST /admin/respawn-session — force-recovery for a hard-capped or channel-wedged REPL',
+  },
+  {
     rung: 'app-launcher',
     composition: 'app_launcher_surface',
     serves:
@@ -299,15 +304,6 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
  * forgotten. Nothing in this list is a reason to add another entry to it.
  */
 export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
-  // ── Live callers exist → these paths 404 in production ────────────────────
-  {
-    rung: 'admin-respawn',
-    composition: 'admin_respawn_handler',
-    why: 'No composer sets it; the field has no setter anywhere outside its own declaration (gateway/composition/input/http-surfaces-input.ts:104).',
-    costs:
-      'The dead-REPL detector tells the operator to POST /admin/respawn-session (runtime/adapters/claude-code/persistent/dead-repl-detector.ts:110,125,134 and channel-unbound-respawn.ts:103). Following that instruction hits a 404, so the documented recovery for a wedged REPL does not exist.',
-  },
-
   // ── Dead at both ends → mounting alone would serve nothing ────────────────
   {
     rung: 'app-focus',
