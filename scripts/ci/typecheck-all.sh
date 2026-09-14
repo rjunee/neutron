@@ -18,7 +18,25 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/../.." || exit 2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$ROOT" || exit 2
+
+# A linked worktree does not inherit gitignored dependencies. Provision its own
+# bun tree before asking tsc anything. The verifier below refuses the known-
+# broken shortcut: a root node_modules symlink gives workspace packages two
+# physical identities.
+if [ ! -d node_modules/.bun ]; then
+  echo "typecheck-all: provisioning worktree dependencies with bun install --frozen-lockfile"
+  if ! bun install --frozen-lockfile; then
+    echo "typecheck-all: REFUSED — worktree dependency installation failed." >&2
+    exit 3
+  fi
+fi
+if ! bun "${SCRIPT_DIR}/verify-workspace-deps.ts" "$ROOT"; then
+  echo "typecheck-all: REFUSED — worktree dependency verification failed." >&2
+  exit 3
+fi
 
 discover() {
   find . -name tsconfig.json -not -path '*/node_modules/*' \

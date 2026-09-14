@@ -1,5 +1,5 @@
 /**
- * verify-workspace-deps.ts — refuse to run a test suite in a tree whose
+ * verify-workspace-deps.ts — refuse to run a repository check in a tree whose
  * dependencies were never installed.
  *
  * WHY THIS EXISTS (measured 2026-08-19, lane 282ad664 / PR #449)
@@ -74,7 +74,7 @@
  * "tests failed", which is the whole distinction this file exists to restore.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const REFUSAL = 3
@@ -85,14 +85,19 @@ const NEVER_A_PACKAGE = new Set(['node_modules'])
 function fail(lines: string[]): never {
   for (const line of lines) console.error(line)
   console.error('')
-  console.error('  This tree was never installed. Run `bun install` here before running tests.')
-  console.error('  A suite run in this state reds hundreds of files on import errors that have')
+  console.error('  Remove any node_modules symlink and run `bun install` in this worktree.')
+  console.error('  A check run in this state reds files on import errors that have')
   console.error("  nothing to do with the diff, and every downstream gate reads that as the")
   console.error('  branch being broken. Refusing rather than producing that evidence.')
   process.exit(REFUSAL)
 }
 
 const root = resolve(process.argv[2] ?? process.cwd())
+
+const modules = join(root, 'node_modules')
+if (existsSync(modules) && lstatSync(modules).isSymbolicLink()) {
+  fail([`verify-workspace-deps: ${root}/node_modules is a symlink, not a worktree-local install.`])
+}
 
 // --- 1. The bun store -------------------------------------------------------
 const store = join(root, 'node_modules', '.bun')
