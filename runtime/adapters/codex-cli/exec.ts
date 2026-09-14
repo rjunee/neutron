@@ -18,6 +18,7 @@ import type { Readable } from 'node:stream'
 
 import type { Event } from '../../events.ts'
 import { mapCodexEvent, newCodexJsonlMapper } from './event-map.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Spawn shim — production binds to `node:child_process.spawn`. Tests inject
@@ -178,7 +179,10 @@ export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Ev
     return cleanupPromise
   }
   const onAbort = (): void => {
-    void cleanup()
+    // An abort must not wait on the group teardown, but a teardown that throws
+    // must still be seen: a bare `void` here discards the rejection, and a kill
+    // that failed is exactly the thing this reaper exists to make observable.
+    fireAndForget('codex-cli.terminate-process-group', cleanup())
   }
   if (opts.signal.aborted) onAbort()
   else opts.signal.addEventListener('abort', onAbort, { once: true })
