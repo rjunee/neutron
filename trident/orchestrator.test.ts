@@ -4815,7 +4815,6 @@ describe('orchestrator — fire did not settle → failed', () => {
   const PUBLISHED_SHA = '7'.repeat(40)
   const PUBLISHED_CHECKPOINT = `outer-published:${PUBLISHED_SHA}:0:3`
   const PLAIN_FIRE_FAILURE = `inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR}`
-  const UNKNOWN_WORKER_EVIDENCE = '\nworker=unknown; observed_at=1970-01-01T00:00:00.000Z; worker observer unavailable; last screen:\n(capture unavailable)'
 
   test('evidence the workflow LAUNCHED holds the lane instead of terminalizing it', async () => {
     const h = buildHarness({
@@ -4899,7 +4898,7 @@ describe('orchestrator — fire did not settle → failed', () => {
     expect(store.get(run.id)?.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
   })
 
-  test('NO launch evidence records explicit unknown worker evidence', async () => {
+  test('NO launch evidence keeps today\'s failure byte-identical', async () => {
     const h = buildHarness({
       plan: () => ({ fire: TIMEOUT_FIRE }),
       gather_fire_evidence: async () => ({ kind: 'none', detail: 'nothing' }),
@@ -4910,10 +4909,10 @@ describe('orchestrator — fire did not settle → failed', () => {
 
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
-    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE + UNKNOWN_WORKER_EVIDENCE)
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
   })
 
-  test('an UNWIRED seam records explicit unknown worker evidence', async () => {
+  test('an UNWIRED seam keeps today\'s failure byte-identical', async () => {
     const h = buildHarness({ plan: () => ({ fire: TIMEOUT_FIRE }) })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
@@ -4921,7 +4920,7 @@ describe('orchestrator — fire did not settle → failed', () => {
 
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
-    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE + UNKNOWN_WORKER_EVIDENCE)
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
   })
 
   test('a NON-timeout fire error never consults the seam', async () => {
@@ -4939,7 +4938,7 @@ describe('orchestrator — fire did not settle → failed', () => {
 
     expect(consulted).toBe(0)
     expect(store.get(run.id)?.phase).toBe('failed')
-    expect(store.get(run.id)?.failure_reason).toBe('inner workflow fire failed: boom' + UNKNOWN_WORKER_EVIDENCE)
+    expect(store.get(run.id)?.failure_reason).toBe('inner workflow fire failed: boom')
   })
 
   // BLOCKER (round 1): the held lane returned the row PINNED BEFORE THE FIRE, and
@@ -5123,7 +5122,7 @@ describe('orchestrator — fire did not settle → failed', () => {
 
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
-    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE + UNKNOWN_WORKER_EVIDENCE)
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
   })
 })
 

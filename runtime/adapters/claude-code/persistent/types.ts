@@ -454,8 +454,9 @@ export interface PersistentReplSubstrateOptions {
    *  `DEFAULT_TURN_INACTIVITY_MS` (90s). Overridable per-turn via
    *  `spec.turn_timeout_ms`. NOT a fixed wall clock — see the constant's doc. */
   turnTimeoutMs?: number
-  /** Per-turn deadline (ms) for unclassified work. A freshly observed working
-   *  terminal control overrides this deadline; PTY bytes alone do not. Default `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min). Overridable
+  /** Per-turn ABSOLUTE-CEILING backstop (ms) — the hard upper bound a single turn
+   *  can run, which neither PTY activity nor an observed working control outranks
+   *  (a live-but-livelocked child). Default `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min). Overridable
    *  per-turn via `spec.turn_absolute_ceiling_ms`. Always coerced ≥ the inactivity
    *  window. */
   turnAbsoluteCeilingMs?: number

@@ -5524,8 +5524,16 @@ export function buildTridentOrchestrator(
           changed: true, waiting: false, note: 'worker reported blocked to orchestrator',
         }
       }
-      if (worker.state === 'working') {
-        return { run, changed: true, waiting: true, note: 'worker still working; renew advancement from run-scoped evidence' }
+      // A WORKING CONTROL SPARES THE NO-ADVANCE DEADLINE, NOT THE CEILING.
+      // `esc to interrupt` establishes that a turn is IN FLIGHT — it does not
+      // establish progress, which is the same limitation PTY activity has and the
+      // exact reason `maxInflightMs` exists (`substrate.ts`: "a live-but-livelocked
+      // child"). Letting this reprieve outrank the ceiling makes a livelocked lane
+      // immortal and puts this module at odds with `run-driving.ts`, which still
+      // refuses every reprieve past `DEFAULT_MAX_INFLIGHT_MS` on the same clock.
+      // So: spare the 90-minute checkpoint-silence gate, fall through at 2 h.
+      if (worker.state === 'working' && elapsedSinceAdvance(run) <= maxInflightMs) {
+        return { run, changed: true, waiting: true, note: 'worker still working; sparing the no-advance deadline on run-scoped evidence' }
       }
       // (1a-crash) RECOVER, DON'T REAP. The launcher died with no harvestable result,
       //     but the run's continuation state (`branch`, `pr`, `inner_checkpoint`) is on
@@ -6119,7 +6127,7 @@ export function buildTridentOrchestrator(
       //     window, but at least one COULD NOT LOOK, so the kill is postponed to the
       //     next tick rather than taken on a blind check. The run is NOT spared: it
       //     is re-examined every tick, and `maxInflightMs` (checked above, and which
-      //     no ledger-only reprieve crosses) still bounds it, so a permanently blind probe cannot
+      //     no reprieve crosses) still bounds it, so a permanently blind probe cannot
       //     make a lane immortal.
       //
       //     SUSPECTED-HANG PATH ONLY. A positive launcher death and the inflight
@@ -6288,9 +6296,22 @@ export function buildTridentOrchestrator(
       catch { worker = unknownWorkerObservation('worker observation failed', now()) }
     }
     const out = await stepCore(run, worker)
-    if (out.changed && out.run.phase === 'failed' && /worker blocked:|worker state unknown:|no progress for|inner workflow fire failed/.test(out.run.failure_reason ?? '')) {
+    // EVIDENCE GOES ON THE REASONS THIS OBSERVER AUTHORS, AND NOWHERE ELSE.
+    // Appending it to every failure (and to every waiting note) rewrote reasons
+    // this change does not own — `inner workflow fire failed: …`, whose
+    // byte-identity is pinned by the fire-evidence wiring test, and the launch
+    // retry notes pinned by the launcher-death e2e. Both went red in CI for
+    // exactly that. A `worker=unknown; worker observer unavailable` suffix is
+    // also pure noise on a run nothing observed.
+    // A POSITIVE observation is new information and can attach anywhere; an
+    // `unknown` attaches ONLY to the reasons this observer authors. Attaching
+    // `worker=unknown; worker observer unavailable` to every failure is what took
+    // out the fire-evidence byte-identity pin, and an unwired or blind observer
+    // must leave an unrelated failure exactly as it found it.
+    const authored = /^worker blocked:|^worker state unknown:/.test(out.run.failure_reason ?? '')
+    if (out.changed && out.run.phase === 'failed' && (authored || worker.state !== 'unknown')) {
       out.run = { ...out.run, failure_reason: `${out.run.failure_reason ?? 'failure cause unknown'}\n${workerEvidence(worker)}` }
-    } else if (out.waiting) {
+    } else if (out.waiting && worker.state !== 'unknown') {
       out.note += `; worker=${worker.state}; ${worker.detail}`
     }
     if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {

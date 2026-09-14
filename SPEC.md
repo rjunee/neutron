@@ -289,15 +289,19 @@ references decisions by date; none is a second home for a decision.
 
 ### 2026-09-14 — Worker prompt evidence overrides elapsed-time inference (#754).
 
-A current interactive selection prompt reports blocked to the orchestrator with
-its captured text. A current working control protects a slow worker from both
-inactivity and deadline policies; the orchestrator renews advancement from that
-run-scoped evidence. Unclassified deadline stops report unknown rather than a
-suspected hang. Raw byte history and failed capture cannot establish either
-positive state. The existing readiness assertion retains its transport role and
-captures evidence before terminating a failed spawn. This supersedes any earlier
-claim that elapsed time alone establishes a hang or that a deadline outranks
-positively observed working UI. Acceptance: `docs/spec-items/blocked-is-not-slow.md`.
+A current interactive selection prompt — a live `❯` cursor, a sibling option and
+the CLI's own key instruction, read off the rendered screen and measured against
+four live captures — reports blocked to the orchestrator with its captured text.
+A current working control spares a slow worker from the inactivity window and the
+90-minute checkpoint-silence gate; it does NOT outrank the absolute ceiling
+(`turn_absolute_ceiling_ms`, `max_inflight_ms`), because a visible interrupt
+control establishes that a turn is IN FLIGHT, not that it is progressing — the
+same limit PTY activity has, and the reason that backstop exists. Unclassified
+deadline stops report unknown rather than a suspected hang, and carry the capture.
+Raw byte history and a failed capture cannot establish either positive state. The
+existing readiness assertion retains its transport role and captures evidence
+before terminating a failed spawn. This supersedes any earlier claim that elapsed
+time alone establishes a hang. Acceptance: `docs/spec-items/blocked-is-not-slow.md`.
 
 
 ### 2026-09-14 — TRIDENT AGENTS ARE CONFINED TO THEIR CWD INSTEAD OF BYPASSING PERMISSIONS, AND THE PROMPT POLICY IS NOT ONE VALUE FOR ALL OF THEM. Trident-family profiles drop `--dangerously-skip-permissions` and take Claude Code `--restricted`, which confines the file tools to the spawn's cwd plus explicit `--add-dir` directories, keeps `--settings` authoritative while ignoring user/project/local settings files, and refuses `bypassPermissions` outright (the two flags together exit 1). The prompt policy then SPLITS by what the agent must do, and the split is measured rather than reasoned: under `--restricted --permission-mode dontAsk` the installed `claude` 2.1.270 denies Write AND Bash *inside the agent's own cwd* ("Permission to use Write has been denied because Claude Code is running in don't ask mode"), so an ACTING profile is inert under it. The acting profiles (`PROFILE_EPHEMERAL`, `PROFILE_LEAK_FIXER`, `PROFILE_WARM_FIRE`) therefore take `acceptEdits`, which runs in-cwd writes and commands with no prompt while confinement still holds — an outside-cwd `Read` is refused by the CLI and an outside-cwd `cat` by the command gate. The TOOL-LESS arbiter keeps `dontAsk`, which costs it nothing. **Named residual:** under `acceptEdits` a shell command the CLI does not recognise as confined (an interpreter one-liner, say) escalates to an approval prompt rather than being refused, and the substrate's `tool-use-approve` detector answers prompts — so a Bash-granted Trident agent can still reach outside its cwd by that route. Confinement of the FILE tools and of recognised read commands is enforced by the CLI and is not subject to that. This narrows only Trident-family profiles; trusted conversational profiles retain their existing policy. GitHub issue #630.

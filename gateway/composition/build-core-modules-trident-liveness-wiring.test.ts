@@ -372,7 +372,9 @@ test('production composition observes a blocked worktree worker and stores its p
   const instance = await mods.tridentModule.init(fakeCtx)
   const id = 'worker-observer-wiring'
   const session = new ReplSession('observed-worker', 'worker-generation', 'worker-session', 'worker-channel', '/repo/observed-worktree')
-  const menu = 'Choose organization\n❯ Alpha\nEnter to select'
+  // A REAL menu has a sibling option under the selected one — that is what
+  // separates a dialog from the composer's own `❯ <typed text>` line.
+  const menu = 'Choose organization\n❯ Alpha\n  Beta\nEnter to select'
   session.attachChild({ hasExited: () => false, readScreen: async () => menu } as PtyChild)
   sink.register(session.sessionId, session)
   try {

@@ -206,3 +206,70 @@ API/timing comments were corrected. The old sentence in `trident/delivery.test.t
 stays as a legacy-row compatibility fixture; the completed historical plan at
 `.trident/plans/trident/2-the-90-min-hang-watchdog-kills-li.md:7` describes its named
 prior commit and was not rewritten.
+
+### Review round 1 — what the lane's instrument could not see, and what changed
+
+The classifier was measured against FOUR LIVE `pane.read` captures rather than
+against its own fixtures, and three of the four came back wrong:
+
+| capture | before | after |
+|---|---|---|
+| tool-use permission prompt (a live wedged worker) | `unknown` | `blocked` |
+| folder-trust dialog (#751's shape) | `blocked` | `blocked` |
+| a working pane | `unknown` | `unknown` |
+| an idle pane | `unknown` | `unknown` |
+
+Two causes, both invisible to a hand-written fixture:
+
+1. **A real capture is padded with blank viewport rows.** `pane.read` returns the
+   viewport, so a dialog drawn part-way up a 54-row pane comes back with twelve
+   blank rows under it. Every window in the classifier was `lines.slice(-4)`,
+   which read the padding — so the footer test, the working veto and the
+   empty-cursor veto were all looking at blank lines on every real screen. Windows
+   are now anchored on the last line that HAS CONTENT.
+2. **The instruction wording was one dialog's, not the CLI's.** The fixture said
+   `Enter to select`; the tool-use permission prompt — the shape #754 was filed on
+   — says `Esc to cancel · Tab to amend` and never says "Enter to select".
+
+Widening the instruction set alone would have reported a healthy worker blocked,
+because the composer also draws `❯ <typed text>`. Blocked therefore now requires a
+live cursor AND a sibling option AND the key instruction; the working and idle
+composer captures are pinned as controls that must NOT classify blocked.
+
+**A working control no longer outranks the absolute ceiling.** It spares the
+inactivity window and the 90-minute checkpoint-silence gate — that is the point of
+the card — but `turn_absolute_ceiling_ms` / `max_inflight_ms` still bound the turn
+and the run. `esc to interrupt` establishes that a turn is IN FLIGHT, which is
+exactly what PTY activity established and exactly why that backstop exists; as
+first written, a livelocked child rendering an interrupt control was immortal, and
+this module contradicted `trident/run-driving.ts`, which still refuses every
+reprieve past the same ceiling.
+
+**The observer can no longer disable the watchdog it feeds.** Every timeout
+decision now sits downstream of the capture, so a capture that REJECTED would have
+skipped the inactivity gate and the ceiling both. The bare `void` is now
+`fireAndForget`, a failed capture degrades to `unknown` and the policy still runs,
+and the one line that could actually reject — `new Date(lastDataAt).toISOString()`
+on a non-finite timestamp — is guarded.
+
+**Evidence attaches only to the reasons this observer authors.** Appending
+`worker=unknown; worker observer unavailable` to every failure rewrote reasons this
+card does not own and took out two pre-existing byte-identity pins in CI (the
+fire-evidence composition wiring test, shard 3; the launcher-death e2e, shard 6).
+A POSITIVE observation may attach anywhere; an unknown attaches only to
+`worker blocked:` / `worker state unknown:`.
+
+**The turn-timeout producer literal is restored.** `g6-error-string-conformance`
+extracts `message: 'persistent-repl: turn timeout', retryable: true` from source
+and fails loudly on a rewording (shard 4, three tests); re-pinning it is a §2.4
+ratchet needing sign-off. The observation is disclosed on the run record by
+`observe_run_worker`, which is where #754 needs it, and to stderr at the turn level.
+
+Mutations re-run by the reviewer, each RED then GREEN on restore: the blank-row
+trim (`worker-observation.ts:25`), the instruction set (`:36`), the sibling-option
+requirement (`:72`), the turn-level ceiling bound (`pool.ts:830`), the run-level
+ceiling bound (`orchestrator.ts:5535`) and the working reprieve itself.
+
+**Still unproven, unchanged by this round:** historical per-run attribution. No
+instance database or deployment record is available here, and nothing in the code,
+the spec item or this record claims otherwise.

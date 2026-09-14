@@ -1,5 +1,5 @@
 import { observeSession } from './observe-workers.ts'
-import { describeWorkerObservation, type WorkerObservation } from './worker-observation.ts'
+import { describeWorkerObservation, unclassifiedObservation, type WorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → pool.ts
 // The warm pool, the createPersistentReplSubstrate turn driver, ephemeral
 // one-shots, and the dropped-inbound replay sink (D2 split).
@@ -413,8 +413,8 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // inactivity window is the idle-time-since-last-PTY-byte before a turn is
       // deemed frozen; the composer raises it for a cold/onboarding turn (heavier
       // initial processing) and keeps it snappy for a warm steady-state turn. The
-      // deadline applies when the terminal cannot positively show ongoing work.
-      // Fresh working controls outrank elapsed time. Non-positive values fall back to the construction defaults; the
+      // absolute ceiling is the hard backstop a live-but-livelocked child can't
+      // exceed, with or without a working control. Non-positive values fall back to the construction defaults; the
       // ceiling is coerced ≥ the inactivity window (a ceiling below the idle
       // window would pre-empt the freeze detector).
       const inactivityMs =
@@ -713,8 +713,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         //      (The liveness keepalive above pushes `status` events but does NOT
         //      touch `lastDataAt`, so an alive-but-frozen child — keepalive still
         //      firing — is correctly detected as frozen here.)
-        //   2. DEADLINE — bounds a turn whose state is unknown. A fresh working
-        //      control observed by the terminal probe below spares a slow turn.
+        //   2. ABSOLUTE CEILING — a hard upper bound so a live-but-livelocked child
+        //      (emitting PTY noise, or holding an interrupt control, forever without
+        //      ever settling) can't run unbounded. A working control spares gate 1
+        //      only.
         // Both emit the SAME retryable `turn timeout` error the composer classifies
         // (auto-retry once → Retry affordance) and poison the warm session so the
         // next dispatch respawns a clean REPL.
@@ -739,7 +741,16 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           }
           // O3 — stamp the typed class so the composer's ladder classifies on
           // `code` before its `persistent-repl: turn timeout` regex fallback.
-          channel.push({ kind: 'error', message: `persistent-repl: turn timeout; ${describeWorkerObservation(observation)}`, retryable: true, code: 'turn_timeout' })
+          // THE PRODUCER LITERAL IS A GOVERNED RATCHET. `g6-error-string-conformance`
+          // extracts `message: 'persistent-repl: turn timeout', retryable: true`
+          // from THIS source text and fails loudly when it is reworded; rewording
+          // it into a template took that pin out (shard 4, three tests) and a
+          // re-pin needs the §2.4 PR-body note + sign-off. The observation is
+          // disclosed on the run record by the orchestrator's own observer
+          // (`observe_run_worker`), which is where #754 needs it, so the turn-level
+          // wording stays put and the evidence is logged rather than spliced in.
+          process.stderr.write(`[repl-timeout:${reason}] ${describeWorkerObservation(observation).slice(0, 1200)}\n`)
+          channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true, code: 'turn_timeout' })
           channel.close()
           turn.settle()
         }
@@ -782,7 +793,25 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           const observedSession = session
           // Reuse this watchdog's cadence. Await a bounded fresh observation before
           // applying timeout policy, so the answer and the decision share a sample.
-          void observeSession(observedSession).then((observation) => {
+          //
+          // THE OBSERVER MUST NOT BE ABLE TO DISABLE THE WATCHDOG IT FEEDS. Every
+          // timeout decision now sits DOWNSTREAM of this capture, so a capture that
+          // REJECTS would skip the inactivity gate and the ceiling both, leaving the
+          // turn with no deadline at all — this card's own failure mode, one level
+          // up. A failed capture is therefore degraded to `unknown` (never working,
+          // never blocked) and the policy below runs on it unchanged. The wrapper is
+          // `fireAndForget`, not a bare `void`: a throw in the POLICY is logged and
+          // counted rather than taking the process down with it.
+          const applyTimeoutPolicy = async (): Promise<void> => {
+           try {
+            let observation: WorkerObservation
+            try {
+              observation = await observeSession(observedSession)
+            } catch (err) {
+              observation = unclassifiedObservation(
+                `worker observation failed: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
             if (turn.settled || channel.closed || observedSession.activeTurn !== turn) return
             if (observation.state === 'blocked') {
               turn.settled = true
@@ -795,7 +824,11 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
               turn.settle()
               return
             }
-            if (observation.state === 'working') return
+            // SPARES THE INACTIVITY WINDOW, NOT THE CEILING — see the same rule in
+            // `trident/orchestrator.ts`. A visible interrupt control proves a turn is
+            // in flight, not that it is progressing, so it must not outrank the
+            // backstop that exists precisely for a child which emits forever.
+            if (observation.state === 'working' && Date.now() - turnStartedAt < absoluteCeilingMs) return
             const nowMs = Date.now()
             // Auth-invalid is a RECLASSIFICATION of a frozen turn, NOT a fast-fail on
             // mere presence (Argus r1 BLOCKER). The signal is cleared at THIS turn's
@@ -835,7 +868,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
               if (authInvalid) failAuthInvalid()
               else failFrozen('inactivity', observation)
             }
-          }).finally(() => { captureInFlight = false })
+           } finally { captureInFlight = false }
+          }
+          fireAndForget('persistent-repl.turn-observation', applyTimeoutPolicy())
         }, watchdogTickMs)
         ;(watchdog as { unref?: () => void }).unref?.()
 

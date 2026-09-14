@@ -15,12 +15,26 @@ be described as proof of a prompt or a hang.
 
 ## Acceptance
 
-- A current selection menu with a live cursor and an input instruction reports
-  blocked to the orchestrator; a quoted menu, byte history, or a silent worker
-  does not. Verify `worker-observation.test.ts` under the persistent adapter.
-- Working controls override both inactivity and deadline policies. Removing the
-  working guard must fail the slow-turn and slow-run tests; removing the blocked
-  guard must fail the positive-menu tests.
+- A current selection menu with a live cursor, a SIBLING OPTION and the CLI's own
+  key instruction reports blocked to the orchestrator; a quoted menu, byte
+  history, a silent worker, and the composer's own `❯ <typed text>` line do not.
+  The fixtures are transcribed from live `pane.read` captures of a tool-permission
+  prompt, the trust dialog, a working pane and an idle one, because a screen read
+  from a real pane is PADDED WITH BLANK ROWS below the dialog and the
+  tool-permission prompt says `Esc to cancel · Tab to amend`, never "Enter to
+  select". Verify `worker-observation.test.ts` under the persistent adapter.
+- Working controls spare the inactivity window and the checkpoint-silence gate,
+  and NOTHING ELSE: the absolute ceiling still bounds a turn and a run, because a
+  visible interrupt control proves a turn is in flight, not that it is
+  progressing. Removing the working guard must fail the slow-turn and slow-run
+  tests; letting it cross the ceiling must fail the two ceiling tests; removing
+  the blocked guard must fail the positive-menu tests.
+- The observer must not be able to disable the watchdog it feeds. A capture that
+  rejects degrades to unknown and the deadline still lands; verify the
+  `an unclassified deadline still lands` cases.
+- Evidence attaches to the reasons this observer AUTHORS. A blind or unwired
+  observer leaves an unrelated failure byte-identical; verify the fire-evidence
+  composition wiring test and the launcher-death e2e.
 - Prompt evidence reaches the persisted run failure and survives database reopen.
   Verify `trident/worker-observation.test.ts` and the production composition test.
 - Readiness failures capture the terminal before termination. Active turns use

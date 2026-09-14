@@ -33,6 +33,55 @@ describe('worker observations', () => {
   ])('unclassified output stays unknown: %s', (screen) => {
     expect(observeWorkerScreen(screen, true).state).toBe('unknown')
   })
+  // THE SHAPES BELOW ARE TRANSCRIBED FROM LIVE `pane.read` CAPTURES (2026-09-14,
+  // four panes: a tool-permission prompt, the trust dialog, a working pane and an
+  // idle one). Two properties of a REAL capture are what the first version of this
+  // detector missed, and both are pinned here rather than described:
+  //   1. the viewport is padded with BLANK ROWS below the dialog, so a window
+  //      anchored on the raw last line reads padding;
+  //   2. the tool-permission prompt's instruction is `Esc to cancel · Tab to
+  //      amend` — it never says "Enter to select".
+  // Measured before the fix: this exact capture classified `unknown`.
+  const toolPrompt = [
+    ' Bash command',
+    '',
+    '   │ git status --short',
+    '   Show the working tree status',
+    '',
+    ' Contains simple_expansion',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. Yes, and switch to auto mode · auto mode handles these prompts for you',
+    '   3. No',
+    '',
+    ' Esc to cancel · Tab to amend',
+  ].join('\n')
+  const padded = (screen: string): string => `${screen}${'\n'.repeat(12)}`
+
+  test('the tool-permission prompt is blocked through the viewport padding', () => {
+    expect(observeWorkerScreen(padded(toolPrompt), true).state).toBe('blocked')
+    expect(observeWorkerScreen(toolPrompt, true).state).toBe('blocked')
+  })
+  test('padding does not hide the working control either', () => {
+    expect(observeWorkerScreen(padded('Editing files… esc to interrupt'), true).state).toBe('working')
+  })
+  // THE CONTROL THAT MUST SURVIVE. A composer draws `❯ <typed text>` on a pane
+  // that is perfectly healthy, and the status rows under it look like options.
+  // Only the dialog instruction separates the two, so a widened instruction set
+  // must still leave this one alone: calling a working worker blocked is the
+  // expensive direction.
+  test.each([
+    ['a working composer', '❯ pick up where we left off\n────────\n\n  ⏵⏵ auto mode on · 2 shells, 4 monitors · ← 1 agent\n  ● main\n  ◯ general-purpose  Confirming clean state  49m 15s'],
+    ['an idle composer', '  new task? /clear to save 207.6k tokens\n────────\n❯\n────────\n\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent'],
+  ])('a live cursor without dialog chrome is not blocked: %s', (_name, screen) => {
+    expect(observeWorkerScreen(padded(screen), true).state).not.toBe('blocked')
+  })
+  test('dialog chrome without an option list is not a menu', () => {
+    // The composer can carry a cursor AND a cancel hint; the SIBLING OPTION is
+    // what makes a menu a menu, so this must stay unknown.
+    expect(observeWorkerScreen(padded('❯ resume the rebase\n\n Esc to cancel · Tab to amend'), true).state).toBe('unknown')
+  })
   test('byte history cannot establish a current prompt', () => {
     const o = observeWorkerScreen(menu, false)
     expect(o.state).toBe('unknown')

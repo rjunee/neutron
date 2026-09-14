@@ -51,13 +51,30 @@ test('blocked fails before the hang budget and persists the prompt across reopen
   expect(interpretFailure(saved).klass).toBe('infra')
 })
 
-test.each([60_000, 999_999])('slow work survives both timeout paths, hang budget %s', async (hang) => {
+// BOTH DIRECTIONS OF THE REPRIEVE. A working control must spare a slow build from
+// the checkpoint-silence deadline — turning a slow build into a false failure is
+// the expensive mistake — but it must NOT outrank the in-flight ceiling: a visible
+// interrupt control proves a turn is in flight, not that it is progressing, and an
+// unbounded lane is not an improvement on a bounded wrong answer.
+test.each([60_000, 999_999])('slow work survives the no-advance deadline, hang budget %s', async (hang) => {
   const { step } = harness('working', hang)
-  const out = await step(makeTridentRun({ last_advanced_at: new Date(0).toISOString() }))
+  // now() is 180_000 and the ceiling is 120_000, so the run must sit INSIDE it.
+  const out = await step(makeTridentRun({ last_advanced_at: new Date(120_000).toISOString() }))
   expect(out.run.phase).not.toBe('failed')
   expect(out.waiting).toBe(true)
   expect(out.changed).toBe(true)
   expect(out.note).toContain('worker=working')
+})
+
+test('a working control does not outrank the in-flight ceiling', async () => {
+  const { step } = harness('working')
+  // 180 s elapsed against a 120 s ceiling (and a 60 s no-advance budget).
+  const out = await step(makeTridentRun({ last_advanced_at: new Date(0).toISOString() }))
+  expect(out.run.phase).toBe('failed')
+  expect(out.run.failure_reason).toContain('no terminal result within')
+  // The evidence still says what was actually seen — the ceiling terminates the
+  // run, it does not relabel the observation.
+  expect(out.run.failure_reason).toContain('worker=working')
 })
 
 test('unknown remains explicit on timeout, with captured output', async () => {

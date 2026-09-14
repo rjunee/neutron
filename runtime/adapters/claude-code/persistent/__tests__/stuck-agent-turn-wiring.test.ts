@@ -271,14 +271,14 @@ describe('worker prompt observation through a real turn', () => {
     expect(failure?.message).toContain(menu)
   })
 
-  it('a slow working turn survives both inactivity and ceiling, then completes', async () => {
+  it('a slow working turn survives the inactivity window, then completes', async () => {
     let captures = 0
     const { host, releaseReply } = makeGatedHost(async () => {
       captures += 1
       return 'Building… esc to interrupt'
     })
     const substrate = createPersistentReplSubstrate({
-      ...optsWith(host), turnTimeoutMs: 200, turnAbsoluteCeilingMs: 300,
+      ...optsWith(host), turnTimeoutMs: 200, turnAbsoluteCeilingMs: 10_000,
     })
     const handle = await substrate.start({ prompt: 'slow work', tools: [], model_preference: ['claude-opus-4-7'] })
     const events: Array<{ kind: string }> = []
@@ -289,6 +289,24 @@ describe('worker prompt observation through a real turn', () => {
     releaseReply()
     await drained
     expect(events.some((event) => event.kind === 'completion')).toBe(true)
+  })
+
+  // THE OTHER DIRECTION. A visible interrupt control proves a turn is IN FLIGHT,
+  // not that it is progressing — which is exactly what PTY activity proved, and
+  // exactly why the absolute ceiling exists (`signatures.ts`: a live-but-livelocked
+  // child emitting forever). The reprieve spares the inactivity window; it must not
+  // make the turn immortal.
+  it('a working control does not outrank the absolute ceiling', async () => {
+    const { host } = makeGatedHost(async () => 'Building… esc to interrupt')
+    const substrate = createPersistentReplSubstrate({
+      ...optsWith(host), turnTimeoutMs: 200, turnAbsoluteCeilingMs: 300,
+    })
+    const errors: Array<{ code?: string }> = []
+    for await (const event of substrate.start({ prompt: 'livelock', tools: [], model_preference: ['claude-opus-4-7'] }).events) {
+      if (event.kind === 'error') errors.push(event)
+    }
+    expect(errors).toHaveLength(1)
+    expect(errors[0]?.code).toBe('turn_timeout')
   })
 })
 
@@ -336,8 +354,17 @@ it('a capture completing after the reply cannot fail a settled turn', async () =
 })
 
 
-it('an unclassified deadline carries its fresh screen with the timeout event', async () => {
-  const { host } = makeGatedHost(async () => 'Unrecognized CLI dialog')
+// THE OBSERVER MUST NOT BE ABLE TO DISABLE THE WATCHDOG IT FEEDS. Every timeout
+// decision now sits downstream of the screen capture, so a capture that FAILS —
+// or one that cannot classify what it sees — must still let the deadline land.
+// The producer wording is a governed ratchet (`g6-error-string-conformance`
+// extracts it from source), so the evidence is disclosed on the run record by
+// the orchestrator's observer, NOT spliced into this literal.
+it.each([
+  ['an unclassifiable screen', async () => 'Unrecognized CLI dialog'],
+  ['a capture that rejects', async () => { throw new Error('capture unavailable') }],
+])('an unclassified deadline still lands: %s', async (_name, readScreen) => {
+  const { host } = makeGatedHost(readScreen as () => Promise<string>)
   const substrate = createPersistentReplSubstrate({ ...optsWith(host), turnTimeoutMs: 200 })
   const errors: Array<{ message?: string; code?: string }> = []
   for await (const event of substrate.start({ prompt: 'work', tools: [], model_preference: ['claude-opus-4-7'] }).events) {
@@ -345,6 +372,5 @@ it('an unclassified deadline carries its fresh screen with the timeout event', a
   }
   expect(errors).toHaveLength(1)
   expect(errors[0]?.code).toBe('turn_timeout')
-  expect(errors[0]?.message).toContain('worker=unknown')
-  expect(errors[0]?.message).toContain('Unrecognized CLI dialog')
+  expect(errors[0]?.message).toBe('persistent-repl: turn timeout')
 })

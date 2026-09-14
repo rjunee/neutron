@@ -27,7 +27,11 @@ export async function observeWorkers(
 export async function observeSession(session: ReplSession): Promise<WorkerObservation> {
   let timer: ReturnType<typeof setTimeout> | undefined
   let o = observeWorkerScreen(session.ring.text(), false)
-  o.detail += `; retained_output_at=${new Date(session.lastDataAt).toISOString()}`
+  // A NON-FINITE `lastDataAt` makes `toISOString()` THROW, and this line sits
+  // outside the try below — the one way this observer could reject, which under
+  // the caller's fire-and-forget would have skipped the whole timeout policy.
+  const retainedAt = Number.isFinite(session.lastDataAt) ? new Date(session.lastDataAt).toISOString() : 'unknown'
+  o.detail += `; retained_output_at=${retainedAt}`
   try {
     if (!session.hasChildExited() && session.child.readScreen !== undefined) {
       const screen = await Promise.race([

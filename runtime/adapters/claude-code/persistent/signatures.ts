@@ -60,9 +60,11 @@ export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
  */
 export const DEFAULT_TURN_INACTIVITY_MS = 90_000
 /**
- * Deadline for unclassified turns. A fresh rendered working control overrides
- * elapsed time; a live process or arbitrary PTY noise alone does not.
- * `turnAbsoluteCeilingMs` / `spec.turn_absolute_ceiling_ms` override the duration.
+ * ABSOLUTE-CEILING backstop for a single turn (2026-07-01). Neither the
+ * activity-based watchdog nor a freshly observed working control may exceed it:
+ * PTY noise and a visible interrupt control both establish that a turn is IN
+ * FLIGHT, never that it is progressing, so a live-but-livelocked child stays
+ * bounded. `turnAbsoluteCeilingMs` / `spec.turn_absolute_ceiling_ms` override the duration.
  */
 export const DEFAULT_TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 /** Signature of the `--dangerously-load-development-channels` first-run
