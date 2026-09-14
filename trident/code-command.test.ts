@@ -339,7 +339,7 @@ describe('/code <task> creates a code_trident_runs row', () => {
     // the bound card via the board-reconcile observer — the same reconcile the board
     // DELETE path runs. A stop that only wrote the phase (pre-r6) left the card
     // showing a stale "building" state.
-    const detached: Array<{ run_id: string; outcome: 'done' | 'failed' }> = []
+    const detached: Array<{ run_id: string; outcome: 'done' | 'failed' | 'blocked' }> = []
     const board = boardStub({
       detachRun: async (_slug, run_id, outcome) => {
         detached.push({ run_id, outcome })

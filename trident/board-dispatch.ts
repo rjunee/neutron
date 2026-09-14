@@ -287,7 +287,18 @@ export interface TridentBoardBinder {
    * uses it to reconcile the board on cancel (§F6a, Codex r6) — the SAME reconcile
    * the tick loop + board DELETE run through `buildBoardReconcileObserver`.
    */
-  detachRun?(project_slug: string, run_id: string, outcome: 'done' | 'failed'): Promise<unknown>
+  detachRun?(
+    project_slug: string,
+    run_id: string,
+    outcome: 'done' | 'failed' | 'blocked',
+    pr_info?: {
+      pr: number | null
+      pr_url: string | null
+      ralph: boolean
+      ralph_round: number
+      max_ralph_rounds: number
+    },
+  ): Promise<unknown>
 }
 
 export interface BoardBoundBuildInput {
