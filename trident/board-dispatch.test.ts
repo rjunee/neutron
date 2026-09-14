@@ -108,6 +108,72 @@ function localDeps(boardOverride: TridentBoardBinder = board): BoardBoundBuildDe
   }
 }
 
+describe('card-owned Ralph iteration budget', () => {
+  function budgetBoard(round: number, cap: number | null): TridentBoardBinder {
+    return {
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: null,
+        ralph_round: round,
+        max_ralph_rounds: cap,
+      }),
+      attachRun: async () => {},
+    }
+  }
+
+  test('a new card receives the full configured budget', async () => {
+    const result = await dispatchBoardBoundBuild(
+      { task: 'build the thing', board_item_id: 'ready' },
+      { ...localDeps(budgetBoard(0, null)), resolveRalph: async () => true, max_ralph_rounds: 3 },
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect([result.run.ralph_round, result.run.max_ralph_rounds]).toEqual([0, 3])
+  })
+
+  test('a re-dispatch one below the card cap inherits its spend without a prior-run link', async () => {
+    const result = await dispatchBoardBoundBuild(
+      { task: 'build the thing', board_item_id: 'ready' },
+      { ...localDeps(budgetBoard(2, 3)), resolveRalph: async () => true, max_ralph_rounds: 20 },
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect([result.run.ralph_round, result.run.max_ralph_rounds]).toEqual([2, 3])
+  })
+
+  test('a card with NO snapshot is never exhausted, whatever the dispatch ceiling says', async () => {
+    // The control for the refusal below, and the shape a review found broken: the
+    // guard read `deps.max_ralph_rounds` when the card had no snapshot, so a
+    // deliberate ceiling of 0 ("no iterations — the LOOP refuses the first one")
+    // and an INVALID ceiling both came back as "this card is exhausted". A card
+    // that has never recorded a governed terminal run has spent nothing.
+    for (const ceiling of [0, -5, Number.NaN]) {
+      const result = await dispatchBoardBoundBuild(
+        { task: `ceiling ${String(ceiling)} — build the thing`, board_item_id: 'ready' },
+        { ...localDeps(budgetBoard(0, null)), resolveRalph: async () => true, max_ralph_rounds: ceiling },
+      )
+      // 0 and NaN are cap values the run store decides on (zero is written, NaN is
+      // refused by name as `backend_error`); NEITHER is this guard's to answer.
+      expect({ ceiling, exhausted: !result.ok && result.code === 'ralph_budget_exhausted' })
+        .toEqual({ ceiling, exhausted: false })
+    }
+  })
+
+  test('a card at its cap is refused as exhausted, not reported complete', async () => {
+    const result = await dispatchBoardBoundBuild(
+      { task: 'build the thing', board_item_id: 'ready' },
+      { ...localDeps(budgetBoard(3, 3)), resolveRalph: async () => true, max_ralph_rounds: 20 },
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('ralph_budget_exhausted')
+    expect(result.message).toContain('No run was created; completion was not reported')
+    expect(store.listNonTerminal()).toHaveLength(0)
+  })
+})
+
 describe('review-only dispatch contract', () => {
   test('a review-shaped task with no bound_pr is REFUSED at dispatch, naming bound_pr', async () => {
     let createCalls = 0

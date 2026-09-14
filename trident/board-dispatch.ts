@@ -41,19 +41,10 @@
  * never authorise work — so a task-text edit past the slug's 35th character does not
  * cost a card its budget while it does still refuse the commit.
  *
- * WHAT THAT DOES NOT DO, stated here because an earlier revision of this header
- * claimed it did: it does NOT make `max_ralph_rounds` a bound on the CARD. The spend
- * rides the card's `linked_run_id`, and THE CHEAPEST WAY TO CLEAR THAT IS ONE CLICK —
- * `work-board/store.ts` NULLs `linked_run_id` when a card leaves the `failed` lane
- * (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) and again on
- * `done → upcoming`. Measured: link cleared → `card_names_no_run` → a full fresh
- * budget, on the same card, same slug, same title, same branch, with nothing re-cut.
- * Two earlier drafts of this paragraph described the escapes as "no card at all"
- * (`onboarding/overnight/register.ts`) or "a re-cut card", both of which require
- * LOSING the slug; that made the limit sound far narrower than it is. The row is
- * recreated by every dispatch and the link is one click from gone, so a per-row
- * counter is one reset away by construction; holding the spend on the CARD is the
- * durable fix and is a separate change (#629).
+ * #629 MOVES THE AUTHORITY TO THE CARD. The linked prior remains a compatibility
+ * source for cards that have not yet recorded their first terminal governed run;
+ * once the card has a snapshot, clearing or replacing `linked_run_id` cannot reset
+ * the spend. Dispatch refuses an at-cap card with `ralph_budget_exhausted`.
  *
  * Every other shape dispatches exactly as it did before, and now SAYS SO: one
  * `dispatch_resume_seed` line per dispatch that had a prior terminal run AND created
@@ -274,6 +265,8 @@ export interface TridentBoardBinder {
   ): (DispatchReadinessTarget & {
     id: string
     linked_run_id?: string | null
+    ralph_round?: number
+    max_ralph_rounds?: number | null
     /**
      * The card's lane. OPTIONAL so the existing readiness/bind test seams need not
      * implement it — but the hold sweep reads it, because a card finished BY HAND
@@ -446,6 +439,7 @@ export type BoardBoundBuildRejectionCode =
   // level out from the fix loop it was stopped in. Clearing the block is a
   // status write the orchestrator makes deliberately.
   | 'card_blocked'
+  | 'ralph_budget_exhausted'
   | 'already_landed'
   // Something LIVE already holds this card's branch — a non-terminal run row,
   // or a linked-worktree lock naming a live pid. REFUSED *AND* QUEUED: nothing
@@ -936,6 +930,35 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  // A card-owned counter is independent of its movable run link. Refuse at the
+  // dispatch chokepoint when it is spent so exhaustion cannot masquerade as a
+  // newly completed run or buy another bootstrap before failing. Non-governed
+  // dispatches do not consume this allowance and remain startable.
+  //
+  // THE CARD'S OWN SNAPSHOT IS THE ONLY THING THIS READS, and the review that
+  // found it reading `deps.max_ralph_rounds` as a fallback is why the sentence is
+  // here. A card with no snapshot has spent nothing — its counter is 0 — so the
+  // fallback could never refuse a card that had genuinely spent anything. What it
+  // COULD do is answer a question it had not been asked: comparing 0 against the
+  // DISPATCH CEILING refused every fresh card when that ceiling was a deliberate
+  // `0` ("no iterations — let the LOOP refuse the first one", pinned in
+  // `retry-resumes-checkpoint.test.ts`), and it answered an INVALID ceiling (`-5`)
+  // with "this card is exhausted" — a config fault reported as a budget fact, i.e.
+  // "I could not read the cap" wearing "the cap is spent" as a mask. The cap this
+  // guard compares against is a value the store has already validated on the way
+  // in (`max_ralph_rounds >= 1`, migration 0141), so it is a cap, not an input.
+  const cardRalphRound = item.ralph_round ?? 0
+  const cardRalphCap = item.max_ralph_rounds ?? null
+  if (ralph && cardRalphCap !== null && cardRalphRound >= cardRalphCap) {
+    return {
+      ok: false,
+      code: 'ralph_budget_exhausted',
+      message:
+        `Refused: Plan item "${board_item_id}" exhausted its Ralph iteration budget ` +
+        `(${cardRalphRound}/${cardRalphCap}). No run was created; completion was not reported.`,
+    }
+  }
+
   const slug = slugifyTask(input.task)
   const branch = `trident/${slug}`
 
@@ -1221,7 +1244,13 @@ export async function dispatchBoardBoundBuild(
   // STRONG identity alone — see `carriedRalphBudget` (run-disposition.ts). Null for
   // every dispatch that has no governed prior to inherit from, which is the
   // pre-existing shape.
-  let budget: { ralph_round: number; max_ralph_rounds: number } | null = null
+  let budget: { ralph_round: number; max_ralph_rounds: number } | null =
+    ralph && item.max_ralph_rounds !== undefined && item.max_ralph_rounds !== null
+      ? {
+          ralph_round: item.ralph_round ?? 0,
+          max_ralph_rounds: Math.min(item.max_ralph_rounds, deps.max_ralph_rounds ?? item.max_ralph_rounds),
+        }
+      : null
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
   // DIFFERENT cards whose titles agree on their first 35 slugged characters share
   // a slug — and therefore share `trident/<slug>` as a branch. Without a seed the
@@ -1366,7 +1395,9 @@ export async function dispatchBoardBoundBuild(
           'Nothing was dispatched.',
       }
     }
-    budget = read.budget
+    // The card snapshot is authoritative once present. The linked row remains
+    // useful for commit salvage and for pre-migration cards only.
+    if (budget === null) budget = read.budget
     if (prior.task !== input.task) {
       // Only the COMMIT is refused, and the reason names which of the two facts
       // disagreed rather than claiming this is a different card.

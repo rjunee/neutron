@@ -210,17 +210,9 @@ export function terminalRunDisposition(
  * writes 0 hands a mid-budget run a fresh count and restarts its cadence, so the
  * periodic full re-plan lands on the wrong iteration of the SAME piece of work.
  *
- * WHAT THIS DOES *NOT* FIX. It does NOT make `max_ralph_rounds` a bound on the CARD.
- * The spend rides the card's `linked_run_id`, and one ordinary status-dot advance off
- * the `failed` lane NULLs that link (`work-board/store.ts`), so the next dispatch
- * inherits nothing — same card, same slug, same branch, full fresh budget. An
- * intervening NON-GOVERNED run launders it a different way: every successful dispatch
- * rebinds the card to its new run (`board-dispatch.ts:1574`), so one ralph-off dispatch
- * makes that row what the link names, and this function then answers null on
- * `run.ralph !== true` (below). The cause is the link moving, NOT a lookup choosing the
- * newest row — that was the mechanism until the prior stopped being resolved by slug,
- * and this sentence went on naming it for a round afterwards. Holding the spend on the
- * card is `#629`.
+ * SINCE #629 this is the compatibility source for a card whose durable snapshot is
+ * still null. Terminal reconciliation writes the governed pair onto the card, and
+ * dispatch prefers that snapshot over this linked-row result thereafter.
  *
  * AN EARLIER VERSION OF THIS PARAGRAPH SAID SOMETHING NOW FALSE, and it is corrected
  * here rather than quietly deleted because the reason it went stale is the point. It

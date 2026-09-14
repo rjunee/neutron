@@ -60,6 +60,52 @@ describe('buildBoardReconcileObserver', () => {
     expect(board.get('proj-1', b.id)?.status).toBe('failed')
     expect(board.get('proj-1', b.id)?.linked_run_id).toBe('run-b')
   })
+
+  test('terminal reconciliation advances the card-owned budget monotonically', async () => {
+    const obs = buildBoardReconcileObserver(board)!
+    const item = await board.create('proj-1', { title: 'bounded card' })
+    await board.attachRun('proj-1', item.id, 'run-budget')
+
+    await obs({
+      project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
+      pr: null, ralph: true, ralph_round: 2, max_ralph_rounds: 3,
+    } as never)
+
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3 })
+
+    // MONOTONIC, in the two directions the name claims — asserted, because a test
+    // that only writes onto a fresh card establishes neither. A DELAYED observer
+    // for an earlier iteration must not walk the spend backward, and a LATER cap
+    // must not widen the one the card already carries.
+    await obs({
+      project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
+      pr: null, ralph: true, ralph_round: 1, max_ralph_rounds: 9,
+    } as never)
+
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3 })
+
+    // …and the control that stops this passing by refusing every write: a genuine
+    // advance with a tighter cap IS recorded.
+    await obs({
+      project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
+      pr: null, ralph: true, ralph_round: 3, max_ralph_rounds: 3,
+    } as never)
+
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 3, max_ralph_rounds: 3 })
+  })
+
+  test('a NON-governed terminal run leaves the card budget untouched', async () => {
+    const obs = buildBoardReconcileObserver(board)!
+    const item = await board.create('proj-1', { title: 'ungoverned card' })
+    await board.attachRun('proj-1', item.id, 'run-plain')
+
+    await obs({
+      project_slug: 'proj-1', id: 'run-plain', phase: 'failed', repo_path: '/repo',
+      pr: null, ralph: false, ralph_round: 4, max_ralph_rounds: 5,
+    } as never)
+
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 0, max_ralph_rounds: null })
+  })
 })
 
 describe('durable PR provenance — the number is written by the terminal reconcile', () => {

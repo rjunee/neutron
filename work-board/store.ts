@@ -83,6 +83,9 @@ export interface WorkBoardItem {
   inline_active: boolean
   /** Bound `code_trident_runs.id` when a trident run works this item. */
   linked_run_id: string | null
+  /** Card-owned Ralph spend. A null cap means no governed dispatch yet. */
+  ralph_round?: number
+  max_ralph_rounds?: number | null
   created_at: string
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
@@ -147,6 +150,12 @@ export type RunReconcileOutcome = 'done' | 'failed' | 'blocked'
 export interface RunPrInfo {
   pr: number | null
   pr_url: string | null
+}
+
+export interface RunTerminalInfo extends RunPrInfo {
+  ralph?: boolean
+  ralph_round?: number
+  max_ralph_rounds?: number
 }
 
 /** Where to drop the moved item relative to a sibling. */
@@ -273,7 +282,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url'
+  'pr, pr_url, ralph_round, max_ralph_rounds'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -298,6 +307,8 @@ interface WorkBoardItemDbRow {
   declared_surfaces: string | null
   pr: number | null
   pr_url: string | null
+  ralph_round: number
+  max_ralph_rounds: number | null
 }
 
 /**
@@ -530,6 +541,8 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     design_doc_ref: row.design_doc_ref,
     inline_active: row.inline_active === 1,
     linked_run_id: row.linked_run_id,
+    ralph_round: row.ralph_round,
+    max_ralph_rounds: row.max_ralph_rounds,
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,
@@ -683,6 +696,8 @@ export class WorkBoardStore {
       design_doc_ref,
       inline_active: false,
       linked_run_id: null,
+      ralph_round: 0,
+      max_ralph_rounds: null,
       created_at: ts,
       updated_at: ts,
       completed_at,
@@ -728,6 +743,8 @@ export class WorkBoardStore {
           item.declared_surfaces === null ? null : JSON.stringify(item.declared_surfaces),
           item.pr,
           item.pr_url,
+          item.ralph_round ?? 0,
+          item.max_ralph_rounds ?? null,
         ],
       )
     })
@@ -1298,7 +1315,7 @@ export class WorkBoardStore {
     project_slug: string,
     run_id: string,
     outcome: RunReconcileOutcome,
-    pr_info?: RunPrInfo,
+    pr_info?: RunTerminalInfo,
   ): Promise<WorkBoardItem | null> {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
@@ -1331,6 +1348,14 @@ export class WorkBoardStore {
       if (pr_info !== undefined && pr_info.pr !== null) {
         sets.push('pr = ?', 'pr_url = ?')
         params.push(pr_info.pr, pr_info.pr_url)
+      }
+      // The card is the durable owner of the allowance. Only governed runs
+      // advance it, MAX prevents a delayed terminal observer from walking spend
+      // backward, and MIN prevents a later dispatch from widening the cap.
+      if (pr_info?.ralph === true && pr_info.ralph_round !== undefined && pr_info.max_ralph_rounds !== undefined) {
+        sets.push('ralph_round = MAX(ralph_round, ?)',
+          'max_ralph_rounds = CASE WHEN max_ralph_rounds IS NULL THEN ? ELSE MIN(max_ralph_rounds, ?) END')
+        params.push(pr_info.ralph_round, pr_info.max_ralph_rounds, pr_info.max_ralph_rounds)
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, current.id)

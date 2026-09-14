@@ -43,10 +43,9 @@
  *     the cause named for it had become fiction. That row is present and readable; it is
  *     simply not governed, which is why it is not a "gap in the chain".
  *
- * Making the bound genuinely card-level is `#629`, not this file. What this file
- * guarantees is narrower and worth stating exactly: WHEN a governed re-dispatch
- * names the governed prior run it is resuming, the spend and the cap travel
- * together, and the cap can only tighten.
+ * #629 makes this helper the compatibility path for a card without a persisted
+ * budget snapshot. Once present, the card-owned pair is authoritative; this helper
+ * still guarantees that an older governed pair travels together and only tightens.
  */
 
 /**
