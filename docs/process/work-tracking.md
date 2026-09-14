@@ -110,7 +110,7 @@ exists in exactly one of them at a time:
 | Answers | "what has been raised?" | "what are we building, and what is done?" |
 | Leaves by | being promoted, or closed as won't-do | being built and recorded in as-built |
 
-## 4. The as-built record — one writer, permanent shards
+## 4. The as-built record — permanent shards
 
 This section is the part that is **not** inherited from general practice. It is
 Neutron's own, and it is the answer to a failure every agent-written repo hits.
@@ -131,8 +131,9 @@ touched only the as-built log**, at roughly 36 minutes of runner time each.
 1. **One file per record.** `docs/as-built/<slug>.md`, matching the spec-item slug
    where one exists. Never a shared monolith.
 2. **The record ships in the PR that earns it**, not in a follow-up commit.
-3. **Nothing else writes it.** A CI guard fails a PR whose diff edits a frozen
-   monolith or another branch's record.
+3. **Merged records are immutable.** A CI guard fails a PR whose diff edits a
+   frozen monolith or another change's existing record, while allowing the PR to
+   add its own shard directly.
 4. **Freeze, never convert, an existing monolith.** Leave it verbatim at its old
    path so every existing citation still resolves, and start the directory beside
    it. Converting rewrites history that other documents cite.
@@ -144,11 +145,10 @@ touched only the as-built log**, at roughly 36 minutes of runner time each.
 
 ### The evidence
 
-This repository adopted rules 1–3 and 5 (staging entries per-branch and bundling
-them into the code commit) before this standard existed. Measured over its last
+This repository adopted rules 1–3 and 5 before this standard existed. Measured over its last
 400 non-merge commits:
 
-| | monolithic log | one-writer log |
+| | monolithic log | sharded record |
 |---|---|---|
 | Commits touching only the as-built log | 386 of 1,367 | **5 of 400** |
 | As-built bundled into the commit that earned it | — | **164 of 400** |

@@ -148,10 +148,6 @@ function buildHarness(opts: {
   /** #541 — the arbiter tier above that resolver. */
   arbitrate?: import('./arbiter.ts').TridentArbiter
   fix_leak_findings?: import('./leak-preflight.ts').LeakPreflightFixer
-  fold_as_built?: (
-    run: TridentRun,
-    base: string,
-  ) => Promise<import('./as-built-appender.ts').FoldStagedAsBuiltEntriesResult>
   merge_deps?: import('./git-mode.ts').MergeCleanupDeps
   on_terminal?: TridentTerminalHook
   /** null exercises production base detection instead of the usual deterministic test base. */
@@ -290,9 +286,6 @@ function buildHarness(opts: {
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   if (opts.arbitrate !== undefined) o.arbitrate = opts.arbitrate
   if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
-  // Keep unrelated orchestrator tests hermetic: production defaults to the real
-  // appender, while the focused wiring tests below inject their own observable seam.
-  o.fold_as_built = opts.fold_as_built ?? (async () => ({ ok: true, folded: 0 }))
   // THE MUTATION PROVER IS SUBSTITUTED FOR EVERY HARNESS RUN. The real gate
   // provisions a git worktree at the branch head and runs the guard, which cannot
   // work against this harness's `/repo` path — left unset it refuses every
@@ -3477,135 +3470,6 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     const plainReason = (await runToTerminal(plain, run2.id)).failure_reason ?? ''
     expect(seenPlain).toEqual([null])
     expect(plainReason).toContain(`${NO_DRIFT_SHA}...${SIM_REVIEWED_HEAD}`)
-  })
-})
-
-describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
-  test('a performed pr-mode merge runs the fold once with the merged run and its resolved base', async () => {
-    const calls: { run: TridentRun; base: string }[] = []
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
-      fold_as_built: async (run, base) => {
-        calls.push({ run, base })
-        return { ok: true, folded: 1 }
-      },
-    })
-    const run = await createRun({ merge_mode: 'pr' })
-
-    const final = await runToTerminal(h, run.id)
-
-    expect(final.phase).toBe('done')
-    expect(final.failure_reason).toBeNull()
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.base).toBe('main')
-    expect(calls[0]?.run.repo_path).toBe('/repo')
-    expect(calls[0]?.run.phase).toBe('done')
-    expect(calls[0]?.run.merge_mode).toBe('pr')
-  })
-
-  test('local mode folds too', async () => {
-    const calls: { run: TridentRun; base: string }[] = []
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      fold_as_built: async (run, base) => {
-        calls.push({ run, base })
-        return { ok: true, folded: 1 }
-      },
-    })
-    const run = await createRun()
-
-    expect((await runToTerminal(h, run.id)).phase).toBe('done')
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.base).toBe('main')
-    expect(calls[0]?.run.merge_mode).toBe('local')
-  })
-
-  test('a fold FAILURE VALUE leaves the merged run done and surfaces in the note', async () => {
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
-      fold_as_built: async () => ({
-        ok: false,
-        folded: 0,
-        reason: 'could not land folded as-built entries: non-fast-forward',
-      }),
-    })
-    const run = await createRun({ merge_mode: 'pr' })
-
-    await h.loop.runOnce()
-    await h.complete()
-    const outcome = await h.step(store.get(run.id)!)
-
-    expect(outcome.run.phase).toBe('done')
-    expect(outcome.note).toContain('as-built fold deferred')
-    expect(outcome.note).toContain('non-fast-forward')
-    expect(await store.saveIfActive(outcome.run)).toBe(true)
-    expect(store.get(run.id)).toMatchObject({ phase: 'done', failure_reason: null })
-  })
-
-  test('a THROWING fold seam still leaves the run done', async () => {
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      fold_as_built: async () => {
-        throw new Error('scratch worktree exploded')
-      },
-    })
-    const run = await createRun()
-
-    await h.loop.runOnce()
-    await h.complete()
-    const outcome = await h.step(store.get(run.id)!)
-
-    expect(outcome.run.phase).toBe('done')
-    expect(outcome.run.failure_reason).toBeNull()
-    expect(outcome.note).toContain('as-built fold deferred')
-    expect(outcome.note).toContain('scratch worktree exploded')
-    expect(await store.saveIfActive(outcome.run)).toBe(true)
-    expect(store.get(run.id)).toMatchObject({ phase: 'done', failure_reason: null })
-  })
-
-  test('every successful cleanup call folds, even when a stub reports performed=false', async () => {
-    const calls: TridentRun[] = []
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      // A REAL gate would provision a worktree at a `/repo` that does not exist.
-    base_branch: 'main',
-    prove_mutation: buildSimMutationProofGate(),
-    merge_deps: {},
-      fold_as_built: async (run) => {
-        calls.push(run)
-        return { ok: true, folded: 1 }
-      },
-    })
-    const run = await createRun()
-
-    const final = await runToTerminal(h, run.id)
-    expect(final.phase).toBe('done')
-    expect(calls).toHaveLength(1)
-  })
-
-  test('a failed cleanup never runs the fold', async () => {
-    const calls: TridentRun[] = []
-    const h = buildHarness({
-      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      // A REAL gate would provision a worktree at a `/repo` that does not exist.
-    base_branch: 'main',
-    prove_mutation: buildSimMutationProofGate(),
-    merge_deps: {
-        mergeLocal: async () => {
-          throw new Error('cleanup failed before fold')
-        },
-      },
-      fold_as_built: async (run) => {
-        calls.push(run)
-        return { ok: true, folded: 1 }
-      },
-    })
-    const run = await createRun()
-
-    const final = await runToTerminal(h, run.id)
-    expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('cleanup failed before fold')
-    expect(calls).toHaveLength(0)
   })
 })
 

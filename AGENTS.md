@@ -27,7 +27,7 @@ The short version, which is not a substitute for reading it:
   weakened without a trace.
 - **One as-built record per change**, in the PR that earns it.
   `docs/AS_BUILT.md` is FROZEN and a CI guard hard-fails any diff touching it —
-  stage yours at `.trident/as-built/<branch>.md`, and see
+  write yours directly at `docs/as-built/<slug>.md`, and see
   [`docs/as-built/README.md`](docs/as-built/README.md).
 
 ## Governance

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# scripts/ci/as-built-write-guard.sh — docs/AS_BUILT.md is FROZEN. No branch
-# may touch it, on a pull request or in the merge queue.
+# scripts/ci/as-built-write-guard.sh — the frozen monolith and merged shards are
+# immutable. A branch may add one new, well-formed shard for its own change.
 #
 # The file is the record up to 2026-09-12 and nothing appends to it again (see
 # the note at its top). Records for later changes are one file per change under
-# docs/as-built/: a branch stages exactly one entry at
-# .trident/as-built/<branch>.md, and the outer loop promotes it to
-# docs/as-built/<slug>.md on the base after the merge lands.
+# docs/as-built/: a branch writes its record there directly, in the PR that
+# earns it. Separate paths let concurrent changes land without a shared offset.
 #
 # WHERE THE EVENT FILTER LIVES, AND WHY IT IS HERE RATHER THAN IN ci.yml.
 # The first design put the base/head shas and the pull_request-or-merge_group
@@ -29,8 +28,8 @@
 #   GITHUB_EVENT_NAME    'pull_request' / 'merge_group' / 'push' / ...
 #   GITHUB_EVENT_PATH    the event payload the shas are read from
 #
-# EXIT: 0 = branch does not write the frozen log, or there is no guarded diff,
-#       1 = branch writes the frozen log,
+# EXIT: 0 = branch leaves history immutable and any new shard is well formed,
+#       1 = branch writes frozen history or adds a malformed shard,
 #       2 = missing/unresolvable input or an indeterminate diff.
 
 set -uo pipefail
@@ -69,9 +68,8 @@ if [ -z "${GUARD_BASE_SHA:-}" ] && [ -z "${GUARD_HEAD_SHA:-}" ]; then
       GUARD_HEAD_SHA="$(event_sha merge_group.head_sha)"
       ;;
     *)
-      # Push-to-main and every non-branch event: the frozen log has no writer
-      # at all, and the outer-loop appender writes docs/as-built/ rather than
-      # this path, so there is nothing on a non-branch event to guard.
+      # Push-to-main and every non-branch event: protected records are written
+      # only by reviewed branch proposals, so there is no diff here to guard.
       # OUTSIDE Actions this is also how a developer running the gate by hand
       # gets a pass — but INSIDE Actions a guarded event with no shas must NEVER
       # land here, which is what the strict branch below enforces.
@@ -135,7 +133,7 @@ fi
 
 ensure_history
 
-if ! changed_paths="$(git -C "$ROOT" diff --name-only --no-renames "${GUARD_BASE_SHA}...${GUARD_HEAD_SHA}" -- docs/AS_BUILT.md 2>/dev/null)"; then
+if ! changed_paths="$(git -C "$ROOT" diff --name-status --no-renames "${GUARD_BASE_SHA}...${GUARD_HEAD_SHA}" -- docs/AS_BUILT.md docs/as-built/ 2>/dev/null)"; then
   echo "as-built-write-guard: diff for GUARD_BASE_SHA '${GUARD_BASE_SHA}' and GUARD_HEAD_SHA '${GUARD_HEAD_SHA}' failed; the guard REFUSES to skip." >&2
   exit 2
 fi
@@ -145,9 +143,8 @@ council_fail() {
     echo "as-built-write-guard: FAILED — this branch writes docs/AS_BUILT.md, which is FROZEN."
     echo "That file is the record up to 2026-09-12 and takes no further entries; its 405 existing"
     echo "entries are cited by other documents and must stay byte-for-byte."
-    echo "Stage your entry at .trident/as-built/<branch>.md instead; after the merge lands the outer"
-    echo "loop promotes it to docs/as-built/<slug>.md. Format: docs/as-built/README.md."
-    echo 'See CONTRIBUTING § "The as-built log has ONE writer".'
+    echo "Add this change's own record at docs/as-built/<slug>.md instead."
+    echo 'See CONTRIBUTING § "As-built records are immutable shards".'
   } >&2
 }
 
@@ -220,7 +217,7 @@ frozen_at_base() {
   esac
 }
 
-if [ -n "$changed_paths" ]; then
+if printf '%s\n' "$changed_paths" | grep -Eq $'^[^[:space:]]+[[:space:]]+docs/AS_BUILT\\.md$'; then
   if frozen_at_base; then
     council_fail
     exit 1
@@ -229,4 +226,53 @@ if [ -n "$changed_paths" ]; then
   exit 0
 fi
 
-echo "as-built-write-guard: OK — branch diff does not write docs/AS_BUILT.md."
+while IFS=$'\t' read -r status path; do
+  [ -n "$status" ] || continue
+  [ "$path" != 'docs/AS_BUILT.md' ] || continue
+  case "$path" in
+    # README.md is the DIRECTORY'S documentation, not a record of a change. It has no
+    # entry heading, it is not named for a branch or spec item, and it is the one file
+    # in here that legitimately gets edited as the convention it describes changes —
+    # this guard's own PR edits it. Treating it as an immutable shard refused that PR
+    # with "merged as-built shards are immutable", which is how the case was found.
+    docs/as-built/README.md) continue ;;
+    docs/as-built/*.md) ;;
+    *) continue ;;
+  esac
+
+  if [ "$status" != 'A' ]; then
+    echo "as-built-write-guard: FAILED — this branch edits existing record ${path}; merged as-built shards are immutable." >&2
+    exit 1
+  fi
+
+  name="${path#docs/as-built/}"
+  if [[ "$name" == */* ]] || [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.md$ ]]; then
+    echo "as-built-write-guard: FAILED — new record path '${path}' is not a single valid shard name." >&2
+    exit 1
+  fi
+
+  if ! shard="$(git -C "$ROOT" show "${GUARD_HEAD_SHA}:${path}" 2>/dev/null)"; then
+    echo "as-built-write-guard: could not read new shard '${path}' from the proposed tree; the guard REFUSES to skip." >&2
+    exit 2
+  fi
+  first_nonblank="$(printf '%s\n' "$shard" | sed -n '/[^[:space:]]/{p;q;}')"
+  heading_count="$(printf '%s\n' "$shard" | awk '
+    BEGIN { fence = ""; count = 0 }
+    {
+      line = $0
+      sub(/^   /, "", line); sub(/^  /, "", line); sub(/^ /, "", line)
+      if (fence == "" && line ~ /^```/) { fence = "`"; next }
+      if (fence == "" && line ~ /^~~~/) { fence = "~"; next }
+      if (fence == "`" && line ~ /^```/) { fence = ""; next }
+      if (fence == "~" && line ~ /^~~~/) { fence = ""; next }
+      if (fence == "" && $0 ~ /^## /) count++
+    }
+    END { print count }
+  ')"
+  if [[ ! "$first_nonblank" =~ ^##\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ —\ .+ ]] || [ "$heading_count" -ne 1 ]; then
+    echo "as-built-write-guard: FAILED — new record '${path}' must begin with exactly one '## YYYY-MM-DD — title' heading." >&2
+    exit 1
+  fi
+done <<< "$changed_paths"
+
+echo "as-built-write-guard: OK — frozen history is unchanged and every new shard is well formed."

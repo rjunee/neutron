@@ -36,7 +36,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { terminalRunDisposition } from './run-disposition.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
@@ -45,37 +45,18 @@ import type { TridentPhase, TridentVerdict } from './store.ts'
 
 const OID = 'a'.repeat(40)
 
-/** The first non-blank line of this card's as-built entry, wherever it lives. */
+/** The first non-blank line of this card's immutable as-built shard. */
 const ENTRY_HEADING =
   '## 2026-08-31 — a run that never reviewed is no longer recorded as a rejection'
 
 /**
- * THE ENTRY IS FOUND BY ITS HEADING, NOT BY ONE HARD-CODED PATH, because an
- * as-built record MOVES exactly once in its life and this file must survive the
- * move. On a branch it is staged at `.trident/as-built/<branch>.md`; after the PR
- * merges the outer loop promotes it to `docs/as-built/<slug>.md` and deletes the
- * staging file (`promoteInScratch`, `trident/as-built-appender.ts`), taking a
- * `-2`/`-3` suffix if that slug is already taken — so neither the staged path nor
- * the promoted one can be written down here and still be true on both sides of the
- * merge. `docs/AS_BUILT.md` is NOT a candidate: it was frozen on 2026-09-12 and a
- * CI guard fails any branch whose diff touches it.
- *
- * Reading both locations is not a loosening: the heading is unique, exactly one
- * file carries it at any moment, and finding NO file is a failure rather than a
- * skip — a deleted record cannot pass this suite by disappearing.
+ * The record ships directly at its permanent path. Pinning that path makes a
+ * deletion or rename fail loudly rather than searching for a replacement.
  */
 function entryPath(): string {
-  const staged = fileURLToPath(
-    new URL('../.trident/as-built/trident/1-measured-cost-97-of-160-rejection.md', import.meta.url),
-  )
-  if (existsSync(staged) && readFileSync(staged, 'utf8').includes(ENTRY_HEADING)) return staged
-  const promotedDir = fileURLToPath(new URL('../docs/as-built/', import.meta.url))
-  const promoted = (existsSync(promotedDir) ? readdirSync(promotedDir) : [])
-    .filter((name) => name.endsWith('.md'))
-    .map((name) => `${promotedDir}${name}`)
-    .find((file) => readFileSync(file, 'utf8').includes(ENTRY_HEADING))
-  expect(promoted ?? `NO as-built record carries "${ENTRY_HEADING}"`).toBe(promoted as string)
-  return promoted as string
+  const path = fileURLToPath(new URL('../docs/as-built/1-measured-cost-97-of-160-rejection.md', import.meta.url))
+  expect(readFileSync(path, 'utf8')).toContain(ENTRY_HEADING)
+  return path
 }
 
 /**
