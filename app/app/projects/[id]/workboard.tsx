@@ -75,7 +75,7 @@ import {
   type WorkBoardItem,
   type WorkBoardWorkerResult,
 } from '../../../lib/work-board-client';
-import { boardErrorCopy, dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
+import { boardErrorCopy, dragReorderTarget, isLinkedRunning, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
 
 /** Live rows held for the state derivation. Small on purpose: only the newest
@@ -274,6 +274,7 @@ function WorkBoardBody({
     snapshot: activitySnapshot,
     rows: activityRows,
     now: activityNow,
+    liveRunInFlight: items.some(isLinkedRunning),
   });
 
   // The client clock the wedge/dead thresholds are measured against. Without it
