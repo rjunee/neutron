@@ -946,7 +946,16 @@ export async function dispatchBoardBoundBuild(
   // with "this card is exhausted" — a config fault reported as a budget fact, i.e.
   // "I could not read the cap" wearing "the cap is spent" as a mask. The cap this
   // guard compares against is a value the store has already validated on the way
-  // in (`max_ralph_rounds >= 1`, migration 0141), so it is a cap, not an input.
+  // in (`max_ralph_rounds IS NULL OR >= 0`, migration 0142 — 0141's `>= 1` was the
+  // rule that disagreed with the run store, and #728 resolved the disagreement in
+  // the store's favour), so it is a cap, not an input.
+  //
+  // BOTH `??` HERE ARE NULLISH, NOT TRUTHY, AND THAT IS LOAD-BEARING. A cap of `0`
+  // is a real cap meaning "no iterations" (`TridentInvalidRalphCapError`'s docblock
+  // in `store.ts` says so in as many words), so it must survive the coalesce and
+  // reach the comparison as `0`, where `0 >= 0` refuses. Rewriting either of these
+  // as `||` would read a zero cap as ABSENT and admit the very card the owner
+  // capped at nothing.
   const cardRalphRound = item.ralph_round ?? 0
   const cardRalphCap = item.max_ralph_rounds ?? null
   if (ralph && cardRalphCap !== null && cardRalphRound >= cardRalphCap) {

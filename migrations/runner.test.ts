@@ -201,6 +201,12 @@ test('first apply runs all migrations in order and records them in _migrations',
     139,
     140,
     141,
+    // 0142 — the zero-Ralph-cap rebuild (#728). This list is EXHAUSTIVE by design,
+    // so every new migration edits it. That is also its safety property: two
+    // branches adding different ordinals collide on these lines and git refuses
+    // the merge, rather than producing a silently wrong union the way a COUNT
+    // would.
+    142,
   ])
   expect(result.skipped).toEqual([])
 

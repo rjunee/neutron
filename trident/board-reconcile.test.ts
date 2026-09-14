@@ -94,6 +94,19 @@ describe('buildBoardReconcileObserver', () => {
     expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 3, max_ralph_rounds: 3 })
   })
 
+  test('a zero cap means no iterations and survives terminal reconciliation', async () => {
+    const obs = buildBoardReconcileObserver(board)!
+    const item = await board.create('proj-1', { title: 'zero-budget card' })
+    await board.attachRun('proj-1', item.id, 'run-zero-budget')
+
+    await obs({
+      project_slug: 'proj-1', id: 'run-zero-budget', phase: 'failed', repo_path: '/repo',
+      pr: null, ralph: true, ralph_round: 0, max_ralph_rounds: 0,
+    } as never)
+
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 0, max_ralph_rounds: 0 })
+  })
+
   test('a NON-governed terminal run leaves the card budget untouched', async () => {
     const obs = buildBoardReconcileObserver(board)!
     const item = await board.create('proj-1', { title: 'ungoverned card' })
@@ -238,6 +251,48 @@ describe('durable PR provenance — the number is written by the terminal reconc
 })
 
 describe('end-to-end — the tick loop reconciles the board on a terminal run', () => {
+  test('a reconciled budget survives clearing the run link and refuses re-dispatch', async () => {
+    const item = await board.create('proj-1', {
+      title: 'implement the bounded retry flow across dispatch and terminal reconciliation with tests',
+    })
+    const deps = {
+      store,
+      board,
+      project_slug: 'proj-1',
+      repo_path: '/repo',
+      resolveBuildRepo: async (home: string) => home,
+      resolveMergeMode: async () => 'local' as const,
+      resolveRalph: async () => true,
+      max_ralph_rounds: 2,
+    }
+    const first = await dispatchBoardBoundBuild(
+      { board_item_id: item.id, task: 'spend the bounded retry budget' },
+      deps,
+    )
+    expect(first).toMatchObject({ ok: true })
+    if (!first.ok) return
+
+    await store.update(first.run.id, { phase: 'failed', ralph_round: 2 })
+    const terminal = store.get(first.run.id)!
+    await buildBoardReconcileObserver(board)!(terminal)
+    expect(board.get('proj-1', item.id)).toMatchObject({
+      linked_run_id: first.run.id,
+      ralph_round: 2,
+      max_ralph_rounds: 2,
+    })
+
+    await board.update('proj-1', item.id, { status: 'upcoming' })
+    expect(board.get('proj-1', item.id)?.linked_run_id).toBeNull()
+
+    const retry = await dispatchBoardBoundBuild(
+      { board_item_id: item.id, task: 'retry after clearing the terminal link' },
+      deps,
+    )
+    expect(retry).toMatchObject({ ok: false, code: 'ralph_budget_exhausted' })
+    const rows = db.raw().query<{ count: number }, []>('SELECT COUNT(*) AS count FROM code_trident_runs').get()
+    expect(rows?.count).toBe(1)
+  })
+
   test('a board-bound /code build drives to done AND completes its Plan item', async () => {
     // 1. Create a ready Plan item + a board-bound run (the dispatch chokepoint).
     const item = await board.create('proj-1', {

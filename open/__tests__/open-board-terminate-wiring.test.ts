@@ -168,6 +168,32 @@ async function seedProject(db: ProjectDb, id: string): Promise<void> {
 }
 
 describe('Open board terminate() wiring (§F6a composition boundary)', () => {
+  test("the /code board binder declares detachRun — the §F6a reconcile is gated on its PRESENCE", async () => {
+    // `/code stop` reconciles the bound card only when the binder it was handed
+    // actually carries `detachRun`:
+    //
+    //   trident/code-command.ts — typeof ctx.work_board.detachRun === 'function'
+    //                               ? buildBoardReconcileObserver(...) : null
+    //
+    // `detachRun` is OPTIONAL on `TridentBoardBinder` (so the readiness/bind test
+    // seams need not implement it), so dropping it from the production literal is
+    // not a type error, produces no call-site to grep for — the gate is a `typeof`
+    // probe, not a `.detachRun(` call — and leaves every unit suite green, because
+    // `trident/code-command.test.ts` supplies its own stub that HAS it. The card
+    // would simply stop being reconciled on `/code stop`, silently.
+    //
+    // This is a SOURCE-SHAPE assertion and claims only that: that the production
+    // literal still declares the member. The behaviour it enables is pinned in
+    // `trident/code-command.test.ts` (§F6a r6) against a stub.
+    const src = await Bun.file(new URL('../composer.ts', import.meta.url)).text()
+    const literal = src.slice(src.indexOf('const tridentCodeBoardBinder'))
+    const body = literal.slice(0, literal.indexOf('\n    }') + 1)
+    expect(body).toContain('const tridentCodeBoardBinder')
+    // The positive control: a member known to be there, found by the same slice.
+    expect(body).toContain('attachRun:')
+    expect(body).toContain('detachRun:')
+  })
+
   test('DELETE of a card bound to a live run cancels it AND fires terminal delivery ONCE through the real chain', async () => {
     harness = await startHarness()
     await seedProject(harness.db, 'acme')
