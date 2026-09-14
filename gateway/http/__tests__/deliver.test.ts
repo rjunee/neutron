@@ -27,6 +27,7 @@ import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-w
 import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ChatMessagePushSink } from '../../push/chat-message-push.ts'
+import { createWebPresenceTracker, suppressPushWhileWebForeground } from '../../push/web-presence.ts'
 import { InMemoryWebChatSenderRegistry } from '../chat-sender-registry.ts'
 import { createDeliver, type DeliverPushTargets } from '../deliver.ts'
 
@@ -701,6 +702,83 @@ describe('an idempotent re-emit does not buzz twice — real ButtonStore', () =>
     const r = await deliver('app:acct-2', approval)
     expect(r.delivered_live).toBe(true)
     expect(await store.deliveredAt(r.prompt_id!)).not.toBeNull()
+  })
+
+  it('a foreground-suppressed alert retries after presence expires, then deduplicates', async () => {
+    let now = 0
+    const presence = createWebPresenceTracker({ now: () => now, ttl_ms: 100 })
+    const s = sink()
+    let live = true
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: { app: () => live },
+      notify: suppressPushWhileWebForeground({
+        sink: s.notify,
+        isWebForeground: () => presence.isForeground('acct-2'),
+      }),
+    })
+    presence.foreground('acct-2', 'browser')
+    const first = await deliver('app:acct-2', approval)
+    expect(first.persisted).toBe(true)
+    expect(first.delivered_live).toBe(true)
+    expect(first.prompt_id).not.toBeNull()
+    expect(s.sent).toEqual([])
+    expect(await store.deliveredAt(first.prompt_id!)).toBeNull()
+
+    // A dead browser need not report its own departure: expiry runs on read.
+    now = 101
+    live = false
+    const retry = await deliver('app:acct-2', approval)
+    expect(retry.prompt_id).toBe(first.prompt_id)
+    expect(retry.delivered_live).toBe(false)
+    expect(s.sent).toEqual([approval.body])
+    expect(await store.deliveredAt(first.prompt_id!)).not.toBeNull()
+    await deliver('app:acct-2', approval)
+    expect(s.sent).toEqual([approval.body])
+  })
+
+  for (const failure of ['false', 'throw', 'timeout'] as const) {
+    it(`a live socket cannot complete an alert when notification returns ${failure}`, async () => {
+      const failing = createDeliver({
+        buttonStore: store,
+        push: { app: () => true },
+        notify: async () => {
+          if (failure === 'throw') throw new Error('notification unavailable')
+          if (failure === 'timeout') return new Promise<boolean>(() => {})
+          return false
+        },
+        notify_timeout_ms: 1,
+        log: () => {},
+      })
+      const first = await failing('app:acct-2', approval)
+      expect(first.delivered_live).toBe(true)
+      expect(first.prompt_id).not.toBeNull()
+      expect(await store.deliveredAt(first.prompt_id!)).toBeNull()
+      const s = sink()
+      const recovered = createDeliver({ buttonStore: store, push: {}, notify: s.notify })
+      const retry = await recovered('app:acct-2', approval)
+      expect(retry.prompt_id).toBe(first.prompt_id)
+      expect(s.sent).toEqual([approval.body])
+      expect(await store.deliveredAt(first.prompt_id!)).not.toBeNull()
+    })
+  }
+
+  it('an explicitly quiet reply completes on live delivery and deduplicates', async () => {
+    const s = sink()
+    let liveCalls = 0
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: { app: () => { liveCalls += 1; return true } },
+      notify: s.notify,
+    })
+    const quiet = { ...approval, notify: 'suppress' as const }
+    const first = await deliver('app:acct-2', quiet)
+    expect(first.prompt_id).not.toBeNull()
+    expect(await store.deliveredAt(first.prompt_id!)).not.toBeNull()
+    const retry = await deliver('app:acct-2', quiet)
+    expect(retry.prompt_id).toBe(first.prompt_id)
+    expect(liveCalls).toBe(1)
+    expect(s.sent).toEqual([])
   })
 
   it('a DIFFERENT message on the same topic still buzzes — the guard is per row', async () => {
