@@ -98,6 +98,7 @@ interface Harness {
   emits: HostDeployEmit[]
   dispatchCalls: HostDeployDispatchInput[]
   notices: Array<{ topic_id: string; body: string }>
+  terminalOutcomes: Array<{ topic_id: string; ref: string; sha: string; kind: string; detail: string }>
   logs: string[]
   options(): string[]
   approveValue(): string
@@ -136,6 +137,7 @@ function harness(
   const emits: HostDeployEmit[] = []
   const dispatchCalls: HostDeployDispatchInput[] = []
   const notices: Array<{ topic_id: string; body: string }> = []
+  const terminalOutcomes: Array<{ topic_id: string; ref: string; sha: string; kind: string; detail: string }> = []
   const logs: string[] = []
   const service = createHostDeployService({
     approvals,
@@ -156,6 +158,7 @@ function harness(
     post_notice: async (topic_id, body) => {
       notices.push({ topic_id, body })
     },
+    on_terminal: async (outcome) => { terminalOutcomes.push(outcome) },
     ...(opts.noCheck === true
       ? {}
       : {
@@ -172,6 +175,7 @@ function harness(
     emits,
     dispatchCalls,
     notices,
+    terminalOutcomes,
     logs,
     options,
     approveValue: () => options().find((v) => v.endsWith(':a')) ?? '',
@@ -307,6 +311,7 @@ describe('an open window deploys without asking', () => {
     h.notices.length = 0
 
     const res = await h.service.request({ ref: 'origin/main', topic_id: TOPIC })
+    await settle()
 
     expect(res.status).toBe('auto_approved')
     if (res.status === 'auto_approved') {
@@ -319,6 +324,13 @@ describe('an open window deploys without asking', () => {
     expect(h.notices).toHaveLength(1)
     expect(h.notices[0]!.body).toContain('standing deploy window')
     expect(h.notices[0]!.body).toContain(TARGET_SHA.slice(0, 8))
+    expect(h.terminalOutcomes.at(-1)).toEqual({
+      topic_id: TOPIC,
+      ref: 'origin/main',
+      sha: TARGET_SHA,
+      kind: 'accepted',
+      detail: 'queued as run 4821',
+    })
   })
 
   test('an auto deploy still stops at up_to_date and never dispatches', async () => {

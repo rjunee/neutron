@@ -308,6 +308,15 @@ export type HostDeployDispatch = (
   input: HostDeployDispatchInput,
 ) => Promise<HostDeployDispatchResult>
 
+/** A completed control-plane call, including the deliberately-unknown timeout state. */
+export interface HostDeployTerminalOutcome {
+  topic_id: string
+  ref: string
+  sha: string
+  kind: 'accepted' | 'refused' | 'timeout' | 'error' | 'unconfigured'
+  detail: string
+}
+
 /** The button prompt emission seam — the composer's durable `deliver`. */
 export interface HostDeployEmit {
   /**
@@ -649,6 +658,11 @@ export interface HostDeployServiceOptions {
    */
   post_notice?: (topic_id: string, body: string) => Promise<void>
   /**
+   * Wake the conversation that requested a deploy after its control-plane call
+   * settles. Best-effort observation: failure cannot rewrite or retry the deploy.
+   */
+  on_terminal: (outcome: HostDeployTerminalOutcome) => Promise<void>
+  /**
    * THE PER-SHA SAFETY CHECK A STANDING WINDOW MAY NEVER SKIP.
    *
    * A window authorises the DECISION — the owner's tap — and nothing else. The
@@ -799,6 +813,7 @@ export function createHostDeployService(
     emit,
     retire_prompt,
     post_notice,
+    on_terminal,
     check_preconditions,
   } = opts
   const log = opts.log ?? ((): void => undefined)
@@ -811,6 +826,19 @@ export function createHostDeployService(
    * instance twice for the same commit.
    */
   const auto_in_flight = new Set<string>()
+
+  function wakeRequestingSession(
+    topic_id: string,
+    ref: string,
+    sha: string,
+    outcome: Awaited<ReturnType<typeof performDeploy>>,
+  ): void {
+    fireAndForget('host-deploy.terminal-wake', on_terminal({
+      topic_id, ref, sha, kind: outcome.kind, detail: outcome.detail,
+    }), (err: unknown) => {
+      log(`host-deploy terminal wake failed on ${topic_id}: ${errText(err)}`)
+    })
+  }
 
   /** The live standing window for `ref`, or null. Reads only. */
   function liveWindow(ref: string): HostDeployWindow | null {
@@ -976,6 +1004,7 @@ export function createHostDeployService(
         } finally {
           auto_in_flight.delete(flight_key)
         }
+        wakeRequestingSession(approval_topic, ref, target_sha, outcome)
         log(
           `host-deploy auto_approved ref=${ref} target=${shortSha(target_sha)} commits=${range.total} ` +
             `window=${window.id} kind=${outcome.kind}`,
@@ -1689,6 +1718,12 @@ export function createHostDeployService(
     }
 
     const outcome = await performDeploy(ref, approved_sha)
+    // RECORD BEFORE WAKING, and the order is the point. #564 made the terminal
+    // outcome durable so a refusal survives the chat detail cap; #556 wakes the
+    // session that asked. A wake that arrives before the row is written would
+    // send the requester to read a status that is not there yet — so the durable
+    // write goes first, and its failure is logged rather than allowed to swallow
+    // the wake.
     const last_deploy: HostDeployLastAttempt = {
       outcome: publicDeployOutcome(outcome.kind),
       ref,
@@ -1701,6 +1736,7 @@ export function createHostDeployService(
     } catch (err) {
       log(`host-deploy terminal outcome not recorded id=${id}: ${errText(err)}`)
     }
+    wakeRequestingSession(row.topic_id ?? approval_topic_id, ref, approved_sha, outcome)
     return { body: `${outcome.body}` }
   }
 
