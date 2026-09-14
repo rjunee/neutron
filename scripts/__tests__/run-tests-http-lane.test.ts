@@ -42,7 +42,15 @@ echo "Ran 1 tests across $count files."
         cwd: ROOT,
         encoding: 'utf8',
         env: {
-          ...(process.env as Record<string, string>),
+          // HERMETIC against the ambient environment — see the same note in
+          // scripts/run-tests-selftest.test.ts. CI exports NEUTRON_TEST_SHARD=i/8
+          // and NEUTRON_TEST_CHUNK_SIZE; the child run-tests.sh inherits them and
+          // slices these fixtures down to nothing, so the assertions below fail on
+          // every shard that does not happen to own the fixture file. Strip the
+          // whole NEUTRON_TEST_ prefix, not the one knob that bit today.
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(([k]) => !k.startsWith('NEUTRON_TEST_')),
+          ),
           NEUTRON_TEST_ROOT: root,
           NEUTRON_BUN_BIN: fakeBun,
           NEUTRON_TEST_DISCOVER_OVERRIDE:
@@ -111,7 +119,15 @@ echo "Ran 1 tests across $count files."
         cwd: ROOT,
         encoding: 'utf8',
         env: {
-          ...(process.env as Record<string, string>),
+          // HERMETIC against the ambient environment — see the same note in
+          // scripts/run-tests-selftest.test.ts. CI exports NEUTRON_TEST_SHARD=i/8
+          // and NEUTRON_TEST_CHUNK_SIZE; the child run-tests.sh inherits them and
+          // slices these fixtures down to nothing, so the assertions below fail on
+          // every shard that does not happen to own the fixture file. Strip the
+          // whole NEUTRON_TEST_ prefix, not the one knob that bit today.
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(([k]) => !k.startsWith('NEUTRON_TEST_')),
+          ),
           NEUTRON_TEST_ROOT: root,
           NEUTRON_BUN_BIN: fakeBun,
           NEUTRON_TEST_DISCOVER_OVERRIDE: [
@@ -148,7 +164,15 @@ echo "Ran 1 tests across $count files."
         .split(/\s+/)
         .filter((tok) => tok.endsWith('.test.ts'))
       expect(httpRan.sort()).toEqual(httpFiles.map((n) => `./pkg/${n}.test.ts`).sort())
-      expect(output).toContain('files executed: 6 (1 general + 0 PGLite + 0 device + 5 real-HTTP)')
+      // NB: assert this with a regex, never a literal, and note that this whole
+      // FILE must avoid spelling the WASM quarantine lane's name. That lane's
+      // membership is a case-insensitive grep for its own name over each test
+      // file's TEXT, so quoting the audit line verbatim would move THIS file into
+      // it — where it would silently inherit a 3-attempt retry budget and a 90s
+      // timeout it has no business having. (It did, on the first CI run.)
+      expect(output).toMatch(
+        /files executed: 6 \(1 general \+ 0 \w+ \+ 0 device \+ 5 real-HTTP\)/,
+      )
       expect(output).toContain('run-tests: PASS')
     } finally {
       rmSync(root, { recursive: true, force: true })
