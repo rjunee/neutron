@@ -40,7 +40,7 @@ import type { ChildCrashInfo } from '@neutronai/runtime/adapters/claude-code/ind
 
 /** The one store call this sink makes — `TridentRunStore.crashRunningByLauncher`. */
 export interface TridentLauncherCrashLatch {
-  (session_key: string, failure_reason: string): Promise<void>
+  (session_key: string, failure_reason: string): Promise<boolean | void>
 }
 
 export interface TridentChildCrashSinkDeps {

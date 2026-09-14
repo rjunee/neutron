@@ -173,7 +173,7 @@ export interface TridentLivenessProbe {
  * harvest-first bounded continuation cannot diverge based on which detector wins.
  */
 export interface TridentDeadLauncherLatch {
-  (session_key: string, failure_reason: string): Promise<void>
+  (session_key: string, failure_reason: string): Promise<boolean | void>
 }
 
 

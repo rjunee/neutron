@@ -325,8 +325,8 @@ criterion 2 remains deliberately unticked for its named dual-channel residual; c
   got overwritten by a confident one. The edge records that a death's report happened; an
   earlier revision closed it only when the report was an ATTRIBUTION, so a successfully
   delivered `cause: 'unknown'` left it open and the next watchdog tick reported the same
-  death again as `cause: 'child-died'` — which `crashRunningByLauncher` writes over the
-  tombstone unconditionally (`trident/store.ts:1367-1370`). `delivered` and `attributed` are
+  death again as `cause: 'child-died'` — which `crashRunningByLauncher` formerly wrote over the
+  tombstone unconditionally (historical behavior; #648 adds information precedence). `delivered` and `attributed` are
   different facts: telling the owner something is not telling the owner it was a deploy, and
   only the first closes the edge. The generalisation, because this is round 4's conflation
   arriving in a third state: `unknown` was not a possible value when that condition was

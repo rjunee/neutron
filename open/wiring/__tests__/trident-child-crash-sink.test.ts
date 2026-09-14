@@ -210,13 +210,11 @@ describe('what the owner actually reads', () => {
 
 describe('the tombstone cannot be overwritten back into a crash', () => {
   test('a late bare-crash notification for the same generation does not erase the deploy', async () => {
-    // `crashRunningByLauncher` upserts the tombstone with
-    // `ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`,
-    // and `saveIfActive` reads that tombstone back to stamp a row it vetoed. So a
-    // second, bare notification for the same dead generation WOULD launder the deploy
-    // attribution away. The shutdown path stamps `child_crash_notified_at` precisely so
-    // the next boot's watchdog never fires that second edge — this case is why that
-    // field is in the patch, and it documents what the row looks like if it is lost.
+    // The run row keeps its latched reason. Separately, #648 now ranks the
+    // tombstone itself so a late bare report cannot downgrade the reason read
+    // by saveIfActive; trident/launcher-crash-precedence.test.ts exercises that
+    // stale-snapshot path in both arrival orders. The shutdown delivery edge
+    // still suppresses redundant reports independently of storage precedence.
     await seedRunning('deploy-4', 'gen-z')
     const s = sink()
     await s({

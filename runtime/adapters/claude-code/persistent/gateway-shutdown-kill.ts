@@ -326,7 +326,8 @@ export function undeterminedShutdownDetail(observed: GatewayShutdownObservation,
  * the marker, so its report carries the SAME deploy attribution. Where it once would
  * have overwritten the reason with a bare "pooled child exited" through
  * `crashRunningByLauncher`'s `ON CONFLICT … DO UPDATE SET failure_reason`
- * (`trident/store.ts`), it now rewrites the identical sentence.
+ * (`trident/store.ts`), it now carries the same reason kind; the store selects
+ * by information rank and resolves equal ranks deterministically (#648).
  *
  * Best-effort by construction: a registry write must never brick a shutdown.
  *
@@ -1243,7 +1244,7 @@ export async function deliverShutdownKillReports(
     // "we told the owner it was a deploy", and left the edge open after an honest
     // undetermined report: the next watchdog tick then passed the reporting gate and
     // reported the SAME death as `cause: 'child-died'`, which
-    // `crashRunningByLauncher` writes over the tombstone unconditionally. An honest
+    // `crashRunningByLauncher` formerly wrote over the tombstone unconditionally. An honest
     // "I could not tell" was replaced by a confident "the child died" — the very
     // misattribution this module exists to prevent, by a new route.
     //

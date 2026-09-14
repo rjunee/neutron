@@ -1322,7 +1322,7 @@ describe('an undelivered report does not promise a recovery it cannot make', () 
  * The crash edge records that a death's report HAPPENED. An earlier revision closed it
  * only for the ATTRIBUTED case, so a successfully delivered `cause: 'unknown'` left it
  * open — the next watchdog tick then passed the reporting gate and reported the same
- * death as `cause: 'child-died'`, and `crashRunningByLauncher` writes over the
+ * death as `cause: 'child-died'`, and `crashRunningByLauncher` formerly wrote over the
  * tombstone's reason unconditionally. The honest answer was replaced by a confident
  * one, which is the misattribution this whole change exists to prevent, reached by a
  * new route.
