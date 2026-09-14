@@ -51,6 +51,7 @@ import {
 } from '@neutronai/work-board/removal.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
+import type { BoardBoundBuildRejectionCode } from '@neutronai/trident/board-dispatch.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
 
 /**
@@ -79,53 +80,15 @@ export interface TridentRunAccess {
 }
 
 /**
- * Result of a ▶ start/retry dispatch. Decoupled from `trident/board-dispatch`
- * so the surface never imports the dispatch internals — the composer maps its
- * `BoardBoundBuildResult` onto this shape.
- *
- * The `code` union is a deliberate hand-copy of `BoardBoundBuildRejectionCode`
- * and MUST be widened alongside it: the composer assigns that type straight
- * into this one, so a new rejection code that lands only in `board-dispatch.ts`
- * fails the typecheck HERE, not there.
+ * Result of a ▶ start/retry dispatch. The rejection vocabulary is owned by the
+ * board-bound dispatch chokepoint and shared here so every new code reaches the
+ * HTTP surface without a second declaration to update.
  */
 export type WorkBoardStartResult =
   | { ok: true; run_id: string }
   | {
       ok: false
-      code:
-        | 'missing_board_item'
-        | 'unknown_board_item'
-        | 'invalid_bound_pr'
-        | 'review_needs_bound_pr'
-        | 'underspecified'
-        | 'already_landed'
-        // Something live already holds the card's branch (a non-terminal run, or a
-        // live worktree lock). It answers 409 like already_landed — via the
-        // catch-all `backend_error ? 500 : 409` below, not a case of its own;
-        // "falls through to the 409 arm" is how the codes that are not
-        // `underspecified` or `backend_error` all reach it.
-        | 'branch_live'
-        // NOT A FAILURE — the build is QUEUED. The card declares an unfinished
-        // blocker, or a live run already claims a file it would touch, so it was
-        // parked in `code_trident_dispatch_holds` and the sweep re-dispatches it
-        // when the blocker completes / the holding run goes terminal. The ▶ route
-        // must therefore report it as accepted-and-waiting rather than as an
-        // error the owner is expected to act on.
-        | 'held'
-        // The executor this build needs is positively known-dead (the Codex seat
-        // was probed and refused server-side). Falls through to the 409 arm, so
-        // the ▶ route answers with the refusal sentence rather than spawning a
-        // lane that would die ~15 minutes later blaming the CLI.
-        | 'executor_unavailable'
-        // THE CARD IS BLOCKED — a previous build stopped and escalated rather than
-        // iterating, and nothing has cleared it. Falls through to the 409 arm like the
-        // other refusals, so the ▶ route answers with the refusal sentence (which names
-        // the decision and the unblocking step) instead of starting a run that would
-        // reach the same block. Deliberately NOT grouped with 'held': a hold is waiting
-        // for a condition a sweep can re-test, and nothing can re-test a decision.
-        | 'card_blocked'
-        | 'ralph_budget_exhausted'
-        | 'backend_error'
+      code: BoardBoundBuildRejectionCode
       message: string
     }
 
