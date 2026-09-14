@@ -7,6 +7,21 @@ export type ProjectsRefreshState =
   | { kind: 'cached'; projects: readonly Project[]; notice: string }
   | { kind: 'failed'; projects: readonly Project[]; notice: string };
 
+/**
+ * What the rail must SHOW for a refresh outcome, or `null` when there is nothing to
+ * say. This lives here, not inline at the call site, because it is the wire between
+ * the state and the only component that renders it: an inline ternary in the screen
+ * can be severed without a single test going red, and a distinction nothing renders
+ * is not a distinction the owner can act on.
+ */
+export function projectsRefreshNotice(
+  state: ProjectsRefreshState,
+): { kind: 'cached' | 'failed'; text: string } | null {
+  return state.kind === 'cached' || state.kind === 'failed'
+    ? { kind: state.kind, text: state.notice }
+    : null;
+}
+
 export const INITIAL_PROJECTS_REFRESH_STATE: ProjectsRefreshState = {
   kind: 'loading',
   projects: [],

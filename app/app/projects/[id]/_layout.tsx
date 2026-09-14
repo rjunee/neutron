@@ -94,6 +94,7 @@ import {
 import {
   INITIAL_PROJECTS_REFRESH_STATE,
   projectsRefreshFailed,
+  projectsRefreshNotice,
   projectsRefreshSucceeded,
 } from '../../../lib/projects-refresh-state';
 import { startProjectsRailLive, type RailProject } from '../../../lib/projects-rail-live';
@@ -734,11 +735,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         <View style={styles.railBody}>
           <ProjectRail
             projects={railList}
-            notice={
-              railRefresh.kind === 'cached' || railRefresh.kind === 'failed'
-                ? { kind: railRefresh.kind, text: railRefresh.notice }
-                : null
-            }
+            notice={projectsRefreshNotice(railRefresh)}
             overlay={railOverlay}
             activeProjectId={project_id}
             onSelect={onRailSelect}

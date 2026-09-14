@@ -4,6 +4,7 @@ import { ProjectsClientError } from '../lib/projects-client';
 import {
   INITIAL_PROJECTS_REFRESH_STATE,
   projectsRefreshFailed,
+  projectsRefreshNotice,
   projectsRefreshSucceeded,
 } from '../lib/projects-refresh-state';
 import type { Project } from '../lib/projects';
@@ -58,5 +59,36 @@ describe('projects refresh outcomes', () => {
     const state = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), new Error('boom'));
     expect(state.kind).toBe('failed');
     expect(state.kind === 'failed' && state.notice).toContain('Try again');
+  });
+});
+
+describe('what the rail is told to show', () => {
+  // THE WIRE, not the state. Severing the screen's `notice` prop reddens nothing
+  // unless the mapping it calls is itself pinned: a distinction no component renders
+  // is not a distinction the owner can act on.
+  it('says nothing while loading or when the list is fresh', () => {
+    expect(projectsRefreshNotice(INITIAL_PROJECTS_REFRESH_STATE)).toBeNull();
+    expect(projectsRefreshNotice(projectsRefreshSucceeded([PROJECT]))).toBeNull();
+  });
+
+  it('hands the rail a cached notice for a deliberately served cache', () => {
+    const cached = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), failure('network', 0));
+    expect(projectsRefreshNotice(cached)).toEqual({
+      kind: 'cached',
+      text: cached.kind === 'cached' ? cached.notice : '',
+    });
+  });
+
+  it('hands the rail a FAILED notice for a missing bearer — a different channel, not a different word', () => {
+    const failed = projectsRefreshFailed(
+      projectsRefreshSucceeded([PROJECT]),
+      failure('missing_bearer', 401),
+    );
+    const notice = projectsRefreshNotice(failed);
+    expect(notice?.kind).toBe('failed');
+    // The two outcomes must not be able to arrive at the rail wearing the same badge.
+    const cached = projectsRefreshFailed(projectsRefreshSucceeded([PROJECT]), failure('network', 0));
+    expect(notice?.kind).not.toBe(projectsRefreshNotice(cached)?.kind);
+    expect(notice?.text).not.toBe(projectsRefreshNotice(cached)?.text);
   });
 });

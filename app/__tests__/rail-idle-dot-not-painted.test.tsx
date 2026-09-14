@@ -99,6 +99,17 @@ describe('project-list refresh notice', () => {
     screen.unmount();
   });
 
+  // THE CONTROL THAT MUST SURVIVE. Without it, a rail that had stopped rendering
+  // notices altogether would still satisfy "no notice when fresh", and the two
+  // assertions above would be the only thing standing between the owner and a
+  // silent cache — which is the defect this whole change is about.
+  it('says nothing at all when the refresh was fresh', async () => {
+    const screen = await mountRail('willow', []);
+    expect(screen.byTestId('project-rail-cached-notice')).toBeNull();
+    expect(screen.byTestId('project-rail-failed-notice')).toBeNull();
+    screen.unmount();
+  });
+
   it('renders a refresh failure through the alert channel', async () => {
     const screen = await mountRail('willow', [], {
       kind: 'failed',
