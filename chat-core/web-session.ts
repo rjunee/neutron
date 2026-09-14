@@ -380,11 +380,20 @@ export class WebChatSession {
   }
 
   private async handleInbound(data: unknown): Promise<void> {
-    const rejection = await this.queue.rejectFrame(data, this.topic_id)
-    if (rejection !== null) {
-      this.emitChange()
-      try { this.onFrame?.(rejection) } catch { /* isolate observers from delivery */ }
-      return
+    // A rejection is the ONLY frame this branch may claim, and the type test is
+    // SYNCHRONOUS on purpose: an `await` here would defer every other frame by a
+    // microtask, and the comment below states that the raw frame reaches the UI
+    // observer FIRST. Awaiting ahead of it silently broke that for all frames.
+    if (
+      typeof data === 'object' && data !== null &&
+      (data as Record<string, unknown>)['type'] === 'message_rejected'
+    ) {
+      const rejection = await this.queue.rejectFrame(data, this.topic_id)
+      if (rejection !== null) {
+        this.emitChange()
+        try { this.onFrame?.(rejection) } catch { /* isolate observers from delivery */ }
+        return
+      }
     }
     if (typeof data !== 'object' || data === null) return
     // Surface the raw frame to any UI observer FIRST (streaming partials,
