@@ -823,7 +823,12 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
     expect(root['command']).toEqual(['claude', '--session-id', 's1'])
     expect(root['cwd']).toBe('/tmp')
     // `undefined` env values are DROPPED (the auth-scrub contract).
-    expect(root['env']).toEqual({ PATH: '/usr/bin' })
+    expect(root['env']).toEqual({
+      PATH: '/usr/bin',
+      ...(process.env['NEUTRON_LANE_CLAIM'] === undefined ? {} : {
+        NEUTRON_LANE_CLAIM: process.env['NEUTRON_LANE_CLAIM'],
+      }),
+    })
     expect(apply.params['focus']).toBe(false) // never steal the owner's focus
     // The id came from the REPLY. `layout.apply` mints new ids, so a host that
     // assumed the tab/pane it asked for would be driving the wrong pane. The read is
@@ -932,4 +937,23 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
     await expect(host.spawn([], { cwd: '/tmp', env: {} })).rejects.toThrow(/argv must be non-empty/)
     expect(server.calls).toEqual([])
   })
+})
+
+
+it('forwards the spawning lane claim through socket creation', async () => {
+  const previous = process.env['NEUTRON_LANE_CLAIM']
+  process.env['NEUTRON_LANE_CLAIM'] = 'lane-claim-proof'
+  const server = new FakeHerdrServer()
+  let child: PtyChild | undefined
+  try {
+    const host = new HerdrHost({ connect: async () => server })
+    child = await host.spawn(['claude'], { cwd: '/tmp', env: { NEUTRON_LANE_CLAIM: 'another-session' } })
+    const root = server.callsTo('layout.apply')[0]!.params['root'] as Record<string, unknown>
+    expect((root['env'] as Record<string, string>)['NEUTRON_LANE_CLAIM']).toBe('lane-claim-proof')
+  } finally {
+    child?.kill()
+    if (child) await child.exited
+    if (previous === undefined) delete process.env['NEUTRON_LANE_CLAIM']
+    else process.env['NEUTRON_LANE_CLAIM'] = previous
+  }
 })

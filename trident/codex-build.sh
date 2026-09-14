@@ -429,6 +429,12 @@
 
 set -uo pipefail
 
+# A separate owner survives the build command's ordinary exit and reaps its claim.
+# If the owner itself dies, the gateway's independent sweep completes the job.
+if [ -z "${NEUTRON_LANE_CLAIM:-}" ] && command -v python3 >/dev/null 2>&1; then
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/lane-processes.py" run -- bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 BRANCH="${1:-}"
 BASE_DIFF_REF="${2:-}"
 # `pr` unless the caller explicitly said `local` — see THE MERGE MODE DECIDES WHAT MUST
@@ -887,6 +893,12 @@ fi
 # sha. Both messages would be false, and neither names the actual missing piece.
 if ! command -v perl >/dev/null 2>&1; then
   echo "CODEX_BUILD_NO_PERL: perl is not on PATH — every network call in this wrapper is wall-clock bounded with 'perl -e alarm', and the brief's integrity is checked with it. DEFERRED — install perl." >&2
+  exit 3
+fi
+
+# Joins the existing exit-3 deferral vocabulary; no build starts without ownership.
+if [ -z "${NEUTRON_LANE_CLAIM:-}" ]; then
+  echo "CODEX_BUILD_PROCESS_OWNERSHIP_UNAVAILABLE: Python 3.9+ with Linux pidfds is required. DEFERRED." >&2
   exit 3
 fi
 
@@ -1367,6 +1379,7 @@ fi
 # below becomes decoration and the leak returns with no symptom. With it a renamed field
 # is a config error that names itself, raised before any tokens are spent.
 set -- --strict-config \
+  -c "shell_environment_policy.set.NEUTRON_LANE_CLAIM='${NEUTRON_LANE_CLAIM}'" \
   -c 'shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]'
 
 # PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,

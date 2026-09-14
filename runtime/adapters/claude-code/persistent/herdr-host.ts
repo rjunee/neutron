@@ -936,7 +936,12 @@ export class HerdrHost implements AdoptableHost {
       type: 'pane',
       command: argv,
       cwd: opts.cwd,
-      env: compactEnv(opts.env),
+      env: compactEnv({
+        ...opts.env,
+        // The socket server is not our descendant. Carry the spawning lane's
+        // identity even when the caller supplies a minimal environment.
+        NEUTRON_LANE_CLAIM: process.env['NEUTRON_LANE_CLAIM'],
+      }),
       label: HERDR_REPL_PANE_LABEL,
     }
     const params: Record<string, unknown> = {

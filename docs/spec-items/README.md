@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**29 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
+**30 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -43,6 +43,7 @@ branch is cut (standard §3.1, §3.2).
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
+| [`dead-lane-process-reaping`](dead-lane-process-reaping.md) | Reap child processes left by dead build lanes | P1 | — |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |

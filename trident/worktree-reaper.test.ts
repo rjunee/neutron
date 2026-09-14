@@ -432,10 +432,10 @@ test('buildWorktreeReaperLoop is immediate and uses the default descriptor', asy
   expect(loop.describe().cadenceMs).toBe(DEFAULT_REAP_INTERVAL_MS)
   loop.start()
   const deadline = Date.now() + 1_000
-  while (repoCalls === 0 && Date.now() < deadline) {
+  while (repoCalls < 2 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
-  expect(repoCalls).toBe(1)
+  expect(repoCalls).toBe(2)
   expect(timerMs).toBe(DEFAULT_REAP_INTERVAL_MS)
   await loop.stop()
   expect(cleared).toBe(true)
