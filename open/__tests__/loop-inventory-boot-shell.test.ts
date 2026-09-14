@@ -60,6 +60,12 @@ const EXPECTED_RUNNING_LOOPS = [
   'kimi-usage',
   'reflect-consolidation',
   'reminders',
+  // #796 — the gateway-owned sweep that admits worker questions the project REPL
+  // could not take yet. It must be a LOOP and it must be the gateway's: a result
+  // that cannot be admitted has to survive a worker exiting, a REPL dying, and a
+  // restart, or the question is silently dropped — which is the failure the whole
+  // routing change exists to prevent. Woken by terminal hooks; drains on shutdown.
+  'terminal-build-decisions',
   'trident',
   // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
   'trident-liveness',
