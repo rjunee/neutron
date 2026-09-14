@@ -184,6 +184,25 @@ R1 is the one the lane's table had no instrument for. R2 is the false/unknown
 collapse in the consumer direction; R3–R5 re-run the lane's decoder and producer
 claims independently, and all three reproduce.
 
+### A cross-file break the lane did not run into
+
+`trident/__tests__/ci-gate.test.ts` ASSEMBLES the synthesis tail out of named pieces
+grabbed from `inner-workflow.mjs` and runs it, deliberately, so that "a helper it
+calls and this list omits throws `ReferenceError` instead of silently testing a
+stale assembly" (that file's own words). Stamping the observation inside the tail's
+returned object added exactly such a helper, and the lane never ran this suite:
+CI shard 4/8 reddened three tests in "a fully excused CI red still holds the merge"
+with `ReferenceError: crossModelRateLimitProvenance is not defined`.
+
+Fixed the way that file says to fix it — by REGISTERING the names, not by stubbing
+the call: `seatRateLimitKey` and `crossModelRateLimitProvenance` join the assembly
+list, and the five outer-scope values the stamp reads (`codexSlot`, `kimiSlot`,
+`slotOneRoute`, `slotTwoRoute`, `verdicts`) are injected as parameters with NEUTRAL
+values — no routed slot, no verdicts, i.e. the nothing-observed case. The fixture
+then ASSERTS `crossModelRateLimited` is `null` rather than assuming it, so it cannot
+later assert a provenance it never set, and every assertion in that describe (all
+about panel classification and CI advisories) reads what it read before.
+
 ### Wider re-run after rebase onto origin/main
 
 `bun test trident/delivery.test.ts trident/__tests__/cross-model-rate-limited.test.ts
