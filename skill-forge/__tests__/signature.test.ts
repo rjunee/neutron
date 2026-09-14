@@ -56,3 +56,17 @@ test('workflowSignature is stable across volatile args (uses normalizeAction)', 
   const sig2 = workflowSignature(wf('edit file (path=bar)', 'run tests (suite=z)'))
   expect(sig1).toBe(sig2)
 })
+
+test('workflowSignature distinguishes intent but ignores run artifacts', () => {
+  const base: CompletedWorkflow = {
+    project_slug: 'p',
+    intent: 'Install the release helper',
+    steps: [{ action: 'forge-init' }, { action: 'trident.build' }],
+    artifacts: ['first-output.md'],
+    succeeded: true,
+  }
+
+  expect(workflowSignature({ ...base, artifacts: ['second-output.md'] })).toBe(workflowSignature(base))
+  expect(workflowSignature({ ...base, intent: 'Install the review helper' })).not.toBe(workflowSignature(base))
+  expect(workflowSignature({ ...base, intent: '  INSTALL   the release helper ' })).toBe(workflowSignature(base))
+})

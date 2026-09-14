@@ -72,6 +72,44 @@ test('getActiveBySignature dedupes pending/approved but not declined', async () 
   expect(await store.getActiveBySignature('sig-X')).toBeNull()
 })
 
+test('createIfEligible applies signature, pending, and rolling-day throttles', async () => {
+  const first = await store.createIfEligible(input({ workflow_signature: 'sig-first' }))
+  expect(first).not.toBeNull()
+
+  now += 86_400_001
+  expect(await store.createIfEligible(input({ workflow_signature: 'sig-second' }))).toBeNull()
+
+  await store.markDeclined(first!.id)
+  const second = await store.createIfEligible(input({ workflow_signature: 'sig-second' }))
+  expect(second).not.toBeNull()
+
+  await store.markDeclined(second!.id)
+  expect(await store.createIfEligible(input({ workflow_signature: 'sig-third' }))).toBeNull()
+  now += 86_400_001
+  expect(await store.createIfEligible(input({ workflow_signature: 'sig-third' }))).not.toBeNull()
+})
+
+test('createIfEligible does not treat a missing throttle result as permission', async () => {
+  const missingRowDb = {
+    transaction: async (fn: (tx: { get: () => null }) => unknown) => fn({ get: () => null }),
+  } as unknown as ProjectDb
+  const missingRowStore = new SkillForgeProposalsStore({ db: missingRowDb })
+
+  await expect(missingRowStore.createIfEligible(input())).rejects.toThrow(
+    'throttle query returned no row',
+  )
+})
+
+test('createIfEligible serializes concurrent attempts into one proposal', async () => {
+  const results = await Promise.all([
+    store.createIfEligible(input({ workflow_signature: 'sig-concurrent-a' })),
+    store.createIfEligible(input({ workflow_signature: 'sig-concurrent-b' })),
+  ])
+
+  expect(results.filter((result) => result !== null)).toHaveLength(1)
+  expect(await store.listPending()).toHaveLength(1)
+})
+
 test('markApproved records the skill path; only pending rows can be decided', async () => {
   const rec = await store.create(input())
   now = 2_000_000

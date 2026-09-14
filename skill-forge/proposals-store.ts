@@ -88,6 +88,33 @@ export class SkillForgeProposalsStore {
     return got
   }
 
+  /**
+   * Atomically insert when the install is new, no proposal is pending, and no
+   * proposal has been created in the preceding 24 hours. Query failures throw;
+   * they are never treated as permission to create.
+   */
+  async createIfEligible(input: CreateProposalInput): Promise<ProposalRecord | null> {
+    const ts = this.now()
+    return this.db.transaction(async (tx) => {
+      const blocked = tx.get<{ blocked: number }, [string, number]>(
+        `SELECT EXISTS(
+           SELECT 1 FROM skill_forge_proposals
+            WHERE (workflow_signature = ? AND status IN ('pending', 'approved'))
+               OR status = 'pending'
+               OR created_at >= ?
+         ) AS blocked`,
+        [input.workflow_signature, ts - 86_400_000],
+      )
+      if (blocked === null) {
+        throw new Error('skill_forge_proposals.createIfEligible: throttle query returned no row')
+      }
+      if (blocked.blocked !== 0) return null
+
+      const store = new SkillForgeProposalsStore({ db: tx, now: () => ts })
+      return store.create(input)
+    })
+  }
+
   async get(id: string): Promise<ProposalRecord | null> {
     const row = this.db
       .get<ProposalRow, [string]>(
