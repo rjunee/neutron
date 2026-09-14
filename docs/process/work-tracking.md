@@ -237,14 +237,49 @@ that already exists.
 **Two people can read the same ruling opposite ways.** Write rulings down with
 their scope stated explicitly, and name what they do **not** overturn.
 
-## 7. Provenance
+## 7. The review-round ceiling
+
+A review loop escalates at **three** rounds and never exceeds **five**. Counting a
+round as one adversarial-review-plus-gate cycle on one change:
+
+- **Round 3 — escalate if anything repeats.** If a finding, or a finding of the same
+  CLASS, survives a fix round, stop. Escalate to an arbiter with a **merge / no-merge**
+  question, not with a request for another review.
+- **Round 5 — hard ceiling, no exceptions.** Escalate whether or not anything repeated.
+  Five rounds without convergence is itself the finding.
+- **Everything that does not block the merge becomes a filed issue**, not another round.
+  The merge bar is the only bar: a defect that (a) changes runtime behaviour incorrectly,
+  (b) weakens or defeats a test or guard, or (c) states a property more broadly than its
+  instrument can establish.
+
+**A fix round cannot repair a defect in the plan.** That is the same finding as the
+`the-review-loop-must-stop-and-re-plan` spec item, which builds the repeat-finding gate
+into trident's inner loop precisely because *"it is arithmetic and requires no agent to be
+honest."* This section extends that rule to loops run by hand, which had no ceiling and
+therefore had none in practice: a hand-run review reached **63 rounds** on one PR on
+2026-09-13, the day after the automated gate shipped. A rule enforced on a subsystem and
+not on its operator has not been adopted.
+
+**Before spending a third round, verify the reviewer is reading the subject.**
+Non-convergence is evidence about the INSTRUMENT at least as much as about the code. On
+that same PR the cross-model gate, at default settings, was reviewing a 3,469-line
+markdown file and zero lines of code, because the diff is truncated by line count in git's
+path order and `.trident/` sorts first. Enumerate the files actually in the review window,
+with a positive control over the untruncated diff, before concluding the problem is hard.
+
+**An exit condition is not a ceiling.** An earlier ruling here fixed only the exit —
+merge on finding CLASS rather than on obtaining an APPROVE — which made the loop
+terminating in principle and unbounded in practice. Both halves are required.
+
+## 8. Provenance
 
 §2, §3, §5 and most of §6 are adopted from a sibling Neutron repository's consolidated work-tracking design (2026-09-12), which in turn adopts
 Kubernetes' KEP machinery — a directory per item, validated frontmatter, ratcheting
 CI validation, rendered indexes.
 
-§4 is Neutron's own and is the part with no established
-practice elsewhere: the industry default is "the PR is the record."
+§4 and §7 are Neutron's own and are the parts with no established
+practice elsewhere: the industry default is "the PR is the record", and it has nothing
+to say about when to stop reviewing one.
 
 Changes to this standard are made once and propagated to every repo. Do not fork
 it per-repo; a per-repo exception belongs in that repo's `AGENTS.md`, naming this
