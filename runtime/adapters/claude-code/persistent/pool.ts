@@ -1092,6 +1092,57 @@ export async function shutdownAllPersistentRepls(
     )
   }
 
+  // LEFT RUNNING, AND HANDED OVER — which is not the same as left alone. Shared by the
+  // SETTLED teardown and the LATE-SPAWN callback (#674), so both survivors retire the same
+  // way; it takes `registryPath` as an argument because the late caller runs after
+  // `supervisedBySessionKey` has been cleared and must use coordinates captured before that.
+  //
+  // No kill and no marker, and — load-bearing — NO `unlinkSessionConfigs`: those files are
+  // the live child's `--mcp-config` and `--settings`, and deleting them under a running REPL
+  // would leave it wired to nothing the next gateway could rebuild.
+  //
+  // BUT THIS WRAPPER MUST LET GO (Argus r25). An earlier revision of this comment said "no
+  // sink unregister that matters (this process is going away)", and the parenthetical was
+  // doing all the work — in a module whose own sibling (`gateway/index.ts`) names "tests,
+  // in-process restarts, overlapping boots" as supported. When this process does NOT go
+  // away, the retired `PtyChild` keeps its poll loop running against a pane it has given up,
+  // still wired to this session's detectors: the next adoption attaches a SECOND wrapper,
+  // and the retired one can fire a detector actuation into a screen it no longer owns. That
+  // is the stale-screen keystroke hazard, arriving from a gateway already told to stop.
+  //
+  // So: `detach` (stop reading, stop delivering, send nothing — and never close), stop the
+  // watchers, and unregister the sink, because a retired wrapper that stays registered can
+  // receive a reply meant for the incarnation that replaced it. The PANE and its process are
+  // untouched, which is the whole distinction between detach and close.
+  //
+  // AND THE LIVE-PROCESS HANDLE (Argus r31). The three non-destructive releases in
+  // `boot-adoption.ts` do it — and `unwind` deliberately does NOT, because that path CLOSES
+  // the pane, so the child exits and `child-exit-wiring`'s handler unregisters for it. This
+  // path is the opposite and has exactly the property that makes the leak matter: the pane is
+  // left running and the wrapper is detached, so `exited` never settles and the exit handler
+  // never fires. The scope that finds this is not "the cleanup paths in one file" but EVERY
+  // PATH THAT STOPS OWNING A SESSION (r52: the exclusion of child exit was itself where a
+  // defect hid).
+  //
+  // AND THE SELF-FENCE TIMER (r49) and THE ADOPTION CLAIM (r50), same rule — and the claim is
+  // the one where leaving it behind would be worst: the next construction is exactly what this
+  // branch keeps the pane alive FOR, and a claim left set would refuse it until the TTL elapsed.
+  const releaseSurvivor = (key: string, session: ReplSession, registryPath: string | undefined, handle: string): void => {
+    session.sizeWatchdog?.stop()
+    session.deadTurnWatcher?.stop()
+    session.child.detach?.()
+    sink.unregisterIf(session.sessionId, session)
+    session.liveHandle?.unregister()
+    session.selfFenceTimer?.cancel()
+    session.selfFenceTimer = undefined
+    releaseAdoptionClaim(registryPath, key, session.paneClaimBy)
+    session.paneClaimBy = undefined
+    process.stderr.write(
+      `[repl] gateway shutdown LEAVING session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} ` +
+        `alive in pane ${handle} — the registry row names it, so the next construction of this substrate re-adopts or closes it\n`,
+    )
+  }
+
   const teardown = async (key: string, session: ReplSession): Promise<void> => {
     // The report owed for THIS child, so the kill's outcome can be attached to it.
     let owedForThisChild: PendingShutdownKillReport | null = null
@@ -1131,66 +1182,7 @@ export async function shutdownAllPersistentRepls(
         childGeneration: session.childGeneration,
       })
       if (survival.kind === 'survive') {
-        // LEFT RUNNING, AND HANDED OVER — which is not the same as left alone.
-        //
-        // No kill and no marker, and — load-bearing — NO `unlinkSessionConfigs`: those
-        // files are the live child's `--mcp-config` and `--settings`, and deleting them
-        // under a running REPL would leave it wired to nothing the next gateway could
-        // rebuild.
-        //
-        // BUT THIS WRAPPER MUST LET GO (Argus r25). An earlier revision of this comment
-        // said "no sink unregister that matters (this process is going away)", and the
-        // parenthetical was doing all the work — in a module whose own sibling
-        // (`gateway/index.ts`) names "tests, in-process restarts, overlapping boots" as
-        // supported. When this process does NOT go away, the retired `PtyChild` keeps its
-        // poll loop running against a pane it has given up, still wired to this session's
-        // detectors: the next adoption attaches a SECOND wrapper, and the retired one can
-        // fire a detector actuation into a screen it no longer owns. That is the
-        // stale-screen keystroke hazard, arriving from a gateway already told to stop.
-        //
-        // So: `detach` (stop reading, stop delivering, send nothing — and never close),
-        // stop the watchers, and unregister the sink, because a retired wrapper that
-        // stays registered can receive a reply meant for the incarnation that replaced
-        // it. The PANE and its process are untouched, which is the whole distinction
-        // between detach and close.
-        session.sizeWatchdog?.stop()
-        session.deadTurnWatcher?.stop()
-        session.child.detach?.()
-        sink.unregisterIf(session.sessionId, session)
-        // AND THE LIVE-PROCESS HANDLE (Argus r31). This is the fourth non-destructive
-        // release and it was the one still missing it. The three in `boot-adoption.ts` do
-        // it — and `unwind` deliberately does NOT, because that path CLOSES the pane, so
-        // the child exits and `child-exit-wiring`'s handler unregisters for it.
-        //
-        // This path is the opposite and has exactly the property that makes the leak
-        // matter: the pane is left running and the wrapper is detached, so `exited` never
-        // settles and the exit handler never fires. Costless when the process really is
-        // going away; on the in-process handover this detach exists for, the retired
-        // incarnation stays in the ambient process registry and the watchdog attributes to
-        // a wrapper that has been retired.
-        //
-        // The scope that finds this is not "the cleanup paths in one file" but EVERY PATH
-        // THAT STOPS OWNING A SESSION — FIVE of them across three files, child exit included
-        // (r52: the exclusion of child exit was itself where a defect hid). The audit table in
-        // the as-built is drawn that way now, with a column per path.
-        session.liveHandle?.unregister()
-        // AND THE ADOPTION CLAIM. One of the five paths that stop owning a session, and the one
-        // where leaving the claim behind would be worst: the next construction is exactly
-        // what this branch keeps the pane alive FOR, and a claim left set would refuse it
-        // until the TTL elapsed.
-        // AND THE SELF-FENCE TIMER (r49) — the fourth non-destructive release, same rule.
-        session.selfFenceTimer?.cancel()
-        session.selfFenceTimer = undefined
-        releaseAdoptionClaim(registryPath, key, session.paneClaimBy)
-        // Same rule as the other give-back paths (r50): no claim, nothing to fence.
-        session.paneClaimBy = undefined
-        //
-        // `return`, not `continue`: this is the per-child teardown closure, and the
-        // walk that calls it is above.
-        process.stderr.write(
-          `[repl] gateway shutdown LEAVING session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} ` +
-            `alive in pane ${survival.handle} — the registry row names it, so the next construction of this substrate re-adopts or closes it\n`,
-        )
+        releaseSurvivor(key, session, registryPath, survival.handle)
         return
       }
       process.stderr.write(
@@ -1254,9 +1246,9 @@ export async function shutdownAllPersistentRepls(
   for (const [key, session] of settledNow) await teardown(key, session)
 
   // PHASE 0b — and only now, the ones that had not spawned yet, on ONE shared bound.
-  // A spawn that lands inside it is marked and killed exactly like the rest; one that
-  // does not is said out loud and left to the cgroup, with a best-effort kill attached in
-  // case it settles while this process still exists. Nothing durable is written for it:
+  // A spawn that lands inside it takes ordinary teardown; one that does not gets a
+  // detached survival decision when it resolves, with a fail-closed kill fallback.
+  // Nothing durable is written while it remains unresolved:
   // it has no `child_generation` yet, so there is no generation to attribute anything to
   // — and a pool entry that never resolved never had a turn injected, so it hosts no
   // detached workflow. The builds at risk are behind the SETTLED entries above, which is
@@ -1279,13 +1271,26 @@ export async function shutdownAllPersistentRepls(
       }
       process.stderr.write(
         `[repl] gateway shutdown reached pool key ${key.slice(0, 24)} whose SPAWN has not settled — it has no ` +
-          `generation yet, so nothing durable can name it; left to the unit's cgroup kill\n`,
+          `generation yet; survival will be checked if it resolves after the grace\n`,
       )
+      // Capture before reset clears supervision. Read the row only AFTER resolution.
+      const registryPath = supervisedBySessionKey.get(key)?.replRegistryPath
       fireAndForget(
         'pool.shutdown.late-spawn-kill',
         p.then((session) => {
-          // It finished after we stopped waiting. Terminate it rather than orphan it —
-          // this is the polite layer non-systemd deployments depend on.
+          const survival = claimShutdownSurvival({
+            registryPath,
+            sessionKey: key,
+            paneHandle: session.child.paneHandle,
+            childGeneration: session.childGeneration,
+          })
+          if (survival.kind === 'survive') {
+            releaseSurvivor(key, session, registryPath, survival.handle)
+            return
+          }
+          process.stderr.write(
+            `[repl] gateway shutdown late spawn killing session=${session.sessionId.slice(0, 8)}: ${survival.reason}\n`,
+          )
           try {
             session.child.kill()
           } catch {

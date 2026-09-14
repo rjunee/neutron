@@ -15,7 +15,7 @@
  * unlink (deleting a live child's `--mcp-config` would leave it wired to nothing).
  */
 
-import { afterEach, beforeAll, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -630,4 +630,73 @@ describe('a surviving child leaves no live-process record behind', () => {
     // itself. The surviving path above cleared its record with no exit at all.
     expect(reg.list().filter((r) => r.name === KEY)).toHaveLength(1)
   })
+})
+
+
+describe('late spawn survival after shutdown reset (#674)', () => {
+  afterEach(() => setFlockImplForTests(undefined))
+
+  const cases = [
+    { name: 'matching row survives', record: row(), survives: true, reason: 'LEAVING' },
+    { name: 'no row kills', record: undefined, survives: false, reason: 'no persisted row names' },
+    { name: 'different pane kills', record: row({ pane_handle: 'w9:p999' }), survives: false, reason: 'the row names pane' },
+    { name: 'different generation kills', record: row({ child_generation: 'gen-other' }), survives: false, reason: 'the row describes generation' },
+    { name: 'unreadable file kills', record: row(), survives: false, reason: 'could NOT BE READ' },
+    { name: 'malformed row kills', record: row(), survives: false, reason: 'could NOT BE READ' },
+    { name: 'unacquired lock kills', record: row(), survives: false, reason: 'LOCK WAS NOT ACQUIRED' },
+    { name: 'settled positive control', record: row(), survives: true, reason: 'LEAVING' },
+  ]
+  for (const testCase of cases) {
+    it(testCase.name, async () => {
+      // No row until the simulated spawn publishes, after teardown has returned.
+      const registryPath = registryWith(undefined)
+      const configPath = join(dirname(registryPath), 'late-config.json')
+      writeFileSync(configPath, '{}')
+      const { session, child } = pooledSession(HANDLE, configPath)
+      let resolveSpawn!: (session: ReplSession) => void
+      const spawning = new Promise<ReplSession>((resolve) => { resolveSpawn = resolve })
+      pool.set(KEY, spawning)
+      supervisedBySessionKey.set(KEY, { replRegistryPath: registryPath } as unknown as PersistentReplSubstrateOptions)
+      const publish = () => {
+        writeFileSync(registryPath, JSON.stringify(testCase.record ? { [KEY]: testCase.record } : {}))
+        if (testCase.name === 'unreadable file kills') {
+          rmSync(registryPath)
+          mkdirSync(registryPath) // EISDIR on the actual registry read, not the lock.
+        }
+        if (testCase.name === 'malformed row kills') {
+          writeFileSync(registryPath, JSON.stringify({ [KEY]: { ...row(), has_session: 'invalid' } }))
+        }
+        if (testCase.name === 'unacquired lock kills') setFlockImplForTests(() => 1)
+        resolveSpawn(session)
+      }
+      const logs: string[] = []
+      const stderr = spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        logs.push(String(chunk))
+        return true
+      })
+      try {
+        const settled = testCase.name === 'settled positive control'
+        if (settled) { publish(); await spawning }
+        await shutdownAllPersistentRepls({ pendingSpawnGraceMs: 1 })
+        expect(supervisedBySessionKey.has(KEY)).toBe(false)
+        if (!settled) {
+          expect(child.killed).toBe(false)
+          expect(child.detached).toBe(false)
+          expect(logs.join('')).toContain('whose SPAWN has not settled')
+          publish()
+          await spawning
+          // Run the detached callback, without a timer race.
+          await Promise.resolve()
+        } else {
+          expect(logs.join('')).not.toContain('whose SPAWN has not settled')
+        }
+        expect(child.killed).toBe(!testCase.survives)
+        expect(child.detached).toBe(testCase.survives)
+        expect(logs.join('')).toContain(testCase.reason)
+        if (testCase.survives) expect(readFileSync(configPath, 'utf8')).toBe('{}')
+      } finally {
+        stderr.mockRestore()
+      }
+    })
+  }
 })

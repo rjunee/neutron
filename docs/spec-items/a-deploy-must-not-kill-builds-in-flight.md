@@ -182,8 +182,14 @@ criterion 2 remains deliberately unticked for its named dual-channel residual; c
   launcher that lost its report was the one whose gateway was already in trouble. Settled
   entries are now read synchronously (`Bun.peek.status`) and handled FIRST; the rest share
   one bounded wait, and anything still unsettled after it is named on stderr and left to
-  the cgroup with a best-effort kill attached in case it lands later. Nothing durable is
-  written for it: a pool entry that never resolved has no `child_generation` to attribute
+  a detached survival decision if it lands later (#674). That decision must read under
+  the registry lock after resolution, using the registry path captured before teardown
+  clears supervision. Only a row naming the exact pane and generation permits survival;
+  missing or mismatched rows, unreadable data, and an unacquired lock require a kill with
+  distinct reasons. Verification: the `late spawn survival after shutdown reset` cases in
+  `runtime/adapters/claude-code/persistent/__tests__/gateway-shutdown-survival.test.ts`
+  resolve after real shutdown returns and include a before-partition positive control.
+  Nothing durable is written while unresolved: it has no `child_generation` to attribute
   anything to, and never had a turn injected, so it hosts no detached workflow.
 - THE RECOVERY PATH DROPPED THE ONE FIELD THAT MAKES RECOVERY POSSIBLE. `confirmShutdownKill`
   reconstructs a lost journal entry from the report and passed only the pid, so the
