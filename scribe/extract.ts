@@ -235,6 +235,7 @@ export function parseExtraction(text: string, sourceText?: string): ScribeExtrac
   }
 }
 
+
 const VALID_KINDS: ReadonlySet<string> = new Set(['person', 'company', 'concept'])
 const VALID_PREDICATES: ReadonlySet<string> = new Set([
   'founded',
@@ -306,12 +307,21 @@ function normRelations(v: unknown): ExtractedRelation[] {
   return out
 }
 
+export const MAX_SCRIBE_RESPONSE_CHARS = 32 * 1024
+
 /**
  * Best-effort JSON-object extraction from LLM text: direct parse, then
  * markdown-fence strip, then first-balanced-object substring. Returns null
  * when nothing parses.
  */
 export function extractJsonObject(text: string): unknown {
+  // BOUND BEFORE THE FENCE EXPRESSION, AND IN THE FUNCTION THAT OWNS IT. Scribe
+  // dispatch requests at most 2,048 completion tokens, so a 32 KiB character
+  // envelope preserves every valid response. The bound lives HERE rather than in
+  // `parseExtraction` because `parseReservedExtraction` (scribe/reflect/reserved-kinds.ts)
+  // feeds the same unbounded model output into the same fence expression below — a
+  // per-caller bound would have left that second path quadratic (#712).
+  if (text.length > MAX_SCRIBE_RESPONSE_CHARS) return null
   const trimmed = text.trim()
   if (trimmed.length === 0) return null
   try {

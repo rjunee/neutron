@@ -102,6 +102,11 @@ export function formatMirrorSource(projectId: string, host: string): string {
   return `${projectId}@${host}`
 }
 
+/** UUID-like project ids plus an at-sign and the existing 80-char host slug fit
+ * within 128 characters. Refuse anything larger before slug normalization: a
+ * truncated namespace could make two distinct mirror authorities collide. */
+export const MAX_MIRROR_SOURCE_CHARS = 128
+
 /**
  * Re-namespace a host page slug into the collaborator's mirror partition so a
  * mirrored page never clobbers the collaborator's own same-named page. The
@@ -110,6 +115,9 @@ export function formatMirrorSource(projectId: string, host: string): string {
  * same mirrored pages.
  */
 export function mirroredSlug(source: string, slug: string): string {
+  if (source.length > MAX_MIRROR_SOURCE_CHARS) {
+    throw new RangeError(`mirror source exceeds ${MAX_MIRROR_SOURCE_CHARS} characters`)
+  }
   const safeSource = source.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
   return `mirror-${safeSource}-${slug}`
 }

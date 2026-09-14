@@ -1,8 +1,13 @@
 import { describe, test, expect } from 'bun:test'
-import { entitySlugify, SLUG_REGEX } from '../entity-slug.ts'
+import { entitySlugify, MAX_ENTITY_NAME_CHARS, SLUG_REGEX } from '../entity-slug.ts'
 import { slugify as scribeSlugify } from '@neutronai/scribe/write-to-gbrain.ts'
 
 describe('entitySlugify — pinned grammar (P2-8 consolidation)', () => {
+  test('refuses an oversized entity name and preserves ordinary normalization', () => {
+    expect(entitySlugify('a'.repeat(MAX_ENTITY_NAME_CHARS + 1))).toBeNull()
+    expect(entitySlugify('Casey Rivera')).toBe('casey-rivera')
+  })
+
   test('lower-cases, hyphenates non-alphanumeric runs, strips edge hyphens', () => {
     expect(entitySlugify('Casey Rivera')).toBe('casey-rivera')
     expect(entitySlugify('Compound Engineering!')).toBe('compound-engineering')

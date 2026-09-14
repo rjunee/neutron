@@ -66,6 +66,15 @@ export function packageNameToSlug(packageName: string): string {
       { packageName },
     )
   }
+  // npm package names are limited to 214 characters. Reject a third-party
+  // manifest that exceeds that contract before scope or slug expressions run.
+  if (packageName.length > MAX_PACKAGE_NAME_CHARS) {
+    throw new CoreInstallError(
+      'manifest_invalid',
+      `package.json name exceeds ${MAX_PACKAGE_NAME_CHARS} characters`,
+      { packageName },
+    )
+  }
   // Strip a leading `@scope/` per npm scope syntax.
   const noScope = packageName.replace(/^@[^/]+\//, '')
   const lower = noScope.toLowerCase()
@@ -79,6 +88,8 @@ export function packageNameToSlug(packageName: string): string {
   }
   return cleaned
 }
+
+export const MAX_PACKAGE_NAME_CHARS = 214
 
 /**
  * Read + parse `<coreDir>/package.json`. Throws `CoreInstallError` with a

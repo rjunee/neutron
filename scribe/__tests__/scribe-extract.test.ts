@@ -16,7 +16,8 @@ import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
-import { parseExtraction, runExtraction } from '../extract.ts'
+import { MAX_SCRIBE_RESPONSE_CHARS, parseExtraction, runExtraction } from '../extract.ts'
+import { parseReservedExtraction } from '../reflect/reserved-kinds.ts'
 import { createScribe } from '../index.ts'
 import { createState, DAILY_CAP } from '../scribe-budget.ts'
 import type { WriteEntityFn } from '../write-to-gbrain.ts'
@@ -88,7 +89,29 @@ const recordingWriteEntity: WriteEntityFn = async (input) => ({
   newLinks: [],
 })
 
+describe('parseReservedExtraction', () => {
+  // THE SECOND CALLER OF THE SAME FENCE EXPRESSION (#712). `parseExtraction` is not the
+  // only path into `extractJsonObject`; the reflect pass feeds it raw model output too,
+  // so the bound is pinned from BOTH callers — a bound that only `parseExtraction`
+  // exercised would pass while this path stayed quadratic.
+  test('refuses oversized model output and preserves ordinary JSON parsing', () => {
+    const oversized = `${' '.repeat(MAX_SCRIBE_RESPONSE_CHARS)}{"entities":[{"name":"Bad","kind":"meeting"}]}`
+    expect(parseReservedExtraction(oversized)).toEqual([])
+    expect(parseReservedExtraction('{"entities":[{"name":"Standup","kind":"meeting"}]}')).toEqual([
+      { name: 'Standup', kind: 'meeting' },
+    ])
+  })
+})
+
 describe('parseExtraction', () => {
+  test('refuses oversized model output and preserves ordinary JSON parsing', () => {
+    const oversized = `${' '.repeat(MAX_SCRIBE_RESPONSE_CHARS)}{"entities":[{"name":"Bad","kind":"person"}]}`
+    expect(parseExtraction(oversized).entities).toEqual([])
+    expect(parseExtraction('{"entities":[{"name":"Ada","kind":"person"}]}').entities).toEqual([
+      { name: 'Ada', kind: 'person' },
+    ])
+  })
+
   test('parses a direct JSON object', () => {
     const out = parseExtraction(
       '{"entities":[{"name":"Ada","kind":"person","fact":"founder"}],"relations":[]}',

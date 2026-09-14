@@ -443,6 +443,11 @@ export function buildSynthesisPrompt(input: BuildPromptInput): string {
  * the retry pass can correct.
  */
 export function extractJson(raw: string): unknown {
+  // Research requests allow at most 4,096 completion tokens. A 64 KiB
+  // character envelope is deliberately generous while bounding fence parsing.
+  if (raw.length > MAX_RESEARCH_RESPONSE_CHARS) {
+    throw new Error(`substrate response exceeds ${MAX_RESEARCH_RESPONSE_CHARS} characters`)
+  }
   const trimmed = raw.trim()
   // Strip a fenced block first.
   const fenceMatch = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/i)
@@ -481,6 +486,8 @@ export function extractJson(raw: string): unknown {
   }
   throw new Error('unbalanced JSON object in substrate response')
 }
+
+export const MAX_RESEARCH_RESPONSE_CHARS = 64 * 1024
 
 /* -----------------------------------------------------------------
  * Sidecar persistence
