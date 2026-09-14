@@ -45,7 +45,7 @@ function stub(
 } {
   const requests: Array<{ ref?: string; topic_id?: string | null }> = []
   const service: HostDeployToolService = {
-    status: () => ({ enabled: true, reason: null, default_ref: 'origin/main' }),
+    status: () => ({ enabled: true, reason: null, default_ref: 'origin/main', last_deploy: null }),
     request: async (input) => {
       requests.push(input)
       return {
@@ -109,12 +109,21 @@ describe('registration', () => {
     const status = reg.get(HOST_DEPLOY_STATUS_TOOL)
     expect(status?.capability_required).toBe('read:project_data')
     expect(status?.agent_hidden ?? false).toBe(false)
+    expect(status?.output_schema).toMatchObject({
+      properties: { last_deploy: { type: ['object', 'null'] } },
+      required: expect.arrayContaining(['last_deploy']),
+    })
   })
 
   test('registered even with NO control plane configured — visible and disabled', async () => {
     const reg = new ToolRegistry()
     const { service } = stub({
-      status: () => ({ enabled: false, reason: DISABLED_REASON, default_ref: 'origin/main' }),
+      status: () => ({
+        enabled: false,
+        reason: DISABLED_REASON,
+        default_ref: 'origin/main',
+        last_deploy: null,
+      }),
       request: async () => ({ status: 'unavailable', reason: DISABLED_REASON }),
     })
     registerHostDeployToolSurface(reg, () => service)
@@ -141,6 +150,24 @@ describe('registration', () => {
 })
 
 describe('handler behaviour', () => {
+  test('status returns the last refused deploy reason to the agent', async () => {
+    const reg = new ToolRegistry()
+    const last_deploy = {
+      outcome: 'refused' as const,
+      ref: 'origin/main',
+      sha: 'ff00112233445566778899aabbccddeeff001122',
+      attempted_at_ms: 1_800_000_000_000,
+      detail: 'deploy preconditions failed: migrations/repairs.json DIVERGES',
+    }
+    const { service } = stub({
+      status: () => ({ enabled: true, reason: null, default_ref: 'origin/main', last_deploy }),
+    })
+    registerHostDeployToolSurface(reg, () => service)
+
+    const out = await reg.get(HOST_DEPLOY_STATUS_TOOL)!.handler({}, CTX)
+    expect(out).toMatchObject({ last_deploy })
+  })
+
   test('a ref argument is trimmed through; an empty one falls back to the default', async () => {
     const reg = new ToolRegistry()
     const { service, requests } = stub()

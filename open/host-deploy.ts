@@ -333,6 +333,17 @@ export interface HostDeployStatus {
   reason: string | null
   /** The ref a `request()` with no `ref` argument would target. */
   default_ref: string
+  /** Most recent authenticated deploy attempt, read from its durable approval row. */
+  last_deploy: HostDeployLastAttempt | null
+}
+
+export interface HostDeployLastAttempt {
+  outcome: 'accepted' | 'refused' | 'errored' | 'timed_out'
+  ref: string
+  sha: string
+  attempted_at_ms: number
+  /** Secret-scrubbed control-plane detail; refusal path lists are kept intact. */
+  detail: string
 }
 
 export type HostDeployRequestResult =
@@ -734,6 +745,8 @@ interface HostDeployApprovalArgs {
    * (the sweep still expires the row, it just cannot retire the button).
    */
   prompt_id?: unknown
+  /** Terminal authenticated-call outcome, written after the owner-approved call settles. */
+  last_deploy?: unknown
 }
 
 /** Read a grant's stored arguments. A row that will not parse reads as empty. */
@@ -743,6 +756,33 @@ function parseApprovalArgs(args_json: string): HostDeployApprovalArgs {
   } catch {
     return {}
   }
+}
+
+function parseLastDeploy(value: unknown): HostDeployLastAttempt | null {
+  if (typeof value !== 'object' || value === null) return null
+  const candidate = value as Partial<HostDeployLastAttempt>
+  if (
+    (candidate.outcome !== 'accepted' &&
+      candidate.outcome !== 'refused' &&
+      candidate.outcome !== 'errored' &&
+      candidate.outcome !== 'timed_out') ||
+    typeof candidate.ref !== 'string' ||
+    typeof candidate.sha !== 'string' ||
+    typeof candidate.attempted_at_ms !== 'number' ||
+    !Number.isFinite(candidate.attempted_at_ms) ||
+    typeof candidate.detail !== 'string'
+  ) {
+    return null
+  }
+  return candidate as HostDeployLastAttempt
+}
+
+function publicDeployOutcome(
+  kind: 'accepted' | 'refused' | 'timeout' | 'error' | 'unconfigured',
+): HostDeployLastAttempt['outcome'] {
+  if (kind === 'timeout') return 'timed_out'
+  if (kind === 'accepted' || kind === 'refused') return kind
+  return 'errored'
 }
 
 export function createHostDeployService(
@@ -783,10 +823,15 @@ export function createHostDeployService(
 
   function status(): HostDeployStatus {
     const cfg = resolveConfig()
+    const last_deploy = approvals
+      .findByToolName(project_slug, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+      .map((row) => parseLastDeploy(parseApprovalArgs(row.args_json).last_deploy))
+      .find((attempt): attempt is HostDeployLastAttempt => attempt !== null) ?? null
     return {
       enabled: cfg.configured,
       reason: cfg.configured ? null : cfg.reason,
       default_ref,
+      last_deploy,
     }
   }
 
@@ -1644,6 +1689,18 @@ export function createHostDeployService(
     }
 
     const outcome = await performDeploy(ref, approved_sha)
+    const last_deploy: HostDeployLastAttempt = {
+      outcome: publicDeployOutcome(outcome.kind),
+      ref,
+      sha: approved_sha,
+      attempted_at_ms: now(),
+      detail: outcome.status_detail,
+    }
+    try {
+      await approvals.mergeArgs(id, { last_deploy })
+    } catch (err) {
+      log(`host-deploy terminal outcome not recorded id=${id}: ${errText(err)}`)
+    }
     return { body: `${outcome.body}` }
   }
 
@@ -1667,13 +1724,20 @@ export function createHostDeployService(
   async function performDeploy(
     ref: string,
     sha: string,
-  ): Promise<{ kind: 'accepted' | 'refused' | 'timeout' | 'error' | 'unconfigured'; body: string; detail: string }> {
+  ): Promise<{
+    kind: 'accepted' | 'refused' | 'timeout' | 'error' | 'unconfigured'
+    body: string
+    detail: string
+    /** Full scrubbed detail for the durable agent-visible status record. */
+    status_detail: string
+  }> {
     // ── (e) RESOLVE THE ENDPOINT + CREDENTIAL NOW, not at composition time.
     const cfg = resolveConfig()
     if (!cfg.configured) {
       return {
         kind: 'unconfigured',
         detail: cfg.reason,
+        status_detail: cfg.reason,
         body: `Approved, but nothing was deployed: ${cfg.reason}`,
       }
     }
@@ -1712,6 +1776,7 @@ export function createHostDeployService(
         return {
           kind: 'timeout',
           detail,
+          status_detail: detail,
           body:
             `Approved, and the deploy was requested — but I stopped waiting for the answer after ` +
             `${Math.round(HOST_DEPLOY_CALL_TIMEOUT_MS / 1000)}s. ${detail}\n\n` +
@@ -1726,11 +1791,13 @@ export function createHostDeployService(
       return {
         kind: 'error',
         detail,
+        status_detail: detail,
         body: `Approved, but the deploy request did not go through: ${detail}. Nothing was deployed; ask again to retry.`,
       }
     }
 
-    const detail = scrubHostDeploySecrets(result.detail, secrets).slice(0, HOST_DEPLOY_DETAIL_CAP)
+    const status_detail = scrubHostDeploySecrets(result.detail, secrets)
+    const detail = status_detail.slice(0, HOST_DEPLOY_DETAIL_CAP)
     log(
       `host-deploy call ${result.ok ? 'accepted' : 'refused'} ref=${ref} sha=${shortSha(sha)}: ${detail}`,
     )
@@ -1738,6 +1805,7 @@ export function createHostDeployService(
       return {
         kind: 'accepted',
         detail,
+        status_detail,
         body: `Deploy requested: ${ref} at ${shortSha(sha)}. ${detail}`,
       }
     }
@@ -1746,6 +1814,7 @@ export function createHostDeployService(
     return {
       kind: 'refused',
       detail,
+      status_detail,
       body: `The host refused the deploy of ${ref} at ${shortSha(sha)}: ${detail}. Nothing was deployed.`,
     }
   }
