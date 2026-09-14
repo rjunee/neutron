@@ -50,6 +50,7 @@ export type RespawnRefusalReason =
   | 'invalid-session-key'
   | 'spawn-cwd-invalid'
   | 'spawn-failed'
+  | 'registry-write-refused'
 
 /** Who asked for this respawn — used for logging + notice text + silencing. */
 export type RespawnTrigger =
@@ -65,6 +66,8 @@ export type RespawnTrigger =
 export type SpawnReplOutcome = { ok: true } | { ok: false; reason: 'invalid-cwd' | 'spawn-failed' }
 
 export interface RespawnOutcome {
+  /** Producer-stamped cause when a required registry write was refused. */
+  error?: Error
   ok: boolean
   reason?: RespawnRefusalReason
   sessionId?: string
