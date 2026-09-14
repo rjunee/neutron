@@ -221,7 +221,22 @@ function MarkdownImpl({
     [onDocLink, origin],
   )
   return (
-    <div className={className !== undefined ? `car-md ${className}` : 'car-md'}>
+    <div
+      className={className !== undefined ? `car-md ${className}` : 'car-md'}
+      onClick={(event) => {
+        const target = event.target
+        if (!(target instanceof Element)) return
+        const code = target.closest('code')
+        if (code === null || !event.currentTarget.contains(code)) return
+        // Fenced blocks own a labelled Copy button, while code inside an anchor
+        // keeps the anchor's navigation intent. Only standalone inline tokens
+        // use click-to-copy.
+        if (code.closest('pre, a') !== null) return
+        const token = code.textContent ?? ''
+        if (token.length === 0) return
+        void copyTextToClipboard(token)
+      }}
+    >
       <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={components}>
         {body}
       </ReactMarkdown>
