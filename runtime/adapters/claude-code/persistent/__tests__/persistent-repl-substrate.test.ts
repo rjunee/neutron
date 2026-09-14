@@ -168,10 +168,18 @@ describe('PersistentReplSubstrate — conformance', () => {
       async spawn(argv): Promise<PtyChild> {
         const sid = extractSessionId(argv)
         const { port: sinkPort, token } = bakedChildSinkInfo(argv)
+        // REJECTION SWALLOWED, like `makeFakeReplHost`'s `post` above. This case's
+        // last act is a FIRE-AND-FORGET `/reply`, and `afterEach` then runs
+        // `shutdownAllPersistentRepls`, which since #786 releases the gateway's reply
+        // listener — so that POST can land on a closed socket and reject with
+        // ECONNREFUSED. That is the correct outcome for a reply aimed at a gateway
+        // that has retired, not a failure of this case; unswallowed it becomes an
+        // unhandled rejection, which Bun charges to whichever case happens to be
+        // running when it arrives (it charged the next one, `tool_resolution`).
         const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
           body: JSON.stringify(body),
-        })
+        }).catch(() => undefined)
         let exited = false
         const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(req) {
           const url = new URL(req.url)

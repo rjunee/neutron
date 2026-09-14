@@ -127,7 +127,23 @@ async function run(
   })
 }
 
+/**
+ * IS THIS CREDENTIAL AUTHORIZED RIGHT NOW? Asked of whatever sink is listening, which
+ * is not always the one `beforeAll` started: `shutdownAllPersistentRepls` RELEASES the
+ * reply listener once the pool and the owed reports have drained (#786 — the listener
+ * belongs to the gateway, not to the panes it leaves running, and holding it is what
+ * kept the gateway alive through SIGTERM until systemd killed it). Several cases below
+ * ask this question after exactly that shutdown, so the listener they must ask is the
+ * SUCCESSOR gateway's — which is what `ensureStarted` here brings up.
+ *
+ * This does not soften a single assertion. The successor restarts the SAME sink object,
+ * so the credential index (`byCredential`) crosses the restart intact, and the durable
+ * root token means the credential is bit-identical either side of it. A registration
+ * that should have been dropped is therefore still honoured by the successor and still
+ * answers 200 — which is how the 401 cases below can red at all.
+ */
 async function postReplyFor(sessionId: string, credential: string): Promise<number> {
+  await sink.ensureStarted()
   const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
@@ -136,7 +152,9 @@ async function postReplyFor(sessionId: string, credential: string): Promise<numb
   return resp.status
 }
 
+/** Same question, for this file's default session id. See `postReplyFor`. */
 async function postReply(credential: string): Promise<number> {
+  await sink.ensureStarted()
   const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
