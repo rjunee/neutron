@@ -1,3 +1,4 @@
+import { readEffectivePrompt, effectivePromptPath } from '../effective-prompt.ts'
 /**
  * ISSUES #204 — unit coverage for the live-agent chat turn runner
  * (post-onboarding spec § ITEM 1, `build-live-agent-turn.ts`).
@@ -768,4 +769,74 @@ describe('build-live-agent-turn — failure shapes (anti-silence contract)', () 
     expect(specs[0]!.prompt).toContain('Welcome! Your workspace is ready.')
     expect(specs[0]!.prompt).toContain('User: thanks!')
   })
+})
+
+
+test('effective prompt view renders the exact cold and warm runtime dispatch for its project', async () => {
+  const specs: AgentSpec[] = []
+  const run = makeRunner({
+    substrate: makeStubSubstrate({ specs }),
+    persona: 'OWNER_PERSONA',
+    projectPersonaResolver: () => 'PROJECT_PERSONA',
+  })
+  await run(makeTurn({ sent: [], project_id: 'project-a', user_text: 'first' }))
+  await run(makeTurn({ sent: [], project_id: 'project-a', user_text: 'second' }))
+  const captured = readEffectivePrompt(effectivePromptPath(tmp, 'project-a', 'web:u-1'))!
+  expect(specs[0]!.tools.length).toBeGreaterThan(0)
+  expect(captured.session_start).toEqual(specs[0]!)
+  expect(captured.latest_dispatch).toEqual(specs[1]!)
+  expect(captured.session_start!.prompt).toContain('OWNER_PERSONA')
+  expect(captured.session_start!.prompt).toContain('PROJECT_PERSONA')
+  expect(captured.session_start!.prompt).toContain('/effective-prompt')
+  const sent: ChatOutbound[] = []
+  await run(makeTurn({ sent, project_id: 'project-a', user_text: '/effective-prompt' }))
+  expect(specs).toHaveLength(2)
+  const reply = sent.find(e => e.type === 'agent_message')!
+  expect('body' in reply && reply.body).toBe('Recorded harness prompt and tool configuration (provider-internal instructions are not exposed):\n' + JSON.stringify(captured, null, 2))
+  const other: ChatOutbound[] = []
+  await run(makeTurn({ sent: other, project_id: 'project-b', user_text: '/effective-prompt' }))
+  expect(JSON.stringify(other)).toContain('no recorded dispatch')
+})
+
+
+test('prompt capture failure prevents dispatch and identifies storage failure', async () => {
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(join(tmp, '.effective-prompts'), 'not a directory')
+  const specs: AgentSpec[] = []
+  const sent: ChatOutbound[] = []
+  const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+  expect((await run(makeTurn({ sent }))).outcome).toBe('failed')
+  expect(specs).toHaveLength(0)
+  expect(JSON.stringify(sent)).toContain('prompt_capture_failed:')
+  await run(makeTurn({ sent, user_text: '/effective-prompt' }))
+  expect(JSON.stringify(sent)).toContain('could not be read')
+})
+
+test('inspection queues behind an active turn instead of being injected into the model', async () => {
+  let release!: () => void
+  let started!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const dispatched = new Promise<void>(resolve => { started = resolve })
+  const specs: AgentSpec[] = []
+  const injected: string[] = []
+  const stub = makeStubSubstrate({ specs })
+  const run = makeRunner({
+    substrate: {
+      start(spec) {
+        const handle = stub.start(spec)
+        started()
+        return { ...handle, events: (async function* () { await pending; yield* handle.events })() }
+      },
+    },
+    injectActiveTurn: async (_turn, text) => { injected.push(text); return true },
+  })
+  const first = run(makeTurn({ sent: [] }))
+  await dispatched
+  const sent: ChatOutbound[] = []
+  const inspection = run(makeTurn({ sent, user_text: '/effective-prompt' }))
+  release()
+  await Promise.all([first, inspection])
+  expect(injected).toEqual([])
+  expect(specs).toHaveLength(1)
+  expect(JSON.stringify(sent)).toContain('Recorded harness prompt')
 })
