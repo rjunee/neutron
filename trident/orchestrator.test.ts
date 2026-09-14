@@ -326,6 +326,144 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
   })
 }
 
+describe('G018 dispatch identity', () => {
+  for (const id of ['', undefined, 'dispatch-with-identity']) {
+    test(`minted ${String(id)} cannot launch without an identity`, async () => {
+      const h = buildHarness({
+        mint_run_id: () => id as string,
+        plan: () => ({ result: null }),
+      })
+      const run = await createRun()
+      const outcome = await h.step(run)
+      if (id === 'dispatch-with-identity') {
+        expect(outcome.run.subagent_run_id).toBe(id)
+        expect(h.inputs).toHaveLength(1)
+      } else {
+        expect(outcome.run.phase).toBe('failed')
+        expect(outcome.run.failure_reason).toContain('mint_run_id produced an empty id')
+        expect(outcome.run.subagent_run_id).toBeNull()
+        expect(h.inputs).toHaveLength(0)
+      }
+    })
+  }
+})
+
+describe('G083 publication prerequisites', () => {
+  for (const scenario of ['local-mode', 'read-failed', 'empty', 'abbreviated', 'nonhex'] as const) {
+    test(`${scenario} cannot publish or dispatch review`, async () => {
+      const head = 'a'.repeat(40)
+      const local = scenario === 'empty' ? '' : scenario === 'abbreviated' ? head.slice(0, 7)
+        : scenario === 'nonhex' ? 'z'.repeat(40) : head
+      let fires = 0
+      let published = false
+      const h = buildHarness({
+        plan: () => ++fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.endsWith('rev-parse --verify refs/heads/feat-x'))
+            return { ok: scenario !== 'read-failed', stdout: local, stderr: '', exit_code: scenario === 'read-failed' ? 128 : 0 }
+          if (cmd.includes('push')) published = true
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(published ? `${head}\trefs/heads/feat-x` : '')
+          if (joined.includes('diff --name-only')) return ok('changed.ts')
+          if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+          if (joined.includes('gh pr list')) return ok('42')
+          return ok()
+        },
+      })
+      const final = await runToTerminal(h, (await createRun({ merge_mode: scenario === 'local-mode' ? 'local' : 'pr' })).id)
+      expect(final.phase).toBe('failed')
+      expect(final.failure_reason).toContain(scenario === 'local-mode' ? 'outside pr mode' : 'could not resolve branch')
+      expect(h.hostCalls.filter((cmd) => cmd.includes('push'))).toHaveLength(0)
+      expect(h.hostCalls.filter((cmd) => cmd.includes('ls-remote') && cmd.includes('refs/heads/feat-x'))).toHaveLength(0)
+      expect(h.inputs).toHaveLength(1)
+      expect(h.refirePatches).toHaveLength(0)
+    })
+  }
+})
+
+describe('G111 terminal and harvest precedence', () => {
+  // Enumerated from TERMINAL_PHASES in state-machine.ts, including failure and cancellation.
+  for (const phase of ['done', 'failed', 'stopped'] as const) {
+    test(`${phase} is inert even with a harvestable result`, async () => {
+      const h = buildHarness({ plan: () => ({ result: null }) })
+      const run = { ...await createRun(), phase, subagent_run_id: 'old-dispatch',
+        inner_result: JSON.stringify({ ok: true, verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true }) }
+      const outcome = await h.step(run)
+      expect(outcome.run).toBe(run)
+      expect(outcome.changed).toBe(false)
+      expect(outcome.waiting).toBe(false)
+      expect(h.hostCalls).toHaveLength(0)
+      expect(h.inputs).toHaveLength(0)
+    })
+  }
+  for (const status of ['crashed', 'running'] as const) {
+    test(`harvest beats ${status} launcher recovery`, async () => {
+      const h = buildHarness({ plan: () => ({ result: null }), begin_crash_recovery: true })
+      const run = await createRun({ merge_mode: 'pr' })
+      await store.update(run.id, {
+        subagent_run_id: 'lost-dispatch', subagent_status: status, pr: 5,
+        inner_checkpoint: 'argus-approved', inner_verdict: 'APPROVE',
+        inner_result: JSON.stringify({ ok: true, verdict: 'APPROVE', prNumber: 5, branch: 'feat-x',
+          round: 1, checkpoint: 'argus-approved', reviewedHead: SIM_REVIEWED_HEAD }),
+      })
+      const outcome = await h.step(store.get(run.id)!)
+      expect(outcome.run.phase).toBe('done')
+      expect(outcome.run.harvested_at).not.toBeNull()
+      expect(h.inputs).toHaveLength(0)
+      expect(store.get(run.id)?.crash_recoveries).toBe(0)
+    })
+  }
+})
+
+describe('G085 publication remote observation', () => {
+  for (const state of ['present', 'absent', 'unknown'] as const) {
+    test(`${state} controls publication and review dispatch`, async () => {
+      const head = 'a'.repeat(40)
+      const previous = 'b'.repeat(40)
+      let observations = 0
+      let pushed = false
+      let fires = 0
+      const h = buildHarness({
+        plan: () => ++fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            observations++
+            if (pushed) return ok(`${head}\trefs/heads/feat-x`)
+            if (state === 'unknown') return { ok: false, stdout: '', stderr: 'remote lookup unavailable', exit_code: 128 }
+            return ok(state === 'absent' ? '' : `${previous}\trefs/heads/feat-x`)
+          }
+          if (cmd.includes('push')) pushed = true
+          if (joined.includes('gh pr list')) return ok('42')
+          if (joined.includes('diff --name-only')) return ok('changed.ts')
+          return ok()
+        },
+      })
+      const run = await createRun({ merge_mode: 'pr' })
+      const final = await runToTerminal(h, run.id)
+      const pushes = h.hostCalls.filter((cmd) => cmd.some((arg) => arg.startsWith('--force-with-lease=')))
+      if (state === 'unknown') {
+        expect(observations).toBe(3)
+        expect(final.phase).toBe('failed')
+        expect(final.failure_reason).toContain('read the remote state of')
+        expect(pushes).toHaveLength(0)
+        expect(h.inputs).toHaveLength(1)
+        expect(h.refirePatches).toHaveLength(0)
+      } else {
+        expect(final.phase).toBe('done')
+        expect(pushes).toHaveLength(1)
+        expect(pushes[0]).toContain(`--force-with-lease=refs/heads/feat-x:${state === 'absent' ? '' : previous}`)
+        expect(h.inputs[1]?.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+      }
+    })
+  }
+})
+
 describe('orchestrator — wave child built terminal', () => {
   test('a child built result ends done without merge, re-fire, review provenance, or owner delivery', async () => {
     const commitSha = 'abcdef0123456789abcdef0123456789abcdef01'

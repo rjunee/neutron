@@ -117,7 +117,7 @@ interface World {
  * A real origin, a real full author clone, and a real SHALLOW build checkout holding a branch
  * that is genuinely behind a `main` which moved after the branch was cut.
  */
-async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; markerSize?: number }): Promise<World> {
+async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; markerSize?: number; conflictFiles?: number }): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), 'trident-rebase-'))
   created.push(root)
   const origin = join(root, 'origin.git')
@@ -144,6 +144,8 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; 
   // this way on a 746-line patch (2026-08-15).
   const baseLib = 'line1\nline2\ncontext-a\ncontext-b\nline3\n'
   writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? `${baseLib}\n` : baseLib)
+  for (let i = 1; i < (opts.conflictFiles ?? 1); i++)
+    writeFileSync(join(author, `conflict-${i}.txt`), readFileSync(join(author, 'lib.txt')))
   await git(author, 'add', '.')
   await git(author, ...GIT_ID, 'commit', '-q', '-m', 'init')
   await git(author, 'push', '-q', 'origin', 'main')
@@ -162,6 +164,8 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; 
     writeFileSync(join(author, 'lib.txt'), 'line1\nline2-from-branch\ncontext-a\ncontext-b\nline3\n')
     writeFileSync(join(author, 'feature.txt'), 'feature\n')
   }
+  for (let i = 1; i < (opts.conflictFiles ?? 1); i++)
+    writeFileSync(join(author, `conflict-${i}.txt`), readFileSync(join(author, 'lib.txt')))
   await git(author, 'add', '.')
   await git(
     author,
@@ -185,6 +189,8 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; 
     writeFileSync(join(author, 'lib.txt'), opts.trailingBlank ? 'line1\nline2\ncontext-a\ncontext-b\nline3-from-main\n\n' : 'line1\nline2\ncontext-a\ncontext-b\nline3-from-main\n')
     writeFileSync(join(author, 'docs.txt'), 'intervening\n')
   }
+  for (let i = 1; i < (opts.conflictFiles ?? 1); i++)
+    writeFileSync(join(author, `conflict-${i}.txt`), readFileSync(join(author, 'lib.txt')))
   await git(author, 'add', '.')
   await git(author, ...GIT_ID, 'commit', '-q', '-m', 'intervening main commit')
   await git(author, 'push', '-q', 'origin', 'main')
@@ -225,6 +231,123 @@ afterAll(() => {
 })
 
 describe('REAL git + REAL shallow — the publish-time rebase onto main', () => {
+  for (const fault of ['local-diff', 'pr-diff', 'empty', 'missing', 'worktree'] as const) {
+    test(`G089 ${fault} refusal prevents replay writes`, async () => {
+      const world = await seedWorld({ conflicting: false })
+      const scratchDir = scratch(world.checkout, `refuse-${fault}`)
+      let injected = false
+      let applies = 0
+      const host: RunHostCommand = async (cmd, cwd) => {
+        if (cmd.includes('apply')) applies++
+        const output = cmd.find((arg) => arg.startsWith('--output='))?.slice('--output='.length)
+        if (output !== undefined || cmd[0] === 'sh' && cmd[2]?.includes('gh pr diff')) {
+          const target = output ?? JSON.parse(cmd[2]!.split(' > ')[1]!) as string
+          if (fault === 'pr-diff') {
+            const fork = (await gitOut(world.checkout, 'merge-base', world.newMainTip, world.branch)).trim()
+            await git(world.checkout, 'diff', `--output=${target}`, `${fork}..${world.branch}`)
+          } else {
+            const result = await spawnCapture(cmd, cwd)
+            expect(result.ok).toBe(true)
+          }
+          if (fault === 'local-diff' || fault === 'pr-diff') {
+            // Nonempty bytes ensure removing this gate can actually reach a successful replay.
+            expect(readFileSync(target, 'utf8').length).toBeGreaterThan(0)
+            injected = true
+            return { ok: false, stdout: '', stderr: 'diff reader failed after writing', exit_code: 1 }
+          }
+          if (fault === 'empty') { writeFileSync(target, ''); injected = true }
+          if (fault === 'missing') { rmSync(target); injected = true }
+          return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+        }
+        const result = await spawnCapture(cmd, cwd)
+        if (fault === 'worktree' && cmd.includes('worktree') && cmd.includes('add')) {
+          expect(result.ok).toBe(true)
+          // A partially provisioned directory is not permission to apply into it.
+          writeFileSync(join(scratchDir, 'other-work.txt'), 'preserve this work\n')
+          injected = true
+          return { ok: false, stdout: '', stderr: 'worktree provisioning incomplete', exit_code: 1 }
+        }
+        return result
+      }
+      const reason = fault === 'worktree' ? 'provision a rebase worktree'
+        : fault === 'empty' || fault === 'missing' ? 'empty diff' : 'read the diff'
+      let failure: unknown
+      try {
+        await rebaseOntoObservedBase(
+          host, world.checkout, world.branch, 'main', fault === 'pr-diff' ? 42 : null, scratchDir,
+        )
+      } catch (error) {
+        failure = error
+      }
+      expect(injected).toBe(true)
+      expect(applies).toBe(0)
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toContain(reason)
+      expect((await gitOut(world.checkout, 'rev-parse', world.branch)).trim()).toBe(world.branchTip)
+      if (fault === 'worktree') expect(readFileSync(join(scratchDir, 'other-work.txt'), 'utf8')).toBe('preserve this work\n')
+    }, 60_000)
+  }
+
+  for (const count of [12, 13]) {
+    test(`G094 ${count} real conflicts spend at most twelve resolver turns`, async () => {
+      const world = await seedWorld({ conflicting: true, conflictFiles: count })
+      const scratchDir = scratch(world.checkout, `rounds-${count}`)
+      const sizes: number[] = []
+      const resolve_conflict: MergeConflictResolver = async (input) => {
+        sizes.push(input.conflicted_files.length)
+        const path = input.conflicted_files[0]!
+        await git(input.repo_path, 'checkout', '--theirs', '--', path)
+        await git(input.repo_path, 'add', '--', path)
+        return { resolved: true }
+      }
+      const replay = rebaseOntoObservedBase(spawnCapture, world.checkout, world.branch, 'main', null,
+        scratchDir, { run: resolverRun(`rounds-${count}`, world), resolve_conflict })
+      if (count === 13) {
+        await expect(replay).rejects.toBeInstanceOf(TridentRebaseConflict)
+        expect((await gitOut(world.checkout, 'rev-parse', world.branch)).trim()).toBe(world.branchTip)
+      } else {
+        expect((await replay).rebased).toBe(true)
+        expect((await gitOut(world.checkout, 'rev-parse', world.branch)).trim()).not.toBe(world.branchTip)
+      }
+      expect(sizes).toEqual(Array.from({ length: 12 }, (_, i) => count - i))
+      expect(existsSync(scratchDir)).toBe(false)
+    }, 60_000)
+  }
+
+  for (const advanceAt of ['patch', 'write'] as const) {
+    test(`G097 preserves another writer's commit when the branch advances at ${advanceAt}`, async () => {
+      const world = await seedWorld({ conflicting: false })
+      const scratchDir = scratch(world.checkout, `cas-${advanceAt}`)
+      const concurrent = await spawnCapture([
+        'git', '-C', world.checkout, ...GIT_ID, 'commit-tree',
+        `${world.branchTip}^{tree}`, '-p', world.branchTip, '-m', 'Concurrent writer commit',
+      ], world.checkout)
+      expect(concurrent.ok).toBe(true)
+      const writerHead = concurrent.stdout.trim()
+      expect(writerHead).not.toBe(world.branchTip)
+      let advances = 0
+      const host: RunHostCommand = async (cmd, cwd) => {
+        // The patch boundary is after the original head read but before replay work.
+        // The write boundary is immediately before Git takes its ref lock.
+        const boundary = advanceAt === 'patch'
+          ? cmd.some((arg) => arg.startsWith('--output='))
+          : cmd.includes('update-ref')
+        if (boundary && advances === 0) {
+          advances++
+          await git(world.checkout, 'update-ref', `refs/heads/${world.branch}`, writerHead, world.branchTip)
+        }
+        return spawnCapture(cmd, cwd)
+      }
+      await expect(rebaseOntoObservedBase(
+        host, world.checkout, world.branch, 'main', null, scratchDir,
+      )).rejects.toThrow('could not advance')
+      expect(advances).toBe(1)
+      expect((await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()).toBe(writerHead)
+      expect((await gitOut(world.checkout, 'log', '-1', '--format=%s', world.branch)).trim()).toBe('Concurrent writer commit')
+      expect(existsSync(scratchDir)).toBe(false)
+    }, 60_000)
+  }
+
   test('healShallowCheckout unshallows a shallow clone and costs a full clone one probe with no fetch', async () => {
     const world = await seedWorld({ conflicting: false })
     await healShallowCheckout(spawnCapture, world.checkout)
