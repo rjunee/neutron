@@ -201,6 +201,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isQualifiedRevRangeOperand } from '../../trident/rev-range-operand.mjs'
 
 /**
  * The git-range surface. `trident/` owns every range that decides what a reviewer
@@ -342,9 +343,8 @@ const IDENTIFIER = /[A-Za-z_$][\w$]*/g
  * the remote-tracking ref's answer was none).
  *
  * THE EXEMPTION MUST AGREE WITH THE INVARIANT, which is that every operand is a full object
- * name or begins with `refs/`. That is a one-line check rather than a sweep: this pattern is
- * the whole exemption, and anything it admits that is not one of those two forms is a hole by
- * construction.
+ * name or begins with `refs/`. The assembled operand prefix is therefore handed to the shared
+ * predicate rather than classified by a gate-only regular expression.
  *
  * IT IS A `refs/` PATH TEST, NOT A PREFIX LIST — `refs/heads/`, `refs/remotes/origin/`,
  * `refs/tags/`, anything under `refs/`. The list it replaces (`['refs/heads/', 'refs/remotes/',
@@ -358,8 +358,6 @@ const IDENTIFIER = /[A-Za-z_$][\w$]*/g
  * path inside something else. Same class as the list, one layer down: **the exemption kept
  * deciding "qualified" by a looser rule than the invariant it enforces.**
  */
-const QUALIFIED_PREFIX = /(^|[\s'"`(=,;:])refs\/[A-Za-z0-9_\-./]*$/
-
 /**
  * Every identifier in `source` that holds a base BRANCH name — by spelling or by
  * the binding it came from. Per file, deliberately: this is a shape check, not a
@@ -534,7 +532,8 @@ export function findBareBaseRanges(source) {
         // the operand to classify it — the same principle as the classifier one layer up:
         // decide what the value IS before deciding what to do about it.
         const before = line.slice(0, m.index).replace(/['"`]\s*\+\s*$/, '')
-        if (QUALIFIED_PREFIX.test(before)) continue
+        const operandPrefix = before.split(/[\s'"`(=,;:]/).at(-1) ?? ''
+        if (isQualifiedRevRangeOperand(operandPrefix)) continue
         if (isExempt(lines, lineNo - 1)) continue
         // One report per (line, name): a joined continuation is scanned as part of the
         // line above it AND on its own, so a range can otherwise be counted twice.

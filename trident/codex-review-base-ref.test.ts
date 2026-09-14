@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { spawnCapture } from './git-mode.ts'
 
 const SCRIPT = join(import.meta.dir, 'codex-review.sh')
+const PREDICATE = join(import.meta.dir, 'rev-range-operand.mjs')
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
 
 const created: string[] = []
@@ -82,7 +83,7 @@ function promotionBlock(): string {
 
 /** The shipped block's raw outcome for `arg` in `repo` — exit code and streams. */
 async function runBlock(repo: string, arg: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const script = `set -uo pipefail\nset -- ${JSON.stringify(arg)}\n${promotionBlock()}\nprintf %s "$BASE_REF"\n`
+  const script = `set -uo pipefail\nNEUTRON_REV_RANGE_OPERAND_PREDICATE=${JSON.stringify(PREDICATE)}\nset -- ${JSON.stringify(arg)}\n${promotionBlock()}\nprintf %s "$BASE_REF"\n`
   const res = await spawnCapture(['bash', '-c', script], repo)
   return { ok: res.ok, stdout: res.stdout.trim(), stderr: res.stderr }
 }
@@ -461,11 +462,8 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // …and the inputs that CANNOT be given that shape are refused rather than passed on.
     //
     // THE SAME ADVERSARIAL VECTOR THE CI GATE USES (`scripts/ci/diff-base-check.test.ts`, "a
-    // QUALIFIED ref is not a hit"). The two classifiers cannot share a function — one decides
-    // about SOURCE TEXT in JavaScript, the other about a runtime VALUE in bash — so they share
-    // the vector instead: a new spelling has to be added in both places, and until it is, one
-    // of them fails. Six positions of this defect were all deciders disagreeing about what
-    // counts as qualified; #658 tracks reducing that to one definition.
+    // QUALIFIED ref is not a hit"). Both sites now ask `rev-range-operand.mjs`; this vector
+    // proves the runtime site's promotion still hands that predicate the intended value.
     for (const arg of ['no-such-branch', 'release', 'notrefs/main', 'xrefs/main', 'origin/refs/main']) {
       const res = await runBlock(w.repo, arg)
       expect({ arg, ok: res.ok }).toEqual({ arg, ok: false })

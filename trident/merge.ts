@@ -65,6 +65,7 @@ import { createLogger } from '@neutronai/logger'
 
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import { gitRangeArgv } from './git-range.ts'
+import { isQualifiedRevRangeOperand } from './rev-range-operand.mjs'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 // TYPE-ONLY, deliberately. `arbiter.ts` imports the shared prompt rules from
@@ -301,8 +302,6 @@ export async function detectBaseBranch(
  * SHA-1 repository with no such ref is accepted here and refused by git at the point of use,
  * which is the direction that fails loudly.
  */
-const OBJECT_NAME_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
-
 /**
  * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
  * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
@@ -400,7 +399,11 @@ export async function diffBaseRef(
   base_sha: string | null | undefined,
   ref_resolves: (ref: string) => Promise<RefProbe>,
 ): Promise<string> {
-  if (typeof base_sha === 'string' && OBJECT_NAME_RE.test(base_sha.trim().toLowerCase())) {
+  if (
+    typeof base_sha === 'string' &&
+    !base_sha.trim().startsWith('refs/') &&
+    isQualifiedRevRangeOperand(base_sha.trim(), [40, 64])
+  ) {
     return base_sha.trim().toLowerCase()
   }
   // AN EMPTY NAME IS REFUSED HERE, and the sentence this replaces is why.
@@ -705,7 +708,7 @@ export async function refResolves(
     // The command could not be run at all. Nothing was established.
     return 'unknown'
   }
-  if (res.ok && OBJECT_NAME_RE.test(res.stdout.trim().toLowerCase())) return 'resolved'
+  if (res.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(res.stdout.trim())) return 'resolved'
   // EXIT 1 IS THE ANSWER "NO SUCH REF", and it is the only thing that means absent. Measured
   // on git 2.43: an existing ref exits 0, a missing one exits 1, and `-C <not-a-repo>` exits
   // 128. Reading 128 — or a spawn failure, or garbage on stdout — as "absent" is what put
