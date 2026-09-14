@@ -6089,23 +6089,33 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
   })
 
   test('a name only git can judge is delegated to check-ref-format — and its rejection refuses', async () => {
+    const repo = '/var/lib/source'
     const calls: string[][] = []
     const out = await runMutationProofGate({
-      run: { ...RUN, branch: 'a/.hidden' }, // passes the pure allowlist; a component may not start with '.'
+      run: { ...RUN, repo_path: repo, branch: 'a/.hidden' }, // passes the pure allowlist; a component may not start with '.'
       claim: CLAIM,
       base_branch: 'main',
       expected_head: HEAD,
       run_host: async (cmd) => {
         calls.push(cmd)
         if (cmd.includes('check-ref-format')) {
-          return { ok: false, stdout: '', stderr: "fatal: 'a/.hidden' is not a valid branch name", exit_code: 1 }
+          return {
+            ok: false,
+            stdout: '',
+            stderr: `fatal: cannot change to '${repo}': no such directory`,
+            exit_code: 1,
+          }
         }
         return res(0, HEAD)
       },
     })
     expect(out.ok).toBe(false)
-    expect(out.reason).toContain('check-ref-format')
-    expect(calls).toEqual([['git', '-C', '/repo', 'check-ref-format', '--branch', 'a/.hidden']])
+    expect(out.reason).toContain('git check-ref-format --branch rejects it')
+    expect(out.reason).toContain("cannot change to '<repo>': no such directory")
+    expect(out.reason).not.toContain(repo)
+    expect(out.reason).toContain('It was not used to resolve a branch head')
+    expect(out.reason).not.toContain('It was not passed to git')
+    expect(calls).toEqual([['git', '-C', repo, 'check-ref-format', '--branch', 'a/.hidden']])
   })
 
   test('a check-ref-format that never RAN says so — an unverified name is not a rejected name', async () => {
