@@ -26,24 +26,21 @@
  * `.claude/` (so the `claude` substring is present) AND embeds the session uuid
  * (so the uuid substring is present) — yet it is NOT our process. SIGKILLing it
  * would violate the recycled-pid-safety invariant this module exists to provide.
- * So `cmdlineMatchesSession` instead requires ALL of: (a) argv[0]'s basename is a
- * real `claude` invocation (the `claude` wrapper, or a node/bun runtime running a
- * claude script) — NOT `tail`/`vim`/`less`/etc; AND (b) the session UUID appears
- * as the VALUE of `--resume`/`--session-id` (the token immediately after the
- * flag, exactly as `buildReplArgv` pushes it) — NOT merely as a substring
- * anywhere in the cmdline. A dead pid, or a cmdline that does not match
- * (recycled / unrelated), is LEFT UNTOUCHED.
+ * `argvMatchesSession` requires the real argv vector: (a) argv[0]'s basename
+ * matches the configured claude binary (or the script slot after a supported
+ * interpreter), and (b) the session UUID is the value of --resume/--session-id.
+ * This checks invocation shape, not executable authenticity: a process can still
+ * deliberately set its entire argv to the exact expected vector.
  *
- * PLATFORM. The dev box is darwin (no `/proc`); prod is Linux. `ps -p <pid> -o
- * command=` prints the full argv on BOTH (BSD `command` + GNU `command` columns
- * both expand to the args; the trailing `=` suppresses the header). So this layer
- * reads the cmdline via `ps`, NOT `/proc`, and is correct on macOS and Linux
- * alike. Documented assumption: any platform whose `ps` lacks `-o command=`
- * (none we target) degrades to `readCmdline → undefined → 'not-ours' → no kill`,
- * which is the SAFE direction (never kills an unverified pid).
+ * PLATFORM. Linux reads NUL-separated /proc/<pid>/cmdline without flattening.
+ * Darwin and other platforms without a structured reader return `unreadable`:
+ * ps output cannot prove argument boundaries, so it cannot authorise identity
+ * or a kill. The flattened process listing remains a conservative spawn-refusal
+ * instrument only. Missing or unreadable argv also establishes nothing.
  */
 
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import type { HandleInspection } from './pty-host.ts'
 
 /** Verdict for one orphan-adoption attempt. */
@@ -64,7 +61,7 @@ export type OrphanAdoptionVerdict =
  *
  *   - `not-ours` is a POSITIVE statement: the kernel showed us a command line and it
  *     belongs to somebody else, so our child released that pid and is gone.
- *   - `unreadable` is the ABSENCE of a statement: `ps` failed, or the process is not
+ *   - `unreadable` is the ABSENCE of a statement: the argv read failed, or the process is not
  *     ours to look at. Our child may be alive and holding the transcript.
  *
  * Collapsed, the second silently inherits the first's licence and a second `claude`
@@ -155,7 +152,7 @@ export interface PaneAdoptionRecord {
  * server:<channelName>`, exactly as `buildReplArgv` pushes it?
  *
  * THE VALUE AFTER THE FLAG, NEVER A SUBSTRING, for the same reason
- * {@link cmdlineMatchesSession} insists on it: the channel name also appears in the
+ * {@link argvMatchesSession} insists on it: the channel name also appears in the
  * `--mcp-config` and `--settings` PATHS on the same command line
  * (`neutron-repl-<channel>/session-mcp.json`), so a substring test would be satisfied
  * by a process that merely has our config files open.
@@ -227,8 +224,8 @@ export function classifyPaneForAdoption(
 export interface OrphanAdoptionDeps {
   /** `kill -0` liveness probe. */
   isPidAlive: (pid: number) => boolean
-  /** Full cmdline for `pid`, or undefined if it cannot be read / pid is gone. */
-  readCmdline: (pid: number) => string | undefined
+  /** Structured argv for `pid`, or undefined if it cannot be read / pid is gone. */
+  readArgv: (pid: number) => readonly string[] | undefined
   /** Terminate the VERIFIED-ours pid (SIGTERM → SIGKILL on overstay). Async — the
    *  caller awaits it before spawning the `--resume` replacement so exactly one
    *  process owns the session transcript. */
@@ -294,20 +291,10 @@ function argv0IsClaude(tokens: ReadonlyArray<string>, claudeBasename: string): b
 }
 
 /**
- * Does `cmdline` identify OUR `claude --resume`/`--session-id` REPL for
- * `sessionId`? Matches the EXACT invocation shape `buildReplArgv` emits, NOT loose
- * substrings (see the file header for why substring-matching is unsafe).
- * `claudeBasename` is the CONFIGURED binary basename (default `'claude'`; the
- * basename of a `CLAUDE_BIN` / `options.claude_bin` override otherwise) — see
- * `argv0IsClaude`. ALL must hold:
- *   1. argv[0] is a real `claudeBasename` invocation (`argv0IsClaude`) — a recycled
- *      `tail`/editor with the transcript path open FAILS here even though the path
- *      sits under `.claude/` and embeds the uuid; AND
- *   2. the session UUID appears as the VALUE of `--resume` or `--session-id` — the
- *      token IMMEDIATELY after the flag, exactly as `buildReplArgv` pushes the
- *      `['--resume', sessionId]` / `['--session-id', sessionId]` pair — NOT merely
- *      as a substring (a transcript path argument does NOT satisfy this).
- * Pure — no IO.
+ * Does a flattened listing resemble the expected launch? LOSSY: an argv[0] of
+ * 'claude --resume' can pass after splitting. Only for conservative transcript
+ * scan refusals, NEVER identity, adoption, or termination. Use argvMatchesSession
+ * on a structured vector for those decisions.
  */
 export function cmdlineMatchesSession(
   cmdline: string | undefined,
@@ -378,18 +365,18 @@ export function argvMatchesSession(
   return false
 }
 
-/** Default `readCmdline` for darwin + Linux. `ps -p <pid> -o command=` prints the
- *  full argv with no header on both platforms. Returns undefined on any failure
- *  (missing pid, non-zero exit, empty output) — the SAFE direction. */
-export function defaultReadCmdline(pid: number): string | undefined {
+/** Read actual argument boundaries. Unsupported platforms and failed/empty reads
+ * establish nothing; never fall back to a flattened ps identity check. */
+export function defaultReadArgv(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  readCmdlineFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
+): readonly string[] | undefined {
+  if (platform !== 'linux') return undefined
   try {
-    const res = spawnSync('ps', ['-p', String(pid), '-o', 'command='], {
-      encoding: 'utf8',
-      timeout: 2_000,
-    })
-    if (res.status !== 0) return undefined
-    const out = (res.stdout ?? '').trim()
-    return out.length > 0 ? out : undefined
+    const raw = readCmdlineFile(`/proc/${pid}/cmdline`)
+    if (!raw.endsWith('\0')) return undefined
+    return raw.slice(0, -1).split('\0')
   } catch {
     return undefined
   }
@@ -409,7 +396,7 @@ export function defaultReadCmdline(pid: number): string | undefined {
  * prevent, and it does so via a guard that looked correct.
  *
  * So the instrument is scoped to the TRANSCRIPT: every live process, filtered by the
- * same exact-shape matcher the kill gate uses ({@link cmdlineMatchesSession}), so a
+ * lossy listing matcher ({@link cmdlineMatchesSession}), so a
  * `tail -f …/<uuid>.jsonl` or an editor with it open is not mistaken for an owner.
  *
  * THREE ANSWERS, AND THE THIRD IS NOT THE FIRST. `none` means the scan RAN and found
@@ -426,7 +413,7 @@ export type TranscriptOwnerScan =
   /** The scan ran, the instrument could have seen an owner, and there is none. The
    *  ONLY answer that licenses clearing a handle or resuming a transcript. */
   | { readonly kind: 'none' }
-  /** At least one live process is. Their pids, for the message a caller writes. */
+  /** At least one listing resembles an owner. Refuse spawn; never authorise a kill. */
   | { readonly kind: 'owners'; readonly pids: readonly number[] }
   /** The scan could not be performed. Establishes NOTHING — never read as `none`. */
   | { readonly kind: 'unknown'; readonly reason: string }
@@ -441,8 +428,7 @@ export interface ProcessListing {
  * Every process on this machine, as `pid` + full command line — or `undefined` when the
  * listing could not be taken, which is a different thing from an empty machine.
  *
- * `ps -eo pid=,command=` on darwin and Linux alike (the same portability argument
- * {@link defaultReadCmdline} makes for the single-pid form). A non-zero exit, a throw,
+ * `ps -eo pid=,command=` on darwin and Linux alike, for spawn refusal only. A non-zero exit, a throw,
  * or empty output all answer `undefined`: the SAFE direction, because the caller's rule
  * for "I could not look" is to establish nothing.
  */
@@ -545,7 +531,7 @@ export function scanTranscriptOwners(
  *
  * `claudeBasename` is the CONFIGURED binary basename (default `'claude'`; the
  * basename of a `CLAUDE_BIN` / `options.claude_bin` override otherwise), threaded
- * to `cmdlineMatchesSession` so the identity gate recognises OUR orphan even when
+ * to `argvMatchesSession` so the identity gate recognises OUR orphan even when
  * the deploy renamed the binary (Argus r3 BLOCKER).
  */
 export async function adoptOrKillOrphan(
@@ -585,7 +571,7 @@ export async function adoptOrKillOrphan(
 export function identifyOrphanPid(
   pid: number | undefined,
   sessionId: string,
-  deps: Pick<OrphanAdoptionDeps, 'isPidAlive' | 'readCmdline' | 'log'>,
+  deps: Pick<OrphanAdoptionDeps, 'isPidAlive' | 'readArgv' | 'log'>,
   claudeBasename: string = 'claude',
 ): 'ours' | 'not-ours' | 'unreadable' | 'dead' | 'no-pid' {
   const log = deps.log ?? (() => {})
@@ -596,8 +582,8 @@ export function identifyOrphanPid(
     return 'dead'
   }
 
-  const cmdline = deps.readCmdline(pid)
-  if (cmdline === undefined) {
+  const argv = deps.readArgv(pid)
+  if (argv === undefined) {
     // ALIVE, AND WE COULD NOT LOOK. Not a finding about the process — a failure to
     // make one. Never killed, and never reported as absence.
     log(
@@ -606,7 +592,7 @@ export function identifyOrphanPid(
     )
     return 'unreadable'
   }
-  if (!cmdlineMatchesSession(cmdline, sessionId, claudeBasename)) {
+  if (!argvMatchesSession(argv, sessionId, claudeBasename)) {
     // Recycled or unrelated process — DO NOT kill. The whole point of #105.
     log(
       `orphan-adoption: pid ${pid} alive but cmdline does NOT match session ` +

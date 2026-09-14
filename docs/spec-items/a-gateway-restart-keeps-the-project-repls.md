@@ -517,3 +517,27 @@ tell another instance's pane from a leaked one must not be allowed to close eith
 - [ ] Fence duration follows SPEC.md Decisions Log 2026-09-14, "fence duration".
 - [ ] The claimant liveness probe documents its shared PID namespace assumption beside
       the implementation; PID evidence is distinguished from claimant identity.
+
+## Recorded-pid argv evidence (#672)
+
+Identity and termination must consume a structured argv vector. On Linux, read
+NUL-separated `/proc/<pid>/cmdline`; preserve spaces, newlines and empty arguments.
+A flattened `ps` string may refuse a spawn but must never authorise adoption or
+termination. Without a structured reader (including Darwin), the recorded-pid
+fallback must report `unreadable`, leaving the process untouched and boot
+reconciliation undecided. Structured pane inspection remains available.
+
+This is the stricter task requirement for #672, superseding the filed brief's
+proposal to retain a Darwin string identity fallback. See SPEC.md's 2026-09-14
+recorded-pid identity decision.
+
+Acceptance (verify with `bun test runtime/adapters/claude-code/persistent/__tests__/orphan-adoption.test.ts`):
+
+- [ ] A live child whose flattened argv resembles our invocation but whose real
+  argv[0] is `claude --resume` is refused, on the same input the string matcher accepts.
+- [ ] A live child with our launch shape under a spaced binary path is accepted;
+  empty arguments and paths containing newlines survive the reader unchanged.
+- [ ] Failed, empty or unterminated reads yield `unreadable`, never `not-ours`.
+- [ ] Unsupported platforms cannot derive identity from flattened output.
+- [ ] Mutating the vector into a flattened parse and mutating the identity gate
+  into an unconditional refusal each fail the regression; restoration passes.
