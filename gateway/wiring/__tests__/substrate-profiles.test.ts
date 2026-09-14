@@ -211,7 +211,10 @@ test('every profile records the expected bypass, confinement, credential, and mo
             // NOT one value for every Trident profile: the arbiter has no tools, so the
             // mode that denies every would-be prompt costs it nothing; the profiles whose
             // agents must WRITE and RUN are inert under it (measured on claude 2.1.270).
-            permission_mode: name === 'PROFILE_ARBITER' ? ('dontAsk' as const) : ('acceptEdits' as const),
+            // Every Trident profile must be able to return its result; see
+            // "a profile whose agent must PRODUCE AN ANSWER…" below for what the
+            // arbiter's former `dontAsk` cost.
+            permission_mode: 'acceptEdits' as const,
           }
         : {}),
       github_credential: github_credential!,
@@ -244,22 +247,51 @@ test('every profile records the expected bypass, confinement, credential, and mo
  * the tool-less arbiter must — otherwise "everything is acceptEdits" would satisfy
  * the first half alone.
  */
-test('a profile whose agent must act never carries the mode that denies every tool', () => {
-  const MUST_ACT = {
+test('a profile whose agent must PRODUCE AN ANSWER never carries the mode that denies every tool', () => {
+  // THE PROPERTY WIDENED, AND IT COST A VERDICT TO LEARN. This case used to say
+  // "must ACT", exempting the arbiter because it grants no tools — and asserted
+  // the arbiter DOES carry `dontAsk`, so the exemption was pinned rather than
+  // merely allowed. But answering IS a tool call: the verdict leaves through the
+  // MCP reply channel, and `allowedMcpTools` is populated only when the tool
+  // bridge is attached (`spawn.ts`), which this profile never has. `dontAsk`
+  // therefore denied the arbiter the single thing it exists to do, emitting no
+  // prompt for the auto-approver to answer, and the turn hung until the
+  // inactivity watchdog abandon-poisoned the REPL hosting it. Observed
+  // 2026-09-14, in the arbiter's own words: "the call was denied by the
+  // permission mode … that tool is the designated channel for my response".
+  //
+  // Acting and answering are the same requirement seen from two ends, so the
+  // list is now every Trident profile.
+  const MUST_PRODUCE_AN_ANSWER = {
     PROFILE_EPHEMERAL,
     PROFILE_LEAK_FIXER,
     PROFILE_WARM_FIRE,
+    PROFILE_ARBITER,
   } as const
-  for (const [name, profile] of Object.entries(MUST_ACT)) {
+  for (const [name, profile] of Object.entries(MUST_PRODUCE_AN_ANSWER)) {
     expect(profile.restricted, `${name} must stay confined`).toBe(true)
     expect(profile.skip_permissions, `${name} must not bypass`).toBe(false)
-    expect(profile.permission_mode, `${name} would be inert under dontAsk`).toBe('acceptEdits')
+    expect(
+      profile.permission_mode,
+      `${name} cannot return its result under dontAsk`,
+    ).toBe('acceptEdits')
   }
-  // The complement. The arbiter grants NO tools, so the strictest prompt policy
-  // costs it nothing — and if this ever relaxes, the reason has to be argued.
-  expect(PROFILE_ARBITER.permission_mode).toBe('dontAsk')
-  expect(PROFILE_ARBITER.restricted).toBe(true)
-  expect(PROFILE_ARBITER.skip_permissions).toBe(false)
+})
+
+test('the confinement, not the prompt policy, is what bounds these profiles', () => {
+  // THE NON-VACUITY CONTROL the previous version got from the arbiter's `dontAsk`.
+  // With every Trident profile on `acceptEdits`, "they are all acceptEdits" would
+  // satisfy the case above on its own — so the boundary has to be asserted where
+  // it actually lives. `acceptEdits` auto-accepts tool PROMPTS; it grants no tool.
+  // The arbiter's real bound is that it is handed none, which `--tools ""`
+  // enforces at CLI level and which survives even
+  // `--dangerously-skip-permissions` (measured against a real binary in
+  // `trident/__tests__/arbiter-tool-gate.e2e.test.ts`).
+  expect(PROFILE_ARBITER.github_credential, 'a judge must not be able to merge or push').toBe(false)
+  expect(PROFILE_ARBITER.restricted, 'and stays confined regardless of prompt policy').toBe(true)
+  // And the modes are still a real decision rather than one value everywhere:
+  // the NON-Trident profiles are untouched by this change.
+  expect(PROFILE_UNTRUSTED_IMPORT.permission_mode).not.toBe('acceptEdits')
 })
 
 test('the fire window is BELOW the absolute ceiling, so the ceiling stays the terminal authority', () => {
@@ -364,7 +396,9 @@ for (const { site, profile, extra } of SITES) {
     // Trident sites deliberately diverge from the legacy bypass control.
     if (isTrident) {
       expect(viaProfile.restricted).toBe(true)
-      expect(viaProfile.permission_mode).toBe(profile === PROFILE_ARBITER ? 'dontAsk' : 'acceptEdits')
+      // Every Trident profile, the arbiter included: it has to return its verdict
+      // through the MCP reply channel, which `dontAsk` denies.
+      expect(viaProfile.permission_mode).toBe('acceptEdits')
       expect(viaInline.restricted).toBeUndefined()
       expect(viaInline.permission_mode).toBeUndefined()
     }
