@@ -356,6 +356,14 @@ export class MobileChatSession {
   }
 
   private async handleInbound(data: unknown): Promise<void> {
+    const rejection = await this.queue.rejectFrame(data, this.topic_id)
+    if (rejection !== null) {
+      this.emitChange()
+      for (const l of this.listeners) {
+        try { l.onFrame?.(rejection) } catch { /* isolate observers from delivery */ }
+      }
+      return
+    }
     // Hand the raw frame to the UI first so streaming partials + typing
     // brackets render even though chat-core only persists final messages.
     for (const l of this.listeners) l.onFrame?.(data);

@@ -56,7 +56,7 @@ export type RenderRole = 'user' | 'agent'
  * mobile `DeliveryState`; redefined here so the browser bundle doesn't pull in
  * the RN `app/` package.
  */
-/** Delivery knowledge: pending (unknown), failed (rejected/errored), or
+/** Delivery knowledge: pending (unknown), failed (rejected), or
  * acknowledged (delivered/read). Socket acceptance alone is still pending. */
 export type DeliveryState = 'pending' | 'failed' | 'delivered' | 'read'
 
@@ -910,7 +910,7 @@ export class NeutronChatController {
 
   /**
    * W5 GAP-4 — retry a failed send. The web UI's ⚠️ "Failed — retry" affordance
-   * calls this with the failed message's client_msg_id; it re-drives every
+   * calls this with the failed message's client_msg_id; it re-drives that
    * not-yet-`acked` send over the current socket, idempotently on client_msg_id
    * (the server de-dupes and the `was_new` guard means a re-delivery never
    * re-fires the agent). A no-op against a legacy fake session without `retry`.
@@ -1300,8 +1300,7 @@ export class NeutronChatController {
       // message a silent dead-end. The common LLM-failure path ships a friendly
       // `agent_message` (not an `error` frame), so this only renders the genuine
       // surface errors (button_choice_failed, dispatch_failed, malformed_envelope,
-      // resume_failed) — matching the Expo native client, which already appends a
-      // system bubble for `error` frames.
+      // resume_failed). Mobile surfaces these through its notice pill.
       this.awaitingReply = false
       const msg = typeof f['message'] === 'string' ? (f['message'] as string) : ''
       const code = typeof f['code'] === 'string' ? (f['code'] as string) : ''
@@ -2143,7 +2142,7 @@ export function deliveryFor(m: ChatMessage, selfDeviceId: string): DeliveryState
   if (m.role !== 'user') return null
   if (m.status === 'queued') return 'pending'
   if (m.status === 'sent') return 'pending'
-  // Only an explicit rejection or send error is a failure.
+  // Only an explicit rejection is a failure.
   if (m.status === 'failed') return 'failed'
   const readBy = m.read_by
   if (readBy !== null && readBy !== undefined) {

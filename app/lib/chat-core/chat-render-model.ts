@@ -232,6 +232,12 @@ export function foldSystemNoticeFrame(
   const f = frame as Record<string, unknown>;
   const type = f['type'];
 
+  // Error notices arrive on this session's socket and remain visible until
+  // the next send/reply. In particular, unmatched rejection must not disappear.
+  if (type === 'error' && typeof f['message'] === 'string') {
+    return { text: f['message'], replyStarted: false };
+  }
+
   if (isTransientSystemNotice(frame)) {
     // Drop a LATE ack: never show the pill once this turn's reply has started.
     if (state.replyStarted) return state;
@@ -348,7 +354,7 @@ export function rowKey(message: ChatMessage): string {
  * device other than the sender — the agent loop (which marks every inbound
  * user message read once it picks it up) or a second device on the account.
  *
- * Delivery knowledge: pending (unknown), failed (rejected/errored), or
+ * Delivery knowledge: pending (unknown), failed (rejected), or
  * acknowledged (delivered/read). Socket acceptance alone is still pending. */
 export type DeliveryState = 'pending' | 'failed' | 'delivered' | 'read';
 
@@ -368,7 +374,7 @@ export function deliveryState(
     case 'sent':
       return 'pending'; // 🕓 — delivery is unknown until the server echo
     case 'failed':
-      return 'failed'; // explicit rejection or send error
+      return 'failed'; // explicit rejection
     case 'acked':
       // ✓✓ delivered; promotes to read once another device/agent has read it.
       return isReadByOther(message.read_by, selfDeviceId) ? 'read' : 'delivered';

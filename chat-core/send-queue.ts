@@ -116,8 +116,8 @@ export class SendQueue {
   }
 
   /**
-   * Reconnect retry: drain every NOT-yet-acked message (both `queued` and
-   * `sent`) to the socket, oldest first, marking each `sent`.
+   * Reconnect retry: drain every NOT-yet-acked message (`queued`, `sent`
+   * and `failed`) to the socket, oldest first. Rejection persists until echo.
    *
    * A row reaches `sent` the instant `WebSocket.send()` accepts the frame —
    * but if the connection drops before the server persists + echoes it, the
@@ -144,7 +144,7 @@ export class SendQueue {
         // Socket down — leave this and the rest for the next reconnect.
         break
       }
-      // A `queued` row advances to `sent`; a `sent` row stays `sent` (the
+      // A `queued` row advances to `sent`; `sent`/`failed` retain status (the
       // retry is idempotent server-side). Never regress an `acked` row — they
       // were filtered out above.
       if (msg.status === 'queued') {
@@ -183,6 +183,28 @@ export class SendQueue {
       await this.store.upsert({ ...msg, status: 'sent' })
     }
     return { ...msg, status: 'sent' }
+  }
+
+  /** Apply only explicit wire refusals; report unmatched/stale IDs separately.
+   * The store's status rank continuously keeps a late ack authoritative.
+   */
+  async rejectFrame(data: unknown, topic_id: string): Promise<{
+    v: 1; type: 'error'; code: string; message: string
+  } | null> {
+    if (typeof data !== 'object' || data === null) return null
+    const frame = data as Record<string, unknown>
+    if (frame['type'] !== 'message_rejected') return null
+    const id = frame['client_msg_id']
+    if (frame['v'] !== 1 || typeof id !== 'string' || id.length === 0 || id.length > 128 ||
+        typeof frame['code'] !== 'string' || typeof frame['message'] !== 'string') {
+      return { v: 1, type: 'error', code: 'invalid_rejection', message: 'Invalid message rejection received; delivery status was not changed.' }
+    }
+    const msg = await this.store.getByClientMsgId(topic_id, id)
+    if (msg === null || msg.status === 'acked') {
+      return { v: 1, type: 'error', code: 'unmatched_rejection', message: `Unmatched message rejection (${id}): ${frame['message']}` }
+    }
+    await this.store.upsert({ ...msg, status: 'failed' })
+    return { v: 1, type: 'error', code: frame['code'], message: frame['message'] }
   }
 
   /** Count of messages still awaiting delivery (queued) for a topic. */

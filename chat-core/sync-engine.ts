@@ -341,7 +341,7 @@ export class SyncEngine {
     const localCursor = await this.store.lastSeenSeq(topic_id)
     if (localCursor > 0 && serverMaxSeq < localCursor) {
       // Drop ONLY the dead server's acked transcript, preserving un-acked local
-      // sends (status queued/sent — the user's typed-but-undelivered messages,
+      // sends (status queued/sent/failed — the user's typed-but-undelivered messages,
       // which carry no server seq) so a reset NEVER loses a send: the
       // `resume`/flush that follows re-drives them against the fresh server
       // (idempotent on client_msg_id). A SINGLE store operation, so a send that
