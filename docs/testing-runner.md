@@ -78,10 +78,18 @@ boot test can consume its 15-second budget waiting on infrastructure rather than
 testing boot.
 
 Listener-opening files therefore run after the other special lanes in their own
-process with `--max-concurrency=1`. They retain `NEUTRON_TEST_TIMEOUT`, have no
-retry budget, and fail the run normally. Membership is content-derived from a
+process(es) with `--max-concurrency=1`. They retain `NEUTRON_TEST_TIMEOUT`, have
+no retry budget, and fail the run normally. Membership is content-derived from a
 direct `Bun.serve(...)` or an awaited `boot(...)` / `bootSignup(...)` call, so a
 new real-listener test is isolated without adding an allowlist entry.
+
+This lane is the biggest special lane — 157 files on this tree against 18 for
+PGLite and 38 for the device harness — so it is chunked at
+`NEUTRON_TEST_CHUNK_SIZE` exactly like the general lane. One `bun test` process
+holding all 157 measured 1.1 GB peak RSS, which is the unbounded-single-process
+condition this runner exists to prevent. Chunking costs nothing in isolation:
+the batches run strictly one after another, and each batch is still
+`--max-concurrency=1`, so at most one listener-opening test is ever in flight.
 
 ### What it looks like when you bypass the lane
 

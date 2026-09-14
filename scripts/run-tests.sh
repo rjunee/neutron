@@ -74,9 +74,17 @@
 # though each general chunk runs in a fresh process. At general-lane concurrency
 # that allocator can be exhausted: Bun then reports EADDRINUSE even for `port: 0`,
 # and a later boot test spends its test budget waiting on infrastructure it does
-# not control. Run listener-opening files serially in their own process. The
-# normal 15s per-test budget and fail-fast outcome stay unchanged: this is
-# isolation, not patience or a retry that could hide a broken boot.
+# not control. Run listener-opening files serially, in their own process(es),
+# after every general chunk has finished. The normal 15s per-test budget and
+# fail-fast outcome stay unchanged: this is isolation, not patience or a retry
+# that could hide a broken boot.
+#
+# This is the largest special lane (157 files on this tree vs 18 PGLite and 38
+# device), so it is CHUNKED at CHUNK_SIZE like the general lane — one process
+# holding all 157 measured 1.1 GB peak RSS, which is the unbounded-process
+# condition this runner exists to prevent (#78). Batches run strictly one after
+# another and each is --max-concurrency=1, so at most one listener-opening test
+# is in flight at any instant, chunked or not.
 #
 # USAGE
 #   scripts/run-tests.sh                 # run the whole suite, bounded memory
@@ -593,7 +601,7 @@ if [ "$NDEVICE" -gt 0 ]; then
   echo "run-tests: device-harness lane → ${NDEVICE} files, isolated process (DOM + module-alias globals)"
 fi
 if [ "$NHTTP" -gt 0 ]; then
-  echo "run-tests: real-HTTP lane → ${NHTTP} files, isolated process, serial=1, timeout=${TIMEOUT}ms"
+  echo "run-tests: real-HTTP lane → ${NHTTP} files, isolated process(es) of <=${CHUNK_SIZE}, serial=1, timeout=${TIMEOUT}ms"
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
@@ -669,16 +677,37 @@ run_device_lane() {
 # Real listeners contend for the host ephemeral-port allocator across processes,
 # so a fresh chunk alone is insufficient. Serial execution bounds acquisition
 # pressure while retaining the ordinary timeout and fatal-on-failure semantics.
+#
+# The lane is itself CHUNKED at CHUNK_SIZE, for the same reason the general lane
+# is: this lane is the suite's largest special lane (157 files on this tree, vs
+# 18 PGLite and 38 device), and one `bun test` process holding all of them
+# measured 1.1 GB peak RSS — the exact unbounded-single-process condition this
+# runner exists to prevent (#78). Chunking does NOT weaken the isolation: the
+# batches run one after another, never concurrently, and each batch still runs
+# --max-concurrency=1, so at most one listener-opening test is in flight at any
+# moment either way. Batch results are folded into ONE `http` results line so the
+# lane stays a single lane for the coverage audit and the LANES count.
 run_http_lane() {
   local llog="$WORK/lane-http.log"
-  {
-    echo "==== real-HTTP isolation lane: ${NHTTP} files (own process, max-concurrency=1, timeout=${TIMEOUT}ms) ===="
-    NO_COLOR=1 "$BUN" test "${HTTP_FILES[@]}" --timeout="$TIMEOUT" --max-concurrency=1 2>&1
-  } >"$llog" 2>&1
-  local rc=$?
-  local ran; ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+  local rc=0 ran=0 start=0 nbatch=0
+  : > "$llog"
+  nbatch=$(( (NHTTP + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+  while [ "$start" -lt "$NHTTP" ]; do
+    local batch=( "${HTTP_FILES[@]:start:CHUNK_SIZE}" )
+    local blog="$WORK/lane-http-$(printf '%03d' "$start").log"
+    {
+      echo "==== real-HTTP isolation lane batch $(( start / CHUNK_SIZE + 1 ))/${nbatch}: ${#batch[@]} files (own process, max-concurrency=1, timeout=${TIMEOUT}ms) ===="
+      NO_COLOR=1 "$BUN" test "${batch[@]}" --timeout="$TIMEOUT" --max-concurrency=1 2>&1
+    } >"$blog" 2>&1
+    local brc=$?
+    if [ "$brc" != "0" ]; then rc="$brc"; fi
+    local bran; bran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$blog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+    ran=$(( ran + ${bran:-${#batch[@]}} ))
+    cat "$blog" >> "$llog"
+    start=$(( start + CHUNK_SIZE ))
+  done
   cat "$llog"
-  echo "http ${rc} ${NHTTP} ${ran:-$NHTTP}" >> "$WORK/results"
+  echo "http ${rc} ${NHTTP} ${ran}" >> "$WORK/results"
 }
 
 idx=0

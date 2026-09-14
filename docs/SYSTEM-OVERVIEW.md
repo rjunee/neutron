@@ -8614,8 +8614,9 @@ silent truncation. For a single file, bare `bun test <file>` is fine.
   `pglite`), so new PGLite tests are quarantined automatically; lane files still
   count toward the coverage audit.
 - **Real-HTTP isolation lane.** Test files that directly open `Bun.serve(...)` or
-  await a production `boot(...)` / `bootSignup(...)` helper run serially in a
-  dedicated process. Real listeners share the host ephemeral-port allocator
+  await a production `boot(...)` / `bootSignup(...)` helper run serially in
+  dedicated process(es), chunked at `NEUTRON_TEST_CHUNK_SIZE` like the general
+  lane. Real listeners share the host ephemeral-port allocator
   across test processes; bounding listener acquisition prevents a concurrent
   general chunk from exhausting it and turning `port: 0` into `EADDRINUSE`.
   These tests retain the ordinary 15-second budget, get no retry, and count
