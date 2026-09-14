@@ -52,11 +52,13 @@ export type RenderRole = 'user' | 'agent'
 
 /**
  * Track B Phase 4 — the per-message delivery ladder for an outbound (user)
- * message: 🕓 pending → ✓ sent → ✓✓ delivered → ✓✓ read (blue). Mirrors the
+ * message: 🕓 pending → ✓✓ delivered/read, or ⚠️ explicit failure. Mirrors the
  * mobile `DeliveryState`; redefined here so the browser bundle doesn't pull in
  * the RN `app/` package.
  */
-export type DeliveryState = 'pending' | 'sent' | 'failed' | 'delivered' | 'read'
+/** Delivery knowledge: pending (unknown), failed (rejected/errored), or
+ * acknowledged (delivered/read). Socket acceptance alone is still pending. */
+export type DeliveryState = 'pending' | 'failed' | 'delivered' | 'read'
 
 /**
  * BUG 3 (live history-import progress) — the in-flight state of a ChatGPT/Claude
@@ -2134,16 +2136,14 @@ export class NeutronChatController {
 /**
  * Track B Phase 4 — derive an outbound message's delivery ladder from its send
  * status + read aggregate. Mirrors the mobile `deliveryState`: queued→pending,
- * sent→sent, acked→delivered, and acked→read once any device OTHER than this
+ * sent→pending, failed→failed, acked→delivered, and acked→read once any device OTHER than this
  * one (incl. the synthetic `agent` reader) appears in `read_by`.
  */
 export function deliveryFor(m: ChatMessage, selfDeviceId: string): DeliveryState | null {
   if (m.role !== 'user') return null
   if (m.status === 'queued') return 'pending'
-  if (m.status === 'sent') return 'sent'
-  // W5 GAP-4 — the ack never arrived within the ack-timeout: show a retry
-  // affordance, not a stuck clock (and never a false ✓✓ delivered). Checked
-  // before the read-aggregate fall-through, which assumes an acked row.
+  if (m.status === 'sent') return 'pending'
+  // Only an explicit rejection or send error is a failure.
   if (m.status === 'failed') return 'failed'
   const readBy = m.read_by
   if (readBy !== null && readBy !== undefined) {

@@ -16,7 +16,7 @@
  *   1. "a socket is negotiating"  — plumbing. Gone, with no replacement.
  *   2. "your message is not going anywhere" — real, and it still has to reach
  *      him. It reaches him by THREE routes, none of which is the old label:
- *      - the per-bubble delivery glyph (🕓 queued → ✓ sent → ⚠️ failed-with-retry;
+ *      - the per-bubble delivery glyph (🕓 queued/sent → ✓✓ acknowledged; ⚠️ explicitly failed with retry;
  *        `lib/chat-core/chat-render-model.ts` `deliveryState`), which is the
  *        iMessage-shaped, per-message channel and is unaffected by this file;
  *      - {@link ConnectionNoticeProps.sendError}, INSTANT and unthrottled — a

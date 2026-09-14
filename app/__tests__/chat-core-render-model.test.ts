@@ -151,11 +151,11 @@ describe('frameMatchesProject', () => {
 describe('deliveryState', () => {
   it('maps user send status to the checkmark ladder', () => {
     expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'queued' }))).toBe('pending');
-    expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'sent' }))).toBe('sent');
+    expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'sent' }))).toBe('pending');
     expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'acked' }))).toBe('delivered');
   });
 
-  it('W5 GAP-4 — maps a never-acked (failed) send to the retry state, not a stuck clock', () => {
+  it('maps an explicitly failed send to the retry state', () => {
     expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'failed' }))).toBe('failed');
     // A failed row never masquerades as ✓✓ delivered/read even if receipts leaked in.
     expect(
@@ -186,12 +186,11 @@ describe('deliveryState', () => {
   it('a queued/sent message ignores receipts', () => {
     expect(
       deliveryState(userMsg({ client_msg_id: 'c', status: 'sent', read_by: ['agent'] })),
-    ).toBe('sent');
+    ).toBe('pending');
   });
 
-  it('glyphs escalate pending → sent → delivered → read (read shares ✓✓)', () => {
+  it('glyphs distinguish unknown, failed, and acknowledged delivery', () => {
     expect(deliveryGlyph('pending')).toBe('🕓');
-    expect(deliveryGlyph('sent')).toBe('✓');
     expect(deliveryGlyph('failed')).toBe('⚠️');
     expect(deliveryGlyph('delivered')).toBe('✓✓');
     expect(deliveryGlyph('read')).toBe('✓✓');

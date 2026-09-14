@@ -329,7 +329,7 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
   it('W5 GAP-4 — round-trips a `failed` send (cold-open must NOT revert it to a pending clock)', async () => {
     const db = freshDb();
     const first = await SqliteChatStore.open(bunExecutor(db));
-    // A send that timed out awaiting its ack (flipped sent → failed).
+    // An explicitly failed send must survive a store round trip.
     await first.upsert(msg({ client_msg_id: 'c-fail', body: 'never acked', created_at: 5, status: 'failed' }));
     expect((await first.list(TOPIC))[0]?.status).toBe('failed');
 

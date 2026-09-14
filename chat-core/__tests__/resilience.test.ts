@@ -6,13 +6,13 @@
  *   GAP-1  half-open socket (no `onclose`) → heartbeat detects it → force-close
  *          → reconnect fires; a pong (or any inbound) keeps a live socket alive.
  *   GAP-2  network flap → `notifyReachable()` → immediate reconnect, backoff reset.
- *   GAP-4  an ack that never arrives → `sent` → `failed` → re-queue + resend on
+ *   GAP-4  an ack that never arrives → stays pending → resend on
  *          reconnect (idempotent on client_msg_id, no dup in the store).
  *   GAP-5  every (re)open resumes from the MAX seq cursor AND drains the queue on
  *          the SAME open — via session_ready, or the onOpen fallback if it never
  *          comes; a normal connect never double-resumes.
  *
- * The through-line assertion: the client NEVER shows a permanently-stuck clock.
+ * Delivery stays unknown until evidence arrives; transport liveness drives reconnect.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -102,7 +102,7 @@ class VirtualClock {
   }
 }
 
-/** Let queued microtasks (async handleInbound / flush / ack-timeout) settle. */
+/** Let queued microtasks (async handleInbound / flush) settle. */
 async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0))
   await new Promise((r) => setTimeout(r, 0))
@@ -369,10 +369,10 @@ describe('W5 FIX 7 — a late onopen while inactive must not wake the client', (
 })
 
 // ===========================================================================
-// GAP-4 — ack-timeout → failed → resend on reconnect (WebChatSession)
+// Unacknowledged delivery → pending → resend on reconnect (WebChatSession)
 // ===========================================================================
-describe('W5 GAP-4 — a never-acked send flips to failed, never a stuck clock', () => {
-  it('sent → failed on ack-timeout, then idempotently resends + reconciles on reconnect', async () => {
+describe('unacknowledged sends remain pending', () => {
+  it('stays sent beyond the former ack deadline, then reconciles on reconnect', async () => {
     const clock = new VirtualClock()
     const sockets: FakeSocket[] = []
     const session = new WebChatSession({
@@ -389,7 +389,6 @@ describe('W5 GAP-4 — a never-acked send flips to failed, never a stuck clock',
         let t = 0
         return () => ++t
       })(),
-      ackTimeoutMs: 15_000,
       resumeFallbackMs: 0, // isolate GAP-5 fallback; session_ready drives resume
       setTimeoutFn: clock.set,
       clearTimeoutFn: clock.clear,
@@ -399,20 +398,19 @@ describe('W5 GAP-4 — a never-acked send flips to failed, never a stuck clock',
     sockets[0]!.deliver(readyFrame())
     await tick()
 
-    // Send while open → delivered, marked `sent` (the 🕓 clock).
+    // Socket acceptance is not proof of server acknowledgement.
     await session.send('important', { client_msg_id: 'cmid-x' })
     await tick()
     expect(sockets[0]!.frames('user_message').map((e) => e['body'])).toEqual(['important'])
     expect((await session.messages())[0]?.status).toBe('sent')
 
-    // The server echo never arrives. After the ack-timeout the clock is NOT
-    // stuck — it flips to `failed` so the UI can show a retry affordance.
-    clock.advance(15_000)
+    // The server can store a message while its echo is delayed. Silence is unknown.
+    clock.advance(60_000)
     await tick()
-    expect((await session.messages())[0]?.status).toBe('failed')
+    expect((await session.messages())[0]?.status).toBe('sent')
 
     // Reconnect: a FRESH socket opens (the realistic model — one session_ready
-    // per connection) and the failed send is re-driven idempotently on it.
+    // per connection) and the unacknowledged send is re-driven idempotently on it.
     sockets[0]!.fireClose()
     session.setActive(false) // cancel the auto-reconnect timer
     session.setActive(true) // synchronously open a fresh socket
@@ -464,7 +462,6 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
         let t = 0
         return () => ++t
       })(),
-      ackTimeoutMs: 0, // isolate GAP-4
       resumeFallbackMs,
       setTimeoutFn: clock.set,
       clearTimeoutFn: clock.clear,

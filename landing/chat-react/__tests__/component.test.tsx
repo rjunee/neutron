@@ -138,6 +138,8 @@ describe('ChatApp render (happy-dom)', () => {
       await tick()
     })
     expect(container.textContent).toContain('hello there')
+    expect(container.querySelector('[aria-label="Message pending acknowledgement"]')?.textContent).toContain('🕓')
+    expect(container.querySelector('.car-msg-failed')).toBeNull()
 
     // Stream a couple of tokens — the live agent bubble exists (running status,
     // text is smooth-revealed via RAF which doesn't flush in happy-dom, so we
@@ -232,6 +234,17 @@ describe('ChatApp render (happy-dom)', () => {
       await tick()
     })
     expect(container.textContent).toContain('This message was deleted')
+
+    // A late echo promotes the original pending bubble without a duplicate.
+    const sent = sentFrames.map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .find((frame) => frame['body'] === 'hello there')!
+    await act(async () => {
+      sockets[0]!.deliver({ v: 1, type: 'user_message', message_id: 'late-echo',
+        client_msg_id: sent['client_msg_id'], seq: 2, body: 'hello there', ts: 7 })
+      await tick()
+    })
+    expect(container.querySelector('[aria-label="Message delivered"]')?.textContent).toContain('✓✓')
+    expect(container.querySelector('.car-msg-failed')).toBeNull()
 
     await act(async () => {
       root.unmount()

@@ -19,6 +19,7 @@ import type { SocketLike } from '@neutronai/chat-core';
 
 import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types/topic-id.ts';
 import { parseDevTokenUserId } from '../lib/auth-helpers';
+import { deliveryState, deliveryGlyph } from '../lib/chat-core/chat-render-model';
 import { MobileChatSession } from '../lib/chat-core/mobile-session';
 import {
   SqliteChatStore,
@@ -659,8 +660,8 @@ class VirtualClock {
   }
 }
 
-describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession)', () => {
-  it('flips a never-acked send sent → failed, then re-drives it on reconnect (never a stuck clock)', async () => {
+describe('MobileChatSession — unknown delivery (parity with WebChatSession)', () => {
+  it('keeps a stored but unacknowledged send pending, then reconciles on reconnect', async () => {
     const store = await freshStore();
     const clock = new VirtualClock();
     const sockets: FakeSocket[] = [];
@@ -678,7 +679,6 @@ describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession
         let t = 1000;
         return () => (t += 1);
       })(),
-      ackTimeoutMs: 15_000,
       heartbeatIntervalMs: 0, // isolate GAP-4 from the GAP-1 heartbeat
       setTimeoutFn: clock.set,
       clearTimeoutFn: clock.clear,
@@ -689,18 +689,20 @@ describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession
     sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
     await tick();
 
-    // Send while open → delivered, marked `sent` (the 🕓 clock).
+    // Socket acceptance is not proof of server acknowledgement.
     await session.send('important', { client_msg_id: 'ack-x' });
     await tick();
     expect((await session.messages())[0]?.status).toBe('sent');
 
-    // The echo never arrives → after the ack-timeout the clock is NOT stuck:
-    // it flips to `failed` so the render layer shows a retry affordance.
-    clock.advance(15_000);
+    // The server can store a message while its echo is delayed. Silence is unknown.
+    clock.advance(60_000);
     await tick();
-    expect((await session.messages())[0]?.status).toBe('failed');
+    const pending = (await session.messages())[0]!;
+    expect(pending.status).toBe('sent');
+    expect(deliveryState(pending)).toBe('pending');
+    expect(deliveryGlyph(deliveryState(pending)!)).toBe('🕓');
 
-    // Reconnect: a fresh socket opens and the failed send is re-driven idempotently.
+    // Reconnect: a fresh socket opens and the unacknowledged send is re-driven idempotently.
     sockets[0]!.close();
     clock.advance(1_000); // fire the reconnect backoff → new socket
     await tick();
@@ -727,6 +729,8 @@ describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession
     expect(msgs.length).toBe(1);
     expect(msgs[0]?.status).toBe('acked');
     expect(msgs[0]?.seq).toBe(7);
+    expect(deliveryState(msgs[0]!)).toBe('delivered');
+    expect(deliveryGlyph(deliveryState(msgs[0]!)!)).toBe('✓✓');
     session.stop();
   });
 });
@@ -764,7 +768,6 @@ describe('MobileChatSession — W5 GAP-4 per-message retry (FIX 11 parity)', () 
       // Open WITHOUT a session_ready so the resume path (re-drives ALL unacked)
       // can't confound the per-message retry; no ack timers / heartbeat noise.
       heartbeatIntervalMs: 0,
-      ackTimeoutMs: 0,
     });
     session.start();
     sockets[0]!.open();

@@ -108,7 +108,6 @@ export { OpfsChatStore, createWebStore } from './stores/opfs-store.ts'
 
 export {
   WebChatSession,
-  DEFAULT_ACK_TIMEOUT_MS,
   DEFAULT_RESUME_FALLBACK_MS,
   type WebChatSessionOptions,
 } from './web-session.ts'

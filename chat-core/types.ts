@@ -116,12 +116,8 @@ export interface MessageReaction {
  *  - `queued` — written to the local store, not yet handed to the socket
  *    (offline, or buffered before flush).
  *  - `sent`   — handed to the socket; awaiting the server echo.
- *  - `failed` — GAP-4: handed to the socket but no ack arrived within the
- *    ack-timeout window, so the socket was (silently) lost. A terminal-until-
- *    retried state that lets the UI swap the stuck 🕓 clock for a retry
- *    affordance. NOT a lost send: it is re-driven (idempotently, on
- *    `client_msg_id`) on the next reconnect and reconciles to `acked` when the
- *    echo finally lands.
+ *  - `failed` — an explicit rejection or send error; silence is not failure.
+ *    A later server echo still reconciles it to `acked`.
  *  - `acked`  — the server echo (with `seq` + `message_id`) has reconciled
  *    it. Inbound agent/user messages from the server are born `acked`.
  *

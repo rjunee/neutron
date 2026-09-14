@@ -405,7 +405,7 @@ describe('WebChatSession — W5 GAP-4 per-message retry (FIX 10)', () => {
 
   it('re-drives ONLY the tapped message, never its siblings', async () => {
     const store = new InMemoryStore()
-    // Two sends that both timed out awaiting their ack (status `failed`).
+    // Two explicitly failed sends (status `failed`).
     await store.upsert(failedRow('A', 'alpha', 1))
     await store.upsert(failedRow('B', 'beta', 2))
     const sockets: FakeSocket[] = []
@@ -422,7 +422,6 @@ describe('WebChatSession — W5 GAP-4 per-message retry (FIX 10)', () => {
       // resume path (which re-drives ALL unacked) can't confound this — isolating
       // the manual per-message retry.
       resumeFallbackMs: 0,
-      ackTimeoutMs: 0,
     })
     session.start()
     sockets[0]!.open()
@@ -454,7 +453,6 @@ describe('WebChatSession — W5 GAP-4 per-message retry (FIX 10)', () => {
         return s
       },
       resumeFallbackMs: 0,
-      ackTimeoutMs: 0,
     })
     session.start()
     sockets[0]!.open()

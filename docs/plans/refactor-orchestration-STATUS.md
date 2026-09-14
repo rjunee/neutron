@@ -347,11 +347,13 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
      mandate; prod passes a resolved config; explicit-port precedence preserved for valid/unset env; all
      cited `boot({port:0})` callers pass).
 3. **W5** ✅ #263 (chat-core connection resilience `[BEHAVIOR]`).
+   - **#608 correction:** elapsed acknowledgement deadlines no longer imply failure.
+     Both sessions retain unknown delivery as pending until evidence arrives.
    - **W5 note — WAVE 2 LOCAL UNITS COMPLETE.** The 4 shared socket-lifecycle gaps (heartbeat/half-open,
-     reachability reconnect, ack-timeout→`failed`, resume-on-every-reopen) + a fully-wired per-message
+     reachability reconnect, delivery tracking, resume-on-every-reopen) + a fully-wired per-message
      `failed`/retry affordance on BOTH web and mobile. **7 Codex rounds** — a real defect each round,
      all fixed: dup-resume on late `session_ready`; fallback-on-closed-socket unhandled rejection; GAP-2
-     web `online` listener; durable-store `failed`→`queued` corruption; native mobile ack-timeout parity
+     web `online` listener; durable-store `failed`→`queued` corruption; native mobile delivery parity
      (+ 11 pre-existing mobile heartbeat failures round-1's verify missed); deactivated-client revival on
      late open; heartbeat-not-rearmed-on-foreground; web+mobile retry wiring → per-message `flushOne`
      (was resending all unacked). Orchestrator merged current `main` (C1) into the branch mid-review to
