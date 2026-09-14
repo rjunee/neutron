@@ -2,7 +2,7 @@
  * @neutronai/app — WORK BOARD row (Work Board Phase 1b; M1 UX redesign).
  *
  * A FLAT one-line row (NOT a card — that's Tasks). Left-to-right: a status dot
- * that reflects the build lifecycle (tap to advance status), the one-line
+ * that reflects the build lifecycle (tap to inspect its worker), the one-line
  * title (tap to edit), a phase TAG capsule + a muted `round N` trail for a
  * bound run, then a drag grip / ▶-or-↻ / ✕ action cluster. The completed
  * variant is dimmed with a strikethrough title + a right-aligned "Merged · Jul
@@ -50,7 +50,6 @@ import {
   isRetry,
   roundText,
   runNotice,
-  statusLabel,
   stepTag,
   type DotColorKey,
 } from '../lib/work-board-helpers';
@@ -73,6 +72,8 @@ export interface WorkBoardRowProps {
   /** Total active-lane row count (drag/a11y-action bounds). */
   laneCount: number;
   onAdvance: () => void;
+  /** Opens the inspector resolved from this item's exact linked run. */
+  onInspect?: () => void;
   onRename: (title: string) => void;
   /** Drag drop OR accessibility increment/decrement resolved to a target index. */
   onReorderTo: (targetIndex: number) => void;
@@ -118,6 +119,7 @@ function WorkBoardRowImpl({
   index,
   laneCount,
   onAdvance,
+  onInspect,
   onRename,
   onReorderTo,
   onDelete,
@@ -230,9 +232,9 @@ function WorkBoardRowImpl({
       <View style={styles.line1}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`${statusLabel(item.status)}. Advance status`}
-          disabled={busy}
-          onPress={onAdvance}
+          accessibilityLabel={`Inspect worker for ${item.title}`}
+          disabled={busy || onInspect === undefined}
+          onPress={onInspect}
           style={styles.dotHit}
         >
           <Animated.View
@@ -288,6 +290,7 @@ function WorkBoardRowImpl({
         )}
 
         <View style={styles.actions}>
+          <IconButton label="Advance status" glyph="→" disabled={busy} onPress={onAdvance} />
           <View
             {...panResponder.panHandlers}
             accessible

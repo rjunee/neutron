@@ -147,6 +147,10 @@ export interface ReorderTarget {
   before?: string;
   after?: string;
 }
+export type WorkBoardWorkerResult =
+  | { state: 'running'; run_id: string; worker_state: 'working' | 'blocked'; detail: string; screen: string }
+  | { state: 'finished'; run_id: string | null; phase: string | null }
+  | { state: 'unknown'; run_id: string | null; detail: string };
 
 /**
  * The id the General board answers to ON THE SERVER.
@@ -255,6 +259,11 @@ export class WorkBoardClient extends GatewayHttpClient {
   async start(project_id: string, item_id: string): Promise<{ ok: boolean; run_id?: string }> {
     const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}/start`;
     return await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' });
+  }
+
+  async worker(project_id: string, item_id: string): Promise<WorkBoardWorkerResult> {
+    const path = `/api/app/projects/${seg(project_id)}/work-board/${encodeURIComponent(item_id)}/worker`;
+    return await this.req<WorkBoardWorkerResult>(path);
   }
 }
 

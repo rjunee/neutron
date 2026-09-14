@@ -193,6 +193,10 @@ interface ItemResponse {
   ok: boolean
   item: WorkBoardItem
 }
+export type WorkBoardWorkerResult =
+  | { state: 'running'; run_id: string; worker_state: 'working' | 'blocked'; detail: string; screen: string }
+  | { state: 'finished'; run_id: string | null; phase: string | null }
+  | { state: 'unknown'; run_id: string | null; detail: string }
 export class WorkBoardClientError extends GatewayClientError {
   constructor(code: string, message: string, status: number) {
     super(code, message, status)
@@ -292,6 +296,11 @@ export class WebWorkBoardClient extends GatewayHttpClient {
     const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}/start`
     const res = await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' })
     return { ok: res.ok === true, ...(typeof res.run_id === 'string' ? { run_id: res.run_id } : {}) }
+  }
+
+  async worker(project_id: string, item_id: string): Promise<WorkBoardWorkerResult> {
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}/worker`
+    return await this.req<WorkBoardWorkerResult>(path)
   }
 
   /** Delete an item (the human board is full-CRUD for the owner). */

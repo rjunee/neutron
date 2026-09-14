@@ -20,7 +20,7 @@ so review rounds are not restarted for such a resume.
 **What still does not carry, which is what this item remains open for.**
 
 - The spend rides `linked_run_id`, so anything that moves or clears that link starts a fresh budget: one
-  ordinary status-dot advance off the `failed` lane NULLs it, an intervening non-governed run becomes
+  ordinary status-advance control off the `failed` lane NULLs it, an intervening non-governed run becomes
   what it names, and `onboarding/overnight/register.ts` dispatches with no card at all. `max_ralph_rounds`
   therefore still bounds a RUN and not a CARD (`#629`).
 - The governed plan is still regenerated from scratch. The inner workflow's cheap continuation planner is
@@ -103,7 +103,7 @@ only changes the cadence of a resumed run's LATER iterations, whose behaviour
 **3. `max_ralph_rounds` is still not a bound on the CARD, and this is the structural
 one.** The spend rides `linked_run_id`, and **the cheapest way to clear that is one
 click**: `work-board/store.ts` NULLs `linked_run_id` when a card leaves the `failed`
-lane (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) and again on
+lane (`nextStatus('failed') → 'upcoming'`, the ordinary status-advance control) and again on
 `done → upcoming`. Measured: link cleared → `card_names_no_run` → a full fresh budget,
 same card, same slug, same title, same branch, nothing re-cut. Two other doors need the
 slug lost (`onboarding/overnight/register.ts` creates governed runs with no card; a

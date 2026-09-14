@@ -513,6 +513,8 @@ import {
 } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { isRunLiveForCompletion } from '@neutronai/trident/run-driving.ts'
+import { observeWorkers } from '@neutronai/runtime/adapters/claude-code/persistent/observe-workers.ts'
+import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
   deriveProjectActivity,
@@ -4540,6 +4542,10 @@ export function buildOpenGraphComposer(
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
+      inspect_worker: (run) => observeWorkers([
+        run.worktree ?? runWorktreePath(run.repo_path, run),
+        joinPath(run.repo_path, '.trident-worktrees', `rebase-${run.id}`),
+      ]),
       // Derived inline activity — the wire `inline_active` on every item-bearing
       // HTTP response becomes evidence truth, the stored column stays a hint.
       // The closure DEREFS the late-bound holder at CALL time, so the
