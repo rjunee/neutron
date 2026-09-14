@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -37,7 +38,7 @@ function orchestrator(control: LaunchControl, crashRecovery = false) {
       return { status: 'fired' as const, error: null, launcher_session_key: `generation-${control.fires}` }
     },
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
     mint_run_id: () => {

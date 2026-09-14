@@ -83,7 +83,13 @@ import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { ralphCapFailureReason } from './ralph-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
-import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
+import {
+  assertDiffOutputHost,
+  cleanupAfterMerge,
+  type DiffOutputHost,
+  type HostCommandResult,
+  type MergeCleanupDeps,
+} from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
 import type { TridentArbiter } from './arbiter.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
@@ -172,7 +178,7 @@ export interface BuildTridentOrchestratorOptions {
    *  terminal-result Bash steps. */
   db_path: string
   /** Host command runner — base-branch detect, existing-PR probe, merge. */
-  run_host: RunHostCommand
+  run_host: DiffOutputHost
   /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   /** The stage ledger READ, in ledger order — consulted ONLY for a run whose fire
@@ -2339,6 +2345,7 @@ export function buildTridentOrchestrator(
     options?: StrandedReconcileOptions,
   ) => Promise<TridentRun | null>
 } {
+  assertDiffOutputHost(opts.run_host)
   const now = opts.now ?? (() => new Date().toISOString())
   /** ms-epoch derived from the (injectable) ISO clock — the `harvested_at`
    *  stamp. Falls back to wall-clock ms if the ISO clock is unparseable. */

@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /**
  * A RE-DISPATCH KEEPS THE CARD'S RALPH COUNT (#519).
  *
@@ -1986,7 +1987,7 @@ describe('THE LAUNCHER-CRASH RELAUNCH IS A DIFFERENT PATH, AND IS UNCHANGED', ()
         return { status: 'fired' as const, launcher_session_key: 'gen-healthy' }
       }) as never,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
       base_branch: 'main',
       begin_crash_recovery: (id) => store.beginCrashRecovery(id),
     })

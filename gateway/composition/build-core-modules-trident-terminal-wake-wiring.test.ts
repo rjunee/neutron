@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -50,7 +51,7 @@ function tridentInput(
     ...baseInput(),
     trident: {
       fire_inner_workflow: async () => ({ status: 'fired', error: null }),
-      run_host: async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 }),
+      run_host: honourDiffOutput(async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 })),
       delivery_sink: { send: async () => '' },
       ...(on_terminal_wake === undefined ? {} : { on_terminal_wake }),
     },

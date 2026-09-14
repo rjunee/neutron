@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 /**
  * Production-registration proof for the startup stranded-failure sweep. This
  * drives the real buildCoreModules(...).tridentModule.init path; it never calls
@@ -118,7 +119,7 @@ function input(run_host: RunHostCommand): CompositionInput {
     platform: STUB_PLATFORM,
     trident: {
       fire_inner_workflow: async () => ({ status: 'fired', error: null }),
-      run_host,
+      run_host: honourDiffOutput(run_host),
       delivery_sink: { send: async () => '' },
     },
   }

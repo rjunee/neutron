@@ -1,3 +1,4 @@
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 /**
  * §F1 — the trident MODULE's quiescing shutdown (PR #313).
  *
@@ -86,7 +87,7 @@ describe('trident module shutdown — §F1 quiesce + drain wiring', () => {
       trident: {
         fire_inner_workflow,
         // Stub host so base-branch detection never spawns real git.
-        run_host: async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 }),
+        run_host: honourDiffOutput(async () => ({ ok: true, stdout: 'main', stderr: '', exit_code: 0 })),
         // Supply a sink so the (unused) ChannelRouter fallback isn't needed.
         delivery_sink: { send: async () => '' },
       },

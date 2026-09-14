@@ -40,6 +40,7 @@ branch is cut (standard §3.1, §3.2).
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
+| [`a-fake-cannot-be-silently-incomplete`](a-fake-cannot-be-silently-incomplete.md) | Require output-capable hosts at merge construction | P1 | — |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
 | [`absence-is-a-question-about-the-ref`](absence-is-a-question-about-the-ref.md) | An absence claim about a tracked file is a question about the ref | P1 | — |
 | [`blocked-is-not-slow`](blocked-is-not-slow.md) | Distinguish blocked workers from slow and unclassified work | P1 | — |

@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /**
  * Run-level infrastructure auto-retry: measured executor/transport failures are
  * retried without a human, while genuine review/build failures stay terminal.
@@ -70,7 +71,7 @@ function harness(over: {
       }
     },
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
     base_branch: 'main',
     now: () => new Date(clockMs).toISOString(),
   }

@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 /** End-to-end pin for external launcher liveness → durable bounded recovery. */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -78,7 +79,7 @@ function harness(
   const orchestrator = buildTridentOrchestrator({
     fire_workflow: fire,
     db_path: join(scratchpad, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
     base_branch: 'main',
     ...(opts.launchThrows
       ? { mint_run_id: () => { throw new Error('persistent launch failure at mint_run_id') } }
@@ -356,7 +357,7 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
     const orchestrator = buildTridentOrchestrator({
       fire_workflow: fireWorkflow,
       db_path: join(scratchpad, 'project.db'),
-      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      run_host: honourDiffOutput(async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 })),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       begin_crash_recovery: (id) => store.beginCrashRecovery(id),

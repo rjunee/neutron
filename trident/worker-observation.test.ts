@@ -1,3 +1,4 @@
+import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,7 +18,7 @@ function harness(state: RunWorkerObservation['state'], hang = 60_000) {
   return buildTridentOrchestrator({
     fire_workflow: async () => { throw new Error('must not relaunch') },
     db_path: '/tmp/worker-observation-test.db',
-    run_host: async () => ({ ok: false, exit_code: 1, stdout: '', stderr: 'no repository' }),
+    run_host: honourDiffOutput(async () => ({ ok: false, exit_code: 1, stdout: '', stderr: 'no repository' })),
     base_branch: 'main', on_orphaned_session: 'wait',
     no_advance_hang_ms: hang, max_inflight_ms: 120_000,
     now: () => new Date(180_000).toISOString(),
