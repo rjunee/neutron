@@ -43,7 +43,8 @@ Consumers were enumerated with repository-wide searches for the old matcher name
 `deriveInfraBlock`, and the new field names. The new field's production readers
 are the terminal transport, decoder, deriver and delivery branches cited above.
 The old matcher constants have no live-code hits: the same search positively
-matches `cross_model_rate_limited` in `trident/delivery.ts:715`. The old names remain
+matches `cross_model_rate_limited` in `trident/delivery.ts:727` and `:729` (the
+review-lane restructure below moved these two lines; re-verified at those numbers). The old names remain
 only in the immutable historical record
 `docs/as-built/542-quota-exhausted-honest-outcome.md:214` and line 244. Those hits
 remain as accounts of what that earlier change shipped, not current instructions.
