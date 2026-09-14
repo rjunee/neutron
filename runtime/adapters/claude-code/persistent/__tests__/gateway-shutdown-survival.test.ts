@@ -39,6 +39,10 @@ const KEY = 'inst user proj cred'
 const SESSION_ID = 'dddddddd-1111-2222-3333-444444444444'
 const CHANNEL = 'neutron-aaaabbbbccccddddeeeeffff00001111'
 const GENERATION = 'gen-shutdown-1'
+/** The generation the NEXT gateway's child is minted with — `spawn.ts` mints a fresh
+ *  UUID per spawn, so a replacement under the same session id derives a DIFFERENT
+ *  credential. Fixed here rather than random so the case reads deterministically. */
+const REPLACEMENT_GENERATION = 'gen-shutdown-2'
 const HANDLE = 'w9:p5'
 
 const row = (over: Partial<ReplRegistryRecord> = {}): ReplRegistryRecord => ({
@@ -454,6 +458,18 @@ describe('a surviving child is handed OVER, not merely left alone', () => {
     await sink.ensureStarted({ tokenPath: join(mkdtempSync(join(tmpdir(), 'neutron-539-sink-')), 'sink-token') })
   })
 
+  /** POST a reply bearing `credential` to whatever sink is listening RIGHT NOW, and
+   *  return the status. Reads `sink.port` at call time on purpose: this group asks the
+   *  question of two different listeners — the retiring gateway's and its successor's. */
+  const postReply = async (credential: string): Promise<number> => {
+    const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
+      body: JSON.stringify({ session_id: SESSION_ID, text: 'hello' }),
+    })
+    return resp.status
+  }
+
   /**
    * ARGUS r25. The existing survival cases assert the pane is not killed and its config
    * files survive — right about the PANE, silent about the WRAPPER. The retiring
@@ -486,16 +502,53 @@ describe('a surviving child is handed OVER, not merely left alone', () => {
     expect(seen).toEqual([])
     // ...and it cannot actuate: nothing reached the pane's stdin.
     expect(child.keys).toEqual([])
-    // ...and its sink registration is gone, asserted at the surface that matters: a
-    // reply carrying this child's own credential is REFUSED, so one meant for the
-    // incarnation that replaces it cannot land on this retired session.
-    const credential = deriveChildSinkToken(sink.token, GENERATION)
-    const resp = await fetch(`http://127.0.0.1:${sink.port}/reply`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
-      body: JSON.stringify({ session_id: SESSION_ID, text: 'hello' }),
-    })
-    expect(resp.status).toBe(401)
+    // ...and its sink registration is gone, asserted at the surface that matters — a
+    // 401 on a real reply, not a map lookup — and at the LISTENER that matters: the
+    // SUCCESSOR gateway's.
+    //
+    // WHY THE SUCCESSOR AND NOT THE ONE THAT JUST SHUT DOWN. `shutdownAllPersistentRepls`
+    // releases the reply listener when the pool and the owed reports have drained
+    // (`pool.ts`, the `sink.stop()` after `deliverShutdownKillReports`), because the
+    // listener belongs to the gateway and not to the panes it left running. An earlier
+    // form of this case posted to the retiring gateway's own port, which only worked
+    // because nothing had ever stopped it — it read the very defect (#786: the gateway
+    // never exited on SIGTERM, because its own listener retained the process) as its
+    // premise. The property was never about the retiring listener. It is that A REPLY
+    // CARRYING A RETIRED CHILD'S CREDENTIAL MUST NOT LAND ON THE SESSION THAT REPLACES
+    // IT, and the successor is the only place that is observable at all.
+    //
+    // THE SUCCESSOR IS THE STRICTER INSTRUMENT, both halves load-bearing:
+    //
+    //  - IT DERIVES THE SAME CREDENTIAL. The root token is DURABLE — the next gateway
+    //    reloads the same bytes (`sink-coordinates.ts`'s `loadOrCreateSinkToken`, pinned
+    //    across a restart by `__tests__/sink-restart-survival.test.ts`), and `stop()`
+    //    keeps it for exactly that reason. So the retired child's credential is
+    //    BIT-IDENTICAL after the restart — pinned on the next line — and a refusal here
+    //    can never be the accident of a changed secret. It is a refusal of THIS
+    //    CREDENTIAL.
+    //  - IT CARRIES THE CREDENTIAL INDEX ACROSS. An in-process restart restarts the same
+    //    sink object, so `byCredential` survives it. Had shutdown failed to unregister
+    //    the survivor (`pool.ts`'s `sink.unregisterIf` in `releaseSurvivor`), the
+    //    successor would AUTHORIZE the retired credential and the assertion below reds —
+    //    which is what makes this case non-vacuous rather than merely green.
+    const retired = deriveChildSinkToken(sink.token, GENERATION)
+    await sink.ensureStarted()
+    expect(deriveChildSinkToken(sink.token, GENERATION)).toBe(retired)
+    expect(await postReply(retired)).toBe(401)
+
+    // THE CONTROL, and the production shape of the hazard: the incarnation that REPLACES
+    // this one. A fresh spawn mints a fresh `childGeneration` (`spawn.ts`'s `randomUUID`)
+    // and reuses the session id, so the replacement registers under the SAME id with a
+    // DIFFERENT credential. It must be served — a successor that refused everything would
+    // satisfy the assertion above for a reason that has nothing to do with the handover —
+    // and the retired credential must STILL not reach it.
+    const replacement = new ReplSession(KEY, REPLACEMENT_GENERATION, SESSION_ID, CHANNEL, '/tmp')
+    const replacementCredential = deriveChildSinkToken(sink.token, REPLACEMENT_GENERATION)
+    expect(replacementCredential).not.toBe(retired)
+    sink.register(SESSION_ID, replacement)
+    expect(await postReply(replacementCredential)).toBe(200)
+    expect(await postReply(retired)).toBe(401)
+    sink.unregisterIf(SESSION_ID, replacement)
   })
 
   it('THE CONTROL: an ordinary teardown still KILLS and still unregisters', async () => {

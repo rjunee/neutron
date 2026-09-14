@@ -1388,6 +1388,10 @@ export async function shutdownAllPersistentRepls(
   // phase; anything abandoned here is still attributed on the next boot from the
   // marker phase 1 wrote, which is what the marker is for.
   await deliverShutdownKillReports(owedReports)
+  // The reply listener belongs to this gateway, even when its REPL panes survive.
+  // Release it after the pool and reports drain so it cannot retain the process
+  // or the durable port needed by the next gateway. This does not close a pane.
+  sink.stop()
   // Reset supervision state so tests don't leak per-key gates across cases.
   // #539 — the boot-adoption gates go too: a resolved gate from the incarnation that
   // just shut down would release a later boot's first spawn instantly while its
