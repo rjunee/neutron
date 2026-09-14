@@ -273,6 +273,10 @@ async function spawnSession(
     // the MCP-tool permission grant (`mcp__neutron`), added ONLY here.
     ...(toolBridgeActive ? { allowedMcpTools: [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] } : {}),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
+    ...(options.restricted !== undefined ? { restricted: options.restricted } : {}),
+    ...(options.permission_mode !== undefined
+      ? { permissionMode: options.permission_mode }
+      : {}),
   })
 
   session.toolSurface = toolSurface.join(',')

@@ -123,7 +123,7 @@ async function resolveOpts(
 }
 
 // ---------------------------------------------------------------------------
-// 1. Every profile encodes TODAY's exact value: { skip_permissions: true }.
+// 1. Every profile records its complete security policy.
 // ---------------------------------------------------------------------------
 
 const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> = [
@@ -138,11 +138,9 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
 ]
 
-test('every profile encodes exactly { skip_permissions: true } — except the ONE that deliberately wires a window', () => {
+test('every profile records the expected bypass, confinement, credential, and model policy', () => {
   for (const { name, profile } of ALL_PROFILES) {
-    // Byte-for-byte: skip_permissions true and NOTHING else. This is the guard
-    // that catches an accidental early-wire of permission_mode / claude_config_dir
-    // / extra_env / sandbox before the migration phase that is meant to set them.
+    // Exact-object equality makes each security knob fail closed on drift.
     //
     // PROFILE_WARM_FIRE is the single deliberate exception. It is enumerated BY
     // NAME rather than the assertion being relaxed for everyone, so a SECOND
@@ -192,19 +190,73 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
     expect(frontier_model_floor, `${name} has no recorded model floor`).toBeDefined()
     if (name === 'PROFILE_WARM_FIRE') {
       expect({ ...profile }, name).toEqual({
-        skip_permissions: true,
+        skip_permissions: false,
+        restricted: true,
+        permission_mode: 'acceptEdits',
         github_credential: true,
         frontier_model_floor: false,
         turn_inactivity_ms: 30 * 60_000,
       })
       continue
     }
+    const isTrident = ['PROFILE_EPHEMERAL', 'PROFILE_LEAK_FIXER', 'PROFILE_ARBITER'].includes(name)
     expect({ ...profile }, name).toEqual({
-      skip_permissions: true,
+      skip_permissions: !isTrident,
+      ...(isTrident
+        ? {
+            restricted: true,
+            // NOT one value for every Trident profile: the arbiter has no tools, so the
+            // mode that denies every would-be prompt costs it nothing; the profiles whose
+            // agents must WRITE and RUN are inert under it (measured on claude 2.1.270).
+            permission_mode: name === 'PROFILE_ARBITER' ? ('dontAsk' as const) : ('acceptEdits' as const),
+          }
+        : {}),
       github_credential: github_credential!,
       frontier_model_floor: frontier_model_floor!,
     })
   }
+})
+
+/**
+ * THE MODE THAT DENIES EVERYTHING IS NOT A SAFE DEFAULT, IT IS AN OFF SWITCH (#630).
+ *
+ * Measured on the installed `claude` 2.1.270, in a scratch cwd, `--restricted
+ * --permission-mode dontAsk --tools Read,Write,Edit,Bash`:
+ *
+ *   Write  -> "Permission to use Write has been denied because Claude Code is
+ *              running in don't ask mode"
+ *   Bash   -> the same sentence for Bash
+ *
+ * — for a file INSIDE the agent's own working directory. So a profile whose agent
+ * has to produce anything is INERT under `dontAsk`, and a unit test that only pins
+ * the constant cannot see it: every argv assertion still passes while the build
+ * lane silently does nothing. That is the failure this case exists to make loud.
+ *
+ * Under `acceptEdits` the same measurement writes the file and runs the in-cwd
+ * shell command with no prompt, and confinement STILL holds: an outside-cwd Read
+ * is refused by the CLI ("--restricted confines the file tools to the working
+ * directory") and an outside-cwd `cat` is refused by the command gate.
+ *
+ * Both directions, deliberately: the acting profiles must NOT carry `dontAsk`, and
+ * the tool-less arbiter must — otherwise "everything is acceptEdits" would satisfy
+ * the first half alone.
+ */
+test('a profile whose agent must act never carries the mode that denies every tool', () => {
+  const MUST_ACT = {
+    PROFILE_EPHEMERAL,
+    PROFILE_LEAK_FIXER,
+    PROFILE_WARM_FIRE,
+  } as const
+  for (const [name, profile] of Object.entries(MUST_ACT)) {
+    expect(profile.restricted, `${name} must stay confined`).toBe(true)
+    expect(profile.skip_permissions, `${name} must not bypass`).toBe(false)
+    expect(profile.permission_mode, `${name} would be inert under dontAsk`).toBe('acceptEdits')
+  }
+  // The complement. The arbiter grants NO tools, so the strictest prompt policy
+  // costs it nothing — and if this ever relaxes, the reason has to be argued.
+  expect(PROFILE_ARBITER.permission_mode).toBe('dontAsk')
+  expect(PROFILE_ARBITER.restricted).toBe(true)
+  expect(PROFILE_ARBITER.skip_permissions).toBe(false)
 })
 
 test('the fire window is BELOW the absolute ceiling, so the ceiling stays the terminal authority', () => {
@@ -217,7 +269,7 @@ test('the fire window is BELOW the absolute ceiling, so the ceiling stays the te
 })
 
 // ---------------------------------------------------------------------------
-// 2. profile: form === pre-refactor inline skip_permissions: true form, per site.
+// 2. Every enumerated production site resolves its profile onto spawn options.
 //    Each entry mirrors one of the 8 production call sites' distinguishing
 //    per-call inputs; the ONLY thing that changed at the site was
 //    `skip_permissions: true` → `profile: PROFILE_X`.
@@ -299,23 +351,23 @@ const SITES: ReadonlyArray<{
 ]
 
 for (const { site, profile, extra } of SITES) {
-  test(`resolved opts are byte-identical: profile vs inline skip_permissions — ${site}`, async () => {
+  test(`resolved security opts match the named profile — ${site}`, async () => {
     const viaProfile = await resolveOpts({ ...extra, profile })
     const viaInline = await resolveOpts({ ...extra, skip_permissions: true })
-    // The security knob resolved to the same value...
-    expect(viaProfile.skip_permissions).toBe(true)
+    // The profile's bypass policy is explicit for every site.
+    const isTrident = [PROFILE_EPHEMERAL, PROFILE_LEAK_FIXER, PROFILE_ARBITER, PROFILE_WARM_FIRE].includes(profile)
+    expect(viaProfile.skip_permissions).toBe(!isTrident)
     expect(viaInline.skip_permissions).toBe(true)
-    // ...and the WHOLE resolved option bag is identical (env holds the scrubbed
-    // credential, identical for both since the same pool/cred is selected).
-    //
-    // TWO SITES DELIBERATELY DIVERGE, and each is asserted as a difference of
-    // EXACTLY ONE NAMED KEY rather than by loosening the equality. A second
-    // unintended field on either profile still fails here.
+    // Trident sites deliberately diverge from the legacy bypass control.
+    if (isTrident) {
+      expect(viaProfile.restricted).toBe(true)
+      expect(viaProfile.permission_mode).toBe(profile === PROFILE_ARBITER ? 'dontAsk' : 'acceptEdits')
+      expect(viaInline.restricted).toBeUndefined()
+      expect(viaInline.permission_mode).toBeUndefined()
+    }
     if (profile === PROFILE_WARM_FIRE) {
-      expect(viaProfile.turn_inactivity_ms).toBe(30 * 60_000)
       expect(viaInline.turn_inactivity_ms).toBeUndefined()
-      const { turn_inactivity_ms, ...rest } = viaProfile
-      expect(rest).toEqual(viaInline)
+      expect(viaProfile.turn_inactivity_ms).toBe(30 * 60_000)
     } else if (profile === PROFILE_WARM_CHAT) {
       // The owner's chat is the ONLY site that carries the frontier-model floor.
       // If this key ever stops appearing here, the Haiku regression is back.
@@ -323,14 +375,14 @@ for (const { site, profile, extra } of SITES) {
       expect(viaInline.frontier_model_floor).toBeUndefined()
       const { frontier_model_floor, ...rest } = viaProfile
       expect(rest).toEqual(viaInline)
-    } else {
+    } else if (!isTrident) {
       expect(viaProfile).toEqual(viaInline)
       // Every OTHER site must be untouched by both applied fields.
       expect(viaProfile.turn_inactivity_ms).toBeUndefined()
       expect(viaProfile.frontier_model_floor).toBeUndefined()
     }
     // Explicit: the reserved fields never leaked onto the resolved options.
-    expect('permission_mode' in viaProfile).toBe(false)
+    expect('permission_mode' in viaProfile).toBe(isTrident)
     expect('sandbox' in viaProfile).toBe(false)
   })
 }

@@ -87,6 +87,10 @@ export interface BuildReplArgvInput {
    * local dev may leave it off.
    */
   skipPermissions?: boolean
+  /** Confine file tools to cwd/add-dir and refuse permission bypass. */
+  restricted?: boolean
+  /** Interactive permission mode; `dontAsk` denies would-be prompts. */
+  permissionMode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan'
   /**
    * Built-in tool surface allow-list (Core-namespace + built-in names, e.g.
    * `['Read','Grep']`). `--tools` is ALWAYS emitted (default-deny): empty /
@@ -147,6 +151,12 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   }
   if (input.skipPermissions === true) {
     argv.push('--dangerously-skip-permissions')
+  }
+  if (input.restricted === true) {
+    argv.push('--restricted')
+  }
+  if (input.permissionMode !== undefined) {
+    argv.push('--permission-mode', input.permissionMode)
   }
   argv.push('--append-system-prompt-file', input.appendSystemPromptFile)
   if (input.addDir !== undefined) {

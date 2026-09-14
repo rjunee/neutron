@@ -440,8 +440,8 @@ export interface BuildLlmCallSubstrateInput {
    * reserved fields and no live site sets the legacy per-call inputs): a
    * profile field WINS over the matching legacy per-call input
    * (`skip_permissions` / `claude_config_dir` / `extra_env`); an absent profile
-   * field falls back to that input. `permission_mode` and `sandbox` are reserved
-   * shape only and are NOT applied yet (no `ClaudeCodeSubstrateOptions` field).
+   * field falls back to that input. `sandbox` remains shape-only; profile
+   * `permission_mode` is applied to the Claude Code subprocess.
    */
   profile?: SubstrateProfile
   /**
@@ -760,16 +760,17 @@ export function buildLlmCallSubstrate(
         const { env, pool } = resolved
         const cred = { id: resolved.cred_id }
         // SECURITY-PROFILE resolution (tool-security redesign Step 0). The
-        // security knobs (`skip_permissions` / `claude_config_dir` / `extra_env`)
+        // security knobs (permission policy / `claude_config_dir` / `extra_env`)
         // now live on a single-source `profile`; a profile field WINS over the
         // matching legacy per-call input, an absent profile field falls back to
         // it. BEHAVIOUR-PRESERVING today: no profile sets the reserved fields and
         // no live site sets these per-call inputs, so each `??` resolves to the
-        // exact same value the pre-refactor inline literal produced. The reserved
-        // `profile.permission_mode` / `profile.sandbox` are shape-only (no
-        // `ClaudeCodeSubstrateOptions` field yet) and deliberately NOT applied
-        // here — that is Phase B / Phase D of the redesign.
+        // same value except for the deliberately narrowed Trident profiles. The reserved
+        // `profile.sandbox` remains shape-only. Interactive permission mode is
+        // applied here for the narrowed Trident profiles.
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
+        const effectiveRestricted = input.profile?.restricted
+        const effectivePermissionMode = input.profile?.permission_mode
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
         // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
         // GitHub credential gets `GH_TOKEN` + the git credential helper; one that
@@ -841,6 +842,8 @@ export function buildLlmCallSubstrate(
         if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
+        if (effectiveRestricted !== undefined) opts.restricted = effectiveRestricted
+        if (effectivePermissionMode !== undefined) opts.permission_mode = effectivePermissionMode
         if (effectiveTurnInactivityMs !== undefined) {
           opts.turn_inactivity_ms = effectiveTurnInactivityMs
         }
