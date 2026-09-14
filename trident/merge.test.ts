@@ -12,9 +12,11 @@ import {
   reviewedHeadOid,
   shouldHoldForBaseDrift,
   TridentBaseDriftHold,
+  TridentMergeDiffHold,
   TridentMergeError,
   type RunHostCommand,
 } from './merge.ts'
+import { isMergeDiffTooLargeReason } from './merge-diff-limit.ts'
 import type { TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
@@ -66,6 +68,137 @@ const noDrift = (cmd: string[]): HostCommandResult | null =>
       cmd.includes('headRefName,baseRefName,isCrossRepository')
       ? ok('feat-x\nmain\nfalse')
       : null
+
+describe('pre-merge diff-size gate', () => {
+  // Pinned independently of the production constant: changing the policy cannot
+  // silently move both sides of this boundary test.
+  const PINNED_LIMIT_BYTES = 1_048_576
+
+  function prGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
+    return recordingHost((cmd) => {
+      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      return noDrift(cmd) ?? ok()
+    })
+  }
+
+  test('a diff exactly inside the pinned limit reaches the real PR merge', async () => {
+    const { host, calls } = prGateHost('x'.repeat(PINNED_LIMIT_BYTES))
+    await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildMergeCleanupDeps(host),
+    )
+    expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(true)
+  })
+
+  test('a diff one byte outside the pinned limit is REFUSED before PR merge', async () => {
+    const { host, calls } = prGateHost('x'.repeat(PINNED_LIMIT_BYTES + 1))
+    const error = await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildMergeCleanupDeps(host),
+    ).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(TridentMergeDiffHold)
+    expect(error).toMatchObject({ measured_bytes: PINNED_LIMIT_BYTES + 1 })
+    expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
+  })
+
+  // LOCAL MODE IS A SECOND CALL SITE, AND AN UNTESTED GUARD IS NOT A GUARD.
+  // Deleting the local `enforceMergeDiffGate` call left every test above green:
+  // the pr-mode cases cannot reach it. These two are what make that deletion red.
+  function localGateHost(diff: string): { host: RunHostCommand; calls: string[][] } {
+    return recordingHost((cmd) => {
+      if (cmd.includes('diff') && cmd.includes('--binary')) return ok(diff)
+      // `merge --abort` / `rebase --abort` are the stale-state probes; a CLEAN
+      // repo fails them (nothing is in progress).
+      return cmd.includes('--abort') ? fail('no operation in progress') : ok()
+    })
+  }
+  const localRun = (): TridentRun =>
+    makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/repo' })
+
+  test('a diff exactly inside the pinned limit still lands in local mode', async () => {
+    const { host, calls } = localGateHost('x'.repeat(PINNED_LIMIT_BYTES))
+    await cleanupAfterMerge(localRun(), buildMergeCleanupDeps(host, { base_branch: 'main' }))
+    expect(calls.map((c) => c.join(' ')).some((c) => c.startsWith('git -C /repo merge --no-ff'))).toBe(true)
+  })
+
+  test('a diff one byte outside the pinned limit is REFUSED before the local land', async () => {
+    const { host, calls } = localGateHost('x'.repeat(PINNED_LIMIT_BYTES + 1))
+    const error = await cleanupAfterMerge(
+      localRun(),
+      buildMergeCleanupDeps(host, { base_branch: 'main' }),
+    ).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(TridentMergeDiffHold)
+    expect(error).toMatchObject({ measured_bytes: PINNED_LIMIT_BYTES + 1 })
+    const joined = calls.map((c) => c.join(' '))
+    // Refused BEFORE anything mutates the shared checkout: no land, and no
+    // rebase that would move `refs/heads/feat-x` off the reviewed commit.
+    expect(joined.some((c) => c.startsWith('git -C /repo merge --no-ff'))).toBe(false)
+    expect(joined.some((c) => c.includes('rebase main'))).toBe(false)
+  })
+
+  // "TOO BIG" AND "I COULD NOT FIND OUT HOW BIG" ARE DIFFERENT FACTS. Both
+  // refuse — the gate fails closed, an unreadable diff is never an empty one —
+  // but the payload keeps them apart, and the orchestrator routes on exactly
+  // that field (`measured_bytes === null` keeps the git-mechanics disposition).
+  test('a diff that cannot be READ refuses with an UNMEASURED payload, not a zero one', async () => {
+    const { host, calls } = recordingHost((cmd) =>
+      cmd.includes('diff') && cmd.includes('--binary') ? fail('fatal: bad revision') : (noDrift(cmd) ?? ok()),
+    )
+    const error = await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildMergeCleanupDeps(host),
+    ).catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(TridentMergeDiffHold)
+    expect(error).toMatchObject({ measured_bytes: null })
+    expect(calls.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'merge')).toBe(false)
+  })
+
+  // IT MEASURES THE DIFF IT CLAIMS TO MEASURE. A rev-range against the wrong
+  // base silently measures the wrong thing and still reports a number, so the
+  // argv is pinned WHOLE — the operand, the three dots, the shield's position
+  // and the flags that decide what the bytes even are. `--binary` counts binary
+  // patch material, `--no-ext-diff` refuses a repository-configured external
+  // driver, `--full-index` stops abbreviation changing the byte count, and
+  // `--end-of-options` is what keeps an option-shaped ref from being read as a
+  // flag. The expected refs are written out here rather than composed from the
+  // same strings the production code uses.
+  test('pr mode measures the REMOTE refs GitHub will merge, three-dot and shielded', async () => {
+    const { host, calls } = prGateHost('')
+    await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildMergeCleanupDeps(host),
+    )
+    expect(calls.filter((c) => c.includes('--binary'))).toEqual([
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+        'refs/remotes/origin/main...refs/remotes/origin/feat-x'],
+    ])
+  })
+
+  test('local mode measures the LOCAL refs it is about to land, three-dot and shielded', async () => {
+    const { host, calls } = localGateHost('')
+    await cleanupAfterMerge(localRun(), buildMergeCleanupDeps(host, { base_branch: 'main' }))
+    expect(calls.filter((c) => c.includes('--binary'))).toEqual([
+      ['git', '-C', '/repo', 'diff', '--binary', '--no-ext-diff', '--full-index', '--end-of-options',
+        'refs/heads/main...refs/heads/feat-x'],
+    ])
+  })
+
+  // THE REFUSAL THE OWNER READS IS THE ONE THE ANNOUNCE LAYER MATCHES. The
+  // wording lives in `merge-diff-limit.ts` precisely so this cannot drift;
+  // `delivery.ts` cannot import `merge.ts`, so nothing but a test can hold the
+  // two ends together.
+  test('the authored refusal is recognised by the announce-layer matcher', async () => {
+    const { host } = prGateHost('x'.repeat(PINNED_LIMIT_BYTES + 1))
+    const error = await cleanupAfterMerge(
+      makeRun({ inner_result: innerResult('a'.repeat(40)) }),
+      buildMergeCleanupDeps(host),
+    ).catch((cause: unknown) => cause)
+    expect(isMergeDiffTooLargeReason((error as Error).message)).toBe(true)
+    // …and a POSITIVE CONTROL on the matcher: the unmeasurable refusal, which
+    // is a different fact and must NOT be answered with "split the work".
+    expect(isMergeDiffTooLargeReason('merge diff could not be measured for a...b')).toBe(false)
+  })
+})
 
 describe('detectBaseBranch', () => {
   test('parses origin/HEAD symbolic-ref', async () => {

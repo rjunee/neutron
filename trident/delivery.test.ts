@@ -17,6 +17,7 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { mergeDiffTooLargeReason } from './merge-diff-limit.ts'
 import { FIRE_PUBLISHED_REASON_MARKER, publishedFailureReason } from './fire-evidence.ts'
 import {
   innerTerminalFailureReason,
@@ -292,6 +293,43 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
       expect(text.toLowerCase()).not.toContain(tok.toLowerCase())
     }
   }
+
+  // #618 — THE SIZE REFUSAL IS ITS OWN CLASS, AND THE ADVICE IS THE POINT.
+  // Before this class the reason fell into the `merge failed:` catch-all and was
+  // announced as "a git step failed while landing the branch … Reply to retry the
+  // build": a step that did not fail, and the one action that cannot work, since
+  // a retry re-measures the same diff. Composed through the REAL author, so a
+  // reword of either half reds here instead of silently un-classifying.
+  test('a merge refused on diff SIZE is its own class and never says "retry"', () => {
+    const reason = mergeDiffTooLargeReason(1_048_577)
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: reason, inner_verdict: 'APPROVE' }),
+    )
+    expect(interp.klass).toBe('merge-too-large')
+    expect(interp.input_needed).toContain('1048577')
+    expect(interp.input_needed.toLowerCase()).toContain('smaller')
+    expect(interp.input_needed.toLowerCase()).not.toContain('reply to retry')
+    assertNoRawLeak(`${interp.summary} ${interp.input_needed}`)
+  })
+
+  // FALSE AND UNKNOWN DO NOT SHARE A BRANCH. "The diff is too big" is measured;
+  // "the diff could not be read" is a git command that failed and says nothing
+  // about size. Both refuse the merge, and they earn different answers — this is
+  // the POSITIVE CONTROL that the class above is not simply swallowing every
+  // reason the size gate can throw.
+  test('a merge refused because the diff could NOT be measured stays git-mechanics', () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'APPROVE',
+        failure_reason:
+          'merge failed: merge diff could not be measured for refs/heads/main...refs/heads/feat-x; ' +
+          'refusing to merge without the size gate',
+      }),
+    )
+    expect(interp.klass).toBe('merge-mechanics')
+    expect(interp.input_needed.toLowerCase()).toContain('retry')
+  })
 
   // THE TWO HALVES MUST MOVE TOGETHER (this file's own contract, delivery.ts:279-284).
   // The hang watchdog now APPENDS a liveness disclosure to its reason and emits two

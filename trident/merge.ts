@@ -77,6 +77,10 @@ import type { ArbitrationOutcome, TridentArbiter } from './arbiter.ts'
 // be measured where it exists in final form — see its header for the defect that forced it
 // (#541 round 14).
 import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
+// The ceiling and the WORDING of the size refusal (#618) live in a leaf both this
+// file and `delivery.ts` can import: the announce layer must recognise the reason
+// this file authors, and it may not import this module (the `no-cycles` rule).
+import { MERGE_DIFF_BYTES_MAX, mergeDiffTooLargeReason } from './merge-diff-limit.ts'
 // The repo's defang + size-cap standard for any text that reaches a prompt, a log
 // or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
@@ -142,6 +146,83 @@ export class TridentBaseDriftHold extends Error {
     super(message)
     this.name = 'TridentBaseDriftHold'
   }
+}
+
+/**
+ * The deterministic pre-merge diff-size refusal (#618).
+ *
+ * TWO CAUSES, AND THEY ARE NOT THE SAME FACT. `measured_bytes` is the number
+ * when the diff was read and found too large, and `null` when the diff could
+ * not be read at all. Both refuse — the gate fails closed — but "this diff is
+ * too big" and "I could not find out how big this diff is" earn different
+ * answers from the owner (split the work / look at the checkout), so they are
+ * kept on separate branches all the way out to the announce: the orchestrator
+ * routes the MEASURED refusal to its own terminal arm and lets the
+ * unmeasurable one keep the `merge failed:` mechanics disposition, which is
+ * what it actually is — a git command that failed.
+ */
+export class TridentMergeDiffHold extends Error {
+  constructor(
+    message: string,
+    readonly measured_bytes: number | null,
+  ) {
+    super(message)
+    this.name = 'TridentMergeDiffHold'
+  }
+}
+
+export { MERGE_DIFF_BYTES_MAX } from './merge-diff-limit.ts'
+
+export type MergeDiffAssessment =
+  | { allow: true; measured_bytes: number }
+  | { allow: false; measured_bytes: number; reason: string }
+
+/** Pure policy over the complete diff; callers own how that diff is obtained. */
+export function assessMergeDiff(diff: string): MergeDiffAssessment {
+  const measured_bytes = Buffer.byteLength(diff, 'utf8')
+  if (measured_bytes <= MERGE_DIFF_BYTES_MAX) return { allow: true, measured_bytes }
+  return { allow: false, measured_bytes, reason: mergeDiffTooLargeReason(measured_bytes) }
+}
+
+async function enforceMergeDiffGate(
+  run_host: RunHostCommand,
+  repo: string,
+  base_ref: string,
+  branch_ref: string,
+): Promise<void> {
+  // THROUGH THE ONE RANGE BUILDER (#546), not a hand-rolled argv. An unshielded
+  // rev-range operand is an arbitrary-file-write primitive (a base of
+  // `--output=<path>` makes `git diff` write that file), and `gitRangeArgv` is
+  // the only place `--end-of-options` can be put in the position that works —
+  // the marker is not a parameter there, so it cannot be omitted. This is also
+  // the constructor the `diff-base-option-shaped` gate enumerates: a range built
+  // by hand here reds it even when the marker happens to be spelled correctly,
+  // because the property that gate asserts is "no module outside the helper
+  // builds a range at all".
+  const result = await run_host(
+    gitRangeArgv({
+      repo_path: repo,
+      subcommand: 'diff',
+      flags: ['--binary', '--no-ext-diff', '--full-index'],
+      base: base_ref,
+      head: branch_ref,
+      dots: '...',
+    }),
+    repo,
+  )
+  if (!result.ok) {
+    throw new TridentMergeDiffHold(
+      // NOT WRITTEN AS A RANGE. The two refs are named with a word between
+      // them rather than `...`: the rev-range guard reads the SOURCE, and a
+      // range operand spelled in a message is indistinguishable to it from one
+      // being handed to git — which is exactly the ambiguity it exists to stop.
+      `merge diff could not be measured between ${base_ref} and ${branch_ref}; ` +
+        'refusing to merge without the size gate',
+      null,
+    )
+  }
+  const assessment = assessMergeDiff(result.stdout)
+  if (!assessment.allow) throw new TridentMergeDiffHold(assessment.reason, assessment.measured_bytes)
 }
 
 /**
@@ -1893,6 +1974,20 @@ export function buildMergeCleanupDeps(
             silent_overlap: [],
           })
         }
+        // THE SIZE GATE GOES HERE, NOT NEXT TO THE MERGE (#618). It reads the
+        // same two refs the fetch above just refreshed, so it is correct
+        // anywhere below that point — and the drift assessment's closing
+        // comment says why it may not sit anywhere else: every host command
+        // between the drift hold and `gh pr merge` widens the window in which a
+        // sibling lane can move `base` under an assessment that already passed.
+        // Reading a megabyte of diff is the most expensive command on this
+        // path, so it is exactly the one that must not be in that window.
+        await enforceMergeDiffGate(
+          run_host,
+          repo,
+          `refs/remotes/origin/${base}`,
+          `refs/remotes/origin/${branchForGate}`,
+        )
         // ASSESS THE REFS GITHUB WILL MERGE — the REMOTE ones, on BOTH sides.
         // `gh pr merge` squashes `refs/heads/<branch>` AS ORIGIN HOLDS IT into
         // `refs/heads/<base>` AS ORIGIN HOLDS IT; this local checkout is not a
@@ -1996,6 +2091,7 @@ export function buildMergeCleanupDeps(
         //     `base` BY NAME — hole 5 in the section header, which says why
         //     pinning the sha here would trade this race for a worse one.
         const drift = await assessBaseDrift(run_host, repo, base, branch)
+        await enforceMergeDiffGate(run_host, repo, `refs/heads/${base}`, `refs/heads/${branch}`)
         // (0) DEFENSIVE stale-state recovery (FIX 2): heal any merge/rebase a PRIOR
         //     build left in the shared checkout BEFORE we touch it — else one old
         //     poisoned index makes every later merge fail "resolve your current
