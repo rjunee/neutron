@@ -98,6 +98,8 @@ interface RunOpts {
    *  claim and the review panel end up in DIFFERENT PROCESSES. */
   mergeMode?: 'pr' | 'local'
   baseSha?: string
+  prNumber?: number
+  codeScanningProbe?: { raw: string; exit_code: number } | null
 }
 
 async function runWorkflow(
@@ -126,7 +128,7 @@ async function runWorkflow(
       if (opts.codexBuild) {
         return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed, ...suite, ...suiteEvidence }
       }
-      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed, ...suite, ...suiteEvidence }
+      return { prNumber: opts.prNumber ?? null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed, ...suite, ...suiteEvidence }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
@@ -157,6 +159,9 @@ async function runWorkflow(
       // exercised); round 2 → APPROVE (ends the loop). Under `approveAll` the
       // synthesis APPROVEs immediately, so the gate is the only remaining actor.
       return { verdict: opts.approveAll === true || synthCount > 1 ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
+    }
+    if (String(label).startsWith('code-scanning-probe-round-')) {
+      return opts.codeScanningProbe ?? { raw: '[[]]\n___EXIT=0\n', exit_code: 0 }
     }
     // checkpoint / terminal-result / cleanup bash steps (also no-op'd by null dbPath).
     return ''
@@ -824,6 +829,42 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     for (const label of ['argus:codex', 'argus:kimi']) {
       expect(captured.find((call) => call.label === label)?.prompt).toContain('KIMI K3 CROSS-MODEL REVIEW')
     }
+  })
+})
+
+describe('inner-workflow.mjs — code-scanning alerts join the real review-panel gate', () => {
+  test('open alerts reach synthesis and deterministically refuse approval as code work', async () => {
+    const alert = {
+      rule: { id: 'js/polynomial-redos' },
+      most_recent_instance: { location: { path: 'src/parser.ts', start_line: 41 } },
+      html_url: 'https://github.com/example/example/security/code-scanning/1',
+    }
+    const { captured, result } = await runWorkflow(GUIDANCE, {
+      approveAll: true,
+      prNumber: 616,
+      codeScanningProbe: { raw: `${JSON.stringify([[alert]])}\n___EXIT=0\n`, exit_code: 0 },
+    })
+
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(captured.some((call) => String(call.label).startsWith('forge:fix-round-'))).toBe(true)
+    const synthesis = captured.find((call) => call.label === 'argus:synthesis')?.prompt ?? ''
+    expect(synthesis).toContain('OPEN CODE-SCANNING ALERTS')
+    expect(synthesis).toContain('js/polynomial-redos')
+    expect(synthesis).toContain('src/parser.ts:41')
+  })
+
+  test('a failed alert fetch is reported as failure and refuses approval as infrastructure', async () => {
+    const { captured, result } = await runWorkflow(GUIDANCE, {
+      approveAll: true,
+      prNumber: 616,
+      codeScanningProbe: { raw: 'HTTP 503 service unavailable\n___EXIT=1\n', exit_code: 1 },
+    })
+
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
+    const synthesis = captured.find((call) => call.label === 'argus:synthesis')?.prompt ?? ''
+    expect(synthesis).toContain('CODE-SCANNING ALERT FETCH FAILED')
+    expect(JSON.stringify(result['findings'])).toContain('CODE SCANNING ALERTS UNREADABLE')
   })
 })
 
