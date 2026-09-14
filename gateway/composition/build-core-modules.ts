@@ -785,17 +785,9 @@ export function buildCoreModules(
         if (tridentWiring.resolve_reflection_context !== undefined) {
           orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
         }
-        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it
-        // exceeds the planned fan-out (`DEFAULT_BUILD_FANOUT`, which is the constant
-        // that carries the guarantee — see `computeTestJobs`). Counts the launching
-        // run's OWN row too, so the divisor is the true number of builds sharing these
-        // cores. Without this line the whole chain is inert (the `resolve_phase_models`
-        // lesson — an unwired producer ships a feature whose every part works and which
-        // as a whole does nothing).
-        //
-        // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
-        // rule and its known over-count live, and which is unit-tested behaviourally.
-        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
+        // Probe live local build lanes. Unknown throws into the launcher's
+        // existing planned-fan-out budget fallback; /code fleet exposes the reason.
+        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns()
         orchestratorOpts.record_stage = (id, stage, meta) => {
           // The stamp is telemetry: a ledger failure must never hold up or fail
           // the fire it is describing, so swallow — but through the sanctioned

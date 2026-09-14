@@ -18,7 +18,7 @@
  * `orchestrator.ts`).
  *
  * The cost was paid by every reader that has no checkpoint-decoder of its own:
- * `/code status`, `active-runs.ts`, the board reconciler, and every operator SQL
+ * the board reconciler and every operator SQL
  * query. `run-progress.ts` had already grown a private workaround — its own
  * inline checkpoint decoder, under a comment reading "the outer phase alone is
  * stuck on `forge-init` for the whole build". That workaround is why the UI was

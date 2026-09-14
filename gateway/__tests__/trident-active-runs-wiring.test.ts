@@ -34,14 +34,14 @@ const strip = (src: string): string =>
     .join('\n')
 
 describe('the COMPOSER supplies the live-run-count resolver', () => {
-  it('wires resolve_active_runs from the trident run store', async () => {
+  it('wires resolve_active_runs from the local process census', async () => {
     const src = strip(
       await Bun.file(new URL('../composition/build-core-modules.ts', import.meta.url)).text(),
     )
     expect(src.includes('orchestratorOpts.resolve_active_runs = () =>')).toBe(true)
-    // …and that it reads the STORE, rather than being handed a constant. The counting
+    // …and that it probes the fleet instead of being handed a constant. The counting
     // rule itself is `trident/active-runs.ts`, tested behaviourally beside its source.
-    expect(src.includes('countActiveBuildRuns(store)')).toBe(true)
+    expect(src.includes('countActiveBuildRuns()')).toBe(true)
     expect(src.includes("from '@neutronai/trident/active-runs.ts'")).toBe(true)
   })
 

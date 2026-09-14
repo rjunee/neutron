@@ -345,5 +345,92 @@ class LaneProcesses(unittest.TestCase):
         self.assertTrue(select.select([fd], [], [], 0)[0])
 
 
+class Census(unittest.TestCase):
+    setUp = LaneProcesses.setUp
+    tearDown = LaneProcesses.tearDown
+    launch = LaneProcesses.launch
+    wait_file = LaneProcesses.wait_file
+
+    def claimed(self, claim_id='a' * 32):
+        claim = {'id': claim_id, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0], 'boot': lanes.boot()}
+        marker = f'ready-{len(self.children)}'
+        child = self.launch([sys.executable, '-c', f"from pathlib import Path; import time; Path({marker!r}).write_text('ready'); time.sleep(60)"],
+                            cwd=self.root, env=dict(os.environ, NEUTRON_LANE_CLAIM=json.dumps(claim),
+                            NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID='run-proof'))
+        self.wait_file(marker)
+        return child
+
+    def test_census_live_then_dead(self):
+        children = [self.claimed(c * 32) for c in 'abcd']
+        report = lanes.census()
+        self.assertEqual(report['status'], 'known')
+        self.assertEqual(len(report['lanes']), 4)
+        self.assertEqual({p['pid'] for lane in report['lanes'] for p in lane['processes']}, {p.pid for p in children})
+        self.assertTrue(all(lane['run_id'] == 'run-proof' for lane in report['lanes']))
+        self.assertTrue(all(0 < lane['processes'][0]['started_at'] <= time.time() for lane in report['lanes']))
+        for p in children:
+            p.kill()
+            p.wait()
+        self.assertEqual(lanes.census()['lanes'], [])
+        self.assertEqual(lanes.census()['status'], 'known')
+
+    def test_census_groups_descendants_but_keeps_process_inventory(self):
+        self.claimed()
+        self.claimed()
+        report = lanes.census()
+        self.assertEqual(len(report['lanes']), 1)
+        self.assertEqual(len(report['lanes'][0]['processes']), 2)
+
+    def test_census_dead_owner_does_not_hide_live_child(self):
+        self.claimed()
+        with patch.object(lanes, 'owner_state', return_value='dead'):
+            report = lanes.census()
+        self.assertEqual(len(report['lanes']), 1)
+        self.assertEqual(report['lanes'][0]['owner'], 'dead')
+
+    def test_census_unknown_is_not_empty(self):
+        self.claimed()
+        with patch.object(lanes, 'environment_claim', side_effect=PermissionError()):
+            self.assertEqual(lanes.census()['status'], 'unknown')
+        with patch.object(lanes.os, 'listdir', side_effect=PermissionError()):
+            self.assertEqual(lanes.census()['status'], 'unknown')
+        self.assertEqual(lanes.census()['status'], 'known')
+
+    def test_census_checks_handle_after_reads(self):
+        child = self.claimed()
+        claim = lanes.environment_claim(child.pid)
+        def exit_during_read(pid):
+            child.kill()
+            child.wait()
+            return claim
+        # Keep the later metadata reads reachable after death to isolate the
+        # final pidfd guard (rather than stopping at an earlier ENOENT).
+        with patch.object(lanes, 'environment_claim', side_effect=exit_during_read), \
+             patch.object(lanes.Path, 'read_bytes', return_value=b''), \
+             patch.object(lanes.os, 'readlink', return_value='/tmp/build'):
+            self.assertEqual(lanes.census()['lanes'], [])
+
+    def test_census_rejects_zombie_and_unrelated_process(self):
+        self.claimed()
+        with patch.object(lanes, 'birth', return_value=('1', 'Z')):
+            self.assertEqual(lanes.census()['lanes'], [])
+        with patch.object(lanes, 'environment_claim', return_value=None):
+            self.assertEqual(lanes.census()['lanes'], [])
+
+    def test_census_unclaimed_wrapper(self):
+        script = self.root / 'codex-build.sh'
+        script.write_text('read -t 60 value\n')
+        child = self.launch(['bash', str(script)], env={}, stdin=subprocess.PIPE)
+        # Wait for exec; a newborn child can still have its parent's argv.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            report = lanes.census()
+            if report['lanes']:
+                break
+            time.sleep(.01)
+        self.assertEqual(report['lanes'][0]['processes'][0]['pid'], child.pid)
+        self.assertEqual(report['lanes'][0]['owner'], 'unknown')
+
+
 if __name__ == '__main__':
     unittest.main()

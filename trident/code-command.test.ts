@@ -472,3 +472,10 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     )
   })
 })
+
+test('/code fleet executes the process census without dispatching a build', async () => {
+  const result = await parseAndExecuteCodeCommand('/code fleet', ctx())
+  expect(result?.text).toContain('Running build lanes:')
+  expect(result?.text).toContain('Cost: unavailable (#554)')
+  expect(attached).toEqual([])
+})
