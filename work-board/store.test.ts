@@ -81,7 +81,7 @@ describe('WorkBoardStore', () => {
     expect(reopened?.completed_at).toBeNull()
   })
 
-  test('re-opening a done item re-appends it to the END of the active lane (no stale sort_order collision)', async () => {
+  test('re-opening a done item restores its prior position without reordering siblings', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'A' }) // sort 1
     const b = await store.create(SLUG, { title: 'B' }) // sort 2
@@ -90,15 +90,39 @@ describe('WorkBoardStore', () => {
     // the active lane so B/C renumber to 1,2 — A's stale 1 would collide.
     await store.complete(SLUG, a.id)
     await store.reorder(SLUG, c.id, { before: b.id }) // active: C(1), B(2)
-    // Re-open A — it must land at the END of the active lane, not at sort 1.
+    // Re-open A at its stored ordinal; C and B retain their relative priority.
     const reopened = await store.update(SLUG, a.id, { status: 'upcoming' })
     expect(reopened?.completed_at).toBeNull()
     const active = store.listActive(SLUG)
-    expect(active.map((it) => it.title)).toEqual(['C', 'B', 'A'])
+    expect(active.map((it) => it.title)).toEqual(['A', 'C', 'B'])
     // No duplicate sort_order values across the active lane.
     const orders = active.map((it) => it.sort_order)
     expect(new Set(orders).size).toBe(orders.length)
-    expect(orders[orders.length - 1]).toBe(Math.max(...orders))
+    expect(orders).toEqual([1, 2, 3])
+  })
+
+  test('re-opening a middle card leaves every sibling in the same relative position', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'A' })
+    const b = await store.create(SLUG, { title: 'B' })
+    const c = await store.create(SLUG, { title: 'C' })
+    await store.complete(SLUG, b.id)
+
+    await store.update(SLUG, b.id, { status: 'upcoming' })
+
+    expect(store.listActive(SLUG).map((item) => item.id)).toEqual([a.id, b.id, c.id])
+  })
+
+  test('a completed card with an unknown prior position reopens first, never last', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'A' })
+    const b = await store.create(SLUG, { title: 'B' })
+    const unknown = await store.create(SLUG, { title: 'legacy', status: 'done' })
+    await db.run('UPDATE work_board_items SET sort_order = 0 WHERE id = ?', [unknown.id])
+
+    await store.update(SLUG, unknown.id, { status: 'upcoming' })
+
+    expect(store.listActive(SLUG).map((item) => item.id)).toEqual([unknown.id, a.id, b.id])
   })
 
   test('listAllActive aggregates active items across ALL scopes (General + projects)', async () => {
@@ -1185,16 +1209,20 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(store.get(SLUG, a.id)?.linked_run_id).toBeNull()
   })
 
-  test('attachRun re-opening a done item clears completed_at + re-appends to the active lane', async () => {
+  test('attachRun re-opening a done item clears completed_at and restores its position', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'reopen me' })
-    await store.create(SLUG, { title: 'other active' })
+    const b = await store.create(SLUG, { title: 'reopen me' })
+    const c = await store.create(SLUG, { title: 'other active' })
     await store.complete(SLUG, a.id)
+    await store.reorder(SLUG, c.id, { before: b.id })
     expect(store.get(SLUG, a.id)?.completed_at).not.toBeNull()
     const reopened = await store.attachRun(SLUG, a.id, 'run-reopen')
     expect(reopened?.status).toBe('in_progress')
     expect(reopened?.completed_at).toBeNull()
     expect(reopened?.linked_run_id).toBe('run-reopen')
+    expect(store.listActive(SLUG).map((item) => item.id)).toEqual([a.id, c.id, b.id])
+    expect(store.listActive(SLUG).map((item) => item.sort_order)).toEqual([1, 2, 3])
   })
 })
 
