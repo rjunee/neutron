@@ -20,6 +20,13 @@ run="$2"
 stage="$3"
 meta="${4:-}"
 
+case "${BASH_SOURCE[0]}" in
+  */*) script_dir="${BASH_SOURCE[0]%/*}" ;;
+  *) script_dir='.' ;;
+esac
+# shellcheck source=trident/sqlite-write-retry.sh
+source "$script_dir/sqlite-write-retry.sh"
+
 # Escape a value for inclusion inside a single-quoted SQL string literal
 # (' -> ''). Uses a variable for the quote char because macOS bash 3.2 treats
 # quote characters embedded in a ${var//pat/rep} replacement as literal text.
@@ -45,11 +52,15 @@ else
   meta_sql="NULL"
 fi
 
-# busy_timeout is per connection, so the PRAGMA and INSERT intentionally share
-# this sqlite3 invocation. Pin an empty init file so user sqlite configuration
-# cannot redirect output or alter execution.
-if ! sqlite_output="$(sqlite3 -init /dev/null "$db" "PRAGMA busy_timeout=5000; INSERT INTO code_trident_stage_events (run_id, stage, at, meta) VALUES ('$quoted_run', '$quoted_stage', '$now_iso', $meta_sql);" 2>&1)"; then
-  echo "stage-stamp.sh: stamp not recorded${sqlite_output:+: $sqlite_output}" >&2
+# The shared wrapper retries only contention. Exhaustion and genuine failures
+# remain distinguishable in stderr even though this best-effort caller exits 0.
+write_sql="PRAGMA busy_timeout=100; INSERT INTO code_trident_stage_events (run_id, stage, at, meta) VALUES ('$quoted_run', '$quoted_stage', '$now_iso', $meta_sql);"
+if ! sqlite_output="$(sqlite_write_with_retry "$db" "$write_sql" 2>&1)"; then
+  case "$sqlite_output" in
+    SQLITE_BUSY:*) kind='contention exhausted' ;;
+    *) kind='write failed' ;;
+  esac
+  echo "stage-stamp.sh: stamp not recorded ($kind)${sqlite_output:+: $sqlite_output}" >&2
 fi
 
 exit 0

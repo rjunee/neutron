@@ -36,7 +36,7 @@
 //       the existing PR (never a duplicate). The workflow writes that checkpoint
 //       itself, mid-run, via an `agent()` Bash step (proto-2 C1: a workflow Bash
 //       step can persist to sqlite mid-run) that invokes the checked-in
-//       `trident/checkpoint.sh` (P10: PRAGMA busy_timeout=5000 retry-under-lock,
+//       `trident/checkpoint.sh` (P10: bounded application retry under lock,
 //       no LLM-transcribed SQL). Date.now()/new Date() are NOT available in a
 //       workflow script — timestamps are computed inside that script via
 //       `date -u +%FT%TZ`.
@@ -174,8 +174,8 @@ const {
   kimiConfigured: kimiConfiguredArg = false,
   // Checkpoint-writer script path (refactor P10). The sqlite UPDATEs behind
   // checkpoint()/writeTerminalResult() live in the checked-in
-  // trident/checkpoint.sh (PRAGMA busy_timeout=5000 on the same connection, so
-  // writes retry up to 5s under lock instead of failing instantly) — the agent
+  // trident/checkpoint.sh (short same-connection busy waits plus bounded
+  // application retry under lock) — the agent
   // invokes the script instead of transcribing raw SQL. Threaded from the
   // launcher (buildWorkflowArgs) like dbPath; a legacy caller that doesn't
   // thread it falls back to the repo-of-record copy (same precedent as
@@ -2789,8 +2789,8 @@ ${plan.executionSpec}
 // C1 per-phase checkpoint — an `agent()` Bash step writes the inner-loop
 // checkpoint into `code_trident_runs` mid-run so a crash-relaunched FRESH
 // workflow can skip finished phases + reuse the PR. The write goes through the
-// checked-in trident/checkpoint.sh (P10): PRAGMA busy_timeout=5000 on the same
-// connection makes the write retry up to 5s under lock (default busy_timeout=0
+// checked-in trident/checkpoint.sh (P10): short same-connection busy waits plus
+// bounded application retry survive scheduler-delayed locks (busy_timeout=0
 // failed instantly — a lost write meant no resume state until the reaper), the
 // prompt carries field/value args instead of raw SQL for the LLM to
 // transcribe, and the script stamps `last_advanced_at` itself (`date -u
@@ -2876,7 +2876,7 @@ function shSingleQuote(s) {
 // file indirection so the JSON's own double quotes can never break the sqlite
 // argument (the script reads the file ONCE, in bash, and emits its bytes as a
 // single SQL literal). The UPDATE itself runs through
-// trident/checkpoint.sh (P10: PRAGMA busy_timeout=5000 retry-under-lock, no
+// trident/checkpoint.sh (P10: bounded application retry under lock, no
 // LLM-transcribed SQL — a lost terminal write meant no harvest until the 25m
 // reaper). No-ops when the launcher did not thread a dbPath/runId (a dry
 // source check).

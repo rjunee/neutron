@@ -151,6 +151,7 @@ function loadMemberHelpers(): {
 // The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
+const SQLITE_WRITE_RETRY_SH = readFileSync(fileURLToPath(new URL('./sqlite-write-retry.sh', import.meta.url)), 'utf8')
 
 /** `SRC` with whole-line comments stripped. Used ONLY by the assertions that a
  *  destructive command is GONE: the comments deliberately quote the exact
@@ -483,7 +484,7 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
     expect(SRC).not.toContain('sqlite3 "${dbPath}"')
   })
 
-  test('checkpoint.sh hardens the write: busy_timeout on the SAME connection + same idempotent UPDATE + in-script timestamp', () => {
+  test('checkpoint.sh hardens the write: bounded retry + same idempotent UPDATE + in-script timestamp', () => {
     // busy_timeout is per-connection: the PRAGMA must share the sqlite3
     // invocation with the UPDATE, so writes retry under lock (was 0 → a lost
     // terminal write meant no harvest until the 25m reaper).
@@ -494,9 +495,10 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
     // a 33 KB findings file killed the entire terminal write with E2BIG. So the
     // pin is on the composition and the pipe that carries it (same invocation,
     // same connection), not on a single-line argv string.
-    expect(CHECKPOINT_SH).toContain('update_sql="PRAGMA busy_timeout=5000;')
+    expect(CHECKPOINT_SH).toContain('update_sql="PRAGMA busy_timeout=100;')
+    expect(CHECKPOINT_SH).toContain('sqlite_write_with_retry "$db" "$update_sql"')
     expect(CHECKPOINT_SH).toContain('UPDATE code_trident_runs SET $set_clause')
-    expect(CHECKPOINT_SH).toContain('printf \'%s\\n\' "$update_sql" | sqlite3 -init /dev/null -bail')
+    expect(SQLITE_WRITE_RETRY_SH).toContain('printf \'%s\\n\' "$sql" | sqlite3 -init /dev/null -bail')
     // Row selection is still WHERE id — the terminal freeze lives in the SET
     // expressions, so it never narrows which row the UPDATE addresses.
     expect(CHECKPOINT_SH).toContain('quoted_run="$(sql_quote "$run")"')

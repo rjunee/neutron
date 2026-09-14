@@ -91,7 +91,21 @@ describe('stage-stamp.sh — append-only best-effort writer', () => {
 
     const result = stamp([unmigrated, 'run-1', 'wrapper-start'])
     expect(result.code).toBe(0)
-    expect(result.stderr).toContain('stage-stamp.sh: stamp not recorded')
+    expect(result.stderr).toContain('stage-stamp.sh: stamp not recorded (write failed)')
     expect(result.stderr).toContain('code_trident_stage_events')
   })
+
+  test('a concurrent writer held beyond the former five-second ceiling is survived and the stamp lands', async () => {
+    const holder = new Database(dbPath)
+    holder.exec('BEGIN EXCLUSIVE')
+    const proc = Bun.spawn(['bash', SCRIPT, dbPath, 'run-1', 'lock-test'], { stderr: 'pipe' })
+
+    await new Promise((resolve) => setTimeout(resolve, 5_250))
+    holder.exec('COMMIT')
+    holder.close()
+
+    expect(await proc.exited).toBe(0)
+    expect((await new Response(proc.stderr).text())).toBe('')
+    expect(events().map((event) => event.stage)).toContain('lock-test')
+  }, 10_000)
 })
