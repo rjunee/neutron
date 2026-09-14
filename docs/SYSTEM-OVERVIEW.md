@@ -4688,6 +4688,14 @@ ritual content in chat.
   an approved grant whose content hash still matches the live bytes. There is no
   register-and-fire in one turn, and surface/cadence widening drops approval via
   the content hash.
+- **Forgotten approval reminders.** The supervised `ritual-approval-sweeper`
+  checks pending content and egress grants independently of agent turns
+  (`open/composer.ts:3199`). The store reserves each attempt durably and
+  serializes delivery with owner answers (`tools/approval.ts:206`). It preserves
+  the grant token, verifies the original content hash before rendering, and
+  exposes retained expiry reasons through ritual status
+  (`reminders/ritual-registration.ts:750`). Policy: Decisions Log 2026-09-14,
+  forgotten ritual approvals (#586).
 - **Bundled defs** (`reminders/bundled-rituals.ts`). `morning-brief`,
   `evening-wrap`, and `kaizen` templates ship in-repo, are seeded
   copy-if-absent into `<owner_home>/rituals/` (`seedBundledRituals`,

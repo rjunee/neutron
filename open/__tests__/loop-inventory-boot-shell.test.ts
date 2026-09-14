@@ -60,6 +60,13 @@ const EXPECTED_RUNNING_LOOPS = [
   'kimi-usage',
   'reflect-consolidation',
   'reminders',
+  // #586 — the approval re-raise sweep. A pending approval nobody answers is
+  // indistinguishable from one nobody needed, so it is re-raised on age and
+  // bounded (24 h, at most 3, then EXPIRED with its reason). It must be a LOOP
+  // for the same reason `terminal-build-decisions` is: the thing it is waiting on
+  // is the owner, so it has to survive a restart or the approval dies silently —
+  // which is the defect it exists to fix.
+  'ritual-approval-sweeper',
   // #796 — the gateway-owned sweep that admits worker questions the project REPL
   // could not take yet. It must be a LOOP and it must be the gateway's: a result
   // that cannot be admitted has to survive a worker exiting, a REPL dying, and a

@@ -90,9 +90,9 @@ interface Harness {
   createSpy: ReturnType<typeof spyOn>
 }
 
-function makeHarness(): Harness {
+function makeHarness(now: () => number = Date.now): Harness {
   const registry = createRitualRegistry({ rituals_dir })
-  const approvals = new ApprovalManager(db, noopNotifier)
+  const approvals = new ApprovalManager(db, noopNotifier, { now })
   const store = new ReminderStore(db)
   const buttonStore = new ButtonStore({ db })
   const emitted: EmittedPrompt[] = []
@@ -1058,5 +1058,86 @@ describe('token codec', () => {
   test('tokenToUuid rejects malformed input', () => {
     expect(tokenToUuid('short')).toBeNull()
     expect(tokenToUuid('!'.repeat(22))).toBeNull()
+  })
+})
+
+describe('automatic pending approval sweep', () => {
+  test('reuses actionable grant tokens, preserves egress separation, exposes expiry', async () => {
+    let now = 1_000_000
+    const h = makeHarness(() => now)
+    await h.service.propose(proposal({ egress: 'web', tool_surface: ['Read', 'WebFetch'] }))
+    const originals = [...h.emitted]
+    const ids = h.approvals.listPending(SLUG).map((r) => r.id)
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(2)
+    for (let day = 1; day <= 3; day++) {
+      now += 86_400_000
+      await h.service.sweepPendingApprovals()
+      const prompts = h.emitted.slice(-2)
+      expect(prompts.map((p) => p.body)).toEqual(originals.map((p) => p.body))
+      expect(prompts.map((p) => p.options)).toEqual(originals.map((p) => p.options))
+      expect(prompts[0]!.idempotency_key).not.toBe(originals[0]!.idempotency_key)
+      expect(prompts[0]!.prompt_id).not.toBe(originals[0]!.prompt_id)
+      expect(h.approvals.listPending(SLUG).map((r) => r.id)).toEqual(ids)
+    }
+    now += 86_400_000
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(8)
+    expect(h.service.status()[0]).toMatchObject({ approval: 'expired', expiry_reason: 'No answer after three daily reminders' })
+    expect(ids.map((id) => h.approvals.get(id)?.status)).toEqual(['expired', 'expired'])
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(8)
+  })
+  test.each(['approved', 'denied'] as const)('answer after selection suppresses reminder: %s', async (decision) => {
+    let now = 1_000_000
+    const h = makeHarness(() => now)
+    await h.service.propose(proposal())
+    now += 86_400_000
+    const list = h.approvals.listPending.bind(h.approvals)
+    const id = list(SLUG)[0]!.id
+    h.approvals.listPending = (slug) => {
+      const selected = list(slug)
+      void h.approvals.respondApproval(id, decision, OWNER)
+      return selected
+    }
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(1)
+    expect(h.approvals.get(id)?.status).toBe(decision)
+  })
+  test('answered content never re-raises while unanswered egress does', async () => {
+    let now = 1_000_000
+    const h = makeHarness(() => now)
+    await h.service.propose(proposal({ egress: 'web', tool_surface: ['Read', 'WebFetch'] }))
+    const content = h.approvals.listPending(SLUG).find((r) => r.tool_name.startsWith('ritual:'))!
+    await h.approvals.respondApproval(content.id, 'approved', OWNER)
+    now += 86_400_000
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(3)
+    expect(h.emitted[2]!.metadata.kind).toBe('ritual-egress-approval')
+  })
+  test.each(['prompt', 'schedule', 'definition'] as const)('unrenderable original %s expires with reason', async (change) => {
+    let now = 1_000_000
+    const h = makeHarness(() => now)
+    await h.service.propose(proposal())
+    if (change === 'prompt') writeFileSync(join(rituals_dir, 'daily-digest.md'), 'Different prompt')
+    if (change === 'schedule') rmSync(join(rituals_dir, 'daily-digest.def.json'))
+    if (change === 'definition') h.registry.unregister('daily-digest')
+    now += 86_400_000
+    await h.service.sweepPendingApprovals()
+    expect(h.emitted).toHaveLength(1)
+    const grant = h.approvals.findByToolName(SLUG, 'ritual:daily-digest')[0]!
+    expect(grant.status).toBe('expired')
+    expect(JSON.parse(grant.args_json).expiry_reason).toContain('no longer available')
+  })
+  test('other tools stay outside the ritual policy', async () => {
+    let now = 1_000_000
+    const h = makeHarness(() => now)
+    void h.approvals.requestApproval({ id: 'other', project_slug: SLUG, topic_id: TOPIC,
+      tool_name: 'host-deploy', args: {}, policy: 'prompt-user' })
+    await settle()
+    now += 86_400_000
+    await h.service.sweepPendingApprovals()
+    expect(h.approvals.get('other')?.status).toBe('pending')
+    expect(h.emitted).toHaveLength(0)
   })
 })

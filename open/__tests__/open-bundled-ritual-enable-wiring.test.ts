@@ -319,3 +319,24 @@ describe('bundled rituals are reachable — the boot enable sweep', () => {
     for (const id of BUNDLED_IDS) expect(contentPrompts(id).length).toBe(1)
   }, 180_000)
 })
+
+test('production age sweep re-raises stale grants and retains expired ones across boot', async () => {
+  await completeOnboarding()
+  await bootOnce({ waitForPrompts: true })
+  const original = promptRows().length
+  await db.run(`UPDATE tool_approvals SET requested_at = requested_at - 86401 WHERE status = 'pending'`, [])
+  await db.run('DELETE FROM onboarding_state', [])
+  await bootOnce()
+  expect(promptRows().length).toBe(original)
+  await completeOnboarding()
+  await bootOnce()
+  expect(promptRows().length).toBe(original * 2)
+  expect(approvalRows().length).toBe(4)
+  await db.run(`UPDATE tool_approvals SET args_json = json_set(args_json,
+    '$.reraise_count', 3, '$.last_raised_at', 1) WHERE status = 'pending'`, [])
+  await bootOnce()
+  expect(approvalRows().every((r) => r.status === 'expired')).toBe(true)
+  expect(promptRows().length).toBe(original * 2)
+  await bootOnce()
+  expect(promptRows().length).toBe(original * 2)
+}, 180_000)

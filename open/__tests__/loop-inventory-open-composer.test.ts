@@ -63,6 +63,10 @@ const EXPECTED_RUNNING_LOOPS = [
   // P0-4), so the reflect-consolidation loop always arms.
   'reflect-consolidation',
   'reminders',
+  // #586 — the approval re-raise sweep. Pinned in BOTH exact-set inventories for
+  // the reason `trident-worktree-reaper` states: a loop registered in only one of
+  // them is exactly how a wiring regression stays half-visible.
+  'ritual-approval-sweeper',
   // #796 — gateway-owned sweep admitting worker questions the project REPL could
   // not take yet. Must outlive the worker, the REPL and a restart, or the
   // question is silently dropped — the failure the routing change prevents.

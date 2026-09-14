@@ -263,6 +263,7 @@ export interface RitualStatusRowResult {
   tool_surface: readonly string[]
   egress: string
   approval: string
+  expiry_reason?: string
   scheduled: boolean
 }
 
