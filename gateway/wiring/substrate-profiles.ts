@@ -383,9 +383,32 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * writer and is not the enforcement of anything.
  *
  * The empty tool surface remains the arbiter's primary boundary; `permission_mode` plus
- * restricted mode add defense in depth. It is the ONE Trident profile that keeps
- * `dontAsk`: it has no tools to allow, so the mode that denies every would-be
- * prompt costs it nothing, where it would make an ACTING agent inert. This profile's credential rule
+ * restricted mode add defense in depth.
+ *
+ * IT USED TO KEEP `dontAsk`, on the argument that "it has no tools to allow, so the mode
+ * that denies every would-be prompt costs it nothing". THAT ARGUMENT IS WRONG, and the
+ * docblock above says why three paragraphs earlier: *the verdict channel carries the answer
+ * out*. Replying is a tool call — an MCP one — and `allowedMcpTools` is populated ONLY when
+ * the tool bridge is attached (`spawn.ts`), which is the owner-facing conversational pair and
+ * never this profile. So the arbiter's reply was exactly the kind of would-be prompt
+ * `dontAsk` denies, and #734 measured that denial emits NO PROMPT, leaving the
+ * always-registered auto-approver nothing to answer.
+ *
+ * Observed on the instance 2026-09-14, in the arbiter's own words on the captured screen:
+ *
+ *   "I attempted to return my arbiter decision via the reply() tool, but the call was denied
+ *    by the permission mode. Since that tool is the designated channel for my response and no
+ *    alternative return path..."
+ *
+ * The turn then never settled, the inactivity watchdog abandon-poisoned the session
+ * (`by=turn-timeout:inactivity`), and the poisoned session was evicted — so the cost of the
+ * "free" stricter mode was the verdict, the turn, and the REPL hosting it.
+ *
+ * `acceptEdits` is the same answer #734 gave the three ACTING Trident profiles, and the
+ * safety argument transfers unchanged: this profile grants no tools at all, so a mode that
+ * auto-accepts tool prompts has nothing local to accept. The boundary was never the
+ * permission mode; it is `--tools ""`, which is CLI-level and survives even
+ * `--dangerously-skip-permissions`. This profile's credential rule
  * independently closes reach that LEAVES THE MACHINE
  * (`gh pr merge`, `git push`, `gh api`), which a tool grant says nothing about.
  *
@@ -394,7 +417,9 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
 export const PROFILE_ARBITER: SubstrateProfile = {
   skip_permissions: false,
   restricted: true,
-  permission_mode: 'dontAsk',
+  // NOT `dontAsk`: a judge that cannot answer is not a stricter judge, it is a
+  // hung turn and a poisoned REPL. See the docblock above.
+  permission_mode: 'acceptEdits',
   // it INSPECTS and SELECTS; the caller applies every decision. Nothing it is allowed to
   // choose requires a credential, and everything the credential unlocks is forbidden to it.
   github_credential: false,
