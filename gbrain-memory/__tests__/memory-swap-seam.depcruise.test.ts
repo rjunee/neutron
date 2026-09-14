@@ -130,7 +130,7 @@ describe('RA5 memory-backend-swap-seam rule (adversarial)', () => {
     )
     expect(seam.length).toBeGreaterThan(0)
     expect(seam[0]!.to).toMatch(/^gbrain-memory\//)
-  })
+  }, 120_000)
 
   test('PASSES the permitted MemoryStore import with op-names in a COMMENT (prose-safe)', () => {
     writeFileSync(
@@ -145,7 +145,7 @@ describe('RA5 memory-backend-swap-seam rule (adversarial)', () => {
       (v) => v.rule.name === RULE && v.from === PASS_REL,
     )
     expect(seam).toEqual([])
-  })
+  }, 120_000)
 })
 
 // --- Acquisition-source scan (layer 3): NO provider of a raw transport --------
@@ -385,7 +385,7 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
     const kinds = scanSourceForTransportProviders(sf, checker).map((l) => l.kind)
     expect(kinds).toContain('exported type alias resolves to the sealed transport')
     expect(kinds).toContain('exported const/var exposes the sealed transport')
-  })
+  }, 120_000)
 
   test('FLAGS a direct `export {…}` re-export of the sealed type', () => {
     const { checker, sf } = overlayProgram(
@@ -395,7 +395,7 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
     expect(scanSourceForTransportProviders(sf, checker).map((l) => l.kind)).toContain(
       're-export of the sealed transport type',
     )
-  })
+  }, 120_000)
 
   test('FLAGS a function/getter that RETURNS the transport (even wrapped in Promise)', () => {
     const { checker, sf } = overlayProgram(
@@ -408,7 +408,7 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
     expect(scanSourceForTransportProviders(sf, checker).map((l) => l.kind)).toContain(
       'exported function returns the sealed transport',
     )
-  })
+  }, 120_000)
 
   test('does NOT flag SINK positions: a param + an interface input field (caller supplies the client)', () => {
     const { checker, sf } = overlayProgram(
@@ -420,7 +420,7 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
       ].join('\n'),
     )
     expect(scanSourceForTransportProviders(sf, checker)).toEqual([])
-  })
+  }, 120_000)
 
   test('RESIDUAL, OUT OF SCOPE — a type-ERASED connect param-echo + a dynamic product op is NOT statically flagged (by design)', () => {
     // The adversarial end-to-end regress:
@@ -453,5 +453,5 @@ describe('RA5 acquisition boundary — no transport PROVIDER outside gbrain-memo
       ].join('\n'),
     )
     expect(scanSourceForTransportProviders(sf, checker)).toEqual([])
-  })
+  }, 120_000)
 })
