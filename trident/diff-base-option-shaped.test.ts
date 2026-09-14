@@ -953,11 +953,11 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * number that moved.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; kind: 'prompt-command' | 'shell-wrapper'; why: string }> = [
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 1743, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2477, why: "the planner's resume inspection hint — also a prompt" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2528, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2633, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 6141, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 1728, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2462, why: "the planner's resume inspection hint — also a prompt" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2513, why: "the RE-PLAN prompt's inspection hint — arrived on main while this branch was open, composing a BARE `${baseBranch}..${forgeBranch}` with no marker; repointed at `diffBase` here, and it is the gate this PR ships that caught it" },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2618, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 6029, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { kind: 'shell-wrapper', file: 'codex-build.sh', line: 827, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
     { kind: 'shell-wrapper', file: 'codex-review.sh', line: 446, why: 'shell: the standalone reviewer builds its own diff' },
   ]
