@@ -453,7 +453,8 @@ describe('SqliteProjectSettingsStore — unread + activity (rail-redesign)', () 
       if (device) headers['x-device-id'] = device
       const response = await surface.handler(new Request('http://localhost/api/app/projects', { headers }))
       expect(response!.status).toBe(200)
-      return (await response!.json()).projects[0].unread_count
+      const body = (await response!.json()) as { projects: Array<{ unread_count: number }> }
+      return body.projects[0]!.unread_count
     }
     expect(await list('dev1')).toBe(0)
     expect(await list('dev2')).toBe(0)
