@@ -370,13 +370,9 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
 
     // DURABLE-ROW-FIRST — persist BEFORE the best-effort live push.
     let prompt_id: string
-    // An idempotent RE-emit that already rendered live must not render AGAIN.
-    // `emit` collapses the durable row on `idempotency_key`, but the live push
-    // ran unconditionally underneath it — so a producer that persisted its row,
-    // failed its own post-delivery bookkeeping and retried (the email pipeline's
-    // deliver→markEscalated seam is exactly this shape) re-notified an online
-    // owner on every retry while the durable history stayed correctly deduped.
-    // The dedup guarantee has to cover BOTH surfaces or it isn't one.
+    // A completed idempotent delivery skips both the bubble and the notification.
+    // Notification-eligible replies are complete only after the sink succeeds;
+    // live rendering alone must leave a suppressed or failed alert retryable.
     let alreadyRendered = false
     try {
       if (durability === 'reply') {
@@ -393,22 +389,8 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
         })
         const emitted = await buttonStore.emit(prompt, { topic_id })
         prompt_id = emitted.prompt_id
-        // The EmitResult contract, verbatim: re-render only when the row is new
-        // OR when it landed in the DB but never reached a client (a transient
-        // send failure on the prior call). The same predicate the onboarding
-        // engine uses (`engine.ts:1186`) — one idiom, not two.
-        //
-        // IT NOW GOVERNS THE BUZZ AS WELL AS THE BUBBLE, and it does so through
-        // the early return below rather than a second guard: an idempotent
-        // re-emit collapses onto a row the owner already has, and returning
-        // before `routedPush` means the notification is never reached either.
-        // The two questions turned out to be one — "does he already have this?"
-        // — so they get one predicate and one exit, not two flags that can
-        // drift apart.
-        //
-        // The `was_delivered` exception is load-bearing for BOTH: both false
-        // means the row landed in the DB but never reached him, so it still
-        // needs rendering AND still needs the notification.
+        // The durable stamp records completion under the policy below. An
+        // unstamped row must retry even if its earlier live push succeeded.
         alreadyRendered = !emitted.was_new && emitted.was_delivered
       } else {
         const persisted = await buttonStore.persistInertAgentTurn({ topic_id, body })
@@ -425,9 +407,7 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       return { prompt_id: null, persisted: false, delivered_live: false }
     }
 
-    // Already on the owner's screen from the first emit — the durable row is
-    // deduped and so is the bubble. Reported as delivered_live because that is
-    // the recorded fact (`delivered_at` is set), not a guess about this call.
+    // Preserve the existing result for an already completed delivery.
     if (alreadyRendered) return { prompt_id, persisted: true, delivered_live: true }
 
     const delivered = await routedPush(topic_id, {
@@ -457,30 +437,14 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     // strength of a notification that was never attempted.
     const notified =
       envelope.notify === 'suppress' ? false : await notifyDevices(topic_id, prompt_id, body)
-    // RECORD that he was shown it, so the next re-emit of the same
-    // `idempotency_key` reads `was_delivered: true` and stays quiet. Gated on the
-    // owner having ACTUALLY been reached — by a device notification or by a live
-    // socket — because the ButtonStore contract's exception is load-bearing: a row
-    // that persisted while every transport failed must still buzz on the retry,
-    // and stamping unconditionally would silence it forever.
-    //
-    // THE COST OF THE `|| delivered` ARM, NAMED RATHER THAN LEFT TO BE FOUND.
-    // Twenty lines up, a live socket is declared NOT to be evidence the owner is
-    // looking; here it is accepted as evidence he was REACHED. Both are meant, but
-    // the pair has a seam: a backgrounded phone holding an open socket while Expo
-    // is down gives `delivered: true, notified: false`, so the row is stamped and
-    // the ALERT for that key is gone for good — a `ritual-approval` or credential
-    // incident then waits silently until he next opens the app.
-    //
-    // Accepted, because the message itself is not lost: the socket handed it to the
-    // client and it is in the transcript, so this delays an alert rather than
-    // dropping information. The alternative — requiring `notified` — makes the
-    // stamp unreachable on any install with no registered device, which is every
-    // fresh one, and there the re-emit would re-notify forever with nothing able to
-    // buzz. Stamping on "reached by some transport" is the honest reading of
-    // `delivered_at`. Revisit if a key ever needs an alert guarantee STRONGER than
-    // the transcript, because that is a different contract and wants a different
-    // field, not a tweak to this condition.
+    // A configured notification must succeed before a reply is complete. A live
+    // socket cannot discharge that obligation when foreground presence suppresses
+    // the notification, or when its transport fails or times out. Leave the row
+    // unstamped so a later emit of the same key retries the notification.
+    // Explicitly quiet envelopes and installations without a sink have only a
+    // live-delivery obligation. An installed sink reporting zero recipients is
+    // NOT the same as an unwired sink: it still leaves the alert retryable.
+    const liveCompletesDelivery = input.notify === undefined || envelope.notify === 'suppress'
     //
     // THE `notified` ARM HAS THE MIRROR-IMAGE SEAM, and "it is in the transcript"
     // is the assumption that carries it. `routedPush` answers a BOOLEAN, so it
@@ -498,7 +462,9 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     // means widening `DeliverPushTargets.app` from `boolean` to the tri-state the
     // markers already carry, which is an API change across `open/composer.ts` and
     // the app-ws wiring — a separate lane, not a condition tweak here.
-    if (durability === 'reply' && (notified || delivered)) await stampDelivered(prompt_id)
+    if (durability === 'reply' && (notified || (delivered && liveCompletesDelivery))) {
+      await stampDelivered(prompt_id)
+    }
     return { prompt_id, persisted: true, delivered_live: delivered }
   }
 }
