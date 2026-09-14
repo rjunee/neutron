@@ -593,3 +593,35 @@ describe('defect 4 — the cold-start ack is a transient pill, never a message',
     screen.unmount();
   });
 });
+
+describe('explicit send rejection', () => {
+  it('renders the mobile warning and retries its message; unmatched rejection is visible', async () => {
+    const { screen, socket } = await mountChat();
+    await screen.type('reject this message');
+    await screen.press('Send');
+    await screen.type('leave this pending');
+    await screen.press('Send');
+    const sent = () => socket.sent.map(s => JSON.parse(s)).filter(f => f.type === 'user_message');
+    const first = sent()[0];
+    expect(first).toBeDefined();
+    expect(screen.host.querySelector('[aria-label="delivery: pending"]')).not.toBeNull();
+    expect(screen.host.querySelector('[aria-label="Message failed to send — retry"]')).toBeNull();
+    await deliver(screen, socket, { v: 1, type: 'message_rejected', client_msg_id: first.client_msg_id, code: 'malformed_envelope', message: 'Invalid message.' });
+    const retry = screen.host.querySelector('[aria-label="Message failed to send — retry"]') as HTMLElement | null;
+    expect(retry).not.toBeNull();
+    expect(retry!.textContent).toContain('⚠️');
+    expect(screen.host.querySelector('[aria-label="delivery: pending"]')).not.toBeNull();
+    const count = sent().length;
+    retry!.click();
+    await screen.settle();
+    expect(sent().slice(count).map(f => f.client_msg_id)).toEqual([first.client_msg_id]);
+    await deliver(screen, socket, { v: 1, type: 'message_rejected', client_msg_id: 'unknown-send', code: 'malformed_envelope', message: 'Invalid message.' });
+    expect(screen.host.textContent).toContain('Unmatched message rejection (unknown-send)');
+    await deliver(screen, socket, { v: 1, type: 'user_message', client_msg_id: first.client_msg_id, message_id: 'ack-rejected', seq: 1, body: first.body, project_id: PROJECT, ts: 1 });
+    expect(screen.host.querySelector('[aria-label="Message failed to send — retry"]')).toBeNull();
+    await deliver(screen, socket, { v: 1, type: 'message_rejected', client_msg_id: first.client_msg_id, code: 'malformed_envelope', message: 'Invalid message.' });
+    expect(screen.host.textContent).toContain(`Unmatched message rejection (${first.client_msg_id})`);
+    expect(screen.host.querySelector('[aria-label="Message failed to send — retry"]')).toBeNull();
+    screen.unmount();
+  });
+});

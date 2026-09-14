@@ -322,6 +322,15 @@ export interface AppWsOutboundAgentMessagePartial {
   project_id?: string
 }
 
+/** Explicit pre-ingest refusal. Generic errors do not establish send failure. */
+export interface AppWsOutboundMessageRejected {
+  v: 1
+  type: 'message_rejected'
+  client_msg_id: string
+  code: string
+  message: string
+}
+
 export interface AppWsOutboundError {
   v: 1
   type: 'error'
@@ -682,4 +691,5 @@ export type AppWsOutbound =
   | AppWsOutboundActivityEvent
   | AppWsOutboundAgentTyping
   | AppWsOutboundImportProgress
+  | AppWsOutboundMessageRejected
   | AppWsOutboundError

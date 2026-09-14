@@ -131,3 +131,29 @@ describe('SendQueue — flushUnacked (reconnect retry of sent-but-unacked)', () 
     expect((await queue.pendingCount(TOPIC))).toBe(0)
   })
 })
+
+describe('explicit rejection correlation', () => {
+  const rejection = { v: 1, type: 'message_rejected', client_msg_id: 'c1', code: 'malformed_envelope', message: 'Invalid message.' }
+  it('requires an explicit valid rejection and preserves unrelated/acknowledged rows', async () => {
+    const store = new InMemoryStore()
+    const queue = new SendQueue(store)
+    const row = await queue.enqueue({ topic_id: TOPIC, body: 'one', client_msg_id: 'c1' })
+    await queue.enqueue({ topic_id: TOPIC, body: 'two', client_msg_id: 'c2' })
+    for (const data of [null, 'bad', { ...rejection, type: 'error' }]) {
+      expect(await queue.rejectFrame(data, TOPIC)).toBeNull()
+      expect((await store.getByClientMsgId(TOPIC, 'c1'))!.status).toBe('queued')
+    }
+    for (const patch of [{ v: 2 }, { client_msg_id: '' }, { client_msg_id: 'x'.repeat(129) }, { client_msg_id: 1 }, { code: null }, { message: null }]) {
+      expect((await queue.rejectFrame({ ...rejection, ...patch }, TOPIC))!.code).toBe('invalid_rejection')
+      expect((await store.getByClientMsgId(TOPIC, 'c1'))!.status).toBe('queued')
+    }
+    expect((await queue.rejectFrame(rejection, 'other-topic'))!.code).toBe('unmatched_rejection')
+    expect((await queue.rejectFrame({ ...rejection, client_msg_id: 'missing' }, TOPIC))!.code).toBe('unmatched_rejection')
+    expect((await queue.rejectFrame(rejection, TOPIC))!.code).toBe('malformed_envelope')
+    expect((await store.getByClientMsgId(TOPIC, 'c1'))!.status).toBe('failed')
+    expect((await store.getByClientMsgId(TOPIC, 'c2'))!.status).toBe('queued')
+    await store.upsert({ ...row, status: 'acked', message_id: 'm1', seq: 1 })
+    expect((await queue.rejectFrame(rejection, TOPIC))!.code).toBe('unmatched_rejection')
+    expect((await store.getByClientMsgId(TOPIC, 'c1'))!.status).toBe('acked')
+  })
+})

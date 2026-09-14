@@ -80,6 +80,7 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
+| [`message-rejection-correlation`](message-rejection-correlation.md) | Attribute explicit send rejections to the originating message | P1 | — |
 | [`native-crash-visibility-for-the-mobile-app`](native-crash-visibility-for-the-mobile-app.md) | Make a native process-start crash diagnosable without a cable | P3 | — |
 
 ### platform

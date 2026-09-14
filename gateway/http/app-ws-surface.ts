@@ -1178,10 +1178,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             transport: 'ws',
             reason: 'malformed_envelope',
           })
+          // Only validation BEFORE ingestion proves rejection. Ingest/dispatch
+          // exceptions may follow a durable write and must remain generic errors.
+          const candidate = parsed as Record<string, unknown> | null
+          const id = candidate?.['client_msg_id']
+          const correlated = candidate?.['type'] === 'user_message' &&
+            typeof id === 'string' && id.length > 0 && id.length <= 128
           ws.send(
             JSON.stringify({
               v: 1,
-              type: 'error',
+              type: correlated ? 'message_rejected' : 'error',
+              ...(correlated ? { client_msg_id: id } : {}),
               code: 'malformed_envelope',
               message: 'expected { v:1, type:"user_message", body, ... } or { v:1, type:"resume", after_seq }',
             }),

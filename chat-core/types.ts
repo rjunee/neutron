@@ -116,19 +116,12 @@ export interface MessageReaction {
  *  - `queued` — written to the local store, not yet handed to the socket
  *    (offline, or buffered before flush).
  *  - `sent`   — handed to the socket; awaiting the server echo.
- *  - `failed` — an explicit rejection or send error; silence is not failure.
+ *  - `failed` — an explicit rejection; silence is not failure.
  *    A later server echo still reconciles it to `acked`.
  *
- *    NO CLIENT PATH PRODUCES THIS TODAY, deliberately (#608). The only two
- *    producers were the web + mobile ack-timeout flips, and they were the bug:
- *    they turned "no echo yet" into "not delivered". Nothing replaced them
- *    because nothing CAN yet — the only inbound failure frame
- *    (`AppWsOutboundError`, wire-types/app-ws-envelope.ts) carries no
- *    `client_msg_id`, so no rejection can be attributed to a message. The state
- *    is retained, not dead: it round-trips through every store, it is ranked in
- *    the monotonic merge (store.ts), both render layers map it to the ⚠️ retry
- *    affordance, and `flushOne` re-drives it. A per-message rejection frame is
- *    what would make it reachable again.
+ *    Only `message_rejected` frames carrying this row's client_msg_id write
+ *    this state. Generic errors and elapsed time do not establish rejection.
+ *    Unknown/already-acknowledged IDs produce a separate visible notice.
  *  - `acked`  — the server echo (with `seq` + `message_id`) has reconciled
  *    it. Inbound agent/user messages from the server are born `acked`.
  *

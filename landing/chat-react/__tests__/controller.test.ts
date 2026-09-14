@@ -1771,3 +1771,36 @@ describe('NeutronChatController — W5 GAP-4 failed-send retry affordance', () =
     controller.stop()
   })
 })
+
+it('explicit rejection reaches web failed/retry; unknown and stale IDs surface notices', async () => {
+  const { controller, sockets } = setup()
+  controller.start()
+  const socket = sockets[0]!
+  socket.open()
+  socket.deliver(ready())
+  await controller.send('rejected text')
+  await controller.send('still unknown')
+  await tick()
+  const clientId = socket.userMessages()[0]!['client_msg_id'] as string
+  const frame = { v: 1, type: 'message_rejected', client_msg_id: clientId, code: 'malformed_envelope', message: 'Invalid message.' }
+  socket.deliver({ ...frame, type: 'error' })
+  await tick()
+  expect(controller.getViewModel().messages.find(m => m.text === 'rejected text')!.delivery).toBe('pending')
+  socket.deliver(frame)
+  await tick()
+  expect(controller.getViewModel().messages.find(m => m.text === 'rejected text')!.delivery).toBe('failed')
+  expect(controller.getViewModel().messages.find(m => m.text === 'still unknown')!.delivery).toBe('pending')
+  const before = socket.userMessages().length
+  await controller.retry(clientId)
+  expect(socket.userMessages().slice(before).some(m => m['client_msg_id'] === clientId)).toBe(true)
+  socket.deliver({ ...frame, client_msg_id: 'missing' })
+  await tick()
+  expect(controller.getViewModel().messages.some(m => m.text.includes('Unmatched message rejection (missing)'))).toBe(true)
+  socket.deliver({ v: 1, type: 'user_message', client_msg_id: clientId, message_id: 'm1', seq: 1, body: 'rejected text', ts: 1 })
+  await tick()
+  socket.deliver(frame)
+  await tick()
+  expect(controller.getViewModel().messages.find(m => m.text === 'rejected text')!.delivery).toBe('delivered')
+  expect(controller.getViewModel().messages.some(m => m.text.includes(`Unmatched message rejection (${clientId})`))).toBe(true)
+  controller.stop()
+})

@@ -91,7 +91,7 @@ export interface Store {
   clear(topic_id: string): Promise<void>
   /**
    * Stale-store reset (M1) — drop ONLY the ACKED (server-sequenced) transcript
-   * for a topic, preserving un-acked local sends (status `queued`/`sent`, which
+   * for a topic, preserving un-acked local sends (status `queued`/`sent`/`failed`, which
    * carry no server seq). Used when a server reinstall is detected
    * ({@link SyncEngine.reconcileServerReset}): the dead server's transcript is
    * wiped while the user's typed-but-undelivered messages survive to be
@@ -513,7 +513,7 @@ export class InMemoryStore implements Store {
     const topic = this.byTopic.get(topic_id)
     if (topic === undefined) return
     // Single pass: drop every server-acked row (the dead server's transcript),
-    // keep un-acked local sends (queued/sent) so a reset never loses them.
+    // keep un-acked local sends (queued/sent/failed) so a reset never loses them.
     for (const [identity, m] of topic) {
       if (m.status === 'acked') topic.delete(identity)
     }
