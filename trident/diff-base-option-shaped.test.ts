@@ -959,7 +959,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 2633, why: 'the plan probe branch log — a shell command composed for a prompt' },
     { kind: 'prompt-command', file: 'inner-workflow.mjs', line: 6141, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { kind: 'shell-wrapper', file: 'codex-build.sh', line: 827, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { kind: 'shell-wrapper', file: 'codex-review.sh', line: 446, why: 'shell: the standalone reviewer builds its own diff' },
+    { kind: 'shell-wrapper', file: 'codex-review.sh', line: 452, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {
