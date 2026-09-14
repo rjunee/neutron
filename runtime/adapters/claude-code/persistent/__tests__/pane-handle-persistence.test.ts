@@ -38,8 +38,9 @@ import {
 } from '../persistent-repl-substrate.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
+import { paneClaimBlocksUs } from '../signatures.ts'
 import type { ReplSession } from '../repl-session.ts'
-import { reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
+import { fenceLostSession, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { registerSupervisedSubstrate, runReplWatchdogTick } from '../supervision.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
 import { childByKey, pool } from '../pool-state.ts'
@@ -1002,6 +1003,59 @@ describe('an ownership write that did not LAND is a refusal, however it failed',
     expect(readFileSync(registryPath, 'utf8')).toBe(before)
   })
 
+  it('a reservation whose DURABLE release failed does not wedge the key for this process', async () => {
+    /**
+     * THE FOURTH REPRESENTATION, AND ITS RELEASE (#539, Argus r61).
+     *
+     * The local-ownership register — "which ids does THIS process hold" — is a fourth
+     * representation of ownership alongside the durable row, the pool entry and the in-memory
+     * claim, and every path that stops owning has to release it. The reservation path acquires
+     * in the funnel and releases in `releaseSpawnReservation`; when that release's durable
+     * write fails, the row goes on naming the reserver, and a process that ALSO went on
+     * claiming to hold it would refuse this key to every later turn until the TTL — the exact
+     * wedge the register was introduced to prevent, arriving from the other side.
+     *
+     * The previous case for this ("a reservation this process no longer holds") checked an
+     * arbitrary unregistered id and passed under both implementations: no acquire, no release,
+     * nothing observed. This one performs the whole cycle and breaks it in the middle.
+     */
+    const dir = scratch()
+    const registryPath = join(dir, 'repl-registry.json')
+    writeFileSync(registryPath, JSON.stringify({}, null, 2))
+    const options = optionsFor(
+      // The registry becomes unwritable between the reservation and the ownership write, so
+      // this turn refuses AND its reservation release cannot persist.
+      echoHost('w9:p-stuck-reservation', () => chmodSync(dir, 0o555)),
+      registryPath,
+    )
+    const key = poolKeyFor(options)
+    const events: Event[] = []
+    try {
+      for await (const ev of createPersistentReplSubstrate(options).start(spec('hi'))
+        .events as AsyncIterable<Event>) {
+        events.push(ev)
+      }
+    } finally {
+      chmodSync(dir, 0o755)
+    }
+    expect(events.find((e) => e.kind === 'error')).toBeDefined()
+
+    // THE PREMISE: the row still names the abandoned reservation, stamped with THIS pid.
+    const stranded = readRow(registryPath, key)
+    expect(typeof stranded?.spawn_reservation_by).toBe('string')
+    expect(stranded?.spawn_reservation_pid).toBe(process.pid)
+
+    // THE NEXT TURN IN THIS PROCESS IS NOT REFUSED BY IT. Same pid, different reserver id, and
+    // no live owner here holds the stranded one.
+    const text = await drain(
+      createPersistentReplSubstrate(optionsFor(echoHost('w9:p-next'), registryPath)).start(
+        spec('again'),
+      ),
+    )
+    expect(text).toContain('echo')
+    expect(spawnCalls).toContain('w9:p-next')
+  })
+
   it('...and a healthy registry still records ownership and serves', async () => {
     // THE POSITIVE CONTROL. Three refusals that fired unconditionally would pass every case
     // above and stop every REPL starting.
@@ -1082,5 +1136,61 @@ describe('a spawn that FAILS READINESS deletes only its own pool entry (#539 r56
     // out of the map every turn resolves through.
     expect(pool.get(key)).toBe(replacement)
     pool.delete(key)
+  })
+})
+
+/**
+ * THE FOUR REPRESENTATIONS AGREE, AND DISAGREE ONLY WHERE THE MODEL SAYS THEY MAY (#539, r61).
+ *
+ * The ownership model names four representations of one fact — the durable row, the pool entry,
+ * the session's in-memory claim, and this process's register of ids it holds. Each pairwise
+ * relation is enforced where it is written, and until now NOTHING asserted the whole agreement:
+ * divergence D5 on the walk, and the shape that made the PID-identity defect invisible to a
+ * per-site review, because every site was locally correct.
+ *
+ * This case states the agreement once, in both of its states: while a session owns its pane, and
+ * after it has been fenced — where the row is DELIBERATELY left alone and the other three go.
+ */
+describe('the representations of ownership agree', () => {
+  it('all four name the same owner while it serves, and three of four release on a fence', async () => {
+    const registryPath = join(scratch(), 'repl-registry.json')
+    const options = optionsFor(echoHost('w9:p-agree'), registryPath)
+    const key = poolKeyFor(options)
+    await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+
+    const row = readRow(registryPath, key)
+    const claim = row?.adoption_claim_by as string
+    const session = (await pool.get(key)) as ReplSession
+
+    // R1 the durable row, R3 the session's own claim: the same id.
+    expect(typeof claim).toBe('string')
+    expect(session.paneClaimBy).toBe(claim)
+    // R2 routing: the key resolves to that session, and `childByKey` mirrors its child.
+    expect(childByKey.get(key)).toBe(session.child)
+    // R4 the process register: another logical gateway HERE is blocked by that claim, which is
+    // the only externally visible statement of "this process holds it".
+    expect(
+      paneClaimBlocksUs(row as NonNullable<typeof row>, {
+        ours: 'some-other-gateway',
+        now: row?.adoption_claim_at as number,
+        ourPid: process.pid,
+      }),
+    ).toBe(true)
+
+    // AND NOW THE ONE ASYMMETRY THE MODEL ALLOWS. Fencing stops serving without touching the
+    // row: after a takeover the row is the winner's, and after a self-fence we are the gateway
+    // that could not write it. So R1 stands and R2/R3/R4 go.
+    fenceLostSession(key, session, 'the row names another claimant', () => {})
+    expect(readRow(registryPath, key)?.adoption_claim_by).toBe(claim) // R1 untouched
+    expect(pool.get(key)).toBeUndefined() // R2
+    expect(childByKey.get(key)).toBeUndefined() // R2's mirror
+    expect(session.paneClaimBy).toBeUndefined() // R3
+    expect(
+      paneClaimBlocksUs(row as NonNullable<typeof row>, {
+        ours: 'some-other-gateway',
+        now: row?.adoption_claim_at as number,
+        ourPid: process.pid,
+      }),
+    ).toBe(false) // R4 — and this is what lets the takeover the fence exists for actually happen
   })
 })

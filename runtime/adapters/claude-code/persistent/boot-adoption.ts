@@ -1500,6 +1500,14 @@ export function fenceLostSession(
   // one behind would fence itself a second time on a pane it had already let go.
   session.selfFenceTimer?.cancel()
   session.selfFenceTimer = undefined
+  // AND SO IS THE CLAIM ITSELF (r61). Not the ROW's claim — that stays exactly where it is,
+  // because after a takeover it is the winner's and after a self-fence we are the gateway that
+  // could not write. What goes is this process's assertion that it HOLDS that id: a fenced
+  // session has stopped serving by definition, and while it went on claiming the id, the
+  // ownership predicates would tell a second gateway IN THIS PROCESS that a live owner here
+  // holds the claim — blocking the very takeover the self-fence exists to make possible.
+  // The release matrix's fourth column, which is what found this.
+  session.paneClaimBy = undefined
   // AND THE INBOUND DIRECTION (r49): a reply already in flight arrives over the sink, not over
   // the pane, so detaching does not stop it. See `ReplSession.fenced`.
   session.fenced = true
@@ -2723,6 +2731,25 @@ async function adoptRow(
       }
       // PUBLISHED, AND THE SESSION REMEMBERS WHAT IT WAS PUBLISHED AS (r55) — the promise its
       // teardown will compare the map against.
+      //
+      // WHY THIS PUBLISH IS NOT IDENTITY-GUARDED, and the licence for it, written here because
+      // the ownership model's rule for R2 is "only the turn whose own entry it is" and this
+      // line looks like an exception to it (divergence D4 on the r59 walk).
+      //
+      // It is the WINNER'S publish: the compare-and-set above succeeded, so the durable row —
+      // the authority — names this pass. Any entry sitting under this key belongs to a session
+      // whose claim we have just taken; it cannot renew (the row names us), so it stops serving
+      // on its own evidence within one self-fence deadline, which is the mechanism rule 5
+      // exists to provide. Refusing to publish would be worse in both directions: this gateway
+      // would hold a row it does not serve, and the key would keep resolving to a session that
+      // has already lost it.
+      //
+      // WHAT IS NOT DONE HERE, deliberately: fencing the displaced session. `fencedKeys` is
+      // keyed by SESSION KEY and is never cleared in this process, so fencing here would
+      // permanently refuse the key we have just adopted — the remedy would cost more than the
+      // defect. No interleaving reaching this line with a foreign entry is known today (the
+      // spawn gate serialises a key's pass against its spawns); if one is ever found, the fix
+      // is to fence the displaced SESSION without marking the key.
       const published = Promise.resolve(session)
       session.pooledAs = published
       pool.set(sessionKey, published)

@@ -1375,17 +1375,42 @@ strongest possible argument that it belongs inside. So the unit is now **every p
 owning a session**, five of them, and the child-exiting one carries its own distinguishing
 cells rather than being left out because one row does not apply to it.
 
-| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch | `fenceLostSession` (r39) | **child exit** (`child-exit-wiring`, added r52) |
-|---|---|---|---|---|---|
-| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` (identity-guarded) |
-| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` | released, guarded on `=== child` |
-| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key | released, guarded on the awaited session being ours |
-| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped | **both** stopped and both references cleared — `sizeWatchdog` was stopped and RETAINED until r53, which this cell overstated; the reference is cleared now rather than the wording softened |
-| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live | **n/a — the child has EXITED.** This is the cell the old scope line was drawn around: there is no hand-over to make and no pane to close, which is why the path looked outside the table and is exactly why it still needs every other row |
-| **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind | cancelled |
-| **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | n/a — the fence sets `fenced` instead, which is the same statement for a path whose whole purpose is to stop serving | **cleared — the r51 defect: this cell was empty, and a dispatched deadline callback fenced a key whose child had just died, so a crashed REPL became a permanently refused one instead of respawning** |
-| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses | **disowned** — handle and claim together, CAS'd on the claim held at exit (captured before the in-memory one is cleared) |
-| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released | released on a clean exit, `markCrashed()` on a crash — the one cell whose two answers are both correct, because the detector needs the crash recorded |
+| Structure | `unwind` (boot-adoption) | `release` / `releaseWithReason` | `pool.ts` survival branch | `fenceLostSession` (r39) | **child exit** (`child-exit-wiring`, added r52) | **covered by — which case asserts the cell** |
+|---|---|---|---|---|---|---|
+| sink registration | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` | released — `unregisterIf` | released — `unregisterIf` (identity-guarded) | released — `unregisterIf` (identity-guarded) | `sink-restart-survival.test.ts` (the identity-guarded `unregisterIf` itself); the fence's is asserted by *"detaches, evicts ITS OWN entry, and refuses turns"* (`adoption-claim…:612`); child exit's by `child-exit-pool-identity.test.ts` |
+| `childByKey` | released, guarded on `=== attached` | released, guarded | **n/a** — the shutdown walk has already drained the map before this branch runs | released, guarded on `=== session.child` | released, guarded on `=== child` | `adoption-claim…:612` (fence), `child-exit-pool-identity.test.ts` (exit), `evict-deletes-only-its-own-entry.test.ts` (the eviction and quarantine paths' identity guards) |
+| `pool` | released via `deleteOwnPoolEntry` (identity-guarded, r30) | released via `deleteOwnPoolEntry` | **n/a** — drained by the partition above | released via `deleteOwnPoolEntry` — the winner's entry may be under this very key | released, guarded on the awaited session being ours | `adoption-claim…:612` (fence — the winner's entry survives), `child-exit-pool-identity.test.ts` (5 cases), `evict-deletes-only-its-own-entry.test.ts` (9), `boot-adoption.test.ts` (M87/M88's arms) |
+| `sizeWatchdog` / `deadTurnWatcher` | stopped | stopped | stopped | stopped | **both** stopped and both references cleared — `sizeWatchdog` was stopped and RETAINED until r53, which this cell overstated; the reference is cleared now rather than the wording softened | `child-exit-pool-identity.test.ts` only — the exit path's stop AND reference-clearing. **The other four columns are structural: no case asserts them.** Stated rather than implied, because this is the row where a missing cell would be least visible |
+| the attached `PtyChild` | **closed** via `closeAndClear` — this is the destructive path | `detach?.()` — non-destructive hand-over | `detach?.()` | `detach?.()` — **and this is the cell that matters most**: the winner's REPL is live | **n/a — the child has EXITED.** This is the cell the old scope line was drawn around: there is no hand-over to make and no pane to close, which is why the path looked outside the table and is exactly why it still needs every other row | `boot-adoption.test.ts` (unwind closes), `gateway-shutdown-survival.test.ts` (*"a surviving child is handed OVER, not merely left alone"*), `adoption-claim…:612` (the fence detaches and does not close — the cell that matters most) |
+| **self-fence timer** (r49) | cancelled | cancelled | cancelled | cancelled — and cancelled in `fenceLostSession` itself, so a fence leaves none behind | cancelled | `adoption-claim-is-a-compare-and-set.test.ts` — the self-fence describes, including the r50/r51 identity cases (*"a child that EXITS while a deadline callback is dispatched is respawned, not fenced"*) |
+| **the IN-MEMORY claim** (`session.paneClaimBy`, r51) | cleared | cleared | cleared | **cleared (r61)** — this cell read *"n/a — the fence sets `fenced` instead"*, and that was true of serving and false of OWNERSHIP: while a fenced session kept its claim id, R4 told a second gateway in this process that a live owner here held the claim, blocking the very takeover the self-fence exists to enable | **cleared — the r51 defect: this cell was empty, and a dispatched deadline callback fenced a key whose child had just died, so a crashed REPL became a permanently refused one instead of respawning** | `child-exit-pool-identity.test.ts` (the r51 defect's case), `adoption-claim…` *"a FENCED session stops holding its claim"* (r61) and the four-representations case in `pane-handle-persistence.test.ts` |
+| **adoption claim** (r37) | released — CAS'd on this pass's own identity | released — same CAS | released — same CAS, and the one that matters most: this branch keeps the pane alive FOR the next construction, which a retained claim would refuse | **n/a** — the claim is the winner's now; touching it is what the CAS refuses | **disowned** — handle and claim together, CAS'd on the claim held at exit (captured before the in-memory one is cleared) | `adoption-claim-is-a-compare-and-set.test.ts` (*"the hand-over gives the claim back"*, *"the give-back is still a write"*), `pane-handle-persistence.test.ts` (the row after each path) |
+| **the LOCAL-OWNERSHIP register** (R4, r59/r61) | released — the `paneClaimBy` accessor drops the id when the claim is cleared, so this path cannot forget | released — same mechanism | released — same mechanism, and it matters here: this branch hands the pane to the NEXT construction, which is in a new process, but an in-process retry would be refused by a register that kept the id | **released (r61) — the gap this round closed.** Fencing cleared `fenced` and the timer but kept the claim, so a fenced session went on asserting ownership in this process and blocked the takeover it exists to allow | released — the exit teardown clears the claim before it attempts the durable disown, so a prevented row write cannot leave the register holding a dead child's id | `adoption-claim…` (the identity describe: same-process claim and reservation, the fenced session, the given-up claim) and `pane-handle-persistence.test.ts` (*"blocks one IN THE SAME PROCESS"*, *"a reservation whose DURABLE release failed"*, and the four-representations case) |
+| **live-process handle** | **deliberately retained** — this path CLOSES the pane, so the child exits and `child-exit-wiring`'s handler unregisters. See M91 below for what that cell actually means. | released (r30) | **released (r31)** — was the one site still missing it | released | released on a clean exit, `markCrashed()` on a crash — the one cell whose two answers are both correct, because the detector needs the crash recorded | `child-exit-pool-identity.test.ts` (exit: release vs `markCrashed`), `gateway-shutdown-survival.test.ts` (*"a surviving child leaves no live-process record behind"*), M91 for the retained cell |
+
+**R4 HAS ONE ACQUIRE/RELEASE PAIR THAT IS NOT A SESSION PATH, and the table cannot hold it:**
+the spawn reservation. A reserver id is minted before any session exists (that is the point of
+reserving first), so it is noted by `reservePaneSpawn` and released by `releaseSpawnReservation`
+— unconditionally and before the durable write, because the row's TTL is the backstop for other
+processes and this line is the backstop for ours.
+
+**HOW I KNOW THE PATH LIST IS COMPLETE — AND I DO NOT, EXACTLY.** The five columns are every
+path that stops owning a session, derived by grepping for the four transitions and for each
+structure's release call and reading every hit. For R4 specifically there is a stronger
+argument: its release is driven by *assignment to `session.paneClaimBy`*, so any path that
+clears the in-memory claim releases R4 by construction, and a path that stops owning WITHOUT
+clearing the claim is already a defect under the r51 row. But that is an argument about a
+mechanism, not an enumeration of callers, and the branch's record on "this cannot be reached"
+is bad enough that I will not claim more: **treat the list as a floor.** The one structural
+claim I will make is that R4 has no fifth counterpart — a representation confined to one
+process has nothing below it to represent.
+
+**A PROCESS DEFECT WORTH THE SAME HONESTY.** The r59 reservation release was written, verified,
+and then **destroyed by my own mutation cleanup**: `git checkout <file>` restores from HEAD, and
+the file had uncommitted work in it, so restoring after a mutation silently reverted the fix as
+well. Every other mutation this branch ran restored from a `cp` backup taken in the same command;
+this one used `git checkout` and the line was gone from the commit. Use the backup, never the
+index, when the working tree is the thing being mutated.
 
 **What "deliberately retained" means, measured rather than assumed.** M91 adds a redundant
 `unregister()` to `unwind` and **nothing reds** — the handle is identity-scoped, so a second
@@ -2726,7 +2751,7 @@ attributed to a case that cannot reach the mutated line*, which is round twenty-
 hazard in its attribution form. Every row below now names the file that actually executes the
 mutated line, and each was verified by printing the line the patch landed on.
 
-## The ownership model, stated once — and the code walked against it (#539, Argus r59)
+### The ownership model, stated once — and the code walked against it (#539, Argus r59)
 
 Rounds fifty-one to fifty-nine were all one subsystem: pool-entry and child ownership identity
 across concurrent paths, patched a site at a time. Each patch was right; each also created a small
@@ -2736,7 +2761,7 @@ growing under the fixes.** So the rules are written out here, in the order they 
 code is walked against them. Divergences are listed as findings; only the one the whole-branch
 review named is fixed in this round.
 
-### 1. What an owner is
+#### 1. What an owner is
 
 An **owner** of a pane is the single logical gateway entitled to write that pane's transcript,
 for as long as it keeps saying so. Not a process, not a session object, not a pool entry: those
@@ -2747,13 +2772,24 @@ are *representations* of the fact, and there are three of them.
 | R1 | the durable row — `pane_handle`, `child_generation`, `adoption_claim_at/_by/_pid`, `spawn_reservation_at/_by/_pid` | the registry file, one row per `sessionKey` | survives this process |
 | R2 | the pool entry — `pool.get(key)`, plus `childByKey` | memory, one per key | this process |
 | R3 | the in-memory claim — `ReplSession.paneClaimBy`, `paneClaimConfirmedAt`, `selfFenceTimer`, `fenced` | memory, one per session | this session |
+| R4 | the **local-ownership register** — which claimant and reserver ids this process holds (`local-ownership.ts`) | memory, one per process | this process |
 
-**R1 is the authority; R2 is routing; R3 is the owner's own record of what it holds.** Everything
+**R4 ARRIVED IN THE SAME PUSH AS THIS SECTION, AND THE SECTION DID NOT COVER IT** (r61). The
+fix that closed the identity defect introduced a fourth representation, the document listed
+three, and the release matrix had no row for it — so a reservation was acquired in the register
+and never released there, which wedged the key for this process on any failed durable release:
+the exact behaviour R4 exists to prevent, arriving from the other side. Hence the rule:
+
+> **A new representation of ownership is not added until it has a row in the release matrix.**
+> The document is a condition of the change, not a record of it.
+
+**R1 is the authority; R2 is routing; R3 is the owner's own record of what it holds; R4 is the
+process's, and R3's accessor maintains it** — one mechanism, so they cannot disagree. Everything
 below follows from that ordering: a disagreement is resolved in R1's favour, R2 may never make a
 key resolve to something R1 does not name, and R3 may never outlive a fact R1 has taken away —
 which is what fencing is for.
 
-### 2. Identity: what makes two owners different
+#### 2. Identity: what makes two owners different
 
 > **The claimant id is identity. The pid is evidence about liveness, and nothing else.**
 
@@ -2773,7 +2809,7 @@ cases, in full, because folding any two of them together is how this was got wro
 register (`local-ownership.ts`, `repl-session.ts`) — the owner's own record (R3) answering for
 the process, rather than a fourth representation to keep in step.
 
-### 3. Who may write each representation, and what licenses it
+#### 3. Who may write each representation, and what licenses it
 
 | Representation | Who may write | Who may clear | The identity test that licenses it |
 |---|---|---|---|
@@ -2787,7 +2823,7 @@ the process, rather than a fourth representation to keep in step.
 environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are failures;
 `caller-skipped` is a decision.
 
-### 4. The ordering rules
+#### 4. The ordering rules
 
 1. **Reserve before spawn.** The reservation is taken before `PtyHost.spawn`, because that call is
    the moment this gateway becomes *capable* of touching the transcript.
@@ -2799,7 +2835,7 @@ environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are
    watchdog interval, so the loser has stopped before the winner starts.
 6. **Give the claim back on every path that stops owning.**
 
-### 5. The walk — divergences, as findings
+#### 5. The walk — divergences, as findings
 
 | # | Divergence | Where | Status |
 |---|---|---|---|
@@ -2809,6 +2845,39 @@ environmental declines (`lock-not-acquired`, `registry-unreadable`, `threw`) are
 | **D4** | The **adoption publish is unguarded**: `pool.set(sessionKey, published)` writes over whatever the key holds, while the spawn publish was given an identity check and a re-validation in r57/r58. No reachable interleaving is known today (the gate serialises a key's pass against its spawns, and an `undecided` pass publishes nothing) — but "it cannot be reached" was also the argument for the readiness-failure delete, until r56 showed it reachable | `boot-adoption.ts:2728` | **finding** |
 | **D5** | Nothing asserts the **three representations agree**. Each pairwise relation is enforced where it is written, and a session can hold R3 for a row whose R1 has moved (fencing exists precisely because that is detectable only at renewal) — but no invariant check, and no test, states the whole agreement | across the subsystem | **finding** — the shape that makes D1-type defects invisible to a per-site review |
 | **D6** | The in-memory claim (R3) was a plain field, so "what does this process hold" was not answerable — which is *why* the pid shortcut existed | `repl-session.ts` | **closed by the D1 fix**: the field is an accessor that maintains the register |
+| **D7** | The D1 fix itself added R4 **without a row in the release matrix**, so the reservation path acquired in the register and never released there; a failed durable release then wedged the key for this process until the TTL. Fencing had the same gap for the claim | `spawn.ts` (reservation release), `boot-adoption.ts` (`fenceLostSession`) | **FIXED r61**, with both directions mutation-covered (M173/M174/M175) and the matrix rule above |
+
+#### The second walk (r61), after this round's changes
+
+Run the same way as the first: every write to each representation enumerated by grep and read.
+
+| Rule | What the walk found |
+|---|---|
+| R1 is written only through the funnel | **clean** — `grep` for the ownership fields outside `repl-registry.ts` returns nothing, and `pane-ownership-is-one-fact.test.ts` keeps it that way with a positive control |
+| every R2 delete is identity-guarded or wholesale by design | **clean** — ten sites, each with a row in the enumeration above and the r57 "what else does this site do" column |
+| every R2 publish is licensed | **two sites.** `spawn.ts:1526` re-enters the validation path (r58). `boot-adoption.ts:2736` is the winner's publish and the licence is now stated at the line: D4 below |
+| R3 is cleared on every path that stops owning | **clean** — six clears cover the five teardown paths plus the fence (r61); the two sets are the spawn and the adoption claim |
+| R4 is released with R3 | **clean by construction** — the accessor does it, so a path that clears the claim cannot forget the register. The one non-session pair (the spawn reservation) is released in `releaseSpawnReservation` |
+| R4 on the refusal paths | **checked, and clean for a reason worth writing down.** A fresh spawn sets `session.paneClaimBy` at `spawn.ts:658` *before* its ownership write, so a turn that LOSES the contest or cannot persist it has already noted the id. It is released because `wireChildExit` runs at `spawn.ts:507` — before the claim — so the kill that follows the refusal fires the teardown that clears it. Order, not luck |
+
+**Still open, and unchanged in kind:**
+
+- **D2 / D3** — `disownPane` and `ownPane` carry no identity test of their own; the licence lives at
+  their call sites. Not a violation of the rules as stated (the licences ARE applied), but the same
+  structural shape as the round-forty defect, in the funnel that was built to end it.
+- **D4** — resolved by **licence rather than by a guard**, stated at the line: the publisher has just
+  won the durable claim, and any session still under that key cannot renew, so it self-fences within
+  one deadline. The remedy that looks obvious (fence the displaced session) would mark the KEY and
+  permanently refuse the pane we just adopted, so it is explicitly not done.
+- **D5 — CLOSED.** *"all four name the same owner while it serves, and three of four release on a
+  fence"* (`pane-handle-persistence.test.ts`) asserts the whole agreement in both states, including
+  the one asymmetry the model allows.
+- **D9 (new, and it is a question rather than a defect)** — `fencedKeys` is keyed by session key and
+  never cleared, so **a fenced key is refused for the life of the process**, including to a second
+  logical gateway that could legitimately take it. Fail-closed and consistent with the model, which
+  does not say whether fencing is reversible. Recorded rather than answered with code: making a
+  fence expire is a behavioural change nobody asked for, and the cost today is bounded by a gateway
+  restart.
 
 **What the list says about method.** D1 was invisible to every incremental round: no single round's
 diff contained both the predicate and the fact that makes a pid ambiguous. D2 and D3 are the same
@@ -2966,7 +3035,7 @@ live evidence) and the remedy is the one used then — name the kinds and count 
 > | Kind | Rows | What the row records |
 > |---|---|---|
 > | **superseded** | M31, M38 | the code the mutation targeted no longer exists; the row is history |
-> | **subsumed** | M80, M116, M161, M169, M173 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
+> | **subsumed** | M80, M116, M161, M169 | a second, independent guard covers the same case, so neither reds alone (M119 reds with both removed); M161's harm is reachable only in the world M160 creates |
 > | **probe, not a guard** | M91, M147 | the mutation cannot change observable behaviour — a redundant no-op (M91), or an ordering the runtime makes unobservable (M147) |
 > | **not isolable** | M93 | the case is reachable by a second guard, so removing this one alone changes nothing; removing the mechanism entirely DOES red |
 >
@@ -3182,7 +3251,9 @@ count from the rows below rather than trusting this sentence.
 | M170 | `ReplSession.paneClaimBy` no longer drops the id when the owner gives it up | `adoption-claim-is-a-compare-and-set.test.ts` (1), `pane-handle-persistence.test.ts` (1 — a replacement spawn refused by its own predecessor) |
 | M171 | the pid is folded back into the RESERVATION predicate | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
 | M172 | `reservePaneSpawn` does not record the reserver | `adoption-claim-is-a-compare-and-set.test.ts` (1) |
-| ~~M173~~ | `releaseSpawnReservation` does not drop the reserver locally | ~~nothing~~ — **subsumed**: every reachable fixture releases the ROW too, and the predicate then never sees the id. The local drop covers the prevented-write path only, which is the parallel of M170's case and would need a lock failure to construct |
+| M173 | `releaseSpawnReservation` does not drop the reserver locally | `pane-handle-persistence.test.ts` (1 — the failed-durable-release case, added r61) — **reclassified from "subsumed", which it never was**: no other mutation's failure implied it, and the document said in one place that the case was missing while claiming in another that the row was covered |
+| M174 | the reservation is released locally but NOT durably | `pane-handle-persistence.test.ts` (2 — the uncontended-spawn control and the no-stub case): the two representations can diverge either way, so both directions carry a red |
+| M175 | `fenceLostSession` keeps the claim in the local register | `adoption-claim-is-a-compare-and-set.test.ts` (1 — a fenced session must not block the takeover) |
 
 M13 and M14 are the direction a "safe" implementation fails in: a guard that refuses
 everything passes every refusal case and delivers nothing.

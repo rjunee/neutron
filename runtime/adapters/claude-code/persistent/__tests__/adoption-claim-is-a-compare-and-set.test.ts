@@ -49,6 +49,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   armSelfFence,
+  fenceLostSession,
   fencedReasonFor,
   setFenceTimerFactoryForTests,
   releaseAdoptionClaim,
@@ -59,6 +60,7 @@ import {
 } from '../boot-adoption.ts'
 import { getOrSpawnSession } from '../spawn.ts'
 import { ReplSession } from '../repl-session.ts'
+import type { PtyChild } from '../pty-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
 import { shutdownAllPersistentRepls } from '../pool.ts'
@@ -1276,6 +1278,38 @@ describe('identity is the claimant id; the pid is only evidence about liveness',
       spawnReservationBlocksUs(
         { spawn_reservation_by: 'reserver-gone', spawn_reservation_at: NOW, spawn_reservation_pid: process.pid },
         { ours: 'reserver-B', now: NOW, ourPid: process.pid },
+      ),
+    ).toBe(false)
+  })
+
+  it('a FENCED session stops holding its claim, so it cannot block the takeover', () => {
+    // THE RELEASE MATRIX'S FOURTH COLUMN (r61). Fencing is how a gateway stops serving a pane
+    // it can no longer prove it owns — and while a fenced session went on holding its claim id
+    // in this process, a second gateway HERE would read "a live owner holds that claim" and be
+    // refused. The self-fence exists to make that takeover possible, so blocking it is the one
+    // outcome the mechanism must not produce.
+    //
+    // The ROW's claim is deliberately untouched by fencing: after a takeover it is the
+    // winner's, and after a self-fence we are the gateway that could not write. Only the local
+    // assertion of ownership goes.
+    const loser = new ReplSession('key-fenced', 'gen-f', 'sid-f', 'chan', '/tmp')
+    // Fencing DETACHES rather than closes, so it needs a child to detach from.
+    loser.attachChild({
+      pid: 4242,
+      write: () => {},
+      kill: () => {},
+      detach: () => {},
+      exited: new Promise<null>(() => {}),
+      hasExited: () => false,
+      wasKilledByUs: () => false,
+    } as unknown as PtyChild)
+    loser.paneClaimBy = 'claimant-FENCED'
+    fenceLostSession('key-fenced', loser, 'the row names another claimant', () => {})
+    expect(loser.paneClaimBy).toBeUndefined()
+    expect(
+      paneClaimBlocksUs(
+        { adoption_claim_by: 'claimant-FENCED', adoption_claim_at: NOW, adoption_claim_pid: process.pid },
+        { ours: 'claimant-NEXT', now: NOW, ourPid: process.pid },
       ),
     ).toBe(false)
   })

@@ -2,6 +2,7 @@
 // Session spawn / resume / turn-inject machinery + the respawn in-flight gate
 // (D2 split).
 
+import { dropLocalOwnership } from './local-ownership.ts'
 import { randomUUID, randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1194,6 +1195,14 @@ function releaseSpawnReservation(
   sessionKey: string,
   reserver: string,
 ): void {
+  // GIVEN UP IN THIS PROCESS FIRST, AND UNCONDITIONALLY (r59, lost to a bad mutation-restore
+  // and re-applied with its case in r61). The durable release can fail — an unacquired lock, a
+  // registry that has become unwritable — and the row then still names this reserver. If the
+  // process also went on claiming to HOLD it, `spawnReservationBlocksUs` would treat the
+  // abandoned reservation as a live in-process owner and refuse this key to every later turn
+  // until the TTL, which is precisely the wedge the local register was introduced to prevent.
+  // The row's TTL is the backstop for other processes; this line is the backstop for ours.
+  dropLocalOwnership(reserver)
   const registryPath = options.replRegistryPath
   if (registryPath === undefined) return
   try {
