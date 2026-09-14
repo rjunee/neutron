@@ -60,11 +60,24 @@ before any of the other gates were added.
 | G023 `:2413` | branch-disagreement condition → `false` | 1 | 18 GREEN |
 | G024 `:7958` | null-plan condition → `false` | 1 | 18 GREEN |
 | G024 `:7964` | absent-pinned-line condition → `false` | 2 | 18 GREEN |
-| G034 `:8387` | empty full-OID condition → `false` | 1 | 18 GREEN |
-| G075 `:8816` | failure-stop condition → `false` | 3 | 18 GREEN |
-| G075 `:8809` | thrown-reason condition → `false` | 1 | 18 GREEN |
-| G075 `:8811` | null-reason condition → `false` | 1 | 18 GREEN |
-| G075 `:8813` | empty-spec condition → `false` | 1 | 18 GREEN |
+| G034 `:8394` | empty full-OID condition → `false` | 1 | 18 GREEN |
+| G075 `:8823` | failure-stop condition → `false` | 3 | 18 GREEN |
+| G075 `:8816` | thrown-reason condition → `false` | 1 | 18 GREEN |
+| G075 `:8818` | null-reason condition → `false` | 1 | 18 GREEN |
+| G075 `:8820` | empty-spec condition → `false` | 1 | 18 GREEN |
+
+Source lines in this table are as they stand on the rebased branch (`origin/main`
+with #624/#738 applied), which is where the runs above were made. They are seven
+lines below the enforcement references in the inventory table, which are kept on
+that document's own declared baseline.
+
+Review replay (independent, same tree): the three pairwise MERGES of G022's
+terminal outcomes each go red, which is the property the row claims. Rethrowing
+`awaitingTrailerError()` in place of `exitedError(cls.exitCode)` (`:2383`) reds
+the three recorded-exit cases; flipping `err.awaitingTrailer` to `false`
+(`:2361`) reds the unknown-wait case with exactly `expected "awaiting-trailer",
+received "inner-error"` — the false/unknown collapse itself; disabling the
+collect arm (`:2373`) reds the finished case. Restored: 18 GREEN.
 
 The unknown-probe fixture has an independent six-call emergency ceiling
 (`trident/inner-workflow-gates.test.ts:36`): removing the production bound yields
@@ -72,20 +85,26 @@ the wrong terminal cause and fails, rather than hanging the test process.
 
 ### Inventory discrepancies and decisions
 
-Updated the six inventory rows, their missing-pin rollup and moved citations.
-G024 moved from 7944/7950 to 7958/7964, G034 from 8371 to 8387, G075 from 8802 to
-8816, and G031 from 8249 to 8263. G075 already has relevant execution coverage
-at `trident/__tests__/escalation-e2e.test.ts:364`; this focused table adds an
+Updated the six inventory rows and their missing-pin rollup. The enforcement
+line references are NOT moved: this document declares its baseline as
+`f7320fc76eb3e1d0775dabd56cf957da632904e5` in its own header, and every original
+reference is correct there (7944 `if (!plan) {`, 7950 `if (pinnedLine === null)
+{`, 8249 the null-Forge throw, 8371 `if (memberMode) {`, 8802 `if (rePlanFailure
+!== '') {`). Re-measuring four rows against a later checkout would leave 161 rows
+on one baseline and 4 on another, and would go stale again at the next merge that
+touches the file — as it did here, since #624/#738 inserted seven lines above
+8260. G075 already has relevant execution coverage at
+`trident/__tests__/escalation-e2e.test.ts:364`; this focused table adds an
 explicit per-guard mutation certification.
 
-The brief's G031 assertion is not substantiated by its cited test in this
-checkout: `trident/infra-retry.test.ts:30` constructs an outer failure result and
-`:131` feeds it to the retry loop. Search
-`rg -n 'inner-workflow.mjs|readFileSync|NO BUILD HAPPENED' trident/infra-retry.test.ts`
-returns only line 24, the positive control. That file does not load the workflow
-body. Kept G031's pin unverified and explained the discrepancy in its inventory
-row, rather than claiming coverage or adding the explicitly excluded seventh
-pin. The rollup now counts 12 unverified rows, enumerated from the table.
+G031 IS certified, by a pin that landed after this inventory's baseline.
+`trident/__tests__/cross-model-dispatch.test.ts:765` (added by #624/#738) drives
+the workflow body with a null build agent and asserts the terminal class;
+replacing the guard with `if (false)` turns it red. `trident/infra-retry.test.ts`
+does not certify it — `:125` injects an outer failure result and the whole file
+stays green under that same mutation — so the inventory row names the pin that
+does and records why the other does not. No seventh pin was added here. The
+rollup now counts 11 unverified rows, enumerated from the table.
 
 No production outcome, guard, invariant or product decision was added. Existing
 refusal and escalation vocabularies above remain unchanged; these tests maintain
