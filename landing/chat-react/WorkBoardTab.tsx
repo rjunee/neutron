@@ -186,8 +186,8 @@ interface PhaseTag {
 }
 
 /**
- * The phase TAG for a bound run's inner step, or null when the item has no run
- * progress (a plain upcoming card shows just the gray dot + title). Sentence-case
+ * The phase TAG for a bound run's inner step, falling back to the card's durable
+ * lane when no run progress exists. Sentence-case
  * copy, tinted capsule; failure uses the non-technical-owner-friendly "Didn't finish". *
  * THE CARD'S OWN LANE WINS OVER THE RUN STEP, for `blocked` and only for `blocked`.
  * Every other state here is REFINED by the bound run, which is right: a live run knows
@@ -202,7 +202,20 @@ interface PhaseTag {
 function stepTag(item: WorkBoardItem): PhaseTag | null {
   if (item.status === 'blocked') return { label: 'Blocked', cls: 'cwb-tag-blocked' }
   const rp = item.run_progress
-  if (rp === undefined) return null
+  if (rp === undefined) {
+    switch (item.status) {
+      case 'upcoming':
+        return { label: 'Upcoming', cls: 'cwb-tag-build' }
+      case 'in_progress':
+        return { label: 'In progress', cls: 'cwb-tag-build' }
+      case 'done':
+        return { label: 'Merged', cls: 'cwb-tag-merge' }
+      case 'failed':
+        return { label: 'Failed', cls: 'cwb-tag-failed' }
+      case 'archived':
+        return { label: 'Shelved', cls: 'cwb-tag-build' }
+    }
+  }
   switch (resolveStepLabel(rp)) {
     case 'building':
       return { label: 'Building', cls: 'cwb-tag-build' }
@@ -1073,11 +1086,8 @@ function WorkBoardRow({
   const pr = item.run_progress?.pr ?? item.pr ?? null
   const prUrl = item.run_progress?.pr_url ?? item.pr_url ?? null
 
-  // Item 4 — the phase TAG (+ round) moves to a SECOND line, muted, but ONLY when
-  // the item has a run to report on OR a durable PR to show (a detached
-  // failed/done card with a durable PR must still get its meta line). A bare
-  // queued/not-started card (no bound run, no PR) stays single-line: just the
-  // title. `hasStatus` gates the meta line.
+  // Item 4 — the phase TAG (+ round) moves to a SECOND line. Every card has a
+  // durable lane tag; bound run progress refines it to the live phase.
   const hasStatus = tag !== null || pr !== null
 
   // Item 2 (a11y) — when the inline confirm closes via Cancel, return focus to the

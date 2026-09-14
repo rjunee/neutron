@@ -191,8 +191,8 @@ export interface PhaseTag {
 }
 
 /**
- * The phase TAG for a bound run's inner step, or null when the item has no run
- * progress (a plain upcoming card shows just the gray dot + title). Sentence-
+ * The phase TAG for a bound run's inner step, falling back to the card's durable
+ * lane when no run progress exists. Sentence-
  * case copy, tinted capsule; failure uses "Didn't finish" (curly apostrophe —
  * matches the web copy exactly). *
  * THE CARD'S OWN LANE WINS OVER THE RUN STEP, for `blocked` and only for `blocked`.
@@ -207,7 +207,20 @@ export interface PhaseTag {
 export function stepTag(item: WorkBoardItem): PhaseTag | null {
   if (item.status === 'blocked') return { label: 'Blocked', colorKey: 'blocked' };
   const rp = item.run_progress;
-  if (rp === undefined) return null;
+  if (rp === undefined) {
+    switch (item.status) {
+      case 'upcoming':
+        return { label: 'Upcoming', colorKey: 'build' };
+      case 'in_progress':
+        return { label: 'In progress', colorKey: 'build' };
+      case 'done':
+        return { label: 'Merged', colorKey: 'merge' };
+      case 'failed':
+        return { label: 'Failed', colorKey: 'failed' };
+      case 'archived':
+        return { label: 'Shelved', colorKey: 'build' };
+    }
+  }
   switch (resolveStepLabel(rp)) {
     case 'building':
       return { label: 'Building', colorKey: 'build' };

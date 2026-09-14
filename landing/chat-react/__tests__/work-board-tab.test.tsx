@@ -258,6 +258,42 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('renders an unbound card state while a bound card keeps its run phase', async () => {
+    const bound = item({
+      id: 'bound',
+      title: 'Bound row',
+      status: 'in_progress',
+      linked_run_id: 'run_bound',
+      run_progress: {
+        run_id: 'run_bound',
+        phase_label: 'reviewing',
+        step_label: 'reviewing',
+        round: 2,
+        started_at: '2026-09-14T00:00:00Z',
+        last_advanced_at: '2026-09-14T00:01:00Z',
+        elapsed_ms: 60000,
+        stalled: false,
+        stalled_ms: null,
+        pr: null,
+        pr_url: null,
+        verdict: null,
+        failure_reason: null,
+      },
+    })
+    const rows = [item({ id: 'unbound', title: 'Unbound row', status: 'upcoming' }), bound]
+    const { container, root, act } = await mount(listOf(rows))
+    const rendered = Array.from(container.querySelectorAll('.cwb-row')).map((row) => ({
+      title: row.querySelector('.cwb-title')?.textContent,
+      phase: row.querySelector('.cwb-tag')?.textContent,
+    }))
+
+    expect(rendered).toEqual([
+      { title: 'Unbound row', phase: 'Upcoming' },
+      { title: 'Bound row', phase: 'Reviewing' },
+    ])
+    await act(async () => root.unmount())
+  })
+
   it('shows a brief corruption alert while the recovered run continues', async () => {
     const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.'
     const rows = [
@@ -545,7 +581,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
-  it('renders 2 lines (title / tag+round) for a bound run but 1 line for a queued item (item 4)', async () => {
+  it('renders a second state line for both bound and unbound cards', async () => {
     const rows = [
       item({
         id: 'building',
@@ -581,10 +617,11 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(meta).not.toBeNull()
     expect(meta!.querySelector('.cwb-tag')!.textContent).toBe('Building')
     expect(meta!.querySelector('.cwb-round')!.textContent).toBe('round 1')
-    // Queued row → title only, NO second line (item 4: 1-line when queued).
+    // Queued row → its durable state, without inventing a round.
     const queuedRow = liRows[1]!
     expect(queuedRow.querySelector('.cwb-title')!.textContent).toBe('Just queued')
-    expect(queuedRow.querySelector('.cwb-row-meta')).toBeNull()
+    expect(queuedRow.querySelector('.cwb-tag')!.textContent).toBe('Upcoming')
+    expect(queuedRow.querySelector('.cwb-round')).toBeNull()
     await act(async () => root.unmount())
   })
 
