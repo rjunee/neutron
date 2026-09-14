@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, renameSync, symlinkSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, renameSync, symlinkSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
@@ -40,7 +40,19 @@ test('unavailable FFI warns once and still seeds on repeated calls', () => {
     for (const cwd of [dir, join(dir, 'another-project')]) {
       expect(ensureClaudeTrust({ cwd, configDir: dir })).toBe(file)
       const config = JSON.parse(readFileSync(file, 'utf8'))
-      expect(config.projects[cwd]).toEqual({
+      // #769 stamps a seed-provenance marker so its prune can touch only entries it
+      // created. Its value carries a device/inode/time triple, so the two stable
+      // fields stay pinned EXACTLY and the marker is pinned as present-and-a-string —
+      // not relaxed to a subset match, which would stop catching an unexpected field.
+      const seeded = config.projects[cwd]
+      // The marker is stamped ONLY for a cwd that exists on disk — an absent
+      // directory cannot establish retention provenance, so #769's prune will
+      // never treat it as its own. Pin that rule, not a blanket 'always set'.
+      expect(typeof seeded.neutronSeededProjectParentV1).toBe(
+        existsSync(cwd) ? 'string' : 'undefined',
+      )
+      const { neutronSeededProjectParentV1: _marker, ...stable } = seeded
+      expect(stable).toEqual({
         hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
       })
       expect(config.bypassPermissionsModeAccepted).toBe(true)
@@ -62,7 +74,10 @@ test('normal acquisition seeds without an unavailable warning', () => {
   try {
     expect(ensureClaudeTrust({ cwd: dir, configDir: dir })).toBe(file)
     const config = JSON.parse(readFileSync(file, 'utf8'))
-    expect(config.projects[dir]).toEqual({
+    const seeded = config.projects[dir]
+    expect(typeof seeded.neutronSeededProjectParentV1).toBe('string')
+    const { neutronSeededProjectParentV1: _marker, ...stable } = seeded
+    expect(stable).toEqual({
       hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
     })
     expect(config.bypassPermissionsModeAccepted).toBe(true)
