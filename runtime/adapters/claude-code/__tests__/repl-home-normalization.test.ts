@@ -385,6 +385,27 @@ describe('createClaudeCodeSubstrateAuto forwards the NORMALIZED cwd, not the raw
     )
     expect(registeredFor(armedByCwd)).toBeDefined()
   })
+
+  test('a disposable substrate is never registered for a heartbeat rooted in its removable cwd', () => {
+    const transientCwd = tempHome('neutron-disposable-cwd-')
+    const disposableId = `cc-disposable-${Date.now()}`
+    withEnvHome(undefined, () =>
+      build({ substrate_instance_id: disposableId, cwd: transientCwd, ephemeral: true }),
+    )
+
+    expect(registeredFor(disposableId)).toBeUndefined()
+    expect(activeWatchdogs.has(deriveReplSupervisionPaths(transientCwd).replRegistryPath)).toBe(false)
+
+    // Complement: an otherwise identical warm substrate still acquires its
+    // registry and heartbeat. This prevents the fix from silencing supervision
+    // for worktrees whose lifetime is not bounded to one disposable turn.
+    const warmId = `cc-warm-control-${Date.now()}`
+    withEnvHome(undefined, () =>
+      build({ substrate_instance_id: warmId, cwd: transientCwd }),
+    )
+    expect(registeredFor(warmId)).toBeDefined()
+    expect(activeWatchdogs.has(deriveReplSupervisionPaths(transientCwd).replRegistryPath)).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------
