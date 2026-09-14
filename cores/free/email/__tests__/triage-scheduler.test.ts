@@ -4,7 +4,7 @@
  * Per docs/plans/email-managed-core-tier1-brief.md § 3.4.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, setSystemTime, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +21,36 @@ function tmp(): { home: string; close: () => void } {
 }
 
 describe('TriageScheduler', () => {
+  test('defaults start() to the current clock', async () => {
+    const { home, close } = tmp()
+    setSystemTime(new Date('2026-05-20T15:00:00Z')) // 08:00 PT
+    try {
+      const resolver = new EmailProjectCacheResolver({ owner_home: home })
+      let fires = 0
+      const s = buildTriageScheduler({
+        cacheFor: (id) => resolver.resolve(id),
+        client: buildSeededInMemoryGmailClient(),
+        targetProjectId: async () => 'demo',
+        fire: async () => {
+          fires++
+          return { chat_message_id: 'cm-1' }
+        },
+        llm: async () => '[]',
+        model: 'haiku',
+        userTz: 'America/Los_Angeles',
+      })
+
+      await s.start()
+
+      expect(fires).toBe(1)
+      await s.stop()
+      resolver.closeAll()
+    } finally {
+      setSystemTime()
+      close()
+    }
+  })
+
   test('does not fire before start', async () => {
     const { home, close } = tmp()
     try {
@@ -328,9 +358,9 @@ describe('TriageScheduler — the digest reads the WHOLE inbox (live 400, 2026-0
         },
         model: 'haiku',
         userTz: 'America/Los_Angeles',
+        now: () => new Date('2026-05-20T15:00:00Z'),
       })
       await s.start()
-      await s.tick(new Date('2026-05-20T15:00:00Z'))
       await s.stop()
       expect(seen.length).toBe(1)
       expect(seen[0]?.['label']).toBe('INBOX')
@@ -367,9 +397,9 @@ describe('TriageScheduler — the digest reads the WHOLE inbox (live 400, 2026-0
         },
         model: 'haiku',
         userTz: 'America/Los_Angeles',
+        now: () => new Date('2026-05-20T15:00:00Z'),
       })
       await s.start()
-      await s.tick(new Date('2026-05-20T15:00:00Z'))
       await s.stop()
       expect(inboxes).toEqual([1])
       resolver.closeAll()
