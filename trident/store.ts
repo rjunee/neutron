@@ -68,7 +68,7 @@ export class TridentUnresumableSeedError extends Error {
 
 export class TridentIncompleteSeedError extends Error {
   constructor(checkpoint: string, column: 'inner_checkpoint_head' | 'base_sha', value: string | null) {
-    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}' with ${column}=${value === null ? 'NULL' : `'${value}'`}: a seeded row needs a 40-hex ${column}, because launch() re-pins neither — a seed missing its head cannot be revalidated against the live tip, and a seed missing its base pin permanently disarms the publish-time "not cut from origin/<base>" refusal`)
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}' with ${column}=${value === null ? 'NULL' : `'${value}'`}: a seeded row needs a 40- or 64-hex ${column}, because launch() re-pins neither — a seed missing its head cannot be revalidated against the live tip, and a seed missing its base pin permanently disarms the publish-time "not cut from origin/<base>" refusal`)
     this.name = 'TridentIncompleteSeedError'
   }
 }
@@ -443,7 +443,7 @@ export interface CreateTridentRunInput {
   inner_checkpoint?: string | null
   /** Salvage-resume seed — see `inner_checkpoint`. The recorded commit the seeded
    *  checkpoint was stamped against; the resume comparison is meaningless without it,
-   *  so `create` REFUSES a seeded row whose head is not 40 hex characters
+   *  so `create` REFUSES a seeded row whose head is not 40 or 64 hex characters
    *  (`TridentIncompleteSeedError`) and stores the trimmed, lower-cased value. */
   inner_checkpoint_head?: string | null
   /** Salvage-resume seed — see `inner_checkpoint`. Carried verbatim, because the
@@ -461,7 +461,7 @@ export interface CreateTridentRunInput {
    * chained off one. Seeding the prior run's pin keeps that gate live.
    *
    * "Required" is ENFORCED, not merely documented (Argus r24): `create` throws
-   * `TridentIncompleteSeedError` when a seeded row's pin is not 40 hex characters,
+   * `TridentIncompleteSeedError` when a seeded row's pin is not 40 or 64 hex characters,
    * and stores the trimmed, lower-cased value it checked.
    */
   base_sha?: string | null
@@ -596,7 +596,7 @@ const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
  * the launcher's revalidation, deliberately: a seed the producer would refuse
  * must not become writable by arriving at `create` from somewhere else.
  */
-const HEX40 = /^[0-9a-f]{40}$/
+const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 /**
  * Split a {@link TridentRunStore.changeSignature} into `run id → last_advanced_at`.
@@ -656,7 +656,7 @@ export class TridentRunStore {
     // AND THE NAME IS ONLY HALF THE SEED (Argus r24, major). The guard above asked
     // whether the checkpoint MEANS "a commit exists and nothing has judged it yet"
     // and then let the two columns that say WHICH commit through unchecked, so a
-    // row seeded `forge-done` with a null `base_sha` — or with no 40-hex head —
+    // row seeded `forge-done` with a null `base_sha` — or with no 40- or 64-hex head —
     // was a valid row. Both shapes are permanently unfixable once written:
     // `launch()` pins a base only on a FRESH build (`inner_checkpoint === null &&
     // base_sha === null`), which a seeded checkpoint makes false, so the row can
@@ -666,15 +666,15 @@ export class TridentRunStore {
     // revalidation compares the seeded head against the live tip, so a seed with no
     // head strips the leftover-branch ownership guard off a row that still needs
     // it. `builtButNeverReviewedSeed` already refuses both (run-disposition.ts), on
-    // the same 40-hex test and the same ASCII trim — this is that predicate at the
+    // the same 40- or 64-hex test and the same ASCII trim — this is that predicate at the
     // write site, which is where this card says a precondition belongs.
     const seededHead = trimAsciiWs(input.inner_checkpoint_head ?? '').toLowerCase()
     const seededBase = trimAsciiWs(input.base_sha ?? '').toLowerCase()
     if (seededCheckpoint !== '') {
-      if (!HEX40.test(seededHead)) {
+      if (!FULL_OID.test(seededHead)) {
         throw new TridentIncompleteSeedError(seededCheckpoint, 'inner_checkpoint_head', input.inner_checkpoint_head ?? null)
       }
-      if (!HEX40.test(seededBase)) {
+      if (!FULL_OID.test(seededBase)) {
         throw new TridentIncompleteSeedError(seededCheckpoint, 'base_sha', input.base_sha ?? null)
       }
     } else {

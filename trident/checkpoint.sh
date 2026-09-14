@@ -480,7 +480,7 @@ phase_for_checkpoint() {
 # EXACTLY TWO SHAPES CARRY A ROUND - everything else prints empty, meaning "this
 # checkpoint implies NOTHING about the round" and the column is left untouched:
 #   `fix-round-N`                                                      -> N
-#   `outer-published:<40-lowercase-hex>:<remaining>:<round>[:deviated]` -> <round>
+#   `outer-published:<40-or-64-lowercase-hex>:<remaining>:<round>[:deviated]` -> <round>
 # The round is the LAST numeric field of the published shape (the publisher builds
 # outer-published:<head>:<remaining_tasks>:<round>), never the first.
 # `argus-request-changes-round-N` also names a round and is DELIBERATELY not
@@ -513,7 +513,7 @@ round_for_checkpoint() {
   local ws_re=$'^[ \t\n\v\f\r]*(.*[^ \t\n\v\f\r])?[ \t\n\v\f\r]*$'
   if [[ "$name" =~ $ws_re ]]; then name="${BASH_REMATCH[1]}"; fi
   local fix_re='^fix-round-([0-9]{1,9})$'
-  local pub_re='^outer-published:[0-9a-f]{40}:[0-9]+:([0-9]{1,9})(:deviated)?$'
+  local pub_re='^outer-published:([0-9a-f]{40}|[0-9a-f]{64}):[0-9]+:([0-9]{1,9})(:deviated)?$'
   # `[0-9]` IS COLLATED, NOT ASCII, under a UTF-8 locale (Argus r23, two repros).
   # On glibc `en_US.UTF-8` it also matches U+0663 ARABIC-INDIC DIGIT THREE, so
   # `fix-round-٣` MATCHED here and then `$(( 10#٣ ))` threw "invalid integer
@@ -528,12 +528,17 @@ round_for_checkpoint() {
   local saved_lc="${LC_ALL-}"
   LC_ALL=C
   local matched=0
-  if [[ "$name" =~ $fix_re ]] || [[ "$name" =~ $pub_re ]]; then matched=1; fi
+  local digits=''
+  if [[ "$name" =~ $fix_re ]]; then
+    matched=1; digits="${BASH_REMATCH[1]}"
+  elif [[ "$name" =~ $pub_re ]]; then
+    matched=1; digits="${BASH_REMATCH[2]}"
+  fi
   if [ -n "$saved_lc" ]; then LC_ALL="$saved_lc"; else unset LC_ALL; fi
   if [ "$matched" = 1 ]; then
     # `10#` normalizes leading zeros (base-10, not octal), so `fix-round-007`
     # answers 7 - the same value Number('007') gives the TypeScript copy.
-    printf '%s' "$(( 10#${BASH_REMATCH[1]} ))"
+    printf '%s' "$(( 10#$digits ))"
   else
     printf ''
   fi

@@ -1386,7 +1386,7 @@ function withLocalMergeLock(repo_path: string, body: () => Promise<void>): Promi
 /** A full git object id — the only form `--match-head-commit` accepts (an
  *  abbreviated sha would be rejected by the API, turning the guard into an
  *  unconditional merge failure). */
-const FULL_OID = /^[0-9a-f]{40}$/
+const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 /**
  * The head OID the reviewers actually judged, read back off the run's typed

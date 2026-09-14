@@ -163,7 +163,7 @@ export function reviewCapableCheckpoint(name: string): boolean {
  * USED FOR THE SHA PINS TOO, not just the checkpoint name (Argus r8). Those were
  * `String.prototype.trim`, so this module named one trim contract in its own
  * docblock and then applied a different one three lines later. Behaviour is
- * unchanged — `/^[0-9a-f]{40}$/` rejects anything either trim would disagree
+ * unchanged — `/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/` rejects anything either trim would disagree
  * about — but a stated contract with an exception in it is how the next drift
  * starts.
  */
@@ -325,11 +325,11 @@ export function carriedRalphBudget(
  * The evidence a built-but-never-reviewed terminal run can hand to the NEXT
  * dispatch of the same card, or null when there is nothing safe to hand over.
  *
- * Null for every disposition but `built-never-reviewed`, null when no 40-hex head
+ * Null for every disposition but `built-never-reviewed`, null when no 40- or 64-hex head
  * was recorded (without a head the resume classifier would rebuild anyway, and a
  * seeded checkpoint with no head would only strip the launcher's leftover-branch
  * guard off a run that still needs it), and null when the prior row carries no
- * 40-hex `base_sha` (a seeded row never re-pins one, so it would be born with the
+ * 40- or 64-hex `base_sha` (a seeded row never re-pins one, so it would be born with the
  * publish-time cut-from-origin refusal permanently disarmed).
  *
  * For an `outer-published:<oid>:<remaining>:<round>` checkpoint (round LAST — the
@@ -372,7 +372,7 @@ export function builtButNeverReviewedSeed(
   if (opts.ralph === true && checkpoint === 'forge-done') return null
   const published = checkpoint.match(OUTER_PUBLISHED_CHECKPOINT)
   const head = trimCheckpoint(published?.[1] ?? run.inner_checkpoint_head ?? '').toLowerCase()
-  if (!/^[0-9a-f]{40}$/.test(head)) return null
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) return null
   // NO BASE PIN, NO SEED. `launch()` re-pins a base only on a FRESH build
   // (`inner_checkpoint === null && base_sha === null`), and a seeded checkpoint
   // makes that false — so a seed carrying a null pin would create a row that can
@@ -381,7 +381,7 @@ export function builtButNeverReviewedSeed(
   // would be permanently inert for it and for every re-seed chained off it. A
   // legacy/unpinned prior row therefore seeds NOTHING: it falls through to the
   // fresh dispatch that pins a base, which is exactly today's behaviour for it.
-  if (typeof run.base_sha !== 'string' || !/^[0-9a-f]{40}$/.test(trimCheckpoint(run.base_sha).toLowerCase()))
+  if (typeof run.base_sha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(trimCheckpoint(run.base_sha).toLowerCase()))
     return null
   return {
     checkpoint,

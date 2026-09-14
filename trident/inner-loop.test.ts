@@ -459,8 +459,8 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(child.branch).toBe('feat/x')
   })
 
-  test('a valid launch base sha is threaded and invalid values are omitted', () => {
-    const sha = 'a'.repeat(40)
+  test.each([40, 64])('a valid %i-hex launch base sha is threaded', (width) => {
+    const sha = 'a'.repeat(width)
     expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
     expect('baseSha' in buildWorkflowArgs(input())).toBe(false)
     expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'abc' }))).toBe(false)

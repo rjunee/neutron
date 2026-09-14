@@ -33,11 +33,13 @@ import type { TridentRun } from './store.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
-/** Full 40-hex OIDs — `normalizeOid` (and merge.ts) refuse anything shorter. */
-const RECORDED = 'a'.repeat(40)
-const MOVED = 'b'.repeat(40)
-const FRESH_BUILD = 'c'.repeat(40)
-const FIX_SHA = (round: number): string => String(round).repeat(40).slice(0, 40)
+for (const width of [40, 64]) {
+describe(`object width ${width}`, () => {
+/** Full OIDs of both supported widths — `normalizeOid` (and merge.ts) refuse anything shorter. */
+const RECORDED = 'a'.repeat(width)
+const MOVED = 'b'.repeat(width)
+const FRESH_BUILD = 'c'.repeat(width)
+const FIX_SHA = (round: number): string => String(round).repeat(width).slice(0, width)
 
 const RECORDED_FINDINGS = [
   { severity: 'blocker', title: 'RECORDED — null deref in parseWidget', evidence: 'widget.ts:42' },
@@ -346,7 +348,7 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
 
     // And the LAUNCH-PINNED sha outranks even that: it is the commit the branch was
     // actually cut from, and a sha cannot go stale.
-    const pinned = 'f'.repeat(40)
+    const pinned = 'f'.repeat(width)
     const pinnedCmd = promptFor(
       await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true, baseSha: pinned }),
       'resume-diff',
@@ -777,7 +779,7 @@ describe('classifyResume — the boundaries, executed', () => {
   }
 
   const source = [
-    'const FULL_OID = /^[0-9a-f]{40}$/',
+    SRC.match(/^const FULL_OID = .+$/m)![0],
     extractFn('normalizeOid'),
     extractFn('classifyResume'),
     extractFn('resumeOnUnchangedHead'),
@@ -946,7 +948,7 @@ describe('classifyResume — the boundaries, executed', () => {
 
   test('a SHORT or malformed sha is never "the same commit"', () => {
     expect(fns.normalizeOid(RECORDED.slice(0, 12))).toBe('')
-    expect(fns.normalizeOid('z'.repeat(40))).toBe('')
+    expect(fns.normalizeOid('z'.repeat(width))).toBe('')
     expect(fns.normalizeOid(42)).toBe('')
     // …and an abbreviation of the very commit that IS on the branch still rebuilds,
     // because merge.ts would refuse that pin anyway.
@@ -1197,3 +1199,6 @@ describe('mid-loop resume — a RECORDED unproven suite still cannot be approved
     expect(out.result.verdict).toBe('APPROVE')
   })
 })
+
+})
+}

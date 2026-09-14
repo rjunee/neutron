@@ -24,8 +24,10 @@ import {
 } from './run-disposition.ts'
 import type { TridentPhase, TridentVerdict } from './store.ts'
 
-const HEAD = 'a'.repeat(40)
-const OTHER = 'b'.repeat(40)
+for (const width of [40, 64]) {
+describe(`object width ${width}`, () => {
+const HEAD = 'a'.repeat(width)
+const OTHER = 'b'.repeat(width)
 
 interface Row {
   phase?: TridentPhase
@@ -120,7 +122,7 @@ describe('terminalRunDisposition — the three terminal states, from columns alo
     expect(terminalRunDisposition(row({ checkpoint: 'fix-round-1234567890' }))).toBe(
       'died-before-build',
     )
-    const oid = 'a'.repeat(40)
+    const oid = 'a'.repeat(width)
     expect(terminalRunDisposition(row({ checkpoint: `outer-published:${oid}:1:123456789` }))).toBe(
       'built-never-reviewed',
     )
@@ -154,7 +156,7 @@ describe('terminalRunDisposition — the three terminal states, from columns alo
 })
 
 /** The origin/<base> pin every seedable prior row must carry. */
-const BASE = 'c'.repeat(40)
+const BASE = 'c'.repeat(width)
 
 describe('builtButNeverReviewedSeed — what may be handed to the next dispatch', () => {
   test('a forge-done row hands over checkpoint, head, findings VERBATIM and the BASE PIN', () => {
@@ -364,3 +366,6 @@ describe('builtButNeverReviewedSeed — what may be handed to the next dispatch'
     ).toBeNull()
   })
 })
+
+})
+}

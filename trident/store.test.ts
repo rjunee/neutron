@@ -732,7 +732,7 @@ describe('TridentRunStore', () => {
   // could not satisfy the refusals above: a complete seed still lands, an UNSEEDED
   // row is still allowed to carry no pins at all, and the pins are stored in the
   // normalised form the guard read.
-  test('a complete seed still lands, and its pins are stored as the guard read them', async () => {
+  test.each([40, 64])('a complete %i-hex seed lands with normalized pins', async (width) => {
     const store = new TridentRunStore(db)
     const run = await store.create({
       slug: 'complete',
@@ -740,13 +740,13 @@ describe('TridentRunStore', () => {
       repo_path: '/r',
       task: 't',
       inner_checkpoint: 'fix-round-2',
-      inner_checkpoint_head: ` ${'A'.repeat(40)} `,
-      base_sha: `${'B'.repeat(40)}\n`,
+      inner_checkpoint_head: ` ${'A'.repeat(width)} `,
+      base_sha: `${'B'.repeat(width)}\n`,
     })
     const stored = store.get(run.id)!
     expect(stored.inner_checkpoint).toBe('fix-round-2')
-    expect(stored.inner_checkpoint_head).toBe('a'.repeat(40))
-    expect(stored.base_sha).toBe('b'.repeat(40))
+    expect(stored.inner_checkpoint_head).toBe('a'.repeat(width))
+    expect(stored.base_sha).toBe('b'.repeat(width))
   })
 
   test('an UNSEEDED row is untouched by the pin guard', async () => {

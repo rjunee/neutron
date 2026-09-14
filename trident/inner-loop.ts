@@ -96,7 +96,7 @@ export interface InnerLoopInput {
    * MID-LOOP RESUME — the LIVE head of `run.branch`, read IN CODE by the launcher at
    * fire time (`resolveResumeLiveHead`), never relayed by a model. Tri-state, and the
    * three values are NOT interchangeable:
-   *   - a full 40-hex lowercase OID → the authority's answer for the branch head.
+   *   - a full 40- or 64-hex lowercase OID → the authority's answer for the branch head.
    *   - `'absent'` → the authority answered SUCCESSFULLY that the branch does not
    *     exist; the recorded work is gone from it, so a rebuild is correct.
    *   - `''` → the launcher tried 3 times and COULD NOT READ the head. Exclusively
@@ -597,7 +597,7 @@ export function buildWorkflowArgs(
     repoPath: run.repo_path,
     task: run.task,
     baseBranch: input.base_branch,
-    ...(typeof input.base_sha === 'string' && /^[0-9a-f]{40}$/.test(input.base_sha) ? { baseSha: input.base_sha } : {}),
+    ...(typeof input.base_sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.base_sha) ? { baseSha: input.base_sha } : {}),
     slug: run.slug,
     maxRounds: input.max_rounds,
     ralph: run.ralph,

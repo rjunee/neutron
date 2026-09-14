@@ -473,7 +473,7 @@ with cross-references noted inline.
     and an absent/null/whitespace-only one FAILS CLOSED to a fresh dispatch
     (`trident/board-dispatch.ts` `cardsPriorRun !== '' && cardsPriorRun === prior.id`, pinned by
     `trident/board-dispatch.test.ts` "a card carrying NO LINK AT ALL does not seed"), the prior
-    row carries a 40-hex `base_sha`, the branch tip resolves to
+    row carries a 40- or 64-hex `base_sha`, the branch tip resolves to
     EXACTLY the recorded head THROUGH THE REF THE LAUNCH WILL READ (`ls-remote --heads origin` in
     pr mode, mirroring `resolveResumeLiveHead`; the local ref in local mode — a local-ref proof in
     pr mode predicts a resume that cannot happen, since Forge does not push in pr mode and
@@ -493,7 +493,7 @@ with cross-references noted inline.
     reviewed prior run"). Any non-qualifying shape dispatches byte-identically to a fresh launch,
     guard intact. AND THE PROOF IS RE-VERIFIED WHERE IT IS CONSUMED: the dispatch proof is taken a
     process earlier, so `launch()` drops the entire seed — checkpoint, head, findings, base pin —
-    when the live head it reads anyway is a 40-hex OTHER than the recorded one, restoring the
+    when the live head it reads anyway is a full 40- or 64-hex OID OTHER than the recorded one, restoring the
     fresh-launch base pin and leftover-branch refusal (`trident/orchestrator.ts`, "SEEDED RESUME —
     REVALIDATED AT LAUNCH"; `trident/orchestrator.test.ts`, "a SEEDED row whose branch MOVED since
     dispatch"). A row that has already FIRED (`workflow_run_id !== null`) is never treated as
@@ -523,7 +523,7 @@ with cross-references noted inline.
     branch CONTAINS its recorded head proceeds"). The comparison is made only when the recorded
     commit is READABLE here (`cat-file -e`), because `merge-base --is-ancestor` cannot tell "not
     an ancestor" from "unknown object" and refusing on an unreadable object would discard built
-    work on evidence the guard does not have. The seed-DROP half stays narrow (40-hex mismatch only): widening the drop
+    work on evidence the guard does not have. The seed-DROP half stays narrow (full-OID mismatch only): widening the drop
     to "not a confirmed match" would discard exactly the built work this invariant exists to
     preserve the first time an origin read blipped. The pr-mode tip
     probe is CREDENTIALED, like the landed probe beside it — uncredentialed it exits non-zero
