@@ -101,7 +101,7 @@ host that answers on stdout and ignores `--output=` writes no patch file, and th
 gate correctly HOLDS. That is right, and it is also a new obligation on a widely
 used test seam. Filed as its own issue rather than left to be rediscovered.
 
-**Nine suites needed the wrapper**, and the enumeration is the point:
+**Ten suites needed the wrapper**, and the enumeration is the point:
 
 | suite | how it reaches the gate |
 |---|---|
@@ -113,6 +113,7 @@ used test seam. Filed as its own issue rather than left to be rediscovered.
 | `trident/ported-fixes.test.ts` (3 sites) | same, via a copied `driftFreeHost` |
 | `trident/restart-resume.test.ts` (2 sites) | same |
 | `trident/code-command.test.ts` | same |
+| `trident/board-reconcile.test.ts` | the tick loop driving a build to done |
 | `trident/merge-realgit.test.ts` | **needed nothing** — it drives real git |
 
 `ralph.test.ts` is the one that matters. Grepping the gate's own symbols
