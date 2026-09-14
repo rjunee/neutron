@@ -215,8 +215,7 @@ function WorkBoardRowImpl({
   };
 
   // M1 polish (item 4) — mirror the web 2-line model: line 1 = dot + title +
-  // actions; line 2 = the muted phase tag + round, rendered ONLY when the item has
-  // a bound run to report (`tag !== null`). A bare queued card is single-line.
+  // actions; line 2 = the card's durable lane tag, refined by run phase when bound.
   const hasStatus = tag !== null;
 
   return (

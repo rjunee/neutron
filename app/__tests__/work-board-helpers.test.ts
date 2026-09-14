@@ -147,8 +147,9 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     expect(roundText(legacyMerged)).toBeNull();
   });
 
-  it('is null/idle for an unbound item (no run_progress)', () => {
-    expect(stepTag(item({ status: 'upcoming' }))).toBeNull();
+  it('falls back to the card state when no run is bound', () => {
+    expect(stepTag(item({ status: 'upcoming' }))).toEqual({ label: 'Upcoming', colorKey: 'build' });
+    expect(stepTag(item({ status: 'in_progress' }))).toEqual({ label: 'In progress', colorKey: 'build' });
     expect(roundText(undefined)).toBeNull();
   });
 });
