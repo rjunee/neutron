@@ -86,9 +86,21 @@ const SHIPPED_PR_ORDINAL = 133
  * database happens to carry. It is also what makes the reapply entry load-bearing rather
  * than cosmetic — with the real repairs, 0133 lands first and 0140 runs normally, which
  * is exactly what the green test below measures. The seed (and the RED control, which
- * deliberately removes the repair) therefore stops short of this ordinal.
+ * deliberately removes the repair) therefore stops short of these ordinals.
+ *
+ * A BOUNDARY, NOT A HOLE, AND THAT DISTINCTION IS THE BUG THIS REPLACED. Excluding
+ * ONLY 0140 while keeping everything after it built a ledger no live database can
+ * have: 0141 (`ALTER TABLE … ADD ralph_round`) landed on the pre-0140 table, then the
+ * act replayed 0140, whose column list predates 0141 and therefore DROPPED both Ralph
+ * columns — and 0141 was already recorded, so nothing put them back. Nothing needed
+ * them until 0142, which rebuilds from a list that includes them and died on
+ * `no such column: ralph_round`. The fixture, not the migration, was wrong: a live
+ * database is a PREFIX of the ledger, never the ledger with a hole punched in it.
+ *
+ * So the seed stops AT this ordinal and everything from here on belongs to the act,
+ * where it runs in real order. Nothing needs updating when a later migration is added.
  */
-const PR_REBUILD_ORDINAL = 140
+const FIRST_PR_DEPENDENT_REBUILD = 140
 
 function copyTree(
   name: string,
@@ -115,7 +127,7 @@ function seedTree(name: string, repairs: Repair[], standIn = false): string {
     name,
     repairs,
     standIn,
-    (version) => version !== SHIPPED_PR_ORDINAL && version !== PR_REBUILD_ORDINAL,
+    (version) => version !== SHIPPED_PR_ORDINAL && version < FIRST_PR_DEPENDENT_REBUILD,
   )
 }
 
@@ -220,12 +232,13 @@ function untrackedTree(name: string): string {
 test('RED control: without reapply the recorded name silently skips 0133', () => {
   const db = seedLiveReplica('red-control')
   const repairs = realRepairs().filter((repair) => repair.reapply !== true)
-  // Stops short of the table rebuild that DEPENDS on 0133's columns — see
-  // PR_REBUILD_ORDINAL. This control is about 0133 being silently skipped; running a
-  // migration that cannot survive that skip would replace the measurement with a throw.
+  // Stops short of the first table rebuild that DEPENDS on 0133's columns — see
+  // FIRST_PR_DEPENDENT_REBUILD. This control is about 0133 being silently skipped;
+  // running a migration that cannot survive that skip would replace the measurement
+  // with a throw.
   const result = applyMigrations(
     db,
-    copyTree('red-control-full', repairs, true, (version) => version !== PR_REBUILD_ORDINAL),
+    copyTree('red-control-full', repairs, true, (version) => version < FIRST_PR_DEPENDENT_REBUILD),
   )
 
   expect(result.applied).not.toContain(133)
