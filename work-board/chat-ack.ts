@@ -33,22 +33,32 @@
  *     other — an add then a dispatch in one turn is a real two-step progression
  *     and posts both. project_id + title are in the key so UNBOUND dispatches
  *     (item_id='') don't collapse to one identity and silently swallow a second
- *     distinct build's ack.
+ *     distinct build's ack. Sequencing also keys on the blocked title and change outcome.
  *   - It only speaks for events the agent-tool layer hands it (agent adds,
- *     inline_active false→true flips, successful build dispatch/start). Human
+ *     inline activity, build dispatch/start, dependency sequencing). Human
  *     HTTP mutations and rejected dispatches post nothing — those callers simply
  *     never invoke it.
  */
 
 /** Which board event the ack speaks to. Distinct dedup identities per item. */
-export type WorkBoardChatAckKind = 'card_added' | 'build_dispatched' | 'inline_started'
+export type WorkBoardChatAckKind = 'card_added' | 'build_dispatched' | 'inline_started' | 'dependency_sequenced'
 
-export interface WorkBoardChatAckInput {
+interface WorkBoardChatAckBase {
   /** The composing turn's ACTIVE project (null on the General surface). */
   project_id: string | null
   item_id: string
   title: string
-  kind: WorkBoardChatAckKind
+}
+
+export type WorkBoardChatAckInput = WorkBoardChatAckBase & (
+  | { kind: Exclude<WorkBoardChatAckKind, 'dependency_sequenced'> }
+  | { kind: 'dependency_sequenced'; blocked_title: string; changed: boolean }
+)
+
+export function dependencySequenceReport(dependency: string, blocked: string, changed: boolean): string {
+  return changed
+    ? `Sequencing decision: moved "${dependency}" before "${blocked}" on the Work Board. "${blocked}" remains blocked; no build was dispatched.`
+    : `Sequencing decision: "${dependency}" already precedes "${blocked}" on the Work Board; order unchanged. "${blocked}" remains blocked; no build was dispatched.`
 }
 
 export interface WorkBoardChatAck {
@@ -116,9 +126,11 @@ function truncateTitle(title: string): string {
   return truncateByGrapheme(title, MAX_TITLE_LEN)
 }
 
-function textFor(kind: WorkBoardChatAckKind, title: string, board: string): string {
-  const t = truncateTitle(title)
-  switch (kind) {
+function textFor(input: WorkBoardChatAckInput, board: string): string {
+  const t = truncateTitle(input.title)
+  switch (input.kind) {
+    case 'dependency_sequenced':
+      return dependencySequenceReport(input.title, input.blocked_title, input.changed)
     case 'card_added':
       // NAMES THE BOARD. Without it an ack for a card added in one project is
       // indistinguishable from one added in another, and the owner cannot tell
@@ -159,8 +171,8 @@ export function buildWorkBoardChatAck(deps: {
     typeof deps.dedup_window_ms === 'number' && deps.dedup_window_ms >= 0
       ? deps.dedup_window_ms
       : DEFAULT_DEDUP_WINDOW_MS
-  // key = `${project_id}\0${item_id}\0${kind}\0${title}` → last-post epoch ms.
-  // NUL joins keep the fields unambiguous regardless of their content. project_id
+  // JSON tuple of event fields → last-post epoch ms; sequencing adds its target/outcome.
+  // JSON encoding keeps fields unambiguous regardless of their content. project_id
   // and title are BOTH in the key because an UNBOUND dispatch (no board item) has
   // item_id='' — keying on `${item_id}\0${kind}` alone collapsed EVERY unbound
   // build within a window to the single key `\0build_dispatched`, silently
@@ -179,7 +191,8 @@ export function buildWorkBoardChatAck(deps: {
         for (const [k, ts] of lastPostedAt) {
           if (t - ts >= windowMs) lastPostedAt.delete(k)
         }
-        const key = `${input.project_id ?? ''}\0${input.item_id}\0${input.kind}\0${input.title}`
+        const key = JSON.stringify([input.project_id, input.item_id, input.kind, input.title,
+          ...(input.kind === 'dependency_sequenced' ? [input.blocked_title, input.changed] : [])])
         const prev = lastPostedAt.get(key)
         if (prev !== undefined && t - prev < windowMs) return
         // Deliver FIRST, then record the dedup stamp — only a delivery that
@@ -190,7 +203,7 @@ export function buildWorkBoardChatAck(deps: {
         const chatId = deps.resolve_chat_id(input.project_id)
         const lookup = deps.project_name ?? ((): string | null => null)
         const board = boardLabelForProjectId(input.project_id, lookup)
-        deps.post(chatId, textFor(input.kind, input.title, board))
+        deps.post(chatId, textFor(input, board))
         lastPostedAt.set(key, t)
       } catch {
         // The ack must NEVER perturb the tool result — swallow everything.

@@ -151,6 +151,8 @@ export interface RunPrInfo {
 
 /** Where to drop the moved item relative to a sibling. */
 export interface ReorderTarget {
+  /** Orchestrator decision: ensure this dependency precedes a blocked card. */
+  precedes?: string
   before?: string
   after?: string
 }
@@ -1083,10 +1085,10 @@ export class WorkBoardStore {
    * Move an active item before/after a sibling and gap-renumber the whole
    * active lane to a clean `1..N` integer sequence. Wrapped in a transaction
    * because the load-reorder-renumber is a read-compute-write over many rows.
-   * No-op if the item isn't an active row.
+   * Generic moves ignore inactive rows; precedence decisions refuse invalid cards.
    */
-  async reorder(project_slug: string, id: string, target: ReorderTarget): Promise<void> {
-    await this.db.transaction(async (tx) => {
+  async reorder(project_slug: string, id: string, target: ReorderTarget): Promise<{ changed: boolean; dependency_title: string; blocked_title: string } | void> {
+    const result = await this.db.transaction(async (tx) => {
       const ids = tx
         .prepare<{ id: string }, [string]>(
           `SELECT id FROM work_board_items
@@ -1095,12 +1097,31 @@ export class WorkBoardStore {
         )
         .all(project_slug)
         .map((r) => r.id)
+      let sequencing: { changed: boolean; dependency_title: string; blocked_title: string } | undefined
+      if (target.precedes !== undefined) {
+        const rows = tx.prepare<{ id: string; title: string; status: string }, [string]>(
+          'SELECT id, title, status FROM work_board_items WHERE project_slug = ?',
+        ).all(project_slug)
+        const dependency = rows.find((row) => row.id === id)
+        const blocked = rows.find((row) => row.id === target.precedes)
+        if (target.before !== undefined || target.after !== undefined || id === target.precedes) {
+          throw new WorkBoardValidationError('invalid_sequence', 'precedes requires two distinct cards and no before/after')
+        }
+        if (!dependency || !ids.includes(id) || !blocked || blocked.status !== 'blocked') {
+          throw new WorkBoardValidationError('invalid_sequence', 'Sequencing requires an existing active dependency and a blocked card on this board; read the board and linked specs again. Missing cards require spec intake first.')
+        }
+        sequencing = { changed: false, dependency_title: dependency.title, blocked_title: blocked.title }
+        // Idempotence is about precedence, not adjacency. Do not move an already
+        // earlier dependency past unrelated priorities, or write on redelivery.
+        if (ids.indexOf(id) < ids.indexOf(target.precedes)) return sequencing
+        sequencing.changed = true
+      }
       const from = ids.indexOf(id)
       if (from === -1) return // not an active item — nothing to reorder
       ids.splice(from, 1)
       let insertAt = ids.length
-      if (target.before !== undefined) {
-        const i = ids.indexOf(target.before)
+      if (target.precedes !== undefined || target.before !== undefined) {
+        const i = ids.indexOf(target.precedes ?? target.before!)
         if (i !== -1) insertAt = i
       } else if (target.after !== undefined) {
         const i = ids.indexOf(target.after)
@@ -1115,8 +1136,10 @@ export class WorkBoardStore {
           [i + 1, ts, project_slug, ids[i]!],
         )
       }
+      return sequencing
     })
-    this.emitChange(project_slug)
+    if (result?.changed !== false) this.emitChange(project_slug)
+    return result
   }
 
   /**

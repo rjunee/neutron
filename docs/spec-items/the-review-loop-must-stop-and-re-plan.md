@@ -114,9 +114,14 @@ Built on branch `fix/review-loop-stop-and-escalate`; record at
 - [x] The round cap becomes the backstop rather than the primary exit, and the owner can
       see on the card that a build stopped because it was BLOCKED rather than because it
       FAILED — two different words, not one.
-- [ ] `missing-dependency` → the ORCHESTRATOR reports in the project chat AND REORDERS
+- [x] `missing-dependency` → the ORCHESTRATOR reports in the project chat AND REORDERS
       the Work Board so the dependency precedes the blocked card (ROUTING, above).
-      UNMET: the reporting half ships here — the chat message names the sequencing call,
-      the card lands in `blocked`, and nothing re-dispatches it until it is moved out —
-      but the orchestrator that makes and reports the reorder does not exist yet; it
-      lands with #545.
+      The existing terminal-wake orchestrator independently reads the board and linked
+      specs, then calls `work_board_reorder` with `precedes`. The store atomically
+      moves an existing active dependency before the blocked card, or reports that it
+      already precedes it without rewriting the order. The tool posts the sequencing
+      result in project chat; the blocked lane remains enforced at dispatch.
+      verify: `bun test work-board/dependency-sequencing.test.ts
+      trident/escalation-block.test.ts trident/board-dispatch.test.ts`
+      This closes the sequencing box against the existing background wake seam; moving
+      orchestration into the project conversation remains part of the broader #545 work.
