@@ -109,7 +109,7 @@ export function buildIntegrationsTools(
   const connectTool: ToolRegistration = {
     name: 'integrations_connect',
     description:
-      'Connect an integration. For a Google OAuth account, returns a click-to-connect URL the user opens to grant access. For an API-key slot, pass `value` to store the key.',
+      'Connect an integration. For a Google OAuth account, returns a click-to-connect URL the user opens to grant access. For an API-key slot, pass `value` only for a secret already legitimately held from an authorized non-chat source. Never ask the owner to paste, send, upload or otherwise disclose credential material in chat. For owner-supplied material or unknown provenance, direct the owner to [Integrations](neutron://integrations) on the phone or General → Admin on the web, then ask only whether setup is complete.',
     input_schema: {
       type: 'object',
       properties: {
