@@ -128,8 +128,9 @@ touched only the as-built log**, at roughly 36 minutes of runner time each.
 
 ### The rule
 
-1. **One file per record.** `docs/as-built/<slug>.md`, matching the spec-item slug
-   where one exists. Never a shared monolith.
+1. **One file per record.** `docs/as-built/<slug>.md`. Prefer the spec-item slug
+   where one exists, but treat that as a naming convention rather than an
+   identity guarantee. Never a shared monolith.
 2. **The record ships in the PR that earns it**, not in a follow-up commit.
 3. **Merged records are immutable.** A CI guard fails a PR whose diff edits a
    frozen monolith or another change's existing record, while allowing the PR to
