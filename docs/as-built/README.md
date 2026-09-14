@@ -8,11 +8,10 @@ This directory is where a record of a merged change lands. It replaces
 
 One change, one file.
 
-- **Filename** — `<slug>.md`. Where the change has a spec item, the slug is the
-  spec-item slug, so the record and the item that asked for it share a name and
-  are findable from either end. Where it does not, the slug is the branch's own
-  name. Only `A-Za-z0-9._-` and no leading `.`, because the name is written by a
-  tool and read by a filesystem.
+- **Filename** — `<slug>.md`. Choose a stable, descriptive slug. Reusing the
+  spec-item slug where one exists, or the branch name otherwise, is a convention
+  that makes provenance easier to follow; it is not an identity guarantee. Only
+  `A-Za-z0-9._-` and no leading `.`, because the name is read by a filesystem.
 - **First non-blank line** — a single `## YYYY-MM-DD — title` heading. Exactly
   the heading form the frozen log used, so an entry reads the same in either
   place and a record moved between them needs no rewriting. The em dash is
@@ -25,9 +24,11 @@ One change, one file.
 
 ## How a file gets here
 
-The PR that earns a record writes `docs/as-built/<slug>.md` directly. The slug
-matches the spec item where one exists; otherwise choose a stable, descriptive
-slug for the change. There is no staging queue or post-merge publisher.
+The PR that earns a record writes `docs/as-built/<slug>.md` directly. Prefer the
+spec-item slug where one exists; otherwise choose a stable, descriptive slug for
+the change. The write guard validates the path and record shape, but does not
+infer a relationship between a change and a spec item. There is no staging queue
+or post-merge publisher.
 
 Once merged, a record is immutable. A later change writes its own shard and
 links to the earlier record when needed; it does not revise another change’s
