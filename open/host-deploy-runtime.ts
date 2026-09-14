@@ -120,7 +120,9 @@ export function createHostDeployRemoteGit(opts: {
    * sends him hunting for a typo that is not there.
    */
   function shaOrNull(status: number, json: unknown, what: string): string | null {
-    if (status === 404) return null
+    // Status alone is ambiguous: only the control plane's explicit body proves
+    // the route ran and the named ref was the thing it could not find.
+    if (status === 404 && detailOf(json) === 'does not know the ref') return null
     if (status !== 200) throw new Error(`${what} failed (${status}): ${detailOf(json)}`)
     const sha = typeof json === 'object' && json !== null ? (json as { target_sha?: unknown }).target_sha : null
     return typeof sha === 'string' && /^[0-9a-f]{40}$/.test(sha) ? sha : null

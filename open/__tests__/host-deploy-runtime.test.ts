@@ -134,6 +134,18 @@ describe('createHostDeployRemoteGit — the control plane answers, not local git
     expect(await g.resolveTarget('v9.9.9')).toBeNull()
   })
 
+  test('a routing 404 throws — it is not evidence that the ref is unknown', async () => {
+    const { fetchImpl } = recorder(() => ({ status: 404, json: { error: 'route not found' } }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    await expect(g.resolveTarget('origin/main')).rejects.toThrow(/route not found/)
+  })
+
+  test('a 404 without the missing-ref discriminator throws as an ambiguous failure', async () => {
+    const { fetchImpl } = recorder(() => ({ status: 404, json: null }))
+    const g = createHostDeployRemoteGit({ resolveConfig: configured, fetchImpl })
+    await expect(g.resolveTarget('origin/main')).rejects.toThrow(/404.*no detail/)
+  })
+
   test('the control plane FAILING throws — it is never reported as an unknown ref', async () => {
     // Collapsing these sends the owner hunting for a typo that is not there.
     const { fetchImpl } = recorder(() => ({ status: 500, json: { error: 'git exploded' } }))
