@@ -166,6 +166,7 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
   ensureKimiKeyExported,
@@ -4266,12 +4267,11 @@ export function buildOpenGraphComposer(
       } catch {
         /* best-effort */
       }
-      let activeTridentRuns = 0
-      try {
-        activeTridentRuns = boardRunStore.listNonTerminal().length
-      } catch {
-        /* best-effort */
-      }
+      // Process evidence owns this answer; durable rows only enrich the census.
+      // Unknown deliberately throws through the snapshot thunk. The command chain's
+      // existing failure boundary then logs and declines the command instead of
+      // manufacturing the real, actionable answer "zero active builds".
+      const activeTridentRuns = countActiveBuildRuns()
       return {
         active_project: activeProject,
         model: getBestModel(),
