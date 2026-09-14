@@ -105,11 +105,9 @@ interface TerminalSite {
   kind: string | null
   /** Why it could not be resolved — empty unless `stamped` is `'unresolved'`. */
   why: string
-  /** The resolved object's own direct property names. Carried so that claims ABOUT the
-   *  terminal results — "N of the twelve carry a `blockKind`" — can be derived here
-   *  instead of counted by hand into prose, where three rounds of this card proved they
-   *  go stale. Empty for an unresolved site. */
-  props: readonly string[]
+  /** Whether this result can carry `blockKind`, whether named directly, supplied by a
+   *  spread, or assigned to the bound result before the terminal write. */
+  carriesBlockKind: boolean
 }
 
 /**
@@ -185,6 +183,7 @@ function analyse(src: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
  *  | site                        | scope it reasons about        | traversal      |
  *  |-----------------------------|-------------------------------|----------------|
  *  | `terminalSites`             | the whole file (every call)   | `walk`         |
+ *  | `resultCanCarryBlockKind`   | assignments before one call   | `walk`         |
  *  | the traversal inventory     | the whole guard file          | `walk`         |
  *  | `composerReturnLiterals`    | one function body             | `walkOwnScope` |
  *
@@ -245,7 +244,7 @@ function terminalSites(src: string): TerminalSite[] {
     const arg = n.arguments[0]
     const line = lineOf(n)
     if (arg === undefined) {
-      sites.push({ label: '(no argument)', line, stamped: 'unresolved', kind: null, why: 'called with no argument', props: [] })
+      sites.push({ label: '(no argument)', line, stamped: 'unresolved', kind: null, why: 'called with no argument', carriesBlockKind: false })
       return
     }
     const label = ts.isIdentifier(arg) ? arg.text : ts.SyntaxKind[arg.kind]
@@ -259,14 +258,16 @@ function terminalSites(src: string): TerminalSite[] {
         // The shape is NAMED, not just refused — a guard that says only "no" leaves the
         // next author guessing which of the handled forms they missed.
         why: `argument is a ${ts.SyntaxKind[arg.kind]} the scanner cannot resolve to an object literal`,
-        props: [],
+        carriesBlockKind: false,
       })
       return
     }
-    // `props` describes the FIRST resolved object; it exists only so claims about the
-    // results (how many carry a `blockKind`) can be derived rather than remembered, and
-    // every real site resolves to exactly one object.
-    sites.push({ label, line, ...readCause(resolved), props: ownPropertyNames(resolved[0]!) })
+    sites.push({
+      label,
+      line,
+      ...readCause(resolved),
+      carriesBlockKind: resultCanCarryBlockKind(checker, sf, arg, n, resolved),
+    })
   })
   return sites
 }
@@ -451,6 +452,63 @@ function ownPropertyNames(obj: ts.ObjectLiteralExpression): string[] {
     }
   }
   return names
+}
+
+/**
+ * CAN `blockKind` REACH THIS TERMINAL RESULT?
+ *
+ * The answer follows all three shapes used by this workflow: a named property, an object
+ * supplied through a spread (including a conditional spread), and an assignment to the
+ * result binding after its literal but before `writeTerminalResult`. This is deliberately
+ * a MAY-carry measurement: a conditional field still reaches the terminal result on the
+ * branch that supplies it, so classifying that site as fieldless would be false.
+ */
+function resultCanCarryBlockKind(
+  checker: ts.TypeChecker,
+  sf: ts.SourceFile,
+  arg: ts.Expression,
+  call: ts.CallExpression,
+  objects: readonly ts.ObjectLiteralExpression[],
+): boolean {
+  if (objects.some((obj) => objectCanSupplyBlockKind(obj))) return true
+  if (!ts.isIdentifier(arg)) return false
+  const resultSymbol = checker.getSymbolAtLocation(arg)
+  if (resultSymbol === undefined) return false
+  const declarationEnd = Math.max(
+    ...resultSymbol.declarations?.map((decl) =>
+      ts.isVariableDeclaration(decl) && decl.initializer !== undefined ? decl.initializer.getEnd() : decl.getEnd(),
+    ) ?? [arg.getStart(sf)],
+  )
+
+  let assigned = false
+  walk(sf, (node) => {
+    if (
+      assigned ||
+      node.getStart(sf) <= declarationEnd ||
+      node.getStart(sf) >= call.getStart(sf) ||
+      !ts.isBinaryExpression(node)
+    ) return
+    if (node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return
+    const target = node.left
+    if (!ts.isPropertyAccessExpression(target) || target.name.text !== 'blockKind') return
+    if (!ts.isIdentifier(target.expression)) return
+    assigned = checker.getSymbolAtLocation(target.expression) === resultSymbol
+  })
+  return assigned
+}
+
+function objectCanSupplyBlockKind(obj: ts.ObjectLiteralExpression): boolean {
+  if (ownPropertyNames(obj).includes('blockKind')) return true
+  return obj.properties.some((prop) => ts.isSpreadAssignment(prop) && expressionCanSupplyBlockKind(prop.expression))
+}
+
+function expressionCanSupplyBlockKind(expression: ts.Expression): boolean {
+  if (ts.isObjectLiteralExpression(expression)) return objectCanSupplyBlockKind(expression)
+  if (ts.isParenthesizedExpression(expression)) return expressionCanSupplyBlockKind(expression.expression)
+  if (ts.isConditionalExpression(expression)) {
+    return expressionCanSupplyBlockKind(expression.whenTrue) || expressionCanSupplyBlockKind(expression.whenFalse)
+  }
+  return false
 }
 
 function readCauseOf(obj: ts.ObjectLiteralExpression): Pick<TerminalSite, 'stamped' | 'kind' | 'why'> {
@@ -735,21 +793,54 @@ async function newExitPath() {
    * THE CLAIM THE VOCABULARY'S DESIGN RESTS ON, MADE EXECUTABLE.
    *
    * `terminal-cause.ts` argues that `terminalCauseKind` had to be a NEW field rather than a
-   * widening of `blockKind`, and one leg of that argument is that most terminal paths are
-   * not review verdicts and carry no `blockKind` at all. That leg was written as a number
+   * widening of `blockKind`, and one leg of that argument is that some terminal paths can
+   * never carry `blockKind`. That leg was written as a number
    * in a docblock — and the number was WRONG WHEN WRITTEN, not merely stale: it said seven
-   * of twelve, and the real figure is four. Nobody derived it, including me.
+   * of twelve, and even its corrected direct-property figure missed the throw path's
+   * spread and later assignment. Nobody derived the runtime shape, including me.
    *
-   * So it is derived here. The argument survives (four of twelve carry nothing, and
+   * So it is derived here. The argument survives (three of twelve can never carry one, and
    * `blockKind` is load-bearing precisely because it is narrow) but it now rests on a
    * measurement that fails if it stops being true.
    */
   test('the blockKind claim is derived, not remembered', () => {
     const sites = terminalSites(SRC)
-    const withBlockKind = sites.filter((s) => s.props.includes('blockKind'))
-    expect({ total: sites.length, withBlockKind: withBlockKind.length }).toEqual({ total: 12, withBlockKind: 8 })
-    // …so four carry none, which is the figure `terminal-cause.ts` cites.
-    expect(sites.length - withBlockKind.length).toBe(4)
+    const withBlockKind = sites.filter((s) => s.carriesBlockKind)
+    expect({ total: sites.length, withBlockKind: withBlockKind.length }).toEqual({ total: 12, withBlockKind: 9 })
+    // …so three can never carry one, which is the figure `terminal-cause.ts` cites.
+    expect(sites.length - withBlockKind.length).toBe(3)
+    // AND WHICH THREE, DERIVED TOO. The docblock does not only cite the NUMBER — it names
+    // the paths ("both publish handoffs and the Ralph re-fire"). A count alone cannot keep
+    // that half honest: three OTHER sites could lose their `blockKind` and the number would
+    // still read 3 while the sentence had gone false. That is precisely how the original
+    // figure in that docblock was wrong when it was written, so the identities are measured
+    // on the same pass as the count rather than remembered beside it.
+    expect(sites.filter((s) => !s.carriesBlockKind).map((s) => s.kind).sort()).toEqual([
+      'handoff-publish',
+      'handoff-publish',
+      'ralph-task-built',
+    ])
+  })
+
+  test.each([
+    ['a named property', "blockKind: 'infra-only',"],
+    ['a conditional spread', "...(k === null ? {} : { blockKind: k }),"],
+  ])('the blockKind instrument sees %s', (_shape, property) => {
+    const doctored = `${SRC}\nconst k = 'infra-only'\nasync function blockKindControl() {\n  const result = { ok: false, terminalCauseKind: 'workflow-threw', ${property} }\n  await writeTerminalResult(result)\n}\n`
+    const sites = terminalSites(doctored)
+    expect({ total: sites.length, withBlockKind: sites.filter((s) => s.carriesBlockKind).length }).toEqual({
+      total: 13,
+      withBlockKind: 10,
+    })
+  })
+
+  test('the blockKind instrument sees an assignment after the literal', () => {
+    const doctored = `${SRC}\nasync function blockKindAssignmentControl() {\n  const result = { ok: false, terminalCauseKind: 'workflow-threw' }\n  result.blockKind = 'infra-only'\n  await writeTerminalResult(result)\n}\n`
+    const sites = terminalSites(doctored)
+    expect({ total: sites.length, withBlockKind: sites.filter((s) => s.carriesBlockKind).length }).toEqual({
+      total: 13,
+      withBlockKind: 10,
+    })
   })
 
   test('the traversal inventory is pinned — a new walk forces the audit', () => {
@@ -766,12 +857,12 @@ async function newExitPath() {
       if (n.expression.text === 'walk') calls.walk += 1
       if (n.expression.text === 'walkOwnScope') calls.walkOwnScope += 1
     })
-    // `walk`: its own recursive call, plus `terminalSites` — whose construct really is the
-    // whole file — plus this inventory, which is also scanning a whole file.
+    // `walk`: its own recursive call; `terminalSites`; the assignment pass used by
+    // `resultCanCarryBlockKind`; plus this inventory, which scans the whole file.
     // `walkOwnScope`: `composerReturnLiterals` alone, the one traversal left that reasons
     // about a single construct and must stop at its edge. It was two until the checker
     // replaced hand-rolled name resolution and `bindsInPattern` stopped existing.
-    expect(calls).toEqual({ walk: 3, walkOwnScope: 1 })
+    expect(calls).toEqual({ walk: 4, walkOwnScope: 1 })
   })
 
   test('the parse is COMPLETE — a truncated tree would make every assertion below vacuous', () => {
