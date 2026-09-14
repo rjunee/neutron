@@ -391,8 +391,6 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at skill-forge/command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'skill-forge/distiller.ts':
     'Broad regex literal at skill-forge/distiller.ts:25 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
-  'trident/as-built-log.ts':
-    'Broad regex literal at trident/as-built-log.ts:305 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/code-command.ts':
     'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/mutation-prover.ts':
