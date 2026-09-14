@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -50,6 +50,8 @@ import {
 } from '../pending-respawns-queue.ts'
 import { getRecord, patchRecord, saveRegistry, type ReplRegistryRecord } from '../repl-registry.ts'
 import { recordGatewayShutdownOutcome } from '../gateway-shutdown-kill.ts'
+import { beginBootAdoption } from '../boot-adoption.ts'
+import { poolKeyFor } from '../pool.ts'
 import type { ChildCrashInfo } from '../types.ts'
 
 afterEach(async () => {
@@ -1334,4 +1336,50 @@ describe('S2 supervision — cross-incarnation turnId collision (Argus r6)', () 
     expect(b.text).toBe('B:q2')
     expect(b.text).not.toContain('STALE')
   })
+})
+
+
+describe('#676 registry resume decisions after boot reconciliation', () => {
+  for (const shape of ['ENOENT', 'missing-row', 'malformed-json', 'EISDIR', 'invalid-row'] as const) {
+    it(`${shape}: absence starts fresh; unreadability refuses retryably`, async () => {
+      const { host, spawns } = makeFakeReplHost()
+      const registryPath = tmpRegistry()
+      const opts = baseOptions(host, registryPath)
+      const sub = createPersistentReplSubstrate(opts)
+      const key = poolKeyFor(opts)
+      // Settle the real boot gate before the file changes, so only the resume
+      // decision can refuse. This also models failure after successful boot.
+      expect((await beginBootAdoption(opts, key)).kind).toBe('no-handle')
+      if (shape === 'missing-row') writeFileSync(registryPath, '{}')
+      if (shape === 'malformed-json') writeFileSync(registryPath, '{broken')
+      if (shape === 'EISDIR') mkdirSync(registryPath)
+      if (shape === 'invalid-row') writeFileSync(registryPath, JSON.stringify({ [key]: { has_session: 'true' } }))
+      try {
+        const result = await drain(sub.start(spec('continue our conversation')))
+        if (shape === 'ENOENT' || shape === 'missing-row') {
+          expect(spawns).toHaveLength(1)
+          expect(spawns[0]?.isResume).toBe(false)
+          expect(result.events.some(e => e.kind === 'error')).toBe(false)
+          expect(result.events.some(e => e.kind === 'completion')).toBe(true)
+        } else {
+          expect(spawns).toHaveLength(0)
+          expect(result.events).toEqual([expect.objectContaining({
+            kind: 'error', code: 'repl_unreconciled', retryable: true,
+            message: expect.stringContaining('registry unreadable'),
+          })])
+          const reason = shape === 'malformed-json' ? 'json-parse-error' : shape === 'EISDIR' ? 'read-error' : 'session row is invalid'
+          expect(result.events[0]).toMatchObject({ message: expect.stringContaining(reason) })
+          // Repair is observed on the next turn, without resetting the substrate.
+          rmSync(registryPath, { recursive: true })
+          const retried = await drain(sub.start(spec('retry')))
+          expect(spawns).toHaveLength(1)
+          expect(retried.events.some(e => e.kind === 'completion')).toBe(true)
+        }
+      } finally {
+        await shutdownAllPersistentRepls()
+        rmSync(dirname(registryPath), { recursive: true, force: true })
+        rmSync(opts.cwd!, { recursive: true, force: true })
+      }
+    })
+  }
 })
