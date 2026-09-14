@@ -16,6 +16,8 @@
  * rows; this PR lands the persistence so neither needs a schema change.
  */
 
+import { createLogger } from '@neutronai/logger'
+import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
@@ -25,6 +27,19 @@ import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
 import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
+
+const crashLog = createLogger('trident-launcher-crash')
+
+/** Information about the CAUSE, not confidence of wording or detector arrival.
+ * Directly measured (or identity-verified durable) attribution > an explicitly
+ * unestablished cause > unexplained death. Unknown/legacy prose stays lowest.
+ * Reuse the delivery taxonomy's markers so existing tombstones need no migration.
+ */
+function launcherCrashReasonRank(reason: string): number {
+  if (isUndeterminedLauncherDeathReason(reason)) return 1
+  if (isDeployRestartKillReason(reason)) return 2
+  return 0
+}
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -1360,32 +1375,61 @@ export class TridentRunStore {
     return rows.map((r) => `${r.at}\t${r.id}`).join('\n')
   }
 
-  /** Durably latch one dead launcher generation and crash only its workflows. */
-  async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
-    await this.db.transaction((tx) => {
+  /** Durably latch one dead launcher generation and crash only its workflows.
+   * Returns the existing write-claim disposition: true = reason written, false =
+   * replacement declined. False still acknowledges delivery; callers must not retry
+   * it as a sink failure. The shared log makes declines visible even to void sinks.
+   */
+  async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<boolean> {
+    const result = await this.db.transaction((tx) => {
       const now = this.now()
-      tx.runSync(
-        `INSERT INTO trident_launcher_crashes (session_key, failure_reason, crashed_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`,
-        [session_key, failure_reason, now],
-      )
-      // Generation keys are unique per spawn. Keep the short race window needed
-      // by an in-flight launcher completion, while bounding durable tombstones.
+      // Acquire the SQLite write lock BEFORE reading the winner (including across
+      // connections). Expiry precedes selection so an expired report cannot win.
       tx.runSync(
         `DELETE FROM trident_launcher_crashes
           WHERE datetime(crashed_at) < datetime(?, '-7 days')`,
         [now],
       )
+      const previous = tx.get<{ failure_reason: string }>(
+        `SELECT failure_reason FROM trident_launcher_crashes WHERE session_key = ?`,
+        [session_key],
+      )
+      const incomingRank = launcherCrashReasonRank(failure_reason)
+      const previousRank = previous === null ? -1 : launcherCrashReasonRank(previous.failure_reason)
+      // INFORMATION WINS: promote better reports, refuse worse ones. At equal
+      // information choose the lexically smaller complete reason (JS code units),
+      // independent of arrival; exact duplicates decline. crashed_at remains the
+      // first death latch time, so duplicates cannot extend retention forever.
+      const accepted = previous === null || incomingRank > previousRank ||
+        (incomingRank === previousRank && failure_reason < previous.failure_reason)
+      if (accepted) {
+        tx.runSync(
+          `INSERT INTO trident_launcher_crashes (session_key, failure_reason, crashed_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`,
+          [session_key, failure_reason, now],
+        )
+      }
+      const selectedReason = accepted ? failure_reason : previous!.failure_reason
       tx.runSync(
         `UPDATE code_trident_runs
             SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
           WHERE workflow_run_id = ?
             AND subagent_status = 'running'
             AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
-        [failure_reason, now, session_key],
+        [selectedReason, now, session_key],
       )
+      return { accepted, incomingRank, previousRank }
     })
+    if (!result.accepted) {
+      crashLog.info('launcher_crash_report_declined', {
+        generation: session_key,
+        disposition: 'no-op',
+        incoming_rank: result.incomingRank,
+        retained_rank: result.previousRank,
+      })
+    }
+    return result.accepted
   }
 
   /**

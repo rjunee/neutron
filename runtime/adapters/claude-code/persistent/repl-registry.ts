@@ -291,7 +291,7 @@ export interface ReplRegistryRecord {
    *  report happened and it said what was true. An earlier revision closed it only
    *  for the attributed case, so an honest undetermined report left the edge open and
    *  the next tick reported the same death again as a confident `child-died`, which
-   *  `crashRunningByLauncher` writes over the tombstone unconditionally. Telling the
+   *  `crashRunningByLauncher` formerly wrote over the tombstone unconditionally. Telling the
    *  owner something and telling the owner it was a deploy are different facts, and
    *  only the first one closes this.
    *

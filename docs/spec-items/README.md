@@ -44,6 +44,7 @@ branch is cut (standard §3.1, §3.2).
 | [`checkpoint-write-contention`](checkpoint-write-contention.md) | Checkpoint writes survive build-load contention | P1 | — |
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
 | [`dead-lane-process-reaping`](dead-lane-process-reaping.md) | Reap child processes left by dead build lanes | P1 | — |
+| [`launcher-crash-report-precedence`](launcher-crash-report-precedence.md) | Prefer the better-informed launcher death report | P1 | — |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
