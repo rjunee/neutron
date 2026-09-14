@@ -65,6 +65,14 @@ function loadReal(): {
   if (!consts.includes('function probeCause(') || !consts.includes('function redactProbeText(')) {
     throw new Error('probeCause/redactProbeText are no longer inside the classifyCi const slice')
   }
+  // `crossModelRateLimitProvenance` is declared ABOVE the const slice and called from
+  // inside it (#631). It is lifted explicitly below for that reason. Named here so a
+  // rename or removal fails with a sentence rather than a bare ReferenceError thrown
+  // from whichever unrelated test happens to touch the excusal path first — which is
+  // exactly how this surfaced.
+  if (!SRC.includes('function crossModelRateLimitProvenance(')) {
+    throw new Error('crossModelRateLimitProvenance is no longer a top-level function in inner-workflow.mjs')
+  }
   // `ciFindingsBlock` delegates to `isNonBlockingFinding`, the ONE predicate the severity
   // gate and the full-suite gate also ask. Lifted, not re-declared, for the same reason
   // every other loader in this repo lifts it: a local copy stays green through a change
@@ -75,7 +83,7 @@ function loadReal(): {
     throw new Error('ADVISORY_FINDING_KEY / NON_BLOCKING_SEVERITIES are no longer top-level consts')
   }
   const factory = new Function(
-    `${consts}\n${severitySet}\n${advisoryKey}\n${grab('isNonBlockingFinding')}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciFindingsBlock')}\n${grab('ciPreexistingNames')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer, ciFindingsBlock, ciPreexistingNames }`,
+    `${consts}\n${severitySet}\n${advisoryKey}\n${grab('crossModelRateLimitProvenance')}\n${grab('isNonBlockingFinding')}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciFindingsBlock')}\n${grab('ciPreexistingNames')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer, ciFindingsBlock, ciPreexistingNames }`,
   ) as () => ReturnType<typeof loadReal>
   return factory()
 }
@@ -3155,6 +3163,21 @@ describe('a fully excused CI red still holds the merge', () => {
       // declares an escalation, so the claim is absent — which is what every assertion
       // below assumes.
       'synthesisRaw',
+      // #631 — THE TAIL NOW ALSO STAMPS THE CROSS-MODEL RATE-LIMIT OBSERVATION on the
+      // object it returns, reading the routed slots and their verdicts. Those live in
+      // `reviewAndSynthesize`'s outer scope, so they are injected here for the same
+      // reason `synthesisRaw` above is, and with NEUTRAL values: no routed slot and no
+      // verdicts, which is the "nothing observed" case. That keeps the observation
+      // `null` and leaves every assertion in this describe — all of which are about
+      // panel classification and CI advisories — reading exactly what they read before.
+      // Registering them rather than stubbing the call is the point: if the tail later
+      // reads something else from these, this assembly throws `ReferenceError` instead
+      // of silently testing a stale one.
+      'codexSlot',
+      'kimiSlot',
+      'slotOneRoute',
+      'slotTwoRoute',
+      'verdicts',
       [
         constLine('NON_BLOCKING_SEVERITIES'),
         constLine('ADVISORY_FINDING_KEY'),
@@ -3169,6 +3192,9 @@ describe('a fully excused CI red still holds the merge', () => {
         // `ReferenceError` instead of silently testing a stale assembly.
         grab('contradictorySynthesis'),
         grab('classifyBlock'),
+        // …and the two helpers that stamp is assembled from (#631).
+        grab('seatRateLimitKey'),
+        grab('crossModelRateLimitProvenance'),
         SRC.slice(at, end),
       ].join('\n'),
     ) as (
@@ -3178,8 +3204,29 @@ describe('a fully excused CI red still holds the merge', () => {
       n: boolean,
       r: string,
       raw: unknown,
+      codexSlot: number | null,
+      kimiSlot: number | null,
+      slotOneRoute: { group?: string },
+      slotTwoRoute: { group?: string },
+      verdicts: unknown[],
     ) => Record<string, unknown>
-    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.', severityGated)
+    const out = run(
+      severityGated,
+      gated,
+      peers,
+      noReviewRan,
+      'Review panel: 4 seat(s) ran; off: none.',
+      severityGated,
+      null,
+      null,
+      {},
+      {},
+      [],
+    )
+    // The injected shape really is the unobserved case, asserted rather than assumed —
+    // otherwise a future change could make this fixture assert a provenance it never set.
+    expect(out['crossModelRateLimited']).toBeNull()
+    return out
   }
 
   const seatSaid = (severityGated: Record<string, unknown> | null): Record<string, unknown> =>

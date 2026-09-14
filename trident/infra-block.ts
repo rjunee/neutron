@@ -57,6 +57,7 @@ export interface InfraBlock {
    * measured.
    */
   cause: string | null
+  cross_model_rate_limited: boolean | null
 }
 
 /**
@@ -68,7 +69,7 @@ export function deriveInfraBlock(
 ): InfraBlock | null {
   const result = harvestedTerminalResult(run)
   if (result === null || result.block_kind !== 'infra-only') return null
-  return { cause: result.terminal_cause }
+  return { cause: result.terminal_cause, cross_model_rate_limited: result.cross_model_rate_limited }
 }
 
 /**
