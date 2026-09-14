@@ -757,18 +757,18 @@ export interface BuildLiveAgentTurnInput {
    */
   memoryIndexSnapshot?: () => Promise<string | null> | string | null
   /**
-   * Plan task 8 — the deterministic ritual-approval capture seam. When wired, at
+   * Deterministic opaque-button decision capture. When wired, at
    * turn-START (after user-turn persistence, BEFORE the onboarding required-answer
    * capture) the runner calls this with the owner's answer + the PERSISTED option
-   * values of the prior prompt. It resolves an in-chat ritual approval ONLY on an
-   * EXACT match of an `rap:` opaque token in that persisted set (owner-only). On a
+   * values of recent prompts. It resolves a decision ONLY on an exact opaque token
+   * match in that persisted set (owner-only). On a
    * non-null result the runner ships that deterministic confirmation and NEVER
    * dispatches the LLM turn (an opaque approval token must never fall through to
    * the free-text personality capture or the substrate). Omitted (LLM-less box /
    * no credential) ⇒ no-op, the turn runs normally. Best-effort: a throwing seam
    * degrades to the normal turn.
    */
-  ritualApprovalCapture?: (input: {
+  buttonDecisionCapture?: (input: {
     user_id: string
     user_text: string
     topic_id: string
@@ -1191,7 +1191,7 @@ export function buildLiveAgentTurn(
     if (
       turn.seed_turn !== true &&
       ((onboardingActive && input.onboarding?.captureRequiredAnswer !== undefined) ||
-        input.ritualApprovalCapture !== undefined)
+        input.buttonDecisionCapture !== undefined)
     ) {
       try {
         const priorPrompt = await input.buttonStore.latestPromptByTopic({
@@ -1211,17 +1211,17 @@ export function buildLiveAgentTurn(
     // rituals could never be scheduled). Union the recent option set instead —
     // still T8-safe (a value is eligible only if it was a real offered button in a
     // recent prompt), kept SEPARATE from onboarding's latest-only capture.
-    let priorRitualOptions: string[] = []
-    if (turn.seed_turn !== true && input.ritualApprovalCapture !== undefined) {
+    let recentDecisionOptions: string[] = []
+    if (turn.seed_turn !== true && input.buttonDecisionCapture !== undefined) {
       try {
-        priorRitualOptions = await input.buttonStore.recentPromptOptionsByTopic({
+        recentDecisionOptions = await input.buttonStore.recentPromptOptionsByTopic({
           topic_id: turn.topic_id,
           before: now(),
           now: now(),
           limit: 4,
         })
       } catch {
-        priorRitualOptions = []
+        recentDecisionOptions = []
       }
     }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
@@ -1245,7 +1245,7 @@ export function buildLiveAgentTurn(
       }
     }
 
-    // Plan task 8 — deterministic ritual-approval capture. Runs AFTER step-1
+    // Deterministic opaque-button capture. Runs AFTER step-1
     // user-turn persistence + transcript append and BEFORE the onboarding
     // required-answer capture, so an opaque `rap:` approval token can NEVER fall
     // through to the personality free-text capture or the substrate LLM turn. The
@@ -1253,16 +1253,16 @@ export function buildLiveAgentTurn(
     // value (owner-only) — an unrelated reply returns null and the turn runs
     // normally (T8). Best-effort: a throw warns + continues the normal turn.
     if (
-      input.ritualApprovalCapture !== undefined &&
+      input.buttonDecisionCapture !== undefined &&
       turn.seed_turn !== true &&
-      priorRitualOptions.length > 0
+      recentDecisionOptions.length > 0
     ) {
       try {
-        const result = await input.ritualApprovalCapture({
+        const result = await input.buttonDecisionCapture({
           user_id: turn.user_id,
           user_text: turn.user_text,
           topic_id: turn.topic_id,
-          prior_option_values: priorRitualOptions,
+          prior_option_values: recentDecisionOptions,
         })
         if (result !== null) {
           // Persist the deterministic confirmation as an inert history turn +
@@ -1273,7 +1273,7 @@ export function buildLiveAgentTurn(
               body: result.body,
             })
           } catch (err) {
-            moduleLog.warn('ritual_capture_persist_failed', {
+            moduleLog.warn('button_decision_capture_persist_failed', {
               project: turn.project_slug,
               topic: turn.topic_id,
               error: err instanceof Error ? err.message : String(err),
@@ -1294,7 +1294,7 @@ export function buildLiveAgentTurn(
           return { outcome: 'replied', reply_prompt_id: null }
         }
       } catch (err) {
-        moduleLog.warn('ritual_capture_failed', {
+        moduleLog.warn('button_decision_capture_failed', {
           project: turn.project_slug,
           topic: turn.topic_id,
           error: err instanceof Error ? err.message : String(err),
