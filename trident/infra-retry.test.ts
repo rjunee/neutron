@@ -122,6 +122,28 @@ describe('measured-fields classifier is conservative and total', () => {
 })
 
 describe('(a) measured incident retries without a human', () => {
+  test('a structurally classified null-build result spends one retry and re-dispatches', async () => {
+    const h = harness()
+    const run = await createRun('null-build-replay')
+
+    await h.loop.runOnce()
+    await writeResult(run.id, {
+      ok: false,
+      verdict: null,
+      round: 1,
+      checkpoint: 'inner-error',
+      blockKind: 'infra-only',
+      terminalCause: 'the build transport returned no usable result',
+    })
+    await h.loop.runOnce()
+
+    expect(store.get(run.id)?.infra_retries).toBe(1)
+    expect(h.inputs).toHaveLength(1)
+    clockMs = INFRA_RETRY_BACKOFF_MS[0] + 1
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(2)
+  })
+
   test('claim clears the slot/result, preserves rounds, waits, then re-fires as a continuation', async () => {
     const h = harness()
     const run = await createRun('incident-replay')

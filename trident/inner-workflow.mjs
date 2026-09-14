@@ -8246,7 +8246,14 @@ ${task}${reflectionGuidance}`,
       'r1',
     )
 
-    if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+    if (!forge) {
+      const error = new Error('forge agent returned null (terminal error before returning a result)')
+      // The dispatch returned no build to judge. Stamp that measured class where it
+      // is known; the terminal catch carries it structurally, so wording changes
+      // cannot demote a retryable infrastructure failure to a genuine build result.
+      error.blockKind = 'infra-only'
+      throw error
+    }
     buildReport = forge
     // A FORGE PR NUMBER IS ADOPTED ONLY WHEN IT IS A REAL ONE. The build's pr-mode
     // trailer is PR number 0 BY DESIGN (see FORGE_PR_LINE above: "the outer loop
@@ -9205,6 +9212,7 @@ ${task}${rePlanNote}${reflectionGuidance}`,
   // (the detached workflow's result API) rather than re-throwing, so the result is
   // a clean terminal value, not an error.
   const awaiting = err != null && err.awaitingTrailer === true
+  const thrownBlockKind = err != null && err.blockKind === 'infra-only' ? 'infra-only' : null
   const thrownMessage = err && err.message ? String(err.message) : String(err)
   log(`trident-v2 inner THREW: ${thrownMessage}`)
   if (awaiting) {
@@ -9229,13 +9237,13 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     // missing commit OID and the operator was told the review panel had refused a build it
     // never saw. So the sentence this workflow composed at the point the
     // fact was known travels out with the result, redacted + capped by the SAME helper the
-    // bounded stops use. No `blockKind` is asserted alongside it: a throw is not a review
-    // verdict, and `null` keeps the outer loop from claiming the code was judged.
+    // bounded stops use. A `blockKind` travels only when the throw site measured one;
+    // ordinary throws keep it absent, so the outer loop does not invent a judgment.
     terminalCause: infraCause(thrownMessage),
-    // A THROW IS ITS OWN CAUSE. No review verdict is asserted beside it (`blockKind`
-    // stays absent) and none is implied here: this names the EXIT, and the prose above
-    // carries the sentence the workflow composed where the fact was known.
+    // A THROW IS ITS OWN CAUSE. This names the EXIT; any structured block class is
+    // carried separately from the prose the workflow composed where the fact was known.
     terminalCauseKind: 'workflow-threw',
+    ...(thrownBlockKind === null ? {} : { blockKind: thrownBlockKind }),
   }
   if (awaiting) {
     failureResult.checkpoint = 'awaiting-trailer'

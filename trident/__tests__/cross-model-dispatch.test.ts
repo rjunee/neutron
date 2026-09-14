@@ -35,6 +35,7 @@ import {
   CODEX_BUILD_SCRIPT_PATH,
   CODEX_REVIEW_SCRIPT_PATH,
 } from '../inner-loop.ts'
+import { classifyInnerFailure } from '../orchestrator.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -118,6 +119,8 @@ async function runWorkflow(
     model?: string
     /** Simulate a wrapper death before either trailer-writing branch. */
     missingBuildTrailer?: boolean
+    /** Make the build agent return no result at all. */
+    nullBuild?: boolean
     /** Answers returned by the truth-order probe after the bridge's wait expires. */
     trailerProbe?: Array<{
       trailerBody?: string
@@ -149,6 +152,7 @@ async function runWorkflow(
       }
     }
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
+      if (label === 'forge:build' && opts.nullBuild === true) return null
       const empty = opts.buildProduces !== undefined && label === 'forge:build'
       const isFix = String(label).startsWith('forge:fix-round-')
       const fixEmpty = opts.fixProduces !== undefined && isFix
@@ -281,14 +285,15 @@ async function runWorkflow(
   const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
   const result = (await fn(agent, parallel, phase, log, budget, args)) as Record<string, unknown>
   // Every healthy run reaches synthesis, so a workflow that silently stopped early
-  // cannot pass a test by dispatching nothing. `buildProduces` is the one case that
-  // is SUPPOSED to stop before the panel, and it asserts that itself.
+  // cannot pass a test by dispatching nothing. An empty or null build is SUPPOSED
+  // to stop before the panel, and each fixture asserts that itself.
   if (
     args.mergeMode !== 'pr' &&
     opts.buildProduces === undefined &&
     opts.remainingTasks === undefined &&
     opts.buildBranch === undefined &&
     opts.missingBuildTrailer !== true &&
+    opts.nullBuild !== true &&
     args['codexBuildScript'] !== undefined
   ) {
     expect(synthCount).toBeGreaterThan(0)
@@ -755,6 +760,23 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(result['terminalCause']).toContain('codexBuildScript')
     expect(logs.some((line) => line.includes('codexBuildScript'))).toBe(true)
     expect(captured.filter((call) => call.label === 'forge:build')).toEqual([])
+  })
+
+  test('a null build is stamped infra and rewording its message cannot change the class', async () => {
+    const { result, captured } = await runWorkflow(productionArgs(null), { nullBuild: true })
+    expect(captured.filter((call) => call.label === 'forge:build')).toHaveLength(1)
+    expect(captured.filter((call) => String(call.label).startsWith('argus:'))).toEqual([])
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    expect(result['blockKind']).toBe('infra-only')
+
+    result['terminalCause'] = 'the build transport returned no usable result'
+    expect(classifyInnerFailure({
+      verdict: null,
+      checkpoint: String(result['checkpoint']),
+      block_kind: result['blockKind'] as 'infra-only',
+      terminal_cause: String(result['terminalCause']),
+    })).toBe('infrastructure')
   })
 
   test('the detached wrapper outlives the Bash-call bound that used to kill it', async () => {
