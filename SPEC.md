@@ -283,6 +283,17 @@ decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
 
+### 2026-09-14 — Run heads and published checkpoints accept either full Git object-name width.
+
+The persisted `outer-published:<oid>:<remaining>:<round>[:deviated]` format keeps its
+field order and accepts 40- or 64-digit OIDs. No version prefix: old readers treat
+unknown names as fallback work, so a prefix cannot make them refuse loudly. New
+readers preserve old checkpoints; old readers are not forward-compatible with
+64-digit checkpoints. Drain old readers before sharing SHA-256 run state, including
+on rollback. This change does not deliver a deployment interlock or claim complete
+SHA-256 coverage for unrelated Git helpers. Decision and acceptance:
+[`docs/spec-items/run-head-hash-width.md`](docs/spec-items/run-head-hash-width.md).
+
 ### 2026-09-13 — "EVERY PROJECT REPL" IS RECONCILED PER SUBSTRATE, NOT PER REGISTRY FILE, and the narrowing is a correctness requirement rather than a shortcut. A boot pass reconciles the row for the pool key whose substrate has been constructed, with that substrate's options. **Narrows the 2026-09-12 entry below** — which says "a boot pass reconciles that row" without saying WHICH rows get one — and does not supersede it: everything that entry claims about a reconciled row still holds. Spec item: [`docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md). GitHub issue #539.
 
 - **Why enumeration would be the worse defect.** One registry file holds a row per pool key, and a pool key folds the substrate instance, the user, the PROJECT and the credential identity. A pass runs with the options of the substrate that started it, so rebuilding another row's session from those options would put a REPL in the pool scoped to the wrong project — every tool call attributed there, and its child authorised on a credential belonging to another key. Reconciling a row under the wrong identity is worse than reconciling it later, and it is worse in exactly the direction this feature exists to protect.

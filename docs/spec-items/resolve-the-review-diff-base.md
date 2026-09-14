@@ -13,7 +13,7 @@ issue_ref: "#546"
 > and are NOT claimed by this item: #658 (three independent deciders for "is this operand
 > qualified" — one predicate would be better than three) and #667 (the SHA-1 assumptions outside
 > this item's rule: the launch-path pin test, `FULL_OID`, and the persisted checkpoint
-> vocabulary).
+> vocabulary), now specified in `docs/spec-items/run-head-hash-width.md`.
 
 ## THE INVARIANT — stated once, cited everywhere else
 
@@ -656,14 +656,10 @@ built, never inferred from the merge mode.
       `codex-review.sh` accepts exactly the width `git rev-parse --show-object-format` reports,
       because it HAS one and accepting both there lets a wrong-width REF capture the base; and
       the refusing word is derived from the same question where it is evaluated.
-      **WHAT THIS CRITERION DOES NOT CLAIM.** The launch path pins the base sha behind a 40-only
-      test (`orchestrator.ts:4179`, which fails the run, and `:4210`, which silently declines to
-      pin), so in a SHA-256 repository a valid base tip does not pin. That is a NON-GOAL here
-      rather than an oversight: `FULL_OID` and the persisted `outer-published:<40hex>:…`
-      checkpoint vocabulary assume SHA-1 as well, so widening the launch recognisers alone would
-      produce a configuration that pins correctly and then fails at resume — support that looks
-      like support. The whole chain is #667. This repository is SHA-1 (measured with
-      `git rev-parse --show-object-format`), so none of it is live either way. **And the test
+      **WHAT THIS CRITERION DOES NOT CLAIM.** This criterion tests resolution, not launch.
+      Issue #667 widens the run-head, launch-base and persisted checkpoint vocabulary;
+      its compatibility policy and bounded scope live in
+      `docs/spec-items/run-head-hash-width.md`. **And the test
       proves what it claims and no more**: it exercises the binding, the `.mjs` twin and the
       wrapper directly, and says in its own text that it does not fire a launch, so nobody reads
       it as evidence about a path it never touches. Verified
@@ -679,12 +675,9 @@ built, never inferred from the merge mode.
       wrapper case. The fixture axis is the point — **a fixture that only ever supplies one hash
       width cannot fail on a hash-width assumption**, which is why this survived thirty-two
       rounds of review.
-      **What is NOT closed, named rather than implied**: `FULL_OID` in `trident/merge.ts` and
-      `trident/inner-workflow.mjs`, and the `outer-published:<40hex>:…` checkpoint vocabulary,
-      still assume SHA-1. They are outside this item's rule (they are about run heads and
-      persisted checkpoint text, not about a rev-range base), and a persisted format is not
-      something to widen in passing — filed as #667, with the exposure stated: every repository
-      trident builds today is SHA-1, so it is latent rather than live.
+      **Separate scope:** run-head and persisted-checkpoint widths belong to #667,
+      specified in `docs/spec-items/run-head-hash-width.md`, including its mixed-version
+      compatibility limit. This item makes no claim about those boundaries.
       verify: `bun test trident/diff-base-option-shaped.test.ts` — "sha1/sha256: the emitted word is the zeros of THIS repository's width,
       and the other width is a live hole" and "…is honoured as a pin by both implementations"
       (both formats); and `bun test trident/codex-review-base-ref.test.ts` — "A SHA-256 OBJECT NAME IS A VALID ONE TOO — 64 hex, kept

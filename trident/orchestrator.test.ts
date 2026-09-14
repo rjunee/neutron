@@ -438,8 +438,8 @@ const literalPath = (pathspec: string): string => {
 }
 
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
-  test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
-    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+  test.each([40, 64])('pr mode publishes and re-fires review with a %i-hex head', async (width) => {
+    const head = 'a'.repeat(width)
     // The remote is BEHIND the local head, so this exercises the real lease push; a remote
     // already AT the head is the no-op-success path, tested below.
     const stale = '9'.repeat(40)
@@ -1421,7 +1421,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
     test('rejects a malformed pin without asking git to measure it', async () => {
       const { h, final } = await ancestryRun(ok(), 'deadbeef')
-      expect(final.failure_reason).toContain('is not a 40-hex commit')
+      expect(final.failure_reason).toContain('is not a full 40- or 64-hex commit')
       expect(final.failure_reason).toContain(produced)
       expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge-base --is-ancestor deadbeef'))).toBe(false)
     })
@@ -7623,7 +7623,8 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe('absent')
   })
 
-  test('the recorded OID may come from the outer-published checkpoint name alone', async () => {
+  test.each([40, 64])('the %i-hex recorded OID comes from the checkpoint name alone', async (width) => {
+    const HEAD = 'a'.repeat(width)
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       hostResponder: (cmd) =>
@@ -7636,8 +7637,8 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH board-shaped pr launch fetches and pins origin/main before firing', async () => {
-    const HEAD = 'a'.repeat(40)
+  test.each([40, 64])('a FRESH pr launch pins a %i-hex origin/main before firing', async (width) => {
+    const HEAD = 'a'.repeat(width)
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       hostResponder: (cmd) => {

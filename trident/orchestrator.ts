@@ -2007,7 +2007,7 @@ export async function rebaseOntoObservedBase(
  *
  * TRI-STATE RETURN — each value means exactly one thing, and they are NOT
  * interchangeable (the workflow's `classifyResume` gives them different consequences):
- *   - a 40-hex lowercase OID → the authority answered; this IS the live head.
+ *   - a 40- or 64-hex lowercase OID → the authority answered; this IS the live head.
  *   - `'absent'`             → the authority answered SUCCESSFULLY that the branch does
  *                              not exist. A real fact, not a failure: the recorded work
  *                              is gone from the authority, so a rebuild is correct and
@@ -2086,7 +2086,7 @@ export async function resolveResumeLiveHead(
         // An OK ls-remote with no output is the remote SAYING the branch is gone.
         if (res.stdout.trim() === '') return 'absent'
         const token = res.stdout.trim().split('\n')[0]?.trim().split(/\s+/)[0] ?? ''
-        if (/^[0-9a-f]{40}$/i.test(token)) return token.toLowerCase()
+        if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(token)) return token.toLowerCase()
         // Malformed output is not an answer — retry rather than believe it.
       }
     } else {
@@ -2096,7 +2096,7 @@ export async function resolveResumeLiveHead(
       )
       if (res.ok) {
         const oid = res.stdout.trim()
-        if (/^[0-9a-f]{40}$/i.test(oid)) return oid.toLowerCase()
+        if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oid)) return oid.toLowerCase()
       } else {
         // A failed rev-parse is ambiguous: a missing branch and a broken/absent repo
         // both fail. Ask git whether it is healthy — if it is, the branch is genuinely
@@ -2149,7 +2149,7 @@ export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
     // Rejecting it here made the launcher spend a whole workflow fire on a checkpoint
     // it should have fast-exited on. The suffix says nothing about whether THIS
     // invocation may skip its rebuild, so a deviated publish decides exactly as a clean one.
-    /^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)
+    /^outer-published:(?:[0-9a-f]{40}|[0-9a-f]{64}):\d+:\d+(:deviated)?$/.test(name)
   )
 }
 
@@ -2559,7 +2559,7 @@ export function buildTridentOrchestrator(
       run.repo_path,
     )
     const resolvedHead = local.stdout.trim()
-    if (!local.ok || !/^[0-9a-f]{40}$/.test(resolvedHead)) {
+    if (!local.ok || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(resolvedHead)) {
       const detail = local.stderr.trim()
       throw new Error(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
@@ -2585,9 +2585,9 @@ export function buildTridentOrchestrator(
     // head passes with no exemption (the recovery-card interaction).
     if (run.reviewed_head !== null) {
       const pin = run.reviewed_head.trim().toLowerCase()
-      if (!/^[0-9a-f]{40}$/.test(pin)) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pin)) {
         throw new Error(
-          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a 40-hex commit; refusing to publish ${resolvedHead} unverified`,
+          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a full 40- or 64-hex commit; refusing to publish ${resolvedHead} unverified`,
         )
       }
       const ancestry = await opts.run_host(
@@ -3916,7 +3916,7 @@ export function buildTridentOrchestrator(
     // `outer-published:<oid>:r:t` capture takes precedence over the checkpoint column.
     const published =
       typeof resume_checkpoint === 'string'
-        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
+        ? resume_checkpoint.match(/^outer-published:([0-9a-f]{40}|[0-9a-f]{64}):(\d+):(\d+)(:deviated)?$/)
         : null
     const recorded = (published?.[1] ?? resume_checkpoint_head ?? '').trim().toLowerCase()
     // Only read when the answer can change a decision: no checkpoint, no recorded OID
@@ -3924,7 +3924,7 @@ export function buildTridentOrchestrator(
     // launch must stay byte-identical (no extra git command, no extra arg).
     let resume_live_head =
       resume_checkpoint !== null &&
-      /^[0-9a-f]{40}$/.test(recorded) &&
+      /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(recorded) &&
       typeof run.branch === 'string' &&
       run.branch.length > 0
         ? await resolveResumeLiveHead(
@@ -3969,7 +3969,7 @@ export function buildTridentOrchestrator(
     // branch legitimately advances past the last checkpoint with its OWN commits.
     //
     // FALSIFIED means the branch DEMONSTRABLY holds a different commit — a real
-    // 40-hex that is not the recorded one. An unreadable head (`''`) or a branch
+    // full OID that is not the recorded one. An unreadable head (`''`) or a branch
     // the remote says is gone (`'absent'`) is NOT evidence of another lane's work,
     // and both are already answered downstream: the bounded fast-exit below, and
     // `classifyResume`'s own rebuild. Narrow on purpose, because the only thing
@@ -4002,7 +4002,7 @@ export function buildTridentOrchestrator(
     const seed_falsified =
       seeded_resume &&
       typeof resume_live_head === 'string' &&
-      /^[0-9a-f]{40}$/.test(resume_live_head) &&
+      /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(resume_live_head) &&
       resume_live_head !== recorded
     if (seed_falsified) {
       resume_checkpoint = null
@@ -4176,7 +4176,7 @@ export function buildTridentOrchestrator(
         launchRun.repo_path,
       )
       const oid = resolved.stdout.trim().toLowerCase()
-      if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+      if (!resolved.ok || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) {
         const detail = gitDetail(resolved.stderr || resolved.stdout)
         return {
           run: failedRun(launchRun, `trident infra: fetched origin/${baseProse} but could not resolve its tip in ${repoProse}; the build was NOT started: ${detail}`, false),
@@ -4207,7 +4207,7 @@ export function buildTridentOrchestrator(
         launchRun.repo_path,
       )
       const oid = resolved.stdout.trim().toLowerCase()
-      if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
+      if (resolved.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) base_sha = oid
     }
     const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
 
@@ -4245,7 +4245,7 @@ export function buildTridentOrchestrator(
       // A missing or ambiguous local ref is the normal first-launch shape: Forge
       // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
       // however, only ancestry can prove that this lane owns what is already there.
-      if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
+      if (branchTipResult.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(branchTip)) {
         // `merge-base --is-ancestor` answers with THREE exits, not two: 0 yes, 1 no, and
         // ANYTHING ELSE an error (128 on a corrupt or missing object, 124 when a watchdog
         // killed it, non-zero when the spawn itself failed). Reading "not ok" as "proven
@@ -4360,7 +4360,7 @@ export function buildTridentOrchestrator(
         // that reorders what is DISPLAYED without changing a byte. The remedy composer folds
         // exactly those codepoints and names them as forgery vectors, so exempting the branch
         // here made this seam contradict the threat model of the module it exists to guard.
-        // Only the shas stay raw, and they are `^[0-9a-f]{40}$`-tested above.
+        // Only the shas stay raw, and they are full-width-tested above.
         // NAME FIELDS ARE FOLDED AS NAMES (Argus blocker/finding). `foldEvidence` folds a
         // forgery codepoint to an ASCII SPACE, and the ASCII space is the one character git's
         // ref rules forbid — the character `delivery.ts` anchors its wrong-base classifier on.
@@ -4498,7 +4498,7 @@ export function buildTridentOrchestrator(
           // UNKNOWN in this guard refuses: it authorises nothing and it names no
           // destructive act, rather than falling through to the wrong-base refusal,
           // which would blame another lane for a history we could not read.
-          if (ownCrashLeftover && /^[0-9a-f]{40}$/.test(recorded)) {
+          if (ownCrashLeftover && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(recorded)) {
             const recordedPresent = await opts.run_host(
               ['git', '-C', launchRun.repo_path, 'cat-file', '-e', `${recorded}^{commit}`],
               launchRun.repo_path,

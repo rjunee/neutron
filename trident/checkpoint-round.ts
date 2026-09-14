@@ -2,7 +2,7 @@ import { trimAsciiWs } from './ascii-trim.ts'
 
 /**
  * The outer loop's published-checkpoint shape, written by the orchestrator when
- * it pushes: `outer-published:<40-hex-oid>:<remaining_tasks>:<round>[:deviated]`.
+ * it pushes: `outer-published:<40-or-64-hex-oid>:<remaining_tasks>:<round>[:deviated]`.
  *
  * THE ONE COPY (Argus r6, minor). It used to be spelled twice — here, and again
  * in `trident/fire-evidence.ts`, whose capturing form the settle-timeout gate
@@ -29,7 +29,7 @@ import { trimAsciiWs } from './ascii-trim.ts'
  *
  * Groups: 1 = sha, 2 = remaining tasks, 3 = round.
  */
-export const OUTER_PUBLISHED_CHECKPOINT = /^outer-published:([0-9a-f]{40}):(\d+):(\d{1,9})(?::deviated)?$/
+export const OUTER_PUBLISHED_CHECKPOINT = /^outer-published:([0-9a-f]{40}|[0-9a-f]{64}):(\d+):(\d{1,9})(?::deviated)?$/
 
 /** The largest round `OUTER_PUBLISHED_CHECKPOINT` accepts — nine digits. */
 export const MAX_CHECKPOINT_ROUND = 999_999_999 as const
@@ -59,7 +59,7 @@ export function checkpointRoundField(round: number | null | undefined): number {
  *
  * The two shapes that carry a round — anything else returns null:
  *   `fix-round-N`                                                → N
- *   `outer-published:<40-hex-oid>:<remaining>:<round>[:deviated]` → <round>
+ *   `outer-published:<40-or-64-hex-oid>:<remaining>:<round>[:deviated]` → <round>
  *
  * FIELD ORDER, pinned: the outer publisher builds
  * `outer-published:${head}:${remaining_tasks}:${round}` (orchestrator.ts

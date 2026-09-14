@@ -146,7 +146,7 @@ const {
   // time (`resolveResumeLiveHead` in orchestrator.ts) at the credentialed host
   // boundary, rather than reported by a probe AGENT. Tri-state, and the three values
   // are NOT interchangeable:
-  //   - a full 40-hex OID → the authority's answer for the branch head.
+  //   - a full 40- or 64-hex OID → the authority's answer for the branch head.
   //   - 'absent'          → the authority answered SUCCESSFULLY that the branch does
   //                         not exist; the recorded work is gone from it → rebuild.
   //   - ''                → the launcher tried and COULD NOT READ it. Exclusively
@@ -4199,11 +4199,11 @@ function roundLanded(headBefore, headAfter) {
   return after !== before
 }
 
-/** A FULL 40-hex OID, or ''. Anything shorter is refused rather than tolerated:
+/** A FULL 40- or 64-hex OID, or ''. Anything shorter is refused rather than tolerated:
  *  the outer merge pins on this value through `reviewedHeadOid` (merge.ts), which
- *  applies the SAME `^[0-9a-f]{40}$` test and refuses an abbreviated sha, so a
+ *  applies the SAME full-width test and refuses an abbreviated sha, so a
  *  resume that accepted one would unlock a fast path whose result cannot merge. */
-const FULL_OID = /^[0-9a-f]{40}$/
+const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 function normalizeOid(value) {
   const s = typeof value === 'string' ? value.trim().toLowerCase() : ''
   return FULL_OID.test(s) ? s : ''
@@ -4347,7 +4347,7 @@ function resumeOnUnchangedHead(name, input) {
   // The optional `:deviated` suffix is about the NEXT iteration's PLANNER, not
   // about whether THIS invocation may skip its own re-build — so a deviated
   // publish checkpoint classifies exactly as a clean one does.
-  if (/^outer-published:[0-9a-f]{40}:\d+:\d+(:deviated)?$/.test(name)) {
+  if (/^outer-published:(?:[0-9a-f]{40}|[0-9a-f]{64}):\d+:\d+(:deviated)?$/.test(name)) {
     return { mode: 'review', reason: 'outer-published-head-unchanged' }
   }
   if (name === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(name)) {
@@ -5993,7 +5993,7 @@ function infraTerminalCause(synthesis) {
  * about whether that string is good news.
  *
  * TRI-STATE, THE SAME ONE `readBuiltHead` AND THE LAUNCHER'S `resolveResumeLiveHead`
- * SPEAK (40-hex / `'absent'` / `''`), because the two probes answer the SAME question
+ * SPEAK (40- or 64-hex / `'absent'` / `''`), because the two probes answer the SAME question
  * for the SAME decider and used to disagree about how to say "not there":
  *   - local mode ran a bare `git rev-parse <branch>`, which on a missing branch prints
  *     the BRANCH NAME on stdout and exits 128 — a name that is not 40 hex, so it reached
@@ -6018,7 +6018,7 @@ async function readBranchHead(round) {
   // verdict at all.
   const res = await seatAttempt(`head-probe-round-${round}`, () =>
     agent(
-      `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a 40-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
+      `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a full 40- or 64-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
 ${cmd}`,
       withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
     ),
@@ -6043,7 +6043,7 @@ const BUILT_HEAD_READ_ATTEMPTS = 3
  *
  * TRI-STATE, exactly like the launcher's `resolveResumeLiveHead` (trident/orchestrator.ts)
  * and for the same reason — "not there" and "could not tell" earn OPPOSITE consequences:
- *   - a 40-hex OID → git answered; this IS the built head.
+ *   - a 40- or 64-hex OID → git answered; this IS the built head.
  *   - `'absent'`   → git answered SUCCESSFULLY that the branch does not exist. A real
  *                    fact and a REAL OUTCOME: nothing was built. It must keep the honest
  *                    "nothing was built" throw and must never be dressed up as an infra
@@ -6087,7 +6087,7 @@ async function readBuiltHead(tag) {
   for (let attempt = 1; attempt <= BUILT_HEAD_READ_ATTEMPTS; attempt++) {
     const res = await seatAttempt(`head-probe-round-built-${tag}`, () =>
       agent(
-        `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a 40-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+        `Run EXACTLY this single Bash command and report the ONE token it prints via the schema — a full 40- or 64-character sha, or the literal word absent. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.\n${cmd}`,
         withModel({ label: `head-probe-round-built-${tag}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
       ),
     )
@@ -7748,7 +7748,7 @@ try {
   // facts it compares.
   const checkpointText = resumeCheckpoint
   const publishedResume = typeof checkpointText === 'string'
-    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)(:deviated)?$/)
+    ? checkpointText.match(/^outer-published:([0-9a-f]{40}|[0-9a-f]{64}):(\d+):(\d+)(:deviated)?$/)
     : null
   // The outer publisher's encoded OID is the newer, independently witnessed
   // record and takes precedence over the companion checkpoint column. It still
@@ -8470,7 +8470,7 @@ ${task}${reflectionGuidance}`,
     // BECAUSE IT REMAINS A CLAIM: no fast path opens unless the recorded OID EQUALS the
     // live head the LAUNCHER reads from git, so a wrong claim degrades to `head-moved` →
     // rebuild — exactly what an empty one would have done — while a right one preserves
-    // the work. Only a FULL 40-hex claim qualifies (`normalizeOid`); an abbreviated one
+    // the work. Only a FULL 40- or 64-hex claim qualifies (`normalizeOid`); an abbreviated one
     // cannot be compared for equality. `'absent'` records '' as before: git ANSWERED that
     // there is no branch, and a claim about a branch git says does not exist is not
     // evidence of anything.
@@ -9103,7 +9103,7 @@ ${task}${rePlanNote}${reflectionGuidance}`,
     // probes, so a built-head read that says the branch is gone can sit next to a
     // branch read that says it moved, and the literal string `'absent'` was then
     // recorded as the reviewed commit. Bounded downstream (`reviewedHeadOid` in
-    // merge.ts refuses anything that is not 40 hex, so a `pr`-mode merge could never
+    // merge.ts refuses anything that is not 40 or 64 hex, so a `pr`-mode merge could never
     // pin it) but this is a LOCAL-mode value that is not a commit, and naming it one
     // is the lie #545 is about. `''` is what every other site in this file says for
     // "no commit to pin", and it is what this one says now.

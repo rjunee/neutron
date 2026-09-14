@@ -10,7 +10,9 @@ import {
 
 const SCRIPT = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 
-const OID = 'a'.repeat(40)
+for (const width of [40, 64]) {
+describe(`object width ${width}`, () => {
+const OID = 'a'.repeat(width)
 
 describe('checkpointRound', () => {
   test.each([
@@ -40,6 +42,7 @@ describe('checkpointRound', () => {
     'fix-round-',
     'fix-round-x',
     'outer-published:nothex:3:1',
+    'outer-published:abcdef0:3:1',
     `outer-published:${OID}:3`,
     // OUT OF DOMAIN (>9 digits). Not a shape any writer produces, and the clamp is
     // what makes the bash mirror's `10#` arithmetic unable to wrap negative — see
@@ -96,6 +99,7 @@ describe('the Bash mirror in checkpoint.sh agrees with the TypeScript parser', (
   })
 
   const CORPUS = [
+    ...[0, 7, 39, 41, 63, 65].map((length) => `outer-published:${'a'.repeat(length)}:2:3`),
     'fix-round-1',
     'fix-round-2',
     'fix-round-12',
@@ -231,3 +235,6 @@ describe('checkpointRoundField — the writer cannot emit a round its readers re
     },
   )
 })
+
+})
+}
