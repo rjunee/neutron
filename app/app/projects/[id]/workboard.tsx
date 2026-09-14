@@ -375,7 +375,11 @@ function WorkBoardBody({
               <Pressable accessibilityRole="button" accessibilityLabel="Close worker inspector" onPress={() => setWorkerInspector(null)}><Text style={styles.inspectorTitle}>✕</Text></Pressable>
             </View>
             <Text style={styles.inspectorText}>{workerInspector?.error ?? (workerInspector?.result === null || workerInspector === null ? 'Reading worker…' : workerInspector.result.state === 'running' ? `Worker is ${workerInspector.result.worker_state}.` : workerInspector.result.state === 'finished' ? 'This worker has finished.' : `Cannot determine which worker: ${workerInspector.result.detail}`)}</Text>
-            {workerInspector?.result?.state === 'running' ? <ScrollView><Text style={styles.inspectorScreen} testID="work-worker-screen">{workerInspector.result.screen || workerInspector.result.detail}</Text></ScrollView> : null}
+            {workerInspector?.result?.state === 'running' ? <ScrollView
+              // KEYBOARD-TAPS-EXEMPT: the inspector's screen dump is a single
+              // read-only Text — there is nothing in here to tap, and the modal
+              // carries no input, so no keyboard can be open over it.
+            ><Text style={styles.inspectorScreen} testID="work-worker-screen">{workerInspector.result.screen || workerInspector.result.detail}</Text></ScrollView> : null}
           </View>
         </View>
       </Modal>
