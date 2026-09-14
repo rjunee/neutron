@@ -40,11 +40,21 @@ timezone fixtures retain their assertions and use the new receipt contract
 
 ### Validation
 
-- Explicit reminder test files plus adjacent gateway wiring, outbound, push and
-  topic resolver suites: 361 passed, 0 failed, 1217 assertions across 23 files in two runs.
-  Five existing external-service skips remain; no skip or assertion was weakened.
-  Files were enumerated with `rg --files reminders` and direct caller searches.
-  The nested background-compose suite adds six passes to the 355-test main run.
+- Final continuation: 336 passed, zero failed, 1152 assertions across 19 files.
+  The files were all 16 `reminders/**/*.test.ts` files (enumerated with
+  `rg --files reminders`) plus `gateway/__tests__/reminders-owner-timezone-wiring.test.ts`,
+  `gateway/composition/build-core-modules-ritual-planner.test.ts`, and
+  `gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts`.
+  Five existing external-service skips remain; no assertion or skip was weakened.
+- Removed the duplicate clock increment left by concurrent edits at
+  `reminders/dispatcher.integration.test.ts:167`; its five tests passed again.
+  A broader five-file run passed 11 tests but failed 23 listener-dependent tests
+  in `gateway/__tests__/reminders-production-composer.test.ts` and
+  `gateway/__tests__/reminders-core-chat-composer.test.ts`. Their listener setup
+  (`:141` and `:175`, respectively) failed with EADDRINUSE on port zero; a
+  standalone `Bun.serve({port: 0, ...})` control failed identically. These broader
+  suites are not certified green. The outbound and tool-surface suites in that
+  run passed. No listener fixture was bypassed to hide this environment failure.
 - `bunx --no-install tsc -p reminders/tsconfig.json --noEmit`: passed.
 - `bun run typecheck`: no script is defined; ran the repository's
   `scripts/ci/typecheck-all.sh` instead (51 configurations). It failed on external
@@ -63,9 +73,14 @@ timezone fixtures retain their assertions and use the new receipt contract
 Each row below was run alone against `reminders/delivery.test.ts`. The changed
 line and the before/after file diff were printed before the test. Every row went
 RED and then GREEN after restoration. Concurrent writes in the build worktree
-invalidated an initial run; the completed proofs used an isolated copy. The
-restored runtime files were compared byte-for-byte with the build worktree.
-The 29 completed mutations cover the changed guards and transaction boundaries.
+invalidated an initial run; the completed proofs used an isolated copy.
+Executable source was compared with the build worktree as detailed below.
+The final continuation independently ran 31 mutations, with exit 1 mutated
+and exit 0 restored for every row. Executable source and the mutation suite were
+compared with the build worktree; concurrent differences were confined to store
+doc comments and the separate integration clock fixture. The settlement
+transaction proof was rerun after synchronizing those comments, printing the
+actual changed line (`reminders/store.ts:224`) before testing.
 The initial exhausted-state fixture was masked by its future cadence timestamp;
 resetting that timestamp made the terminal guard reachable independently
 (`reminders/delivery.test.ts:110`). A last-attempt success fixture also reaches
@@ -73,35 +88,37 @@ the positive-receipt exemption independently (`reminders/delivery.test.ts:336`).
 
 | Guard and landing line | Mutation | Test that went red | Restored |
 | --- | --- | --- | --- |
-| attempt bound (`reminders/delivery.ts:25`) | `attempts > 500` | bounds include five attempts and the full hour | GREEN |
-| time bound (`reminders/delivery.ts:26`) | `now > fire_at + 999999` | bounds include five attempts and the full hour | GREEN |
-| query exhausted (`reminders/store.ts:184`) | `0` | query excludes exhausted, delivered and waiting rows before applying limit | GREEN |
-| query delivered (`reminders/store.ts:184`) | `0` | dispatch query filters cadence, delivered and terminal rows before its limit | GREEN |
-| query cadence (`reminders/store.ts:184`) | `d.next_attempt_at > ? + 999999` | query excludes exhausted, delivered and waiting rows before applying limit | GREEN |
-| claim current occurrence (`reminders/store.ts:193`) | `if (false) return null` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
-| claim terminal ledger (`reminders/store.ts:195`) | `if (false) return null` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
-| claim exhaustion (`reminders/store.ts:197`) | `if (false) {` | lost completion survives restart and time expiry never stamps fired | GREEN |
+| attempt bound (`reminders/delivery.ts:25`) | `false` | bounds include five attempts and the full hour | GREEN |
+| hour bound (`reminders/delivery.ts:26`) | `false` | bounds include five attempts and the full hour | GREEN |
+| hour equality (`reminders/delivery.ts:26`) | `now >= fire_at + REMINDER_DELIVERY_WINDOW_SECONDS` | bounds include five attempts and the full hour | GREEN |
+| sql observation vocabulary (`reminders/store.ts:162`) | `remove SQL constraint` | database refuses an unclassified delivery observation | GREEN |
+| query exhaustion (`reminders/store.ts:184`) | remove exhausted predicate | query excludes exhausted, delivered and waiting rows before applying limit | GREEN |
+| query delivered (`reminders/store.ts:184`) | remove delivered predicate | dispatch query filters cadence, delivered and terminal rows before its limit | GREEN |
+| query cadence (`reminders/store.ts:184`) | `d.next_attempt_at < ?` | lost completion survives restart and time expiry never stamps fired | GREEN |
+| claim schedule status (`reminders/store.ts:193`) | `current?.fire_at !== reminder.fire_at` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
+| claim schedule time (`reminders/store.ts:193`) | `current?.status !== 'pending'` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
+| claim exhausted (`reminders/store.ts:195`) | `before?.state === 'delivered'` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
+| claim delivered (`reminders/store.ts:195`) | `before?.exhausted_reason` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
 | claim cadence (`reminders/store.ts:206`) | `if (false) return null` | claim rejects cancelled, moved, terminal, and early attempts | GREEN |
-| expiry recurrence advance (`reminders/store.ts:203`) | `if (false) await this.advanceRecurrence(reminder.id, next_fire_at)` | expired recurring occurrence advances atomically without a delivery stamp | GREEN |
-| stale observation (`reminders/store.ts:226`) | `false \|\| before.state === 'delivered'` | stale or duplicate observation cannot overwrite a newer attempt or delivery | GREEN |
-| duplicate observation (`reminders/store.ts:226`) | `before?.attempts !== attempt \|\| false` | stale or duplicate observation cannot overwrite a newer attempt or delivery | GREEN |
-| affirmative delivery (`reminders/store.ts:227`) | `const delivered = true` | outbound false has an explicit durable observation | GREEN |
-| unknown timestamp (`reminders/store.ts:232`) | `now` | outbound void has an explicit durable observation | GREEN |
-| owner schedule preservation (`reminders/store.ts:235`) | `if (false) return delivered` | delivery preserves concurrent owner reschedule | GREEN |
-| settlement exhaustion advance (`reminders/store.ts:236`) | `if (delivered) {` | recurring fifth failure advances only its occurrence and retains history | GREEN |
-| exhaustion cannot fire (`reminders/store.ts:238`) | `else if (true) await this.markFired` | known-not-delivered exhausts across actual database reopen without firing | GREEN |
-| post exception observation (`reminders/dispatcher.ts:537`) | `if (true) {` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
-| post keeps earlier success (`reminders/dispatcher.ts:545`) | `if (true) {` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
-| post affirmative only (`reminders/dispatcher.ts:554`) | `if (accepted !== false) receipt.observation` | outbound void has an explicit durable observation | GREEN |
-| post rejection keeps success (`reminders/dispatcher.ts:555`) | `accepted === false` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
-| void dispatch unknown (`reminders/tick.ts:185`) | `state: 'delivered', reason: 'dispatcher returned without a delivery observation'` | attempt three stamps fired once and only once | GREEN |
-| observation vocabulary (`reminders/store.ts:162`) | `Remove the SQL constraint` | database refuses an unclassified delivery observation | GREEN |
+| stale settlement (`reminders/store.ts:226`) | `before?.state === 'delivered'` | stale or duplicate observation cannot overwrite a newer attempt or delivery | GREEN |
+| duplicate settlement (`reminders/store.ts:226`) | `before?.attempts !== attempt` | stale or duplicate observation cannot overwrite a newer attempt or delivery | GREEN |
+| delivered stamp (`reminders/store.ts:227`) | `const delivered = true` | outbound false has an explicit durable observation | GREEN |
+| rescheduled settlement (`reminders/store.ts:235`) | `if (false) return delivered` | delivery preserves concurrent owner reschedule | GREEN |
+| pre-dispatch expiry advance (`reminders/store.ts:203`) | `if (false) await this.advanceRecurrence(reminder.id, next_fire_at)` | expired recurring occurrence advances atomically without a delivery stamp | GREEN |
+| completion expiry advance (`reminders/store.ts:236`) | `if (delivered) {` | recurring fifth failure advances only its occurrence and retains history | GREEN |
+| unknown return (`reminders/tick.ts:185`) | `state: 'delivered'` | attempt three stamps fired once and only once | GREEN |
+| positive acknowledgement (`reminders/dispatcher.ts:554`) | `if (accepted !== false) receipt.observation` | outbound void has an explicit durable observation | GREEN |
 | negative acknowledgement (`reminders/dispatcher.ts:555`) | `accepted !== true && receipt.observation.state !== 'delivered'` | outbound void has an explicit durable observation | GREEN |
+| preserve delivered on unknown (`reminders/dispatcher.ts:545`) | `if (true) {` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
+| preserve delivered on rejection (`reminders/dispatcher.ts:555`) | `accepted === false` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
+| preserve receipt on throw (`reminders/dispatcher.ts:537`) | `if (true) {` | ritual notices preserve positive evidence through later rejection, silence or throw | GREEN |
+| expiry refusal branch (`reminders/store.ts:197`) | `if (false) {` | lost completion survives restart and time expiry never stamps fired | GREEN |
+| no false stamp at exhaustion (`reminders/store.ts:238`) | `else if (true) await this.markFired` | known-not-delivered exhausts across actual database reopen without firing | GREEN |
+| skip refused dispatch (`reminders/tick.ts:181`) | `if (false) continue` | fifth crashed attempt exhausts on restart without a completion callback | GREEN |
+| unknown observation timestamp (`reminders/store.ts:232`) | `now` | outbound void has an explicit durable observation | GREEN |
+| delivered has no exhaustion (`reminders/store.ts:228`) | `exhaustionReason(attempt, reminder.fire_at, now)` | positive evidence on the last attempt wins over retry exhaustion | GREEN |
 | claim transaction (`reminders/store.ts:191`) | `return ((f) => f())(async () => {` | expiry and settlement roll back their ledger when schedule advancement fails | GREEN |
 | settlement transaction (`reminders/store.ts:224`) | `  ): Promise<boolean> {     return ((f) => f())(async () => {` | expiry and settlement roll back their ledger when schedule advancement fails | GREEN |
-| hour equality (`reminders/delivery.ts:26`) | `now >= fire_at + REMINDER_DELIVERY_WINDOW_SECONDS` | bounds include five attempts and the full hour | GREEN |
-| refused dispatch (`reminders/tick.ts:181`) | `if (false) continue` | fifth crashed attempt exhausts on restart without a completion callback | GREEN |
-| positive acknowledgement clears exhaustion (`reminders/store.ts:228`) | `exhaustionReason(attempt, reminder.fire_at, now)` | positive evidence on the last attempt wins over retry exhaustion | GREEN |
 
 ### Documentation sweep and limits
 
