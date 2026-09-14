@@ -1,7 +1,9 @@
 ---
 title: Checkpoint writes survive build-load contention
-group: reliability
-issue: 639
+group: trident
+status: done
+priority: P1
+cutover: false
 ---
 
 # Checkpoint writes survive build-load contention
