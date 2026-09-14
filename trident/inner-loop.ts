@@ -483,8 +483,8 @@ export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workfl
 /** The abs path of the sibling checkpoint-writer script (refactor P10). The
  *  workflow's Bash checkpoint/terminal-result steps invoke it instead of
  *  embedding raw sqlite SQL in the agent prompt; it prepends
- *  `PRAGMA busy_timeout=5000;` on the same connection so checkpoint writes
- *  retry under lock. Threaded via args (the workflow script has no module
+ *  a short same-connection busy timeout plus bounded application retry so
+ *  checkpoint writes survive scheduler-delayed locks. Threaded via args (the workflow script has no module
  *  resolution and the TARGET repo need not contain trident/). */
 export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 

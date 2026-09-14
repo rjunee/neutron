@@ -9,9 +9,10 @@
 # db lock FAILED INSTANTLY, and a lost terminal write meant no harvest until
 # the 25m reaper. This checked-in script replaces that inline SQL:
 #
-#   * `PRAGMA busy_timeout=5000;` is prepended IN THE SAME sqlite3 invocation
-#     (busy_timeout is per-connection), so writes retry for up to 5s under
-#     lock instead of failing instantly.
+#   * a short per-connection busy timeout plus bounded application retry lets
+#     writes survive scheduler-delayed lock holders without one long blocking
+#     sqlite3 call. Exhausted contention exits 75; genuine SQLite failures keep
+#     their original non-zero status and message.
 #   * The agent now invokes ONE fixed command with field/value args — no SQL
 #     for the LLM to transcribe (and mistranscribe).
 #
@@ -81,6 +82,13 @@
 # it replaces; the values that actually occur (uuids, slugs, enum names,
 # /tmp paths) contain no quotes, so emitted SQL is unchanged for them.
 set -euo pipefail
+
+case "${BASH_SOURCE[0]}" in
+  */*) script_dir="${BASH_SOURCE[0]%/*}" ;;
+  *) script_dir='.' ;;
+esac
+# shellcheck source=trident/sqlite-write-retry.sh
+source "$script_dir/sqlite-write-retry.sh"
 
 usage="usage: checkpoint.sh <db> <run-id> <field> <value> [<field> <value> ...]"
 db="${1:?$usage}"
@@ -1021,7 +1029,7 @@ quoted_run="$(sql_quote "$run")"
 # the OLD row inside the atomic statement and is the authority on what happens.
 prior_verdict=''
 if [ "$demoted_rejection" -eq 1 ]; then
-  prior_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=5000; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
+  prior_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=100; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
 fi
 
 # A frozen write is not an error, but a missing row IS: callers must be able to
@@ -1039,9 +1047,9 @@ fi
 # them would take a write lock for the whole read on the hot checkpoint path.
 #
 # busy_timeout is a per-connection PRAGMA: it MUST run in the SAME sqlite3
-# invocation as the UPDATE (';'-separated), not as a separate process — `tail -1`
-# drops that PRAGMA's own "5000" echo and keeps only the final SELECT. Errors
-# still reach stderr and fail the script (set -e + pipefail).
+# invocation as the UPDATE. The shared wrapper retries only SQLITE_BUSY and gives
+# exhausted contention exit 75; every other sqlite failure returns immediately
+# with its original status. Each attempt replays the one idempotent statement.
 #
 # `-init /dev/null -list -separator '|'` pins the OUTPUT FORMAT the `case` below
 # parses: an rc file setting `.mode`/`.separator`/`.output` makes both branches fall
@@ -1072,10 +1080,10 @@ fi
 # trailing SELECT after an aborted UPDATE and print a plausible outcome line). With
 # `-bail` the process stops and exits non-zero, and `pipefail` + `set -e` fail the
 # script exactly as they did before.
-update_sql="PRAGMA busy_timeout=5000;
+update_sql="PRAGMA busy_timeout=100;
 UPDATE code_trident_runs SET $set_clause WHERE id='$quoted_run';
 SELECT changes(), COALESCE((SELECT CASE WHEN phase IN $terminal_phases THEN 'terminal' ELSE 'active' END FROM code_trident_runs WHERE id='$quoted_run'), 'gone');"
-outcome="$(printf '%s\n' "$update_sql" | sqlite3 -init /dev/null -bail -list -separator '|' "$db" | tail -1)"
+outcome="$(sqlite_write_with_retry "$db" "$update_sql" | tail -1)"
 case "$outcome" in
   0'|'*)
     echo "checkpoint.sh: run '$run' not found — checkpoint NOT applied" >&2
@@ -1092,7 +1100,7 @@ esac
 # statement on purpose (the UPDATE has already landed atomically), best-effort, and
 # it can never fail the write it is describing.
 if [ "$guarded_rejection" -eq 1 ] || [ "$demoted_rejection" -eq 1 ] || [ "$frozen_no_review" -eq 1 ]; then
-  recorded_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=5000; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
+  recorded_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=100; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
   if [ "$guarded_rejection" -eq 1 ] && [ "$recorded_verdict" != 'REQUEST_CHANGES' ]; then
     echo "checkpoint.sh: REFUSED a findings-free REQUEST_CHANGES for run '$run' — a rejection must carry at least one finding; recorded '$recorded_verdict' instead" >&2
   elif [ "$guarded_rejection" -eq 0 ] && [ "$prior_verdict" = 'REQUEST_CHANGES' ] && [ "$recorded_verdict" != 'REQUEST_CHANGES' ]; then

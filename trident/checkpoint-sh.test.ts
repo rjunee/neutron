@@ -11,8 +11,8 @@
  *   2. the terminal-result `inner_result_file` path keeps the readfile()
  *      JSON-safe indirection AND the column-consistency CASE (subagent_status
  *      flips to 'completed' ONLY when the result file has non-empty content);
- *   3. writes RETRY under a held lock (PRAGMA busy_timeout=5000 on the same
- *      connection) instead of failing instantly like the old busy_timeout=0;
+ *   3. writes RETRY under a held lock (short same-connection busy waits plus
+ *      bounded application retry) instead of failing at a fixed five seconds;
  *   4. a row that has already reached a TERMINAL phase has its LIVENESS pair
  *      frozen — a surviving detached workflow cannot write a stale `running`
  *      claim (or a fresh heartbeat) back onto a cancelled/reaped run, while its
@@ -1664,17 +1664,29 @@ describe('checkpoint.sh — payloads past the platform per-argument limit', () =
   })
 })
 
-describe('checkpoint.sh — retry under lock (PRAGMA busy_timeout=5000, the P10 hardening)', () => {
-  test('a write against an EXCLUSIVE-locked db retries and lands once the lock releases (old busy_timeout=0 failed instantly)', async () => {
+describe('checkpoint.sh — bounded application retry under lock', () => {
+  test('a concurrent writer held beyond the former five-second ceiling is survived and the write lands', async () => {
     const holder = new Database(dbPath)
     holder.exec('BEGIN EXCLUSIVE') // hold the write lock
     const proc = Bun.spawn(['bash', SCRIPT, dbPath, 'run-1', 'inner_checkpoint', 'lock-test', 'subagent_status', 'running'], { stderr: 'pipe' })
-    // Keep the lock across most of a second — far beyond busy_timeout=0's
-    // instant "database is locked", well inside the 5s retry budget.
-    await new Promise((r) => setTimeout(r, 750))
+    // This is deliberately beyond the old PRAGMA busy_timeout=5000. The holder
+    // is a second real SQLite connection and COMMIT is the only release signal.
+    await new Promise((r) => setTimeout(r, 5_250))
     holder.exec('COMMIT')
     holder.close()
     expect(await proc.exited).toBe(0)
     expect(row('run-1').inner_checkpoint).toBe('lock-test')
+  }, 10_000)
+
+  test('a genuine SQLite write failure is reported as itself, never as exhausted contention', () => {
+    const unmigrated = join(dir, 'unmigrated.db')
+    new Database(unmigrated, { create: true }).close()
+
+    const result = sh([unmigrated, 'run-1', 'inner_checkpoint', 'failure-test'])
+
+    expect(result.code).not.toBe(0)
+    expect(result.code).not.toBe(75)
+    expect(result.stderr).toContain('code_trident_runs')
+    expect(result.stderr).not.toContain('retry budget exhausted')
   })
 })
