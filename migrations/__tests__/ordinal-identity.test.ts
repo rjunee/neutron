@@ -237,11 +237,20 @@ function rebuildFilesInRealTree(): string[] {
  * The branch ordinal is deliberately ABOVE every ordinal the real tree uses, so this
  * fixture cannot collide with a real file — it collided with `0131` the moment the
  * repair migration landed, which turned a name-collapse test into an ordinal-collision
- * failure that said nothing about the collapse.
+ * failure that said nothing about the collapse. It then collided AGAIN, with `0141`,
+ * for the same reason: a hand-pinned constant one above the tree's tail is one
+ * migration away from being inside it. It is now DERIVED from the real tree, so the
+ * property the comment above states is enforced rather than re-asserted every time
+ * someone adds a file.
  */
 const RENUMBERED_NAME = 'work_board_items_archived_status'
 const RENUMBERED_FILE = '0130_work_board_items_archived_status.sql'
-const BRANCH_ORDINAL = 141
+const BRANCH_ORDINAL =
+  Math.max(
+    ...readdirSync(REAL_TREE)
+      .filter((f) => /^\d{4}_.+\.sql$/.test(f))
+      .map((f) => Number(f.slice(0, 4))),
+  ) + 1
 const MERGED_ORDINAL = 130
 
 /**

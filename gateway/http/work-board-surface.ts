@@ -124,6 +124,7 @@ export type WorkBoardStartResult =
         // reach the same block. Deliberately NOT grouped with 'held': a hold is waiting
         // for a condition a sweep can re-test, and nothing can re-test a decision.
         | 'card_blocked'
+        | 'ralph_budget_exhausted'
         | 'backend_error'
       message: string
     }

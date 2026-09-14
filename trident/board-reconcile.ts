@@ -51,7 +51,13 @@ export interface TridentBoardReconciler {
     project_slug: string,
     run_id: string,
     outcome: 'done' | 'failed' | 'blocked',
-    pr_info?: { pr: number | null; pr_url: string | null },
+    pr_info?: {
+      pr: number | null
+      pr_url: string | null
+      ralph: boolean
+      ralph_round: number
+      max_ralph_rounds: number
+    },
   ): Promise<unknown>
 }
 
@@ -113,6 +119,12 @@ export function buildBoardReconcileObserver(
         pr_url = null
       }
     }
-    await board.detachRun(run.project_slug, run.id, outcome, { pr, pr_url })
+    await board.detachRun(run.project_slug, run.id, outcome, {
+      pr,
+      pr_url,
+      ralph: run.ralph,
+      ralph_round: run.ralph_round,
+      max_ralph_rounds: run.max_ralph_rounds,
+    })
   }
 }

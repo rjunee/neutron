@@ -24,10 +24,8 @@
  * and inherited nothing. Decoupling the budget from the seed made it false. A FIX
  * INVALIDATES THE EXPLANATIONS OF THE BUG IT FIXES.
  *
- * WHAT THIS DOES *NOT* CLOSE, pinned as tests rather than left in prose (see "THE LIMIT"
- * below). It does NOT make `max_ralph_rounds` a bound on the CARD, because the carry is
- * gated on `item.linked_run_id` and three things move or invalidate that link. Each
- * mechanism re-derived from the ladder as it now stands:
+ * HISTORICAL BOUNDARY: these tests pin the prior-row compatibility carry that #629
+ * supersedes once a card owns a budget snapshot. The old reset mechanisms were:
  *
  *   - THE LINK IS CLEARED BY ONE CLICK. `work-board/store.ts` NULLs `linked_run_id` when
  *     a card leaves the `failed` lane and again on `done → upcoming`, so
@@ -41,9 +39,8 @@
  *   - A DISPATCH WITH NO CARD AT ALL. `onboarding/overnight/register.ts` creates governed
  *     runs with no board item, so there is never a link to inherit through.
  *
- * The row is recreated by every dispatch and the link is one click from gone, so a
- * per-row counter is one reset away by construction; holding the spend on the CARD is the
- * durable fix and is `#629`.
+ * The card-owned tests in `board-dispatch.test.ts` now prove these link movements do
+ * not reset a card whose snapshot exists.
  *
  * This file drives the REAL `dispatchBoardBoundBuild` against the REAL store and pins
  * both directions — the carry on proof, the fresh start (and its logged reason)
