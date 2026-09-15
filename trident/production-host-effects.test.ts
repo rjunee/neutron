@@ -1,3 +1,4 @@
+import { reviewArtifact } from './gates/review-artifact.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
@@ -497,7 +498,8 @@ test('local-mode driver reaches merged through the real production effect', asyn
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   // Policy seams are scripted here; git measurement, preparation, landing and
   // the final ancestry witness use the real local repository.
-  const deps: BuildRunDeps = { ...f.effects,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...f.effects,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
@@ -585,7 +587,8 @@ async function resumeFixture(round = 3, replansUsed = 1) {
   }
   const restarted = createProductionHostEffects(f.options)
   const rounds: number[][] = []
-  const deps: BuildRunDeps = { ...restarted.effects, modes: restarted.modes,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...restarted.effects, modes: restarted.modes,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they

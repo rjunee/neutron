@@ -1,3 +1,5 @@
+import { reviewArtifact } from './review-artifact.ts'
+import { briefIntegrity } from './brief-integrity.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -44,11 +46,14 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
     usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
   const runner = fakeRunner('pi', { outcomes: new Map(['run:plan:0', 'run:build:0', 'run:review:1'].map(step => [step, completed])) })
   const request = { model_id: 'test', effort: null, cwd: f.wt, writable: true, network: false,
-    tools: 'edit-and-run', brief: { path: 'brief', integrity: 'test' }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
+    tools: 'edit-and-run', brief: { path: 'brief', integrity: briefIntegrity('brief.context.json') }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
   const worker = { runner, request }
   const deps: BuildRunDeps = {
     readReviewCap: async () => ({ kind: 'known' }),
     assignedBranch: 'change',
+    // Compose the host gate with a simulated prepared context read.
+    reviewArtifact: (request, snapshot) => reviewArtifact(request, snapshot, async path =>
+      path === request.brief.path ? 'brief.context.json' : JSON.stringify({ request, snapshot })),
     prepareWork: async () => {}, admissionGate: async () => f.check(),
     measure: async () => ({ kind: 'known', value: { ...snapshot, head: await f.git('rev-parse', 'change'), diff: await f.git('diff', 'base...change') } }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),

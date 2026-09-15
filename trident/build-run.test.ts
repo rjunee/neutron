@@ -1,3 +1,5 @@
+import { reviewArtifact } from './gates/review-artifact.ts'
+import { briefIntegrity } from './gates/brief-integrity.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { expect, spyOn, test } from 'bun:test'
 import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
@@ -35,7 +37,7 @@ function fixture(landFixes = true) {
   const cross = fakeRunner('openai-codex', { outcomes })
   const request = {
     model_id: 'test', effort: null, cwd: '.', writable: true, network: false, tools: 'edit-and-run',
-    brief: { path: 'brief.md', integrity: 'digest' }, result: { path: 'result.json', schema: 'build/1' },
+    brief: { path: 'brief.md', integrity: briefIntegrity('brief.md.context.json') }, result: { path: 'result.json', schema: 'build/1' },
     thread: null, budget: { wall_ms: 1000 },
   } as const
   const input: BuildRunInput = {
@@ -52,6 +54,9 @@ function fixture(landFixes = true) {
     // The host composes fixLineage; this fixture models git confirming descent.
     checkFixLineage: (snapshot, pin) => fixLineage(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' }), '.', 'change', pin, snapshot.head),
     prepareWork: async () => {},
+    // Compose the host gate; this fake host models the context file readback.
+    reviewArtifact: (request, snapshot) => reviewArtifact(request, snapshot, async path =>
+      path === request.brief.path ? 'brief.md.context.json' : JSON.stringify({ request, snapshot })),
     measure: async () => { reads++; events.push('measure'); return { kind: 'known', value: structuredClone(snapshot) } },
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: snapshot.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
@@ -1306,4 +1311,34 @@ test('G057 G060 driver routes incomplete panel facts to the orchestrator', async
     expect(f.events).not.toContain('publish')
     expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
   }
+})
+
+for (const fault of ['missing', 'unknown', 'blocked'] as const) test(`G102 driver refuses ${fault} artifact before dispatch`, async () => {
+  const f = fixture()
+  const prepared: string[] = []
+  f.deps.prepareWork = async request => { prepared.push(request.role) }
+  if (fault === 'missing') delete f.deps.reviewArtifact
+  else f.deps.reviewArtifact = async () => fault === 'unknown'
+    ? { kind: 'unknown', detail: 'artifact unreadable' } : { kind: 'blocked', on: 'artifact disagrees' }
+  expect(await f.run()).toMatchObject({ kind: fault === 'blocked' ? 'blocked' : 'unknown', phase: 'review' })
+  expect(prepared).toEqual(['plan', 'build', 'review'])
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G102 driver checks artifact after preparation and before every review', async () => {
+  const f = fixture()
+  let preparedStep = ''
+  const checks: string[] = []
+  f.deps.prepareWork = async request => { preparedStep = request.step_id }
+  const check = f.deps.reviewArtifact!
+  f.deps.reviewArtifact = async (request, snapshot) => {
+    expect(preparedStep).toBe(request.step_id)
+    expect(f.cross.calls).toHaveLength(checks.length)
+    checks.push(request.step_id)
+    return check(request, snapshot)
+  }
+  f.decisions.push({ kind: 'fix', findings: ['repair'] }, { kind: 'approve' })
+  expect((await f.run()).kind).toBe('merged')
+  expect(checks).toEqual(['run:review:1', 'run:review:2'])
 })
