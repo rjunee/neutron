@@ -348,3 +348,45 @@ should see the reasoning, not just the conclusions.
 - Whether the eval harness (Managed dispatch queue #28) becomes the cutover's acceptance
   instrument.
 - Anything about Managed hosting; this is all engine.
+
+### Pi bounded-worker acceptance and measured boundary (2026-09-15, #938)
+
+**This measurement sits against §3.2 and does not amend it.** That section's rule
+is the placement split — same model as the REPL means a subagent inside it, and only
+a different model becomes a headless harness — and Pi satisfies that rule: the
+project conversation dispatches the child. What Pi does not satisfy is the
+*rationale* the section gives alongside it, "warm cache, shared MCP connections, no
+new process": the measured extension starts a separate ephemeral Pi process per
+child. §3.2 is left exactly as written; whether that rationale was meant as a
+constraint on every harness or as the reason the split is cheap for Claude and Codex
+is the owner's to say, and nothing here depends on the answer.
+
+The third runner is `runtime/workers/pi-in-repl.ts:35`. Placement is `in-repl` only;
+the existing project conversation dispatches the `subagent` extension tool. The
+host must supply the named user-scope agent definition and enforce each request's
+model, effort and grants before composing. The sample extension's CLI tool list
+is not filesystem or network confinement, and an empty definition tool list
+means defaults. The runner's callback contract does not install a project Pi
+adapter or provide a sandbox. Those host obligations must be satisfied before
+connecting the runner to a live project (`runtime/workers/pi-in-repl.ts:14`).
+
+Acceptance checks in `runtime/workers/pi-in-repl.test.ts:54`:
+
+- Durable exclusive step reservation precedes compose; concurrent instances and
+  replacement runners cannot dispatch the same identity twice (`runtime/workers/pi-in-repl.test.ts:58`, `:110`, `:248`).
+- Changed request identity cannot consume the prior step's trailer (`runtime/workers/pi-in-repl.test.ts:119`).
+- The project topic, resolved model and full request reach the host; the extension
+  gets a single named user-scope agent, task and cwd, without invented model tool arguments (`runtime/workers/pi-in-repl.test.ts:59`).
+- Only validated trailer bytes establish a result. Prose, child diagnostics,
+  dispatch exceptions, cancellation, timeout and blind probes preserve uncertainty (`runtime/workers/pi-in-repl.ts:96`, `:110`, `:115`).
+- Headless placement is refused. A requested child thread is refused because the
+  inspected extension creates ephemeral children; project session continuity is
+  separately owned by the host (`runtime/workers/pi-in-repl.ts:17`, `:46`).
+
+Run `python3 scripts/probes/pi-in-repl.py` with Pi installed to remeasure its RPC
+correlation, extension registration, tool selection, session identity and
+conversation continuity, and signal-only child exit reporting without a model.
+The probe uses an isolated agent directory and kills the child on appearance.
+Pi 0.85.1 reported a killed child with exitCode 0 and no messages (`scripts/probes/pi-in-repl.py:134`). That is why
+extension diagnostics cannot establish success. The probe's tool allowlists
+measure the exposed tool surface, not OS-level confinement.

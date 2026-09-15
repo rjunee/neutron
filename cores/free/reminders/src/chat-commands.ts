@@ -455,7 +455,7 @@ export function resolveTimeSpec(raw: string, now: Date): TimeSpecResult | null {
   }
 
   // `tomorrow at <time>` / `tomorrow <HH:mm>` / `tomorrow`
-  const tomorrowMatch = /^tomorrow(?:\s+(?:at\s+)?(.+))?$/.exec(phrase)
+  const tomorrowMatch = /^tomorrow(?:\s+(?:at\s+)?(\S.*))?$/.exec(phrase)
   if (tomorrowMatch !== null) {
     const timeStr = (tomorrowMatch[1] ?? '').trim()
     const time = timeStr.length === 0
@@ -467,7 +467,7 @@ export function resolveTimeSpec(raw: string, now: Date): TimeSpecResult | null {
   }
 
   // `next <weekday> at <time>` / `next <weekday> <HH:mm>` / `next <weekday>`
-  const nextMatch = /^next\s+([a-z]+)(?:\s+(?:at\s+)?(.+))?$/.exec(phrase)
+  const nextMatch = /^next\s+([a-z]+)(?:\s+(?:at\s+)?(\S.*))?$/.exec(phrase)
   if (nextMatch !== null) {
     const weekday = matchWeekday(nextMatch[1]!)
     if (weekday === -1) return null
@@ -481,7 +481,7 @@ export function resolveTimeSpec(raw: string, now: Date): TimeSpecResult | null {
   }
 
   // `on <month> <day> at <time>` / `on <month> <day>`
-  const onMatch = /^on\s+([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(?:at\s+)?(.+))?$/.exec(phrase)
+  const onMatch = /^on\s+([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(?:at\s+)?(\S.*))?$/.exec(phrase)
   if (onMatch !== null) {
     const monthIdx = MONTHS.indexOf(onMatch[1]!.toLowerCase())
     if (monthIdx === -1) return null
@@ -497,7 +497,7 @@ export function resolveTimeSpec(raw: string, now: Date): TimeSpecResult | null {
   }
 
   // `at <time> today` / `at <time>`
-  const atTodayMatch = /^at\s+(.+?)(?:\s+today)?$/.exec(phrase)
+  const atTodayMatch = /^at\s+(\S.*)$/.exec(phrase.replace(/\stoday$/, '').trimEnd())
   if (atTodayMatch !== null) {
     const time = parseTimeWord(atTodayMatch[1]!.trim())
     if (time !== null) {

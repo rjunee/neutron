@@ -30,6 +30,7 @@
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CredentialUsagePayload } from '@neutronai/contracts/credential-usage.ts'
 import type { PoolSummary } from '@neutronai/persistence/usage-samples-store.ts'
+import type { UsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
 import { jsonResponse, resolveBearer } from './surface-kit.ts'
 
 const USAGE_PATH = '/api/app/usage'
@@ -47,7 +48,7 @@ export interface AppUsageSurfaceOptions {
    * deleted from that list and never by having no samples. It was an array before
    * that was true, which is why adding the others changed nothing here.
    */
-  dashboard: () => ReadonlyArray<PoolSummary>
+  dashboard: () => { pools: ReadonlyArray<PoolSummary>; analytics: UsageAnalytics }
 }
 
 export interface AppUsageSurface {
@@ -82,7 +83,7 @@ export function createAppUsageSurface(opts: AppUsageSurfaceOptions): AppUsageSur
             resolved.code === 'missing_bearer' ? resolved.message : 'authentication required',
         })
       }
-      if (isDashboard) return jsonResponse(200, { pools: opts.dashboard() })
+      if (isDashboard) return jsonResponse(200, opts.dashboard())
       return jsonResponse(200, opts.snapshot())
     },
   }

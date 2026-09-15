@@ -88,6 +88,8 @@ import {
   type ProjectedAccount,
   type ProjectedWindow,
   type UsageDashboard,
+  type UsageAnalytics,
+  type UsageAmount,
   type UsagePool,
 } from '../lib/usage-dashboard-client';
 
@@ -228,6 +230,11 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
           {line}
         </Text>
       ) : null}
+      {view.all_accounts_capped !== null ? (
+        <Text style={styles.muted} testID={`usage-${view.pool}-all-capped-band`}>
+          All accounts capped until {new Date(view.all_accounts_capped.to).toLocaleTimeString()}
+        </Text>
+      ) : null}
       {/* WHICH account the line above is about. The headline says WHEN; on a pool
           with more than one account the owner still has to know WHOSE, because
           that is the account he routes the next build to. */}
@@ -260,6 +267,36 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
           now={now}
         />
       ))}
+    </View>
+  );
+}
+
+function tokenAmount(amount: UsageAmount): string {
+  if (amount.state === 'unknown' || amount.value === null) return 'Unknown';
+  return `${amount.state === 'partial' ? '≥ ' : ''}${amount.value.toLocaleString()} tokens`;
+}
+
+function AnalyticsCard({ analytics }: { analytics: UsageAnalytics }) {
+  return (
+    <View style={styles.pool} testID="usage-analytics">
+      <Text style={styles.poolTitle}>Token spend</Text>
+      <Text>{tokenAmount(analytics.spend.total)}</Text>
+      <Text style={styles.rowLabel}>By project</Text>
+      {analytics.spend.by_project.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_project.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By phase</Text>
+      {analytics.spend.by_phase.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_phase.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By topic</Text>
+      {analytics.spend.by_topic.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_topic.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By agent</Text>
+      {analytics.spend.by_agent.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_agent.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By model</Text>
+      <Text style={styles.muted}>Unknown</Text>
+      <Text style={styles.poolTitle}>Wasted work</Text>
+      <Text>{tokenAmount(analytics.waste.total)}</Text>
+      {analytics.waste.by_reason.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      {analytics.waste.bands.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.poolTitle}>Longest builds</Text>
+      {analytics.throughput.state === 'unknown' ? <Text style={styles.muted}>Unknown</Text> : analytics.throughput.runs.map((run, i) => <Text style={styles.muted} key={`${run.project}-${i}`}>{run.project}: {Math.round(run.seconds / 60)}m ({run.outcome})</Text>)}
     </View>
   );
 }
@@ -434,9 +471,12 @@ export default function ModelUsageScreen() {
             No readings yet.
           </Text>
         ) : (
-          usage.pools.map((pool) => (
-            <PoolCard key={pool.pool} pool={pool} now={nowMs} />
-          ))
+          <>
+            {usage.pools.map((pool) => (
+              <PoolCard key={pool.pool} pool={pool} now={nowMs} />
+            ))}
+            <AnalyticsCard analytics={usage.analytics} />
+          </>
         )}
 
         <Pressable

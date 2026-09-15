@@ -25,9 +25,9 @@
  *      which is what a real outage looks like and what a naively-written timer
  *      re-arms forever without ever firing.
  *
- * Time is REAL here (the component takes an `offlineAfterMs` seam, and the tests
- * use a few tens of ms); no fake clock is installed, so nothing in this file can
- * pass because a timer was mocked into firing.
+ * The flapping path uses real time. The queue-depth mutation guard drives the
+ * component's injected deadline callback inside React's `act`, so it measures
+ * the state transition rather than racing React's loaded-runner render flush.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
@@ -177,17 +177,27 @@ describe('ConnectionNotice — what is actually on screen', () => {
   });
 
   it('MUTATION GUARD — an extended outage DOES surface, with the queue depth', async () => {
+    let elapse: (() => void) | null = null;
     const screen = await mountScreen(
       createElement(ConnectionNotice, {
         status: 'reconnecting',
         pendingCount: 2,
         sendError: null,
         offlineAfterMs: FAST_OUTAGE_MS,
+        scheduleDeadline: (onElapsed) => {
+          elapse = onElapsed;
+          return () => {
+            elapse = null;
+          };
+        },
       }),
     );
     // Still silent the instant it mounts…
     expect(screen.text()).toBe('');
-    await waitPast(FAST_OUTAGE_MS * 3);
+    expect(elapse).not.toBeNull();
+    await act(async () => {
+      elapse?.();
+    });
     // …and speaking once the outage has run long.
     expect(screen.byTestId('chat-offline-notice')).not.toBeNull();
     expect(screen.text()).toBe('Offline — 2 messages waiting to send');

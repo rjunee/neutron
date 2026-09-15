@@ -91,11 +91,10 @@ condition this runner exists to prevent. Chunking costs nothing in isolation:
 the batches run strictly one after another, and each batch is still
 `--max-concurrency=1`, so at most one listener-opening test is ever in flight.
 
-### What it looks like when you bypass the lane
+### The app-wide co-residency guard
 
-Running a whole directory that spans both lanes — `bun test app/__tests__` is
-the one people reach for — puts the harness back in a shared process and
-reproduces the collision. Measured on `bun test v1.3.9`, 2026-07-31: **1295
+Running a whole directory without isolation puts the harness back in a shared
+global and reproduces the collision. Measured on `bun test v1.3.9`, 2026-07-31: **1295
 pass / 12 fail across 102 files**, and each of the three affected files passes
 on its own. The three shapes, all the same root cause:
 
@@ -105,14 +104,15 @@ on its own. The three shapes, all the same root cause:
 | `app/__tests__/authed-attachment-file-open.test.tsx` | 5 | the harness's source rewrite (`support/native-harness.ts:149`) redirects `app/components/*`'s `react-native` imports to `support/stubs/react-native.ts`, so the component reads that stub's `Platform.OS` (`'web'` unless `__HARNESS_OS__` is set) instead of the `platform` object the test mutates — every native-path assertion fails |
 | `app/__tests__/chat-prompt-spent-after-remount.test.tsx` | 4 | the reverse direction: `docs-panes-render.test.ts:44` registers a process-global `mock.module('../lib/markdown-render')` whose `RenderMarkdown` renders `null`, so the harness's real `ChatSyncSurface` draws every bubble without its body |
 
-Both lanes are individually clean in a single process (verified same day: 1226
+Both lanes were individually clean in a single process (verified same day: 1226
 pass / 0 fail across the 92 general files; 81 pass / 0 fail across the 10
 harness files), so this is a process-boundary artifact, not a rotting suite.
-Run the lanes, not the directory:
+CI now exercises every app file in one invocation using Bun's runner-owned
+per-file isolation. The ordinary whole-suite runner retains its process lane for
+bounded memory and compatibility with the rest of the repository:
 
 ```bash
-bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
-bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+bun test --isolate app/__tests__/ --max-concurrency=4
 ```
 
 ## Hermeticity — the env a test run sees
@@ -175,9 +175,11 @@ before "fixing" a spawned-child env assertion by extending the delete list.
 
 CI executes **every** file. `.github/workflows/ci.yml` runs the *same*
 `bash scripts/run-tests.sh` under an 8-way `NEUTRON_TEST_SHARD` matrix with bun
-pinned `1.3.9`, and the same coverage audit (`declared == bun-discovered ==
-executed`, drift fatal) gates both. There is no hidden skip list. "CI is green"
-and "the local suite passes" now mean the same thing, up to toolchain version.
+pinned `1.3.13`, and the same coverage audit (`declared == bun-discovered ==
+executed`, drift fatal) gates both. Shard 1 additionally runs every app test in
+one `--isolate` invocation, so app co-residency is checked independently of the
+matrix grouping. There is no hidden skip list. "CI is green" and "the local
+suite passes" now mean the same thing, up to toolchain version.
 
 ### A skip is not a pass, and an empty check is not a clean check
 
@@ -206,8 +208,9 @@ and CI surface. A gate with no failing case is an empty check wearing a green ti
 
 ### The toolchain-skew gotcha
 
-That last clause is load-bearing: CI pins bun `1.3.9`, and a newer local bun can
-differ. Measured on `1.3.13`:
+That last clause is load-bearing: toolchain versions can differ. CI now pins bun
+`1.3.13`; the following differences were measured while CI still pinned `1.3.9`
+and the local runner used `1.3.13`:
 
 - `stat.mtimeMs` carries sub-ms precision (1.3.9 hands back integer ms) — which
   is why `gateway/wiring/__tests__/persona-loader.test.ts` pins whole-second

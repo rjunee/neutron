@@ -1463,8 +1463,7 @@ export function baseDriftHoldMessage(
 
 /**
  * Per-working-tree serialization for LOCAL-mode merges. Two parallel builds in
- * the SAME project share ONE build workspace (`ensureProjectBuildWorkspace` keys
- * the `code` dir on the project slug), so both runs carry the IDENTICAL
+ * the SAME declared repository share one build workspace, so both runs carry the IDENTICAL
  * `repo_path`. A local merge is `git checkout <base>` + `git merge --no-ff` in
  * that single working tree; running two concurrently collides — build A's
  * committed-but-not-yet-merged files show up as UNTRACKED when build B checks
@@ -1472,7 +1471,7 @@ export function baseDriftHoldMessage(
  * overwritten". A per-`repo_path` promise chain forces the second merge to WAIT
  * for the first: by the time B checks out `base`, A's files are TRACKED on
  * `base` and B merges cleanly on top. Keyed on `repo_path` so merges in
- * DIFFERENT workspaces (different projects) still run fully in parallel. The
+ * DIFFERENT workspaces (including different repos in one project) still run fully in parallel. The
  * PR-mode path merges the remote and never touches the shared tree, so it is
  * NOT gated here.
  */
@@ -1658,6 +1657,37 @@ export async function localMergeReadiness(
     if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return { kind: 'blocked', on: 'Local base drift overlaps reviewed changes' }
     return { kind: 'allow' }
   } catch { return { kind: 'unknown', detail: 'Local merge observation failed' } }
+}
+
+/** Land the reviewed commit without rebasing or deleting its branch. The local
+ * receive-pack owns checkout safety and the expected-base ref transaction. */
+export async function mergeLocalReviewed(
+  run: RunHostCommand, repo: string, branch: string, base: string,
+  worktree: string, head: string,
+): Promise<import('./build-run.ts').GateResult> {
+  let result: import('./build-run.ts').GateResult = { kind: 'unknown', detail: 'Local merge did not complete' }
+  try {
+    await withLocalMergeLock(repo, async () => {
+      const git = (...args: string[]) => run(['git', '-C', repo, ...args], repo)
+      const checked = async (...args: string[]) => {
+        const value = await git(...args)
+        if (!value.ok || value.timed_out) throw new Error(`Local merge could not establish ${args[0]}`)
+        return value.stdout.trim()
+      }
+      const baseOid = await checked('rev-parse', '--verify', `refs/heads/${base}^{commit}`)
+      const ready = await localMergeReadiness(run, repo, branch, base, worktree, head)
+      if (ready.kind !== 'allow') { result = ready; return }
+      const tree = await checked('merge-tree', '--write-tree', baseOid, head)
+      const commit = await checked('commit-tree', tree, '-p', baseOid, '-p', head, '-m', `Merge ${branch}`)
+      // The receiver checks the lease while updating the ref, and updateInstead
+      // refuses a dirty checked-out base. No shared checkout reset is performed.
+      await checked('push', '--porcelain',
+        '--receive-pack=git -c receive.denyCurrentBranch=updateInstead receive-pack',
+        `--force-with-lease=refs/heads/${base}:${baseOid}`, repo, `${commit}:refs/heads/${base}`)
+      result = { kind: 'allow' }
+    })
+  } catch (error) { result = { kind: 'unknown', detail: String(error) } }
+  return result
 }
 
 /**

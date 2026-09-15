@@ -174,13 +174,13 @@ describe('app-projects surface — PATCH /settings', () => {
   it('PATCH sets and clears the explicit project model provider', async () => {
     const set = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
       method: 'PATCH',
-      body: JSON.stringify({ model_provider: 'openai-codex-cli' }),
+      body: JSON.stringify({ model_provider: 'openai-codex' }),
     })
     expect(set.status).toBe(200)
-    expect(((await set.json()) as SettingsResponse).project.model_provider).toBe('openai-codex-cli')
+    expect(((await set.json()) as SettingsResponse).project.model_provider).toBe('openai-codex')
     const inspected = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`)
     expect(((await inspected.json()) as SettingsResponse).model_provider_resolution).toEqual({
-      provider: 'openai-codex-cli',
+      provider: 'openai-codex',
       source: 'project',
     })
     const clear = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
@@ -189,6 +189,22 @@ describe('app-projects surface — PATCH /settings', () => {
     })
     expect(clear.status).toBe(200)
     expect(((await clear.json()) as SettingsResponse).project.model_provider).toBeNull()
+  })
+
+  it('PATCH accepts pi and rejects the obsolete Codex spelling', async () => {
+    const accepted = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: 'pi' }),
+    })
+    expect(accepted.status).toBe(200)
+    expect(((await accepted.json()) as SettingsResponse).project.model_provider).toBe('pi')
+
+    const obsolete = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: 'openai-codex-cli' }),
+    })
+    expect(obsolete.status).toBe(400)
+    expect((await obsolete.json()) as { code: string }).toMatchObject({ code: 'invalid_model_provider' })
   })
 
   let harness: Harness

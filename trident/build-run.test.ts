@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from 'bun:test'
 import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
+import { reviewPanel } from './gates/review-panel.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ReviewDecision } from './build-run.ts'
 
 function fixture() {
@@ -9,7 +10,8 @@ function fixture() {
     kind: 'completed', result: value, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null,
   })
   for (const role of ['plan', 'build', 'review', 'fix']) {
-    for (let round = 0; round <= 5; round++) outcomes.set(`run:${role}:${round}`, completed())
+    for (let round = 0; round <= 12; round++) outcomes.set(`run:${role}:${round}`, completed(
+      role === 'plan' && round > 0 ? { ...snapshot, payload: { executionSpec: 'revised execution spec' } } : undefined))
   }
   const runner = fakeRunner('anthropic', { outcomes })
   const cross = fakeRunner('openai-codex', { outcomes })
@@ -26,12 +28,20 @@ function fixture() {
   const decisions: ReviewDecision[] = []
   let reads = 0
   const deps: BuildRunDeps = {
+    readReviewCap: async () => ({ kind: 'known' }),
+    checkBuildClaim: async () => { events.push('preserve'); return { kind: 'blocked', on: 'Claim conflicts after preservation' } },
     prepareWork: async () => {},
     measure: async () => { reads++; events.push('measure'); return { kind: 'known', value: structuredClone(snapshot) } },
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: snapshot.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: 7 }),
-    reviewGate: async () => decisions.shift() ?? { kind: 'approve' },
+    reviewReadiness: async () => ({ kind: 'allow' }),
+    reviewSuite: async () => ({ kind: 'known', findings: [] }),
+    reviewGate: async (_payload, _snapshot, _round, _used, record) => {
+      const decision = decisions.shift() ?? { kind: 'approve' as const }
+      record?.('findings' in decision ? { findings: decision.findings, blockingCount: decision.blockingCount ?? decision.findings.length } : { findings: [], blockingCount: 0 })
+      return decision
+    },
     publishGate: async () => { events.push('publishGate'); return { kind: 'allow' } },
     mergeGate: async () => { events.push('mergeGate'); return { kind: 'allow' } },
     publish: async () => { events.push('publish'); snapshot.pr = { number: 1, head: snapshot.head, state: 'OPEN' } },
@@ -48,7 +58,7 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'mergeGate', 'merge'])
-  expect(f.reads()).toBe(11)
+  expect(f.reads()).toBe(13)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
 })
 
@@ -133,17 +143,18 @@ for (const kind of ['unknown', 'blocked'] as const) {
   })
 }
 
-test('round three repeats stop; five rounds stop even with distinct findings', async () => {
+test('first repeat stops; five rounds stop even with decreasing distinct findings', async () => {
   for (const repeated of [true, false]) {
     const f = fixture()
-    for (let round = 1; round <= 5; round++) f.decisions.push({ kind: 'fix', findings: [repeated ? 'same-class' : `class-${round}`] })
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 5 })
+    for (let round = 1; round <= 5; round++) f.decisions.push({ kind: 'fix', findings: [repeated ? 'same-class' : `class-${round}`], blockingCount: 6 - round })
     expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator' })
-    expect(f.cross.calls).toHaveLength(repeated ? 3 : 5)
-    expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(repeated ? 2 : 4)
+    expect(f.cross.calls).toHaveLength(repeated ? 2 : 5)
+    expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(repeated ? 1 : 4)
   }
 })
 
-for (const read of [1, 3, 5, 6, 7, 8, 9]) {
+for (const read of [1, 3, 4, 5, 6, 7, 8, 9]) {
   test(`unreadable host measurement ${read} preserves uncertainty`, async () => {
     const f = fixture(); const measure = f.deps.measure; let n = 0
     f.deps.measure = async () => ++n === read ? { kind: 'unknown', detail: 'cannot read' } : measure()
@@ -152,7 +163,7 @@ for (const read of [1, 3, 5, 6, 7, 8, 9]) {
 }
 test('review cannot change its subject even with a matching trailer', async () => {
   const f = fixture(); const measure = f.deps.measure; let n = 0
-  f.deps.measure = async () => { if (++n === 4) f.snapshot.head = 'c'.repeat(40); return measure() }
+  f.deps.measure = async () => { if (++n === 5) f.snapshot.head = 'c'.repeat(40); return measure() }
   f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, head: 'c'.repeat(40) }))
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Reviewed revision changed during review' })
 })
@@ -295,6 +306,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
   f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, ...structuredClone(context) }) }
   f.deps.modes = {
     loadResume: async () => state.resume,
+    saveCheckpoint: async () => {},
     regenerateDiff: async head => { f.events.push(`diff:${head}`); return { kind: 'known', diff: state.regenerated } },
     probePlan: async () => { f.events.push('probe'); return state.probe },
     advanceRalph: async () => { state.oldResult = null; state.advances++; return { kind: 'allow' } },
@@ -462,12 +474,12 @@ test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', 
 
 test('G041 resume inherits spent rounds and cannot restart exhausted budget', async () => {
   for (const stage of ['fixed', 'rejected'] as const) {
-    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 5)
+    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 10)
     checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
     f.decisions.push({ kind: 'fix', findings: ['bug'] })
     expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator' })
     expect(f.runner.calls).toHaveLength(0)
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(stage === 'fixed' ? ['run:review:5'] : [])
+    expect(f.cross.calls.map(c => c.step_id)).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
   }
   const f = modeFixture('pr'); f.resume('fixed', 3)
   f.decisions.push({ kind: 'fix', findings: ['new bug'] })
@@ -605,7 +617,7 @@ test('local revision is pinned across the publication boundary', async () => {
   const measure = f.deps.measure
   let reads = 0
   f.deps.measure = async () => {
-    if (++reads === 7) f.snapshot.head = 'b'.repeat(40)
+    if (++reads === 8) f.snapshot.head = 'b'.repeat(40)
     return measure()
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed before merge' })
@@ -613,22 +625,95 @@ test('local revision is pinned across the publication boundary', async () => {
 })
 
 const gap: ReviewDecision = { kind: 're-plan', whatIsMissing: 'revise the execution spec', findings: ['old'], blockingCount: 2 }
+for (const payload of [null, {}, 'not a plan', { executionSpec: 42 }, { executionSpec: '' }, { executionSpec: ' \n ' }]) {
+  test(`G075 unusable re-plan escalates before rebuild: ${JSON.stringify(payload)}`, async () => {
+    const f = fixture(); f.decisions.push(gap)
+    f.outcomes.set('run:plan:1', f.completed({ ...f.snapshot, payload }))
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', recipient: 'orchestrator', on: expect.stringContaining('design-gap: re-plan-failed') })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1'])
+    expect(f.cross.calls).toHaveLength(1)
+    expect(f.events).not.toContain('publish')
+  })
+}
+test('G075 thrown re-planner escalates before rebuild', async () => {
+  const f = fixture(); f.decisions.push(gap)
+  const runner = f.input.workers.plan.runner
+  f.input.workers.plan.runner = { ...runner, run: async (request, placement, signal) => {
+    if (request.step_id === 'run:plan:1') throw new Error('planner unavailable')
+    return runner.run(request, placement, signal)
+  } }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: expect.stringContaining('design-gap: re-plan-failed: planner threw') })
+  expect(f.runner.calls.filter(c => c.role === 'build')).toHaveLength(1)
+  expect(f.cross.calls).toHaveLength(1)
+})
+test('G075 terminal planner failure escalates while running work remains unknown', async () => {
+  for (const outcome of [
+    { kind: 'failed', class: 'infra', detail: 'planner unavailable' },
+    { kind: 'unknown', detail: 'planner still running' },
+  ] satisfies BoundedWorkOutcome[]) {
+    const f = fixture(); f.decisions.push(gap); f.outcomes.set('run:plan:1', outcome)
+    expect(await f.run()).toMatchObject(outcome.kind === 'failed'
+      ? { kind: 'blocked', on: 'design-gap: re-plan-failed: infra: planner unavailable' }
+      : { kind: 'unknown', step_id: 'run:plan:1', detail: 'planner still running' })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1'])
+    expect(f.cross.calls).toHaveLength(1)
+  }
+})
+test('G075 revised execution spec reaches rebuild', async () => {
+  const f = fixture(); f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
+  const prepared: unknown[] = []
+  f.deps.prepareWork = async (request, context) => {
+    if (request.step_id === 'run:build:1') prepared.push(context.previous)
+  }
+  expect((await f.run()).kind).toBe('merged')
+  expect(prepared).toEqual([{ executionSpec: 'revised execution spec' }])
+})
+test('G075 unreadable re-plan measurement remains unknown', async () => {
+  const f = fixture(); f.decisions.push(gap)
+  let replanning = false
+  f.deps.prepareWork = async request => { replanning = request.step_id === 'run:plan:1' }
+  const measure = f.deps.measure
+  f.deps.measure = async () => {
+    if (replanning) throw new Error('revision observation unavailable')
+    return measure()
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', step_id: 'run:plan:1', detail: 'revision observation unavailable' })
+  expect(f.runner.calls.filter(c => c.role === 'build')).toHaveLength(1)
+})
+test('G077 final-round design gap stops; a spare round admits replacement', async () => {
+  for (const round of [4, 5]) {
+    const f = fixture(); f.input.start = 'resume'
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 5 })
+    f.deps.modes = {
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [] }),
+      regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      saveCheckpoint: async () => {},
+    }
+    f.decisions.push(gap)
+    expect(await f.run()).toMatchObject(round === 5
+      ? { kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: `design-gap: re-plan-unreachable: ${gap.whatIsMissing}; no round left for the bounded re-plan` }
+      : { kind: 'merged' })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 5 ? [] : ['run:plan:4', 'run:build:4'])
+    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
+  }
+})
 test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
   const f = fixture()
   f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
   const counts: number[] = []
   const gate = f.deps.reviewGate
-  f.deps.reviewGate = (payload, snapshot, round, used) => { counts.push(used!); return gate(payload, snapshot, round, used) }
+  f.deps.reviewGate = (payload, snapshot, round, used, record) => { counts.push(used!); return gate(payload, snapshot, round, used, record) }
   expect(await f.run()).toMatchObject({ kind: 'merged' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
   expect(counts).toEqual([0, 1, 1])
-  expect(f.reads()).toBe(14)
+  expect(f.reads()).toBe(17)
 })
 test('host refuses a second re-plan even when worker claims zero spent', async () => {
   const f = fixture()
   f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
-  f.deps.reviewGate = async (_payload, _snapshot, _round, used) => ({ ...gap, whatIsMissing: `host count ${used}` })
+  f.deps.reviewGate = async (_payload, _snapshot, _round, used, record) => { record?.({ findings: gap.findings, blockingCount: 2 }); return { ...gap, whatIsMissing: `host count ${used}` } }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
   expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
 })
@@ -638,7 +723,7 @@ for (const decision of [
 ] satisfies ReviewDecision[]) {
   test(`post-re-plan trigger stops: ${decision.findings[0]}`, async () => {
     const f = fixture(); f.decisions.push(gap, decision)
-    expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: `Review requires orchestrator arbitration: ${decision.findings[0] === 'old' ? 'repeated finding' : 'no-progress'}` })
     expect(f.runner.calls.some(c => c.role === 'fix')).toBe(false)
   })
 }
@@ -654,6 +739,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
   for (const used of [1, 2]) {
     const f = fixture(); f.input.start = 'resume'
     f.deps.modes = {
+      saveCheckpoint: async () => {},
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
@@ -665,10 +751,326 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
 test('resumed rejection after re-plan stops before another fix', async () => {
   const f = fixture(); f.input.start = 'resume'
   f.deps.modes = {
+    saveCheckpoint: async () => {},
     loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
     probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
   expect(f.runner.calls).toHaveLength(0)
+})
+
+for (const field of ['head', 'diff'] as const) test(`G035 fresh review refuses missing ${field} before spending panel`, async () => {
+  const f = fixture()
+  f.deps.prepareWork = async request => {
+    if (request.role === 'build') { f.snapshot[field] = ''; f.outcomes.set(request.step_id, f.completed(f.snapshot)) }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('diff artifact') })
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G043 fix erasing the diff cannot spend another panel', async () => {
+  const f = fixture()
+  f.decisions.push({ kind: 'fix', findings: ['code'] })
+  f.deps.prepareWork = async request => {
+    if (request.role === 'fix') { f.snapshot.head = 'b'.repeat(40); f.snapshot.diff = ''; f.outcomes.set(request.step_id, f.completed(f.snapshot)) }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('diff artifact') })
+  expect(f.cross.calls).toHaveLength(1)
+  expect(f.events).not.toContain('publish')
+})
+
+test('readiness runs before each paid panel and cannot default to permission', async () => {
+  for (const kind of ['blocked', 'unknown', 'missing'] as const) {
+    const f = fixture()
+    if (kind === 'missing') delete f.deps.reviewReadiness
+    else f.deps.reviewReadiness = async () => kind === 'blocked' ? { kind, on: 'conflicts' } : { kind, detail: 'checks unreadable' }
+    expect(await f.run()).toMatchObject({ kind: kind === 'blocked' ? 'blocked' : 'unknown', phase: 'review' })
+    expect(f.cross.calls).toHaveLength(0)
+  }
+  const f = fixture(); let admissions = 0
+  f.deps.reviewReadiness = async () => { admissions++; return { kind: 'allow' } }
+  f.decisions.push({ kind: 'fix', findings: ['code'] }, { kind: 'approve' })
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(admissions).toBe(2)
+})
+
+test('readiness cannot dispatch review after its measured subject changes', async () => {
+  const f = fixture()
+  f.deps.reviewReadiness = async () => { f.snapshot.head = 'b'.repeat(40); return { kind: 'allow' } }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Revision changed during review readiness' })
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('suite step feeds panel and fix briefs and overrides approving panels every round', async () => {
+  const f = fixture(); const order: string[] = []
+  const briefs: { role: string; findings: readonly string[] }[] = []
+  f.deps.prepareWork = async (request, context) => { briefs.push({ role: request.role, findings: [...context.findings] }) }
+  f.deps.reviewSuite = async (snapshot, round) => {
+    expect(snapshot.head).toBe(f.snapshot.head); order.push(`suite:${round}`)
+    return { kind: 'known', findings: round === 1 ? [{ title: 'FULL SUITE NOT PROVEN', evidence: 'run full suite', advisory: false }] : [] }
+  }
+  f.deps.reviewGate = async (_, __, round, _used, record) => { order.push(`panel:${round}`); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  expect((await f.run()).kind).toBe('merged')
+  expect(order).toEqual(['suite:1', 'panel:1', 'suite:2', 'panel:2'])
+  for (const role of ['review', 'fix']) expect(briefs.find(b => b.role === role)?.findings).toContain('FULL SUITE NOT PROVEN: run full suite')
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
+})
+test('suite missing or unreadable host cannot dispatch panel or publish', async () => {
+  for (const missing of [true, false]) {
+    const f = fixture()
+    if (missing) delete f.deps.reviewSuite
+    else f.deps.reviewSuite = async () => ({ kind: 'unknown', detail: 'suite checkpoint unreadable' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('suite') })
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).not.toContain('publish')
+  }
+})
+test('suite advisory transcription reaches panel before approval', async () => {
+  const f = fixture(); let seen: readonly string[] = []
+  f.deps.reviewSuite = async () => ({ kind: 'known', findings: [{ title: 'PRE-EXISTING', evidence: 'base comparison', advisory: true }] })
+  f.deps.prepareWork = async (request, context) => { if (request.role === 'review') seen = [...context.findings] }
+  expect((await f.run()).kind).toBe('merged')
+  expect(seen).toContain('PRE-EXISTING: base comparison')
+})
+
+function progressPanel(f: ReturnType<typeof fixture>, rounds: { severity: string; rule: string }[][]) {
+  for (let round = 1; round <= rounds.length; round++) {
+    const payload = { verdict: 'REQUEST_CHANGES', findings: rounds[round - 1]!.map(item => ({ ...item, file: 'code.ts', symbol: 'f', title: item.rule, evidence: 'code.ts:1', line: 1 })) }
+    f.outcomes.set(`run:review:${round}`, f.completed({ ...f.snapshot, payload }))
+  }
+  f.deps.reviewGate = (payload, snapshot, round, used, record) => reviewPanel({
+    seats: [{ id: 'core', provider: 'pi', modelId: 'model', role: 'core', enabled: true }],
+    readSeat: async () => ({ runId: 'run', head: snapshot.head, round, provider: 'pi', modelId: 'model', status: 'completed', payload }),
+    retrySeat: async () => {},
+    readSynthesis: async () => ({ runId: 'run', head: snapshot.head, round, checkpoint: 'argus-approved', payload }),
+  }, payload, snapshot, round, 'run', used, undefined, record)
+}
+
+test('G070 all-minor repeated finding stops before approval after a suite-driven fix', async () => {
+  const f = fixture()
+  progressPanel(f, [[{ severity: 'minor', rule: 'recurring' }], [{ severity: 'minor', rule: 'recurring' }]])
+  f.deps.reviewSuite = async (_snapshot, round) => ({ kind: 'known', findings: round === 1 ? [{ title: 'SUITE', evidence: 'required test failed', advisory: false }] : [] })
+  const briefed: string[] = []
+  f.deps.prepareWork = async (request, context) => { if (request.role === 'fix') briefed.push(...context.findings) }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  expect(briefed).toContain('code.ts:f:recurring')
+  expect(f.cross.calls).toHaveLength(2)
+  expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G070 resolved minor finding allows approval after a fix', async () => {
+  const f = fixture()
+  progressPanel(f, [[{ severity: 'major', rule: 'first' }, { severity: 'minor', rule: 'minor' }], [{ severity: 'minor', rule: 'different' }]])
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+})
+
+for (const second of [1, 2]) test(`G071 distinct findings with count ${second} stop at second code round`, async () => {
+  const f = fixture()
+  progressPanel(f, [[{ severity: 'major', rule: 'first' }], Array.from({ length: second }, (_, i) => ({ severity: 'major', rule: `new-${i}` }))])
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
+  expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G071 decreasing distinct code counts allow the next fix', async () => {
+  const f = fixture()
+  progressPanel(f, [[{ severity: 'major', rule: 'first' }, { severity: 'major', rule: 'second' }], [{ severity: 'major', rule: 'new' }], [{ severity: 'nit', rule: 'style' }]])
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(2)
+})
+
+test('progress missing observation cannot approve', async () => {
+  const f = fixture(); f.deps.reviewGate = async () => ({ kind: 'approve' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Review progress needs') })
+  expect(f.events).not.toContain('publish')
+})
+
+
+test('G070 suite blocker recurrence stops while preexisting advisory evidence permits progress', async () => {
+  for (const advisory of [false, true]) {
+    const f = fixture()
+    f.deps.reviewSuite = async () => ({ kind: 'known', findings: [{ title: 'SUITE', evidence: 'base comparison', advisory }] })
+    expect(await f.run()).toMatchObject(advisory ? { kind: 'merged' } : { kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+    expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(advisory ? 0 : 1)
+  }
+})
+
+test('G070 repeated nits do not enter fix arithmetic', async () => {
+  const f = fixture()
+  progressPanel(f, [[{ severity: 'nit', rule: 'style' }], [{ severity: 'nit', rule: 'style' }]])
+  f.deps.reviewSuite = async (_snapshot, round) => ({ kind: 'known', findings: round === 1 ? [{ title: 'SUITE', evidence: 'required test failed', advisory: false }] : [] })
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
+})
+
+test('G070 resumed fix retains its briefed identities for the next panel', async () => {
+  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 1)
+  checkpoint.findings = [{ kind: 'code', actionable: true, text: 'code.ts:f:recurring' }]
+  checkpoint.previousFindings = []
+  progressPanel(f, [[], [{ severity: 'minor', rule: 'recurring' }]])
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
+})
+
+for (const cap of [1, 2, 7, 12]) {
+  test(`G076 configured cap ${cap} counts exact host rounds despite worker claims`, async () => {
+    const f = fixture()
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: cap })
+    const rounds: number[] = []
+    f.deps.reviewGate = async (_payload, _snapshot, round, _used, record) => {
+      rounds.push(round)
+      record?.({ findings: [`unique-${round}`], blockingCount: 0 })
+      return { kind: 'fix', findings: [`unique-${round}`] }
+    }
+    for (let round = 1; round <= 12; round++) {
+      f.outcomes.set(`run:review:${round}`, f.completed({ ...f.snapshot, payload: { round: 0, max_rounds: 100 } }))
+    }
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', on: expect.stringContaining('round ceiling') })
+    expect(rounds).toEqual(Array.from({ length: cap }, (_, i) => i + 1))
+    expect(f.runner.calls.filter(c => c.role === 'fix').map(c => c.step_id)).toEqual(
+      Array.from({ length: cap - 1 }, (_, i) => `run:fix:${i + 1}`))
+    expect(f.events).not.toContain('publish')
+  })
+}
+
+test('G076 approval on the last configured round can publish', async () => {
+  const f = fixture()
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 2 })
+  f.decisions.push({ kind: 'fix', findings: ['bug'] }, { kind: 'approve' })
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
+})
+
+test('G076 unreadable cap never dispatches work', async () => {
+  for (const read of [undefined, async () => ({ kind: 'unknown' as const, detail: 'offline' }),
+    async () => { throw new Error('read failed') }]) {
+    const f = fixture()
+    if (read) f.deps.readReviewCap = read
+    else {
+      // @ts-expect-error Required for typed callers; exercise an untyped caller's omission.
+      delete f.deps.readReviewCap
+    }
+    expect((await f.run()).kind).toBe('unknown')
+    expect(f.runner.calls).toHaveLength(0)
+  }
+})
+for (const cap of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '7']) {
+  test(`G076 malformed cap ${String(cap)} stays unknown`, async () => {
+    const f = fixture()
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: cap as number })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'Review round cap is invalid' })
+    expect(f.runner.calls).toHaveLength(0)
+  })
+}
+
+test('G076 resumed rejection consumes exactly one remaining round', async () => {
+  for (const round of [6, 7]) {
+    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', round)
+    checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
+    expect((await f.run()).kind).toBe(round === 6 ? 'merged' : 'blocked')
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:fix:6'] : [])
+    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:review:7'] : [])
+  }
+})
+
+test('G076 over-budget resume refuses before review', async () => {
+  const f = modeFixture('pr'); f.resume('fixed', 8)
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('round ceiling') })
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('G076 re-plan cannot buy work after the final review', async () => {
+  const f = fixture()
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 1 })
+  f.decisions.push({ kind: 're-plan', findings: ['gap'], whatIsMissing: 'design' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('re-plan-unreachable') })
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0'])
+})
+
+test('G032 local build and fix require full heads within three observations', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    for (const bad of ['short', '', 'absent', 'a'.repeat(39)]) {
+      const f = localFixture()
+      if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+      const measure = f.deps.measure
+      let attempts = 0
+      f.deps.measure = async () => {
+        if (f.runner.calls.at(-1)?.role === role && (role === 'build' || f.cross.calls.length === 1)) {
+          attempts++
+          return { kind: 'known', value: { ...f.snapshot, head: bad } }
+        }
+        return measure()
+      }
+      f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed({ ...f.snapshot, head: bad }))
+      expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, detail: expect.stringContaining('full commit OID') })
+      expect(attempts).toBe(3)
+      expect(f.cross.calls).toHaveLength(role === 'build' ? 0 : 1)
+      expect(f.events).not.toContain('merge')
+    }
+  }
+})
+
+test('G032 transient unreadable observations recover on the third read', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    const f = localFixture()
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+    const measure = f.deps.measure
+    let attempts = 0
+    f.deps.measure = async () => {
+      if (f.runner.calls.at(-1)?.role === role && attempts < 3) {
+        if (++attempts < 3) return { kind: 'unknown', detail: 'head unreadable' }
+      }
+      return measure()
+    }
+    expect((await f.run()).kind).toBe('merged')
+    expect(attempts).toBe(3)
+  }
+})
+
+test('G100 waits for preservation before refusing build and fix claims', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    const f = fixture()
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+    f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed({ ...f.snapshot, head: 'b'.repeat(40) }))
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    f.deps.checkBuildClaim = async () => { entered(); await pending; f.events.push('receipt'); return { kind: 'blocked', on: 'preserved conflict' } }
+    let done = false
+    const result = f.run().then(value => { done = true; return value })
+    await started
+    expect(done).toBe(false)
+    expect(f.cross.calls).toHaveLength(role === 'build' ? 0 : 1)
+    release()
+    expect(await result).toMatchObject({ kind: 'failed', phase: role, cause: 'built-head-unverified' })
+    expect(f.events).toContain('receipt')
+    expect(f.events).not.toContain('publish')
+  }
+})
+
+test('G100 missing preservation stays unknown and resolved same claims continue', async () => {
+  for (const resolution of ['missing', 'unknown', 'allow'] as const) {
+    const f = fixture()
+    f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, head: 'aaaaaaa' }))
+    if (resolution === 'missing') delete f.deps.checkBuildClaim
+    else f.deps.checkBuildClaim = async () => resolution === 'allow' ? { kind: 'allow' } : { kind: 'unknown', detail: 'receipt missing' }
+    const result = await f.run()
+    expect(result.kind).toBe(resolution === 'allow' ? 'merged' : 'unknown')
+    if (resolution === 'missing') expect(result).toMatchObject({ detail: 'Build claim resolution and preservation source is missing' })
+    expect(f.cross.calls.length).toBe(resolution === 'allow' ? 1 : 0)
+  }
+})
+
+
+test('G032 local full SHA-256 heads remain accepted', async () => {
+  const f = localFixture()
+  f.snapshot.head = 'a'.repeat(64)
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  expect((await f.run()).kind).toBe('merged')
 })

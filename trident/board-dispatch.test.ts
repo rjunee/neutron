@@ -2176,3 +2176,52 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     expect(tipReads).toEqual([])
   })
 })
+
+test('dispatch forwards the card repo name to resolution and preserves refusal by name', async () => {
+  const selectedBoard: TridentBoardBinder = {
+    ...board,
+    get: () => ({ ...board.get('proj-1', 'ready')!, repo_name: 'missing-repo' }),
+  }
+  const result = await dispatchBoardBoundBuild(
+    { task: 'wire the CSV export button to the new endpoint with tests', board_item_id: 'ready' },
+    { ...localDeps(selectedBoard), resolveBuildRepo: async (_home, _slug, name) => {
+      expect(name).toBe('missing-repo')
+      throw new Error(`Project does not declare repo "${name}"`)
+    } },
+  )
+  expect(result.ok).toBe(false)
+  if (!result.ok) {
+    expect(result.code).toBe('backend_error')
+    expect(result.message).toContain('Project does not declare repo "missing-repo"')
+  }
+})
+
+test('production resolver uses declared card repo and refuses undeclared repo before creating a run', async () => {
+  const project = join(tmp, 'Projects', 'proj-1')
+  mkdirSync(project, { recursive: true })
+  writeFileSync(join(project, 'project-repos.json'), JSON.stringify({
+    repos: [{ name: 'widgets', path: 'code', remote: null }, { name: 'docs', path: 'repos/docs', remote: null }],
+    default: 'widgets',
+  }))
+  let repo_name = 'missing'
+  const selectedBoard: TridentBoardBinder = {
+    ...board,
+    get: () => ({ ...board.get('proj-1', 'ready')!, repo_name }),
+  }
+  const deps = localDeps(selectedBoard)
+  delete deps.resolveBuildRepo
+  const rejected = await dispatchBoardBoundBuild(
+    { task: 'wire the CSV export button to the new endpoint with tests', board_item_id: 'ready' }, deps,
+  )
+  expect(rejected.ok).toBe(false)
+  if (!rejected.ok) expect(rejected.message).toContain('"missing"')
+  expect(db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()?.n).toBe(0)
+  expect(existsSync(join(project, 'code'))).toBe(false)
+  repo_name = 'docs'
+  const built = await dispatchBoardBoundBuild(
+    { task: 'wire the CSV export button to the new endpoint with tests', board_item_id: 'ready' }, deps,
+  )
+  expect(built.ok).toBe(true)
+  expect(db.prepare<{ repo_path: string }, []>('SELECT repo_path FROM code_trident_runs').get()?.repo_path)
+    .toBe(join(project, 'repos', 'docs'))
+})

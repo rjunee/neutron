@@ -32,30 +32,47 @@ const sites: Record<string, string[]> = {
   'run-disposition.ts': ['.test(head)) return null', '.test(trimCheckpoint(run.base_sha)'],
   'store.ts': ['const FULL_OID ='],
 }
-for (const [file, markers] of Object.entries(sites)) {
+const EXPECTED_RECOGNIZER_SITES = 21
+const GENERATED_TESTS_PER_SITE = 11
+const inventory = Object.entries(sites).flatMap(([file, markers]) => {
   const lines = readFileSync(new URL(file, import.meta.url), 'utf8').split('\n')
-  for (const marker of markers) {
-    describe(`${file}: ${marker}`, () => {
-      const matches = lines.filter((line) => line.includes(marker) && !line.trim().startsWith('//'))
-      test('positive control: exactly one executable regex is selected', () => {
-        expect(matches).toHaveLength(1)
-        expect(matches[0]).toMatch(/\/\^.+\$\/[i]?/)
-      })
-      const literal = matches[0]!.match(/\/(\^.+\$)\/([i]?)/)!
-      const pattern = new RegExp(literal[1]!, literal[2])
-      const checkpoint = pattern.source.startsWith('^outer-published:')
-      const input = (oid: string): string => checkpoint ? `outer-published:${oid}:2:3:deviated` : oid
-      test.each([40, 64])('accepts exactly %i hex digits', (width) => {
-        expect(pattern.test(input('a'.repeat(width)))).toBe(true)
-      })
-      test.each([0, 7, 39, 41, 63, 65])('refuses %i hex digits', (width) => {
-        expect(pattern.test(input('a'.repeat(width)))).toBe(false)
-      })
-      test.each([40, 64])('refuses non-hex at width %i', (width) => {
-        expect(pattern.test(input('g'.repeat(width)))).toBe(false)
-      })
+  return markers.map((marker) => {
+    const matches = lines.filter((line) => line.includes(marker) && !line.trim().startsWith('//'))
+    const literal = matches[0]?.match(/\/(\^.+\$)\/([i]?)/)
+    return { file, marker, matches, literal }
+  })
+})
+const selectedSiteCount = inventory.filter(({ literal }) => literal !== null && literal !== undefined).length
+const generatedTestCount = inventory.length + (selectedSiteCount * (GENERATED_TESTS_PER_SITE - 1))
+
+test('inventory selects every recognizer site', () => {
+  expect(selectedSiteCount).toBe(EXPECTED_RECOGNIZER_SITES)
+})
+
+test('inventory generates the complete recognizer test count', () => {
+  expect(generatedTestCount).toBe(EXPECTED_RECOGNIZER_SITES * GENERATED_TESTS_PER_SITE)
+})
+
+for (const { file, marker, matches, literal } of inventory) {
+  describe(`${file}: ${marker}`, () => {
+    test('positive control: exactly one executable regex is selected', () => {
+      expect(matches).toHaveLength(1)
+      expect(matches[0]).toMatch(/\/\^.+\$\/[i]?/)
     })
-  }
+    if (!literal) return
+    const pattern = new RegExp(literal[1]!, literal[2])
+    const checkpoint = pattern.source.startsWith('^outer-published:')
+    const input = (oid: string): string => checkpoint ? `outer-published:${oid}:2:3:deviated` : oid
+    test.each([40, 64])('accepts exactly %i hex digits', (width) => {
+      expect(pattern.test(input('a'.repeat(width)))).toBe(true)
+    })
+    test.each([0, 7, 39, 41, 63, 65])('refuses %i hex digits', (width) => {
+      expect(pattern.test(input('a'.repeat(width)))).toBe(false)
+    })
+    test.each([40, 64])('refuses non-hex at width %i', (width) => {
+      expect(pattern.test(input('g'.repeat(width)))).toBe(false)
+    })
+  })
 }
 
 for (const format of ['sha1', 'sha256'] as const) {
