@@ -1,7 +1,7 @@
 import type { Provider } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
 import { validateTrailer, type VerdictTrailer } from './result-contract.ts'
-import { findingIdentity } from './escalation.ts'
+import { decideEscalation, findingIdentity } from './escalation.ts'
 
 export interface ReviewSeat {
   id: string
@@ -57,7 +57,7 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
 }
 
 /** G057–G062, G104: re-read the recorded panel for this exact revision and round. */
-export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string): Promise<ReviewDecision> {
+export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0): Promise<ReviewDecision> {
   const trailer = validateTrailer('verdict', unmarked(payload))
   if (!trailer.ok) return unknown(`Review trailer ${trailer.reason} at ${trailer.path}`)
   if (!source) return unknown('Review panel observation source is missing')
@@ -82,14 +82,19 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     const canonical = (value: VerdictTrailer) => JSON.stringify([value.verdict, value.findings.map(f => [f.severity, f.title, f.evidence, f.file, f.symbol, f.rule, f.line]), value.escalate?.kind, value.escalate?.whatIsMissing])
     if (canonical(synthesis.value) !== canonical(trailer.value)) return blocked('Review worker trailer differs from recorded synthesis')
     verdicts.push(synthesis.value)
-    for (const verdict of verdicts) {
-      if (verdict.escalate) return blocked(`Review requires orchestrator arbitration: ${verdict.escalate.kind}: ${verdict.escalate.whatIsMissing}`)
-    }
     const blockers = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'minor' && f.severity !== 'nit')
+    let replan: ReviewDecision | undefined
+    for (const verdict of verdicts) {
+      if (!verdict.escalate) continue
+      const escalation = decideEscalation({ claim: verdict.escalate, claimVerdict: verdict.verdict, replansUsed, round })
+      if (escalation.action !== 're-plan') return blocked(`Review requires orchestrator arbitration: ${escalation.refusedClaim || verdict.escalate.kind}: ${verdict.escalate.whatIsMissing}`)
+      replan = { kind: 're-plan', whatIsMissing: escalation.whatIsMissing, findings: [...new Set(blockers.map(findingIdentity))], blockingCount: blockers.length }
+    }
+    if (replan) return replan
     if (blockers.length > 0) {
       const identities = blockers.map(findingIdentity)
       if (identities.some(id => !id)) return unknown('Review blocking findings have no stable identity for arbitration')
-      return { kind: 'fix', findings: [...new Set(identities)] }
+      return { kind: 'fix', findings: [...new Set(identities)], blockingCount: blockers.length }
     }
     if (verdicts.some(v => v.verdict === 'COMMENT' || (v.verdict === 'REQUEST_CHANGES' && v.findings.length === 0))) return blocked('Review has an unresolved verdict without nonblocking findings')
     if (recorded.checkpoint !== 'argus-approved') return unknown('Review recorded approval checkpoint is missing')
