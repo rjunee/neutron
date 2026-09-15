@@ -32,6 +32,7 @@ async function fixture() {
   let leakCode = 3
   const options: BuildHostOptions = {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checks: [{ name: 'checks', state: 'passed' }] }) },
+    reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
@@ -299,7 +300,9 @@ test('host admission and review reach authoritative policy sources', async () =>
   }
   const host = f.make()
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
+  const progress: unknown[] = []
+  expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
+  expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
@@ -505,7 +508,7 @@ async function boundFixture(failure = false) {
   // Reachable permissive build control: a routing regression must actually build,
   // publish and merge, rather than stop at an unrelated admission or leak gate.
   host.deps.admissionGate = async () => ({ kind: 'allow' })
-  host.deps.reviewGate = async () => ({ kind: 'approve' })
+  host.deps.reviewGate = async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.mergeGate = async () => ({ kind: 'allow' })
@@ -589,6 +592,17 @@ test('host review readiness uses independent facts and fails closed when unwired
   expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('source is missing') })
 })
 
+test('host composes suite observations with host run and round identity', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toEqual({ kind: 'known', findings: [] })
+  f.options.reviewSuite = { observe: async (subject, round) => ({ kind: 'known', runId: 'test', head: subject.head, round, strategy: 'full suite', scope: 'full-suite', report: { testsPassed: false, suiteOutcome: 'not-run' } }) }
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
+  f.options.mutation.run.id = 'other'
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
+  delete f.options.reviewSuite
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
+})
+
 for (const cap of [undefined, 2, 7]) {
   test(`G076 host threads run row cap ${String(cap)} into the driver`, async () => {
     const f = await fixture()
@@ -604,7 +618,13 @@ for (const cap of [undefined, 2, 7]) {
     }
     const host = f.make()
     host.deps.admissionGate = async () => ({ kind: 'allow' })
-    host.deps.reviewGate = async (_payload, _snapshot, round) => ({ kind: 'fix', findings: [`bug-${round}`] })
+    // A real panel reports its findings to the host; this stub must too, or the
+    // driver's progress gate has nothing to read and this test stops on that
+    // instead of on the cap it exists to measure.
+    host.deps.reviewGate = async (_payload, _snapshot, round, _used, record) => {
+      record?.({ findings: [`bug-${round}`], blockingCount: 0 })
+      return { kind: 'fix', findings: [`bug-${round}`] }
+    }
     expect(await host.run(f.input(host), new AbortController().signal)).toMatchObject({
       kind: 'blocked', on: expect.stringContaining('round ceiling'),
     })

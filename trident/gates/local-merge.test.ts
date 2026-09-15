@@ -53,7 +53,8 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     reviewReadiness: async () => ({ kind: 'allow' }),
-    reviewGate: async () => ({ kind: 'approve' }), publishGate: async () => f.check(), mergeGate: async () => f.check(),
+    reviewSuite: async () => ({ kind: 'known', findings: [] }),
+    reviewGate: async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }, publishGate: async () => f.check(), mergeGate: async () => f.check(),
     publish: async () => { throw new Error('local mode must not publish') },
     merge: async () => { await f.git('merge', '--no-ff', f.head, '-m', 'land reviewed head') },
     confirmLocalMerge: async () => {

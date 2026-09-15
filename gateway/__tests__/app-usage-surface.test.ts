@@ -33,8 +33,8 @@ const EMPTY_POOL: PoolSummary = {
   accounts: [],
 }
 const UNKNOWN_ANALYTICS: UsageAnalytics = {
-  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_model: { state: 'unknown', rows: [] } },
-  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0 },
+  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_topic: [], by_agent: [], by_model: { state: 'unknown', rows: [] } },
+  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0, bands: [] },
   throughput: { state: 'unknown', runs: [] },
 }
 

@@ -195,8 +195,8 @@ describe('G5 CI typechecks every project-owned tsconfig on disk', () => {
  * Parallelised CI (2026-07-28) — guards on the aggregator that keeps the
  * REQUIRED `test` context honest.
  *
- * `test` is the sole required status check on `main`, with a strict up-to-date
- * policy. Two ways to break merging on this repo, both silent:
+ * `test` is the sole required status check on `main`. The up-to-date policy is
+ * currently off. Two ways to break merging on this repo, both silent:
  *
  *   1. Rename or matrix-ify `test`. The required context then NEVER reports and
  *      every PR blocks forever, with no failing check to point at.
@@ -262,6 +262,12 @@ describe('parallel CI aggregator', () => {
     // the file — including the COMMENT above the setting that explains it — so
     // flipping the setting to true left the test green. Caught by mutation.
     expect(yml).toMatch(/^\s+fail-fast: false$/m)
+  })
+
+  test('one shard leg runs the whole app suite co-resident with per-file isolation', () => {
+    const shard = yml.match(/^ {2}shard:\n[\s\S]*?(?=^ {2}[a-z][a-z0-9-]*:\n)/m)?.[0] ?? ''
+    expect(shard).toContain('if: matrix.shard == 1')
+    expect(shard).toContain('run: bun test --isolate app/__tests__/ --max-concurrency=4')
   })
 
   test('the layering job checks out full history for the ratchet-growth guard', () => {
@@ -1178,7 +1184,7 @@ describe('bun install cache wiring', () => {
     ],
     [
       'bun-version is bumped without touching the key',
-      (s) => s.replace('bun-version: 1.3.9', 'bun-version: 1.4.0'),
+      (s) => s.replace('bun-version: 1.3.13', 'bun-version: 1.4.0'),
       "does not carry this job's bun version",
     ],
     [

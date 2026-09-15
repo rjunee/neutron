@@ -1,0 +1,8 @@
+{
+  "file": "trident/transcript-usage.ts",
+  "find": "reasoning > output",
+  "replace": "reasoning > Number.MAX_SAFE_INTEGER",
+  "guard": ["bun", "test", "trident/transcript-usage.test.ts"],
+  "control": ["bun", "test", "trident/usage-analytics.test.ts"],
+  "rationale": "Reasoning tokens are a reported subset of output tokens. Relaxing the bound admits a structurally impossible event and the parser test turns red, while the independent analytics control remains green."
+}

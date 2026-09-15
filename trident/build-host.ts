@@ -1,3 +1,4 @@
+import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
 import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
 import { checkBuildClaim } from './gates/build-claim.ts'
@@ -19,6 +20,7 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  modes?: BuildRunDeps['modes']
   boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
@@ -35,6 +37,7 @@ export interface BuildHostOptions {
   local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
   reviewReadiness?: ReviewReadinessSource
+  reviewSuite?: ReviewSuiteSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
@@ -81,6 +84,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
       return { kind: 'known', max_rounds: row.max_rounds }
     },
+    ...(options.modes ? { modes: options.modes } : {}),
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host
@@ -124,7 +128,8 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
       ? localReadiness(snapshot)
       : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
-    reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }),
+    reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
+    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
