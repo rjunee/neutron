@@ -78,6 +78,9 @@ export interface AppSurfacesCompositionInput {
   app_voice_transcription_surface?: {
     handler: (req: Request) => Promise<Response | null>
   }
+  app_email_digest_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
   /**
    * Per-phase model/effort settings — `/api/app/trident/phase-models`.
    *

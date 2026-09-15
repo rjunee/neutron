@@ -160,6 +160,16 @@ export interface EmailPipelineStoreOptions {
   migrations_dir?: string
 }
 
+export interface BriefRow {
+  id: number
+  local_day: string
+  period: 'morning' | 'afternoon'
+  generated_at: number
+  email_count: number
+  delivered_at: number | null
+  data: string
+}
+
 /**
  * Typed CRUD over the pipeline sidecar. Every statement is prepared once at
  * construction — a poll tick touches this store once per message.
@@ -367,6 +377,40 @@ export class EmailPipelineStore {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       [key, value],
     )
+  }
+
+  listUnbriefedEmails(): EmailRow[] {
+    return this.db.query<EmailRow, []>(
+      `SELECT * FROM emails WHERE brief_id IS NULL AND handling <> 'preexisting' ORDER BY received_at ASC`,
+    ).all()
+  }
+
+  hasDeliveredBrief(local_day: string, period: 'morning' | 'afternoon'): boolean {
+    return this.db.query<{ id: number }, [string, string]>(
+      `SELECT id FROM briefs WHERE local_day = ? AND period = ? AND delivered_at IS NOT NULL LIMIT 1`,
+    ).get(local_day, period) !== null
+  }
+
+  createBrief(input: Omit<BriefRow, 'id' | 'delivered_at'>): number {
+    const result = this.db.run(
+      `INSERT INTO briefs (local_day, period, generated_at, email_count, data)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(local_day, period) DO UPDATE SET generated_at = excluded.generated_at,
+         email_count = excluded.email_count, data = excluded.data`,
+      [input.local_day, input.period, input.generated_at, input.email_count, input.data],
+    )
+    if (result.lastInsertRowid !== 0) return Number(result.lastInsertRowid)
+    return this.db.query<{ id: number }, [string, string]>(
+      `SELECT id FROM briefs WHERE local_day = ? AND period = ?`,
+    ).get(input.local_day, input.period)!.id
+  }
+
+  markBriefDelivered(id: number, at: number, rows: readonly Pick<EmailRow, 'id' | 'account_id'>[]): void {
+    const updateEmail = this.db.query(`UPDATE emails SET brief_id = ? WHERE id = ? AND account_id = ?`)
+    this.db.transaction(() => {
+      this.db.run(`UPDATE briefs SET delivered_at = ? WHERE id = ?`, [at, id])
+      for (const row of rows) updateEmail.run(id, row.id, row.account_id ?? '')
+    })()
   }
 
   getSenderCache(sender: string): SenderCacheRow | null {

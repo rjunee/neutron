@@ -98,6 +98,7 @@ describe('Open email-pipeline composition wiring', () => {
     expect(pipeline?.push).not.toBeNull()
     expect(typeof pipeline?.push?.pushAll).toBe('function')
     expect(typeof pipeline?.resolveTimezone).toBe('function')
+    expect(pipeline?.mailbox_writes).toBe('held_back')
     expect(pipeline?.owner_home).toBe(tmpDir)
 
     cleanup(composition)

@@ -122,6 +122,8 @@ export interface EmailPipelineTickDeps {
   max_poll_pages?: number
   /** Backlog pages one tick may sweep before pausing until the next tick. */
   max_backlog_pages?: number
+  /** Pre-cutover rehearsal reads/classifies/delivers but holds every Gmail label/archive write. */
+  mailbox_writes?: 'enabled' | 'held_back'
 }
 
 export interface EmailPipelineTickResult {
@@ -275,6 +277,7 @@ export async function runEmailPipelineTick(
   const log = deps.log
   const max_results = deps.max_results ?? DEFAULT_MAX_RESULTS
   const max_attempts = deps.max_escalation_attempts ?? DEFAULT_MAX_ESCALATION_ATTEMPTS
+  const mailboxWritesEnabled = deps.mailbox_writes !== 'held_back'
   const result: EmailPipelineTickResult = {
     scanned: 0,
     escalated: 0,
@@ -732,6 +735,7 @@ export async function runEmailPipelineTick(
       account_id: string | null
       handling: string
     }): Promise<void> {
+      if (!mailboxWritesEnabled) return
       const account_id = row.account_id === null || row.account_id === '' ? undefined : row.account_id
       const label_id = await processedLabelId(account_id)
       try {
@@ -759,7 +763,7 @@ export async function runEmailPipelineTick(
     // in the poll path can ever come back to it. This pass is the only thing
     // that finishes it — without re-classifying (costly) and without
     // re-escalating (the owner was already told, on the row's own record).
-    for (const pending of store.listPendingMutations(max_attempts)) {
+    for (const pending of mailboxWritesEnabled ? store.listPendingMutations(max_attempts) : []) {
       // Same rule, and here it is a WRITE — a disabled mailbox must not be
       // labelled or archived by a pipeline the owner has switched off for it.
       if (!accountEnabled(pending.account_id)) continue
