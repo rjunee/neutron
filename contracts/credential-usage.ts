@@ -39,6 +39,8 @@ export type UsageUnavailableReason =
   | 'unsupported_credential'
   /** The last measurement failed (network, upstream 5xx, missing headers). */
   | 'probe_failed'
+  /** The last successful reading crossed the freshness ceiling. */
+  | 'reading_aged_out'
 
 /** A measured reading of the active credential's two windows. */
 export interface CredentialUsageReading {

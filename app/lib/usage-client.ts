@@ -25,7 +25,8 @@ export type UsageUnavailableReason =
   | 'no_credential'
   | 'not_measured_yet'
   | 'unsupported_credential'
-  | 'probe_failed';
+  | 'probe_failed'
+  | 'reading_aged_out';
 
 export type UsagePayload =
   | {

@@ -21,7 +21,7 @@
  * {@link USAGE_MAX_AGE_MS} is the point past which the monitor stops claiming to
  * know. Inside that window a stale-but-recent reading survives a failed probe on
  * purpose — a dropped packet should not blank the meter — and beyond it the
- * monitor reports `probe_failed` and the surfaces draw a plain divider again.
+ * monitor reports `reading_aged_out` and the surfaces draw a plain divider again.
  *
  * A PERMANENT NEGATIVE IS NOT RETRIED FOREVER at the network level: a box with an
  * API key or no credential at all resolves to an unavailable answer WITHOUT
@@ -42,7 +42,7 @@
  * owns the once-per-lapse latch and the durable delivery.
  */
 
-import { createLogger } from '@neutronai/logger'
+import { createLogger, type LogEmitter } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop/index.ts'
 import type {
   CredentialUsagePayload,
@@ -109,6 +109,8 @@ export interface CredentialUsageMonitorDeps {
   /** Injected in tests; production uses the real probe. */
   probe?: (token: string) => Promise<CredentialUsageProbeOutcome>
   probeDeps?: UsageProbeDeps
+  /** Injected in tests so outcome and transition logs are observable. */
+  log?: LogEmitter
   credentialDeps?: ActiveCredentialDeps
   /**
    * Told what each tick learned about the credential's VALIDITY. Optional so the
@@ -158,6 +160,7 @@ export class CredentialUsageMonitor {
   private readonly now: () => number
   private readonly probe: (token: string) => Promise<CredentialUsageProbeOutcome>
   private readonly credentialDeps: ActiveCredentialDeps
+  private readonly log: LogEmitter
   private readonly onStanding: CredentialStandingObserver | undefined
   private readonly onSample: ((reading: PersistedSample) => void | Promise<void>) | undefined
 
@@ -165,6 +168,8 @@ export class CredentialUsageMonitor {
   private cached: CachedReading | null = null
   /** What the last tick learned about the credential itself. Null before the first. */
   private lastStanding: CredentialStanding | null = null
+  /** Last probe outcome logged; repeated equal outcomes are steady-state noise. */
+  private lastLoggedOutcome: CredentialUsageProbeOutcome['kind'] | null = null
   /** Why there is currently nothing to show, when there is nothing to show. */
   private unavailable: Extract<CredentialUsagePayload, { available: false }> = {
     available: false,
@@ -180,6 +185,7 @@ export class CredentialUsageMonitor {
       ((token: string): Promise<CredentialUsageProbeOutcome> =>
         probeCredentialUsage(token, probeDeps ?? {}))
     this.credentialDeps = deps.credentialDeps ?? {}
+    this.log = deps.log ?? moduleLog
     this.onStanding = deps.onStanding
     this.onSample = deps.onSample
     this.loop = new SupervisedLoop({
@@ -207,7 +213,7 @@ export class CredentialUsageMonitor {
       return cached.payload
     }
     // A cached reading that has aged out is not evidence of anything any more.
-    if (cached !== null) return { available: false, reason: 'probe_failed' }
+    if (cached !== null) return { available: false, reason: 'reading_aged_out' }
     return this.unavailable
   }
 
@@ -247,9 +253,11 @@ export class CredentialUsageMonitor {
     }
     const outcome = await this.probe(credential.token)
     switch (outcome.kind) {
-      case 'ok':
+      case 'ok': {
+        const measuredAt = this.now()
+        this.logOutcome(outcome, measuredAt)
         this.cached = {
-          payload: { available: true, measured_at: this.now(), ...outcome.reading },
+          payload: { available: true, measured_at: measuredAt, ...outcome.reading },
         }
         // The label rides with the reading it describes: `credential` was resolved
         // in the SAME call that produced this token, so the pair cannot disagree
@@ -257,7 +265,9 @@ export class CredentialUsageMonitor {
         await this.persist({ ...outcome.reading, account_label: credential.account_label })
         await this.report('healthy')
         return
+      }
       case 'no-windows':
+        this.logOutcome(outcome)
         this.cached = null
         this.unavailable = { available: false, reason: 'unsupported_credential' }
         // No meter, but the credential ANSWERED — it is alive. Reporting this as
@@ -266,6 +276,7 @@ export class CredentialUsageMonitor {
         await this.report('healthy')
         return
       case 'unauthorized':
+        this.logOutcome(outcome)
         // The credential we hold is dead. Whatever we last measured described a
         // credential that no longer answers, so it is dropped outright.
         this.cached = null
@@ -273,11 +284,34 @@ export class CredentialUsageMonitor {
         await this.report('lapsed')
         return
       case 'error':
+        this.logOutcome(outcome)
         // Transient. Keep the last good reading — `snapshot()` ages it out on its
         // own if the outage outlasts the staleness ceiling — and, for the same
         // reason, claim nothing about the credential itself.
         this.unavailable = { available: false, reason: 'probe_failed' }
         await this.report('indeterminate')
+        return
+    }
+  }
+
+  /** Emit the result on an outcome edge, never once per steady polling tick. */
+  private logOutcome(outcome: CredentialUsageProbeOutcome, measuredAt?: number): void {
+    if (outcome.kind === this.lastLoggedOutcome) return
+    this.lastLoggedOutcome = outcome.kind
+    switch (outcome.kind) {
+      case 'ok':
+        this.log.info('usage_probe_ok', { measured_at: measuredAt })
+        return
+      case 'no-windows':
+        this.log.warn('usage_probe_no_windows')
+        return
+      case 'unauthorized':
+        this.log.warn('usage_probe_unauthorized', { status: outcome.httpStatus })
+        return
+      case 'error':
+        // The probe's exception text is deliberately excluded: provider and
+        // transport messages are not a safe place to assume credentials absent.
+        this.log.warn('usage_probe_failed', { cause: 'probe_error' })
         return
     }
   }
@@ -307,7 +341,7 @@ export class CredentialUsageMonitor {
     try {
       await sink(reading)
     } catch (err) {
-      moduleLog.warn('usage_sample_persist_threw', {
+      this.log.warn('usage_sample_persist_threw', {
         error: err instanceof Error ? err.message : String(err),
       })
     }
@@ -317,13 +351,20 @@ export class CredentialUsageMonitor {
     // Recorded BEFORE the observer is consulted, and unconditionally: the usage
     // card reads this whether or not anything is listening, and an observer that
     // throws must not cost the card the fact that the credential was rejected.
+    const previous = this.lastStanding
     this.lastStanding = standing
+    if (standing !== previous) {
+      this.log.info('credential_standing_changed', {
+        from: previous,
+        to: standing,
+      })
+    }
     const observer = this.onStanding
     if (observer === undefined) return
     try {
       await observer(standing)
     } catch (err) {
-      moduleLog.warn('standing_observer_failed', {
+      this.log.warn('standing_observer_failed', {
         standing,
         error: err instanceof Error ? err.message : String(err),
       })
