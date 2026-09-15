@@ -142,7 +142,7 @@ enforcement lives in `depcruise` + the per-package `tsconfig` matrix.
 
 ### 2.3 — Substrate (spawn-and-stdio)
 
-Judgment turns run as spawned `claude` CLI processes over stdio (not an
+Claude judgment turns run as spawned `claude` CLI processes over stdio (not an
 in-process API client in the parent). A persistent REPL pool keeps warm
 sessions; the credential pool threads each spawn's auth into that child's
 environment only, never the parent. The contract is **one reply per turn**. The
@@ -150,6 +150,14 @@ substrate is swappable behind the `Substrate`/`Event` seam: Claude Code is the
 default/primary adapter, and an opt-in OpenAI GPT conversational adapter is also
 production-wired (BYO `OPENAI_API_KEY`, selected by env); autonomous builds
 (Trident) always run on Claude Code.
+
+Configured API models are available for review and project chat through shared
+configuration rows. An explicit project-to-tier map selects this conversational
+route before the harness hierarchy. This API adapter replays context and uses
+project-bound tools, while harness-based orchestration remains separate
+(Decisions Log 2026-09-15, configured model access). See
+[the configured-model specification](docs/spec-items/configured-models-for-review-and-chat.md)
+for configuration and the outstanding live compatibility measurements.
 
 A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
 substrate becomes selectable"), which makes it a child of the herdr server
@@ -290,6 +298,23 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-15 — Configured model access for review and project chat (#939).
+
+A shared API row supplies the provider label, exact model ID, endpoint and
+credential reference for both review and chat. `NEUTRON_PROJECT_MODELS` explicitly
+maps project IDs to those tiers before the inherited harness selection; removing
+that map restores the ordinary hierarchy. This deliberately adds a supported
+chat-completions backend alongside the existing harness backends. It is a
+transport choice, not an alternate implementation behind a feature flag.
+Stateless chat rehydrates its recent context each turn and resolves only the
+project-bound tool manifest. Unknown or unavailable selections refuse by name.
+The existing configured review protocol is reused; the proposed external router
+and live provider compatibility remain unmeasured. This decision authorises the
+API integration, not a claim that a particular external router works.
+Evidence: `runtime/configured-models.ts:10`,
+`gateway/wiring/build-llm-call-substrate.ts:699`,
+`runtime/adapters/configured-chat/index.ts:42`.
 
 ### 2026-09-15 — Projects declare repos and a default; cards select by name (#935).
 

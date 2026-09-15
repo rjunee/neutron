@@ -1300,3 +1300,13 @@ test('unwired pi names the instance and project selection sources', () => {
     expect(() => sub.start(spec())).toThrow(`Selection source: ${source}`)
   }
 })
+
+test('configured chat refuses an advertised tool manifest without a resolver', () => {
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(), substrate_instance_id: 'configured-test',
+    configuredChat: { env: { NEUTRON_PROJECT_MODELS: '{"one":"glm"}' },
+      toolManifest: () => [{ name: 'lookup', description: 'lookup', input_schema: {} }],
+    },
+  })!
+  expect(() => sub.start({ ...spec(), metering_context: { project_id: 'one' } })).toThrow('configured model glm: missing tool resolver')
+})
