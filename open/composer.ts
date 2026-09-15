@@ -6816,6 +6816,8 @@ export function buildOpenGraphComposer(
         chat_ack: workBoardChatAck,
         derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
         removal: workBoardRemoval,
+        project_exists: async (owner_slug, project_id) =>
+          (await projectSettingsStore.list(owner_slug)).some((project) => project.id === project_id),
       },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path

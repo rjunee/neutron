@@ -261,6 +261,9 @@ export function buildCoreModules(
           // The composer-built removal chokepoint — the SAME one the UI's X
           // runs. Present → `work_board_remove` registers; absent → it does not.
           ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
+          ...(input.work_board.project_exists !== undefined
+            ? { projectExists: input.work_board.project_exists }
+            : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
