@@ -6,10 +6,12 @@ import { fakeRunner, type Provider, type BoundedWorkRequest } from '@neutronai/r
 import { buildRun, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
+import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { MERGE_DIFF_BYTES_MAX } from './merge.ts'
 
 const head = 'a'.repeat(40)
 const snapshot: BuildSnapshot = { head, diff: '+code', pr: null }
+const published: BuildSnapshot = { ...snapshot, pr: { number: 12, head, state: 'OPEN' } }
 const dirs: string[] = []
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
 async function fixture() {
@@ -47,11 +49,17 @@ async function fixture() {
       readClaim: async () => null,
       run_host: async (argv) => {
         calls.push(argv)
+        if (argv.includes('gh')) return { ok: true, exit_code: 0, stdout: JSON.stringify({ headRefName: 'change', baseRefName: 'release', isCrossRepository: false, headRefOid: head, state: 'OPEN' }), stderr: '' }
+        if (argv.includes('fetch') || argv.includes('ls-remote')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         if (argv.includes('rev-parse') && drift === 'unreadable') return { ok: false, exit_code: 128, stdout: '', stderr: '' }
         if (argv.includes('merge-base')) return { ok: drift !== 'unreadable', exit_code: drift === 'unreadable' ? 128 : 0, stdout: drift === 'overlap' ? 'b'.repeat(40) : head, stderr: '' }
         if (argv.includes('--name-only')) return { ok: true, exit_code: 0, stdout: 'src/code.ts\n', stderr: '' }
         if (argv.includes('rev-parse')) return { ok: true, exit_code: 0, stdout: head, stderr: '' }
-        if (argv.includes('diff')) return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
+        if (argv.includes('diff')) {
+          const output = argv.find(arg => arg.startsWith('--output='))
+          if (output) await writeFile(output.slice('--output='.length), diff)
+          return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
+        }
         if (argv.includes('check-ref-format')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         throw new Error(`Unexpected command: ${argv.join(' ')}`)
       },
@@ -145,7 +153,7 @@ test('mutation proof blocks missing nomination and pins the reviewed head', asyn
   const { deps } = f.make()
   expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('nominated no mutation') })
   f.prose()
-  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Complete publication readiness is not wired' })
+  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Publication previous reviewed-head lineage could not be established' })
   expect(await deps.publishGate({ ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('branch tip') })
 })
 
@@ -157,20 +165,117 @@ test('CI unreadable stays unknown; red, absent, running and wrong head block', a
     { kind: 'completed', headSha: 'other', conclusion: 'success' },
   ] as const) {
     f.options.observeCi = async () => observation
-    expect(await f.make().deps.mergeGate(snapshot)).toMatchObject({ kind: 'blocked' })
+    expect(await f.make().deps.mergeGate(published)).toMatchObject({ kind: 'blocked' })
   }
   f.options.observeCi = async () => ({ kind: 'unreadable', reason: 'offline' })
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'offline' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'offline' })
   f.options.observeCi = async () => ({ kind: 'completed', headSha: head, conclusion: 'success' })
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Atomic pinned-head merge eligibility is not wired' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
 })
 
 test('base drift preserves uncertainty and blocks overlapping changes', async () => {
   const f = await fixture()
   f.setDrift('unreadable')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Base drift could not be assessed' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'Base drift could not be assessed' })
   f.setDrift('overlap')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Base drift overlaps reviewed changes' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'blocked', on: 'Base drift overlaps reviewed changes' })
   f.setDrift('clear')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Atomic pinned-head merge eligibility is not wired' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+})
+
+const commandResult = (stdout = '', exit_code = 0) => ({ ok: exit_code === 0, exit_code, stdout, stderr: '' })
+
+test('publication readiness measures local head, remote state and first-push ancestry', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value)
+  expect(await check()).toEqual({ kind: 'allow' })
+  for (const result of [commandResult('', 128), commandResult('short')]) {
+    expect(await check(async (argv, cwd) => argv.includes('rev-parse') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
+  }
+  expect(await check(baseRun, { ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked' })
+  for (const result of [commandResult('', 128), commandResult('not-an-oid refs/heads/change'), commandResult(`${head}\trefs/heads/other`)]) {
+    expect(await check(async (argv, cwd) => argv.includes('ls-remote') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
+  }
+  for (const [code, kind] of [[1, 'blocked'], [128, 'unknown']] as const) {
+    expect(await check(async (argv, cwd) => argv.includes('--is-ancestor') ? commandResult('', code) : baseRun(argv, cwd))).toMatchObject({ kind })
+  }
+  let ancestryCalls = 0
+  expect(await check(async (argv, cwd) => {
+    if (argv.includes('ls-remote')) return commandResult(`${head}\trefs/heads/change\n`)
+    if (argv.includes('--is-ancestor')) { ancestryCalls++; return commandResult('', 1) }
+    return baseRun(argv, cwd)
+  })).toEqual({ kind: 'allow' })
+  expect(ancestryCalls).toBe(0)
+  expect(await check(async () => { throw new Error('offline') })).toMatchObject({ kind: 'unknown' })
+})
+
+test('merge eligibility refuses absent, malformed, closed or mismatched review pins', async () => {
+  const f = await fixture()
+  for (const value of [snapshot, { ...published, head: 'short' },
+    ...[0, -1, 1.5, NaN].map(number => ({ ...published, pr: { ...published.pr!, number } })),
+    { ...published, pr: { ...published.pr!, state: 'CLOSED' as const } },
+    { ...published, pr: { ...published.pr!, head: 'c'.repeat(40) } },
+  ]) {
+    expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', value)).toMatchObject({ kind: 'blocked' })
+  }
+  expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', published)).toEqual({ kind: 'allow' })
+})
+
+test('merge eligibility measures actual PR refs and rejects unreadable or foreign observations', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  const pr = { headRefName: 'change', baseRefName: 'release', isCrossRepository: false, headRefOid: head, state: 'OPEN' }
+  const cases = [
+    { result: commandResult('', 1), kind: 'unknown' },
+    { result: commandResult('not-json'), kind: 'unknown' },
+    ...[null, {}, { ...pr, headRefName: '' }, { ...pr, baseRefName: '' }, { ...pr, isCrossRepository: null }]
+      .map(value => ({ result: commandResult(JSON.stringify(value)), kind: 'unknown' })),
+    ...[{ ...pr, isCrossRepository: true }, { ...pr, headRefOid: 'c'.repeat(40) }, { ...pr, state: 'CLOSED' }]
+      .map(value => ({ result: commandResult(JSON.stringify(value)), kind: 'blocked' })),
+  ]
+  for (const { result, kind } of cases) {
+    const run: typeof baseRun = (argv, cwd) => argv.includes('gh') ? Promise.resolve(result) : baseRun(argv, cwd)
+    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind })
+  }
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+  expect(f.calls).toContainEqual(['git', '-C', 'repo', 'fetch', 'origin', '+refs/heads/release:refs/remotes/origin/release', '+refs/heads/change:refs/remotes/origin/change'])
+  expect(f.calls).toContainEqual(['git', '-C', 'repo', 'merge-base', 'refs/remotes/origin/release', 'refs/remotes/origin/change'])
+})
+
+test('merge eligibility preserves refresh, size and fetched-head gates', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  for (const token of ['check-ref-format', 'fetch', 'diff']) {
+    const run: typeof baseRun = (argv, cwd) => argv.includes(token) ? Promise.resolve(commandResult('', 128)) : baseRun(argv, cwd)
+    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind: 'unknown' })
+  }
+  expect(await pinnedMergeReadiness(async (argv, cwd) => {
+    if (!argv.includes('diff')) return baseRun(argv, cwd)
+    await writeFile(argv.find(arg => arg.startsWith('--output='))!.slice('--output='.length), 'x'.repeat(MERGE_DIFF_BYTES_MAX + 1))
+    return commandResult('truncated stdout')
+  }, 'repo', published)).toMatchObject({ kind: 'blocked' })
+  expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('diff')
+    ? commandResult('stdout is not a written diff') : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'unknown' })
+  expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('rev-parse') && argv.some(arg => arg.includes('refs/remotes/origin/change'))
+    ? commandResult('c'.repeat(40)) : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'blocked', on: 'Fetched PR head differs from reviewed head' })
+  expect(await pinnedMergeReadiness(async () => { throw new Error('offline') }, 'repo', published)).toMatchObject({ kind: 'unknown' })
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+})
+
+test('host publication readiness is reached after a measured prose exemption', async () => {
+  const f = await fixture()
+  f.prose()
+  const baseRun = f.options.mutation.run_host
+  f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor')
+    ? Promise.resolve(commandResult('', 1)) : baseRun(argv, cwd)
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'blocked', on: 'Publication branch does not contain the pinned launch base' })
+  f.options.mutation.run_host = baseRun
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Publication previous reviewed-head lineage could not be established' })
+})
+
+test('host merge eligibility is reached after green CI', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
 })
