@@ -88,3 +88,58 @@ The socket-dependent cases remain unrun because the supplied sandbox restriction
 The 5000ms ready and health budgets remain (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:290`), as does the 90000ms runner allowance and the reasoning for keeping real spawn headroom (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:64`). No product decision changed. This follow-up does not modify eviction behavior, add a feature flag, change the runner script, or run the whole suite. Its three code/test paths were enumerated with `git diff --name-only` before extending this record. The user explicitly requested extending this existing shard rather than creating another record.
 
 The header correction was swept with `rg -n 'fake spawn takes its full budget|channel is announced immediately|HEADROOM: keep the existing runner allowance' --glob '*.ts' --glob '*.md' .`: the positive control found the revised header at `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:64`; neither removed phrase had another hit in that search scope.
+
+### 2026-09-15 — Config lifecycle cleanup follow-up
+
+The three reported paths share `unlinkSessionConfigs`: shutdown calls it at `runtime/adapters/claude-code/persistent/pool.ts:1536`, child teardown at `runtime/adapters/claude-code/persistent/child-exit-wiring.ts:144`, and failed construction now reaches it through the spawn's `finally` at `runtime/adapters/claude-code/persistent/spawn.ts:976`.
+
+Before changing production code, socket-free lifecycle reproductions printed the following actual config paths (shown relative to the temporary root here), their existence after cleanup, and the responsible owner. The file assertion and directory assertion are separate (`runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:37`).
+
+| Path | Captured config | File exists afterwards | Directory exists afterwards | Owner |
+| --- | --- | --- | --- | --- |
+| Clean shutdown | `neutron-repl-cleanup-7V2uA9/session-mcp.json` | false | true | pool shutdown → shared cleanup |
+| Child teardown | `neutron-repl-cleanup-jglJUX/session-mcp.json` | false | true | child exit → shared cleanup |
+| Failed host spawn | `neutron-repl-neutron-726386fa57f5f1696a605cd379c77037/session-mcp.json` | false | true | failed spawn → shared cleanup |
+
+This reproduction established retained empty directories, not retained plaintext on these three paths. It does not claim to reproduce the historical CI filesystem state. The original assertions also require directory removal (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:521`, `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:548`, `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:705`). Their security assertions remain, with explicit config-path diagnostics added. The failed-spawn test now requires the host's specific error and a captured secret-bearing config, preventing a socket bind failure from satisfying a generic rejection (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:535`, `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:543`).
+
+### Implementation and error vocabulary
+
+The shared helper removes each file, then removes its validated empty directory with non-recursive `rmdirSync` (`runtime/adapters/claude-code/persistent/repl-session.ts:721`, `runtime/adapters/claude-code/persistent/repl-session.ts:730`). It continues attempting the other paths after a failure, accepts only ENOENT as absence, and logs each failed path before throwing (`runtime/adapters/claude-code/persistent/repl-session.ts:695`, `runtime/adapters/claude-code/persistent/repl-session.ts:723`, `runtime/adapters/claude-code/persistent/repl-session.ts:732`, `runtime/adapters/claude-code/persistent/repl-session.ts:738`). The log is necessary because shutdown has an outer catch (`runtime/adapters/claude-code/persistent/pool.ts:1537`); removal failures must remain visible even there. Existing containment refusals still report the retained credential (`runtime/adapters/claude-code/persistent/repl-session.ts:710`). Non-recursive removal preserves unexpected directory contents; its failure is explicit rather than silently accepted.
+
+Cleanup errors join the existing `SpawnConfigurationError` vocabulary, with an aggregate cause containing the individual filesystem failures (`runtime/adapters/claude-code/persistent/repl-session.ts:739`). This follows the existing local config-read error at `runtime/adapters/claude-code/persistent/ensure-claude-trust.ts:116`, checked against its actual disposition: the class stamps `spawn_configuration` (`runtime/adapters/claude-code/persistent/spawn-configuration-error.ts:5`), which is non-retryable (`runtime/errors.ts:106`). An ordinary unstamped error would instead fall through to `undefined` (`runtime/adapters/claude-code/persistent/classify-spawn-error.ts:73`) and become retryable (`runtime/adapters/claude-code/persistent/pool.ts:459`). The test verifies the selected class on a real removal failure (`runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:112`).
+
+Spawn now records every possible config path before the first write (`runtime/adapters/claude-code/persistent/spawn.ts:178`). A `finally` maintains ownership until the child-exit handler is wired (`runtime/adapters/claude-code/persistent/spawn.ts:623`, `runtime/adapters/claude-code/persistent/spawn.ts:976`). This also protects construction failures before host spawn, where the previous host-spawn catch could not run. The additional fixture faults settings construction after verifying the on-disk MCP secret (`runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:69`). Cleanup therefore does not depend on the failed child starting, posting readiness, or emitting an exit event. Successful-child cleanup remains with the existing lifecycle owner.
+
+### Mutation evidence
+
+Every row printed the actual edited source line, ran the selected test to a nonzero exit, restored the source, and reran to exit zero. The three-path rows use the socket-free lifecycle tests, not a claim that the original socket tests ran successfully.
+
+| Guard and landed line | Mutation | Red evidence | Restored |
+| --- | --- | --- | --- |
+| Shared cleanup, `runtime/adapters/claude-code/persistent/repl-session.ts:659` | immediate return | Shutdown, teardown, failed host spawn: three failures naming stranded `session-mcp.json` paths, no timeout | 3 pass |
+| Directory removal, `runtime/adapters/claude-code/persistent/repl-session.ts:730` | remove `rmdirSync(dir)` | Four lifecycle cases report stranded config directories | 4 pass |
+| Unlink errors, `runtime/adapters/claude-code/persistent/repl-session.ts:723` | suppress error recording | Exact failed-file diagnostic missing | 1 pass |
+| Directory resolution errors, `runtime/adapters/claude-code/persistent/repl-session.ts:695` | suppress error recording | Resolution failure no longer raises | 1 pass |
+| Directory removal errors, `runtime/adapters/claude-code/persistent/repl-session.ts:732` | suppress error recording | Nonempty directory failure no longer raises | 1 pass |
+| Visible reporting, `runtime/adapters/claude-code/persistent/repl-session.ts:738` | remove stderr report | Failed path absent from captured diagnostics | 1 pass |
+| Failure propagation, `runtime/adapters/claude-code/persistent/repl-session.ts:739` | remove throw | No error reaches caller | 1 pass |
+| Error classification, `runtime/adapters/claude-code/persistent/repl-session.ts:739` | throw ordinary `Error` | Expected `spawn_configuration`, received `undefined` | 1 pass |
+| Pre-child ownership, `runtime/adapters/claude-code/persistent/spawn.ts:976` | remove finally cleanup | Host and settings failures both name stranded config files | 2 pass |
+
+With all cleanup removed, the three printed stranded files were `neutron-repl-cleanup-b8Nhee/session-mcp.json`, `neutron-repl-cleanup-D9aM1Z/session-mcp.json`, and `neutron-repl-neutron-158ecadd521c677834d33cf6280d423a/session-mcp.json` under the temporary root. Each was asserted present before teardown and absent afterwards; no secret value was printed.
+
+The initial resolution-error mutation survived because its fixture never entered the mutated catch: resolving a regular file itself succeeds, and the later unlink guard caught ENOTDIR. The corrected fixture puts another directory component below that regular file and positively asserts that `realpathSync` throws before invoking cleanup (`runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:122`). No assertion was weakened.
+
+### Validation and limits for this follow-up
+
+- `bun test runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts runtime/adapters/claude-code/persistent/__tests__/post-spawn-assertion.test.ts`: 18 pass, zero failures.
+- `bun test runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts -t 'fake readiness|stops dividing|is a no-op'`: 6 pass; 31 filtered by the local command.
+- The full requested owner-MCP file and `spawn-failure-revokes-credential.test.ts` were attempted together: 6 pass, 34 fail at the forbidden listener bind. Of the owner's 37 runner-enumerated cases, the six executable cases are the rejected-root-credential readiness diagnosis, acknowledgement ordering, both failed-acknowledgement cases, startup division floor, and no-warm-child eviction. The other 31 socket-dependent cases include all three reported security assertions, config wiring, warm reuse, and server eviction. None is claimed green. All three cases in the spawn-failure credential suite require the listener: failed-host credential revocation, and readiness-failure revocation with/without replacement. Their credential assertions remain unverified here.
+- `session-config-containment.test.ts` selected positive controls, temp-root refusal, aliased-root cleanup, and scratch cleanup: 6 pass, 15 filtered. An earlier selection also reached the two outside-temp symlink cases; both failed while creating their fixtures under the read-only home directory. Neither is reported as a pass.
+- `bash scripts/ci/lint.sh`: all gates pass.
+- `bash scripts/ci/typecheck-all.sh`: all 51 projects pass. The runtime project was also checked separately after restoring mutations.
+
+No product/spec decision changed. No new backend, feature flag, alternate secret location, recursive removal, test skip, whole-directory test sweep, or full test runner was introduced. The requested production-cleanup exemplar could not be read at its supplied path in this checkout; the filesystem enumeration `rg --files .trident/as-built | rg 'production-cleanup|fix-559-fix'` returned the known-present current shard as positive control, not the exemplar. This is a checkout observation, not an absence claim about a fetched remote ref; network access was not attempted.
+
+The obsolete cleanup comments were swept with `rg -n 'existing best-effort catch|already gone / never written|spawn itself can throw, and cleanup is owned|finally owns cleanup|Filesystem errors are logged' --glob '*.ts' --glob '*.md' .`. The positive controls found the corrected helper comment and failed-spawn comment; the removed phrases had no remaining hits in that search. This extends the existing single-heading shard as explicitly requested.

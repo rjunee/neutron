@@ -516,27 +516,34 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     await shutdownAllPersistentRepls()
     // The FILE went, and so did its 0700 directory — which used to survive every spawn
     // forever, one per session, in `tmpdir()`.
-    expect(existsSync(cfgPath)).toBe(false)
+    console.info({ config: cfgPath, exists: existsSync(cfgPath), owner: 'shutdownAllPersistentRepls -> unlinkSessionConfigs' })
+    expect(existsSync(cfgPath), `stranded config: ${cfgPath}`).toBe(false)
     expect(existsSync(cfgDir)).toBe(false)
   })
 
   it('A FAILED SPAWN STRANDS NOTHING — no plaintext secrets left in tmpdir', async () => {
     // The window: the config is written, then `buildSettings` / trust-seeding / the
-    // spawn itself can throw, and cleanup is owned by the child-exit handler — which
-    // does not exist yet. A throw there left the MCP config, holding the dev-channel
+    // spawn itself can throw before the child-exit handler exists. The spawn's
+    // finally owns cleanup until that handler is wired. A throw once left the config, holding the dev-channel
     // token and every installed server's env VALUES, sitting in `tmpdir()` for the life
     // of the box.
     setReplToolBridge(bridge())
     const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    let cfgPath: string | undefined
     const exploding: PtyHost = {
-      async spawn(): Promise<PtyChild> {
+      async spawn(argv): Promise<PtyChild> {
+        cfgPath = argv[argv.indexOf('--mcp-config') + 1]!
+        expect(readFileSync(cfgPath, 'utf8')).toContain(EXAMPLE.env['EXAMPLE_API_KEY']!)
         throw new Error('pty host refused to spawn')
       },
     }
     const sub = createPersistentReplSubstrate(
       opts(exploding, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
     )
-    await expect(drain(sub.start(spec('hi')))).rejects.toThrow()
+    await expect(drain(sub.start(spec('hi')))).rejects.toThrow('pty host refused to spawn')
+    expect(cfgPath).toBeDefined()
+    console.info({ config: cfgPath, exists: existsSync(cfgPath!), owner: 'spawn finally -> unlinkSessionConfigs' })
+    expect(existsSync(cfgPath!), `stranded config: ${cfgPath}`).toBe(false)
 
     const leaked = readdirSync(tmpdir()).filter(
       (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
@@ -689,6 +696,11 @@ describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reo
     const spawned = argvs.length
 
     await shutdownAllPersistentRepls()
+    for (const argv of argvs) {
+      const cfgPath = argv[argv.indexOf('--mcp-config') + 1]!
+      console.info({ config: cfgPath, exists: existsSync(cfgPath), owner: 'shutdownAllPersistentRepls -> unlinkSessionConfigs' })
+      expect(existsSync(cfgPath), `stranded config: ${cfgPath}`).toBe(false)
+    }
 
     const leaked = readdirSync(tmpdir()).filter(
       (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),

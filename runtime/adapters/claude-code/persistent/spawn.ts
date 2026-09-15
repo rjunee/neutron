@@ -173,6 +173,11 @@ async function spawnSession(
   // `sink-coordinates.ts`'s header where the token is loaded.
   const { dir: cfgDir, mcpConfigPath, settingsPath, toolsManifestPath } =
     replSessionConfigPaths(channelName)
+  // Own every possible path before the first write. Failed construction cannot
+  // rely on a child-exit callback: there may never be a child.
+  session.configPaths = [mcpConfigPath, settingsPath, toolsManifestPath]
+  let childOwnsConfigs = false
+  try {
   mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
 
   // P0-1 — the dev-channel reply sink is ALWAYS present (`server:<name>`). When
@@ -360,12 +365,6 @@ async function spawnSession(
   // message. The digest is in-memory only; it is derived from secret values and is
   // never logged or persisted.
   session.mcpFingerprint = mcpSurfaceFingerprint(extraMcpServers)
-  // Stash the temp config paths so teardown can unlink them (Argus r5 IMPORTANT —
-  // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
-  // manifest is only written when the bridge is active; include it when so.
-  session.configPaths = toolBridgeActive
-    ? [mcpConfigPath, settingsPath, toolsManifestPath]
-    : [mcpConfigPath, settingsPath]
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env)
@@ -621,13 +620,13 @@ async function spawnSession(
       label: 'spawn.then',
       registryPath: options.replRegistryPath,
     })
+    childOwnsConfigs = true
     } catch (e) {
       // The spawn never produced a child, so the registration it was made for must not
       // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
       // already hold this session id, and evicting ITS credential would turn our failure
       // into a second one. The configs go too — they carry the credential in plaintext.
       sink.unregisterIf(sessionId, session)
-      unlinkSessionConfigs(session)
       throw e
     }
 
@@ -972,6 +971,9 @@ async function spawnSession(
     return session
   } finally {
     releaseSpawnReservation(options, sessionKey, spawnReserver)
+  }
+  } finally {
+    if (!childOwnsConfigs) unlinkSessionConfigs(session)
   }
 }
 

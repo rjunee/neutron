@@ -2,9 +2,10 @@
 // The ReplSession warm-REPL class + child-termination / env / http-health
 // helpers (D2 split).
 
+import { SpawnConfigurationError } from './spawn-configuration-error.ts'
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
 import { createHash, randomBytes } from 'node:crypto'
-import { realpathSync, unlinkSync } from 'node:fs'
+import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
@@ -653,7 +654,7 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
  * is a credential file we meant to delete and did not, so the residual is a RETAINED
  * plaintext credential file rather than a deleted stranger's file. That is the right
  * direction to fail in and it still has a cost, which is why it is said out loud rather
- * than swallowed by the existing best-effort catch.
+ * than silently ignored. Filesystem errors are logged and raised after all paths are tried.
  */
 export function unlinkSessionConfigs(session: ReplSession): void {
   // BOTH SIDES OF THE COMPARISON MUST BE REAL PATHS (Argus r45). This resolved the child
@@ -678,14 +679,20 @@ export function unlinkSessionConfigs(session: ReplSession): void {
     // to refuse. The cost is the same retained-credential residual documented above.
     root = resolve(tmpdir())
   }
+  const directories = new Set<string>()
+  const failures: Error[] = []
+  const recordFailure = (path: string, error: unknown) => {
+    failures.push(new Error(`config cleanup failed for ${path}`, { cause: error }))
+  }
   for (const p of session.configPaths) {
     let real: string
     try {
       // The DIRECTORY, not the file: the file may legitimately not exist yet, and it is
       // the directory component that a symlink would redirect.
       real = realpathSync(dirname(p))
-    } catch {
-      // The directory is gone — so is anything we would have deleted in it.
+    } catch (error) {
+      // Only ENOENT proves absence; permission and I/O failures can hide secrets.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') recordFailure(p, error)
       continue
     }
     // `=== root` IS REJECTED HERE TOO (Argus r34). This read `real !== root && !…` — so a
@@ -709,11 +716,27 @@ export function unlinkSessionConfigs(session: ReplSession): void {
       )
       continue
     }
+    directories.add(dirname(p))
     try {
       unlinkSync(p)
-    } catch {
-      /* already gone / never written */
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') recordFailure(p, error)
     }
+  }
+  // Non-recursive: remove only an empty directory whose containment was checked.
+  // Missing optional files and a second lifecycle cleanup are both normal.
+  for (const dir of directories) {
+    try {
+      rmdirSync(dir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') recordFailure(dir, error)
+    }
+  }
+  if (failures.length > 0) {
+    // Some lifecycle callers catch teardown failures. Report at the owner as well,
+    // so their catch cannot turn a retained credential into silent success.
+    for (const failure of failures) process.stderr.write(`[repl] ${failure.message}: ${String(failure.cause)}\n`)
+    throw new SpawnConfigurationError('config cleanup failed', { cause: new AggregateError(failures) })
   }
 }
 
