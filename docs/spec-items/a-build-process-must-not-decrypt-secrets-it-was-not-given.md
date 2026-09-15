@@ -1,7 +1,7 @@
 ---
 title: Stop a build process reading the owner's encryption keyfile
 group: security
-status: open
+status: done
 priority: P1
 cutover: false
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
@@ -18,15 +18,14 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > (`trident/inner-workflow.mjs:1494-1495`). Acceptance (a) is therefore SHIPPED, and
 > (b) is moot because no agent-side push is kept.
 >
-> **This item is narrowed to acceptance (c), which is untouched:** nothing stops a
-> build process reading the owner's encryption keyfile. The run is still handed the
+> **This item was narrowed to acceptance (c), shipped by issue #515:** the run is handed the
 > data dir that holds it — the `SecretsStore` coordinates are threaded into the
 > workflow args precisely so `trident/gh-authed.ts` can resolve the token in its own
-> process (`trident/inner-loop.ts:116`, `trident/orchestrator.ts:215`). Those seams
+> process (`trident/inner-loop.ts:123-126`, `trident/orchestrator.ts:232-240`). Those seams
 > pass *paths and handles, never the token*, which is the right shape for the push —
 > but the data dir is the keyfile's directory, and the build runs as the keyfile's
-> owner. **The reachability is the condition; the push path was only one symptom.**
-> No test proves a build cannot decrypt secrets it was not given.
+> owner. The build lane now masks that keyfile before launching build code, and the
+> bidirectional process test below proves the boundary.
 
 **A build agent must never HOLD a credential — it asks the host to push** (owner-directed 2026-08-13,
 from observed behaviour, not theory). `github/credential.ts` argues at length against every way of
@@ -75,14 +74,20 @@ boundary or have the host push; never through the prompt.
 
 ## Acceptance
 
-- [ ] **A build process cannot decrypt secrets it was not given, and a test proves it.**
+- [x] **A build process cannot decrypt secrets it was not given, and a test proves it.**
       This is acceptance (c) of the original item and the whole of what remains.
-- [ ] The test is bidirectional: a build handed a secret CAN use it, and the same build
+- [x] The test is bidirectional: a build handed a secret CAN use it, and the same build
       attempting a secret it was not given FAILS. A test that only asserts a denial would
       also pass against a build that can read nothing at all, including what it needs.
-- [ ] Deleting the isolation turns the test red. A build that runs as the keyfile's owner
+- [x] Deleting the isolation turns the test red. A build that runs as the keyfile's owner
       and reaches `.neutron-aes-key` must be caught, not merely discouraged by contract
       text — the original defect was task completion under an impossible instruction, not
       misbehaviour, so a prompt-level prohibition does not satisfy this.
-- [ ] No secret material reaches a log, an error, or a transcript on any path this change
+- [x] No secret material reaches a log, an error, or a transcript on any path this change
       touches.
+
+The build wrapper passes only the owner data-directory coordinate to the lane
+owner. Before starting build code, that owner creates a bubblewrap mount namespace
+whose final mount masks the encryption keyfile while preserving the worktree and
+explicitly handed credentials. Missing keyfile evidence, missing bubblewrap, or a
+namespace setup failure defers the build before it can run.

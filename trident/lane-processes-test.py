@@ -362,6 +362,28 @@ class LaneProcesses(unittest.TestCase):
         self.assertEqual(p.wait(timeout=5), 0)
         self.assertTrue(select.select([fd], [], [], 0)[0])
 
+    def test_build_can_use_handed_secret_but_cannot_read_owner_keyfile(self):
+        keyfile = self.root / '.neutron-aes-key'
+        keyfile.write_text('owner-key-material')
+        result = self.root / 'isolation-result'
+        code = (
+            "import os; from pathlib import Path; "
+            "key=Path(os.environ['KEYFILE']); out=Path(os.environ['RESULT']); "
+            "\ntry: key.read_bytes(); access='readable'\n"
+            "except OSError: access='denied'\n"
+            "out.write_text(os.environ['HANDED_SECRET'] + ':' + access)"
+        )
+        with patch.dict(os.environ, HANDED_SECRET='allowed-value', KEYFILE=str(keyfile), RESULT=str(result)):
+            status = lanes.run([sys.executable, '-c', code], str(keyfile))
+        self.assertEqual(status, 0)
+        self.assertEqual(result.read_text(), 'allowed-value:denied')
+
+    def test_requested_isolation_refuses_before_launch_when_it_cannot_be_established(self):
+        missing = self.root / '.neutron-aes-key'
+        with patch.object(lanes.subprocess, 'Popen') as launch:
+            self.assertEqual(lanes.run(['false'], str(missing)), 3)
+        launch.assert_not_called()
+
 
 class Census(unittest.TestCase):
     setUp = LaneProcesses.setUp

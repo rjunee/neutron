@@ -432,7 +432,11 @@ set -uo pipefail
 # A separate owner survives the build command's ordinary exit and reaps its claim.
 # If the owner itself dies, the gateway's independent sweep completes the job.
 if [ -z "${NEUTRON_LANE_CLAIM:-}" ] && command -v python3 >/dev/null 2>&1; then
-  exec python3 "$(dirname "${BASH_SOURCE[0]}")/lane-processes.py" run -- bash "${BASH_SOURCE[0]}" "$@"
+  _isolation_args=()
+  if [ -n "${NEUTRON_BUILD_OWNER_DATA_DIR:-}" ]; then
+    _isolation_args=(--deny-keyfile "${NEUTRON_BUILD_OWNER_DATA_DIR}/.neutron-aes-key")
+  fi
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/lane-processes.py" run "${_isolation_args[@]}" -- bash "${BASH_SOURCE[0]}" "$@"
 fi
 
 BRANCH="${1:-}"

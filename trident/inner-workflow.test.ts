@@ -78,6 +78,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     'diffBase',
     'mergeMode',
     'codexHome',
+    'ghDataDir',
     'NO_INTERACTIVE_RULE',
     'REDIRECT_RULE',
     'NO_PATTERN_KILL_RULE',
@@ -113,6 +114,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     "'refs/remotes/origin/main'",
     'pr',
     '/codex-home',
+    '/owner-data',
     '',
     '',
     '',
@@ -408,6 +410,12 @@ describe('inner-workflow.mjs — inlined contracts + rules in EVERY agent', () =
     expect(dispatch).toContain("opts.label === 'forge:build' ? 'forge-done' : opts.label.slice('forge:'.length)")
     expect(SRC).toContain('await checkpoint(`fix-round-${round}`')
     expect(SRC).toContain("await checkpoint('forge-done'")
+  })
+
+  test('Codex dispatch hands the owner data directory to the process isolation boundary', () => {
+    expect(loadCodexBridgePrompts().build).toContain(
+      "NEUTRON_BUILD_OWNER_DATA_DIR='/owner-data'",
+    )
   })
 
   test('inlines the Forge build contract (PR_NUMBER/BRANCH/WORKTREE, push + open PR, smallest-correct-change)', () => {

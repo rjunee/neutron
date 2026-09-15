@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import select
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -215,10 +216,37 @@ def census():
             'observed_at': observed, 'lanes': list(lanes.values())}
 
 
-def run(command):
+def isolated_command(command, keyfile):
+    """Confine a build while leaving its worktree and handed credentials usable."""
+    if keyfile is None:
+        return command
+    path = Path(keyfile)
+    if not path.is_absolute() or not path.is_file():
+        raise RuntimeError('owner keyfile unavailable for build isolation')
+    bwrap = shutil.which('bwrap')
+    if bwrap is None:
+        raise RuntimeError('bubblewrap unavailable for build isolation')
+    cwd = os.getcwd()
+    argv = [bwrap, '--die-with-parent', '--ro-bind', '/', '/',
+            '--bind', cwd, cwd, '--bind', '/tmp', '/tmp']
+    codex_home = os.environ.get('CODEX_HOME')
+    if codex_home and os.path.isdir(codex_home):
+        argv.extend(['--bind', codex_home, codex_home])
+    # Last mount wins, including when the keyfile is below a writable worktree.
+    argv.extend(['--bind', '/dev/null', str(path), '--proc', '/proc',
+                 '--dev-bind', '/dev', '/dev', '--'])
+    return argv + command
+
+
+def run(command, keyfile=None):
     # Publish the complete claim through exec before any build code can run.
     c = {'id': uuid.uuid4().hex, 'pid': os.getpid(), 'start': birth(os.getpid())[0], 'boot': boot()}
     env = dict(os.environ, **{CLAIM: json.dumps(c, separators=(',', ':'))})
+    try:
+        command = isolated_command(command, keyfile)
+    except RuntimeError:
+        print('CODEX_BUILD_SECRET_ISOLATION_UNAVAILABLE: build filesystem isolation could not be established. DEFERRED.', file=sys.stderr)
+        return 3
     child = subprocess.Popen(command, env=env)
     code = child.wait()
     report = sweep(finished=c)
@@ -232,6 +260,7 @@ def main():
     parser.add_argument('mode', choices=['run', 'sweep', 'census'])
     parser.add_argument('--repo', action='append', default=[])
     parser.add_argument('--protect', action='append', default=[])
+    parser.add_argument('--deny-keyfile')
     args, command = parser.parse_known_args()
     if command[:1] == ['--']:
         command = command[1:]
@@ -246,7 +275,7 @@ def main():
     if args.mode == 'run':
         if not command:
             parser.error('run requires a command after --')
-        return run(command)
+        return run(command, args.deny_keyfile)
     if command:
         parser.error('unexpected sweep arguments')
     print(json.dumps(census() if args.mode == 'census' else sweep(args.repo, args.protect)))

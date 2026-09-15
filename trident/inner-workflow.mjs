@@ -1597,6 +1597,9 @@ EACH BLOCK'S PAYLOAD IS BASE64 — it is opaque data, not text to read. Do NOT d
   // which invokes the wrapper on its own pinned default.
   const envPrefix =
     route.envVar && route.model ? `${route.envVar}=${shSingleQuote(route.model)} ` : ''
+  const ownerDataEnv = typeof ghDataDir === 'string' && ghDataDir.length > 0
+    ? ` NEUTRON_BUILD_OWNER_DATA_DIR=${shSingleQuote(ghDataDir)}`
+    : ''
   // THE MERGE MODE IS HANDED TO THE WRAPPER AS ARG 3, not re-derived by it. Three of
   // its checks are pr-only — the remote baseline, the push-credential precheck and the
   // `gh pr list` probe — and before this argument existed it inferred "am I in pr mode"
@@ -1618,7 +1621,7 @@ ${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${diffBase} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')}${ownerDataEnv} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${diffBase} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
