@@ -534,7 +534,11 @@ ${CHUNK}"
     CALL_EXIT=$?
   else
     if [ -n "$REVIEW_MODEL" ]; then set -- --model "$REVIEW_MODEL"; else set --; fi
-    CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>>"$CODEX_STDERR_FILE")
+    if [ -n "${NEUTRON_CODEX_THREAD_ID:-}" ]; then
+      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec resume "${NEUTRON_CODEX_THREAD_ID}" "$@" - 2>>"$CODEX_STDERR_FILE")
+    else
+      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>>"$CODEX_STDERR_FILE")
+    fi
     CALL_EXIT=$?
   fi
   [ "$CALL_EXIT" -eq 0 ] || break
