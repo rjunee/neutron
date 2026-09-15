@@ -25,7 +25,7 @@ async function fixture() {
     timeout_ms: 120, signal: new AbortController().signal,
   }
   const binding: ClaudeActingSession = {
-    project_id: 'project', topic_id: 'topic', grants: { tools: 'edit-and-run', writable: true, network: true },
+    project_id: 'project', topic_id: 'topic', grants: { roots: [], tools: 'edit-and-run', writable: true, network: true },
     session: { sessionId: 'session', cwd: dir, acquireTurn: async () => { acquired++; return () => { released++ } },
       child: { pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
         submitLine: async text => { commands.push(text); await writeFile(input.request.result.path, '{}') } } },
@@ -183,3 +183,41 @@ test('real HerdrHost child submits text then Enter in the existing pane', async 
   expect(await f.run()).toEqual({ kind: 'turn-ended' })
   expect(calls).toEqual(['pane.send_text', 'pane.send_keys'])
 })
+
+for (const cwd of ['/a/b', '/a/b/worktree', '/a/b/../b/worktree']) {
+  test(`granted root accepts ${cwd}`, async () => {
+    const f = await fixture()
+    f.binding.grants.roots = ['/a/b']
+    f.input.request = { ...f.input.request, cwd }
+    expect(await f.run()).toEqual({ kind: 'turn-ended' })
+    expect(f.commands).toHaveLength(1)
+  })
+}
+for (const cwd of ['/a/bc', '/a/b/../outside', '/a']) {
+  test(`granted root refuses segment escape ${cwd}`, async () => {
+    const f = await fixture()
+    f.binding.grants.roots = ['/a/b']
+    f.input.request = { ...f.input.request, cwd }
+    expect(await f.run()).toMatchObject({ kind: 'refused', detail: expect.stringContaining('granted roots') })
+    expect(f.commands).toHaveLength(0)
+  })
+}
+test('session cwd includes descendants and binding snapshots root grants', async () => {
+  const f = await fixture()
+  f.input.request = { ...f.input.request, cwd: join(f.dir, 'child') }
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  const roots: string[] = []
+  f.binding.grants.roots = roots
+  const run = createClaudeActingTurn(f.binding)
+  roots.push('/a/b')
+  f.input.request = { ...f.input.request, cwd: '/a/b' }
+  expect((await run(f.input)).kind).toBe('refused')
+})
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`acting turn forwards effort ${effort}`, async () => {
+    const f = await fixture()
+    f.input.request = { ...f.input.request, effort }
+    expect(await f.run()).toEqual({ kind: 'turn-ended' })
+    expect(JSON.parse(f.commands[0]!.slice(f.commands[0]!.indexOf('{'))).effort).toBe(effort)
+  })
+}

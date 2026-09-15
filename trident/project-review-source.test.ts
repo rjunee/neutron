@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -105,8 +105,6 @@ test('findings remain findings and revision/round changes force fresh observatio
 test('configuration and dispatch admission reject unsupported values with valid controls', async () => {
   const f = await fixture(); expect(f.source().seats[1]!.enabled).toBe(true)
   f.options.wallMs = 0; expect(f.source).toThrow('positive wall budget'); f.options.wallMs = 1000
-  f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol', effort: 'max' } }
-  expect(f.source).toThrow('unsupported effort')
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'k3' } }
   expect(f.source).toThrow('unsupported configured model')
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol' } }
@@ -141,4 +139,26 @@ test('observation copies cannot rewrite the authoritative host record', async ()
   observed!.modelId = 'forged'
   observed!.payload = null
   expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ modelId: 'gpt-5.6-sol', payload: approve })
+})
+
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`review source dispatches selected effort ${effort}`, async () => {
+    const f = await fixture()
+    f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol', effort } }
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(f.calls[0]!.effort).toBe(effort)
+  })
+}
+test('null model telemetry preserves completion and reports unknown panel family', async () => {
+  const f = await fixture()
+  f.options.phaseModels = { ...f.options.phaseModels, review_codex: { model: 'sol' } }
+  f.answer(async () => ({ kind: 'completed', result: approve, usage: null, model_reported: null, thread_id: null }))
+  const warning = spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const source = f.source()
+    expect(await f.check(source)).toEqual({ kind: 'approve' })
+    expect(await source.readSeat(source.seats[1]!, snapshot, 1)).toMatchObject({ status: 'completed', family: null })
+    expect(warning.mock.calls.flat().join(' ')).toContain('panel-unknown-family')
+    expect(warning.mock.calls.flat().join(' ')).not.toContain('panel-single-family')
+  } finally { warning.mockRestore() }
 })

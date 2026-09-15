@@ -21,6 +21,8 @@ export interface SeatObservation {
   round: number
   provider: Provider
   modelId: string
+  /** null explicitly means missing host model telemetry; omission retains host configuration. */
+  family?: string | null
   status: 'completed' | 'deferred' | 'unavailable' | 'rate-limited'
   payload: unknown
 }
@@ -74,18 +76,22 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     const families = [...seats, ...(builder ? [builder] : [])].map(seat => seat.family
       ?? registry.find(model => model.model_id === seat.modelId)?.group
       ?? (seat.provider === 'pi' ? `pi:${seat.modelId}` : seat.provider))
-    if (families.length > 1 && new Set(families).size === 1) {
-      createLogger('trident').warn('panel-single-family', { family: families[0]!, seats: families.length, 'configuration-accepted': true })
-    }
+    let unknownFamily = false
     const verdicts: VerdictTrailer[] = []
     for (const seat of seats) {
       const observed = await readReviewSeat(source, seat, snapshot, round)
       if (!observed) return infrastructure(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
       if (observed.runId !== runId || observed.head !== snapshot.head || observed.round !== round || observed.provider !== seat.provider || observed.modelId !== seat.modelId) return infrastructure(`Review seat ${seat.id} (${seat.provider}) provenance does not match run, revision, round, provider or model`)
+      if (observed.family === null) unknownFamily = true
       if (observed.status !== 'completed') return blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`)
       const checked = validateTrailer('verdict', unmarked(observed.payload))
       if (!checked.ok) return infrastructure(`Review seat ${seat.id} (${seat.provider}) verdict is unusable`)
       verdicts.push(checked.value)
+    }
+    if (unknownFamily) {
+      createLogger('trident').warn('panel-unknown-family', { 'configuration-accepted': true })
+    } else if (families.length > 1 && new Set(families).size === 1) {
+      createLogger('trident').warn('panel-single-family', { family: families[0]!, seats: families.length, 'configuration-accepted': true })
     }
     const recorded = await source.readSynthesis(snapshot, round)
     if (!recorded || recorded.runId !== runId || recorded.head !== snapshot.head || recorded.round !== round) return infrastructure('Review synthesis provenance does not match run, revision and round')

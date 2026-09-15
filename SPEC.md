@@ -61,6 +61,11 @@ exactly one such queue (`docs/process/work-tracking.md` §3.4).
 
 ## System Overview
 
+Bounded project work uses explicitly granted directory roots, validates result
+trailers independently of nullable host telemetry, and carries all five selected
+effort levels. Unsupported transport effort is a named refusal (Decisions Log
+2026-09-15, bounded worker roots, telemetry and effort contract).
+
 Neutron Open is a **single-owner, local-first agent harness** you self-host. One
 person (the **owner**) runs one instance on their own machine; there is no fleet
 and no shared control plane in this tree. The product is Apache-2.0 and
@@ -298,6 +303,19 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-15 — Bounded worker roots, telemetry and effort contract (#871).
+
+Owner ruling: a project acting session admits a requested cwd within its cwd or
+an explicitly bound granted directory, using path-segment containment. An
+isolated build worktree does not need to equal the conversation checkout.
+A validated completed trailer remains completed when host telemetry is absent;
+usage, reported model and thread are null. Unknown model family remains explicit
+in panel diagnostics and does not establish a same-family comparison.
+The bounded effort vocabulary is low, medium, high, xhigh and max. Transports
+preserve selected values or refuse unsupported values by name; they never reduce
+effort silently. These rulings amend the bounded contract, without changing the
+launcher lane's durable outcome handoff.
 
 ### 2026-09-15 — Live rail unread belongs to each connection's device (#627).
 

@@ -220,8 +220,9 @@ one substrate where it would do nothing refuses the setting instead of eating it
   line — never by editing a user-level `config.toml` (global mutable state, and the
   reference box's config pins nothing, which is how F happened). The config key exists
   in codex-cli 0.147.0 (verified in the binary's string table, which also shows effort
-  tiers including `xhigh`). Map `low/medium/high/xhigh` 1:1; map Neutron's `max` to
-  Codex's top tier and LOG the mapping in the `trident.agent` line. Note the REVIEW path
+  tiers including `xhigh`). For the bounded worker, preserve all selected effort
+  values exactly; do not reduce `max` to another tier (Decisions Log 2026-09-15,
+  bounded worker roots, telemetry and effort contract). Note the REVIEW path
   takes no effort at all today (`codex-review.sh` passes only `--model`,
   `codex-review.sh:138-144`) — those lanes stay in `UNROUTED_LABELS`
   (`phase-models.ts:174-192`) and the UI keeps not offering them a control.

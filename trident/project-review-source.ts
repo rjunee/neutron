@@ -42,8 +42,6 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     if (!phase.dispatchGroups.includes(group)) throw Error(`Review seat ${id}: unsupported configured model ${tier}`)
     const provider: Provider = group === 'claude' ? 'anthropic' : group === 'codex' ? 'openai-codex' : 'pi'
     const effort = override?.effort ?? phase.default.effort
-    // The bounded-work vocabulary currently cannot represent xhigh or max.
-    if (effort !== 'low' && effort !== 'medium' && effort !== 'high') throw Error(`Review seat ${id}: unsupported effort ${effort}`)
     const model: ModelTierDescriptor = custom ? { tier, provider: custom.provider, model_id: custom.model,
       endpoint: custom.endpoint, credential: custom.credential, group: 'api', transport: 'cli',
       wrapper: 'trident/api-review-cli.ts', env_var: null, requires: custom.credential } : builtin!
@@ -97,7 +95,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     try {
       if (options.signal.aborted) { abort(); return unavailable('host cancelled review') }
       const outcome = await Promise.race([runner.run(request, placement, controller.signal), stopped])
-      if (outcome.kind === 'completed') return { ...identity, status: 'completed', payload: structuredClone(outcome.result) }
+      if (outcome.kind === 'completed') return { ...identity, status: 'completed', family: outcome.model_reported === null ? null : seat.family, payload: structuredClone(outcome.result) }
       if (outcome.kind === 'refused') return unavailable(outcome.reason)
       // A worker block has no retryability evidence (it may be a rate limit).
       if (outcome.kind === 'blocked') return unavailable(outcome.on)

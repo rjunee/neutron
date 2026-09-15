@@ -311,3 +311,17 @@ test('ephemeral extension children cannot resume a child thread', async () => {
   expect(f.calls).toHaveLength(0)
   await expect(readFile(f.reservation)).rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`forwards extended effort ${effort} unchanged`, async () => {
+    const f = await fixture()
+    f.options.composeActingTurn = async (_topic, spec, opts) => {
+      const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+      expect(opts.request.effort).toBe(effort)
+      expect(args.task).toContain(JSON.stringify({ ...f.req, effort }))
+      await f.trailer()
+      return 'done'
+    }
+    expect(await f.run(undefined, { ...f.req, effort })).toEqual({ kind: 'blocked', on: 'file evidence' })
+  })
+}

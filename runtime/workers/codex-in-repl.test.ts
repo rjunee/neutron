@@ -298,3 +298,17 @@ test.each(['run_id', 'step_id', 'schema'])('decoder rejects mismatched trailer %
   await writeFile(f.req.result.path, JSON.stringify(value))
   expect((await f.run()).kind).toBe('unknown')
 })
+
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`forwards extended effort ${effort} unchanged`, async () => {
+    const f = await fixture()
+    f.options.composeActingTurn = async (_topic, spec, opts) => {
+      const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+      expect(args.reasoning_effort).toBe(effort)
+      expect(args.message).toContain(JSON.stringify({ ...f.req, effort }))
+      await f.trailer()
+      return 'done'
+    }
+    expect(await f.run(undefined, { ...f.req, effort })).toEqual({ kind: 'blocked', on: 'file evidence' })
+  })
+}

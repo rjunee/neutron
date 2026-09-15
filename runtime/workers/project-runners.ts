@@ -56,8 +56,9 @@ export function decodeProjectTrailer(bytes: string, request: BoundedWorkRequest,
     }
     if (value.kind !== 'completed') return unknown('Trailer outcome kind missing or unsupported.')
     if (!validate(value.result)) return unknown('Trailer result failed host schema validation.')
-    const metadata = host.metadata(request)
-    if (!metadata) return unknown('Host usage/model/thread observation missing.')
+    let metadata: ReturnType<ProjectTrailerDecoder['metadata']>
+    try { metadata = host.metadata(request) } catch { /* Telemetry cannot invalidate a validated result. */ }
+    metadata ??= { usage: null, model_reported: null, thread_id: null }
     return { kind: 'completed', result: value.result, ...metadata }
   } catch {
     return unknown('Trailer JSON or host validation could not be read.')
