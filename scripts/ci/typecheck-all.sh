@@ -2,16 +2,18 @@
 #
 # G5 — typecheck completeness.
 #
-# Runs `tsc -p` for EVERY tsconfig.json in the repo (the root deploy-gate config
-# PLUS every leaf/package config). The old CI gate ran only the root
+# Runs `tsc -p` for every project-owned tsconfig.json in the repo (the root
+# deploy-gate config PLUS every leaf/package config). The old CI gate ran only the root
 # `tsc --noEmit`, whose include list never reached `trident/`, `app/`,
 # `work-board/`, `project-credentials/`, `jwt-validator/`, `landing/chat-react/`,
 # and every test file under them — so real type errors shipped invisibly.
 #
 # Discovery is dynamic (a plain `find`), so a NEW package that owns a
 # tsconfig.json is typechecked automatically — it can never silently escape the
-# gate. `scripts/ci/ci-workflow.test.ts` cross-checks this list against an
-# independent enumeration so the discovery can't be quietly narrowed.
+# gate. Tool-managed `.claude` worktrees are excluded because they are separate
+# checkouts, not packages owned by this checkout. `scripts/ci/ci-workflow.test.ts`
+# cross-checks this list against an independent enumeration so the discovery
+# can't be quietly narrowed.
 #
 # Note: `tsconfig.base.json` is `extends`-only (no `include`) and is NOT named
 # `tsconfig.json`, so `find -name tsconfig.json` correctly skips it.
@@ -23,7 +25,9 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$ROOT" || exit 2
 
 discover() {
-  find . -name tsconfig.json -not -path '*/node_modules/*' \
+  find . -name tsconfig.json \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.claude/*' \
     | sed 's|^\./||' \
     | LC_ALL=C sort
 }

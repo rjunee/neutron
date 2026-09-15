@@ -714,10 +714,10 @@ describe('an idempotent re-emit does not buzz twice — real ButtonStore', () =>
       push: { app: () => live },
       notify: suppressPushWhileWebForeground({
         sink: s.notify,
-        isWebForeground: () => presence.isForeground('acct-2'),
+        isWebForeground: (project_id) => presence.isForeground('acct-2', project_id),
       }),
     })
-    presence.foreground('acct-2', 'browser')
+    presence.foreground('acct-2', null, 'browser')
     const first = await deliver('app:acct-2', approval)
     expect(first.persisted).toBe(true)
     expect(first.delivered_live).toBe(true)
