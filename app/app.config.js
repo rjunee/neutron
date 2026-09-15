@@ -29,6 +29,7 @@ const { expo } = require('./app.json')
 module.exports = () => ({
   expo: {
     ...expo,
+    plugins: [...expo.plugins, './plugins/with-native-crash-reporting'],
     android: {
       ...expo.android,
       // EAS supplies an absolute path; a local build falls back to the
