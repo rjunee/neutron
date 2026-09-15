@@ -28,6 +28,7 @@ let db: ProjectDb
 let skillsDir: string
 let notifier: CapturingNotifier
 let forge: SkillForge
+let now: number
 
 const workflow: CompletedWorkflow = {
   project_slug: 'p',
@@ -59,8 +60,9 @@ beforeEach(() => {
   db = ProjectDb.open(dbPath)
   skillsDir = join(tmp, 'owner-data', 'skills')
   notifier = new CapturingNotifier()
+  now = 1000
   forge = new SkillForge({
-    store: new SkillForgeProposalsStore({ db, now: () => 1000 }),
+    store: new SkillForgeProposalsStore({ db, now: () => now }),
     notifier,
     skillsDir,
   })
@@ -100,6 +102,36 @@ test('the same workflow is not re-proposed while a proposal is pending', async (
   const second = await forge.onWorkflowCompleted(workflow)
   expect(second).toBeNull()
   expect(notifier.calls.length).toBe(1)
+})
+
+test('different installs with the same step shape are proposed once each', async () => {
+  const first = await forge.onWorkflowCompleted(workflow)
+  await forge.approve(first!.id)
+
+  now += 86_400_001
+  const differentInstall = { ...workflow, intent: 'Scrape a release and file it to the changelog' }
+  const second = await forge.onWorkflowCompleted(differentInstall)
+  expect(second).not.toBeNull()
+
+  await forge.approve(second!.id)
+  now += 86_400_001
+  expect(await forge.onWorkflowCompleted(workflow)).toBeNull()
+  expect(notifier.calls.map((call) => call.proposal.workflow.intent)).toEqual([
+    workflow.intent,
+    differentInstall.intent,
+  ])
+})
+
+test('proposal creation allows at most one pending and at most one new proposal per 24 hours', async () => {
+  const first = await forge.onWorkflowCompleted(workflow)
+  const differentInstall = { ...workflow, intent: 'Scrape a release and file it to the changelog' }
+  expect(await forge.onWorkflowCompleted(differentInstall)).toBeNull()
+
+  await forge.decline(first!.id)
+  expect(await forge.onWorkflowCompleted(differentInstall)).toBeNull()
+
+  now += 86_400_001
+  expect(await forge.onWorkflowCompleted(differentInstall)).not.toBeNull()
 })
 
 test('approve distills + registers a native SKILL.md pack that survives a fresh session', async () => {
@@ -149,6 +181,7 @@ test('decline creates nothing and marks the proposal declined', async () => {
   expect(listPacks()).toEqual([])
 
   // A declined workflow CAN be re-proposed on a later run (user may reconsider).
+  now += 86_400_001
   const reproposed = await forge.onWorkflowCompleted(workflow)
   expect(reproposed).not.toBeNull()
 })

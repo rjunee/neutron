@@ -145,6 +145,15 @@ function run(opts: RunOpts = {}): {
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
+  test('resumes the requested Codex thread', () => {
+    const { status, codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_THREAD_ID: 'thread-42' },
+    })
+    expect(status).toBe(0)
+    expect(codexArgv.split('\n').slice(0, 3)).toEqual(['exec', 'resume', 'thread-42'])
+  })
   test('no CODEX_HOME → exit 10 (not connected, graceful)', () => {
     const { status, stderr } = run({ noCodexHome: true })
     expect(status).toBe(10)

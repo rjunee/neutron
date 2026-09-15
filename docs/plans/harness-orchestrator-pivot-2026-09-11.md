@@ -245,8 +245,8 @@ control flow lived inside an LLM turn on **one shared launcher REPL** hosting ev
 workflows in-process. One run's fire turn overran the 3-minute settle budget →
 `inner-loop.ts` cancelled it → the session was marked poisoned → the next run to fire
 evicted it with SIGKILL → every workflow inside died (the Argus panel at
-`inner-workflow.mjs:5995`, the arbiter, cleanup). 23 of 25 hang-reaps were preceded by an
-eviction. Only the codex build was detached (`inner-workflow.mjs:1878`, `nohup setsid`)
+`pre-#845 trident/inner-workflow.mjs:5995`, the arbiter, cleanup). 23 of 25 hang-reaps were preceded by an
+eviction. Only the codex build was detached (`pre-#845 trident/inner-workflow.mjs:1878`, `nohup setsid`)
 and therefore survived.
 
 **#501** (merged 2026-09-11) stops that chain while the shared REPL exists. **One

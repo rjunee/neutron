@@ -291,6 +291,29 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-14 — Forgotten ritual approvals re-raise daily, at most three times (#586).
+
+The owner chose a 24-hour interval because a weekly reminder would arrive after
+its gated work was stale, and a cap of three because a fourth identical prompt
+becomes noise. An unanswered grant expires with a retained reason at the next
+daily boundary after the third reminder. Unknown age expires with a reason;
+answered grants never re-raise. The policy is maintained by a supervised sweep,
+independent of agent activity. Acceptance lives in
+`docs/spec-items/stale-approval-is-re-raised.md`.
+### 2026-09-14 — Reminder fired means observed durable delivery (#553).
+
+A scheduler attempt is not a delivery receipt. Persist each occurrence's attempt
+count before dispatch and record delivered, known-not-delivered, or not-yet-known
+separately from scheduling status. Only affirmative durable outbound acceptance
+sets a one-shot fired stamp. Missing acknowledgements remain unknown, including
+a crash after sending; retries can duplicate that send. Five attempts and a
+one-hour occurrence window bound retries across restarts. Exhaustion records
+undelivered disposition without inventing a negative observation; recurring
+schedules advance independently. A delivered ritual failure notice counts as a
+turn; silent and skipped rituals do not. Live push and human read receipts are
+outside this delivery boundary.
+
+
 ### 2026-09-14 — Worker prompt evidence overrides elapsed-time inference (#754).
 
 A current interactive selection prompt — a live `❯` cursor, a sibling option and

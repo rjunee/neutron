@@ -58,7 +58,7 @@ afterEach(() => {
 
 const recordingDispatcher = (): ReminderDispatcher & { fired: Reminder[] } => {
   const fired: Reminder[] = []
-  return { fired, dispatch: async (r) => { fired.push(r) } }
+  return { fired, dispatch: async (r) => { fired.push(r); return { state: 'delivered' } } }
 }
 
 /** Render an instant as `HH:mm` on a given zone's wall clock. This is the

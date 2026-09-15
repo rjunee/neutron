@@ -28,7 +28,7 @@ const recordingDispatcher = (): ReminderDispatcher & { fired: Reminder[] } => {
   const fired: Reminder[] = []
   return {
     fired,
-    dispatch: async (r) => { fired.push(r) },
+    dispatch: async (r) => { fired.push(r); return { state: 'delivered' } },
   }
 }
 
@@ -69,6 +69,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const dispatcher: ReminderDispatcher = {
       dispatch: async (r) => {
         if (r.message === 'fail') throw new Error('nope')
+        return { state: 'delivered' }
       },
     }
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
@@ -78,12 +79,8 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(store.listPending('t1').map((r) => r.message)).toEqual(['fail'])
   })
 
-  // #319 — crash-window dedup. The row is CLAIMED (status flipped fired /
-  // recurrence advanced) BEFORE the post is attempted, so a process crash
-  // anywhere during the send leaves an already-claimed row that a post-restart
-  // `listDue` will not return — no double-send. The pre-fix loop marked fired
-  // only AFTER the post, leaving a `pending` due row across the crash window.
-  test('#319 one-shot row is claimed (fired) BEFORE the post, so a crash mid-send cannot re-fire', async () => {
+  // Delivery is observed after dispatch; attempts are persisted separately.
+  test('one-shot stays pending during the post and fires only after observation', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const r = await store.create({
@@ -100,14 +97,14 @@ describe('ReminderTickLoop.runOnce', () => {
         // Observe the persisted row at the instant the post is attempted.
         probe.status = store.get(rem.id)?.status ?? null
         postCount++
+        return { state: 'delivered' }
       },
     }
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
 
     await loop.runOnce()
-    // The claim is committed BEFORE the dispatcher posts: a crash right after a
-    // successful post finds an already-fired row.
-    expect(probe.status).toBe('fired')
+    // An in-flight attempt is not delivery evidence.
+    expect(probe.status).toBe('pending')
     expect(postCount).toBe(1)
     expect(store.get(r.id)?.status).toBe('fired')
 
@@ -116,7 +113,7 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(postCount).toBe(1)
   })
 
-  test('#319 recurring row is advanced PAST due BEFORE the post, so a crash mid-send cannot re-fire', async () => {
+  test('recurring row advances only after the post is observed', async () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000
     const r = await store.createRecurring({
@@ -132,15 +129,15 @@ describe('ReminderTickLoop.runOnce', () => {
       dispatch: async (rem) => {
         probe.fireAt = store.get(rem.id)?.fire_at ?? null
         postCount++
+        return { state: 'delivered' }
       },
     }
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
 
     await loop.runOnce()
-    // fire_at was rolled forward to the next occurrence BEFORE the post — so it
-    // is no longer due, and a crash-restart tick won't re-fire it.
+    // The occurrence remains due until the post is observed.
     expect(probe.fireAt).not.toBeNull()
-    expect(probe.fireAt!).toBeGreaterThan(now_sec)
+    expect(probe.fireAt!).toBe(r.fire_at)
     expect(postCount).toBe(1)
     expect(store.get(r.id)?.status).toBe('pending') // recurring stays pending
 
@@ -148,9 +145,9 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(postCount).toBe(1) // not due → no double-send
   })
 
-  test('#319 a caught dispatch throw REVERTS the claim so the row retries (one-shot)', async () => {
+  test('a caught dispatch throw leaves the row pending for a bounded retry', async () => {
     const store = new ReminderStore(db)
-    const now = 10_000_000
+    let now = 10_000_000
     const r = await store.create({
       owner_slug: 't1',
       topic_id: null,
@@ -162,22 +159,24 @@ describe('ReminderTickLoop.runOnce', () => {
       dispatch: async () => {
         attempts++
         if (attempts === 1) throw new Error('outbound post rejected — left pending for retry')
+        return { state: 'delivered' }
       },
     }
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
 
     await loop.runOnce()
-    // First tick claimed then the post failed → claim reverted to pending.
+    // First tick received no delivery observation; the row remains pending.
     expect(store.get(r.id)?.status).toBe('pending')
     expect(store.get(r.id)?.fired_at).toBeNull()
 
-    // Second tick re-fires the still-pending row and succeeds.
+    // Retry on the next cadence, then observe delivery.
+    now += 30_000
     await loop.runOnce()
     expect(attempts).toBe(2)
     expect(store.get(r.id)?.status).toBe('fired')
   })
 
-  test('#319 a caught dispatch throw REVERTS the claim so the recurring row stays due', async () => {
+  test('a caught dispatch throw leaves the recurring occurrence due', async () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000
     const initial_fire = now_sec - 10
@@ -196,14 +195,14 @@ describe('ReminderTickLoop.runOnce', () => {
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
 
     await loop.runOnce()
-    // The advance was reverted: the row is still due at its original fire_at.
+    // Without delivery the row remains due at its original fire_at.
     const after = store.get(r.id)
     expect(after?.status).toBe('pending')
     expect(after?.fire_at).toBe(initial_fire)
     expect(store.listDue(now_sec).map((x) => x.id)).toContain(r.id)
   })
 
-  test('#319 a concurrent reschedule during dispatch is NOT clobbered by the claim revert', async () => {
+  test('a concurrent reschedule during dispatch survives settlement', async () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000
     const initial_fire = now_sec - 10
@@ -218,7 +217,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const dispatcher: ReminderDispatcher = {
       dispatch: async (rem) => {
         // Simulate the owner rescheduling WHILE the (long) dispatch is in
-        // flight — the claim already advanced fire_at; this overrides it.
+        // flight — preserve the new schedule when settling the old occurrence.
         await store.reschedule(rem.id, owner_new_fire)
         throw new Error('post failed after the owner rescheduled')
       },
@@ -226,8 +225,7 @@ describe('ReminderTickLoop.runOnce', () => {
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
 
     await loop.runOnce()
-    // The revert is a CAS keyed on the claimed fire_at, so the owner's new time
-    // survives — it is NOT overwritten back to the original due time.
+    // Settlement checks the occurrence identity and preserves the owner's new time.
     const after = store.get(r.id)
     expect(after?.status).toBe('pending')
     expect(after?.fire_at).toBe(owner_new_fire)
@@ -509,7 +507,7 @@ describe('ReminderTickLoop — one dispatch path for every row', () => {
     expect(store.get(row.id)?.status).toBe('fired')
   })
 
-  test('a dispatch THROW reverts the claim for a ritual row, exactly as for a nudge', async () => {
+  test('a dispatch THROW preserves the pending ritual occurrence, exactly as for a nudge', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
     const row = await store.create({

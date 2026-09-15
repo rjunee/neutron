@@ -58,9 +58,8 @@ is the thing being rebuilt.
       reading the old file top to bottom — and pin each. A gate silently lost in a rewrite
       is the most likely real defect in this whole item.
 
-- [ ] **The run still cannot mutate the Work Board.** `trident/escalation-block.test.ts`
-      holds this line today ("the run cannot REORDER the board"; "the reconcile is handed
-      ONE board verb"). It must still pass, unmodified, against the rebuilt loop.
+The removed Work Board mutation box was agent-authored and appears in no governing spec;
+it is not an owner requirement and must not be reinstated as acceptance criteria.
 
 - [ ] **A card is dispatched and reaches MERGED with no human touching it.** The owner's own
       definition of "trident works", and the only criterion here that is about the product

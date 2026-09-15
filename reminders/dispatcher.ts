@@ -36,6 +36,7 @@ import {
 } from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
+import type { DeliveryObservation } from './delivery.ts'
 import type { ReminderDispatcher } from './tick.ts'
 import { RITUAL_TIMEOUT_MS } from './rituals.ts'
 import {
@@ -60,7 +61,7 @@ export interface ReminderOutboundInput {
 
 export interface ReminderOutbound {
   /** Deliver one composed reminder to a topic. Returns true when accepted. */
-  post(input: ReminderOutboundInput): boolean | Promise<boolean>
+  post(input: ReminderOutboundInput): boolean | void | Promise<boolean | void>
 }
 
 /** Gathers live context (calendar / STATUS / project state) for a fire. */
@@ -523,206 +524,178 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       : (explicit_topic ?? general_topic_id)
   }
 
-  async function post(reminder: Reminder, topic_id: string, body: string): Promise<boolean> {
-    const accepted = await input.outbound.post({
-      topic_id,
-      owner_slug: reminder.owner_slug,
-      body,
-      reminder_id: reminder.id,
-    })
-    return accepted !== false
-  }
-
-  /**
-   * Fire an approved ritual: ONE turn on the owner's normal session, posted
-   * through the ONE delivery seam, then the ledger closed.
-   *
-   * Everything here except "which prompt" and "write it down" is the nudge path
-   * verbatim — same `composeTurn`, same `post`, same topic resolution. What
-   * differs is the failure posture, and only because the two genuinely differ: a
-   * nudge has a literal body to degrade to, a ritual has none, so a ritual that
-   * composes nothing is a recorded FAILURE with a one-line notice rather than a
-   * silently-degraded post.
-   */
-  async function fireRitual(
-    reminder: Reminder,
-    plan: RitualFirePlan,
-    topic_id: string,
-    project_id: string,
-  ): Promise<void> {
-    const outcome = await composeTurn({
-      reminder,
-      prompt: plan.prompt,
-      project_id,
-      model_preference: [resolveRitualModel()],
-      max_tokens: RITUAL_MAX_TOKENS,
-      timeout_ms: RITUAL_TIMEOUT_MS,
-    })
-    if (!outcome.ok) {
-      // FAILED. Record the ACTUAL CAUSE and say so out loud (ISSUES #506): the
-      // previous lane logged a ritual failure at debug (so journalctl never named
-      // the ritual in the whole window) and wrote a tautological reason (so the
-      // ledger did not name the cause either) — leaving a failed morning brief with
-      // literally no diagnosable trace on either surface. An unattended failure has
-      // to be answerable from the logs OR the ledger; here it is both.
-      dispatcherLog.error('ritual_fire_failed', {
-        reminder: reminder.id,
-        ritual_id: plan.ritual_id,
-        run_id: plan.run_id,
-        reason: outcome.reason,
-      })
-      const notices = await plan.settle({ status: 'failed', detail: outcome.reason })
-      for (const notice of notices) await post(reminder, topic_id, notice)
-      return
-    }
-    const body = outcome.text
-    // A `silent` ritual suppresses SUCCESS output only — its failure notices
-    // above still post. Settle FIRST either way: the durable row is the record,
-    // and it must exist before the output can reach the owner.
-    const notices = await plan.settle({ status: 'finished', body })
-    for (const notice of notices) await post(reminder, topic_id, notice)
-    if (plan.silent) return
-    const posted = await post(reminder, topic_id, body)
-    if (!posted) {
-      throw new Error(
-        `ritual ${plan.ritual_id} outbound post rejected for topic ${topic_id} — left pending for retry`,
-      )
-    }
-  }
-
   return {
-    async dispatch(reminder: Reminder): Promise<void> {
-      // ONE question per due row, asked before anything else: what does this row
-      // compose from? There is no `ritual_id` branch in `reminders/tick.ts` and no
-      // second executor — a ritual and a nudge reach the substrate and the owner
-      // through the code below, together (ISSUES #504).
-      const decision: RitualFireDecision =
-        ritual_planner !== undefined ? await ritual_planner.plan(reminder) : { kind: 'nudge' }
-
-      if (decision.kind === 'skipped') {
-        // Fail-closed refusal (unknown / unapproved / edited prompt / missing
-        // file). A durable `code_ritual_runs` 'skipped' row already landed inside
-        // the planner. Post NOTHING and return normally so the tick keeps its
-        // claim — an unapproved ritual must not retry every 30 s forever.
-        log(`reminder ${reminder.id} ritual ${decision.ritual_id} skipped: ${decision.reason}`)
-        return
+    async dispatch(reminder: Reminder): Promise<DeliveryObservation> {
+      // Per-dispatch observation: even a later exception cannot erase a delivered turn.
+      const receipt: { observation: DeliveryObservation; attempted: boolean } = {
+        observation: { state: 'known-not-delivered', reason: 'dispatch completed without posting a turn' },
+        attempted: false,
       }
-
-      if (decision.kind === 'fire') {
-        const explicit_topic = reminder.topic_id ?? null
-        await fireRitual(
-          reminder,
-          decision.plan,
-          topicFor(reminder, explicit_topic),
-          deriveReminderProjectId(reminder),
-        )
-        return
-      }
-
-      // A RITUAL ROW WITH NO PLANNER MUST POST NOTHING — it must never fall through
-      // to the nudge path below.
-      //
-      // `ritual_planner` is null on a box with no LLM (`open/composer.ts` —
-      // `init_ritual_planner` never runs), and the decision above then reads
-      // `{ kind: 'nudge' }` for EVERY row including ritual rows. A ritual row's
-      // stored `message` is the dispatch token `ritual:<id>`
-      // (`reminders/ritual-registration.ts:982`), so composing it as an ordinary
-      // nudge puts that token through `classifyReminderMessage` as literal intent —
-      // and the owner's lock screen reads `ritual:kaizen`. That is the exact symptom
-      // this whole lane exists to remove, arriving by a second route.
-      //
-      // The comment on `ritualPlanner` called the fall-through "fail-closed: nothing
-      // reads a ritual's prompt". True and beside the point: the prompt is protected,
-      // the NOTIFICATION is not. Fail-closed here means posting nothing at all, the
-      // same posture as the planner's own `skipped`.
-      //
-      // Keyed on `reminder.ritual_id` (`reminders/store.ts:59`), not on the shape of
-      // the message text — the column is what makes the row a ritual, and a prefix
-      // test would also swallow a plain reminder the owner happened to word that way.
-      //
-      // ⚠️ REFUSING TO COMPOSE IS ONLY HALF OF IT: THE OCCURRENCE IS CONSUMED HERE.
-      // Returning normally leaves the tick loop's pre-dispatch claim standing, so
-      // `markFired`/`advanceRecurrence` retires this occurrence — and the first
-      // version of this guard did that with a `log()` that defaults to DEBUG and
-      // nothing else. That is the ISSUES #506 shape exactly: a scheduled ritual
-      // vanished with no post, no ledger row, no journal line at the default level,
-      // and no way for the owner to tell it apart from a ritual he never scheduled.
-      // `reminders/AGENTS.md` states the contract the other way round — for a
-      // ritual, "a failure is recorded + noticed instead". So both happen here.
-      //
-      // WHY CONSUME RATHER THAN THROW. Throwing would revert the claim and retry
-      // next tick, which on an instance with no model credential means every 30 s
-      // forever for a condition that cannot resolve without an operator. That is
-      // the same reasoning the planner's own `skipped` branch above is built on.
-      //
-      // WHY NO `code_ritual_runs` ROW. The ledger writer and the run-id mint both
-      // live inside the planner, which is the thing that is absent, and 'skipped'
-      // rows are constrained to a fixed `skip_reason` set at the schema level
-      // (`migrations/0106_ritual_schema.sql`) that has no member for this state.
-      // The record is therefore the error-level log line, and the notice is what
-      // reaches the owner — the "answerable from the logs OR the ledger" bar
-      // `fireRitual` states below, met on the log side.
-      if (reminder.ritual_id !== null && reminder.ritual_id.length > 0) {
-        dispatcherLog.error('ritual_unplannable', {
-          reminder: reminder.id,
-          ritual_id: reminder.ritual_id,
-          reason: 'no ritual planner is wired on this instance',
-        })
-        const notice_topic_id = topicFor(reminder, reminder.topic_id ?? null)
-        const noticed = await post(
-          reminder,
-          notice_topic_id,
-          formatRitualUnplannableNotice({ ritual_id: reminder.ritual_id }),
-        )
-        // A rejected notice means the owner learned nothing, so the occurrence must
-        // NOT be consumed, and the #319 contract holds (this throws before any
-        // successful delivery).
-        //
-        // WHICH SITES THIS MATCHES, NAMED — the earlier wording ("the two sibling
-        // post sites") was read by review as claiming parity with ALL of them, which
-        // is false and worth being exact about. It matches the two DELIVERABLE
-        // posts: the nudge body below, and `fireRitual`'s ritual body. It does NOT
-        // match the SETTLE-NOTICE loops in `fireRitual`, which discard `post`'s
-        // boolean — so a rejected settle notice still retires the occurrence with
-        // neither output nor notice, which is the ISSUES #506 shape surviving in one
-        // corner. That is pre-existing behaviour and a separate fix (the loops need
-        // to collect their rejections without losing the ledger write that must
-        // precede them); it is not what this guard changed, and this comment no
-        // longer implies otherwise.
-        if (!noticed) {
-          throw new Error(
-            `reminder ${reminder.id} ritual ${reminder.ritual_id} unplannable notice rejected for topic ${notice_topic_id} — left pending for retry`,
-          )
+      try {
+        await dispatchBody()
+      } catch (error) {
+        if (!receipt.attempted) {
+          receipt.observation = { state: 'not-yet-known', reason: String(error) }
         }
-        return
+      }
+      return receipt.observation
+
+      async function post(reminder: Reminder, topic_id: string, body: string): Promise<void> {
+        receipt.attempted = true
+        if (receipt.observation.state !== 'delivered') {
+          receipt.observation = { state: 'not-yet-known', reason: 'outbound has not confirmed delivery' }
+        }
+        const accepted = await input.outbound.post({
+          topic_id,
+          owner_slug: reminder.owner_slug,
+          body,
+          reminder_id: reminder.id,
+        })
+        if (accepted === true) receipt.observation = { state: 'delivered' }
+        else if (accepted === false && receipt.observation.state !== 'delivered') {
+          receipt.observation = { state: 'known-not-delivered', reason: 'outbound post rejected' }
+        }
       }
 
-      const shape = classifyReminderMessage(reminder.message)
-      // A reminder whose stored `message` is empty/whitespace (the Reminders
-      // Core create path, unlike the app surface, has no non-empty guard) has
-      // no deliverable intent — even the LLM has nothing to compose from.
-      // Skip the post (and the wasted compose turn) and return normally so the
-      // tick advances the row rather than re-firing an empty body forever.
-      if (literalFallback(shape).trim().length === 0) {
-        log(`reminder ${reminder.id} has empty message — skipping empty-body fire`)
-        return
+      /**
+       * Fire an approved ritual: ONE turn on the owner's normal session, posted
+       * through the ONE delivery seam, then the ledger closed.
+       *
+       * Everything here except "which prompt" and "write it down" is the nudge path
+       * verbatim — same `composeTurn`, same `post`, same topic resolution. What
+       * differs is the failure posture, and only because the two genuinely differ: a
+       * nudge has a literal body to degrade to, a ritual has none, so a ritual that
+       * composes nothing is a recorded FAILURE with a one-line notice rather than a
+       * silently-degraded post.
+       */
+      async function fireRitual(
+        reminder: Reminder,
+        plan: RitualFirePlan,
+        topic_id: string,
+        project_id: string,
+      ): Promise<void> {
+        const outcome = await composeTurn({
+          reminder,
+          prompt: plan.prompt,
+          project_id,
+          model_preference: [resolveRitualModel()],
+          max_tokens: RITUAL_MAX_TOKENS,
+          timeout_ms: RITUAL_TIMEOUT_MS,
+        })
+        if (!outcome.ok) {
+          // FAILED. Record the ACTUAL CAUSE and say so out loud (ISSUES #506): the
+          // previous lane logged a ritual failure at debug (so journalctl never named
+          // the ritual in the whole window) and wrote a tautological reason (so the
+          // ledger did not name the cause either) — leaving a failed morning brief with
+          // literally no diagnosable trace on either surface. An unattended failure has
+          // to be answerable from the logs OR the ledger; here it is both.
+          dispatcherLog.error('ritual_fire_failed', {
+            reminder: reminder.id,
+            ritual_id: plan.ritual_id,
+            run_id: plan.run_id,
+            reason: outcome.reason,
+          })
+          const notices = await plan.settle({ status: 'failed', detail: outcome.reason })
+          for (const notice of notices) await post(reminder, topic_id, notice)
+          return
+        }
+        const body = outcome.text
+        // A `silent` ritual suppresses SUCCESS output only — its failure notices
+        // above still post. Settle FIRST either way: the durable row is the record,
+        // and it must exist before the output can reach the owner.
+        const notices = await plan.settle({ status: 'finished', body })
+        for (const notice of notices) await post(reminder, topic_id, notice)
+        if (plan.silent) return
+        await post(reminder, topic_id, body)
       }
-      const explicit_topic = reminder.topic_id ?? shape.routing_topic ?? null
-      const destination_project_id = deriveReminderProjectId(reminder)
-      const topic_id = topicFor(reminder, explicit_topic)
-      const body = await compose(reminder, shape, destination_project_id)
-      const accepted = await post(reminder, topic_id, body)
-      // A rejected durable post (e.g. the chat history write failed) MUST NOT
-      // let the row stay claimed/fired — that would silently consume a reminder
-      // that never reached the user. Throw so the tick loop reverts the
-      // pre-dispatch claim and leaves the row pending to retry next tick. The
-      // tick loop treats EVERY caught dispatch throw as "post did not happen"
-      // (#319), which holds because the dispatcher only ever throws BEFORE a
-      // successful delivery, never after one.
-      if (accepted === false) {
-        throw new Error(
-          `reminder ${reminder.id} outbound post rejected for topic ${topic_id} — left pending for retry`,
-        )
+
+      async function dispatchBody(): Promise<void> {
+        // ONE question per due row, asked before anything else: what does this row
+        // compose from? There is no `ritual_id` branch in `reminders/tick.ts` and no
+        // second executor — a ritual and a nudge reach the substrate and the owner
+        // through the code below, together (ISSUES #504).
+        const decision: RitualFireDecision =
+          ritual_planner !== undefined ? await ritual_planner.plan(reminder) : { kind: 'nudge' }
+
+        if (decision.kind === 'skipped') {
+          // Fail-closed refusal (unknown / unapproved / edited prompt / missing
+          // file). The planner records a skipped run. No post means known
+          // non-delivery, subject to the loop's finite retry budget.
+          log(`reminder ${reminder.id} ritual ${decision.ritual_id} skipped: ${decision.reason}`)
+          return
+        }
+
+        if (decision.kind === 'fire') {
+          const explicit_topic = reminder.topic_id ?? null
+          await fireRitual(
+            reminder,
+            decision.plan,
+            topicFor(reminder, explicit_topic),
+            deriveReminderProjectId(reminder),
+          )
+          return
+        }
+
+        // A RITUAL ROW WITH NO PLANNER MUST POST NOTHING — it must never fall through
+        // to the nudge path below.
+        //
+        // `ritual_planner` is null on a box with no LLM (`open/composer.ts` —
+        // `init_ritual_planner` never runs), and the decision above then reads
+        // `{ kind: 'nudge' }` for EVERY row including ritual rows. A ritual row's
+        // stored `message` is the dispatch token `ritual:<id>`
+        // (`reminders/ritual-registration.ts:982`), so composing it as an ordinary
+        // nudge puts that token through `classifyReminderMessage` as literal intent —
+        // and the owner's lock screen reads `ritual:kaizen`. That is the exact symptom
+        // this whole lane exists to remove, arriving by a second route.
+        //
+        // The comment on `ritualPlanner` called the fall-through "fail-closed: nothing
+        // reads a ritual's prompt". True and beside the point: the prompt is protected,
+        // the NOTIFICATION is not. Fail-closed here means posting nothing at all, the
+        // same posture as the planner's own `skipped`.
+        //
+        // Keyed on `reminder.ritual_id` (`reminders/store.ts:59`), not on the shape of
+        // the message text — the column is what makes the row a ritual, and a prefix
+        // test would also swallow a plain reminder the owner happened to word that way.
+        //
+        // Record the configuration failure and attempt a notice. Only affirmative
+        // acceptance counts as delivery; the loop bounds unsuccessful retries.
+        //
+        // WHY NO `code_ritual_runs` ROW. The ledger writer and the run-id mint both
+        // live inside the planner, which is the thing that is absent, and 'skipped'
+        // rows are constrained to a fixed `skip_reason` set at the schema level
+        // (`migrations/0106_ritual_schema.sql`) that has no member for this state.
+        // The record is therefore the error-level log line, and the notice is what
+        // reaches the owner — the "answerable from the logs OR the ledger" bar
+        // `fireRitual` states below, met on the log side.
+        if (reminder.ritual_id !== null && reminder.ritual_id.length > 0) {
+          dispatcherLog.error('ritual_unplannable', {
+            reminder: reminder.id,
+            ritual_id: reminder.ritual_id,
+            reason: 'no ritual planner is wired on this instance',
+          })
+          const notice_topic_id = topicFor(reminder, reminder.topic_id ?? null)
+          await post(
+            reminder,
+            notice_topic_id,
+            formatRitualUnplannableNotice({ ritual_id: reminder.ritual_id }),
+          )
+          return
+        }
+
+        const shape = classifyReminderMessage(reminder.message)
+        // A reminder whose stored `message` is empty/whitespace (the Reminders
+        // Core create path, unlike the app surface, has no non-empty guard) has
+        // no deliverable intent — even the LLM has nothing to compose from.
+        // Skip the post; the loop records non-delivery and bounds retries.
+        if (literalFallback(shape).trim().length === 0) {
+          log(`reminder ${reminder.id} has empty message — skipping empty-body fire`)
+          return
+        }
+        const explicit_topic = reminder.topic_id ?? shape.routing_topic ?? null
+        const destination_project_id = deriveReminderProjectId(reminder)
+        const topic_id = topicFor(reminder, explicit_topic)
+        const body = await compose(reminder, shape, destination_project_id)
+        await post(reminder, topic_id, body)
       }
     },
   }

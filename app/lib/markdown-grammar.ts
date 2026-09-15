@@ -99,7 +99,7 @@ void _inlineKindsFrozen;
 // ── URL sanitization ─────────────────────────────────────────────────────────
 
 /** Allow-list for tappable URLs in the frozen native renderer: `http(s)://`, the
- *  in-app `neutron://docs/` + `app://` schemes, and root-relative paths. The
+ *  in-app `neutron://docs/` + `app://` schemes, the exact Integrations link, and root-relative paths. The
  *  root-relative branch requires the leading `/` NOT be followed by another `/`
  *  or a `\` — otherwise a protocol-relative URL (`//host`, or `/\host` which a
  *  URL parser normalises to `//host`) would slip through as "root-relative" and
@@ -112,7 +112,7 @@ const URL_ALLOW = /^(https?:\/\/|neutron:\/\/docs\/|app:\/\/|\/(?![/\\]))/;
  *  schemes are dropped. Platform-free + exported so the sanitization contract is
  *  tested against PRODUCTION code rather than a copied regex. */
 export function isAllowedUrl(url: string): boolean {
-  return URL_ALLOW.test(url);
+  return url === 'neutron://integrations' || URL_ALLOW.test(url);
 }
 
 // ── Block parser ─────────────────────────────────────────────────────────────

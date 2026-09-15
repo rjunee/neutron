@@ -167,11 +167,8 @@ describe('rituals_propose / rituals_status — UNWIRED (fail closed)', () => {
 /**
  * #510 — `rituals_reapprove`, the way BACK to a pending approval.
  *
- * The boot sweep deliberately leaves a `pending` grant alone, on the stated ground
- * that "the prompt is already in front of him". That holds for about as long as it
- * takes the chat to scroll. `kaizen`'s two grants were raised 2026-08-03, never
- * answered, and the ritual has never once fired — `rituals_status` could SAY
- * "pending", but the only tappable buttons were in a four-day-old message.
+ * Automatic reminders now cover forgotten approvals at a bounded daily cadence.
+ * This tool also supports explicit reapproval at the owner's request.
  *
  * So the property under test is not "a method dispatches" but "there is a reachable
  * way to re-raise the prompt, and it does not decide anything on the owner's

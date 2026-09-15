@@ -144,6 +144,61 @@ describe('SwitchTimer', () => {
     t.mark('transcript')
     expect(records).toHaveLength(1)
   })
+
+  test('missing paint settles after two browser frames, independent of elapsed time', () => {
+    const clock = fakeClock()
+    const { emit, records } = collector()
+    const frames: Array<() => void> = []
+    const t = new SwitchTimer('a', 'b', {
+      now: clock.now,
+      emit,
+      visibility: () => 'visible',
+      requestFrame: (callback) => frames.push(callback),
+    })
+    t.mark('vm_published')
+    t.mark('transcript_read')
+    t.mark('transcript')
+
+    expect(records).toHaveLength(0)
+    expect(frames).toHaveLength(1)
+    clock.advance(60_000)
+    frames.shift()!()
+    expect(records).toHaveLength(0)
+    expect(frames).toHaveLength(1)
+    frames.shift()!()
+    expect(records).toHaveLength(1)
+    expect(records[0]!.paint).toBe('unknown')
+  })
+
+  test('hidden and unknown paint states do not collapse into one permissive outcome', async () => {
+    const hidden = collector()
+    const hiddenTimer = new SwitchTimer('a', 'b', {
+      emit: hidden.emit,
+      visibility: () => 'hidden',
+      requestFrame: () => { throw new Error('a hidden document must not request a frame') },
+    })
+    hiddenTimer.mark('vm_published')
+    hiddenTimer.mark('transcript_read')
+    hiddenTimer.mark('transcript')
+    expect(hidden.records).toHaveLength(0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hidden.records).toHaveLength(1)
+    expect(hidden.records[0]!.paint).toBe('not_painted')
+
+    const unknown = collector()
+    const unknownTimer = new SwitchTimer('a', 'b', {
+      emit: unknown.emit,
+      deadlineMs: 5,
+      visibility: () => 'unknown',
+    })
+    unknownTimer.mark('vm_published')
+    unknownTimer.mark('transcript_read')
+    unknownTimer.mark('transcript')
+    expect(unknown.records).toHaveLength(0)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(unknown.records).toHaveLength(1)
+    expect(unknown.records[0]!.paint).toBe('unknown')
+  })
 })
 
 describe('switch timing diagnostics', () => {
@@ -156,10 +211,13 @@ describe('switch timing diagnostics', () => {
       incomplete: false,
       superseded: false,
       servedFromCache: false,
+      paint: 'painted',
     }
 
     const report = buildSwitchReport(record, 123)
     const context = report.events[0]!.context
+    expect(report.schema).toBe(5)
+    expect(context.paint).toBe('painted')
     expect(context.marks).toEqual({
       vm_published: 5,
       frame_rendered: 8,
@@ -195,6 +253,7 @@ describe('switch timing diagnostics', () => {
       incomplete: true,
       superseded: false,
       servedFromCache: false,
+      paint: 'unknown',
     }
 
     expect(() => emit(record)).not.toThrow()

@@ -310,3 +310,14 @@ test('integrations_migrate_orphaned refuses on a fallback boot', async () => {
   expect(moved.total_moved).toBeGreaterThan(0)
   expect(moved.refused_direction).toBeUndefined()
 })
+
+
+test('#581 connect tool teaches provenance and a reachable alternative', async () => {
+  const { built } = await makeBench()
+  const connect = byName(built, 'integrations_connect')
+  expect(connect.description).toContain('only for a secret already legitimately held from an authorized non-chat source')
+  expect(connect.description).toContain('Never ask the owner to paste, send, upload or otherwise disclose credential material in chat')
+  expect(connect.description).toContain('owner-supplied material or unknown provenance')
+  expect(connect.description).toContain('[Integrations](neutron://integrations)')
+  expect(connect.description).toContain('ask only whether setup is complete')
+})

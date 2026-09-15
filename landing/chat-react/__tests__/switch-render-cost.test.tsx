@@ -402,7 +402,6 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
     timer.servedFromCache()
     t = 4
@@ -433,7 +432,6 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'gamma', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
     t = 4
     timer.mark('vm_published')
@@ -466,7 +464,6 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5_000,
     })
     timer.servedFromCache()
     t = 0.3
@@ -491,7 +488,6 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
     timer.servedFromCache()
     t = 4

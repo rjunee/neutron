@@ -138,7 +138,7 @@ interface ExpoMessage {
  * still exercised against the real thing.
  */
 function buildChain(opts: { approved: boolean; planner?: boolean; rejectPost?: boolean }): {
-  dispatch: (r: Reminder) => Promise<void>
+  dispatch: ReturnType<typeof buildReminderDispatcher>['dispatch']
   expo: ExpoMessage[]
   composeCalls: () => number
 } {
@@ -340,27 +340,16 @@ describe('a ritual row with NO PLANNER is refused, and the owner is TOLD', () =>
     expect(chain.expo[0]?.data?.kind).toBe('agent_message')
   })
 
-  test('the occurrence is CONSUMED, not thrown back for a 30s retry loop', async () => {
-    // The deliberate half of the posture, asserted so it cannot be "fixed" into a
-    // hot loop by a later reader. An instance with no model credential cannot plan
-    // this row on the next tick either, so throwing (which reverts the tick's claim,
-    // `reminders/tick.ts`) would re-fire it every 30 s until an operator intervenes.
-    // The occurrence is retired and the owner is told instead.
+  test('an accepted failure notice is an observed delivered turn', async () => {
     const chain = buildChain({ approved: true, planner: false })
-
-    await expect(chain.dispatch(await ritualRow('kaizen'))).resolves.toBeUndefined()
+    await expect(chain.dispatch(await ritualRow('kaizen'))).resolves.toEqual({ state: 'delivered' })
   })
 
-  test('a REJECTED notice throws, so the occurrence is not consumed in silence', async () => {
-    // The other half: consuming the occurrence is only acceptable because the owner
-    // was told. If the notice never landed, the row must stay pending — the same
-    // contract the nudge and ritual post sites hold (#319: the dispatcher only ever
-    // throws BEFORE a successful delivery).
+  test('a rejected notice reports known non-delivery for bounded retry', async () => {
     const chain = buildChain({ approved: true, planner: false, rejectPost: true })
-
-    await expect(chain.dispatch(await ritualRow('kaizen'))).rejects.toThrow(
-      /unplannable notice rejected/,
-    )
+    await expect(chain.dispatch(await ritualRow('kaizen'))).resolves.toEqual({
+      state: 'known-not-delivered', reason: 'outbound post rejected',
+    })
   })
 
   test('a PLAIN reminder still fires normally with no planner — the guard is keyed on the row, not the box', async () => {

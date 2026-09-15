@@ -869,12 +869,19 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
       expect(caller.pid).toBeDefined()
       await Bun.sleep(50)
       process.kill(-caller.pid!, 'SIGTERM')
-      // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: bun's
-      // default per-test timeout is 5 s, so a 10 s deadline could never expire — a child
-      // that never writes killed the test as a runner timeout ('timed out after 5000ms')
-      // and this named assertion never ran. 3 s is 12x the fixture's 250 ms child delay
-      // and still leaves 2 s of the runner's budget, so a real failure fails HERE, by name.
-      const deadline = Date.now() + 3_000
+      // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: a deadline
+      // past the per-test timeout can never expire, so a child that never writes kills the
+      // test as a runner timeout and this named assertion never runs. That invariant is
+      // why the explicit timeout below exists — the two move together.
+      //
+      // 3 s was 12x the fixture's 250 ms child delay and still failed FOUR CI runs at
+      // 3051 ms while passing every local run: the scarce resource on a shared runner is
+      // not the child's sleep, it is getting scheduled at all, and 8 concurrent shards
+      // starve a 250 ms sleep for seconds. Widening the margin does not weaken the
+      // property — the group is still SIGTERMed before the child can possibly finish, so
+      // a wrapper that failed to detach still fails here. It only stops the clock being
+      // the thing under test.
+      const deadline = Date.now() + 15_000
       while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(10)
       expect(existsSync(marker)).toBe(true)
       expect(readFileSync(marker, 'utf8')).toBe('done')
@@ -889,7 +896,9 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+    // 40 s, so the 15 s deadline above is REACHABLE and a genuine failure fails by name
+    // rather than as an anonymous runner timeout.
+  }, 40_000)
 
   test('an absent completion trailer is DEFERRED and names the killed wrapper artifacts', async () => {
     const { result, logs, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {

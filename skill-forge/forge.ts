@@ -5,7 +5,7 @@
  *
  *   onWorkflowCompleted(wf)
  *     → auditWorkflow (gate 1: is it skill-worthy?)
- *     → dedupe by signature (no re-nag while pending/approved)
+ *     → dedupe by install signature + throttle proposal frequency
  *     → distill a draft + persist a PENDING proposal
  *     → notify the user with the proposal message
  *     → return the proposal (NOTHING written to disk yet)
@@ -69,18 +69,15 @@ export class SkillForge {
   /**
    * Audit a completed workflow and, if worthy + not already proposed, surface
    * a PENDING proposal. Returns the proposal, or `null` when nothing was
-   * proposed (not worthy, or a duplicate). Writes no skill.
+   * proposed (not worthy, duplicate, or throttled). Writes no skill.
    */
   async onWorkflowCompleted(workflow: CompletedWorkflow): Promise<ProposalRecord | null> {
     const audit = auditWorkflow(workflow)
     if (!audit.worthy) return null
 
     const signature = workflowSignature(workflow)
-    const existing = await this.store.getActiveBySignature(signature)
-    if (existing !== null) return null
-
     const draft = distillSkill(workflow)
-    const proposal = await this.store.create({
+    const proposal = await this.store.createIfEligible({
       workflow_signature: signature,
       project_slug: workflow.project_slug,
       topic_id: workflow.topic_id ?? null,
@@ -90,6 +87,7 @@ export class SkillForge {
       artifacts: draft.artifacts,
       workflow,
     })
+    if (proposal === null) return null
 
     try {
       await this.notifier.notify(proposal, composeProposalMessage(proposal))

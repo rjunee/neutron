@@ -1,11 +1,11 @@
 /**
  * @neutronai/skill-forge — workflow signature.
  *
- * A stable hash of a completed workflow's normalized step sequence. Two runs
- * of the "same" workflow (same ordered actions) hash identically regardless of
- * volatile per-run args, so the proposals store can dedupe: a workflow is
+ * A stable hash of a completed workflow's normalized intent and step sequence.
+ * Two runs of the same install hash identically regardless of volatile per-run
+ * args, so the proposals store can dedupe: a workflow is
  * proposed at most once while a prior proposal for the same signature is still
- * pending or approved.
+ * pending or approved, subject to the proposal throttle.
  */
 
 import { createHash } from 'node:crypto'
@@ -45,11 +45,12 @@ function dropTrailingParenTail(s: string): string {
 }
 
 /**
- * Deterministic signature of a workflow's *shape* (its ordered, normalized
- * actions). Intent and artifacts are intentionally excluded — they vary per
- * run; the dedupe key is the procedure, not the payload.
+ * Deterministic signature of an install identity: normalized user intent plus
+ * its ordered, normalized actions. Artifacts are deliberately excluded because
+ * they are outputs of the run rather than identity of the requested install.
  */
 export function workflowSignature(workflow: CompletedWorkflow): string {
   const shape = workflow.steps.map((s) => normalizeAction(s.action)).join('>')
-  return createHash('sha256').update(shape).digest('hex').slice(0, 32)
+  const intent = workflow.intent.trim().toLowerCase().replace(/\s+/g, ' ')
+  return createHash('sha256').update(JSON.stringify([intent, shape])).digest('hex').slice(0, 32)
 }

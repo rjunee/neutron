@@ -19,6 +19,7 @@ installNativeHarness();
 setHarnessPlatform('ios');
 
 const { mountScreen } = await import('./support/mount');
+const { Alert } = await import('react-native');
 const { WorkBoardCompletedRow, WorkBoardRow } = await import('../components/WorkBoardRow');
 const { PHASE, THEME } = await import('../lib/theme');
 
@@ -74,7 +75,7 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
-  it("the dot calls this row's inspector callback, while status advance has its own control", async () => {
+  it('keeps the status dot inert and gives worker inspection its own labelled control', async () => {
     const opened: string[] = [];
     const advanced: string[] = [];
     const row = item({ id: 'item-a', title: 'Item A' });
@@ -83,12 +84,54 @@ describe('WorkBoardRow brief alerts (mobile)', () => {
       onInspect: () => opened.push(row.id), onAdvance: () => advanced.push(row.id),
       onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
     }));
+    const indicator = screen.byTestId('wb-status-indicator-item-a');
+    expect(indicator).not.toBeNull();
+    expect(indicator?.getAttribute('role')).toBeNull();
+    indicator?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(opened).toEqual([]);
+    expect(advanced).toEqual([]);
     await screen.press('Inspect worker for Item A');
     expect(opened).toEqual(['item-a']);
     expect(opened).not.toContain('item-b');
     expect(advanced).toEqual([]);
-    await screen.press('Advance status');
-    expect(advanced).toEqual(['item-a']);
+    screen.unmount();
+  });
+
+  it('confirms the destructive done transition from its named control', async () => {
+    const advanced: string[] = [];
+    let confirm: (() => void) | undefined;
+    const originalAlert = Alert.alert;
+    Alert.alert = (_title, _message, buttons) => {
+      confirm = buttons?.find((button) => button.text === 'Mark done')?.onPress;
+    };
+    const row = item({ id: 'item-done', title: 'Finish me' });
+    const screen = await mountScreen(createElement(WorkBoardRow, {
+      item: row, busy: false, index: 0, laneCount: 1,
+      onAdvance: () => advanced.push(row.id),
+      onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+    }));
+    try {
+      await screen.press('Mark done');
+      expect(advanced).toEqual([]);
+      expect(confirm).toBeFunction();
+      confirm?.();
+      expect(advanced).toEqual(['item-done']);
+    } finally {
+      Alert.alert = originalAlert;
+      screen.unmount();
+    }
+  });
+
+  it('starts progress immediately from its named non-destructive control', async () => {
+    const advanced: string[] = [];
+    const row = item({ id: 'item-start', title: 'Start me', status: 'upcoming' });
+    const screen = await mountScreen(createElement(WorkBoardRow, {
+      item: row, busy: false, index: 0, laneCount: 1,
+      onAdvance: () => advanced.push(row.id),
+      onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+    }));
+    await screen.press('Start progress');
+    expect(advanced).toEqual(['item-start']);
     screen.unmount();
   });
 
