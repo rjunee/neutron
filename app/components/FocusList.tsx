@@ -43,7 +43,7 @@ import type {
   FocusStateError,
 } from '../lib/focus-state-reducer';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
-import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { FocusBucketSection } from './FocusBucketSection';
 import { FocusHeroCard } from './FocusHeroCard';
 
@@ -244,7 +244,7 @@ export function FocusList({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   listScroll: { flex: 1 },
   listContent: {
     padding: SPACING.lg,

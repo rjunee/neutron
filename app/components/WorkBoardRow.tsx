@@ -41,7 +41,7 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import {
   canPlay,
   dotState,
@@ -464,7 +464,7 @@ function IconButton({
 export const WorkBoardRow = memo(WorkBoardRowImpl);
 export const WorkBoardCompletedRow = memo(WorkBoardCompletedRowImpl);
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'column',
     gap: 1,

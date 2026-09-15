@@ -10,7 +10,7 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { FILTER_CHOICES, type FilterChoice } from '../lib/task-state-reducer';
 
 export interface TaskFilterChipsProps {
@@ -52,7 +52,7 @@ export function TaskFilterChips({ active, onSelect }: TaskFilterChipsProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'row',
     gap: SPACING.sm,

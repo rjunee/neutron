@@ -33,7 +33,7 @@
 
 import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 
 import { ReminderCreateModal } from '../../../components/ReminderCreateModal';
 import { ReminderEditModal } from '../../../components/ReminderEditModal';
@@ -46,7 +46,7 @@ import {
 } from '../../../lib/reminder-state';
 import type { ReminderItem } from '../../../lib/reminders-client';
 import { useAuthSession } from '../../../lib/session';
-import { SPACING, THEME } from '../../../lib/theme';
+import { createThemedStyles, SPACING, THEME } from '../../../lib/theme';
 
 export default function RemindersTab() {
   // ISSUE #38 — read both `id` (project segment) and `reminder_id`
@@ -170,7 +170,7 @@ function RemindersTabBody({ highlightReminderId }: { highlightReminderId: string
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

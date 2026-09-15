@@ -9,11 +9,24 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import {
+  createThemedStyles,
+  DARK_THEME,
+  DENSITY,
+  LIGHT_THEME,
+  MOTION,
+  resolveTheme,
+  readThemePreference,
+  setResolvedTheme,
+  SPACING,
+  THEME,
+  TYPOGRAPHY,
+  writeThemePreference,
+} from '../lib/theme';
 
 describe('THEME', () => {
   it('exports the locked P5.0 dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
-    expect(THEME).toEqual({
+    expect(DARK_THEME).toEqual({
       // LIFTED + BLUE-TINTED 2026-08-07 on owner feedback ("colors are too dark …
       // more variation between the chat bubbles and the background"). This lock
       // test is what forced the change to be deliberate — it did its job.
@@ -46,8 +59,64 @@ describe('THEME', () => {
     });
   });
 
-  it('is frozen — no consumer can mutate the palette at runtime', () => {
-    expect(Object.isFrozen(THEME)).toBe(true);
+  it('keeps both concrete palettes frozen', () => {
+    expect(Object.isFrozen(DARK_THEME)).toBe(true);
+    expect(Object.isFrozen(LIGHT_THEME)).toBe(true);
+  });
+
+  it('mirrors the web light palette for mobile semantic tokens', () => {
+    expect(LIGHT_THEME).toEqual({
+      background: '#ffffff', surface: '#f5f5f7', surface_raised: '#e9e9eb',
+      text_primary: '#1c1c1e', text_secondary: '#3a3f4a', text_muted: '#66666a',
+      accent: '#1064cc', hairline: '#d1d1d6', danger: '#c9252d', warning: '#8a5f00',
+      link: '#0b57d0', user_bubble: '#1064cc', user_ink: '#ffffff',
+      rail_selected: 'rgba(16,100,204,.12)', work: '#1064cc', attention: '#e0a020',
+      usage_nominal: '#1a7f37', usage_warning: '#b07407', usage_critical: '#c9252d',
+    });
+  });
+
+  it('resolves a different palette and existing themed style when appearance changes', () => {
+    setResolvedTheme('dark');
+    const styles = createThemedStyles({
+      page: { backgroundColor: THEME.background },
+      bubbleInk: { color: THEME.user_ink },
+      overlay: { backgroundColor: 'rgba(224,224,224,0.12)' },
+    });
+    expect(THEME.background).toBe('#101419');
+    expect(styles.page.backgroundColor).toBe('#101419');
+    expect(styles.bubbleInk.color).toBe('#ffffff');
+    expect(styles.overlay.backgroundColor).toBe('rgba(224,224,224,0.12)');
+
+    setResolvedTheme('light');
+    expect(THEME.background).toBe('#ffffff');
+    expect(styles.page.backgroundColor).toBe('#ffffff');
+    expect(styles.bubbleInk.color).toBe('#ffffff');
+    expect(styles.overlay.backgroundColor).toBe('rgba(16,100,204,0.12)');
+    setResolvedTheme('dark');
+  });
+
+  it('follows system unless an explicit persisted preference wins', () => {
+    expect(resolveTheme('system', 'light')).toBe('light');
+    expect(resolveTheme('system', 'dark')).toBe('dark');
+    expect(resolveTheme('dark', 'light')).toBe('dark');
+    expect(resolveTheme('light', 'dark')).toBe('light');
+  });
+
+  it('persists all three choices and defaults corrupt or unreadable storage to system', async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: async (key: string) => values.get(key) ?? null,
+      setItem: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+    for (const preference of ['light', 'dark', 'system'] as const) {
+      await writeThemePreference(storage, preference);
+      expect(await readThemePreference(storage)).toBe(preference);
+    }
+    values.set('neutron-theme', 'corrupt');
+    expect(await readThemePreference(storage)).toBe('system');
+    expect(await readThemePreference({ ...storage, getItem: async () => { throw new Error('unreadable'); } })).toBe('system');
   });
 });
 

@@ -19,7 +19,7 @@ import {
   View,
 } from 'react-native';
 
-import { THEME } from '../../lib/theme';
+import { createThemedStyles, THEME } from '../../lib/theme';
 import { type CommitSummary, type DocTreeNode } from '../../lib/docs-client';
 import { formatBytes, formatHistoryDate, treeIconFor } from './docs-shared';
 
@@ -524,7 +524,7 @@ export function RenameModal({ node, onClose, onRename }: RenameModalProps) {
   );
 }
 
-export const styles = StyleSheet.create({
+export const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: '#0a0a0a' },
   centered: { alignItems: 'center', justifyContent: 'center' },
   header: {

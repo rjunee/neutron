@@ -42,7 +42,6 @@ import {
   Modal,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   View,
   useWindowDimensions,
@@ -50,7 +49,7 @@ import {
 
 import { loadAppConfig } from '../../../lib/config';
 import { useAuthSession } from '../../../lib/session';
-import {
+import { createThemedStyles,
   BREAKPOINTS,
   MOTION,
   SPACING,
@@ -927,7 +926,7 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

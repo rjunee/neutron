@@ -17,7 +17,7 @@
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { LauncherEntry, LauncherIcon } from '../lib/launcher-client';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 /** Long-press delay — sits inside Apple HIG's 250–500ms band. */
 export const LONG_PRESS_DELAY = MOTION.fast * 2;
@@ -106,7 +106,7 @@ function LauncherIconView({ icon }: { icon: LauncherIcon }) {
   return <Text style={styles.tileEmoji}>🧩</Text>;
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   tileWrap: {
     // width is set per-instance from the `size` prop. The wrapper
     // exists so the inner Pressable's pressed-state border doesn't

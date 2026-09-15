@@ -46,7 +46,6 @@ import {
   Modal,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   View,
@@ -63,7 +62,7 @@ import {
 import { loadAppConfig } from '../../../lib/config';
 import { railIdToScope } from '../../../lib/project-rail-view';
 import { useAuthSession } from '../../../lib/session';
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { createThemedStyles, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
 import {
   ACTIVITY_POLL_MS,
   workActivityIndicator,
@@ -639,7 +638,7 @@ function WorkActivityStrip({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.md },
   statusStrip: {
     flexDirection: 'row',

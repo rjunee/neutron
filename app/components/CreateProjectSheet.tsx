@@ -25,7 +25,7 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { checkProjectName } from '../lib/create-project-helpers';
 
 export interface CreateProjectSheetProps {
@@ -133,7 +133,7 @@ export function CreateProjectSheet({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

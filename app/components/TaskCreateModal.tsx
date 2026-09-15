@@ -23,7 +23,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import type { CreateTaskInput } from '../lib/tasks-client';
 import { normalizeDueDate } from '../lib/task-formatters';
 
@@ -162,7 +162,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

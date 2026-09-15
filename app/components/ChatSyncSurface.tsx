@@ -62,7 +62,7 @@ import {
   type ChatInitialAnchor,
 } from '../lib/chat-core/chat-initial-anchor';
 import { activityLabel, useMobileChat } from '../lib/chat-core/use-mobile-chat';
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { useAuthSession } from '../lib/session';
 import { loadAppConfig } from '../lib/config';
 import { RenderMarkdown } from '../lib/markdown-render';
@@ -1422,7 +1422,7 @@ function EmptyState(): React.JSX.Element {
 // actually been down long enough to matter; the reasoning, and where the
 // per-message truth is carried instead, is documented in that file.
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   fill: { flex: 1, backgroundColor: THEME.background },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: SPACING.xl },
   listContent: { paddingVertical: SPACING.md, paddingHorizontal: SPACING.md },

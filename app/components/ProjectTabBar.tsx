@@ -30,7 +30,7 @@
 
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
-import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
 
@@ -203,7 +203,7 @@ const WIDE_ITEM_ACCENT_WIDTH = 3;
 
 const TAB_SEAT_RADIUS = 9;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
   // `surface` band with a bottom hairline; tabs sit on it as top-rounded
   // sheets, the active one fused to the content sheet below.

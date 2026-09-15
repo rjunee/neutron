@@ -65,7 +65,7 @@ import { copyToClipboard } from '../lib/clipboard';
 import { loadAppConfig } from '../lib/config';
 import { GitHubConnectClient, type GitHubConnectState } from '../lib/github-connect-client';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import {
   CoresClient,
   CoresClientError,
@@ -1189,7 +1189,7 @@ function formatErr(err: unknown): string {
   return String(err);
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
   centered: { alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.7 },

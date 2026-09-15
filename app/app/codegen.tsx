@@ -41,7 +41,7 @@ import {
   type PhaseOverride,
 } from '../lib/phase-models-client';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 
 function formatErr(err: unknown): string {
   return err instanceof Error ? err.message : 'something went wrong';
@@ -346,7 +346,7 @@ export default function CodeGenSettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
   centered: { alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.6 },
