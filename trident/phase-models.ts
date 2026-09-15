@@ -49,12 +49,13 @@
  * and a bare id does not. `gpt-5.6-terra` typed into the old text field looked like a
  * pin and was really a Claude-endpoint lookup for a model that is only reachable as a
  * subprocess — a build that quietly ran on the wrong model. A tier cannot be
- * ambiguous that way, and adding one is a single edit in `model-tiers.ts`, which is
- * what the hatch existed to avoid.
+ * ambiguous that way. Built-in defaults live in `model-tiers.ts`; additional API
+ * reviewers are configuration rows resolved through that registry.
  *
  * A stored value that is NOT a tier (an older build's literal pin, or a tier since
  * retired) is therefore invalid — and it degrades VISIBLY: it is rejected here, the
- * phase falls back to its default, and {@link ParsedPhaseModelConfig.rejected} carries
+ * parser records it in {@link ParsedPhaseModelConfig.rejected}; explicit peer seats
+ * are preserved by the launcher for named refusal. Other phases retain defaults with
  * the offending value so the pane can show it struck through and say so.
  *
  * ── TRANSPORT IS A CAPABILITY, so a phase cannot take just any tier ──────────
@@ -88,6 +89,7 @@ import {
   type Transport,
   isModelTier,
   modelTier,
+  modelTierRegistry,
 } from './model-tiers.ts'
 
 export { MODEL_TIERS, isModelTier }
@@ -252,7 +254,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     // build on a GPT tier, Opus on this seat is exactly the cross-family panel the
     // design wants. The owner composes the panel; a single-family one is warned about
     // at dispatch (`inner-workflow.mjs`, `trident.panel-single-family`), never vetoed.
-    dispatchGroups: ['none', 'claude', 'codex', 'kimi'],
+    dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'],
   },
   {
     key: 'review_kimi',
@@ -263,7 +265,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'k3', effort: 'high' },
     // Same as `review_codex` above — see the note there for why a Claude tier on a
     // cross-model seat is a stated choice and not the banned silent fallback.
-    dispatchGroups: ['none', 'claude', 'codex', 'kimi'],
+    dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'],
   },
   {
     key: 'synthesis',
@@ -286,6 +288,9 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'head-probe-round-', dynamic: true },
       { label: 'probe:codex-trailer-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
+      // The code-scanning twin is another fixed `gh api` read whose output is parsed
+      // by workflow code. It belongs on the same cheap mechanical seat as CI status.
+      { label: 'code-scanning-probe-round-', dynamic: true },
       // The BASE-side twin of the probe above: one `gh api` read of the same checks at
       // the commit the branch was cut from, transcribed verbatim. Same shape, same tier.
       { label: 'ci-base-probe-round-', dynamic: true },
@@ -586,7 +591,7 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           // Named in the message AND kept in `rejected`, so the pane can show what
           // was dropped instead of quietly reverting to the default.
           errors.push(
-            `phase '${key}': '${model}' is not a model tier — expected one of: ${MODEL_TIERS.join(', ')}`,
+            `phase '${key}': '${model}' is not a model tier — expected one of: ${modelTierRegistry().map((seat) => seat.tier).join(', ')}`,
           )
           reject(key, { model })
           continue

@@ -3,7 +3,7 @@
  *
  * The ONE place that maps a `Provider` string onto its concrete adapter
  * factory. Claude Code (`anthropic`) is the DEFAULT and primary orchestration
- * backend; `openai` (Responses API) and `openai-codex-cli` are alternates a
+ * backend; `openai` (Responses API) and `openai-codex` are alternates a
  * project can opt into behind the SAME locked `Substrate` interface.
  *
  * LAYERING — platform band. This module imports ONLY the three adapter
@@ -21,6 +21,7 @@
  */
 
 import type { Substrate } from '../substrate.ts'
+import { PROVIDERS, type Provider } from '../provider.ts'
 import {
   createClaudeCodeSubstrateAuto,
   type ClaudeCodeSubstrateOptions,
@@ -37,9 +38,11 @@ import {
 /**
  * The conversational/utility model provider a project can select. `anthropic`
  * (Claude Code) is the untouched default; `openai` is the OpenAI Responses API
- * adapter (BYO `OPENAI_API_KEY`); `openai-codex-cli` shells out to the Codex CLI.
+ * adapter (BYO `OPENAI_API_KEY`); `openai-codex` shells out to the Codex CLI.
+ * `pi` is part of the stored/build vocabulary but has no conversational adapter;
+ * selecting its factory therefore fails loudly below.
  */
-export type Provider = 'anthropic' | 'openai' | 'openai-codex-cli'
+export type { Provider } from '../provider.ts'
 
 /**
  * Discriminated factory result. The `create` function is the adapter factory
@@ -49,7 +52,7 @@ export type Provider = 'anthropic' | 'openai' | 'openai-codex-cli'
 export type SelectedSubstrateFactory =
   | { provider: 'anthropic'; create: (opts: ClaudeCodeSubstrateOptions) => Substrate }
   | { provider: 'openai'; create: (opts: GptResponsesApiSubstrateOptions) => Substrate }
-  | { provider: 'openai-codex-cli'; create: (opts?: CodexCliSubstrateOptions) => Substrate }
+  | { provider: 'openai-codex'; create: (opts?: CodexCliSubstrateOptions) => Substrate }
 
 /**
  * Capability descriptor for a provider — lets callers ask what a backend can do
@@ -83,7 +86,9 @@ export function providerCapabilities(provider: Provider): ProviderCapabilities {
       return { continuity: 'pool-key', nativeToolBridge: true }
     case 'openai':
       return { continuity: 'session-id', nativeToolBridge: false }
-    case 'openai-codex-cli':
+    case 'openai-codex':
+      return { continuity: 'session-id', nativeToolBridge: false }
+    case 'pi':
       return { continuity: 'session-id', nativeToolBridge: false }
     default: {
       const _exhaustive: never = provider
@@ -94,7 +99,38 @@ export function providerCapabilities(provider: Provider): ProviderCapabilities {
 }
 
 /** The known provider values, for validation + actionable error messages. */
-export const KNOWN_PROVIDERS: readonly Provider[] = ['anthropic', 'openai', 'openai-codex-cli']
+export const KNOWN_PROVIDERS: readonly Provider[] = PROVIDERS
+
+export function assertConversationalProviderWired(
+  provider: Provider,
+  source?: ProviderSelectionSource,
+): asserts provider is Exclude<Provider, 'pi'> {
+  if (provider === 'pi') {
+    throw new Error(`Provider 'pi' has no conversational substrate adapter. Selection source: ${source ?? 'unspecified'}.`)
+  }
+}
+
+export type ProviderSelectionSource = 'application' | 'instance' | 'project'
+
+export interface ProviderSelection {
+  provider: Provider
+  source: ProviderSelectionSource
+}
+
+/** Resolve the three-level provider hierarchy without collapsing an absent
+ * project override into an explicit choice. Most-specific non-empty value wins. */
+export function resolveProviderSelection(input: {
+  instance?: string | null
+  project?: string | null
+}): ProviderSelection {
+  if (input.project !== undefined && input.project !== null && input.project.trim() !== '') {
+    return { provider: normalizeProvider(input.project), source: 'project' }
+  }
+  if (input.instance !== undefined && input.instance !== null && input.instance.trim() !== '') {
+    return { provider: normalizeProvider(input.instance), source: 'instance' }
+  }
+  return { provider: 'anthropic', source: 'application' }
+}
 
 /**
  * Normalize a provider string to a known `Provider` — the single chokepoint that
@@ -116,7 +152,7 @@ export const KNOWN_PROVIDERS: readonly Provider[] = ['anthropic', 'openai', 'ope
 export function normalizeProvider(provider: string | undefined | null): Provider {
   if (provider === undefined || provider === null || provider.trim() === '') return 'anthropic'
   const v = provider.trim()
-  if (v === 'anthropic' || v === 'openai' || v === 'openai-codex-cli') return v
+  if (PROVIDERS.some((known) => known === v)) return v as Provider
   throw new Error(
     `Unknown model provider '${provider}'. Valid values: ${KNOWN_PROVIDERS.map((p) => `'${p}'`).join(
       ', ',
@@ -135,19 +171,20 @@ export function normalizeProvider(provider: string | undefined | null): Provider
  * site hardcodes today, so an absent/`'anthropic'` provider is a no-op.
  */
 export function selectSubstrateFactory(provider: Provider): SelectedSubstrateFactory {
+  assertConversationalProviderWired(provider)
   switch (provider) {
     case 'openai':
       return { provider: 'openai', create: createGptResponsesApiSubstrate }
-    case 'openai-codex-cli':
-      return { provider: 'openai-codex-cli', create: createCodexCliSubstrate }
+    case 'openai-codex':
+      return { provider: 'openai-codex', create: createCodexCliSubstrate }
     case 'anthropic':
       return { provider: 'anthropic', create: createClaudeCodeSubstrateAuto }
     default: {
       // Exhaustiveness guard: a new Provider variant that forgets a case is a
-      // compile error here. At runtime an unknown value degrades to anthropic.
+      // compile error here. Raw runtime values are rejected by normalizeProvider.
       const _exhaustive: never = provider
       void _exhaustive
-      return { provider: 'anthropic', create: createClaudeCodeSubstrateAuto }
+      throw new Error(`Unknown model provider '${String(_exhaustive)}'`)
     }
   }
 }

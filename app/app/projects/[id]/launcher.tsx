@@ -36,7 +36,6 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   View,
 } from 'react-native';
@@ -58,7 +57,7 @@ import {
   useLauncherState,
 } from '../../../lib/launcher-state';
 import { useAuthSession } from '../../../lib/session';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
 
 export default function LauncherTab() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -293,7 +292,7 @@ function LauncherTabBody({ projectId }: LauncherTabBodyProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.lg },
   centered: { alignItems: 'center', justifyContent: 'center' },
   intro: { gap: SPACING.xs, marginBottom: SPACING.md },

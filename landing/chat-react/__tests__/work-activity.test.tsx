@@ -61,7 +61,7 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 const rp = (phase: RunProgress['phase_label']): RunProgress =>
-  ({ run_id: 'r', phase_label: phase, step_label: 'building', round: 1, started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: null, failure_reason: null })
+  ({ run_id: 'r', phase_label: phase, step_label: 'building', round: 1, started_at: '', last_advanced_at: '', heartbeat_at: '2099-01-01T00:00:00Z', heartbeat_fresh_until: '2099-01-01T00:05:00Z', elapsed_ms: 0, stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: null, failure_reason: null })
 
 /** A controllable live source. `replay` (if set) is delivered SYNCHRONOUSLY on
  *  subscribe — mirroring the controller replaying its last snapshot to a late
@@ -88,7 +88,11 @@ function fakeLive(replay?: { items: WorkBoardItem[]; pid?: string }): {
 describe('itemRunning', () => {
   it('is true for a linked, non-terminal run', () => {
     expect(itemRunning(item({ linked_run_id: 'r1', run_progress: rp('building') }))).toBe(true)
-    expect(itemRunning(item({ linked_run_id: 'r1' }))).toBe(true) // linked, no progress yet
+    expect(itemRunning(item({ linked_run_id: 'r1' }))).toBe(false)
+  })
+  it('fails closed when the heartbeat is missing or stale', () => {
+    expect(itemRunning(item({ linked_run_id: 'r1', run_progress: { ...rp('building'), heartbeat_at: null, heartbeat_fresh_until: null } }))).toBe(false)
+    expect(itemRunning(item({ linked_run_id: 'r1', run_progress: { ...rp('building'), heartbeat_fresh_until: '2020-01-01T00:00:00Z' } }))).toBe(false)
   })
   it('is false without a linked run or when terminal', () => {
     expect(itemRunning(item({ linked_run_id: null }))).toBe(false)
@@ -120,7 +124,7 @@ describe('useWorkActivity', () => {
   it('seeds a REPLAYED pre-existing run silently (not announced)', async () => {
     // The controller replays its last snapshot synchronously to a late
     // subscriber — that pre-existing run is the baseline, not a new start.
-    const live = fakeLive({ items: [item({ id: 'a', linked_run_id: 'r1' })], pid: 'acme' })
+    const live = fakeLive({ items: [item({ id: 'a', linked_run_id: 'r1', run_progress: rp('building') })], pid: 'acme' })
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
       await tick()
@@ -134,7 +138,7 @@ describe('useWorkActivity', () => {
     const live = fakeLive() // no replay → the first live frame IS the seed
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([item({ id: 'a', title: 'Pre-existing', linked_run_id: 'r1' })], 'acme')
+      live.emit([item({ id: 'a', title: 'Pre-existing', linked_run_id: 'r1', run_progress: rp('building') })], 'acme')
       await tick()
     })
     // The first matching frame only seeds — no false drawer for a pre-existing run.
@@ -143,7 +147,7 @@ describe('useWorkActivity', () => {
     // A subsequent rise (a genuinely new run) IS announced.
     await act(async () => {
       live.emit(
-        [item({ id: 'a', linked_run_id: 'r1' }), item({ id: 'b', title: 'New run', linked_run_id: 'r2' })],
+        [item({ id: 'a', linked_run_id: 'r1', run_progress: rp('building') }), item({ id: 'b', title: 'New run', linked_run_id: 'r2', run_progress: rp('building') })],
         'acme',
       )
       await tick()
@@ -159,7 +163,7 @@ describe('useWorkActivity', () => {
     const live = fakeLive({ items: [item({ id: 'other', linked_run_id: 'rX' })], pid: 'other' })
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([item({ id: 'a', title: 'Already building', linked_run_id: 'r1' })], 'acme')
+      live.emit([item({ id: 'a', title: 'Already building', linked_run_id: 'r1', run_progress: rp('building') })], 'acme')
       await tick()
     })
     expect(h.latest().running).toBe(1)
@@ -171,7 +175,7 @@ describe('useWorkActivity', () => {
     const live = fakeLive({ items: [], pid: 'acme' }) // replayed empty baseline
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([item({ id: 'a', title: 'New build', linked_run_id: 'r1' })], 'acme')
+      live.emit([item({ id: 'a', title: 'New build', linked_run_id: 'r1', run_progress: rp('building') })], 'acme')
       await tick()
     })
     expect(h.latest().running).toBe(1)
@@ -183,7 +187,7 @@ describe('useWorkActivity', () => {
     const live = fakeLive()
     const h = mountActivity(live.source, 'acme', false)
     await act(async () => {
-      live.emit([item({ id: 'a', title: 'Desktop build', linked_run_id: 'r1' })], 'acme')
+      live.emit([item({ id: 'a', title: 'Desktop build', linked_run_id: 'r1', run_progress: rp('building') })], 'acme')
       await tick()
     })
     expect(h.latest().running).toBe(1) // pulse still works

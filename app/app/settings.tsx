@@ -41,7 +41,8 @@ import {
 } from '../lib/diagnostics-send-state';
 import { disablePushForUser } from '../lib/push';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
+import { useAppTheme, type ThemePreference } from '../lib/theme-runtime';
 import {
   VoiceTranscriptionClient,
   type TranscriptionBackendChoice,
@@ -60,6 +61,7 @@ export default function SettingsScreen() {
   const [serverUrl, setServerUrl] = useState(() => loadAppConfig().gateway_base_url);
   const [sendState, setSendState] = useState<DiagnosticsSendState>('idle');
   const [sendMessage, setSendMessage] = useState('');
+  const { preference: themePreference, resolved: resolvedTheme, setPreference: setThemePreference } = useAppTheme();
 
   // ISSUES #385 — changing the server invalidates the session (the old
   // instance minted the token). `commitServerConfig` already wiped
@@ -303,6 +305,28 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
+        <View style={styles.serverCard} testID="settings-appearance-card">
+          <Text style={styles.navRowTitle}>Appearance</Text>
+          <Text style={styles.navRowSubtitle}>Follow this device, or keep Neutron light or dark.</Text>
+          <View accessibilityRole="radiogroup" style={styles.themeOptions}>
+            {(['system', 'light', 'dark'] as const).map((option: ThemePreference) => {
+              const selected = themePreference === option;
+              const label = option === 'system' ? `System (${resolvedTheme})` : `${option[0].toUpperCase()}${option.slice(1)}`;
+              return (
+                <Pressable
+                  key={option}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  onPress={() => setThemePreference(option)}
+                  style={[styles.themeOption, selected && styles.themeOptionSelected]}
+                >
+                  <Text style={[styles.themeOptionText, selected && styles.themeOptionTextSelected]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
         <View style={styles.userCard} testID="settings-user-card">
           <View style={styles.avatar} accessibilityElementsHidden>
             <Text style={styles.avatarInitial}>{initial(user.displayName)}</Text>
@@ -507,7 +531,7 @@ function initial(name: string): string {
   return trimmed.slice(0, 1).toUpperCase();
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
   centered: { alignItems: 'center', justifyContent: 'center' },
   header: {
@@ -542,6 +566,19 @@ const styles = StyleSheet.create({
   headerTitle: { color: THEME.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
   pressed: { opacity: 0.7 },
   body: { padding: 16, gap: 16 },
+  themeOptions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  themeOption: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+    backgroundColor: THEME.background,
+  },
+  themeOptionSelected: { backgroundColor: THEME.accent, borderColor: THEME.accent },
+  themeOptionText: { color: THEME.text_secondary, fontSize: 13, fontWeight: '600' },
+  themeOptionTextSelected: { color: THEME.user_ink },
   userCard: {
     flexDirection: 'row',
     alignItems: 'center',

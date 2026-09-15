@@ -1,12 +1,19 @@
+import { assessReviewCi, type ReviewCiSource } from './gates/review-ci.ts'
+import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
+import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
+import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
+import { checkBuildClaim } from './gates/build-claim.ts'
+import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
-import type { BuildRunDeps, BuildRunInput, BuildSnapshot, GateResult } from './build-run.ts'
+import { buildRun, type BuildRunOutcome, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type GateResult } from './build-run.ts'
+import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import { validateTrailer } from './gates/result-contract.ts'
-import { eligibleFixFindings } from './gates/verdict.ts'
+import { projectAdmission, type AdmissionSource } from './gates/project-admission.ts'
+import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
-import { assessMergeDiff, assessBaseDrift, shouldHoldForBaseDrift } from './merge.ts'
+import { assessMergeDiff, localMergeReadiness } from './merge.ts'
 import { runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
 
 type Workers = BuildRunInput['workers']
@@ -14,6 +21,8 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  modes?: BuildRunDeps['modes']
+  boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
   workers: Record<Role, { provider: Provider; request: Workers[Role]['request'] }>
@@ -21,8 +30,17 @@ export interface BuildHostOptions {
   effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
+    run: MutationGateInput['run'] & { max_rounds?: number | undefined }
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
+  /** Persisted previous review pin; explicit null for a fresh first round. */
+  reviewed_head: string | null
+  local?: { baseBranch: string; worktree: string }
+  admission?: AdmissionSource
+  reviewReadiness?: ReviewReadinessSource
+  reviewCi?: ReviewCiSource
+  reviewSuite?: ReviewSuiteSource
+  review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
 
@@ -36,8 +54,8 @@ function unavailableRunner(provider: Provider): WorkerRunner {
   }
 }
 
-/** Compose the kept gates. Partial gate evidence never authorizes publication. */
-export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers } {
+/** Compose the kept gates and the advisory leak preflight. */
+export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers; run(input: BuildRunInput, signal: AbortSignal): Promise<BuildRunOutcome | BoundReviewOutcome> } {
   const workers = {} as Workers
   for (const role of roles) {
     const selected = options.workers[role]
@@ -55,8 +73,37 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     }
   }
   const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
+  const localReadiness = (snapshot: BuildSnapshot): Promise<GateResult> => options.local
+    ? localMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path,
+      options.mutation.run.branch, options.local.baseBranch, options.local.worktree, snapshot.head)
+    : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
+    async readReviewCap(runId) {
+      const row = options.mutation.run
+      if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
+      return { kind: 'known', max_rounds: row.max_rounds }
+    },
+    // A missing run row is the cap reader's `unknown`, not a crash here: the same
+    // test deletes the row to exercise that refusal.
+    assignedBranch: options.mutation.run?.branch ?? (options.mutation.run?.slug ? `trident/${options.mutation.run.slug}` : undefined),
+    ...(options.modes ? { modes: options.modes } : {}),
+    async confirmLocalMerge(snapshot) {
+      if (!options.local) return unknown('Local merge configuration is missing')
+      const run = options.mutation.run_host
+      const repo = options.mutation.run.repo_path
+      const branch = options.mutation.run.branch
+      const tip = await run(['git', '-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`], repo)
+      if (!tip.ok) return unknown('Local branch confirmation could not be read')
+      if (tip.stdout.trim() !== snapshot.head) return { kind: 'blocked', on: 'Local branch was changed or removed' }
+      const contained = await run(['git', '-C', repo, 'merge-base', '--is-ancestor', snapshot.head, `refs/heads/${options.local.baseBranch}`], repo)
+      if (contained.ok) return { kind: 'allow' }
+      return contained.exit_code === 1 && !contained.timed_out
+        ? { kind: 'blocked', on: 'Local merge not confirmed for reviewed head' }
+        : unknown('Local merge ancestry could not be read')
+    },
     async admissionGate(input) {
       // Re-read every brief on admission, including the later fix role.
       for (const role of roles) {
@@ -66,32 +113,57 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         catch { return unknown(`${role} brief could not be read`) }
         if (briefIntegrity(text) !== brief.integrity) return { kind: 'blocked', on: `${role} brief integrity mismatch` }
       }
-      return unknown('Complete project admission policy is not wired')
+      return projectAdmission(options.admission, input)
     },
-    runLeakGatePreflight: (snapshot) => runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0 }),
+    async runLeakGatePreflight(snapshot) {
+      let gateReturned = false
+      const result = await runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0,
+        run_host: async (argv, cwd, env, timeout) => {
+          const result = await options.leak.run_host(argv, cwd, env, timeout)
+          // The scanner returned an observation, including a gate error. Setup
+          // failures and thrown invocations provide no such observation.
+          if (argv.includes('bash') && argv.includes('--tree')) gateReturned = true
+          return result
+        },
+      })
+      if (!gateReturned) return { ...result, status: 'unknown' }
+      return result
+    },
     assessMergeDiff,
-    async reviewGate(payload) {
-      const checked = validateTrailer('verdict', payload)
-      if (!checked.ok) return { kind: 'unknown', detail: `Review trailer ${checked.reason} at ${checked.path}` }
-      const findings = eligibleFixFindings(checked.value.findings)
-      if (findings && findings.length > 0) return { kind: 'blocked', on: 'Review has blocking findings; panel provenance is not wired' }
-      return { kind: 'unknown', detail: 'Review panel provenance, cross-model seats and arbitration are not wired' }
-    },
-    async publishGate(snapshot) {
+    reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
+      ? localReadiness(snapshot)
+      : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
+    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha),
+    reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
+    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
+    async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
       if (!proof.ok) return { kind: 'blocked', on: proof.reason }
-      return unknown('Complete publication readiness is not wired')
+      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
+      if (readiness.kind !== 'allow') return readiness
+      return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },
-    async mergeGate(snapshot) {
+    async mergeGate(snapshot, mergeMode) {
+      if (mergeMode === 'local') return localReadiness(snapshot)
       const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))
       if (ci.kind === 'cannot-read') return unknown(ci.reason)
       if (ci.kind !== 'green') return { kind: 'blocked', on: `CI: ${ci.kind}` }
-      const drift = await assessBaseDrift(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.base_branch, snapshot.head)
-      if (!drift.assessable) return unknown('Base drift could not be assessed')
-      if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return { kind: 'blocked', on: 'Base drift overlaps reviewed changes' }
-      return unknown('Atomic pinned-head merge eligibility is not wired')
+      return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot)
     },
   }
-  return { deps, workers }
+  return {
+    deps, workers,
+    async run(input, signal) {
+      if (input.mode === 'bound_pr') {
+        const review = options.boundReview
+        if (!review || review.run.id !== input.run_id || review.run.bound_pr !== input.bound_pr) {
+          return { kind: 'blocked', phase: 'review', on: 'Bound review context is missing or mismatched', recipient: 'orchestrator' }
+        }
+        // Return both success and failure directly: neither enters buildRun.
+        return executeBoundReview(review.run, review.deps)
+      }
+      return buildRun(input, deps, signal)
+    },
+  }
 }

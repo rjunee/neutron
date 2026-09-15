@@ -11,6 +11,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildTridentDelivery,
   composeTerminalDelivery,
+  deliverInfraRetry,
   infraDeathSentence,
   interpretFailure,
   topicForRun,
@@ -60,6 +61,17 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
     },
   }
 }
+
+test('infrastructure retry delivery returns to the originating topic with the attempt', async () => {
+  const recorder = recordingSink()
+  await deliverInfraRetry(recorder.sink, runWith({ phase: 'forge-init' }), 1, 'executor unavailable')
+  expect(recorder.sent).toHaveLength(1)
+  expect(recorder.sent[0]?.topic.channel_topic_id).toBe('12345:678')
+  expect(recorder.sent[0]?.text).toContain('Retrying automatically (attempt 1)')
+  expect(recorder.sent[0]?.text).toContain('executor unavailable')
+  await deliverInfraRetry(recorder.sink, runWith({ chat_id: null }), 1, 'executor unavailable')
+  expect(recorder.sent).toHaveLength(1)
+})
 
 // ARGUS r4 (major): `interpretFailure` routes to `published-unreviewed` on a
 // substring of the failure_reason. While that substring was the plain English

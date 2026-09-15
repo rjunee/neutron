@@ -16,7 +16,7 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface TaskHeaderProps {
   onCreatePress: () => void;
@@ -48,7 +48,7 @@ export function TaskHeader({ onCreatePress }: TaskHeaderProps) {
 
 const BUTTON_RADIUS = DENSITY.bubble_radius - 4;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',

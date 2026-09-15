@@ -66,6 +66,8 @@ export type WorkBoardTaskType = 'build' | 'research'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
+  /** Repository name; null or omitted selects the project default. */
+  repo_name?: string | null
   id: string
   project_slug: string
   title: string
@@ -109,6 +111,8 @@ export interface WorkBoardItem {
 }
 
 export interface CreateWorkBoardItemInput {
+  /** Repository name; null or omitted selects the project default. */
+  repo_name?: string | null
   title: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
@@ -121,6 +125,8 @@ export interface CreateWorkBoardItemInput {
 }
 
 export interface WorkBoardItemUpdate {
+  /** Repository name; null or omitted selects the project default. */
+  repo_name?: string | null
   title?: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
@@ -281,7 +287,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url, ralph_round, max_ralph_rounds'
+  'pr, pr_url, ralph_round, max_ralph_rounds, repo_name'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -290,6 +296,7 @@ const COL_PLACEHOLDERS = COLS.split(',')
   .join(', ')
 
 interface WorkBoardItemDbRow {
+  repo_name: string | null
   id: string
   project_slug: string
   title: string
@@ -532,6 +539,7 @@ function defaultUlid(): string {
 
 function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
   return {
+    repo_name: row.repo_name,
     id: row.id,
     project_slug: row.project_slug,
     title: row.title,
@@ -719,6 +727,7 @@ export class WorkBoardStore {
     const declared_surfaces = validateDeclaredSurfaces(input.declared_surfaces ?? [])
 
     const item: WorkBoardItem = {
+      repo_name: input.repo_name ?? null,
       id,
       project_slug,
       title,
@@ -776,6 +785,7 @@ export class WorkBoardStore {
           item.pr_url,
           item.ralph_round ?? 0,
           item.max_ralph_rounds ?? null,
+          item.repo_name ?? null,
         ],
       )
     })
@@ -981,6 +991,7 @@ export class WorkBoardStore {
         sets.push(`${col} = ?`)
         params.push(val)
       }
+      if (patch.repo_name !== undefined) push('repo_name', patch.repo_name)
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
       if (blockedBy !== undefined) push('blocked_by', serializeStringArray(blockedBy))

@@ -38,7 +38,7 @@ import {
   type ReminderStateError,
 } from '../lib/reminder-state-reducer';
 import type { ReminderItem } from '../lib/reminders-client';
-import { BREAKPOINTS, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, BREAKPOINTS, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
 import { ReminderRow } from './ReminderRow';
 
@@ -182,7 +182,7 @@ function emptyCopyForFilter(filter: ReminderFilterChoice, total: number): string
   return 'No pending reminders. Tap “+ New reminder” to add one.';
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   listWrap: { flex: 1 },
   listScroll: { flex: 1 },
   listContent: {

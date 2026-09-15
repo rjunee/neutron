@@ -48,7 +48,7 @@ import {
 } from '../../../lib/project-credentials-client';
 import { ProjectsClient, type ProjectMember } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
-import { SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
 
 export default function SettingsTab() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -618,7 +618,7 @@ function CredentialRow({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background },
   content: { padding: SPACING.md, paddingBottom: SPACING.xxl },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },

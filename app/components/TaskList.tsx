@@ -25,7 +25,7 @@ import { useEffect, useRef } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 
-import { BREAKPOINTS, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, BREAKPOINTS, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import type { Task } from '../lib/tasks-client';
 import type { TaskStateError } from '../lib/task-state-reducer';
 import { ALPHA_TINTS, TaskRow } from './TaskRow';
@@ -144,7 +144,7 @@ export function TaskList({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   listWrap: { flex: 1 },
   listScroll: { flex: 1 },
   listContent: {

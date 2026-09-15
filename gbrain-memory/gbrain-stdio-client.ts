@@ -8,9 +8,8 @@
  * ever sketched as an interface ("the actual client lands in P1").
  *
  * The per-instance systemd unit sets `GBRAIN_BRAIN_ID` (which brain) + optionally
- * `GBRAIN_SOURCE` (project scope — MM ships single-source `default`; project
- * partitioning via GBrain `source` comes in M2.6) before launch; we forward
- * those through the child env.
+ * `GBRAIN_SOURCE` (project scope) before launch; we forward those through the
+ * child env.
  *
  * **Version-notice (notify mode).** GBrain emits `UPGRADE_AVAILABLE <cur>
  * <latest>` on the child's stderr on a minor/major upstream bump. We pipe
@@ -46,7 +45,7 @@ export interface GBrainStdioMcpClientOptions {
   args?: string[]
   /** `GBRAIN_BRAIN_ID` — which per-instance brain to open. */
   brainId?: string
-  /** `GBRAIN_SOURCE` — project scope. MM ships `default` (single source). */
+  /** `GBRAIN_SOURCE` — project scope. */
   source?: string
   /** Extra child env (merged over `getDefaultEnvironment()`). */
   env?: Record<string, string>

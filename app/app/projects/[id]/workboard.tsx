@@ -46,7 +46,6 @@ import {
   Modal,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   View,
@@ -63,7 +62,7 @@ import {
 import { loadAppConfig } from '../../../lib/config';
 import { railIdToScope } from '../../../lib/project-rail-view';
 import { useAuthSession } from '../../../lib/session';
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { createThemedStyles, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
 import {
   ACTIVITY_POLL_MS,
   workActivityIndicator,
@@ -254,21 +253,18 @@ function WorkBoardBody({
     };
   }, [activityClient, projectId]);
 
-  // The board's own slow poll, for the same reason and only while it is needed:
-  // `inline_active` arrives DERIVED from a 90 s evidence window, so it expires by
-  // the clock with no write to push a fresh snapshot. Without this the pane would
-  // hold the last frame it was sent — a card pulsing with ▶ suppressed on a board
-  // where nothing is happening. Gated on a card actually reading inline-active,
-  // so a quiet board never polls — and QUIET (`refresh(true)`), because the loud
-  // path replaces the entire board with a spinner and this fires every 15 s.
+  // The board's slow poll refreshes both clock-expiring signals: derived inline
+  // activity and per-run heartbeat evidence. A bound id schedules observation;
+  // it is never interpreted as proof that the run is alive.
   const hasInlineActive = items.some((it) => it.inline_active);
+  const hasBoundRun = items.some((it) => it.linked_run_id !== null && it.linked_run_id.length > 0);
   useEffect(() => {
-    if (!hasInlineActive) return;
+    if (!hasInlineActive && !hasBoundRun) return;
     const t = setInterval(() => {
       refresh(true);
     }, ACTIVITY_POLL_MS);
     return () => clearInterval(t);
-  }, [hasInlineActive, refresh]);
+  }, [hasInlineActive, hasBoundRun, refresh]);
 
   const activityState: ActivityState = workActivityState({
     snapshot: activitySnapshot,
@@ -639,7 +635,7 @@ function WorkActivityStrip({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.md },
   statusStrip: {
     flexDirection: 'row',

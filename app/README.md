@@ -70,7 +70,7 @@ P7.0–P7.5 docs interface).
   (`commitServerConfig`) serves discovery, the self-host form and the Settings
   editor; changing the host wipes the session (the old instance's token is
   meaningless on the new one).
-- **Theme.** Locked minimal dark palette + P5.1 design tokens in `lib/theme.ts`
+- **Theme.** Runtime-resolved light/dark palettes + P5.1 design tokens in `lib/theme.ts`
   (`TYPOGRAPHY` h1–h4 + body + mono, `SPACING` 8-pt rhythm, `MOTION` fast /
   base / slow / pulse, `DENSITY` bubble / chip / composer radii). Every
   component reads tokens from theme.ts — no inline magic numbers.
@@ -159,7 +159,7 @@ app/
 │   ├── token-storage.ts              # AsyncStorage + localStorage abstraction
 │   ├── config.ts                     # auth_base_url / gateway_base_url / ws_base_url + boot hydration
 │   ├── server-url.ts                 # #385 — pure precedence / normalise / /healthz check / persist
-│   ├── theme.ts                      # Dark palette + TYPOGRAPHY / SPACING / MOTION / DENSITY
+│   ├── theme.ts                      # Resolved palettes + TYPOGRAPHY / SPACING / MOTION / DENSITY
 │   ├── composer-constants.ts         # MAX_USER_MESSAGE_LEN_CLIENT + theme barrel
 │   ├── placeholder-tab.tsx           # <PlaceholderTab name=… landsIn=… />
 │   ├── ws-client.ts                  # WS connection primitive (chat surface)
@@ -437,18 +437,12 @@ bun run build:web       # expo export --platform web → dist/
 
 ### Running the app unit tests
 
-`bun test app/__tests__/` is **NOT** a supported invocation and will report
-~12 failures that every one of those files passes on its own. The mobile
-device-harness files (the ones that call `installNativeHarness()`) register a
-process-global happy-dom DOM and rewrite the app's own `react-native` imports;
-Bun runs many test *files* per process, so in a shared process that harness
-collides with the sibling files that own the `react-native` specifier with
-`mock.module(…)` and with the `typeof window` / `typeof XMLHttpRequest`
-capability probes in `lib/upload-client.ts`. Neither half is wrong — they are
-two incompatible module graphs, which is why `scripts/run-tests.sh` gives the
-harness its own process (§ device-harness isolation lane, and
-`docs/testing-runner.md`). Nothing is skipped: every file runs, in the lane
-where it is clean.
+The app suite must run with Bun's per-file isolation. Some files intentionally
+install process-global DOM or module mocks, so sharing one global object makes
+their result depend on which files happen to be co-resident. `--isolate` keeps
+all app files in one invocation while giving each file a fresh global and module
+registry. CI runs this whole-directory check on one shard leg before the normal
+partitioned suite, so changing the shard count cannot hide a collision.
 
 From the repo root:
 
@@ -457,9 +451,8 @@ From the repo root:
 # This is what CI runs.
 bash scripts/run-tests.sh
 
-# App-only, the same two lanes, one bun process each:
-bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
-bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+# App-only, every file in one isolated invocation (the CI co-residency guard):
+bun test --isolate app/__tests__/ --max-concurrency=4
 
 # A single file is always safe:
 bun test app/__tests__/upload-client.test.ts

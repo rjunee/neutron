@@ -68,3 +68,40 @@ test('code_trident_runs accepts REVIEW_NOT_RUN and rejects unknown verdicts', ()
     ).get('review-not-run')?.inner_verdict,
   ).toBe('REVIEW_NOT_RUN')
 })
+
+test('projects accept the shared provider vocabulary and reject obsolete or unknown values', () => {
+  applyMigrations(db)
+  const insert = (id: string, provider: string): void => {
+    db.run(
+      `INSERT INTO projects (id, name, created_at, updated_at, model_provider)
+       VALUES (?, 'Project', '2026-09-15T00:00:00Z', '2026-09-15T00:00:00Z', ?)`,
+      [id, provider],
+    )
+  }
+
+  for (const provider of ['anthropic', 'openai', 'openai-codex', 'pi']) {
+    expect(() => insert(provider, provider)).not.toThrow()
+  }
+  expect(() => insert('obsolete', 'openai-codex-cli')).toThrow()
+  expect(() => insert('unknown', 'unknown')).toThrow()
+})
+
+test('provider vocabulary migration translates the obsolete Codex spelling', () => {
+  db.exec(`CREATE TABLE projects (
+    id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, description TEXT, persona TEXT,
+    privacy_mode TEXT NOT NULL DEFAULT 'private', billing_mode TEXT NOT NULL DEFAULT 'personal',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, context_archived_at TEXT,
+    topic_id TEXT, agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages', emoji TEXT,
+    last_activity_at TEXT, archived_at TEXT, model_provider TEXT
+  ) STRICT`)
+  db.run(
+    `INSERT INTO projects (id, name, created_at, updated_at, model_provider)
+     VALUES ('legacy', 'Legacy', '2026-09-15T00:00:00Z', '2026-09-15T00:00:00Z', 'openai-codex-cli')`,
+  )
+
+  db.exec(readFileSync(join(HERE, '0147_project_provider_vocabulary.sql'), 'utf8'))
+
+  expect(db.query<{ model_provider: string }, []>('SELECT model_provider FROM projects').get()).toEqual({
+    model_provider: 'openai-codex',
+  })
+})

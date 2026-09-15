@@ -34,8 +34,16 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     const p = deriveRunProgress(run(), T0 + 30_000)
     expect(p.phase_label).toBe('planning')
     expect(p.round).toBe(1)
+    expect(p.ralph_round).toBe(0)
     expect(p.elapsed_ms).toBe(30_000)
     expect(p.stalled).toBe(false)
+  })
+
+  test('an infrastructure retry carries its count and never renders failed', () => {
+    const p = deriveRunProgress(run({ infra_retries: 2, phase: 'forge-init' }), T0)
+    expect(p.infra_retries).toBe(2)
+    expect(p.step_label).toBe('retrying')
+    expect(p.phase_label).not.toBe('failed')
   })
 
   test('forge-done checkpoint → reviewing', () => {
@@ -68,6 +76,11 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     const p = deriveRunProgress(run({ round: 1, inner_checkpoint: null }), T0)
     expect(p.step_label).toBe('building')
     expect(p.round).toBe(1)
+  })
+
+  test('a re-fired second task carries outer counter 1 beside inner round 1', () => {
+    const p = deriveRunProgress(run({ ralph: true, ralph_round: 1, round: 1 }), T0)
+    expect({ ralph_round: p.ralph_round, round: p.round }).toEqual({ ralph_round: 1, round: 1 })
   })
 
   test('fix-round-N checkpoint → REVIEWING round N (the fix is already built)', () => {
@@ -159,6 +172,19 @@ describe('deriveRunProgress — stall detection', () => {
 })
 
 describe('runProgressForItem', () => {
+  test('carries only the supplied per-run heartbeat into its bounded ALIVE window', () => {
+    const heartbeat = '2026-07-02T00:01:00.000Z'
+    const p = runProgressForItem(
+      { linked_run_id: 'run-x', project_slug: 'owner' },
+      lookup(run({ id: 'run-x' })),
+      T0,
+      undefined,
+      (id) => id === 'run-x' ? heartbeat : null,
+    )
+    expect(p?.heartbeat_at).toBe(heartbeat)
+    expect(p?.heartbeat_fresh_until).toBe('2026-07-02T00:06:00.000Z')
+  })
+
   const lookup = (r: TridentRun) => (id: string) => (id === r.id ? r : null)
 
   test('null when the item has no linked run', () => {

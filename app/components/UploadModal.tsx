@@ -30,7 +30,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export type UploadModalPhase =
   | 'uploading'
@@ -296,7 +296,7 @@ function formatSize(bytes: number | undefined): string | null {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   scrim: {
     flex: 1,
     backgroundColor: 'rgba(10,10,10,0.72)',

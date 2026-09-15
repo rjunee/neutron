@@ -43,6 +43,7 @@ const CORE_MODULES_SRC = readFileSync(
 
 /** The COMPLETE set of loops a credentialed single-owner Open boot starts. */
 const EXPECTED_RUNNING_LOOPS = [
+  'agent-watcher',
   'chunked-upload-sweeper',
   // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
   // uncredentialed box does a cheap env/file check and no network call, so a
@@ -88,7 +89,7 @@ const EXPECTED_RUNNING_LOOPS = [
   'work-wakeup',
 ] as const
 /** The D-7 dormant loops (built, never started). */
-const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
+const EXPECTED_DORMANT_LOOPS = ['project-backup-scheduler'] as const
 
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
@@ -232,7 +233,7 @@ test('the ONE boot line names every running loop + the dormant set', () => {
   expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
-  expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
 })
 
 /**

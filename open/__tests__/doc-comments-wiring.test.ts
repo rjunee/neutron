@@ -128,6 +128,7 @@ let harness: Harness
 
 interface Harness {
   base: string
+  fetch(request: Request): Promise<Response>
   close(): Promise<void>
 }
 
@@ -136,6 +137,7 @@ function mockSubstrate(): Substrate {
   return {
     start(_spec: AgentSpec): SessionHandle {
       async function* gen(): AsyncGenerator<Event> {
+        yield { kind: 'token', text: 'I handled this inline comment.' }
         yield {
           kind: 'completion',
           usage: { input_tokens: 1, output_tokens: 1 },
@@ -155,10 +157,16 @@ function mockSubstrate(): Substrate {
 async function startHarness(): Promise<Harness> {
   seedMigratedDb(process.env['NEUTRON_DB_PATH'] as string)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
+  db.raw().run(
+    `INSERT INTO projects
+       (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES (?, ?, '', NULL, 'private', 'personal', ?, ?)`,
+    [PROJECT, 'Demo Project', '2026-09-15T00:00:00.000Z', '2026-09-15T00:00:00.000Z'],
+  )
   const composer = buildOpenGraphComposer({
     env: process.env,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     substrateFactory: (() => mockSubstrate()) as any,
+    agentWatcherPollIntervalMs: 20,
   })
   const composition = await composer({ db, project_slug: OWNER_SLUG })
   const graph = await composeProductionGraph(composition)
@@ -166,16 +174,12 @@ async function startHarness(): Promise<Harness> {
     throw new Error('Open composition did not expose graph.fetch/websocket')
   }
   const composedFetch = graph.fetch
-  const composedWebsocket = graph.websocket
-  const server = Bun.serve({
-    port: 0,
-    fetch: (req, srv) => composedFetch(req, srv),
-    websocket: composedWebsocket,
-  })
   return {
-    base: `http://127.0.0.1:${server.port}`,
+    // These cases exercise HTTP routing, not socket upgrades. Calling the composed
+    // fetch chain directly keeps the suite runnable where loopback binds are denied.
+    base: 'http://local.test',
+    fetch: async (request) => await composedFetch(request, undefined as never),
     close: async () => {
-      await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
           cleanup()
@@ -197,11 +201,11 @@ async function call(
   const headers: Record<string, string> = { accept: 'application/json' }
   if (init.auth !== false) headers['authorization'] = `Bearer ${OWNER_SLUG}`
   if (init.body !== undefined) headers['content-type'] = 'application/json'
-  return await fetch(`${harness.base}${path}`, {
+  return await harness.fetch(new Request(`${harness.base}${path}`, {
     method: init.method ?? 'GET',
     headers,
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-  })
+  }))
 }
 
 const commentsBase = `/api/app/projects/${PROJECT}/docs/comments`
@@ -356,6 +360,30 @@ afterAll(async () => {
 })
 
 describe('links 1-3 — the store exists, reaches the surface, and the routes answer', () => {
+  test('a new comment wakes the production-composed AgentWatcher and receives an agent reply', async () => {
+    const { res, event_id } = await postRootComment('please respond here')
+    expect(res.status).toBe(200)
+    expect(event_id).toBeDefined()
+
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const thread = await call(`${commentsBase}/${event_id as string}/thread`)
+      expect(thread.status).toBe(200)
+      const body = (await thread.json()) as {
+        thread?: { replies?: Array<{ author_kind?: string; body?: string }> }
+      }
+      const reply = body.thread?.replies?.find(
+        (event) => event.body === 'I handled this inline comment.',
+      )
+      if (reply !== undefined) {
+        expect(reply.author_kind).toBe('agent')
+        return
+      }
+      await Bun.sleep(20)
+    }
+    throw new Error('production-composed AgentWatcher did not reply before the deadline')
+  })
+
   test('POST a root comment returns 200, NOT 503 comments_unavailable', async () => {
     const { res } = await postRootComment('first thought')
     // The specific status matters more than "not an error". 503 is the exact
@@ -447,6 +475,31 @@ describe('link 4 — a doc edit re-anchors its comments (AnchorWalker)', () => {
     expect(afterAnchor?.current_start).toBe((beforeStart as number) + inserted.length)
     expect(afterAnchor?.status).not.toBe('orphaned')
     expect(afterAnchor?.status).not.toBe('dead')
+  })
+
+  test('editing a linked plan H1 updates the card title through the same mutation hook', async () => {
+    const planPath = 'plans/title-sync.md'
+    const create = await call(`/api/app/projects/${PROJECT}/work-board`, {
+      method: 'POST',
+      body: {
+        title: 'Old card title',
+        design_doc_ref: `neutron-docs:${planPath}`,
+      },
+    })
+    // Collection POSTs return the surface's exact created outcome.
+    expect(create.status).toBe(201)
+
+    const write = await call(`/api/app/projects/${PROJECT}/docs/file`, {
+      method: 'PUT',
+      body: { path: planPath, content: '# Title from the plan\n\nDetails.' },
+    })
+    expect(write.status).toBe(200)
+
+    const board = await call(`/api/app/projects/${PROJECT}/work-board`)
+    expect(board.status).toBe(200)
+    const body = (await board.json()) as { items?: Array<{ title?: string }> }
+    expect(body.items?.some((item) => item.title === 'Title from the plan')).toBe(true)
+    expect(body.items?.some((item) => item.title === 'Old card title')).toBe(false)
   })
 })
 

@@ -147,6 +147,17 @@ describe('SqliteProjectSettingsStore — get synthesises without creating (#412)
 })
 
 describe('SqliteProjectSettingsStore — update PATCH', () => {
+  test('model provider override persists; clearing it restores inheritance', async () => {
+    await seed(store, 'neutron')
+    expect(store.modelProviderOverride('neutron')).toBeNull()
+    await store.update(OWNER, 'neutron', { model_provider: 'openai-codex' })
+    expect(store.modelProviderOverride('neutron')).toBe('openai-codex')
+    const reopened = new SqliteProjectSettingsStore(db)
+    expect(reopened.modelProviderOverride('neutron')).toBe('openai-codex')
+    await reopened.update(OWNER, 'neutron', { model_provider: null })
+    expect(reopened.modelProviderOverride('neutron')).toBeNull()
+  })
+
   test('update flips privacy_mode + bumps updated_at; row persists', async () => {
     await seed(store, 'neutron')
     const before = await store.get(OWNER, 'neutron')
@@ -244,6 +255,13 @@ describe('SqliteProjectSettingsStore — update PATCH', () => {
     // Sanity — original value is untouched.
     const reread = await store.get(OWNER, 'neutron')
     expect(reread!.privacy_mode).toBe('private')
+  })
+
+  test('CHECK constraint rejects an out-of-band model provider', async () => {
+    await seed(store, 'neutron')
+    await expect(
+      db.run("UPDATE projects SET model_provider = 'unknown' WHERE id = 'neutron'", []),
+    ).rejects.toThrow(/constraint/i)
   })
 
   test('CHECK constraint rejects an out-of-band billing_mode value', async () => {

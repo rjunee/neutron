@@ -10,7 +10,7 @@ import { type CwdDriftSupervisedEntry, type CwdDriftTickResult, type CwdProbe, r
 import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watchdog.ts'
 import type { SubstrateClassed } from './classify-spawn-error.ts'
 import { makeInFlightGate } from './in-flight-gate.ts'
-import { type ModelUpdateWatchdog, type SessionIdleSignals, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
+import { type ModelUpdateWatchdog, type SessionIdleSignals, isModelClass, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, argvMatchesSession, defaultReadArgv, registerOrphanKill } from './orphan-adoption.ts'
 import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
@@ -936,7 +936,11 @@ export function startModelUpdateWatchdogForInstance(
     loadState: () => loadModelUpdateState(statePath),
     saveState: (s) => saveModelUpdateState(statePath, s),
     getConfiguredModel: getBestModel,
-    adoptModel: (m) => setBestModelOverride(m),
+    // A class default already tracks the latest release. Keep that class pinned;
+    // concrete adoption remains available only for an explicit version override.
+    adoptModel: (m) => {
+      if (!isModelClass(getBestModel())) setBestModelOverride(m)
+    },
     knownFallbacks: getKnownFallbackModels,
     postNotice: (notice) => {
       if (options.onModelUpdate !== undefined) {
@@ -949,11 +953,19 @@ export function startModelUpdateWatchdogForInstance(
     },
     runUpgrade: async (newModel: string) => {
       if (registryPath === undefined) return
+      const upgradeModel = isModelClass(getBestModel()) ? getBestModel() : newModel
       // Target only the warm sessions this instance owns (pool keys whose owning
       // substrate points at this registry) — never another instance's sessions.
       const ownedKeys = [...pool.keys()].filter(
         (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath,
       )
+      if (isModelClass(upgradeModel)) {
+        // The running child already resolved this class when it spawned. Keep
+        // persisted rows version-free so every later resume resolves afresh;
+        // no disruptive respawn is needed merely because the resolved id moved.
+        for (const key of ownedKeys) patchRecord(registryPath, key, { model: upgradeModel })
+        return
+      }
       await runGracefulUpgrade({
         listSessionKeys: () => ownedKeys,
         idleSignals: (key) =>
@@ -961,13 +973,13 @@ export function startModelUpdateWatchdogForInstance(
         upgradeSession: (key) => {
           // Rewrite the registry record's model BEFORE the respawn so the
           // `--resume` re-attaches on the NEW model (resumeSpecFor reads it).
-          patchRecord(registryPath, key, { model: newModel })
+          patchRecord(registryPath, key, { model: upgradeModel })
           const owner = supervisedBySessionKey.get(key) ?? options
           const outcome = respawnReplSession(
             owner,
             key,
             'model-update-watchdog',
-            `model upgrade → ${newModel}`,
+            `model upgrade → ${upgradeModel}`,
           )
           return outcome.ok
         },

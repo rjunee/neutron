@@ -291,6 +291,33 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Pi bounded worker delegates through the project extension surface (#938).
+
+Pi is the third base harness at the bounded-worker seam, as requested for the
+post-cutover increment. `in-repl` names who owns delegation; Pi 0.85.1's documented
+subagent extension starts separate ephemeral child processes. Pi therefore meets the placement split but not the
+warm-cache/shared-MCP rationale stated beside it on 2026-09-11. That entry and
+the plan's §3.2 are left exactly as written; whether the rationale binds every
+harness or only explains why the split is cheap for Claude and Codex is the
+owner's to say, and nothing shipped here depends on the answer. Cross-model
+callouts remain headless. The new runner refuses child-thread resume, reserves
+before dispatch, and accepts results only through validated trailer files.
+Project session binding, extension provisioning and enforced child grants remain
+host responsibilities; this worker does not claim a deployed project adapter.
+Acceptance and offline measurement: the Pi bounded-worker section of
+`docs/plans/harness-orchestrator-pivot-2026-09-11.md`.
+
+### 2026-09-15 — Projects declare repos and a default; cards select by name (#935).
+
+A project declares a set of repositories and a default for a nonempty set. A card
+with no repo name selects the default; an undeclared name refuses by name and must
+never select the default. The repository's own name determines `repos/<repo-name>/`.
+Existing `code/` workspaces remain supported while declaration lands; renaming them
+is a separate reversible step. Zero repositories is valid project data and cannot
+resolve a build. The build driver continues to receive a single resolved path.
+The model and its acceptance criteria live in
+`docs/spec-items/project-code-repos-and-vault-split.md`.
+
 ### 2026-09-15 — Native Android process-start crashes enter the owner's existing diagnostics queue (#528).
 
 An unexported initializer provider with maximum init order installs the native
