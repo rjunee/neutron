@@ -63,6 +63,14 @@ test('suite observation must establish source, identity and dispatch configurati
   }
   expect(await fixture().decide()).toEqual(approve)
 })
+test('suite thrown host cause is bounded and normal refusal text is unchanged', async () => {
+  expect(await assessReviewSuite({ observe: async () => { throw new Error('recognisable suite failure') } }, snapshot, 2, 'run')).toEqual({
+    kind: 'unknown', detail: 'Review suite host observation failed: Error: recognisable suite failure',
+  })
+  expect(await assessReviewSuite({ observe: async () => ({ kind: 'known', runId: 'other', head: snapshot.head, round: 2, strategy: '', scope: 'subset', report: null }) }, snapshot, 2, 'run')).toEqual({
+    kind: 'unknown', detail: 'Review suite record does not match run, revision and round',
+  })
+})
 test('suite composition preserves stops and combines repairs with code and re-plan decisions', async () => {
   const f = fixture(); f.observation.report = null
   const suite = await f.assess()

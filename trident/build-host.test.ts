@@ -130,7 +130,7 @@ test('unreadable admission and missing project source stay unknown', async () =>
   expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'Project admission observation source is missing' })
   expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toMatchObject({ kind: 'unknown', phase: 'plan' })
   await rm(f.path)
-  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'plan brief could not be read' })
+  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: expect.stringMatching(/^plan brief could not be read: Error: ENOENT/) })
 })
 
 test('malformed review and missing panel evidence are infrastructure blocks', async () => {
@@ -198,7 +198,7 @@ const commandResult = (stdout = '', exit_code = 0) => ({ ok: exit_code === 0, ex
 test('publication readiness measures local head, remote state and first-push ancestry', async () => {
   const f = await fixture()
   const baseRun = f.options.mutation.run_host
-  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value)
+  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value, 'run')
   expect(await check()).toEqual({ kind: 'allow' })
   for (const result of [commandResult('', 128), commandResult('short')]) {
     expect(await check(async (argv, cwd) => argv.includes('rev-parse') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
@@ -220,6 +220,16 @@ test('publication readiness measures local head, remote state and first-push anc
   expect(await check(async () => { throw new Error('offline') })).toMatchObject({ kind: 'unknown' })
 })
 
+test('publication thrown host cause is bounded and normal refusal text is unchanged', async () => {
+  expect(await publicationReadiness(async () => { throw new Error('recognisable publication failure') }, 'repo', 'change', 'b'.repeat(40), snapshot, 'run')).toEqual({
+    kind: 'unknown', detail: 'Publication host observation failed: Error: recognisable publication failure',
+  })
+  const f = await fixture()
+  expect(await publicationReadiness(f.options.mutation.run_host, 'repo', 'change', 'b'.repeat(40), { ...snapshot, head: 'c'.repeat(40) }, 'run')).toEqual({
+    kind: 'blocked', on: 'Publication branch differs from reviewed head',
+  })
+})
+
 test('merge eligibility refuses absent, malformed, closed or mismatched review pins', async () => {
   const f = await fixture()
   for (const value of [snapshot, { ...published, head: 'short' },
@@ -227,9 +237,9 @@ test('merge eligibility refuses absent, malformed, closed or mismatched review p
     { ...published, pr: { ...published.pr!, state: 'CLOSED' as const } },
     { ...published, pr: { ...published.pr!, head: 'c'.repeat(40) } },
   ]) {
-    expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', value)).toMatchObject({ kind: 'blocked' })
+    expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', value, 'run')).toMatchObject({ kind: 'blocked' })
   }
-  expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', published)).toEqual({ kind: 'allow' })
+  expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', published, 'run')).toEqual({ kind: 'allow' })
 })
 
 test('merge eligibility measures actual PR refs and rejects unreadable or foreign observations', async () => {
@@ -246,9 +256,9 @@ test('merge eligibility measures actual PR refs and rejects unreadable or foreig
   ]
   for (const { result, kind } of cases) {
     const run: typeof baseRun = (argv, cwd) => argv.includes('gh') ? Promise.resolve(result) : baseRun(argv, cwd)
-    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind })
+    expect(await pinnedMergeReadiness(run, 'repo', published, 'run')).toMatchObject({ kind })
   }
-  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published, 'run')).toEqual({ kind: 'allow' })
   expect(f.calls).toContainEqual(['git', '-C', 'repo', 'fetch', 'origin', '+refs/heads/release:refs/remotes/origin/release', '+refs/heads/change:refs/remotes/origin/change'])
   expect(f.calls).toContainEqual(['git', '-C', 'repo', 'merge-base', 'refs/remotes/origin/release', 'refs/remotes/origin/change'])
 })
@@ -258,19 +268,28 @@ test('merge eligibility preserves refresh, size and fetched-head gates', async (
   const baseRun = f.options.mutation.run_host
   for (const token of ['check-ref-format', 'fetch', 'diff']) {
     const run: typeof baseRun = (argv, cwd) => argv.includes(token) ? Promise.resolve(commandResult('', 128)) : baseRun(argv, cwd)
-    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind: 'unknown' })
+    expect(await pinnedMergeReadiness(run, 'repo', published, 'run')).toMatchObject({ kind: 'unknown' })
   }
   expect(await pinnedMergeReadiness(async (argv, cwd) => {
     if (!argv.includes('diff')) return baseRun(argv, cwd)
     await writeFile(argv.find(arg => arg.startsWith('--output='))!.slice('--output='.length), 'x'.repeat(MERGE_DIFF_BYTES_MAX + 1))
     return commandResult('truncated stdout')
-  }, 'repo', published)).toMatchObject({ kind: 'blocked' })
+  }, 'repo', published, 'run')).toMatchObject({ kind: 'blocked' })
   expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('diff')
-    ? commandResult('stdout is not a written diff') : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'unknown' })
+    ? commandResult('stdout is not a written diff') : baseRun(argv, cwd), 'repo', published, 'run')).toMatchObject({ kind: 'unknown' })
   expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('rev-parse') && argv.some(arg => arg.includes('refs/remotes/origin/change'))
-    ? commandResult('c'.repeat(40)) : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'blocked', on: 'Fetched PR head differs from reviewed head' })
-  expect(await pinnedMergeReadiness(async () => { throw new Error('offline') }, 'repo', published)).toMatchObject({ kind: 'unknown' })
-  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+    ? commandResult('c'.repeat(40)) : baseRun(argv, cwd), 'repo', published, 'run')).toMatchObject({ kind: 'blocked', on: 'Fetched PR head differs from reviewed head' })
+  expect(await pinnedMergeReadiness(async () => { throw new Error('offline') }, 'repo', published, 'run')).toMatchObject({ kind: 'unknown' })
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published, 'run')).toEqual({ kind: 'allow' })
+})
+
+test('merge thrown host cause is bounded and normal refusal text is unchanged', async () => {
+  expect(await pinnedMergeReadiness(async () => { throw new Error('recognisable merge failure') }, 'repo', published, 'run')).toEqual({
+    kind: 'unknown', detail: 'Merge host observation could not be decoded: Error: recognisable merge failure',
+  })
+  expect(await pinnedMergeReadiness(async () => commandResult(), 'repo', snapshot, 'run')).toEqual({
+    kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID',
+  })
 })
 
 test('host publication readiness is reached after a measured prose exemption', async () => {

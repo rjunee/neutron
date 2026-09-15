@@ -299,7 +299,7 @@ test('merge refuses when remote base-risk evidence cannot be persisted', async (
     throw new Error('Storage unavailable')
   }
   expect(await f.mergeChecked(snapshot)).toEqual({
-    kind: 'unknown', detail: 'Remote merge base-risk evidence could not be persisted',
+    kind: 'unknown', detail: 'Remote merge base-risk evidence could not be persisted: Error: Storage unavailable',
   })
   expect(attempted).toBe(true)
   expect(f.calls.filter(argv => argv[0] === 'gh' && ['create', 'merge'].includes(argv[2]!))

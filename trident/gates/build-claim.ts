@@ -1,12 +1,13 @@
 import type { BuildSnapshot, GateResult } from '../build-run.ts'
 import type { RunHostCommand } from '../merge.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 const fullOid = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 
 /** G100: independently resolve the claim, then preserve before refusing review. */
 export async function checkBuildClaim(run: RunHostCommand, repo: string, branch: string,
-  claim: string, snapshot: BuildSnapshot): Promise<GateResult> {
+  claim: string, snapshot: BuildSnapshot, runId: string): Promise<GateResult> {
   try {
     if (!fullOid(snapshot.head)) return unknown('Measured build head is not a full commit OID')
     const ref = `refs/heads/${branch}`
@@ -34,5 +35,5 @@ export async function checkBuildClaim(run: RunHostCommand, repo: string, branch:
       if (!receipt.ok || parse(receipt.stdout) !== snapshot.head) return unknown('Build branch preservation receipt does not match measured head')
     }
     return { kind: 'blocked', on: `Build claim ${claim} resolves to ${resolved.stdout.trim()} but measured head is ${snapshot.head}; branch preserved on origin` }
-  } catch { return unknown('Build claim resolution or preservation failed') }
+  } catch (error) { return unknownCause('Build claim resolution or preservation failed', error, runId) }
 }

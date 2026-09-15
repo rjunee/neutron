@@ -1,4 +1,5 @@
 import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 export interface SuiteFinding {
   title: string
@@ -47,7 +48,7 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
       return known([{ title: 'FULL SUITE RED FOR PRE-EXISTING REASONS', evidence: `Untrusted build transcription; verify the base comparison and named failures before approving:\n${evidence}`, advisory: true }])
     }
     return blocker('FULL SUITE NOT PROVEN', 'Run the required full suite and record its result')
-  } catch { return unknown('Review suite host observation failed') }
+  } catch (error) { return unknownCause('Review suite host observation failed', error, runId) }
 }
 
 /** Suite evidence can require repairs, but cannot override a panel stop or grant approval. */
