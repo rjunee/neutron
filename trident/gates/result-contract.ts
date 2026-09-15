@@ -48,6 +48,8 @@ export interface PlanTrailer {
   branchBrief?: string | null
 }
 
+export const BRANCH_BRIEF_MAX_BYTES = 4096
+
 export type TrailerKind = 'verdict' | 'forge' | 'plan'
 export type TrailerFor<K extends TrailerKind> = K extends 'verdict'
   ? VerdictTrailer
@@ -168,6 +170,41 @@ const shapes: Record<TrailerKind, Shape> = {
 export const VERDICT_SCHEMA = shapes.verdict
 export const FORGE_SCHEMA = shapes.forge
 export const PLAN_SCHEMA = shapes.plan
+
+function utf8ByteWidth(codePoint: number): number {
+  return codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4
+}
+
+export function clampBranchBrief(value: string): string {
+  const brief = value.trim()
+  if (brief === '') return ''
+  let bytes = 0
+  for (const character of brief) bytes += utf8ByteWidth(character.codePointAt(0)!)
+  if (bytes <= BRANCH_BRIEF_MAX_BYTES) return brief
+
+  const marker = `\n[branch-state brief truncated at ${BRANCH_BRIEF_MAX_BYTES} bytes]`
+  let markerBytes = 0
+  for (const character of marker) markerBytes += utf8ByteWidth(character.codePointAt(0)!)
+  const contentLimit = BRANCH_BRIEF_MAX_BYTES - markerBytes
+  let bounded = ''
+  bytes = 0
+  for (const character of brief) {
+    const characterBytes = utf8ByteWidth(character.codePointAt(0)!)
+    if (bytes + characterBytes > contentLimit) break
+    bounded += character
+    bytes += characterBytes
+  }
+  return bounded + marker
+}
+
+/** Preserve a plan's shape while bounding its untrusted branch-state summary. */
+export function clampPlanBranchBrief(payload: unknown): unknown {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)
+      || !('branchBrief' in payload) || typeof payload.branchBrief !== 'string') return payload
+
+  const branchBrief = clampBranchBrief(payload.branchBrief)
+  return branchBrief === payload.branchBrief ? payload : { ...payload, branchBrief }
+}
 
 function reject(reason: TrailerRejectionReason, path: string): { ok: false; reason: TrailerRejectionReason; path: string } {
   return { ok: false, reason, path }

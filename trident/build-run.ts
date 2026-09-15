@@ -5,6 +5,7 @@ import { createLogger } from '@neutronai/logger'
 // wrapper in `./gates/unknown-cause.ts`, which returns a `GateResult`.
 import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
+import { clampPlanBranchBrief } from './gates/result-contract.ts'
 import {
   placementFor,
   type BoundedWorkOutcome,
@@ -368,8 +369,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [] })
       }
-      previousPayload = result.payload
-      return { payload: result.payload }
+      const payload = role === 'plan' ? clampPlanBranchBrief(result.payload) : result.payload
+      previousPayload = payload
+      return { payload }
     }
 
     let plan: ExecutionPlan | null = null

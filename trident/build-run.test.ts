@@ -302,6 +302,15 @@ test('host prepares the next brief from measured state and prior work', async ()
   expect(prepared.find(p => p.role === 'build')?.previous).toEqual({ plan: 'implement spec' })
   expect(prepared.find(p => p.role === 'fix')?.findings).toEqual(['missing validation'])
 })
+test('G030 caps a planner branch brief before preparing the builder context', async () => {
+  const f = modeFixture()
+  const brief = `${'a'.repeat(4093)}😀`
+  f.setPlan({ ...f.plan, branchBrief: brief })
+  expect(await f.run()).toMatchObject({ kind: 'continued' })
+  const previous = f.prepared.find(p => p.role === 'build')?.previous as { branchBrief: string }
+  expect(Buffer.byteLength(previous.branchBrief, 'utf8')).toBe(4096)
+  expect(previous.branchBrief).toEndWith('[branch-state brief truncated at 4096 bytes]')
+})
 
 for (const role of ['plan', 'review', 'fix'] as const) {
   test(`${role} unknown preserves its pending step`, async () => {
