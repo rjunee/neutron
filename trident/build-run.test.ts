@@ -31,6 +31,7 @@ function fixture() {
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: snapshot.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: 7 }),
+    reviewReadiness: async () => ({ kind: 'allow' }),
     reviewGate: async () => decisions.shift() ?? { kind: 'approve' },
     publishGate: async () => { events.push('publishGate'); return { kind: 'allow' } },
     mergeGate: async () => { events.push('mergeGate'); return { kind: 'allow' } },
@@ -48,7 +49,7 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'mergeGate', 'merge'])
-  expect(f.reads()).toBe(11)
+  expect(f.reads()).toBe(13)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
 })
 
@@ -143,7 +144,7 @@ test('round three repeats stop; five rounds stop even with distinct findings', a
   }
 })
 
-for (const read of [1, 3, 5, 6, 7, 8, 9]) {
+for (const read of [1, 3, 4, 5, 6, 7, 8, 9]) {
   test(`unreadable host measurement ${read} preserves uncertainty`, async () => {
     const f = fixture(); const measure = f.deps.measure; let n = 0
     f.deps.measure = async () => ++n === read ? { kind: 'unknown', detail: 'cannot read' } : measure()
@@ -152,7 +153,7 @@ for (const read of [1, 3, 5, 6, 7, 8, 9]) {
 }
 test('review cannot change its subject even with a matching trailer', async () => {
   const f = fixture(); const measure = f.deps.measure; let n = 0
-  f.deps.measure = async () => { if (++n === 4) f.snapshot.head = 'c'.repeat(40); return measure() }
+  f.deps.measure = async () => { if (++n === 5) f.snapshot.head = 'c'.repeat(40); return measure() }
   f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, head: 'c'.repeat(40) }))
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Reviewed revision changed during review' })
 })
@@ -605,7 +606,7 @@ test('local revision is pinned across the publication boundary', async () => {
   const measure = f.deps.measure
   let reads = 0
   f.deps.measure = async () => {
-    if (++reads === 7) f.snapshot.head = 'b'.repeat(40)
+    if (++reads === 8) f.snapshot.head = 'b'.repeat(40)
     return measure()
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed before merge' })
@@ -623,7 +624,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
   expect(counts).toEqual([0, 1, 1])
-  expect(f.reads()).toBe(14)
+  expect(f.reads()).toBe(17)
 })
 test('host refuses a second re-plan even when worker claims zero spent', async () => {
   const f = fixture()
@@ -671,4 +672,47 @@ test('resumed rejection after re-plan stops before another fix', async () => {
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
   expect(f.runner.calls).toHaveLength(0)
+})
+
+for (const field of ['head', 'diff'] as const) test(`G035 fresh review refuses missing ${field} before spending panel`, async () => {
+  const f = fixture()
+  f.deps.prepareWork = async request => {
+    if (request.role === 'build') { f.snapshot[field] = ''; f.outcomes.set(request.step_id, f.completed(f.snapshot)) }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('diff artifact') })
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G043 fix erasing the diff cannot spend another panel', async () => {
+  const f = fixture()
+  f.decisions.push({ kind: 'fix', findings: ['code'] })
+  f.deps.prepareWork = async request => {
+    if (request.role === 'fix') { f.snapshot.head = 'b'.repeat(40); f.snapshot.diff = ''; f.outcomes.set(request.step_id, f.completed(f.snapshot)) }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('diff artifact') })
+  expect(f.cross.calls).toHaveLength(1)
+  expect(f.events).not.toContain('publish')
+})
+
+test('readiness runs before each paid panel and cannot default to permission', async () => {
+  for (const kind of ['blocked', 'unknown', 'missing'] as const) {
+    const f = fixture()
+    if (kind === 'missing') delete f.deps.reviewReadiness
+    else f.deps.reviewReadiness = async () => kind === 'blocked' ? { kind, on: 'conflicts' } : { kind, detail: 'checks unreadable' }
+    expect(await f.run()).toMatchObject({ kind: kind === 'blocked' ? 'blocked' : 'unknown', phase: 'review' })
+    expect(f.cross.calls).toHaveLength(0)
+  }
+  const f = fixture(); let admissions = 0
+  f.deps.reviewReadiness = async () => { admissions++; return { kind: 'allow' } }
+  f.decisions.push({ kind: 'fix', findings: ['code'] }, { kind: 'approve' })
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(admissions).toBe(2)
+})
+
+test('readiness cannot dispatch review after its measured subject changes', async () => {
+  const f = fixture()
+  f.deps.reviewReadiness = async () => { f.snapshot.head = 'b'.repeat(40); return { kind: 'allow' } }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Revision changed during review readiness' })
+  expect(f.cross.calls).toHaveLength(0)
 })
