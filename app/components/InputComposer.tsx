@@ -39,7 +39,7 @@ import {
   View,
 } from 'react-native';
 
-import { MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 
 export interface ComposerAttachment {
   /** Local URI (file:// on native, blob:/data: on web). */
@@ -898,7 +898,7 @@ export function InputComposer({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   wrap: {
     paddingHorizontal: SPACING.sm,
     paddingTop: SPACING.sm,

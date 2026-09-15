@@ -22,7 +22,7 @@ import { useEffect, useRef } from 'react';
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { type VoiceRecorderValue } from '../lib/use-voice-recorder';
 
 export interface VoiceRecorderOverlayProps {
@@ -205,7 +205,7 @@ function usePulse(active: boolean): Animated.Value {
   return value;
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'row',
     alignItems: 'center',

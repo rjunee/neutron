@@ -28,11 +28,11 @@
 
 import { useLocalSearchParams } from 'expo-router';
 import { createElement } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, Text, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 
 import { sanitizeCoreTabUrl } from '../../../../lib/project-tabs';
-import { SPACING, THEME, TYPOGRAPHY } from '../../../../lib/composer-constants';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../../../../lib/composer-constants';
 
 export default function CoreTabScreen() {
   const { slug, url, label } = useLocalSearchParams<{
@@ -97,7 +97,7 @@ export default function CoreTabScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

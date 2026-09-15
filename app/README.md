@@ -70,7 +70,7 @@ P7.0–P7.5 docs interface).
   (`commitServerConfig`) serves discovery, the self-host form and the Settings
   editor; changing the host wipes the session (the old instance's token is
   meaningless on the new one).
-- **Theme.** Locked minimal dark palette + P5.1 design tokens in `lib/theme.ts`
+- **Theme.** Runtime-resolved light/dark palettes + P5.1 design tokens in `lib/theme.ts`
   (`TYPOGRAPHY` h1–h4 + body + mono, `SPACING` 8-pt rhythm, `MOTION` fast /
   base / slow / pulse, `DENSITY` bubble / chip / composer radii). Every
   component reads tokens from theme.ts — no inline magic numbers.
@@ -159,7 +159,7 @@ app/
 │   ├── token-storage.ts              # AsyncStorage + localStorage abstraction
 │   ├── config.ts                     # auth_base_url / gateway_base_url / ws_base_url + boot hydration
 │   ├── server-url.ts                 # #385 — pure precedence / normalise / /healthz check / persist
-│   ├── theme.ts                      # Dark palette + TYPOGRAPHY / SPACING / MOTION / DENSITY
+│   ├── theme.ts                      # Resolved palettes + TYPOGRAPHY / SPACING / MOTION / DENSITY
 │   ├── composer-constants.ts         # MAX_USER_MESSAGE_LEN_CLIENT + theme barrel
 │   ├── placeholder-tab.tsx           # <PlaceholderTab name=… landsIn=… />
 │   ├── ws-client.ts                  # WS connection primitive (chat surface)

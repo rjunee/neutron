@@ -54,7 +54,7 @@ import {
   type AttachmentAuthCtx,
 } from '../lib/attachment-url';
 import { type BubbleTone } from '../lib/chat-bubble-metrics';
-import { THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, THEME, TYPOGRAPHY } from '../lib/theme';
 import { VoiceNoteBubble } from './VoiceNoteBubble';
 
 export interface AuthedAttachmentImageProps {
@@ -356,7 +356,7 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   fallback: {
     alignItems: 'center',
     justifyContent: 'center',

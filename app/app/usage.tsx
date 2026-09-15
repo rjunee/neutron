@@ -64,7 +64,7 @@ import {
 
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts';
 
 import {
@@ -463,7 +463,7 @@ export default function ModelUsageScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
   centered: { alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.6 },

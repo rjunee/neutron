@@ -28,7 +28,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import type { Task, UpdateTaskInput } from '../lib/tasks-client';
 import { ALPHA_TINTS } from './TaskRow';
 import { normalizeDueDate } from './TaskCreateModal';
@@ -246,7 +246,7 @@ export function TaskEditModal({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

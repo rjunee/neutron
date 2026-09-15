@@ -44,7 +44,7 @@
 import { useState } from 'react';
 import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 
 export interface ProjectHeaderProps {
   /** Display name rendered as the header title. */
@@ -209,7 +209,7 @@ const LOGO_SIZE = 26;
  */
 const HEADER_TOP_INSET = 44;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   header: {
     flexDirection: 'row',
     alignItems: 'center',

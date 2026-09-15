@@ -42,7 +42,7 @@ import {
   parseBlocks,
   tokeniseInline,
 } from './markdown-grammar';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
+import { createThemedStyles, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
 
 /**
  * P7.5 — resolves a relative `![alt](relpath)` link in markdown to the
@@ -485,7 +485,7 @@ function renderToken(
   }
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   paragraph: {
     ...TYPOGRAPHY.body,
     marginBottom: SPACING.xs + 2,

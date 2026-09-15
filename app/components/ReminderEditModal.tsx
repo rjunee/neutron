@@ -44,7 +44,7 @@ import {
   type ReminderPreset,
 } from '../lib/reminder-presets';
 import { formatFireAt, type ReminderItem } from '../lib/reminders-client';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
 
 export interface ReminderEditModalProps {
@@ -245,7 +245,7 @@ function formatAbsolute(fire_at_seconds: number): string {
   }
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

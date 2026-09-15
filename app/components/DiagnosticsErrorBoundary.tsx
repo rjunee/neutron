@@ -19,7 +19,7 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { captureReport, recordDiagnosticEvent } from '../lib/diagnostics';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 
 interface Props {
   children: ReactNode;
@@ -84,7 +84,7 @@ export class DiagnosticsErrorBoundary extends Component<Props, State> {
   }
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: { flex: 1, backgroundColor: THEME.background, paddingTop: 72 },
   body: { padding: 24, gap: 16 },
   title: { color: THEME.text_primary, fontSize: 22, fontWeight: '700' },

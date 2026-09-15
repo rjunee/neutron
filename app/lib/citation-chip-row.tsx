@@ -17,7 +17,7 @@
 import { useState } from 'react';
 import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from './theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from './theme';
 
 const URL_ALLOW = /^(https?:\/\/|neutron:\/\/docs\/|app:\/\/|\/)/;
 
@@ -104,7 +104,7 @@ function CitationChip({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     gap: SPACING.xs + 2,
     paddingVertical: SPACING.xs,
