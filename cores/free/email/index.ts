@@ -50,6 +50,7 @@ export {
   MessageNotFoundError,
   ThreadNotFoundError,
   OAuthMissingError,
+  ClassificationSetupError,
   buildGoogleGmailClient,
   buildInMemoryGmailClient,
   buildRawMessage,
@@ -80,6 +81,7 @@ export {
   type GmailThreadModifyInput,
   type GmailThreadModifyResult,
   type GoogleGmailClientOptions,
+  type ClassificationSetupErrorCode,
   type InMemoryGmailSeed,
   type SeededInMemoryGmailClient,
   type AccountReadOutcome,
@@ -184,6 +186,16 @@ export {
 
 export { LAUNCHER_ICON, type LauncherIconMeta } from './src/ui/launcher-icon.ts'
 export { APP_TAB_META, type AppTabMeta } from './src/ui/app-tab-surface.ts'
+
+export {
+  CLASSIFICATION_SURVEY_LIMIT,
+  applyClassificationSetup,
+  surveyClassificationSetup,
+  type ClassificationProposal,
+  type ClassificationSetupAction,
+  type ClassificationSetupAnswer,
+  type ClassificationSurvey,
+} from './src/pipeline/setup.ts'
 
 // ── X2: typed Core module contract ──────────────────────────────────────
 // The ONE declaration the install composer (`gateway/cores/install-bundled.ts`)

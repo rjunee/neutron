@@ -32,7 +32,7 @@
 
 import { useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 
 import { TaskCreateModal } from '../../../components/TaskCreateModal';
 import { TaskEditModal } from '../../../components/TaskEditModal';
@@ -45,7 +45,7 @@ import {
   useTaskState,
 } from '../../../lib/task-state';
 import type { Task, UpdateTaskInput } from '../../../lib/tasks-client';
-import { SPACING, THEME } from '../../../lib/theme';
+import { createThemedStyles, SPACING, THEME } from '../../../lib/theme';
 
 export default function TasksTab() {
   // Argus r2 BLOCKER B2 (PR #276) — read both `id` (project segment)
@@ -172,7 +172,7 @@ function TasksTabBody({ highlightTaskId }: { highlightTaskId: string | null }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

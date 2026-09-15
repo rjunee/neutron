@@ -116,7 +116,7 @@ export function parseCalCommand(raw: string, now: Date): CalCommand {
   }
   const body = trimmed.slice('/cal'.length).trim()
   if (body.length === 0) return { kind: 'help' }
-  const verbMatch = body.match(/^(\S+)\s*(.*)$/)
+  const verbMatch = body.match(/^(\S+)(?:\s+(\S.*))?$/)
   if (verbMatch === null) return { kind: 'unrecognized', reason: 'no verb' }
   const verb = (verbMatch[1] ?? '').toLowerCase()
   const rest = (verbMatch[2] ?? '').trim()

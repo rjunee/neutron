@@ -64,6 +64,7 @@ import type { RunWorkerObservation } from '@neutronai/trident/worker-observation
  */
 export interface TridentRunAccess {
   get(id: string): TridentRun | null
+  latestHeartbeatAt?(id: string): string | null
   update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
   /**
    * §F6a — the terminal-write CHOKEPOINT. Deleting a board card bound to a LIVE
@@ -249,6 +250,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
         lookup,
         when,
         repoWebUrls !== undefined ? (p: string) => repoWebUrls.peek(p) : undefined,
+        trident_runs.latestHeartbeatAt?.bind(trident_runs),
       )
       return progress === null ? it : { ...it, run_progress: progress }
     })

@@ -43,7 +43,7 @@ import {
   useFocusState,
 } from '../lib/focus-state';
 import { useAuthSession } from '../lib/session';
-import { SPACING, THEME } from '../lib/theme';
+import { createThemedStyles, SPACING, THEME } from '../lib/theme';
 
 export default function FocusScreen() {
   const { user } = useAuthSession();
@@ -157,7 +157,7 @@ function FocusScreenBody() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

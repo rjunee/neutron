@@ -25,7 +25,7 @@
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface FocusHeaderProps {
   refreshing: boolean;
@@ -91,7 +91,7 @@ export function FocusHeader({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',

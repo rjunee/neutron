@@ -21,6 +21,8 @@ import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts
 
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -695,7 +697,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
   })
 })
 
-describe('wireSubstrates — swappable provider (trident stays Claude Code)', () => {
+describe('wireSubstrates — project-aware provider across chat and builds', () => {
   function openaiCtxOverrides(): Partial<OpenWiringContext> {
     return {
       provider: 'openai',
@@ -746,16 +748,56 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     expect(liveTools.map((t) => t.name)).toEqual(['work_board_add'])
   })
 
-  test('provider=openai: trident-fire + ephemeral substrates STILL dispatch through the Claude Code factory', async () => {
-    // The CC-typed `substrateFactory` is used ONLY by the anthropic path. If the
-    // trident substrates recorded into `captured`, they are on Claude Code —
-    // exactly the hard constraint (trident's Workflow inner loop is CC-only).
-    const { ctx, captured } = makeCtx(openaiCtxOverrides())
+  test('build substrates honor the project Responses provider; Claude is a positive control', async () => {
+    let selected: 'openai' | 'anthropic' = 'openai'
+    const rec = recordingOpenAiFetch()
+    const { ctx, captured } = makeCtx({
+      ...openaiCtxOverrides(),
+      providerResolver: () => ({ provider: selected, source: 'project' }),
+      toolManifest: () => [{ name: 'work_board_add', description: 'add', input_schema: { type: 'object' } }],
+      openaiFetchImpl: rec.fetchImpl,
+    })
     const w = wireSubstrates(ctx)
     await drain(w.makeWarmFireSubstrate('/repo/alpha'))
     await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    expect(captured.some((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))).toBe(true)
+    expect(rec.bodies).toHaveLength(2)
+    for (const body of rec.bodies) expect(body['tools']).toBeUndefined()
+    expect(captured.filter((o) => o.substrate_instance_id.includes('trident'))).toHaveLength(0)
+
+    selected = 'anthropic'
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/two'))
     expect(captured.some((o) => o.substrate_instance_id === 'cc-trident-owner')).toBe(true)
+  })
+
+  test('Codex build dispatch reaches the CLI, with Claude dispatch as a positive control', async () => {
+    const spawned: string[] = []
+    let selected: 'openai-codex' | 'anthropic' = 'openai-codex'
+    const { ctx, captured } = makeCtx({
+      ...openaiCtxOverrides(),
+      providerResolver: () => ({ provider: selected, source: 'project' }),
+      codexSpawnImpl: (command) => {
+        spawned.push(command)
+        const emitter = new EventEmitter()
+        return {
+          pid: 4343,
+          stdout: Readable.from([Buffer.from('{"type":"thread.started","thread_id":"test-thread"}\n{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n')]),
+          stderr: Readable.from([]),
+          exitCode: 0,
+          on: emitter.on.bind(emitter),
+          once: emitter.once.bind(emitter),
+          removeListener: emitter.removeListener.bind(emitter),
+        } as unknown as ReturnType<NonNullable<OpenWiringContext['codexSpawnImpl']>>
+      },
+    })
+    const w = wireSubstrates(ctx)
+    await drain(w.makeWarmFireSubstrate('/repo'))
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo'))
+    expect(spawned).toEqual(['codex', 'codex'])
+    expect(captured.filter((o) => o.substrate_instance_id.includes('trident'))).toHaveLength(0)
+    selected = 'anthropic'
+    await drain(w.makeWarmFireSubstrate('/repo'))
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo'))
+    expect(captured.filter((o) => o.substrate_instance_id.includes('trident'))).toHaveLength(2)
   })
 
   test('provider=openai: conversational substrates are built (non-null) and do NOT use the CC fake factory', async () => {
@@ -771,22 +813,21 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     expect(captured.some((o) => o.substrate_instance_id === 'cc-llm-owner')).toBe(false)
   })
 
-  test('OpenAI-ONLY box (llmPool null, openai pool present): conversational substrates are BUILT (Codex blocker fix)', () => {
+  test('OpenAI-only instance dispatches build substrates without Anthropic credentials', async () => {
     // Repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, NO Claude credential.
     // Pre-fix these nulled out because construction gated on the Anthropic llmPool.
-    const { ctx } = makeCtx({ ...openaiCtxOverrides(), llmPool: null })
+    const rec = recordingOpenAiFetch()
+    const { ctx } = makeCtx({ ...openaiCtxOverrides(), llmPool: null, openaiFetchImpl: rec.fetchImpl })
     const w = wireSubstrates(ctx)
     expect(w.llmCallSubstrate).not.toBeNull()
     expect(w.liveAgentSubstrate).not.toBeNull()
     // No Anthropic pool → no CC pre-warm fired (openai is stateless HTTP).
     expect(w.prewarmReady).toBeNull()
     expect(w.prewarmSettledRef.settled).toBe(true)
-    // Trident stays Claude-Code-ONLY: with no Anthropic pool an autonomous build
-    // cannot run, and the factory throws LOUDLY (never silently no-ops on GPT).
-    expect(() => w.makeWarmFireSubstrate('/repo')).toThrow(/empty Anthropic credential pool/)
-    expect(() => w.makeEphemeralSubstrate('cc-trident')('/repo')).toThrow(
-      /empty Anthropic credential pool/,
-    )
+    await drain(w.makeWarmFireSubstrate('/repo'))
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo'))
+    expect(rec.bodies).toHaveLength(2)
+
   })
 
   test('OPERATOR OVERRIDE: NEUTRON_OPENAI_MODEL on ctx.env is the model SENT on the wire (not the ambient global)', async () => {
@@ -920,14 +961,14 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     buildToolManifest: buildOpenAiToolManifest,
   })
 
-  test('unset / anthropic → {} (Claude Code, no provider override)', () => {
-    expect(resolveOpenConversationalProvider({} as NodeJS.ProcessEnv, deps(false))).toEqual({})
+  test('unset / anthropic → explicit application-default Claude selection', () => {
+    expect(resolveOpenConversationalProvider({} as NodeJS.ProcessEnv, deps(false))).toEqual({ provider: 'anthropic' })
     expect(
       resolveOpenConversationalProvider(
         { NEUTRON_MODEL_PROVIDER: 'anthropic' } as unknown as NodeJS.ProcessEnv,
         deps(false),
       ),
-    ).toEqual({})
+    ).toEqual({ provider: 'anthropic' })
   })
 
   test('openai + OPENAI_API_KEY → fully-wired GPT ctx', () => {
@@ -971,24 +1012,22 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     expect(threw).toBe(true)
   })
 
-  test('openai-codex-cli (declared but NOT production-wired) → THROWS a loud boot error (never silent Claude)', () => {
+  test('openai-codex + credentials is wired instead of falling back to Claude', () => {
+    const ctx = resolveOpenConversationalProvider(
+      { NEUTRON_MODEL_PROVIDER: 'openai-codex' } as unknown as NodeJS.ProcessEnv,
+      deps(true),
+    )
+    expect(ctx.provider).toBe('openai-codex')
+    expect(ctx.openaiLlmPool).toBeDefined()
+  })
+
+  test.each([false, true])('pi refuses at boot whether OpenAI credentials exist: %s', (withKey) => {
     expect(() =>
       resolveOpenConversationalProvider(
-        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
-        deps(true),
+        { NEUTRON_MODEL_PROVIDER: 'pi' } as unknown as NodeJS.ProcessEnv,
+        deps(withKey),
       ),
-    ).toThrow(/not.*production-wired|refusing to boot/i)
-    // Mutation check: it must NOT silently return {} (Claude fallback).
-    let threw = false
-    try {
-      resolveOpenConversationalProvider(
-        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
-        deps(true),
-      )
-    } catch {
-      threw = true
-    }
-    expect(threw).toBe(true)
+    ).toThrow(/pi.*no conversational substrate adapter/)
   })
 })
 
@@ -1020,12 +1059,31 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(rejected).toBe(false)
   })
 
+  test.each([
+    { provider: 'anthropic', source: 'application' },
+    { provider: 'anthropic', source: 'instance' },
+    { provider: 'openai', source: 'project' },
+  ] as const)('credential-free live selection %s leaves deterministic substrates', (selection) => {
+    const { ctx } = makeCtx({
+      llmPool: null,
+      openaiLlmPool: null,
+      providerResolver: () => selection,
+    })
+    const w = wireSubstrates(ctx)
+    expect(w.llmCallSubstrate).toBeNull()
+    expect(w.liveAgentSubstrate).toBeNull()
+    expect(w.reminderComposeSubstrate).toBeNull()
+    expect(w.makeComposeSubstrate('any-project')).toBeNull()
+    expect(w.prewarmReady).toBeNull()
+    expect(w.prewarmSettledRef.settled).toBe(true)
+  })
+
   test('LLM-less: warm substrates null, prewarm skipped (settled true), factories throw', () => {
     const { ctx } = makeCtx({ llmPool: null })
     const w = wireSubstrates(ctx)
     expect(w.llmCallSubstrate).toBeNull()
     expect(w.liveAgentSubstrate).toBeNull()
-    // Compose is LLM-only — no provider → the per-project compose factory returns null.
+    // Compose is LLM-only — no credentials means its factory returns null.
     expect(w.makeComposeSubstrate('any-project')).toBeNull()
     expect(w.prewarmReady).toBeNull()
     // No pre-warm to await → settled seeds true immediately.

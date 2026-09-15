@@ -26,7 +26,7 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface ToastProps {
   /** Bold leading line, e.g. "Joined Acme". */
@@ -137,7 +137,7 @@ export function Toast({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   wrap: {
     position: 'absolute',
     top: SPACING.md,

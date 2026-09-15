@@ -18,7 +18,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, Text, View } from 'react-native';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface DropZoneOverlayProps {
   /** When false, the overlay is rendered at opacity 0 + pointerEvents none. */
@@ -61,7 +61,7 @@ export function DropZoneOverlay({ visible, filename, source_label }: DropZoneOve
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   overlay: {
     position: 'absolute',
     top: 0,

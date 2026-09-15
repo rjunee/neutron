@@ -17,7 +17,7 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface ReminderHeaderProps {
   onCreatePress: () => void;
@@ -49,7 +49,7 @@ export function ReminderHeader({ onCreatePress }: ReminderHeaderProps) {
 
 const BUTTON_RADIUS = DENSITY.bubble_radius - 4;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   header: {
     flexDirection: 'row',
     alignItems: 'flex-start',

@@ -236,6 +236,12 @@ CREATE INDEX idx_topics_project_id ON topics(project_id)
 [index] idx_topics_status (tbl=topics)
 CREATE INDEX idx_topics_status ON topics(status)
 
+[index] idx_transcript_usage_events_observed (tbl=transcript_usage_events)
+CREATE INDEX idx_transcript_usage_events_observed ON transcript_usage_events (observed_at)
+
+[index] idx_transcript_usage_events_run (tbl=transcript_usage_events)
+CREATE INDEX idx_transcript_usage_events_run ON transcript_usage_events (run_id)
+
 [index] idx_trident_dispatch_holds_item (tbl=code_trident_dispatch_holds)
 CREATE UNIQUE INDEX idx_trident_dispatch_holds_item
     ON code_trident_dispatch_holds (project_slug, board_item_id)
@@ -980,7 +986,8 @@ CREATE TABLE instance_metadata (
   -- time; an unknown identifier throws and the cron tick / surface request
   -- fails closed (which is preferable to silently picking the wrong day).
   timezone TEXT
-, transcription_backend TEXT, trident_phase_models TEXT, email_digest_enabled INTEGER CHECK (email_digest_enabled IN (0, 1)))
+, transcription_backend TEXT, trident_phase_models TEXT, model_provider TEXT
+  CHECK (model_provider IS NULL OR model_provider IN ('anthropic', 'openai', 'openai-codex', 'pi')), model_provider_initialized INTEGER NOT NULL DEFAULT 0, email_digest_enabled INTEGER CHECK (email_digest_enabled IN (0, 1)))
 
 [table] instance_scope_ledger (tbl=instance_scope_ledger)
 CREATE TABLE instance_scope_ledger (
@@ -1262,13 +1269,19 @@ CREATE TABLE "projects" (
                              CHECK (privacy_mode IN ('private', 'workspace', 'public')),
     billing_mode         TEXT NOT NULL DEFAULT 'personal'
                              CHECK (billing_mode IN ('personal', 'group_per_seat', 'group_shared')),
-    created_at           TEXT NOT NULL,                          -- ISO-8601 UTC
-    updated_at           TEXT NOT NULL,                          -- ISO-8601 UTC
-    deleted_at           TEXT,                                   -- ISO-8601 UTC; NULL = live
-    context_archived_at  TEXT,                                   -- ISO-8601 UTC; NULL = not archived
-    topic_id             TEXT                                    -- telegram forum-topic thread id; NULL = unbound
-, agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'
-        CHECK (agent_engagement_mode IN ('tag_gated', 'all_messages')), emoji TEXT, last_activity_at TEXT, archived_at TEXT) STRICT
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    deleted_at           TEXT,
+    context_archived_at  TEXT,
+    topic_id             TEXT,
+    agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'
+                             CHECK (agent_engagement_mode IN ('tag_gated', 'all_messages')),
+    emoji                TEXT,
+    last_activity_at     TEXT,
+    archived_at          TEXT,
+    model_provider       TEXT
+                             CHECK (model_provider IS NULL OR model_provider IN ('anthropic', 'openai', 'openai-codex', 'pi'))
+) STRICT
 
 [table] reminders (tbl=reminders)
 CREATE TABLE reminders (
@@ -1541,6 +1554,35 @@ CREATE TABLE topics (
     updated_at REAL NOT NULL
 )
 
+[table] transcript_usage_events (tbl=transcript_usage_events)
+CREATE TABLE transcript_usage_events (
+    source_path TEXT NOT NULL,
+    line_offset INTEGER NOT NULL CHECK (line_offset >= 0),
+    observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+    project TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    run_id TEXT,
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+    reasoning_tokens INTEGER NOT NULL CHECK (reasoning_tokens >= 0),
+    PRIMARY KEY (source_path, line_offset),
+    CHECK (cache_read_tokens <= input_tokens),
+    CHECK (reasoning_tokens <= output_tokens)
+) STRICT
+
+[table] transcript_usage_watermarks (tbl=transcript_usage_watermarks)
+CREATE TABLE transcript_usage_watermarks (
+    source_path TEXT PRIMARY KEY NOT NULL,
+    byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+    reasoning_tokens INTEGER NOT NULL CHECK (reasoning_tokens >= 0)
+) STRICT
+
 [table] trident_launcher_crashes (tbl=trident_launcher_crashes)
 CREATE TABLE trident_launcher_crashes (
     session_key TEXT PRIMARY KEY NOT NULL, -- unique child-generation token
@@ -1617,7 +1659,7 @@ CREATE TABLE "work_board_items" (
                            CHECK (ralph_round >= 0),
     max_ralph_rounds   INTEGER
                            CHECK (max_ralph_rounds IS NULL OR max_ralph_rounds >= 0)
-) STRICT
+, repo_name TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

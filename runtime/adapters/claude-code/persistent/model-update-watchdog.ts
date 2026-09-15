@@ -136,6 +136,13 @@ export interface ParsedModelId {
   version: number[]
 }
 
+const MODEL_CLASSES = new Set(['opus', 'fable', 'sonnet', 'haiku'])
+
+/** Whether `value` is a version-free Claude CLI model-class alias. */
+export function isModelClass(value: string): boolean {
+  return MODEL_CLASSES.has(value)
+}
+
 /**
  * Anthropic's current id shape: `claude-<family>-<v1>[-<v2>…]`, optionally with
  * a trailing `-YYYYMMDD` snapshot suffix that {@link normalizeModelId} strips
@@ -278,6 +285,15 @@ export function decideModelUpdate(args: {
 
   const baseline = state.last_known_model ?? configuredModel
   const probedNorm = normalizeModelId(probe.model)
+  if (!state.last_known_model && isModelClass(configuredModel)) {
+    const probed = parseModelId(probe.model)
+    if (probed?.family !== configuredModel) {
+      return { action: 'skip-unrecognized', probed: probe.model, baseline: configuredModel }
+    }
+    // The class alias already follows the newest model. Persist the concrete id
+    // only as the next edge-detection baseline; never replace the live alias.
+    return { action: 'no-change', current: probe.model, seed: probe.model }
+  }
   if (probedNorm === normalizeModelId(baseline)) {
     // Seed `last_known_model` the first time so subsequent ticks have a baseline
     // independent of `configuredModel` (which a later upgrade also mutates).
@@ -644,6 +660,7 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
     if (
       adopted !== undefined &&
       !isFallbackModel(adopted, deps.knownFallbacks()) &&
+      !isModelClass(deps.getConfiguredModel()) &&
       compareModelRecency(adopted, deps.getConfiguredModel()) === 'newer'
     ) {
       deps.adoptModel(adopted)

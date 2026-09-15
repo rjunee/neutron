@@ -27,7 +27,7 @@ import type {
   LauncherEntry,
   LauncherEntryLongPressEntry,
 } from '../lib/launcher-client';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface LauncherItemMenuTarget {
   entry: LauncherEntry;
@@ -189,7 +189,7 @@ function ActionRow({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

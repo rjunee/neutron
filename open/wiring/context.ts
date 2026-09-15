@@ -21,7 +21,7 @@ import type {
   ClaudeCodeSubstrateOptions,
   RecoveredReply,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
-import type { Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import type { Provider, ProviderSelection } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
@@ -58,20 +58,17 @@ export interface OpenWiringContext {
    */
   prewarmSubstrate: (substrate: Substrate) => Promise<void>
   /**
-   * SWAPPABLE MODEL PROVIDER — the CONVERSATIONAL backend for this box. Absent ⇒
-   * `'anthropic'` (Claude Code), the default. Set from `NEUTRON_MODEL_PROVIDER`
-   * (read in `open/composer.ts` — a Managed-open-contract env read stays under
-   * `open/`, never `runtime/`). Applied ONLY to the conversational substrates
-   * (`cc-llm-*` phase-spec + `cc-agent-*` live chat); the trident-fire + ephemeral
-   * substrates stay Claude-Code by construction (trident's Workflow inner loop has
-   * no OpenAI analogue).
+   * Static provider for standalone callers. Production resolves the stored
+   * project/instance choice per turn through providerResolver; an absent choice
+   * inherits the application default (Claude Code).
    */
   provider?: Provider
+  /** Live per-turn project/instance/application resolution with provenance. */
+  providerResolver?: (projectId?: string) => ProviderSelection
   /**
    * Resolved OpenAI credential pool (`OPENAI_API_KEY`), or null when the box has
-   * no OpenAI key. Consumed ONLY when `provider === 'openai'`; when a project
-   * selects openai but this is null the wiring degrades LOUDLY to Claude Code
-   * (logged in the composer) rather than booting a broken openai path.
+   * no OpenAI key. Consumed by the OpenAI-family adapters; when a project
+   * selects openai but this is null the dispatch refuses with a terminal error.
    */
   openaiLlmPool?: CredentialPool | null
   /**
@@ -95,6 +92,8 @@ export interface OpenWiringContext {
    * model id honors `ctx.env` overrides).
    */
   openaiFetchImpl?: typeof fetch
+  /** Test seam for actual Codex CLI dispatch. */
+  codexSpawnImpl?: import('@neutronai/runtime/adapters/codex-cli/index.ts').CodexCliSubstrateOptions['spawnImpl']
   /**
    * O6 — the notice-family sinks (`onDeadTurnNotice` / `onSizeAlert` /
    * `onRateLimitBanner`) the composer builds over the app-ws push registry +

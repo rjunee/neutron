@@ -20,7 +20,8 @@ import {
 import { AuthSessionProvider } from '../lib/session';
 import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { installPushTapHandler } from '../lib/push';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
+import { AppThemeProvider } from '../lib/theme-runtime';
 
 /**
  * Remote diagnostics — installed at MODULE SCOPE, not in an effect.
@@ -171,7 +172,7 @@ function useServerConfigEpoch(): number {
   return epoch;
 }
 
-export default function RootLayout() {
+function RootLayoutContent() {
   const [phase, setPhase] = useState<BootPhase>('hydrating');
   const serverEpoch = useServerConfigEpoch();
   // Read fresh on every render, deliberately NOT memoised. `loadAppConfig()`
@@ -238,7 +239,15 @@ export default function RootLayout() {
   );
 }
 
-const styles = StyleSheet.create({
+export default function RootLayout() {
+  return (
+    <AppThemeProvider>
+      <RootLayoutContent />
+    </AppThemeProvider>
+  );
+}
+
+const styles = createThemedStyles({
   booting: {
     flex: 1,
     backgroundColor: THEME.background,

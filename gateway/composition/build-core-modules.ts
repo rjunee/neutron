@@ -78,7 +78,7 @@ import {
   sweepStrandedFailures,
 } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
-import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
+import { buildTridentDelivery, deliverInfraRetry } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
@@ -826,6 +826,8 @@ export function buildCoreModules(
         // "An infrastructure failure must retry itself" — atomically spend the
         // durable executor/transport retry budget and release the run slot.
         orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
+        orchestratorOpts.on_infra_retry = (run, attempt, cause) =>
+          deliverInfraRetry(tridentWiring.delivery_sink ?? router, run, attempt, cause)
         // A credential blink happens after Forge has completed. Preserve its
         // harvested result and retry only the outer publish step.
         orchestratorOpts.begin_publish_retry = (id) => store.beginPublishRetry(id)

@@ -4,9 +4,9 @@
  * export" this branch has removed twice; what makes this one live is not that it is
  * exported, it is that the contract it claims is asserted here.
  *
- * These spawn REAL processes on a REAL pty — there is no seam to fake, because the
- * host reaches `Bun.Terminal` and `Bun.spawn` directly, and faking them would test the
- * fake. They use `/bin/echo` and `/bin/cat`: no network, no credentials, milliseconds.
+ * Lifecycle checks spawn real processes on a real PTY. Screen and submission checks
+ * drive the existing terminal seam: chunk boundaries and delivered bytes are the
+ * properties, independent of how quickly a subprocess gets scheduled.
  *
  * WHAT IS DELIBERATELY NOT ASSERTED: parity with `HerdrHost`. The two backends are not
  * interchangeable — exit codes, exit detection and the origin of `onScreen` all differ
@@ -24,113 +24,103 @@ import {
 import type { PtyChild } from '../pty-host.ts'
 import { withCapturedStderr } from './capture-stderr.ts'
 
-/** Wait until `cond()` holds, or throw. */
-async function until(cond: () => boolean, label: string, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`until: timed out waiting for ${label}`)
-    await Bun.sleep(5)
-  }
+/** Drive the host's real data callback and capture its writes, without scheduling a child. */
+async function terminalFixture() {
+  const screens: string[] = []
+  const writes: string[] = []
+  let deliver!: (text: string) => void
+  const exit = Promise.withResolvers<number>()
+  const host = new BunTerminalHost({
+    createTerminal: (opts) => {
+      const terminal = {
+        write(data: string | ArrayBufferView) {
+          const bytes = typeof data === 'string'
+            ? new TextEncoder().encode(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          writes.push(new TextDecoder().decode(bytes))
+          return bytes.byteLength
+        },
+        resize: () => undefined,
+        close: () => undefined,
+      }
+      deliver = (text) => opts.data!(terminal, new TextEncoder().encode(text))
+      return terminal
+    },
+    spawn: () => ({ pid: 77, exited: exit.promise, exitCode: null, kill: () => exit.resolve(0) }),
+  })
+  const child = await host.spawn(['/bin/cat'], {
+    cwd: '/tmp', env: {}, onScreen: (screen) => screens.push(screen),
+  })
+  child.beginOutput!()
+  return { child, screens, writes, deliver }
 }
 
 describe('the in-process Bun PTY backend is kept as a working option', () => {
   it('spawns on a real pty, reports a real pid, and resolves a REAL exit code', async () => {
-    const screens: string[] = []
-    const child = await bunTerminalHost.spawn(['/bin/echo', 'hello-from-the-pty'], {
-      cwd: '/tmp',
-      env: {},
-      onScreen: (s) => screens.push(s),
-    })
-    // AS PRODUCTION DOES. `spawn.ts` calls this once its consumers are wired; without
-    // it the host holds screens for the fail-open window. These tests used to pass
-    // without it because this backend had no gate — which was the defect.
-    child.beginOutput?.()
-    // `spawn` is async for herdr's sake; here the pid exists immediately and must be
-    // real — `supervision.ts` liveness-probes it.
+    // The child checks its actual descriptors. A pipe-backed spawn exits 1 instead.
+    // Await process completion, not a deadline for terminal output. Nonzero success
+    // distinguishes the real exit status from a backend that fabricates zero/null.
+    const child = await bunTerminalHost.spawn(
+      ['/bin/sh', '-c', 'test -t 0 && test -t 1 && test -t 2 || exit 1; exit 23'],
+      { cwd: '/tmp', env: {} },
+    )
+    child.beginOutput!()
     expect(child.pid).toBeGreaterThan(0)
-    const code = await child.exited
-    // THE DIVERGENCE, ASSERTED RATHER THAN DESCRIBED. Under herdr this is always
-    // `null` and crash-vs-recycle rests entirely on `wasKilledByUs`. Here it is a real
-    // kernel status, and that is the whole reason the option is worth keeping.
-    expect(code).toBe(0)
+    expect(await child.exited).toBe(23)
     expect(child.hasExited()).toBe(true)
-    await until(() => screens.length > 0, 'a screen')
-    expect(screens.join('')).toContain('hello-from-the-pty')
+  })
+
+  it('onScreen delivers terminal output through the host callback', async () => {
+    const { child, screens, deliver } = await terminalFixture()
+    try {
+      deliver('hello-from-the-pty\r\n')
+      expect(screens.join('')).toContain('hello-from-the-pty')
+    } finally {
+      child.kill()
+      await child.exited
+    }
   })
 
   it('onScreen delivers an ACCUMULATION, not one chunk — the ring replaces what it gets', async () => {
-    // If the host forwarded each chunk, `PtyRing.replace` would erase all previous
-    // output on every delivery and the ring would silently hold only the last bytes.
-    // Two writes, and the LAST screen must carry both.
-    const screens: string[] = []
-    const child = await bunTerminalHost.spawn(['/bin/cat'], {
-      cwd: '/tmp',
-      env: {},
-      onScreen: (s) => screens.push(s),
-    })
-    // AS PRODUCTION DOES. `spawn.ts` calls this once its consumers are wired; without
-    // it the host holds screens for the fail-open window. These tests used to pass
-    // without it because this backend had no gate — which was the defect.
-    child.beginOutput?.()
-    await child.submitLine!('first-line')
-    await until(() => screens.some((s) => s.includes('first-line')), 'the first line')
-    await child.submitLine!('second-line')
-    await until(() => screens.some((s) => s.includes('second-line')), 'the second line')
-    const last = screens[screens.length - 1]!
-    expect(last).toContain('first-line')
-    expect(last).toContain('second-line')
-    child.kill()
-    await child.exited
+    const { child, screens, deliver } = await terminalFixture()
+    try {
+      deliver('first-line\r\n')
+      expect(screens.at(-1)).toContain('first-line')
+      deliver('second-line\r\n')
+      expect(screens.at(-1)).toContain('first-line')
+      expect(screens.at(-1)).toContain('second-line')
+    } finally {
+      child.kill()
+      await child.exited
+    }
   })
 
   it('the accumulation keeps its LINE STRUCTURE across chunks', async () => {
-    // Everything positional downstream depends on this: `textSince` is an
-    // order-preserving multiset difference of LINES, and `getRecentOutput({bottomN})`
-    // and the doc-quote guard in `output-scan.ts` slice by line. The trim uses
-    // `bottomNLines`, which deliberately drops a trailing newline — right for a
-    // finished capture, WRONG for a running accumulation, where it would join the last
-    // line to whatever the next chunk brings. Two lines arriving in two deliveries must
-    // stay two lines.
-    const screens: string[] = []
-    const child = await bunTerminalHost.spawn(
-      ['/bin/sh', '-c', 'while IFS= read -r line; do echo "GOT:$line"; done'],
-      { cwd: '/tmp', env: {}, onScreen: (s) => screens.push(s) },
-    )
-    child.beginOutput?.() // as production does, once its consumers are wired
-    await child.submitLine!('alpha')
-    await until(() => screens.some((s) => s.includes('GOT:alpha')), 'the first line')
-    await child.submitLine!('beta')
-    await until(() => screens.some((s) => s.includes('GOT:beta')), 'the second line')
-    const last = screens[screens.length - 1]!
-    const lines = last.split('\n').map((l) => l.trim())
-    expect(lines).toContain('GOT:alpha')
-    expect(lines).toContain('GOT:beta')
-    child.kill()
-    await child.exited
+    const { child, screens, deliver } = await terminalFixture()
+    try {
+      // Force distinct deliveries; a real process can coalesce both writes into one.
+      deliver('GOT:alpha\r\n')
+      deliver('GOT:beta\r\n')
+      const lines = screens.at(-1)!.split('\n').map((line) => line.trim())
+      expect(lines).toContain('GOT:alpha')
+      expect(lines).toContain('GOT:beta')
+    } finally {
+      child.kill()
+      await child.exited
+    }
   })
 
   it('submitLine SUBMITS — the Enter is load-bearing, not decorative', async () => {
-    // `cat` would be the wrong reader here: a pty ECHOES what is typed, so the text
-    // appears on screen whether or not it was ever submitted, and a test against the
-    // echo passes for an implementation that sends no Enter at all (verified: that
-    // mutation survived until this case existed). This reader emits `GOT:` only after
-    // a COMPLETE LINE arrives, so the marker can only appear if the submit fired.
-    const screens: string[] = []
-    const child = await bunTerminalHost.spawn(
-      ['/bin/sh', '-c', 'while IFS= read -r line; do echo "GOT:$line"; done'],
-      { cwd: '/tmp', env: {}, onScreen: (s) => screens.push(s) },
-    )
-    child.beginOutput?.() // as production does, once its consumers are wired
-    await child.submitLine!('acknowledged-line')
-    await until(
-      () => screens.some((s) => s.includes('GOT:acknowledged-line')),
-      'the reader seeing a COMPLETE line',
-    )
-    child.kill()
-    await child.exited
-    // AND IT IS NOT NO-OP-SAFE. `write`/`writeKey` are fire-and-forget by interface;
-    // this is the variant a caller reports an outcome from, so "the child is already
-    // gone" has to reach the caller rather than resolve as a completed submit.
+    const { child, writes } = await terminalFixture()
+    try {
+      await child.submitLine!('acknowledged-line')
+      // Assert the actual bytes handed to the terminal. Checking echoed screen text
+      // accepts a missing Enter; waiting for a reader then turns that defect into a hang.
+      expect(writes.join('')).toBe('acknowledged-line\r')
+    } finally {
+      child.kill()
+      await child.exited
+    }
     await expect(child.submitLine!('too-late')).rejects.toThrow(/after exit/)
   })
 

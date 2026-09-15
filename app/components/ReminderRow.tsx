@@ -37,7 +37,7 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { formatFireAt, type ReminderItem } from '../lib/reminders-client';
 import {
   computeFireAtBucket,
@@ -174,7 +174,7 @@ const ROW_MIN_HEIGHT = SPACING.lg * 4;
 const GLYPH_VISUAL = 24;
 const GLYPH_HIT = 44;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-start',

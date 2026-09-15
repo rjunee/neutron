@@ -47,6 +47,7 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_LANDING_STATIC_DIR',
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
@@ -66,6 +67,8 @@ beforeEach(() => {
   process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-tasks-test-secret-0123456789'
+  delete process.env['ANTHROPIC_API_KEY']
+  delete process.env['OPENAI_API_KEY']
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
@@ -108,7 +111,6 @@ describe('Open tasks composition wiring (ISSUES #440)', () => {
   test('the focus-score recompute cron is ON — with or without a credential', async () => {
     // No LLM, no network: the pass is a read plus one transaction, and the
     // time-derived half of every focus score goes stale without it.
-    delete process.env['ANTHROPIC_API_KEY']
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
 
@@ -134,7 +136,6 @@ describe('Open tasks composition wiring (ISSUES #440)', () => {
     // `prioritized_by: 'deterministic'` before attempting any call. So the llm
     // is a plain value here, not a gate — an uncredentialed box still gets a
     // ranked backlog.
-    delete process.env['ANTHROPIC_API_KEY']
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
 

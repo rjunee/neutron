@@ -48,7 +48,18 @@ const PROJECT_ID = 'neutron'
 async function startGateway(): Promise<Harness> {
   const store = new InMemoryProjectSettingsStore()
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
-  const surface = createAppProjectsSurface({ store, auth })
+  const surface = createAppProjectsSurface({
+    store,
+    auth,
+    resolveModelProvider: (project_id) => ({
+      provider: project_id === PROJECT_ID && store.modelProviderOverrideForTests(project_id) !== null
+        ? store.modelProviderOverrideForTests(project_id)!
+        : 'openai',
+      source: project_id === PROJECT_ID && store.modelProviderOverrideForTests(project_id) !== null
+        ? 'project'
+        : 'instance',
+    }),
+  })
   const composed = composeHttpHandler({
     appProjects: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
@@ -96,6 +107,7 @@ interface SettingsResponse {
   project: ProjectSettings
   project_id: string
   project_slug: string
+  model_provider_resolution?: { provider: string; source: string }
 }
 
 describe('app-projects surface — GET /settings', () => {
@@ -126,6 +138,7 @@ describe('app-projects surface — GET /settings', () => {
     // Connect engagement mode defaults to all_messages (migration 0088): a
     // fresh group project behaves like a single-person chat out of the box.
     expect(json.project.agent_engagement_mode).toBe('all_messages')
+    expect(json.model_provider_resolution).toEqual({ provider: 'openai', source: 'instance' })
     // Generic default shell — no hardcoded demo members (R6 removed the seed).
     expect(json.project.members).toEqual([])
   })
@@ -158,6 +171,42 @@ describe('app-projects surface — GET /settings', () => {
 })
 
 describe('app-projects surface — PATCH /settings', () => {
+  it('PATCH sets and clears the explicit project model provider', async () => {
+    const set = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: 'openai-codex' }),
+    })
+    expect(set.status).toBe(200)
+    expect(((await set.json()) as SettingsResponse).project.model_provider).toBe('openai-codex')
+    const inspected = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`)
+    expect(((await inspected.json()) as SettingsResponse).model_provider_resolution).toEqual({
+      provider: 'openai-codex',
+      source: 'project',
+    })
+    const clear = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: null }),
+    })
+    expect(clear.status).toBe(200)
+    expect(((await clear.json()) as SettingsResponse).project.model_provider).toBeNull()
+  })
+
+  it('PATCH accepts pi and rejects the obsolete Codex spelling', async () => {
+    const accepted = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: 'pi' }),
+    })
+    expect(accepted.status).toBe(200)
+    expect(((await accepted.json()) as SettingsResponse).project.model_provider).toBe('pi')
+
+    const obsolete = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model_provider: 'openai-codex-cli' }),
+    })
+    expect(obsolete.status).toBe(400)
+    expect((await obsolete.json()) as { code: string }).toMatchObject({ code: 'invalid_model_provider' })
+  })
+
   let harness: Harness
   beforeEach(async () => {
     harness = await startGateway()

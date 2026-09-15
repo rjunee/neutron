@@ -1,3 +1,4 @@
+import { createLogger } from '@neutronai/logger'
 import { createHash } from 'node:crypto'
 import {
   placementFor,
@@ -8,7 +9,15 @@ import {
 } from '@neutronai/runtime/bounded-work.ts'
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
+import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
+import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
+
+const log = createLogger('trident')
+
+export type BuildLeakPreflightOutcome = Omit<LeakPreflightOutcome, 'status'> & {
+  status: LeakPreflightOutcome['status'] | 'unknown'
+}
 
 export type BuildPhase = 'plan' | 'build' | 'review' | 'fix' | 'publish' | 'merge'
 type WorkPhase = Extract<BuildPhase, 'plan' | 'build' | 'review' | 'fix'>
@@ -22,7 +31,8 @@ export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unk
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }
 export type ReviewDecision =
   | { kind: 'approve' }
-  | { kind: 'fix'; findings: readonly string[] }
+  | { kind: 'fix'; findings: readonly string[]; blockingCount?: number }
+  | { kind: 're-plan'; findings: readonly string[]; whatIsMissing: string; blockingCount?: number }
   | Exclude<GateResult, { kind: 'allow' }>
 
 export interface ExecutionPlan {
@@ -42,13 +52,18 @@ export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'ralph-task-built' | 'ralph-task-built-deviated'
   round: number
+  /** Persisted by the host alongside the review checkpoint. */
+  replansUsed?: number
+  previousBlockingCount?: number
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** A running/unobserved turn must be settled by its host, never dispatched again. */
-  pending?: { phase: WorkPhase; step_id: string }
+  pending?: { phase: WorkPhase; step_id: string } | undefined
 }
 export interface BuildModeHost {
   loadResume(): Promise<ResumeCheckpoint | null>
+  /** Only the driver supplies this state; never pass a worker trailer here. */
+  saveCheckpoint(checkpoint: ResumeCheckpoint): Promise<void>
   /** Diff must be generated using this exact OID, not a moving branch name. */
   regenerateDiff(head: string): Promise<{ kind: 'known'; diff: string } | { kind: 'unknown'; detail: string }>
   probePlan(head: string): Promise<PlanProbe | null>
@@ -62,6 +77,7 @@ export interface BuildRunInput {
   run_id: string
   mode: 'pr' | 'ralph' | 'wave' | 'bound_pr'
   start: 'fresh' | 'resume'
+  merge_mode?: 'pr' | 'local'
   bound_pr?: number
   pinnedTaskId?: string
   ralphRound?: number
@@ -77,21 +93,29 @@ export interface BuildRunInput {
  * exports WorkerRunner but no BuildHost; keep host effects here until that lands.
  */
 export interface BuildRunDeps {
+  /** Required host run-row reader; only an omitted field on a known row uses the stored default. */
+  readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
   measure(): Promise<Measurement>
+  /** Resolve a differing commit claim and preserve a real conflict before refusing. */
+  checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
   admissionGate(input: BuildRunInput): Promise<GateResult>
   // Existing module vocabularies are preserved across extraction.
-  runLeakGatePreflight(snapshot: BuildSnapshot): Promise<LeakPreflightOutcome>
+  runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
-  // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
-  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number): Promise<ReviewDecision>
+  reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
+  // reviewGate owns panel provenance and severity, and records evidence before filtering.
+  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
-  publishGate(snapshot: BuildSnapshot): Promise<GateResult>
-  mergeGate(snapshot: BuildSnapshot): Promise<GateResult>
+  publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  mergeGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   publish(snapshot: BuildSnapshot): Promise<void>
+  /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
   merge(snapshot: BuildSnapshot): Promise<void>
+  confirmLocalMerge?(snapshot: BuildSnapshot): Promise<GateResult>
 }
 
 export type BuildRunOutcome =
@@ -137,6 +161,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (gate.kind === 'unknown') return unknown(gate.detail)
     return null
   }
+  // G019 stays in the retained review-only executor, including on resume.
+  if (input.mode === 'bound_pr') return blocked('bound_pr requires the retained review-only executor')
   try {
     // Enumerate every reachable worker role at admission, including later fixes.
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -144,8 +170,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const support = runner.supports(role, placementFor(runner.provider, input.repl_provider))
       if (!support.ok) return { kind: 'refused', reason: 'worker-unsupported', detail: `${role}: ${support.reason}: ${support.detail}` }
     }
+    const local = input.merge_mode === 'local'
+    if (local && !deps.confirmLocalMerge) return unknown('Local merge confirmation source is missing')
     const admission = gateStop(await deps.admissionGate(input))
     if (admission) return admission
+
+    if (!deps.readReviewCap) return unknown('Review round cap source is missing')
+    const cap = await deps.readReviewCap(input.run_id)
+    if (cap.kind === 'unknown') return unknown(cap.detail)
+    const maxRounds = cap.max_rounds === undefined ? 10 : cap.max_rounds
+    if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) return unknown('Review round cap is invalid')
 
     const modes = deps.modes
     if ((input.mode === 'ralph' || input.start === 'resume') && !modes) return blocked('Mode host is required')
@@ -160,17 +194,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     const initial = await deps.measure()
     if (initial.kind === 'unknown') return unknown(initial.detail)
     snapshot = initial.value
-    if (input.mode === 'bound_pr') {
-      if (!Number.isSafeInteger(input.bound_pr) || snapshot.pr?.number !== input.bound_pr || snapshot.pr?.state !== 'OPEN') {
-        return blocked('Bound PR is not the requested open PR')
-      }
-    } else if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
+    if (local && snapshot.pr !== null) return blocked('Local build has a PR')
+    if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
 
+    let replansUsed = resume?.replansUsed ?? 0
+    if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
     let skipBuild = false
     let approved = false
     let firstRound = 1
     let resumeFix = false
     let previous: readonly string[] = []
+    let previousReview: ReviewProgress | undefined
+    let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
     if (resume) {
       if (!Number.isSafeInteger(resume.round) || resume.round < 0) return blocked('Invalid recorded review round')
       firstRound = Math.max(1, resume.round)
@@ -212,6 +247,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
     }
 
+    let durable: ResumeCheckpoint = resume ?? { head: null, stage: 'built', round: 0,
+      replansUsed: 0, findings: [], previousFindings: [] }
+    async function checkpoint(patch: Partial<ResumeCheckpoint>) {
+      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount, ...patch }
+      await modes?.saveCheckpoint(structuredClone(durable))
+    }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown } | { stop: BuildRunOutcome }> {
@@ -221,9 +262,15 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const boundedRequest: BoundedWorkRequest = {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
+      await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
-      const outcome: BoundedWorkOutcome = await runner.run(
-        boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+      let outcome: BoundedWorkOutcome
+      try {
+        outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+      } catch (error) {
+        if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
+        throw error
+      }
       switch (outcome.kind) {
         case 'unknown': return { stop: unknown(outcome.detail) }
         case 'blocked': return { stop: blocked(outcome.on) }
@@ -231,26 +278,61 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         case 'failed': return { stop: failed(`${outcome.class}: ${outcome.detail}`) }
         case 'completed': break
       }
-      const observation = await deps.measure()
+      let observation = await deps.measure()
+      if (local && (role === 'build' || role === 'fix')) {
+        // G032: the host owns the three-read budget; no worker sets it.
+        for (let attempt = 1; attempt < 3 && (observation.kind === 'unknown' || !fullOid(observation.value.head)); attempt++) {
+          observation = await deps.measure()
+        }
+        if (observation.kind === 'known' && !fullOid(observation.value.head)) {
+          return { stop: unknown('Built head is missing or not a full commit OID after 3 read attempts') }
+        }
+      }
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
       const measured = observation.value
-      if (!corroborates(outcome.result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
-      if (input.mode === 'bound_pr' && (measured.pr?.number !== input.bound_pr || measured.pr?.state !== 'OPEN')) {
-        return { stop: blocked('Worker changed the bound PR identity') }
+      let result = outcome.result
+      if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
+          && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
+          && /^[a-f0-9]{4,64}$/i.test(result.head)) {
+        if (!deps.checkBuildClaim) return { stop: unknown('Build claim resolution and preservation source is missing') }
+        const claim = await deps.checkBuildClaim(result.head, measured)
+        if (claim.kind === 'unknown') return { stop: unknown(claim.detail) }
+        if (claim.kind === 'blocked') return { stop: failed(claim.on, 'built-head-unverified') }
+        result = { ...result, head: measured.head }
       }
+      if (!corroborates(result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
       // Read-only review must describe exactly the revision sent to the panel.
       if (role === 'review' && (measured.head !== snapshot.head || measured.diff !== snapshot.diff || !samePr(measured.pr, snapshot.pr))) {
         return { stop: blocked('Reviewed revision changed during review') }
       }
       snapshot = measured
-      previousPayload = outcome.result.payload
-      return { payload: outcome.result.payload }
+      // The host records the produced head before returning it, so a crash after a
+      // build or fix resumes from what was made rather than redoing it. `result` is
+      // the trailer AFTER the measured head replaced any claim, which is the value
+      // the rest of the driver uses.
+      if (role === 'build' || role === 'fix') {
+        await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
+          round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [] })
+      }
+      previousPayload = result.payload
+      return { payload: result.payload }
     }
 
     let plan: ExecutionPlan | null = null
-    if (!skipBuild) {
-      const planned = await work('plan', 0)
-      if ('stop' in planned) return planned.stop
+    async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
+      const replanning = replansUsed > 0
+      const replanFailed = (reason: string) => blocked(`design-gap: re-plan-failed: ${reason}`)
+      const planned = await work('plan', round)
+      if ('stop' in planned) {
+        // Running or unreadable work retains its identity; it is not a failed plan.
+        // Corroboration failures retain their existing measured-evidence cause.
+        if (replanning && planned.stop.kind === 'failed' && planned.stop.cause === 'workflow-threw') return replanFailed(planned.stop.detail)
+        return planned.stop
+      }
+      // G075: even PR mode must receive a usable replacement before rebuilding.
+      if (replanning && (!planned.payload || typeof planned.payload !== 'object'
+          || !('executionSpec' in planned.payload) || typeof planned.payload.executionSpec !== 'string'
+          || !planned.payload.executionSpec.trim())) return replanFailed('planner returned no executionSpec')
       if (input.mode === 'ralph' || input.mode === 'wave') {
         // G025: a completed worker with a null planner payload is still no plan.
         if (!executionPlan(planned.payload)) return blocked('Planner returned no execution plan')
@@ -270,7 +352,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         }
         previousPayload = plan
       }
-      const built = await work('build', 0)
+      const built = await work('build', round)
       if ('stop' in built) return built.stop
       if (input.mode === 'wave') {
         // G034: even a corroborated short hash cannot become a join result.
@@ -284,28 +366,83 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (handoff) return handoff
         return { kind: 'continued', snapshot, remainingTasks: plan!.remainingTasks, cause: 'ralph-task-built' }
       }
+      return null
+    }
+    if (!skipBuild) {
+      const stop = await planAndBuild(0)
+      if (stop) return stop
     }
     if (resumeFix) {
-      if (firstRound >= 5) return blocked('Review requires orchestrator arbitration: round ceiling')
+      if (firstRound >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       findings = resume!.findings.filter(f => f.kind === 'code' && f.actionable).map(f => f.text)
       if (firstRound >= 3 && findings.some(f => previous.includes(f))) return blocked('Review requires orchestrator arbitration: repeated finding')
+      if (replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
       previous = findings
+      previousBlockingCount = findings.length
+      previousReview = { findings: [...findings], blockingCount: findings.length }
       const fixed = await work('fix', firstRound)
       if ('stop' in fixed) return fixed.stop
       firstRound++
     }
     for (let round = firstRound; !approved; round++) {
+      if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+      phase = 'review'
+      step_id = null
+      // G035/G043: both fresh builds and fixes need a measured review artifact.
+      if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
+      if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
+      const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
+      if (readiness) return readiness
+      if (!deps.reviewSuite) return unknown('Review suite host is missing')
+      const suite = await deps.reviewSuite(snapshot, round)
+      if (suite.kind === 'unknown') return unknown(suite.detail)
+      findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
+      const readyRevision = await deps.measure()
+      if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
+      if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
-      const decision = await deps.reviewGate(result.payload, snapshot, round)
+      let currentReview: ReviewProgress | undefined
+      const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
+        currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
+      })
+      const decision = applyReviewSuite(panel, suite)
+      if (currentReview) {
+        const suiteBlockers = suite.findings.filter(f => !f.advisory)
+        currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
+      }
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
-      if (decision.kind === 'approve') break
-      if (round >= 5 || (round >= 3 && decision.findings.some(finding => previous.includes(finding)))) {
-        return blocked('Review requires orchestrator arbitration: repeated finding or round ceiling')
+      // The rejection is recorded BEFORE the stops below. A repeated finding or an
+      // exhausted round ends the run, and the orchestrator resumes from this row;
+      // writing it only on the paths that continue would lose exactly the rounds
+      // that need it.
+      if (decision.kind === 'fix') {
+        await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+          findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       }
-      findings = decision.findings
-      previous = decision.findings
+      if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
+      const progress = gateStop(reviewProgress(previousReview, currentReview))
+      if (progress) return progress
+      if (decision.kind === 'approve') {
+        await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
+        break
+      }
+      previousReview = currentReview
+      if (decision.kind === 're-plan') {
+        // G077: a replacement needs a subsequent review within the host's cap.
+        if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
+        replansUsed++
+        findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
+        await checkpoint({ head: null, stage: 'built', round: round + 1, pending: undefined, findings: [] })
+        planner = 'full'
+        committedPlan = undefined
+        const stop = await planAndBuild(round)
+        if (stop) return stop
+        continue
+      }
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+      findings = [...new Set([...decision.findings, ...currentReview!.findings])]
       const fix = await work('fix', round)
       if ('stop' in fix) return fix.stop
     }
@@ -314,37 +451,45 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     phase = 'publish'
     step_id = null
     const leak = await deps.runLeakGatePreflight(reviewed)
-    if (leak.status !== 'clean' && leak.status !== 'fixed') return blocked(`Leak preflight: ${leak.status}`)
+    // G139: completed scans are advisory; CI enforces the findings.
+    const emit = leak.status === 'clean' || leak.status === 'fixed' ? log.info : log.warn
+    emit('leak_preflight', { run_id: input.run_id, status: leak.status, note: leak.note,
+      findings: JSON.stringify(leak.findings), skipped_rules: leak.skipped_rules.join(', ') })
+    if (leak.status === 'unknown' || leak.status === 'skipped-no-gate') return unknown(`Leak preflight did not run: ${leak.note}`)
     const publishObservation = await deps.measure()
     if (publishObservation.kind === 'unknown') return unknown(publishObservation.detail)
     snapshot = publishObservation.value
     if (leak.head !== reviewed.head || !corroborates(reviewed, snapshot)) return blocked('Revision changed after review')
     const diff = deps.assessMergeDiff(snapshot.diff)
     if (!diff.allow) return blocked(diff.reason)
-    const publishGate = gateStop(await deps.publishGate(snapshot))
+    const publishGate = gateStop(await deps.publishGate(snapshot, input.merge_mode))
     if (publishGate) return publishGate
     const beforePublish = await deps.measure()
     if (beforePublish.kind === 'unknown') return unknown(beforePublish.detail)
     if (!corroborates(snapshot, beforePublish.value)) return blocked('Revision changed during publication gates')
-    await deps.publish(snapshot)
+    if (!local) await deps.publish(snapshot)
 
     phase = 'merge'
     const published = await deps.measure()
     if (published.kind === 'unknown') return unknown(published.detail)
     snapshot = published.value
-    if ((input.mode === 'bound_pr' && snapshot.pr?.number !== input.bound_pr) || snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
-      return blocked('Published PR does not match reviewed revision')
+    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
+      return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
     }
-    const mergeGate = gateStop(await deps.mergeGate(snapshot))
+    const mergeGate = gateStop(await deps.mergeGate(snapshot, input.merge_mode))
     if (mergeGate) return mergeGate
     const beforeMerge = await deps.measure()
     if (beforeMerge.kind === 'unknown') return unknown(beforeMerge.detail)
     if (!corroborates(snapshot, beforeMerge.value)) return blocked('Revision changed during merge gates')
-    // The merge implementation must atomically enforce snapshot.pr.head.
+    // The merge effect must atomically enforce the reviewed head and assessed base.
     await deps.merge(snapshot)
     const merged = await deps.measure()
     if (merged.kind === 'unknown') return unknown(merged.detail)
-    if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr.number || merged.value.pr.head !== reviewed.head) {
+    if (local) {
+      if (merged.value.head !== reviewed.head || merged.value.pr !== null) return blocked('Local revision changed during merge')
+      const confirmation = gateStop(await deps.confirmLocalMerge!(reviewed))
+      if (confirmation) return confirmation
+    } else if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr!.number || merged.value.pr.head !== reviewed.head) {
       return blocked('Merge not confirmed for reviewed PR')
     }
     return { kind: 'merged', snapshot: merged.value }

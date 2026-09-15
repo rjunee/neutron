@@ -55,6 +55,15 @@ describe('#321 ci.yml test-gate always fires on PRs to main', () => {
     expect(yml).toMatch(/^\s{2}test:\s*$/m)
   })
 })
+
+describe('#946 open-PR migration ordinal check wiring', () => {
+  test('grants read access and runs the check only for pull requests', () => {
+    expect(yml).toMatch(/^permissions:\n  contents: read\n  pull-requests: read$/m)
+    expect(yml).toContain("if: github.event_name == 'pull_request'")
+    expect(yml).toContain('GITHUB_TOKEN: ${{ github.token }}')
+    expect(yml).toContain('run: bun scripts/ci/open-pr-migration-ordinal-check.ts')
+  })
+})
 /**
  * G5 — typecheck completeness.
  *
@@ -186,8 +195,8 @@ describe('G5 CI typechecks every project-owned tsconfig on disk', () => {
  * Parallelised CI (2026-07-28) — guards on the aggregator that keeps the
  * REQUIRED `test` context honest.
  *
- * `test` is the sole required status check on `main`, with a strict up-to-date
- * policy. Two ways to break merging on this repo, both silent:
+ * `test` is the sole required status check on `main`. The up-to-date policy is
+ * currently off. Two ways to break merging on this repo, both silent:
  *
  *   1. Rename or matrix-ify `test`. The required context then NEVER reports and
  *      every PR blocks forever, with no failing check to point at.
