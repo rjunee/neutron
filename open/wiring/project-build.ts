@@ -14,6 +14,7 @@ import { validateTrailer, PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neu
 import { phaseByKey, parsePhaseModelConfig } from '@neutronai/trident/phase-models.ts'
 import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
+import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
@@ -104,12 +105,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const descriptor = modelTier(selected?.model ?? phase.default.tier)
     if (!descriptor) throw Error(`Unknown model for ${role}`)
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
-    const brief = [run.task, input.reflection_context ?? '', input.test_strategy ?? '',
+    // Owner guidance and test execution instructions belong only to the builders.
+    const isBuilder = role === 'build' || role === 'fix'
+    const brief = [run.task, isBuilder ? input.test_strategy ?? '' : '',
       `Perform the ${role} role. Return a result object with head, diff, pr and payload.`,
       `Read the host context for the measured snapshot. Payload must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
-    ].join('\n\n')
+    ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
     const path = join(state, `${role}.brief`)
     await writeFile(path, brief, { mode: 0o600 })
     workers[role] = { provider, request: {
