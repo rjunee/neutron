@@ -300,7 +300,9 @@ test('host admission and review reach authoritative policy sources', async () =>
   }
   const host = f.make()
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
+  const progress: unknown[] = []
+  expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
+  expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
@@ -506,7 +508,7 @@ async function boundFixture(failure = false) {
   // Reachable permissive build control: a routing regression must actually build,
   // publish and merge, rather than stop at an unrelated admission or leak gate.
   host.deps.admissionGate = async () => ({ kind: 'allow' })
-  host.deps.reviewGate = async () => ({ kind: 'approve' })
+  host.deps.reviewGate = async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.mergeGate = async () => ({ kind: 'allow' })

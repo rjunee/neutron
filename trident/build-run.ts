@@ -10,6 +10,7 @@ import {
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
 import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
+import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 
 const log = createLogger('trident')
@@ -99,8 +100,8 @@ export interface BuildRunDeps {
   assessMergeDiff(diff: string): MergeDiffAssessment
   reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
-  // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
-  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number): Promise<ReviewDecision>
+  // reviewGate owns panel provenance and severity, and records evidence before filtering.
+  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
   publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
@@ -191,6 +192,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let firstRound = 1
     let resumeFix = false
     let previous: readonly string[] = []
+    let previousReview: ReviewProgress | undefined
     let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
     if (resume) {
       if (!Number.isSafeInteger(resume.round) || resume.round < 0) return blocked('Invalid recorded review round')
@@ -331,6 +333,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
       previous = findings
       previousBlockingCount = findings.length
+      previousReview = { findings: [...findings], blockingCount: findings.length }
       const fixed = await work('fix', firstRound)
       if ('stop' in fixed) return fixed.stop
       firstRound++
@@ -352,34 +355,35 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
-      const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
+      let currentReview: ReviewProgress | undefined
+      const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
+        currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
+      })
       const decision = applyReviewSuite(panel, suite)
+      if (currentReview) {
+        const suiteBlockers = suite.findings.filter(f => !f.advisory)
+        currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
+      }
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
+      if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
+      const progress = gateStop(reviewProgress(previousReview, currentReview))
+      if (progress) return progress
       if (decision.kind === 'approve') break
+      previousReview = currentReview
       if (decision.kind === 're-plan') {
-        if (replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
         // G077: a replacement needs a subsequent review within the host's cap.
         if (round >= 5) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
         replansUsed++
-        findings = [decision.whatIsMissing, ...decision.findings]
-        previous = decision.findings
-        previousBlockingCount = decision.blockingCount ?? decision.findings.length
+        findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
         planner = 'full'
         committedPlan = undefined
         const stop = await planAndBuild(round)
         if (stop) return stop
         continue
       }
-      if (replansUsed > 0 && (decision.findings.some(finding => previous.includes(finding)) || (decision.blockingCount ?? decision.findings.length) >= previousBlockingCount)) {
-        return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
-      }
-      if (round >= 5 || (round >= 3 && decision.findings.some(finding => previous.includes(finding)))) {
-        return blocked('Review requires orchestrator arbitration: repeated finding or round ceiling')
-      }
-      findings = decision.findings
-      previous = decision.findings
-      previousBlockingCount = decision.blockingCount ?? decision.findings.length
+      if (round >= 5) return blocked('Review requires orchestrator arbitration: round ceiling')
+      findings = [...new Set([...decision.findings, ...currentReview!.findings])]
       const fix = await work('fix', round)
       if ('stop' in fix) return fix.stop
     }
