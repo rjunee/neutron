@@ -1463,8 +1463,7 @@ export function baseDriftHoldMessage(
 
 /**
  * Per-working-tree serialization for LOCAL-mode merges. Two parallel builds in
- * the SAME project share ONE build workspace (`ensureProjectBuildWorkspace` keys
- * the `code` dir on the project slug), so both runs carry the IDENTICAL
+ * the SAME declared repository share one build workspace, so both runs carry the IDENTICAL
  * `repo_path`. A local merge is `git checkout <base>` + `git merge --no-ff` in
  * that single working tree; running two concurrently collides — build A's
  * committed-but-not-yet-merged files show up as UNTRACKED when build B checks
@@ -1472,7 +1471,7 @@ export function baseDriftHoldMessage(
  * overwritten". A per-`repo_path` promise chain forces the second merge to WAIT
  * for the first: by the time B checks out `base`, A's files are TRACKED on
  * `base` and B merges cleanly on top. Keyed on `repo_path` so merges in
- * DIFFERENT workspaces (different projects) still run fully in parallel. The
+ * DIFFERENT workspaces (including different repos in one project) still run fully in parallel. The
  * PR-mode path merges the remote and never touches the shared tree, so it is
  * NOT gated here.
  */

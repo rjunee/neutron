@@ -55,6 +55,15 @@ describe('#321 ci.yml test-gate always fires on PRs to main', () => {
     expect(yml).toMatch(/^\s{2}test:\s*$/m)
   })
 })
+
+describe('#946 open-PR migration ordinal check wiring', () => {
+  test('grants read access and runs the check only for pull requests', () => {
+    expect(yml).toMatch(/^permissions:\n  contents: read\n  pull-requests: read$/m)
+    expect(yml).toContain("if: github.event_name == 'pull_request'")
+    expect(yml).toContain('GITHUB_TOKEN: ${{ github.token }}')
+    expect(yml).toContain('run: bun scripts/ci/open-pr-migration-ordinal-check.ts')
+  })
+})
 /**
  * G5 — typecheck completeness.
  *

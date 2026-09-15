@@ -1274,3 +1274,29 @@ test('STRUCTURAL: success → turn 2 SETUP THROW (resolvePool throws) → turn 3
   expect(rec.bodies).toHaveLength(2)
   assertTurn3ReplaysFullHistory(rec.bodies)
 })
+
+
+test('dispatch project chooses its provider independently of the active-project fallback', async () => {
+  const cc = ccCapture()
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(), substrate_instance_id: 'scoped-provider', substrateFactory: cc.substrateFactory,
+    providerResolver: (projectId) => ({ provider: projectId === 'other' ? 'openai' : 'anthropic', source: 'project' }),
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), fetchImpl: gptFetch() },
+  })!
+  const other = { ...spec(), metering_context: { project_id: 'other', project_slug: 'owner' } }
+  const first = await drain(sub.start(other))
+  expect(first.at(-1)?.kind).toBe('completion')
+  expect(cc.seen).toHaveLength(0)
+  await drain(sub.start(spec()))
+  expect(cc.seen).toHaveLength(1)
+})
+
+test('unwired pi names the instance and project selection sources', () => {
+  for (const source of ['instance', 'project'] as const) {
+    const sub = buildLlmCallSubstrate({
+      pool: anthropicPool(), substrate_instance_id: 'unwired',
+      providerResolver: () => ({ provider: 'pi', source }),
+    })!
+    expect(() => sub.start(spec())).toThrow(`Selection source: ${source}`)
+  }
+})
