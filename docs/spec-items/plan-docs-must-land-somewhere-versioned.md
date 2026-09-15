@@ -1,7 +1,7 @@
 ---
 title: Land a card's plan doc somewhere durable and versioned
 group: work-board
-status: open
+status: done
 priority: P1
 cutover: false
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
@@ -32,13 +32,13 @@ the design question — do not pick it here.
 
 ## Acceptance
 
-- [ ] A plan doc lands somewhere durable and versioned, **committed by the writer, not by
+- [x] A plan doc lands somewhere durable and versioned, **committed by the writer, not by
       hand**. A doc created through `work-board/spec-doc.ts` is tracked without any human
       step; assert the untracked case turns a test red.
-- [ ] It does NOT leave the Documents tab. The Ryan-locked location (2026-07-02) still
+- [x] It does NOT leave the Documents tab. The Ryan-locked location (2026-07-02) still
       resolves — a fix that versions the doc by moving it out of the owner's view fails
       this criterion.
-- [ ] A doc's history is inspectable.
-- [ ] The spec a build ran against is recoverable AFTER THE FACT from the record, not from
+- [x] A doc's history is inspectable.
+- [x] The spec a build ran against is recoverable AFTER THE FACT from the record, not from
       a live file. Assert recovery still works once the live file has been edited — a test
       that reads the current file would also pass with the defect present.
