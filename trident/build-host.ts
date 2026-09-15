@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildRunDeps, BuildRunInput, BuildSnapshot, GateResult } from './build-run.ts'
+import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { validateTrailer } from './gates/result-contract.ts'
 import { eligibleFixFindings } from './gates/verdict.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
-import { assessMergeDiff, assessBaseDrift, shouldHoldForBaseDrift } from './merge.ts'
+import { assessMergeDiff } from './merge.ts'
 import { runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
 
 type Workers = BuildRunInput['workers']
@@ -81,16 +82,15 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
       if (!proof.ok) return { kind: 'blocked', on: proof.reason }
-      return unknown('Complete publication readiness is not wired')
+      const readiness = await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
+      if (readiness.kind !== 'allow') return readiness
+      return unknown('Publication previous reviewed-head lineage could not be established')
     },
     async mergeGate(snapshot) {
       const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))
       if (ci.kind === 'cannot-read') return unknown(ci.reason)
       if (ci.kind !== 'green') return { kind: 'blocked', on: `CI: ${ci.kind}` }
-      const drift = await assessBaseDrift(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.base_branch, snapshot.head)
-      if (!drift.assessable) return unknown('Base drift could not be assessed')
-      if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return { kind: 'blocked', on: 'Base drift overlaps reviewed changes' }
-      return unknown('Atomic pinned-head merge eligibility is not wired')
+      return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot)
     },
   }
   return { deps, workers }
