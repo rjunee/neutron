@@ -59,16 +59,11 @@ export interface EnsureBuildWorkspaceResult {
   created: boolean
 }
 
-/** The git identity + no-gpg flags the initial commit is pinned to (mirrors the
- *  wow-moment materializer so a box with no user git config still commits). */
-const COMMIT_IDENTITY = [
-  '-c',
-  'user.name=Neutron',
-  '-c',
-  'user.email=neutron@localhost',
-  '-c',
-  'commit.gpgsign=false',
-]
+/** Repository-local identity maintained for every agent-authored build commit. */
+const COMMIT_IDENTITY = {
+  name: 'Neutron',
+  email: 'neutron@localhost',
+} as const
 
 /**
  * Resolve (and lazily create) the per-project build workspace, guaranteeing a
@@ -92,11 +87,10 @@ export async function ensureProjectBuildWorkspace(
 
   if (!probe.exists(build_repo_path)) probe.mkdirp(build_repo_path)
 
-  // Already a repo WITH a commit? Nothing to do — never re-init or re-commit a
-  // healthy workspace (that would surprise-commit the user's working tree).
+  let hasHead = false
   if (probe.exists(join(build_repo_path, '.git'))) {
     const head = await probe.git(['rev-parse', '--verify', 'HEAD'], build_repo_path)
-    if (head.ok) return { build_repo_path, created: false }
+    hasHead = head.ok
   } else {
     const init = await probe.git(['init', '-q', '--initial-branch=main'], build_repo_path)
     if (!init.ok) {
@@ -106,11 +100,30 @@ export async function ensureProjectBuildWorkspace(
     }
   }
 
+  // Agent commits must never inherit the machine owner's global identity. Keep
+  // this repository-local config current on every dispatch, including repos that
+  // predate this guard. A failed write is fatal: continuing would restore the
+  // exact inheritance this configuration prevents.
+  for (const [key, value] of [
+    ['user.name', COMMIT_IDENTITY.name],
+    ['user.email', COMMIT_IDENTITY.email],
+  ] as const) {
+    const configured = await probe.git(['config', '--local', key, value], build_repo_path)
+    if (!configured.ok) {
+      throw new Error(
+        `git identity configuration failed at ${build_repo_path}: ${configured.stderr || configured.stdout || `exit ${configured.exit_code}`}`,
+      )
+    }
+  }
+
+  // A healthy workspace is never re-initialized or surprise-committed.
+  if (hasHead) return { build_repo_path, created: false }
+
   // Initial commit — `--allow-empty` so a brand-new project (no files yet) still
   // gets a valid HEAD. `git worktree add` needs a commit to base the build
   // branch on; the empty tree is fine, Forge writes the first files.
   const commit = await probe.git(
-    [...COMMIT_IDENTITY, 'commit', '-q', '--allow-empty', '-m', `chore: initialize ${project_slug} build workspace`],
+    ['-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', `chore: initialize ${project_slug} build workspace`],
     build_repo_path,
   )
   if (!commit.ok) {

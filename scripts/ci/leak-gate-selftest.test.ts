@@ -1328,6 +1328,21 @@ describe('structural private-path rule (needs no secret)', () => {
 })
 
 describe('commit-message + PR-body scan', () => {
+  test('an explicitly supplied unresolvable base is fatal rather than substituted', () => {
+    const { dir } = gitFixture()
+    try {
+      const { code, out } = runGate(dir, {
+        ...CANONICAL_PUSH,
+        LEAK_GATE_BASE_SHA: '1111111111111111111111111111111111111111',
+        LEAK_GATE_PII_DENYLIST_B64: DENYLIST,
+      })
+      expect(out).toContain('FATAL — could not determine a commit range to scan')
+      expect(code).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('RED on a denylisted token in a COMMIT MESSAGE', () => {
     // GHArchive/BigQuery mirror this permanently; there is no removal path, so
     // the gate has to stop it before the push, not after.
