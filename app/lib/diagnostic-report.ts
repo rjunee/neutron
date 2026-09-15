@@ -46,6 +46,7 @@ export type ReportReason =
   | 'js_error'
   | 'unhandled_rejection'
   | 'render_crash'
+  | 'native_crash'
   | 'manual'
   | 'perf'
   | 'push_registration_failed';

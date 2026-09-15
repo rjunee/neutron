@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+hooks_dir=$(git config --path --get core.hooksPath 2>/dev/null || true)
+if [ -n "$root" ] && [ -n "$hooks_dir" ] && [ -f "$hooks_dir/.neutron-managed-hooks" ]; then
+  for hook_path in "$root"/.githooks/*; do
+    [ -f "$hook_path" ] && [ -x "$hook_path" ] || continue
+    hook_name=${hook_path##*/}
+    if [ "$hook_name" = "pre-push" ] && [ -f "$hooks_dir/.pre-push-disabled" ]; then
+      continue
+    fi
+    if [ ! -L "$hooks_dir/$hook_name" ] || [ "$(readlink "$hooks_dir/$hook_name" 2>/dev/null)" != "$hook_path" ]; then
+      echo "commit refused: managed hook '$hook_name' is not linked; run scripts/install-git-hooks.sh" >&2
+      exit 68
+    fi
+  done
+fi
+
 head_oid=$(git rev-parse --verify HEAD 2>/dev/null)
 probe_exit=$?
 if [ "$probe_exit" -ne 0 ]; then

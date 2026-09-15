@@ -825,6 +825,9 @@ export function buildCoreModules(
         orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
         orchestratorOpts.on_infra_retry = (run, attempt, cause) =>
           deliverInfraRetry(tridentWiring.delivery_sink ?? router, run, attempt, cause)
+        // A credential blink happens after Forge has completed. Preserve its
+        // harvested result and retry only the outer publish step.
+        orchestratorOpts.begin_publish_retry = (id) => store.beginPublishRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({
           store,

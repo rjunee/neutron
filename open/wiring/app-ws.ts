@@ -404,6 +404,8 @@ export interface WireAppWsDeps {
    * counterpart to the sink's live-delivery branch). Omitted on an LLM-less box.
    */
   recoveredReplyDrain?: (channel_topic_id: string) => void
+  /** Reconcile a valid captured zone into an already-existing USER.md. */
+  stampUserTimezone?: (timezone: string) => Promise<void>
 }
 
 export interface WiredAppWs {
@@ -460,6 +462,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     activeChatProjects,
     railChatKey,
     recoveredReplyDrain,
+    stampUserTimezone,
   } = deps
   const cleanups: Array<() => void> = []
   const onboardingStateStore = landing.stateStore
@@ -1470,7 +1473,9 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       const result = await persistOwnerTimezoneIfChanged(db, ownerSlug, tz)
       if (result === 'invalid') {
         log.warn('owner_timezone_rejected', { project: project_slug, tz })
+        return
       }
+      await stampUserTimezone?.(tz)
     },
   })
   cleanups.push(() => appWsSurface.closeConnections('service_restart'))

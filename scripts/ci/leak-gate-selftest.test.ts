@@ -16,7 +16,17 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1002,6 +1012,42 @@ describe('pre-push hook — the control fires before anything is published', () 
       expect(cfg).not.toBe('')
       expect(existsSync(join(cfg, 'pre-commit'))).toBe(true)
       expect(existsSync(join(cfg, 'pre-push'))).toBe(true)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('the installer links every executable hook in the versioned hook directory', () => {
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      const addedHook = join(fx.root, '.githooks', 'post-merge')
+      writeFileSync(addedHook, '#!/usr/bin/env bash\nexit 0\n')
+      chmodSync(addedHook, 0o755)
+
+      expect(fx.install().code).toBe(0)
+      const cfg = execFileSync('git', ['-C', fx.root, 'config', '--get', 'core.hooksPath'], {
+        encoding: 'utf8',
+      }).trim()
+      expect(readlinkSync(join(cfg, 'post-merge'))).toBe(addedHook)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('pre-commit refuses after a new executable hook arrives without a managed link', () => {
+    const fx = pushFixture(null)
+    try {
+      expect(fx.install().code).toBe(0)
+      const addedHook = join(fx.root, '.githooks', 'post-merge')
+      writeFileSync(addedHook, '#!/usr/bin/env bash\nexit 0\n')
+      chmodSync(addedHook, 0o755)
+
+      expect(() =>
+        execFileSync('git', ['-C', fx.root, 'hook', 'run', 'pre-commit'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }),
+      ).toThrow(/managed hook 'post-merge' is not linked/)
     } finally {
       fx.cleanup()
     }
