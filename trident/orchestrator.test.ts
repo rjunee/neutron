@@ -146,6 +146,7 @@ function buildHarness(opts: {
   list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
   begin_crash_recovery?: boolean
+  read_run?: (id: string) => TridentRun | null
   /** Wire recovery of a reservation whose in-process project driver died with a gateway. */
   begin_project_build_driver_recovery?: boolean
   max_crash_recoveries?: number
@@ -314,6 +315,7 @@ function buildHarness(opts: {
   // blocking the merge two steps later.
   o.prove_mutation = opts.prove_mutation ?? buildSimMutationProofGate()
   if (opts.merge_deps !== undefined) o.merge_deps = opts.merge_deps
+  if (opts.read_run) o.read_run = opts.read_run
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
     store,
@@ -10044,4 +10046,34 @@ describe('sanitizeLeakAnnotation', () => {
     expect(path).not.toContain(T2)
     expect(path).toContain('ten-ants/x/plan.md:7')
   })
+})
+
+// THE POST-FIRE WRITE MUST NOT CLOBBER WHAT THE LAUNCHER PERSISTED.
+// `pinnedRun` is captured BEFORE the fire. The project launcher's `prepare` assigns and
+// persists `branch`/`worktree`/`base_sha` DURING the call, so a `{ ...pinnedRun }` spread
+// afterwards writes the pre-launch snapshot back over them.
+//
+// Measured on the second acceptance dispatch (2026-09-15): `prepare` created the
+// worktree and persisted it, `fire-settled` wrote the stale row, and the driver's very
+// next `row()` refused with "identity, branch or worktree is missing or changed" before
+// any gate ran. Re-synthesising these on `pinnedRun` instead (an earlier attempt, #991)
+// reddened ten salvage/liveness tests, because `pinnedRun` feeds EVERY firer and a null
+// branch is exactly the row the salvage and no-fire paths key on.
+test('a launcher that persists branch/worktree keeps them through the post-fire write', async () => {
+  const run = await createRun({ branch: undefined })
+  const worktree = '/repo/.trident-worktrees/add-thing-1'
+  const h = buildHarness({
+    read_run: (id) => store.get(id) ?? null,
+    plan: (input) => {
+      // Exactly what `prepareProjectBuild` does INSIDE the fire.
+      store.update(input.run.id, { branch: 'trident/add-thing', worktree, base_sha: 'a'.repeat(40) })
+      return { result: null }
+    },
+  })
+  // Assert the ROW THE STEP RETURNS — that is what the tick persists, and it is the
+  // thing the stale `{ ...pinnedRun }` spread corrupted. Asserting the store instead
+  // proves nothing: `plan` wrote those values directly, so they are there either way.
+  const out = await h.step(store.get(run.id)!)
+  expect(out.run.worktree).toBe(worktree)
+  expect(out.run.branch).toBe('trident/add-thing')
 })

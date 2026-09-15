@@ -417,6 +417,14 @@ export interface BuildTridentOrchestratorOptions {
    */
   begin_project_build_driver_recovery?: (run_id: string, reservation: string) => Promise<TridentRun | null>
   /**
+   * Re-read a run row by id. Used only to carry forward the fields the LAUNCHER
+   * assigns and persists during the fire (`branch`, `worktree`, `base_sha`), which a
+   * post-fire `{ ...pinnedRun }` spread would otherwise overwrite with the pre-launch
+   * snapshot. Unwired → the spread behaves exactly as before, byte-stable for legacy
+   * callers and tests.
+   */
+  read_run?: (run_id: string) => TridentRun | null
+  /**
    * INFRASTRUCTURE RETRY CLAIM — atomically clear a harvested executor/transport
    * failure and spend one durable `infra_retries` unit. Omitted means legacy
    * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
@@ -2094,7 +2102,7 @@ export function buildTridentOrchestrator(
         )
       }
       const next: TridentRun = {
-        ...pinnedRun,
+        ...withLauncherPersistedFields(pinnedRun),
         subagent_run_id: id,
         subagent_status: 'running',
         // THE LAUNCHER GENERATION, when the turn had injected by the budget; else
@@ -2150,7 +2158,7 @@ export function buildTridentOrchestrator(
     stamp('fire-settled')
     fired.add(run.id)
     const next: TridentRun = {
-      ...pinnedRun,
+      ...withLauncherPersistedFields(pinnedRun),
       subagent_run_id: id,
       subagent_status: 'running',
       // The exact pooled launcher generation is the crash-ownership token. A
@@ -2872,6 +2880,32 @@ export function buildTridentOrchestrator(
     probeBranchHolderFor, detectMergedPr, failedRun, launch, applyResult,
     handleUnconfirmedFire, sharedLauncherStandDown,
   })
+
+
+  /**
+   * The fields the LAUNCHER owns, re-read after it ran.
+   *
+   * `pinnedRun` is captured BEFORE the fire. The project launcher's `prepare` assigns
+   * and PERSISTS `branch`, `worktree` and `base_sha` during the call
+   * (`open/wiring/project-build.ts`), so spreading `...pinnedRun` afterwards writes the
+   * pre-launch snapshot back over them — nulling a worktree the build is already using.
+   *
+   * Measured on the second acceptance dispatch (2026-09-15): `prepare` created
+   * `.trident-worktrees/<slug>-<id>` and persisted it, `fire-settled` then wrote the
+   * stale row, and the driver's very next `row()` refused with "identity, branch or
+   * worktree is missing or changed" before any gate ran.
+   *
+   * Re-reading rather than re-synthesising is deliberate: an earlier attempt filled these
+   * on `pinnedRun` itself (#991) and that reddened ten salvage and liveness tests, because
+   * `pinnedRun` feeds EVERY firer and a null branch is exactly the row the salvage and
+   * no-fire paths key on. The launcher is the only thing that knows these values, so the
+   * launcher's own write is the one that must win.
+   */
+  function withLauncherPersistedFields(pinned: TridentRun): TridentRun {
+    const current = opts.read_run?.(pinned.id)
+    if (!current) return pinned
+    return { ...pinned, branch: current.branch, worktree: current.worktree, base_sha: current.base_sha }
+  }
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
     const deadProjectDriverReservation = projectBuildDriverReservation(run.inner_result)
