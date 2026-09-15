@@ -156,20 +156,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const phaseSpecProvider = conversationalProviderFor(false)
   const liveAgentProvider = conversationalProviderFor(true)
 
-  // Codex-fix — the CONVERSATIONAL substrates build when the SELECTED provider's
-  // pool is available, NOT solely on the Anthropic `llmPool`. An OpenAI-only box
-  // (valid OPENAI_API_KEY, no Claude credential) must still get its conversational
-  // pair; otherwise `llmPool === null` silently nulls them while the OpenAI pool is
-  // never consulted (repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, no Claude).
-  //
-  // The Anthropic `pool`/`resolvePool` arg is required by the composer contract but
-  // is NEVER consulted on an openai turn (`start()` delegates to the openai branch
-  // before touching it). When there's no Anthropic pool we thread a lazy resolver
-  // that returns null so construction still yields a non-null Substrate. When NOT
-  // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
-  // to before.
-  const conversationalAvailable =
-    ctx.providerResolver !== undefined || ctx.provider !== undefined || llmPool !== null
+  // Credential availability and provider selection are independent. A live
+  // resolver can exist before any credential does; that boot must retain the
+  // null substrates consumed by deterministic callers. With credentials, keep
+  // resolution live so project overrides and instance changes apply per turn.
+  const conversationalAvailable = llmPool !== null || openaiFullyWired
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 

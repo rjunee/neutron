@@ -1059,12 +1059,31 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(rejected).toBe(false)
   })
 
+  test.each([
+    { provider: 'anthropic', source: 'application' },
+    { provider: 'anthropic', source: 'instance' },
+    { provider: 'openai', source: 'project' },
+  ] as const)('credential-free live selection %s leaves deterministic substrates', (selection) => {
+    const { ctx } = makeCtx({
+      llmPool: null,
+      openaiLlmPool: null,
+      providerResolver: () => selection,
+    })
+    const w = wireSubstrates(ctx)
+    expect(w.llmCallSubstrate).toBeNull()
+    expect(w.liveAgentSubstrate).toBeNull()
+    expect(w.reminderComposeSubstrate).toBeNull()
+    expect(w.makeComposeSubstrate('any-project')).toBeNull()
+    expect(w.prewarmReady).toBeNull()
+    expect(w.prewarmSettledRef.settled).toBe(true)
+  })
+
   test('LLM-less: warm substrates null, prewarm skipped (settled true), factories throw', () => {
     const { ctx } = makeCtx({ llmPool: null })
     const w = wireSubstrates(ctx)
     expect(w.llmCallSubstrate).toBeNull()
     expect(w.liveAgentSubstrate).toBeNull()
-    // Compose is LLM-only — no provider → the per-project compose factory returns null.
+    // Compose is LLM-only — no credentials means its factory returns null.
     expect(w.makeComposeSubstrate('any-project')).toBeNull()
     expect(w.prewarmReady).toBeNull()
     // No pre-warm to await → settled seeds true immediately.
