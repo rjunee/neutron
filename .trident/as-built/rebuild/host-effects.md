@@ -1,4 +1,4 @@
-## 2026-09-15 — Additive production host foundation (partial)
+## 2026-09-15 — Additive production host effects (partial)
 
 ### Scope and completion boundary
 
@@ -6,6 +6,10 @@ This is a partial delivery for HOSTFX, using the task brief's explicit permissio
 for a complete, tested subset. It is not ready for launcher cutover. The task also
 explicitly requires this shard location and additive delivery; those instructions
 override the general shard-location and immediate-replacement rules for this lane.
+
+HOSTFX3 connects local landing; see `host-effects-3.md` for current evidence.
+Resume/Ralph persistence remains outstanding. The foundation details and mutation
+table below are historical; their line numbers describe their original delivery.
 
 The production factory supplies measurement, preparation, publication and PR merge
 adapters at `trident/production-host-effects.ts:203`. The project factory assembles
@@ -15,8 +19,6 @@ and policy-specific sources (`trident/project-build-host.ts:26`).
 
 Outstanding work before cutover:
 
-- Atomic local merge: the effect explicitly returns `unknown` at
-  `trident/production-host-effects.ts:172`.
 - Remote **base** enforcement remains non-atomic. HOSTFX2 now explicitly records
   this limitation before every PR merge attempt
   (`trident/production-host-effects.ts:175`), and refuses if the risk evidence
@@ -40,6 +42,22 @@ Outstanding work before cutover:
 The existing launcher cutover, driver changes, and old-path deletion were
 intentionally deferred as requested. No product target or spec decision is changed
 by this partial implementation.
+
+### HOSTFX3 local landing evidence
+
+The positive driver test reaches `merged` through production measurement,
+preparation and landing, using real git and scripted policy/worker seams
+(`trident/production-host-effects.test.ts:414`). The production local effect now
+calls the kept merge module (`trident/production-host-effects.ts:171`). Its new
+callable landing reuses G109 readiness (`trident/merge.ts:1679`) and preserves the
+reviewed branch. A local receiver enforces the expected-base lease and checked-out
+base safety (`trident/merge.ts:1685`). This is a local filesystem push, not remote
+publication. Validation and mutations are recorded in `host-effects-3.md`.
+
+The readiness-bypass mutation makes the dirty-worktree and silent-overlap tests
+RED (`trident/production-host-effects.test.ts:388`); restoring it makes both GREEN.
+No resume-count mutation is claimed: gap 2 is not implemented. The outstanding
+mode-host entry above remains binding for the next lane.
 
 ### What changed and why
 

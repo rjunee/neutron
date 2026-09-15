@@ -1660,6 +1660,37 @@ export async function localMergeReadiness(
   } catch { return { kind: 'unknown', detail: 'Local merge observation failed' } }
 }
 
+/** Land the reviewed commit without rebasing or deleting its branch. The local
+ * receive-pack owns checkout safety and the expected-base ref transaction. */
+export async function mergeLocalReviewed(
+  run: RunHostCommand, repo: string, branch: string, base: string,
+  worktree: string, head: string,
+): Promise<import('./build-run.ts').GateResult> {
+  let result: import('./build-run.ts').GateResult = { kind: 'unknown', detail: 'Local merge did not complete' }
+  try {
+    await withLocalMergeLock(repo, async () => {
+      const git = (...args: string[]) => run(['git', '-C', repo, ...args], repo)
+      const checked = async (...args: string[]) => {
+        const value = await git(...args)
+        if (!value.ok || value.timed_out) throw new Error(`Local merge could not establish ${args[0]}`)
+        return value.stdout.trim()
+      }
+      const baseOid = await checked('rev-parse', '--verify', `refs/heads/${base}^{commit}`)
+      const ready = await localMergeReadiness(run, repo, branch, base, worktree, head)
+      if (ready.kind !== 'allow') { result = ready; return }
+      const tree = await checked('merge-tree', '--write-tree', baseOid, head)
+      const commit = await checked('commit-tree', tree, '-p', baseOid, '-p', head, '-m', `Merge ${branch}`)
+      // The receiver checks the lease while updating the ref, and updateInstead
+      // refuses a dirty checked-out base. No shared checkout reset is performed.
+      await checked('push', '--porcelain',
+        '--receive-pack=git -c receive.denyCurrentBranch=updateInstead receive-pack',
+        `--force-with-lease=refs/heads/${base}:${baseOid}`, repo, `${commit}:refs/heads/${base}`)
+      result = { kind: 'allow' }
+    })
+  } catch (error) { result = { kind: 'unknown', detail: String(error) } }
+  return result
+}
+
 /**
  * Remove a specific worktree path + prune stale admin entries — UNLESS it is
  * dirty (ISSUES #541).
