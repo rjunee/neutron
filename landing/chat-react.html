@@ -273,12 +273,9 @@
   /* Seated tabs (M1 UX redesign) — the tab band reads as the page's top edge: a
      surface strip whose ACTIVE tab lifts onto the content sheet (fused via a
      -1px bottom margin over the band's own bottom border). No sliding underline. */
-  /* The band's bottom edge is NOT drawn here — `.car-usage` below is the seam
-     between the band and the stage, and it owns that line whether or not there
-     is anything to report. */
   .car-topbar {
     display: flex; align-items: flex-end; flex: 0 0 auto; gap: 2px;
-    padding: 8px 10px 0; background: var(--surface);
+    padding: 8px 10px 0; background: var(--surface); border-bottom: 1px solid var(--border);
   }
   /* THE TOP-RIGHT MENU — the web twin of the mobile header's ☰ (owner ask: settings
      must live in ONE place across both clients). `margin-left:auto` pins it to the
@@ -308,17 +305,15 @@
     background: transparent; color: var(--fg); font: inherit; cursor: pointer;
   }
   .car-hmenu-row:hover { background: var(--surface); }
-  /* ── USAGE METER — the line between the tab band and the chat stage ─────────
-     This IS the divider, not a widget near it. Two 1px rules stacked: the
+  /* ── USAGE METER — the hairline directly above the chat composer ────────────
+     Two 1px rules stacked: the
      5-hour SESSION window on top, the 7-day WEEKLY window below. Each fills from
      the left edge, and the ENTIRE fill is one colour that changes as a unit when
      it crosses a threshold (green → amber at 85%, amber → red at 95%). No
      gradient: at one pixel tall a gradient is just a smudge.
 
      Unfilled track is `--border`, so a box with nothing to report renders as the
-     plain divider it always was — and the seated tabs' old "fused" trick (the
-     active tab pulled -1px over the band's border to erase that segment) is gone
-     on purpose. A line that reads as a fill level must not have a hole in it. */
+     plain hairline it always was. */
   .car-usage { flex: 0 0 auto; display: flex; flex-direction: column; }
   .car-usage-line { height: 1px; background: var(--border); overflow: hidden; }
   /* `min-width` is the "measured but barely used" floor: a sub-pixel fill would
@@ -1539,7 +1534,7 @@
     flex: none; width: 40px; text-align: right;
     font-size: 0.8667rem; opacity: 0.7; font-variant-numeric: tabular-nums;
   }
-  .car-composer-wrap { border-top: 1px solid var(--border); background: var(--surface); }
+  .car-composer-wrap { background: var(--surface); }
   .car-composer-wrap .car-composer { border-top: 0; }
   /* BUG 1 — staged-attachment chips align to the centered composer column. */
   .car-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; width: 100%; max-width: var(--chat-col); margin: 0 auto; }

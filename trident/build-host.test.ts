@@ -278,6 +278,7 @@ test('host merge eligibility is reached after green CI', async () => {
   const f = await fixture()
   expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID' })
   expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+<<<<<<< HEAD
 })
 
 
@@ -299,4 +300,6 @@ test('host admission and review reach authoritative policy sources', async () =>
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
   f.options.review.readSynthesis = async () => null
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+=======
+>>>>>>> origin/main
 })
