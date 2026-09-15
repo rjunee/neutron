@@ -7,7 +7,13 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import * as hostModule from './project-build-host.ts'
-import { createProjectLauncher, projectBuildPending, projectBuildResult } from './project-launcher.ts'
+import {
+  createProjectLauncher,
+  projectBuildDriverReservation,
+  projectBuildDriverReservationFromPriorGateway,
+  projectBuildPending,
+  projectBuildResult,
+} from './project-launcher.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { parseInnerResult, type InnerLoopInput } from './inner-loop.ts'
 import type { ProjectBuildOutcome } from './project-build-host.ts'
@@ -62,6 +68,9 @@ test('unknown persists step and worker across a new outer loop despite blocked o
   await settle()
   const run = f.store.get(f.input.run.id)!
   expect(JSON.parse(run.inner_result!).projectBuild).toEqual(unknown)
+  // The driver's measured uncertainty has no gateway ownership marker, so it
+  // remains pending across a restart rather than being mistaken for a dead promise.
+  expect(projectBuildDriverReservationFromPriorGateway(run.inner_result)).toBe(false)
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
     base_branch: 'main', run_host: honourDiffOutput(async () => { throw Error('must not reap') }),
     observe_run_worker: async () => ({ state: 'blocked', detail: 'prompt', observed_at: new Date().toISOString(), screen: 'prompt' }) })
@@ -134,6 +143,14 @@ test('a rejecting driver settles as inner-error rather than stranding the reserv
 test('result mappings retain driver causes and wave/Ralph handoffs', async () => {
   const f = await fixture()
   for (const raw of [null, '', '{', 'null', '{}', '{"projectBuild":{"kind":"merged"}}']) expect(projectBuildPending(raw)).toBe(false)
+  const deadDriverReservation = JSON.stringify({
+    projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'awaiting outcome' },
+    projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'prior-gateway' },
+  })
+  // Both are `unknown`, but only the reservation identifies a promise that the
+  // previous gateway owned and therefore may reconcile after it exits.
+  expect(projectBuildPending(deadDriverReservation)).toBe(true)
+  expect(projectBuildDriverReservation(deadDriverReservation)).toBe(deadDriverReservation)
   const blocked = parseInnerResult(projectBuildResult({ kind: 'blocked', phase: 'review', on: 'missing source', recipient: 'orchestrator', cleanup: merged.cleanup }, f.input))!
   expect(blocked.ok).toBe(false)
   expect(blocked.terminal_cause).toBe('missing source')

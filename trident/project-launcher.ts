@@ -3,9 +3,38 @@ import type { FireOutcome, InnerLoopInput, TridentWorkflowFirer } from './inner-
 import { createProjectBuildHost, type ProjectBuildHostOptions, type ProjectBuildOutcome } from './project-build-host.ts'
 import type { TridentRunStore } from './store.ts'
 
+const projectDriverGatewaySession = crypto.randomUUID()
+
+type ProjectBuildDriverReservation = {
+  kind: 'in-process-driver'
+  gateway_session: string
+}
+
+function driverReservation(raw: string | null): ProjectBuildDriverReservation | null {
+  try {
+    const parsed = JSON.parse(raw ?? 'null')
+    const reservation = parsed?.projectBuildReservation
+    return parsed?.projectBuild?.kind === 'unknown' &&
+      reservation?.kind === 'in-process-driver' && typeof reservation.gateway_session === 'string'
+      ? reservation
+      : null
+  } catch { return null }
+}
+
 /** The canonical result field also carries nonterminal driver uncertainty. */
 export function projectBuildPending(raw: string | null): boolean {
   try { return JSON.parse(raw ?? 'null')?.projectBuild?.kind === 'unknown' } catch { return false }
+}
+
+/** A reservation is process-owned; an authored `unknown` deliberately has no owner. */
+export function projectBuildDriverReservationFromPriorGateway(raw: string | null): boolean {
+  const reservation = driverReservation(raw)
+  return reservation !== null && reservation.gateway_session !== projectDriverGatewaySession
+}
+
+/** The exact reservation bytes are the store claim's compare-and-swap witness. */
+export function projectBuildDriverReservation(raw: string | null): string | null {
+  return projectBuildDriverReservationFromPriorGateway(raw) ? raw : null
 }
 
 export function projectBuildResult(outcome: ProjectBuildOutcome, input: InnerLoopInput): string {
@@ -39,7 +68,13 @@ export interface ProjectLauncherOptions {
 export function createProjectLauncher(options: ProjectLauncherOptions): TridentWorkflowFirer {
   return async input => {
     const controller = new AbortController()
-    const reservation = JSON.stringify({ projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'Project driver started; awaiting durable outcome' } })
+    // This is not the driver's measured `unknown`: this gateway authored it before
+    // starting an in-process promise. The session marker lets the next gateway recover
+    // a dead promise while preserving a measured driver `unknown` for reconciliation.
+    const reservation = JSON.stringify({
+      projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'Project driver started; awaiting durable outcome' },
+      projectBuildReservation: { kind: 'in-process-driver', gateway_session: projectDriverGatewaySession },
+    })
     let reserved = false
     const started = Date.now()
     const launch = (async (): Promise<FireOutcome> => {

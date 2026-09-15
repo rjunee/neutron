@@ -337,6 +337,7 @@ export interface TridentRun {
    * continuation instead of reaping it. Legacy rows (NULL) read as 0.
    *
    * RECOVERY-OWNED, SINGLE WRITER: only {@link TridentRunStore.beginCrashRecovery}
+   * and {@link TridentRunStore.beginProjectBuildDriverRecovery}
    * ever writes it. It is DELIBERATELY absent from `TridentRunUpdate`, `update()`,
    * `save()` and `saveIfActive()` — same ownership discipline as `inner_result`
    * (workflow-owned) and `harvested_at` (harvest-owned), so no full-snapshot save
@@ -1524,6 +1525,32 @@ export class TridentRunStore {
           WHERE id = ? AND subagent_status = 'crashed'
             AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
         [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
+  }
+
+  /**
+   * Atomically claim an in-process project-driver reservation left by a prior gateway.
+   * The reservation bytes are a CAS witness: a live driver's completion cannot be
+   * cleared by a stale recovery tick. This is the same durable crash budget as launcher
+   * recovery, but it does not require the detached-launcher crash latch because the
+   * driver itself lived in the gateway process.
+   */
+  async beginProjectBuildDriverRecovery(id: string, reservation: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET inner_result = NULL,
+                subagent_status = NULL,
+                subagent_run_id = NULL,
+                workflow_run_id = NULL,
+                crash_recoveries = COALESCE(crash_recoveries, 0) + 1,
+                last_advanced_at = ?
+          WHERE id = ? AND inner_result IS ?
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [this.now(), id, reservation],
       )
       return res.changes > 0
     })

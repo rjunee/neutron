@@ -86,6 +86,7 @@ function harness(
       : {}),
     on_orphaned_session: 'wait',
     begin_crash_recovery: (id) => store.beginCrashRecovery(id),
+    begin_project_build_driver_recovery: (id, reservation) => store.beginProjectBuildDriverRecovery(id, reservation),
     max_crash_recoveries: opts.maxCrashRecoveries ?? 2,
   })
   return new TridentTickLoop({
@@ -218,6 +219,37 @@ describe('external launcher death reaches the real orchestrator without killing 
     expect(continued.crash_recoveries).toBe(1)
     expect(continued.round).toBe(1)
     expect(continued.ralph_round).toBe(0)
+  })
+
+  test('a gateway restart resumes a dead in-process driver from its checkpoint, never as a fresh build', async () => {
+    const run = await seedRunning('driver-restart', 'generation-before-restart')
+    const reservation = JSON.stringify({
+      projectBuild: { kind: 'unknown', phase: 'build', step_id: 'build-1', detail: 'driver was running' },
+      projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'gateway-before-restart' },
+    })
+    await store.update(run.id, {
+      inner_result: reservation,
+      inner_checkpoint: 'ralph-task-built',
+      inner_checkpoint_head: 'a'.repeat(40),
+    })
+    const fires: InnerLoopInput[] = []
+    const loop = harness('alive', async input => {
+      fires.push(input)
+      return { status: 'fired', error: null, launcher_session_key: 'generation-after-restart' }
+    })
+
+    await loop.runOnce()
+
+    // The claim consumed the stale reservation, then `launch()` was given the
+    // persisted continuation — branch/PR/checkpoint all survive; it is not fresh.
+    expect(fires).toHaveLength(1)
+    expect(fires[0]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]!.run.branch).toBe('trident/existing')
+    expect(fires[0]!.run.pr).toBe(312)
+    const recovered = store.get(run.id)!
+    expect(recovered.crash_recoveries).toBe(1)
+    expect(recovered.inner_result).toBeNull()
+    expect(recovered.workflow_run_id).toBe('generation-after-restart')
   })
 
   test('persistent launch throws terminate the latched run within six sweeps with work preserved', async () => {
