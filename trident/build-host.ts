@@ -107,6 +107,27 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         source: known && baseline?.source !== report.source ? 'multiple-models' : report.source,
         observed_at: Math.max(report.observed_at, (baseline?.observed_at ?? -1) + 1, (usageLastObserved.get(key) ?? -1) + 1),
       }
+      // NOTHING MEASURED, NOTHING TO WRITE — and the schema is what decides that.
+      // `0144_trident_phase_usage.sql:23-34` permits all-null measurements ONLY under
+      // `status = 'unknown'`; a `'partial'` row must carry a source, an observed_at AND
+      // at least one non-null token/cost field. The trigger `code_trident_runs_seed_usage`
+      // already seeds every phase as `'unknown'`, so when the harness reports no usage
+      // the truthful row is ALREADY THERE and rewriting it as `'partial'` is what the
+      // CHECK rejects.
+      //
+      // That is not hypothetical: a project build supplies `metadata: () => undefined`
+      // (`open/wiring/project-build.ts`), so `decodeProjectTrailer` fills
+      // `{usage: null, model_reported: null, ...}` and EVERY field here resolves null.
+      // The first completed worker turn — plan, round 0 — therefore threw
+      // `Phase usage write was …` out of this very line, and `buildRun` reported
+      // `{kind: 'unknown', phase: 'plan'}` before any gate ran. Measured against a copy
+      // of the live database: `SQLiteError: CHECK constraint failed`.
+      //
+      // Skipping preserves the record rather than degrading it: the row keeps saying
+      // "no measurement", which is exactly what happened.
+      if (absolute.input_tokens === null && absolute.output_tokens === null
+        && absolute.cache_read_tokens === null && absolute.cache_creation_tokens === null
+        && absolute.cost_usd === null) return
       const result = await options.phaseUsage.record(runId, phase, absolute)
       if (result !== 'recorded') throw new Error(`Phase usage write was ${result}`)
       usageLastObserved.set(key, absolute.observed_at)
