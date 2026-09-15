@@ -195,6 +195,13 @@ describe('ProjectShell render (happy-dom)', () => {
     expect(container.textContent).toContain('Send')
     const chatPanel = container.querySelector('.car-tabpanel') as HTMLElement
     expect(chatPanel.hasAttribute('hidden')).toBe(false)
+    // The usage hairline belongs immediately above the message composer, not at
+    // the distant tab-band/stage seam. Pin both placement and the old-location
+    // absence so moving the same component back cannot satisfy this assertion.
+    const usageMeter = chatPanel.querySelector('[data-testid="usage-meter"]') as HTMLElement
+    expect(usageMeter.parentElement?.classList.contains('car-thread')).toBe(true)
+    expect(usageMeter.nextElementSibling?.classList.contains('car-composer-wrap')).toBe(true)
+    expect(container.querySelector('.car-topbar + [data-testid="usage-meter"]')).toBeNull()
 
     // Switch to Documents → the real Documents view mounts (PR-5), Chat panel
     // hidden (but mounted). The injected fetch only serves /tabs, so the docs

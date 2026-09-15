@@ -16,7 +16,6 @@ const sites: Record<string, string[]> = {
     '.test(oid)) return oid.toLowerCase()',
     '    /^outer-published:',
     '.test(resolvedHead))',
-    '.test(pin))',
     '? resume_checkpoint.match(',
     '.test(recorded) &&',
     '.test(resume_live_head) &&',
@@ -25,6 +24,9 @@ const sites: Record<string, string[]> = {
     '.test(branchTip))',
     'if (ownCrashLeftover && /',
   ],
+  // G084's full-width pin check moved here when the gate was extracted from
+  // `publishBuiltCommit`; the recognizer follows the code, not the old file.
+  'gates/fix-lineage.ts': ['.test(pin))'],
   'inner-loop.ts': ['.test(input.base_sha)'],
   'checkpoint-round.ts': ['export const OUTER_PUBLISHED_CHECKPOINT ='],
   'run-disposition.ts': ['.test(head)) return null', '.test(trimCheckpoint(run.base_sha)'],

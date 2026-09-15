@@ -671,26 +671,14 @@ export function ChatSyncSurface({
   // and the equality check below swallowed it. The target is a PER-VISIT instruction,
   // so a visit without one must not leave a spent instruction behind.
   //
-  // WHAT DOES *NOT* REACH THIS CHECK — corrected 2026-08-11, and the earlier version of
-  // this comment (and commit 93245925's message) got it wrong. It said the motivating
-  // sequence was "tap the notification for X, rail-tap elsewhere, then tap the SAME
-  // notification again — it is still sitting in the shade". The premise is right and the
-  // conclusion is not: a real re-tap of the same notification never gets here at all. It
-  // is swallowed ONE LAYER UP, in `installPushTapHandler`'s `dispatch` helper
-  // (`app/lib/push.ts`): it reads `response.notification.request.identifier`, returns
-  // early on `store.has(id)`, and only THEN calls `resolvePushRoute`/`push(path)`. So the
-  // second tap produces no navigation whatsoever and never re-supplies `?message_id=`;
-  // nothing reaches this component to be swallowed by the equality check. The dedupe TTL
-  // is 7 DAYS (`push-tap-dedupe-store.ts` `PUSH_TAP_DEDUPE_TTL_MS`) and the warm listener
-  // passes `{dismiss:false}`, so the notification genuinely does stay in the shade —
-  // which is exactly what made the false claim read as plausible. Filed as its own
-  // defect (#182) rather than widened into this change.
+  // A repeated warm notification tap now reaches this check: issue #182 restricted
+  // identifier dedupe to cached cold-start responses. The latch must therefore still
+  // release on a targetless visit so the repeated `?message_id=` can be honoured.
   //
   // WHAT DOES REACH IT is any SECOND ARRIVAL of the same target at this live component:
-  // a fresh notification for the same message (a new `request.identifier`, so the dedupe
-  // passes it), or the route otherwise re-supplying the same `message_id` after a
-  // no-target render. That is the reachable form of the sequence above, and it is the one
-  // the sixth arm of the test drives.
+  // a fresh notification for the same message, a repeated warm tap of the same
+  // notification, or the route otherwise re-supplying the same `message_id` after a
+  // no-target render. The sixth arm of the test drives the route-level form.
   //
   // WHAT SURVIVES A PROJECT SWITCH AND WHAT DOES NOT, stated exactly, because the two
   // halves point opposite ways and an earlier version of this comment got the second
@@ -707,9 +695,8 @@ export function ChatSyncSurface({
   //     above CAN therefore act on the way back, if `anchorRef` is populated before the
   //     new list's first paint.
   //
-  // So the honest scope of this fix: the latch was a state machine with no exit, which
-  // is a defect by inspection and one line to close. What it is NOT is a fix for the
-  // re-tap the earlier comment claimed — that never arrives (see above). Whether the
+  // So the honest scope of this latch fix: it closes a state machine with no exit; issue
+  // #182 separately made repeated warm taps reach it. Whether the
   // owner could SEE the latch on the rail-switch path depends on the frozen anchor
   // winning that repaint race, and that is a device claim not made here. The imperative
   // seam is the only path when the list is NOT remounted — a target arriving while the

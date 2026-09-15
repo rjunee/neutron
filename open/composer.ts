@@ -370,6 +370,8 @@ import { DocVersionStore } from '@neutronai/gateway/git/doc-version-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
+import { AgentWatcher } from '@neutronai/gateway/comments/agent-watcher.ts'
+import { buildAgentWatcherLlmCall } from '@neutronai/gateway/wiring/build-agent-watcher-llm-call.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
 import {
@@ -635,6 +637,8 @@ export interface BuildOpenGraphComposerOptions {
   substrateFactory?: (
     opts: import('@neutronai/runtime/adapters/claude-code/index.ts').ClaudeCodeSubstrateOptions,
   ) => import('@neutronai/runtime/substrate.ts').Substrate
+  /** Test-only cadence override for production-composition watcher reachability. */
+  agentWatcherPollIntervalMs?: number
   /**
    * Install-token handoff seam (E2E). Production leaves this undefined →
    * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-
@@ -3657,10 +3661,9 @@ export function buildOpenGraphComposer(
     // contract (`anchor-walker.ts:323` — the doc write has already landed, so a
     // walker failure must not surface as a 500 on a successful save).
     //
-    // Note this is NOT the dormant comments `AgentWatcher`
-    // (`gateway/composition.ts:74` DORMANT_LOOPS, decision D-7): that one is a
-    // background LLM tick loop deliberately not started. The walker is a
-    // synchronous hook on a write that already happens.
+    // This walker also lends its per-project lock to the comments `AgentWatcher`
+    // constructed below. The walker remains a synchronous write hook; the watcher
+    // is the independently scheduled LLM reply loop.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
     const docVersionStore = new DocVersionStore({ owner_home, project_slug })
     const docStore = new DocStore({
@@ -3668,6 +3671,37 @@ export function buildOpenGraphComposer(
       versionStore: docVersionStore,
       onMutationSuccess: anchorWalker.handle,
     })
+    const agentWatcherLlmCall = buildAgentWatcherLlmCall({
+      substrate: llmCallSubstrate,
+      url_slug: project_slug,
+      personaLoader,
+    })
+    if (agentWatcherLlmCall !== null) {
+      const projectSettingsStore = new SqliteProjectSettingsStore(db)
+      const agentWatcher = new AgentWatcher({
+        comment_store: commentStore,
+        llm_call: agentWatcherLlmCall,
+        owner_home,
+        doc_read: async (projectId, docPath) => {
+          try {
+            return (await docStore.readDoc(projectId, docPath)).content
+          } catch {
+            return null
+          }
+        },
+        list_active_projects: async () =>
+          (await projectSettingsStore.list(project_slug)).map((project) => project.id),
+        with_project_lock: (projectId, fn) =>
+          anchorWalker.withProjectLockExternal(projectId, fn),
+        chat_session_projects: chatSessionProjects,
+        ...(options.agentWatcherPollIntervalMs !== undefined
+          ? { poll_interval_ms: options.agentWatcherPollIntervalMs }
+          : {}),
+      })
+      loopRegistry.register(agentWatcher.describe())
+      agentWatcher.start()
+      realmodeCleanups.push(() => agentWatcher.stop())
+    }
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
@@ -4201,6 +4235,7 @@ export function buildOpenGraphComposer(
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {
       get: (id: string): TridentRun | null => boardRunStore.get(id),
+      latestHeartbeatAt: (id: string): string | null => boardRunStore.latestHeartbeatAt(id),
       update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
         boardRunStore.update(id, patch),
       terminate: async (id: string, phase: TridentRun['phase'], reason?: string): Promise<{ won: boolean }> => {
@@ -4238,7 +4273,13 @@ export function buildOpenGraphComposer(
           type: 'work_board_changed',
           items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
-            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+            const run_progress = runProgressForItem(
+              it,
+              (id) => boardRunStore.get(id),
+              nowMs,
+              undefined,
+              (id) => boardRunStore.latestHeartbeatAt(id),
+            )
             return {
               id: it.id,
               title: it.title,

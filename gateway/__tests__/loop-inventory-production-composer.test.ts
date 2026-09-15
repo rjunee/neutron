@@ -57,12 +57,13 @@ const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'trident-watch',
 // is registered in `open/composer.ts`, not by `composeProductionGraph`, so it
 // belongs on this side of the boundary and nowhere in EXPECTED_GATEWAY_LOOPS.
 const OPEN_COMPOSER_LOOPS = [
+  'agent-watcher',
   'chunked-upload-sweeper',
   'dispatch-lifecycle-watchdog',
   'terminal-build-decisions',
 ] as const
 /** The exact set of D-7 dormant loops (built, never started). */
-const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
+const EXPECTED_DORMANT_LOOPS = ['project-backup-scheduler'] as const
 
 const noOpInputBase = {
   topic_handler: async () => {},
@@ -157,7 +158,7 @@ test('the ONE boot line names running loops (with cron jobs) + the dormant set',
   expect(line).toContain('5 loop(s) running')
   for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
-  expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
 })
 
 test('the watcher cadence is CONFIGURABLE from the production wiring, not just the type', async () => {

@@ -250,6 +250,7 @@ describe('parseWorkBoardItems', () => {
           run_id: 'run-1',
           phase_label: 'building',
           round: 2,
+          ralph_round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
           elapsed_ms: 60000,
@@ -271,6 +272,7 @@ describe('parseWorkBoardItems', () => {
     ])
     expect(out[0]!.run_progress?.phase_label).toBe('building')
     expect(out[0]!.run_progress?.round).toBe(2)
+    expect(out[0]!.run_progress?.ralph_round).toBe(1)
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(out[1]!.run_progress).toBeUndefined()
   })
