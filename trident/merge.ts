@@ -1633,6 +1633,33 @@ async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<strin
   }
 }
 
+/** G109 observation for the build host. The landing effect must enforce these
+ * pins again at the write; a readiness observation is not a lock. */
+export async function localMergeReadiness(
+  run: RunHostCommand, repo: string, branch: string | null, base: string,
+  worktree: string, head: string,
+): Promise<import('./build-run.ts').GateResult> {
+  if (!branch || branch === base) return { kind: 'blocked', on: 'local-mode merge requires a branch' }
+  try {
+    if (!worktree || realpathOrSelf(worktree) === realpathOrSelf(repo)) return { kind: 'blocked', on: 'Local merge requires an isolated worktree' }
+    const top = await run(['git', '-C', worktree, 'rev-parse', '--show-toplevel'], worktree)
+    if (!top.ok || !top.stdout.trim()) return { kind: 'unknown', detail: 'Local worktree identity could not be read' }
+    if (realpathOrSelf(top.stdout.trim()) !== realpathOrSelf(worktree)) return { kind: 'blocked', on: 'Local merge requires an isolated worktree' }
+    const common = async (cwd: string) => run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], cwd)
+    const roots = await Promise.all([common(repo), common(worktree)])
+    if (roots.some(r => !r.ok || !r.stdout.trim())) return { kind: 'unknown', detail: 'Local repository identity could not be read' }
+    if (realpathOrSelf(roots[0]!.stdout.trim()) !== realpathOrSelf(roots[1]!.stdout.trim())) return { kind: 'blocked', on: 'Local worktree belongs to another repository' }
+    // Reuse the preservation policy; unreadable dirt is conservatively unknown.
+    const dirt = await worktreeDirt(run, worktree)
+    if (dirt !== null) return { kind: 'unknown', detail: 'Local merge worktree cannot be safely reused: ' + dirt }
+    const drift = await assessBaseDrift(run, repo, `refs/heads/${base}`, `refs/heads/${branch}`)
+    if (!drift.assessable) return { kind: 'unknown', detail: 'Local base drift could not be assessed' }
+    if (drift.branch_head_sha !== head) return { kind: 'blocked', on: 'Local branch differs from reviewed head' }
+    if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return { kind: 'blocked', on: 'Local base drift overlaps reviewed changes' }
+    return { kind: 'allow' }
+  } catch { return { kind: 'unknown', detail: 'Local merge observation failed' } }
+}
+
 /**
  * Remove a specific worktree path + prune stale admin entries — UNLESS it is
  * dirty (ISSUES #541).

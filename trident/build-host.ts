@@ -8,7 +8,7 @@ import { projectAdmission, type AdmissionSource } from './gates/project-admissio
 import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
-import { assessMergeDiff } from './merge.ts'
+import { assessMergeDiff, localMergeReadiness } from './merge.ts'
 import { runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
 
 type Workers = BuildRunInput['workers']
@@ -27,6 +27,7 @@ export interface BuildHostOptions {
   }
   /** Persisted previous review pin; explicit null for a fresh first round. */
   reviewed_head: string | null
+  local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
@@ -61,8 +62,26 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     }
   }
   const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
+  const localReadiness = (snapshot: BuildSnapshot): Promise<GateResult> => options.local
+    ? localMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path,
+      options.mutation.run.branch, options.local.baseBranch, options.local.worktree, snapshot.head)
+    : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    async confirmLocalMerge(snapshot) {
+      if (!options.local) return unknown('Local merge configuration is missing')
+      const run = options.mutation.run_host
+      const repo = options.mutation.run.repo_path
+      const branch = options.mutation.run.branch
+      const tip = await run(['git', '-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`], repo)
+      if (!tip.ok) return unknown('Local branch confirmation could not be read')
+      if (tip.stdout.trim() !== snapshot.head) return { kind: 'blocked', on: 'Local branch was changed or removed' }
+      const contained = await run(['git', '-C', repo, 'merge-base', '--is-ancestor', snapshot.head, `refs/heads/${options.local.baseBranch}`], repo)
+      if (contained.ok) return { kind: 'allow' }
+      return contained.exit_code === 1 && !contained.timed_out
+        ? { kind: 'blocked', on: 'Local merge not confirmed for reviewed head' }
+        : unknown('Local merge ancestry could not be read')
+    },
     async admissionGate(input) {
       // Re-read every brief on admission, including the later fix role.
       for (const role of roles) {
@@ -77,15 +96,16 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     runLeakGatePreflight: (snapshot) => runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0 }),
     assessMergeDiff,
     reviewGate: (payload, snapshot, round) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id),
-    async publishGate(snapshot) {
+    async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
       if (!proof.ok) return { kind: 'blocked', on: proof.reason }
-      const readiness = await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
+      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },
-    async mergeGate(snapshot) {
+    async mergeGate(snapshot, mergeMode) {
+      if (mergeMode === 'local') return localReadiness(snapshot)
       const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))
       if (ci.kind === 'cannot-read') return unknown(ci.reason)
       if (ci.kind !== 'green') return { kind: 'blocked', on: `CI: ${ci.kind}` }

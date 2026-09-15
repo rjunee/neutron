@@ -27,8 +27,9 @@ export async function projectAdmission(source: AdmissionSource | undefined, inpu
     for (const ref of [project.branch, project.baseBranch]) {
       if (!ref || !(await git('check-ref-format', `refs/heads/${ref}`)).ok) return unknown('Project admission branch configuration is invalid')
     }
-    const baseRef = `refs/remotes/origin/${project.baseBranch}`
-    if (!(await git('fetch', '--no-tags', '--no-recurse-submodules', 'origin', `+refs/heads/${project.baseBranch}:${baseRef}`)).ok) return unknown('Project admission base could not be refreshed')
+    const local = input.merge_mode === 'local'
+    const baseRef = local ? `refs/heads/${project.baseBranch}` : `refs/remotes/origin/${project.baseBranch}`
+    if (!local && !(await git('fetch', '--no-tags', '--no-recurse-submodules', 'origin', `+refs/heads/${project.baseBranch}:${baseRef}`)).ok) return unknown('Project admission base could not be refreshed')
     const base = await git('rev-parse', '--verify', `${baseRef}^{commit}`)
     if (!base.ok || !oid.test(base.stdout.trim())) return unknown('Project admission base commit could not be resolved')
     const branchRef = `refs/heads/${project.branch}`
