@@ -62,6 +62,8 @@ No fallback read of the former activity key was added. No alias from a real proj
 
 ### Enumeration before further implementation (2026-09-15)
 
+### Historical round-three enumeration before the ruling (2026-09-15)
+
 The requested recursive grep over TypeScript and TSX, excluding dependency and Git directories, returned **372 matching lines in 117 files** in the build worktree. This is an enumeration of that pattern, not all semantic scope consumers. Every hit is classified below; grouped rows list every matching line. Imports are reader bindings; fixture construction and assertions are distinguished. Diagnostic/session values are not automatically HTTP ids.
 
 ```sh
@@ -279,6 +281,8 @@ The original pattern misses `/general/` embedded in template URLs and constant-b
 | Chat, Work, Docs order | `app/__tests__/general-tab-set.test.tsx:225` | `app/__tests__/general-tab-set.test.tsx:135`; `app/__tests__/general-tab-set.test.tsx:147`; `app/__tests__/general-tab-set.test.tsx:230` | Same rejected tabs fetch prevents reading the registry fixture. A tab-order change would not repair that boundary. |
 | Activity onRecord | `open/activity-inspector.test.ts:261`; `open/activity-inspector.ts:52` | `open/activity-inspector.test.ts:264` | Writer supplies reserved scope, assertion expects former literal. The callback forwards the supplied scope (`open/activity-inspector.ts:330`); this is a scope-value mismatch in its result, not evidence that it stopped firing. |
 
+| Activity onRecord | `open/activity-inspector.test.ts:261`; `open/activity-inspector.ts:52` | `open/activity-inspector.test.ts:264` | Writer supplies reserved scope, assertion expects former literal. This is a scope-value mismatch in the callback result, not evidence that the callback stopped firing. |
+
 ### Contract conflict and review ceiling
 
 The current instruction declares the web three-spelling rule authoritative and forbids changing it. The web HTTP mapper returns `general` (`landing/chat-react/general-scope.ts:30`, `landing/chat-react/general-scope.ts:41`), but the branch implements reserved HTTP segments (`app/lib/general-scope.ts:65`, `gateway/http/scope-segment.ts:6`). Its existing acceptance test expressly keeps HTTP `general` and `~general` distinct (`gateway/http/scope-segment.test.ts:7`, `gateway/http/scope-segment.test.ts:9`) and the storage test protects the real project named `general` (`work-board/store.test.ts:1236`). Mapping HTTP `general` to General would restore the collision that this branch was built to remove. Retaining the reserved HTTP design requires revising the expressly protected web rule and mobile fake-gateway contract. Neither is an implementation-only choice under this brief.
@@ -286,6 +290,8 @@ The current instruction declares the web three-spelling rule authoritative and f
 The docs ownership decision is implicated too: the migration moves four components to the reserved directory (`gateway/docs-general-scope-migration.ts:7`, `gateway/docs-general-scope-migration.ts:26`, `gateway/docs-general-scope-migration.ts:27`, `gateway/docs-general-scope-migration.ts:37`), while the protected web header points to the former docs root (`landing/chat-react/general-scope.ts:16`). Web activity still reads the former scope (`landing/chat-react/activity-client.ts:145`, `landing/chat-react/activity-client.ts:149`) while the inspector writes the reserved scope (`open/activity-inspector.ts:52`). The affected contracts therefore span mobile clients/fixtures, web clients/fixtures, HTTP resolution, board storage, activity push/snapshot scope, and docs migration.
 
 The earlier record's claim that reflection was the sole lagging producer is superseded by this enumeration. A whole-tree Markdown search for `sole lagging producer|All pass a nullable/reserved` found the earlier paragraph and this correction; the earlier paragraph stays as history of the previous pass, not as the current conclusion. The review is looking at the subject: concrete HTTP fixtures and mobile client mappings disagree with branch-changed resolvers. Its description of a web rail failure and an orchestrator lookup failure was broader than the named tests show, as mapped above.
+
+The earlier record's claim that reflection was the sole lagging producer is superseded by this enumeration. The review is looking at the subject: concrete HTTP fixtures and mobile client mappings disagree with branch-changed resolvers. Its description of a web rail failure and an orchestrator lookup failure was broader than the named tests show, as mapped above.
 
 **BLOCKED: repeat finding after 3 rounds**, as reported in the task brief. The repeating class is incomplete General-boundary propagation. Under the standing round-three ceiling, no fourth implementation round was started. The actual disagreement is whether HTTP General remains `general` or retains the collision-proof reserved segment. A product ruling must reconcile that choice with the real project named `general`, existing docs ownership, and the protected tests before implementation resumes.
 
@@ -302,3 +308,40 @@ Two additional existing contract controls passed: `gateway/http/scope-segment.te
 ### Deliberately not changed in this investigation
 
 No runtime code, fixtures, assertions, spec decision, migration, or layer mapper was edited. No fallback lookup was introduced. This commit records enumeration and a blocked design review; it does not claim the five failures are fixed.
+
+### Deliberately not changed in this investigation
+
+No runtime code, fixtures, assertions, spec decision, migration, or layer mapper was edited. No fallback lookup was introduced. This commit records enumeration and a blocked design review; it does not claim the five failures are fixed.
+
+### Ruling applied (2026-09-15)
+
+The owner resolved the round-three conflict: HTTP General is `~general`, and its docs root remains `Projects/~general/docs/`. The web three-layer contract still maps empty client scope to a nonempty HTTP segment; its updated header and constant explain the reserved spelling (`landing/chat-react/general-scope.ts:12`, `landing/chat-react/general-scope.ts:30`). The project validator excludes `~` (`channels/adapters/app-ws/envelope.ts:396`), so legal project `general` remains distinct by construction. This completes the selected issue direction; no existing decision in `SPEC.md` or a spec item changed.
+
+The historical enumeration above was recovered from the previous lane's logged generation script and its retained 372-line grep output, because this checkout starts before that record-only commit. Its classifications and round-three conflict are preserved as historical evidence; the ruling supersedes that block, including its blocked status. The earlier claim of a sole lagging producer is likewise superseded by the enumeration and the web reader correction here.
+
+The five failures occupy four files, as the retained table enumerates. The owner-keyed completion and start fixtures now request the reserved segment (`trident/escalation-block.test.ts:492`, `trident/liveness-death-e2e.test.ts:138`). The mobile gateway fake imports the production resolver instead of maintaining a second validator (`app/__tests__/general-tab-set.test.tsx:25`, `app/__tests__/general-tab-set.test.tsx:130`). Its two failing cases now exercise the accepted scope. The callback assertion matches the reserved value supplied to the writer (`open/activity-inspector.test.ts:261`, `open/activity-inspector.test.ts:264`).
+
+The live web activity reader now derives its General key from the shared HTTP constant (`landing/chat-react/activity-client.ts:146`), matching the inspector's reserved key (`open/activity-inspector.ts:52`). Its test also pins the legal project `general` to its own activity endpoint (`landing/chat-react/__tests__/activity-client.test.ts:163`). Web Work Board URL expectations moved with the shared mapping (`landing/chat-react/__tests__/work-board-client.test.ts:154`). The docs mapping test explicitly pins both literals (`landing/chat-react/__tests__/general-docs-reachable.test.tsx:49`).
+
+Continuous separation is maintained by the existing project validator, exact server resolver (`gateway/http/scope-segment.ts:6`), and storage key mapping (`work-board/store.ts:265`), independently of client correctness. The mobile fake delegates to that resolver. No new error, verdict, state, or refusal joins an outcome vocabulary: the existing scope and invalid-project handling remain in use. General docs migration and ownership remain as implemented (`gateway/docs-general-scope-migration.ts:26`, `gateway/docs-general-scope-migration.ts:27`, `gateway/docs-general-scope-migration.ts:37`).
+
+### Ruling mutation evidence
+
+| Guard / boundary | Printed mutation site and change | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| HTTP board separation | `gateway/http/scope-segment.ts:6`: also map literal `general` to General | Populated project board returned `legacy` instead of `real project card`, at `gateway/http/work-board-surface.test.ts:923` | Same case passed |
+| Web General HTTP mapping | `landing/chat-react/general-scope.ts:30`: restore literal `general` | Literal reserved-segment assertion failed at `landing/chat-react/__tests__/general-docs-reachable.test.tsx:50` | Same case passed |
+| Activity reader scope | `landing/chat-react/activity-client.ts:146`: restore literal `general` | Both scope and named-project endpoint assertions failed at `landing/chat-react/__tests__/activity-client.test.ts:154` and `landing/chat-react/__tests__/activity-client.test.ts:163` | Both cases passed |
+| Mobile fake scope acceptance | `app/__tests__/general-tab-set.test.tsx:130`: reject `~general` before resolving | Both General component cases failed; 2 pass / 2 fail | Full file 4 pass / 0 fail |
+
+The board fixture populates both scopes before making HTTP requests (`gateway/http/work-board-surface.test.ts:913`), and asserts each board's contents. The activity mutation's first test filter mistakenly treated `+` as a regex operator and matched zero cases; that attempt is not counted as evidence. The corrected filter executed both cases and produced the RED/GREEN results above. All mutations were restored.
+
+### Ruling validation and scope
+
+The targeted server/web command passed 320 tests across these ten files, explicitly enumerated by command arguments: `trident/escalation-block.test.ts`, `trident/liveness-death-e2e.test.ts`, `open/activity-inspector.test.ts`, `gateway/http/scope-segment.test.ts`, `work-board/store.test.ts`, `gateway/http/work-board-surface.test.ts`, `landing/chat-react/__tests__/activity-client.test.ts`, `landing/chat-react/__tests__/general-docs-reachable.test.tsx`, `landing/chat-react/__tests__/work-board-client.test.ts`, and `landing/chat-react/__tests__/docs-client.test.ts`. The separate mobile command passed all four cases in `app/__tests__/general-tab-set.test.tsx`. The strengthened board test was rerun after ordering its content assertion before its metadata assertion and passed after restoration. Mobile tests emit React act warnings but pass their assertions.
+
+A whole-tree source/Markdown phrase search checked `indistinguishable from the sentinel`, `surfaces key General on the literal`, `General buffer on the literal`, and `WHY THE STUB BELOW`, with positive control `The reserved HTTP path segment` matching `landing/chat-react/general-scope.ts:29`. The stale phrases had no remaining matches. A paired search for `sole lagging producer|All pass a nullable/reserved` finds the prior record and its correction; those historical entries stay with this explicit supersession.
+
+Deliberately not built: no literal-HTTP alias, fallback read, project rename, storage remapping, or docs migration change. The protected resolver and storage assertions were not weakened. No whole-directory sweep or full test suite was run. Delivery is a local commit for orchestrator review.
+
+Final local gates: `bash scripts/ci/typecheck-all.sh` passed all 51 configurations; `bash scripts/ci/lint.sh` passed all reported gates. `git diff --check` passed, and the record has exactly one top-level `## ` heading.

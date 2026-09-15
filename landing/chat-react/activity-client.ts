@@ -20,6 +20,8 @@
  * injected `fetchImpl`, so it unit-tests with no DOM and no live server.
  */
 
+import { GENERAL_HTTP_ID } from './general-scope'
+
 import {
   GatewayClientError,
   GatewayHttpClient,
@@ -138,11 +140,10 @@ export function parseActivitySnapshot(raw: unknown): ActivitySnapshot | null {
 /**
  * The scope key the client uses for General. The web shell models General as the
  * EMPTY project id (`vm.projectId === null` → `''`) but the server keys the
- * General buffer on the literal `'general'` (matching the live-turn metering
- * scope), so the two must be mapped at this boundary — the identical mismatch
- * `workBoardPathSegment` handles for the board.
+ * General buffer on the reserved `'~general'` scope. This boundary maps the
+ * client id to the server key, as the Work Board client does for HTTP paths.
  */
-export const GENERAL_ACTIVITY_SCOPE = 'general'
+export const GENERAL_ACTIVITY_SCOPE = GENERAL_HTTP_ID
 
 /** Map a client-side scope id (`''` ⇒ General) to its inspector scope key. */
 export function activityScopeKey(project_id: string | null): string {
