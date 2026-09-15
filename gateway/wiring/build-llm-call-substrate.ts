@@ -252,6 +252,8 @@ export interface BuildLlmCallSubstrateInput {
    *  Also the instance+role discriminator the persistent substrate folds into its
    *  warm-pool key (S3 §2). */
   substrate_instance_id: string
+  /** Human-legible REPL pane label composed by the construction site. */
+  repl_pane_label?: string
   /**
    * WHOSE turns this substrate serves, for credential-pool failure accounting.
    * Defaults to `'interactive'` — a person is waiting — which is the behaviour
@@ -833,6 +835,7 @@ export function buildLlmCallSubstrate(
           substrate_instance_id: input.substrate_instance_id,
           env: spawnEnv,
         }
+        if (input.repl_pane_label !== undefined) opts.repl_pane_label = input.repl_pane_label
         if (input.cwd !== undefined) opts.cwd = input.cwd
         // Ritual executor (plan task 4) — a non-default system prompt file so the
         // scheduled REPL runs as an unattended executor rather than the chat

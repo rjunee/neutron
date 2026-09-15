@@ -394,6 +394,7 @@ export function buildImportSubstrate(
         }
         const opts: ClaudeCodeSubstrateOptions = {
           substrate_instance_id: input.substrate_instance_id,
+          repl_pane_label: `import · ${input.project_slug ?? 'history'}`,
           env,
         }
         if (input.cwd !== undefined) opts.cwd = input.cwd

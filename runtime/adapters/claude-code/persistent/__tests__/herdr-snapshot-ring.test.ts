@@ -33,6 +33,7 @@ import type { PtyChild } from '../pty-host.ts'
 async function spawnWithFake(
   server: FakeHerdrServer,
   pollIntervalMs = 5,
+  label?: string,
 ): Promise<{ child: PtyChild; screens: string[]; exits: (number | null)[] }> {
   const screens: string[] = []
   const exits: (number | null)[] = []
@@ -45,6 +46,7 @@ async function spawnWithFake(
   const child = await host.spawn(['claude', '--session-id', 's1'], {
     cwd: '/tmp',
     env: { PATH: '/usr/bin', DROP_ME: undefined },
+    ...(label !== undefined ? { label } : {}),
     onScreen: (s) => screens.push(s),
     onExit: (c) => exits.push(c),
   })
@@ -836,6 +838,34 @@ describe('herdr bridge — spawn refuses what it cannot supervise', () => {
     await until(() => server.callsTo('pane.read').length >= 1, 'a read')
     expect(server.callsTo('pane.read')[0]!.params['pane_id']).toBe('w9:pZZ')
     child.kill()
+  })
+
+  it('gives concurrently spawned REPL kinds different labels and keeps the fallback', async () => {
+    const chatServer = new FakeHerdrServer({ paneId: 'w9:chat' })
+    const buildServer = new FakeHerdrServer({ paneId: 'w9:build' })
+    const fallbackServer = new FakeHerdrServer({ paneId: 'w9:fallback' })
+
+    const [chatSpawn, buildSpawn, fallbackSpawn] = await Promise.all([
+      spawnWithFake(chatServer, 5, 'chat · neutron-open'),
+      spawnWithFake(buildServer, 5, 'build · #827 forge'),
+      spawnWithFake(fallbackServer),
+    ])
+
+    const paneLabel = (server: FakeHerdrServer): unknown => {
+      const root = server.callsTo('layout.apply')[0]!.params['root'] as Record<string, unknown>
+      return root['label']
+    }
+    expect([paneLabel(chatServer), paneLabel(buildServer)]).toEqual([
+      'chat · neutron-open',
+      'build · #827 forge',
+    ])
+    expect(paneLabel(chatServer)).not.toBe(paneLabel(buildServer))
+    expect(paneLabel(fallbackServer)).toBe('neutron-repl')
+
+    chatSpawn.child.kill()
+    buildSpawn.child.kill()
+    fallbackSpawn.child.kill()
+    await Promise.all([chatSpawn.child.exited, buildSpawn.child.exited, fallbackSpawn.child.exited])
   })
 
   it('REFUSES the spawn when herdr never reports a pid, rather than inventing one', async () => {

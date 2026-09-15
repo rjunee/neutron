@@ -1386,6 +1386,7 @@ export function buildOpenGraphComposer(
         ? buildLlmCallSubstrate({
             pool: llmPool,
             substrate_instance_id: `cc-synthesis-${owner_handle}`,
+            repl_pane_label: `import · ${project_slug}`,
             cwd: owner_home,
             owner_handle,
             user_id: OWNER_USER_ID,

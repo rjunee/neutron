@@ -950,7 +950,7 @@ export class HerdrHost implements AdoptableHost {
         // identity even when the caller supplies a minimal environment.
         NEUTRON_LANE_CLAIM: process.env['NEUTRON_LANE_CLAIM'],
       }),
-      label: HERDR_REPL_PANE_LABEL,
+      label: opts.label ?? HERDR_REPL_PANE_LABEL,
     }
     const params: Record<string, unknown> = {
       // The owner's focus is theirs: they must be able to `herdr session attach`

@@ -212,6 +212,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-llm-${owner_handle}`,
+          repl_pane_label: `setup · ${project_slug}`,
           cwd: owner_home,
           owner_handle,
           user_id: OWNER_USER_ID,
@@ -267,6 +268,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${owner_handle}`,
+          repl_pane_label: `chat · ${project_slug}`,
           cwd: owner_home,
           owner_handle,
           user_id: OWNER_USER_ID,
@@ -357,6 +359,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       : buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-compose-${owner_handle}`,
+          repl_pane_label: 'compose',
           cwd: owner_home,
           owner_handle,
           user_id: OWNER_USER_ID,
@@ -443,6 +446,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-nudge-${owner_handle}`,
+          repl_pane_label: 'compose',
           cwd: owner_home,
           owner_handle,
           user_id: OWNER_USER_ID,
@@ -501,6 +505,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           : buildLlmCallSubstrate({
               pool: llmPool,
               substrate_instance_id: `${instance_prefix}-${owner_handle}`,
+              repl_pane_label: instance_prefix === 'cc-dispatch' ? 'agent · research' : `build · ${project_slug}`,
               cwd,
               owner_handle,
               user_id: OWNER_USER_ID,
@@ -554,6 +559,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     const built = buildLlmCallSubstrate({
       pool: llmPool,
       substrate_instance_id: `cc-trident-fire-${owner_handle}-${h.toString(36)}`,
+      repl_pane_label: `build · ${project_slug}`,
       cwd,
       owner_handle,
       user_id: OWNER_USER_ID,
