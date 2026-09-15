@@ -165,7 +165,9 @@ function vocabulary(connections: CrossModelConnections): object {
       // plus a reason looked up beside it — is how "needs a Codex connection" outlived
       // the single condition it described.
       const reason =
-        t.requires === null
+        t.credential
+          ? process.env[t.credential]?.trim() ? null : `review seat ${t.model_id}: needs ${t.credential}`
+          : t.requires === null
           ? null
           : t.requires === 'codex'
             ? connections.codex.usable

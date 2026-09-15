@@ -124,7 +124,12 @@ export function readTridentPhaseModels(
   db: ProjectDb,
   project_slug: string,
 ): Readonly<Record<string, { model?: string; effort?: string }>> {
-  return readTridentPhaseModelsWithRejected(db, project_slug).config
+  const { config, rejected } = readTridentPhaseModelsWithRejected(db, project_slug)
+  const out = { ...config }
+  for (const key of ['review_codex', 'review_kimi']) {
+    if (rejected[key]?.model) out[key] = { model: rejected[key]!.model! }
+  }
+  return out
 }
 
 /**
@@ -134,8 +139,8 @@ export function readTridentPhaseModels(
  * been retired must not simply vanish into the default — the owner chose something,
  * and a control that silently reverts is one they cannot trust again. So the pane gets
  * `rejected` alongside `config` and renders the dead value struck through, naming the
- * default it fell back to. The BUILD path deliberately takes only `config`: a run has
- * nobody to tell.
+ * invalid value. The build read preserves rejected peer model selections so the
+ * panel refuses them by name; other phases retain validated defaults.
  */
 export function readTridentPhaseModelsWithRejected(
   db: ProjectDb,
@@ -169,8 +174,9 @@ export function readTridentPhaseModelsWithRejected(
  * stores nothing. This is the opposite of the read path above and the asymmetry is
  * the point: at the settings boundary the owner is present and can be told, so a
  * silent partial write is the worst outcome available (they would set `xhigh`,
- * observe nothing, and reasonably conclude the feature is broken). Deeper in, no
- * one is listening, so dropping the bad entry and continuing is the only safe move.
+ * observe nothing, and reasonably conclude the feature is broken). At build time,
+ * explicit peer selections must survive reads for named refusal; other invalid
+ * entries use validated defaults.
  *
  * An empty config clears the setting to NULL rather than storing `{}`, so "never
  * configured" and "configured to nothing" are one state instead of two.
