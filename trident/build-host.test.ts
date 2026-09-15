@@ -114,22 +114,22 @@ test('brief integrity blocks changed bytes including the fix brief', async () =>
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'blocked', on: 'fix brief integrity mismatch' })
 })
 
-test('unreadable admission and complete admission policy stay unknown', async () => {
+test('unreadable admission and missing project source stay unknown', async () => {
   const f = await fixture()
   const host = f.make()
-  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'Complete project admission policy is not wired' })
+  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'Project admission observation source is missing' })
   expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toMatchObject({ kind: 'unknown', phase: 'plan' })
   await rm(f.path)
   expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'plan brief could not be read' })
 })
 
-test('malformed review stays unknown and blocking severity blocks', async () => {
+test('malformed review and missing panel evidence stay unknown', async () => {
   const f = await fixture()
   const { deps } = f.make()
   expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review trailer not-object at $' })
   const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'blocked' })
-  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel provenance, cross-model seats and arbitration are not wired' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel observation source is missing' })
   expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
 
@@ -278,4 +278,25 @@ test('host merge eligibility is reached after green CI', async () => {
   const f = await fixture()
   expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID' })
   expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+})
+
+
+test('host admission and review reach authoritative policy sources', async () => {
+  const f = await fixture()
+  f.options.admission = {
+    observe: async input => ({ runId: input.run_id, repo: 'repo', branch: 'change', baseBranch: 'main', prior: null }),
+    run: async argv => commandResult(argv.includes('rev-parse') ? head : ''),
+  }
+  const payload = { verdict: 'APPROVE', findings: [] }
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'core-model', role: 'core', enabled: true }],
+    readSeat: async (_seat, value, round) => ({ runId: 'test', head: value.head, round, provider: 'pi', modelId: 'core-model', status: 'completed', payload }),
+    retrySeat: async () => { throw Error('unexpected retry') },
+    readSynthesis: async (value, round) => ({ runId: 'test', head: value.head, round, checkpoint: 'argus-approved', payload }),
+  }
+  const host = f.make()
+  expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
+  f.options.review.readSynthesis = async () => null
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
