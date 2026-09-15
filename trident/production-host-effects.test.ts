@@ -1,3 +1,4 @@
+import { fixLineage } from './gates/fix-lineage.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -481,6 +482,8 @@ test('local-mode driver reaches merged through the real production effect', asyn
     // record it must stop rather than continue unmeasured. These fixtures keep
     // the write observable and silent.
     recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
@@ -567,6 +570,8 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     // record it must stop rather than continue unmeasured. These fixtures keep
     // the write observable and silent.
     recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.

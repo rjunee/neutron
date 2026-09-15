@@ -104,6 +104,8 @@ export interface BuildRunDeps {
   measure(): Promise<Measurement>
   /** Resolve a differing commit claim and preserve a real conflict before refusing. */
   checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
+  /** Re-measure fix ancestry against the host-held pre-fix revision. */
+  checkFixLineage?(snapshot: BuildSnapshot, reviewedHead: string): Promise<GateResult>
   admissionGate(input: BuildRunInput): Promise<GateResult>
   // Existing module vocabularies are preserved across extraction.
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
@@ -278,6 +280,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       try {
         outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
+        if (role === 'review') return { stop: blocked('infra-only: Review round threw before producing synthesis') }
         if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
         throw error
       }
@@ -325,6 +328,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (branch) return { stop: branch }
       }
       if (role === 'fix' && !fixLanded(snapshot.head, measured.head)) return { stop: failed('Fix round did not move the measured branch head', 'round-lost-work') }
+      if (role === 'fix') {
+        if (!deps.checkFixLineage) return { stop: unknown('Fix lineage host is missing') }
+        const lineage = gateStop(await deps.checkFixLineage(measured, snapshot.head))
+        if (lineage) return { stop: lineage }
+      }
       let result = outcome.result
       if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
           && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
