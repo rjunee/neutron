@@ -74,6 +74,8 @@ import {
   windowName,
   type ProjectedWindow,
   type UsageDashboard,
+  type UsageAnalytics,
+  type UsageAmount,
   type UsagePool,
 } from './usage-dashboard-client.ts'
 import {
@@ -1077,9 +1079,12 @@ export function SettingsTab({
             No readings yet.
           </div>
         ) : (
-          usage.pools.map((pool) => (
-            <UsagePoolCard key={pool.pool} pool={pool} now={nowMs} />
-          ))
+          <>
+            {usage.pools.map((pool) => (
+              <UsagePoolCard key={pool.pool} pool={pool} now={nowMs} />
+            ))}
+            <UsageAnalyticsPanel analytics={usage.analytics} />
+          </>
         )}
       </section>
 
@@ -1635,6 +1640,39 @@ export function SettingsTab({
           Invite / Remove — available in M2
         </button>
       </section>
+    </div>
+  )
+}
+
+function formatTokenAmount(amount: UsageAmount): string {
+  if (amount.state === 'unknown' || amount.value === null) return 'Unknown'
+  return `${amount.state === 'partial' ? '≥ ' : ''}${amount.value.toLocaleString()} tokens`
+}
+
+function UsageAnalyticsPanel({ analytics }: { analytics: UsageAnalytics }): React.JSX.Element {
+  const breakdown = (title: string, rows: UsageAnalytics['spend']['by_phase']): React.JSX.Element => (
+    <div>
+      <p className="cset-label">{title}</p>
+      {rows.length === 0 ? <p className="cset-sub">Unknown</p> : rows.map((row) => (
+        <p className="cset-sub" key={row.key}>{row.key}: {formatTokenAmount(row.amount)}</p>
+      ))}
+    </div>
+  )
+  return (
+    <div className="cset-usage-pool" data-testid="usage-analytics">
+      <p className="cset-label">Token spend</p>
+      <p data-testid="usage-spend-total">{formatTokenAmount(analytics.spend.total)}</p>
+      {breakdown('By project', analytics.spend.by_project)}
+      {breakdown('By phase', analytics.spend.by_phase)}
+      {breakdown('By model', analytics.spend.by_model.rows)}
+      <p className="cset-label">Wasted work</p>
+      <p data-testid="usage-waste-total">{formatTokenAmount(analytics.waste.total)}</p>
+      {breakdown('By reason', analytics.waste.by_reason)}
+      {analytics.waste.unclassified_runs > 0 ? <p className="cset-sub">{analytics.waste.unclassified_runs} run(s) could not be classified.</p> : null}
+      <p className="cset-label">Longest builds</p>
+      {analytics.throughput.state === 'unknown' ? <p className="cset-sub">Unknown</p> : analytics.throughput.runs.map((run, i) => (
+        <p className="cset-sub" key={`${run.project}-${i}`}>{run.project}: {Math.round(run.seconds / 60)}m ({run.outcome})</p>
+      ))}
     </div>
   )
 }

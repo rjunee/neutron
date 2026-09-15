@@ -1033,8 +1033,10 @@ describe('the two decoders agree about what is an answer', () => {
   test('an EMPTY pools array is reachable on both — different from unreachable', () => {
     // Collapsing the two would hide a server that answered correctly, and the two
     // render differently: "No readings yet" versus "not available from this server".
-    expect(mobile.decodeDashboard({ pools: [] })).toEqual({ reachable: true, pools: [] })
-    expect(web.decodeDashboard({ pools: [] })).toEqual({ reachable: true, pools: [] })
+    expect(mobile.decodeDashboard({ pools: [] })).toEqual(web.decodeDashboard({ pools: [] }))
+    const empty = web.decodeDashboard({ pools: [] })
+    expect(empty.reachable && empty.pools).toEqual([])
+    expect(empty.reachable && empty.analytics.spend.total.value).toBeNull()
     expect(mobile.DASHBOARD_UNREACHABLE.reachable).toBe(false)
     expect(web.DASHBOARD_UNREACHABLE.reachable).toBe(false)
   })

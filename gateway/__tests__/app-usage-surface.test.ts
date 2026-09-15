@@ -17,6 +17,7 @@ import { describe, expect, it } from 'bun:test'
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import type { CredentialUsagePayload } from '@neutronai/contracts/credential-usage.ts'
 import type { PoolSummary } from '@neutronai/persistence/usage-samples-store.ts'
+import type { UsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
 
 import { createAppUsageSurface } from '../http/app-usage-surface.ts'
 
@@ -31,6 +32,11 @@ const EMPTY_POOL: PoolSummary = {
   stale_after_ms: 120_000,
   accounts: [],
 }
+const UNKNOWN_ANALYTICS: UsageAnalytics = {
+  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_model: { state: 'unknown', rows: [] } },
+  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0 },
+  throughput: { state: 'unknown', runs: [] },
+}
 
 function surfaceFor(
   payload: CredentialUsagePayload,
@@ -39,7 +45,7 @@ function surfaceFor(
   return createAppUsageSurface({
     auth: createAppWsAuthResolver({ project_slug: OWNER, bypass: true }),
     snapshot: () => payload,
-    dashboard: () => pools,
+    dashboard: () => ({ pools, analytics: UNKNOWN_ANALYTICS }),
   })
 }
 
@@ -135,7 +141,7 @@ describe('GET /api/app/usage/dashboard', () => {
     const surface = surfaceFor({ available: false, reason: 'no_credential' }, [MEASURED])
     const res = await surface.handler(authedDashboardGet())
     expect(res?.status).toBe(200)
-    expect(await res?.json()).toEqual({ pools: [MEASURED] })
+    expect(await res?.json()).toEqual({ pools: [MEASURED], analytics: UNKNOWN_ANALYTICS })
   })
 
   it('serves an empty series as null windows, not as an error', async () => {
@@ -144,7 +150,7 @@ describe('GET /api/app/usage/dashboard', () => {
     const surface = surfaceFor({ available: false, reason: 'no_credential' })
     const res = await surface.handler(authedDashboardGet())
     expect(res?.status).toBe(200)
-    expect(await res?.json()).toEqual({ pools: [EMPTY_POOL] })
+    expect(await res?.json()).toEqual({ pools: [EMPTY_POOL], analytics: UNKNOWN_ANALYTICS })
   })
 
   it('does NOT serve the meter body from the dashboard path', async () => {
