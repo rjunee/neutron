@@ -149,3 +149,26 @@ test('G127 cleanup failure stays visible without changing the build verdict', as
     ...build, cleanup: { kind: 'failed', detail: 'script crashed' },
   })
 })
+
+
+test('project composition binds review source to admitted run and worktree', async () => {
+  const f = await fixture()
+  const requests: { run_id: string; cwd: string }[] = []
+  f.options.policy.review = {
+    evidenceRoot: f.options.production.repo, env: {},
+    phaseModels: { review_rubric: { model: 'none' }, review_adversarial: { model: 'sol' },
+      review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
+    wallMs: 1000, signal: new AbortController().signal,
+    runnerFor: (_model, seat) => ({ provider: seat.provider, supports: () => ({ ok: true }),
+      liveness: async () => 'unknown', run: async request => {
+        requests.push(request)
+        return { kind: 'completed', result: { verdict: 'APPROVE', findings: [] },
+          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: request.model_id, thread_id: null }
+      } }),
+  }
+  const host = await createProjectBuildHost(f.options)
+  expect(await host.deps.reviewGate({ verdict: 'APPROVE', findings: [] },
+    { head: 'b'.repeat(40), diff: 'measured diff', pr: null }, 1, 0)).toEqual({ kind: 'approve' })
+  expect(requests).toHaveLength(2)
+  expect(requests.every(request => request.run_id === f.options.production.runId && request.cwd === f.options.production.worktree)).toBe(true)
+})
