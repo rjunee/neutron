@@ -19,8 +19,8 @@
 #     so they are in scope. Pre-existing history is deliberately NOT scanned: it
 #     is immutable and already mirrored, so flagging it would only produce a
 #     permanently-red gate with no available remedy. The scan window is
-#     `$LEAK_GATE_BASE_SHA..HEAD` (the workflow supplies the PR base / push
-#     `before` sha), i.e. exactly the commits this change is adding.
+#     `$LEAK_GATE_BASE_SHA..HEAD` (the workflow derives the base from fetched
+#     repository history), i.e. exactly the commits this change is adding.
 #
 # RULE TIERS
 #   * Tier-1 PII  — owner proper nouns / private paths. The pattern source is
@@ -662,9 +662,11 @@ build_message_view() {
   local base="" cand
   if [ -n "${LEAK_GATE_BASE_SHA:-}" ]; then
     case "${LEAK_GATE_BASE_SHA}" in
-      0000000*) ;;                                   # push that created the ref
+      0000000*) [ "$IN_CI" = "1" ] && return 1 ;;
       *) if git -C "$SCAN_ROOT" cat-file -e "${LEAK_GATE_BASE_SHA}^{commit}" 2>/dev/null; then
            base="${LEAK_GATE_BASE_SHA}"
+         else
+           return 1
          fi ;;
     esac
   fi
@@ -682,7 +684,7 @@ build_message_view() {
   # scanning HEAD there would check commits that are not being pushed while
   # missing the ones that are.
   local head="${LEAK_GATE_HEAD_SHA:-HEAD}"
-  git -C "$SCAN_ROOT" rev-parse --verify -q "${head}^{commit}" >/dev/null 2>&1 || head=HEAD
+  git -C "$SCAN_ROOT" rev-parse --verify -q "${head}^{commit}" >/dev/null 2>&1 || return 1
   # ALREADY-PUBLISHED HISTORY IS NOT THIS PUSH'S TO ANSWER FOR. `base..head` is a
   # single-floor range, and a branch that MERGES the mainline pulls the mainline's
   # commits into it — commits already on GitHub, already mirrored, and not
@@ -735,8 +737,8 @@ leak-gate: FATAL — could not determine a commit range to scan. Commit messages
 PR bodies are mirrored to GHArchive permanently and cannot be redacted after the
 fact, so skipping them in CI is not an option.
 
-Fix: the purity job needs `fetch-depth: 0` and `LEAK_GATE_BASE_SHA`
-(github.event.pull_request.base.sha || github.event.before). See ci.yml.
+Fix: the purity job needs `fetch-depth: 0` and a history-derived
+`LEAK_GATE_BASE_SHA`. See ci.yml.
 EOF
   exit 2
 elif [ "$MESSAGES_ONLY" = "1" ]; then

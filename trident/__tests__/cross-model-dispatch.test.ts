@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -859,31 +859,56 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const marker = join(dir, 'completed')
     try {
       // Scaled reproduction of the real mechanism: the foreground caller owns a fresh
-      // process group, and that whole group is killed at 50ms, before the 250ms build
-      // finishes. `setsid` moves the backgrounded wrapper out of the doomed group.
+      // process group, and that whole group is SIGTERMed while the build is still
+      // running. `setsid` moves the backgrounded wrapper out of the doomed group.
+      //
+      // NO TIMER GATES THE PROPERTY, because the property is not about elapsed time.
+      // Two earlier versions had the child `sleep` and raced a deadline against it:
+      // 3 s (12x the 250 ms sleep) failed four CI runs at 3051 ms, and 15 s then failed
+      // at 15052 ms. This test's own comment had already named why — "the scarce resource
+      // on a shared runner is not the child's sleep, it is getting scheduled at all" — so
+      // widening the margin a third time would only measure the runner's load.
+      //
+      // Detachment is a STRUCTURAL fact about process groups, readable the moment the
+      // child exists. `setsid` exists to move the wrapper OUT of the caller's doomed
+      // group, so the question is simply: which group is the child in? That is field 5
+      // (`pgrp`) of /proc/<pid>/stat, and it needs no timer and no kill to answer.
+      //
+      // Two probes that looked structural but were not, both rejected here: `kill(pid, 0)`
+      // after the group kill is ambiguous, because a killed-but-unreaped child is still
+      // reachable and reports alive; and gating the child on a fifo deadlocks the test
+      // when the child IS dead, since the release write blocks forever with no reader.
+      // The child therefore polls for a release FILE, which no failure mode can block.
+      const started = join(dir, 'started')
+      const release = join(dir, 'release')
       const caller = spawn(
         'bash',
-        ['-c', `nohup setsid sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
+        [
+          '-c',
+          `nohup setsid sh -c 'printf $$ > "$1"; until [ -f "$2" ]; do sleep 0.05; done; `
+            + `printf done > "$3"' _ '${started}' '${release}' '${marker}' `
+            + `</dev/null >/dev/null 2>&1 & wait`,
+        ],
         { detached: true, stdio: 'ignore' },
       )
       expect(caller.pid).toBeDefined()
-      await Bun.sleep(50)
+      // Setup, not the measurement: wait for the child to publish its pid. The per-test
+      // timeout is the only bound, so a child that never starts is an environment failure
+      // rather than a false verdict about detachment.
+      while (!existsSync(started)) await Bun.sleep(10)
+      const child = Number(readFileSync(started, 'utf8'))
+      expect(Number.isInteger(child)).toBe(true)
+
+      // THE MEASUREMENT. /proc/<pid>/stat is `pid (comm) state ppid pgrp ...`, and comm
+      // can itself contain spaces and parentheses, so split after the LAST ')'.
+      const fields = readFileSync(`/proc/${child}/stat`, 'utf8')
+      const pgrp = Number(fields.slice(fields.lastIndexOf(')') + 2).split(' ')[2])
+      // Without `setsid` the child shares the caller's group and is killed with it below.
+      expect(pgrp).not.toBe(caller.pid)
+
       process.kill(-caller.pid!, 'SIGTERM')
-      // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: a deadline
-      // past the per-test timeout can never expire, so a child that never writes kills the
-      // test as a runner timeout and this named assertion never runs. That invariant is
-      // why the explicit timeout below exists — the two move together.
-      //
-      // 3 s was 12x the fixture's 250 ms child delay and still failed FOUR CI runs at
-      // 3051 ms while passing every local run: the scarce resource on a shared runner is
-      // not the child's sleep, it is getting scheduled at all, and 8 concurrent shards
-      // starve a 250 ms sleep for seconds. Widening the margin does not weaken the
-      // property — the group is still SIGTERMed before the child can possibly finish, so
-      // a wrapper that failed to detach still fails here. It only stops the clock being
-      // the thing under test.
-      const deadline = Date.now() + 15_000
-      while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(10)
-      expect(existsSync(marker)).toBe(true)
+      writeFileSync(release, 'go') // never blocks: a plain file, not a fifo
+      while (!existsSync(marker)) await Bun.sleep(10)
       expect(readFileSync(marker, 'utf8')).toBe('done')
 
       const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
