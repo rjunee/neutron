@@ -15,7 +15,6 @@ const sites: Record<string, string[]> = {
     '.test(token)) return token.toLowerCase()',
     '.test(oid)) return oid.toLowerCase()',
     '    /^outer-published:',
-    '.test(resolvedHead))',
     '? resume_checkpoint.match(',
     '.test(recorded) &&',
     '.test(resume_live_head) &&',
@@ -27,6 +26,11 @@ const sites: Record<string, string[]> = {
   // G084's full-width pin check moved here when the gate was extracted from
   // `publishBuiltCommit`; the recognizer follows the code, not the old file.
   'gates/fix-lineage.ts': ['.test(pin))'],
+  // Same rule, same reason: the publication cluster left `orchestrator.ts` (#999)
+  // and took its resolved-head recognizer with it. The COUNT is unchanged — 21
+  // sites, just one of them in a new file. Lowering the count instead would have
+  // been the silent way to lose a recognizer.
+  'publication.ts': ['.test(resolvedHead))'],
   'inner-loop.ts': ['.test(input.base_sha)'],
   'checkpoint-round.ts': ['export const OUTER_PUBLISHED_CHECKPOINT ='],
   'run-disposition.ts': ['.test(head)) return null', '.test(trimCheckpoint(run.base_sha)'],

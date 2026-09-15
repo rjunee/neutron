@@ -1123,12 +1123,17 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       { file: 'orchestrator.ts', base: 'base_ref', why: 'the resolved ref the binding returned' },
       { file: 'replay.ts', base: 'await localForkPoint()', why: 'an object name read from git' },
       { file: 'orchestrator.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
-      { file: 'orchestrator.ts', base: 'seenPin', why: 'a recorded object name' },
+      // #999 moved the publication cluster out of `orchestrator.ts`, and these two
+      // operands went with it. Enumerated in the NEW file rather than dropped: an
+      // operand that stops being listed stops being argued, and this whole table
+      // exists to make every operand argued.
+      { file: 'publication.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
+      { file: 'publication.ts', base: 'seenPin', why: 'a recorded object name' },
       { file: 'orchestrator.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
       { file: 'orchestrator.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
     ]
     const seen: string[] = []
-    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'replay.ts'] as const) {
+    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'publication.ts', 'replay.ts'] as const) {
       const lines = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8').split('\n')
       for (let i = 0; i < lines.length; i += 1) {
         if (!(lines[i] ?? '').includes('gitRangeArgv(')) continue
