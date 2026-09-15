@@ -95,6 +95,7 @@ branch is cut (standard §3.1, §3.2).
 | [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
+| [`pin-model-class-resolve-latest-per-tier`](pin-model-class-resolve-latest-per-tier.md) | Pin the model class and resolve the latest version per tier | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
 | [`stale-approval-is-re-raised`](stale-approval-is-re-raised.md) | Re-raise forgotten ritual approvals at a bounded daily cadence | P2 | — |

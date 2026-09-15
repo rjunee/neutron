@@ -20,10 +20,10 @@ describe('C1 BootConfig — defaults table (verbatim fidelity)', () => {
   const c = resolveBootConfig({})
 
   test('models — runtime/models.ts', () => {
-    expect(c.models.best).toBe('claude-opus-5') // :53
-    expect(c.models.fable).toBe('claude-fable-5') // :71
-    expect(c.models.sonnet).toBe('claude-sonnet-5') // :89
-    expect(c.models.fast).toBe('claude-haiku-4-5-20251001') // :96
+    expect(c.models.best).toBe('opus')
+    expect(c.models.fable).toBe('fable')
+    expect(c.models.sonnet).toBe('sonnet')
+    expect(c.models.fast).toBe('haiku')
   })
 
   test('claude bin — CLAUDE_BIN ?? "claude"', () => {

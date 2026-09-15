@@ -291,6 +291,16 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Anthropic defaults pin a model class, never a numbered version (#548).
+
+The best, planning, mid-tier, and fast defaults are the Claude Code aliases
+`opus`, `fable`, `sonnet`, and `haiku`. Claude Code resolves the latest version
+within each class when the process starts, so model turnover does not require a
+Neutron release. Explicit environment overrides remain the supported way to pin
+a version deliberately. The strict pricing registry carries current verified
+class rates and retains numbered rows for explicit pins and historical records.
+Spec item: [`docs/spec-items/pin-model-class-resolve-latest-per-tier.md`](docs/spec-items/pin-model-class-resolve-latest-per-tier.md).
+
 ### 2026-09-14 — Forgotten ritual approvals re-raise daily, at most three times (#586).
 
 The owner chose a 24-hour interval because a weekly reminder would arrive after

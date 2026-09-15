@@ -77,11 +77,11 @@ const SONNET_5_PRICING_SOURCE_URL = 'https://platform.claude.com/docs/en/about-c
 const SONNET_5_PRICING_VERIFIED_AT = '2026-08-13'
 
 /**
- * The pricing registry. Keys are canonical Anthropic model ids. The
+ * The pricing registry. Keys include Claude Code's bare model-class aliases and
+ * canonical Anthropic model ids. The
  * date-suffixed snapshot id (e.g. `claude-haiku-4-5-20251001`) is registered
  * alongside its un-suffixed alias because both forms appear in production:
- * `runtime/models.ts:FAST_MODEL` defaults to the date-suffixed form while
- * `BEST_MODEL` and `SONNET_MODEL` default to the un-suffixed alias.
+ * numbered forms remain for explicit operator pins and historical accounting.
  *
  * When Anthropic publishes a new snapshot, add the new key here with the
  * same numbers as the alias entry. Pricing only diverges across model
@@ -99,11 +99,34 @@ const SONNET_5_PRICING_VERIFIED_AT = '2026-08-13'
 export const MODEL_PRICING_TABLE: Readonly<
   Record<string, Readonly<ModelPricingEntry>>
 > = Object.freeze({
-  // The current `runtime/models.ts:BEST_MODEL` default. Opus is priced
-  // identically across the 4.x generation ($5 in / $25 out per MTok), so this
-  // matches the 4-7 row; it MUST exist because `resolvePricingFor(getBestModel())`
-  // is called at import-job build time and throws on an unregistered id.
-  // The current `runtime/models.ts:BEST_MODEL` default. Opus stays $5 in / $25
+  // Claude Code resolves these class aliases to the latest version at process
+  // start. Their rows carry the currently verified class rates; the numbered
+  // rows below remain available when an operator explicitly pins a version.
+  opus: Object.freeze({
+    input_usd_per_m: 5,
+    output_usd_per_m: 25,
+    verified_at: OPUS_5_PRICING_VERIFIED_AT,
+    source_url: OPUS_5_PRICING_SOURCE_URL,
+  }),
+  fable: Object.freeze({
+    input_usd_per_m: 10,
+    output_usd_per_m: 50,
+    verified_at: SONNET_5_PRICING_VERIFIED_AT,
+    source_url: SONNET_5_PRICING_SOURCE_URL,
+  }),
+  sonnet: Object.freeze({
+    input_usd_per_m: 2,
+    output_usd_per_m: 10,
+    verified_at: SONNET_5_PRICING_VERIFIED_AT,
+    source_url: SONNET_5_PRICING_SOURCE_URL,
+  }),
+  haiku: Object.freeze({
+    input_usd_per_m: 1,
+    output_usd_per_m: 5,
+    verified_at: PRICING_VERIFIED_AT,
+    source_url: PRICING_SOURCE_URL,
+  }),
+  // Explicit Opus 5 operator pin. Opus stays $5 in / $25
   // out across the generation boundary, so this matches the 4.x rows — verified
   // against Anthropic's own Opus 5 announcement rather than assumed from the
   // pattern, because this table carries a `verified_at` and a guess in a field
@@ -114,8 +137,8 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: OPUS_5_PRICING_VERIFIED_AT,
     source_url: OPUS_5_PRICING_SOURCE_URL,
   }),
-  // The current `runtime/models.ts:FABLE_MODEL` default — the tier trident
-  // gives decomposition and verdict synthesis.
+  // Explicit Fable 5 operator pin — the tier trident gives decomposition and
+  // verdict synthesis.
   //
   // THIS ROW WAS SIMPLY MISSING until the coverage test in
   // `runtime/__tests__/pricing-covers-defaults.test.ts` went looking, which is
@@ -146,9 +169,9 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: PRICING_VERIFIED_AT,
     source_url: PRICING_SOURCE_URL,
   }),
-  // The current `runtime/models.ts:SONNET_MODEL` default. Read off the pricing
-  // table rather than carried across from the 4.6 row, because Sonnet is the
-  // one tier whose generation bump CHANGED the numbers — downward.
+  // Explicit Sonnet 5 operator pin. Read off the pricing table rather than
+  // carried across from the 4.6 row, because Sonnet is the one tier whose
+  // generation bump CHANGED the numbers — downward.
   'claude-sonnet-5': Object.freeze({
     input_usd_per_m: 2,
     output_usd_per_m: 10,
@@ -169,8 +192,8 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: PRICING_VERIFIED_AT,
     source_url: PRICING_SOURCE_URL,
   }),
-  // The current production snapshot id used by `runtime/models.ts:FAST_MODEL`.
-  // Same numbers as the alias — Anthropic prices a model generation
+  // Retained production snapshot id for explicit pins and historical billing.
+  // Same numbers as the numbered alias — Anthropic prices a model generation
   // identically across snapshots.
   'claude-haiku-4-5-20251001': Object.freeze({
     input_usd_per_m: 1,

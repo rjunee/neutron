@@ -1,9 +1,9 @@
 /**
  * @neutronai/runtime — central model resolver.
  *
- * Single source of truth for every Claude model id used in Neutron. When
- * Anthropic releases a new top-tier model, update the alias here and the
- * entire codebase picks it up.
+ * Single source of truth for every Claude model class used in Neutron. Bare
+ * Claude Code aliases resolve to the latest model in their class, so a new
+ * version does not require a Neutron release.
  *
  * **Rule:** never hardcode a Claude model id outside this file. Add a new
  * alias here if you need one. Mirrors Nova's `gateway/models.ts` pattern.
@@ -36,21 +36,14 @@
 
 /**
  * The user's Max-subscription best model. Override via `NEUTRON_BEST_MODEL`.
- * Defaults to Claude Opus 5.
+ * Defaults to the latest Claude Opus.
  *
- * **This constant is the FRESH-INSTALL SEED, not the live runtime value.** It
- * is bound ONCE at module load and a runtime model upgrade cannot mutate a
- * `const`. Every code path that SPAWNS a live REPL / dispatches a live-agent or
- * onboarding turn MUST resolve the model through {@link getBestModel} (the
- * dynamic accessor) so the model-update watchdog's adopted id reaches new
- * spawns — NOT through this frozen literal. A stale literal here rots into a
- * hang the moment Anthropic retires the pinned model (the opus-4-7 incident,
- * 2026-06-30): a fresh install, before the first watchdog tick, would spawn a
- * dead model and the turn produces zero tokens → the 180s per-turn timeout.
- * Keep the seed current AND route live spawns through {@link getBestModel}.
+ * The bare class alias is deliberately passed through to Claude Code. Claude
+ * Code resolves it when each process starts; pinning a numbered id here makes
+ * every caller stale together.
  */
 export const BEST_MODEL: string =
-  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-5'
+  process.env['NEUTRON_BEST_MODEL'] ?? 'opus'
 
 /**
  * FABLE_MODEL — the ORCHESTRATOR / max-reasoning planning model (Ryan-locked
@@ -65,14 +58,14 @@ export const BEST_MODEL: string =
  * this registry; keep the id here, the single source of truth, not a literal in
  * the workflow). Verified routable 2026-07-02 (`claude-fable-5` returns cleanly).
  *
- * Override via `NEUTRON_FABLE_MODEL`. Defaults to Claude Fable 5.
+ * Override via `NEUTRON_FABLE_MODEL`. Defaults to the latest Claude Fable.
  */
 export const FABLE_MODEL: string =
-  process.env['NEUTRON_FABLE_MODEL'] ?? 'claude-fable-5'
+  process.env['NEUTRON_FABLE_MODEL'] ?? 'fable'
 
 /**
- * The mid-tier model. Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude
- * Sonnet 5.
+ * The mid-tier model. Override via `NEUTRON_SONNET_MODEL`. Defaults to the
+ * latest Claude Sonnet.
  *
  * WHY THE TIER EXISTS (P2-v2 S21, 2026-05-17): it draws on a different
  * Anthropic rate-limit bucket from `BEST_MODEL`, and Pass-2 synthesis was
@@ -81,30 +74,18 @@ export const FABLE_MODEL: string =
  * exhaustion on a subscription. Sonnet keeps the same prompt body, schema and
  * parser, and trades a stylistically-different result for one that arrives.
  *
- * WHY IT IS PINNED TO A GENERATION AND NOT AN ALIAS. There is no floating
- * `claude-sonnet-latest`; every tier here names an exact id, so a generation
- * bump is a code change by construction. That is deliberate — an id that moved
- * on its own would move billing with it — but it means this line is the one
- * that ROTS, and it did: it sat on 4.6 while `BEST_MODEL` and `FABLE_MODEL`
- * both moved to 5, which is what the owner saw in the model-selector pane
- * (ISSUES #564).
- *
- * WHAT MUST HAPPEN ALONGSIDE ANY FUTURE BUMP: add the new id to
- * `runtime/model-pricing.ts` FIRST. `resolveModelPricing` throws on an
- * unregistered id, by design, and it is called at composer construction — so a
- * bump here without a row there does not mis-bill quietly, it fails the boot.
- * `pricing-covers-defaults.test.ts` pins that pairing so the next bump cannot
- * ship half of itself.
+ * The class alias makes version selection Claude Code's responsibility. The
+ * operator override remains the escape hatch for a deliberate version pin.
  */
 export const SONNET_MODEL: string =
-  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-5'
+  process.env['NEUTRON_SONNET_MODEL'] ?? 'sonnet'
 
 /**
  * The fast/cheap model. Override via `NEUTRON_FAST_MODEL`. Defaults to
- * Claude Haiku 4.5.
+ * the latest Claude Haiku.
  */
 export const FAST_MODEL: string =
-  process.env['NEUTRON_FAST_MODEL'] ?? 'claude-haiku-4-5-20251001'
+  process.env['NEUTRON_FAST_MODEL'] ?? 'haiku'
 
 /**
  * Probe model — alias of `FAST_MODEL`. Used by `auth/max-oauth.ts` for the

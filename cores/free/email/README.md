@@ -126,8 +126,8 @@ under any circumstances. Tier 2 Email-Private Core will request
 
 ## LLM summarization + triage
 
-The Core ships **two** Haiku 4.5 driven agents (production:
-`claude-haiku-4-5-20251001` via `@neutron/runtime`'s `FAST_MODEL`):
+The Core ships **two** Haiku-class agents (production:
+the latest Haiku via `@neutron/runtime`'s `FAST_MODEL`):
 
 - **Prose-brief summarizer** (`src/summarizer.ts`). `composeBriefSummary`
   takes the structured row from the deterministic `EmailSummarizer`
@@ -153,7 +153,7 @@ import { buildSubstrateEmailLlm } from '@neutron/email-managed-core'
 
 const emailHaikuLlm = buildSubstrateEmailLlm({
   substrate,            // the gateway's per-instance Substrate
-  model: FAST_MODEL,    // 'claude-haiku-4-5-20251001'
+  model: FAST_MODEL,    // 'haiku' (resolved by Claude Code)
 })
 ```
 

@@ -30,14 +30,14 @@ async function freshImport(): Promise<typeof import('../models.ts')> {
 }
 
 describe('runtime/models', () => {
-  test('BEST_MODEL defaults to Claude Opus 4.8 when env is unset', async () => {
-    const { BEST_MODEL } = await freshImport()
-    expect(BEST_MODEL).toBe('claude-opus-5')
-  })
-
-  test('FAST_MODEL defaults to Claude Haiku 4.5 when env is unset', async () => {
-    const { FAST_MODEL } = await freshImport()
-    expect(FAST_MODEL).toBe('claude-haiku-4-5-20251001')
+  test('defaults pin model classes rather than numbered versions', async () => {
+    const { BEST_MODEL, FABLE_MODEL, SONNET_MODEL, FAST_MODEL } = await freshImport()
+    expect({ BEST_MODEL, FABLE_MODEL, SONNET_MODEL, FAST_MODEL }).toEqual({
+      BEST_MODEL: 'opus',
+      FABLE_MODEL: 'fable',
+      SONNET_MODEL: 'sonnet',
+      FAST_MODEL: 'haiku',
+    })
   })
 
   test('PROBE_MODEL aliases FAST_MODEL', async () => {
@@ -68,11 +68,4 @@ describe('runtime/models', () => {
     expect(PROBE_MODEL.length).toBeGreaterThan(0)
   })
 
-  test('default model ids match documented Anthropic format', async () => {
-    const { BEST_MODEL, FAST_MODEL } = await freshImport()
-    // Anthropic model ids are kebab-cased, all lowercase, contain
-    // 'claude-', and may include a date suffix.
-    expect(BEST_MODEL).toMatch(/^claude-[a-z0-9-]+$/)
-    expect(FAST_MODEL).toMatch(/^claude-[a-z0-9-]+$/)
-  })
 })

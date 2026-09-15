@@ -376,7 +376,7 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
   test('FABLE_MODEL is defined in the model registry (single source of truth) and threaded via buildWorkflowArgs', () => {
     const models = readFileSync(fileURLToPath(new URL('../runtime/models.ts', import.meta.url)), 'utf8')
     expect(models).toContain('FABLE_MODEL')
-    expect(models).toContain("'claude-fable-5'")
+    expect(models).toContain("?? 'fable'")
     // The launcher resolves the ids from the registry and threads them via args.
     const loop = readFileSync(fileURLToPath(new URL('./inner-loop.ts', import.meta.url)), 'utf8')
     expect(loop).toContain('FABLE_MODEL')
