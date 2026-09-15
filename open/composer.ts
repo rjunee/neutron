@@ -2820,9 +2820,9 @@ export function buildOpenGraphComposer(
         fanOut: pushTransport,
         project_slug,
       }),
-      // The owner, and only the owner: presence is per-user, so a guest sitting
-      // in a shared project cannot silence his phone by having a tab open.
-      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
+      // The owner and the message's project: a guest, or an owner tab looking at
+      // another project, cannot silence this notification.
+      isWebForeground: (project_id) => webPresence.isForeground(OWNER_USER_ID, project_id),
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
