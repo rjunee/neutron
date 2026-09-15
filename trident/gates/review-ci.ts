@@ -1,5 +1,6 @@
 import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
 import { applyReviewSuite, type SuiteAssessment } from './review-suite.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 export interface ReviewCiObservation {
   kind: 'known'
@@ -15,7 +16,7 @@ export interface ReviewCiSource {
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
 
 /** G055 acquisition and comparison; unknown base evidence excuses no branch failure. */
-export async function assessReviewCi(source: ReviewCiSource | undefined, snapshot: BuildSnapshot, baseHead: string): Promise<SuiteAssessment> {
+export async function assessReviewCi(source: ReviewCiSource | undefined, snapshot: BuildSnapshot, baseHead: string, runId: string): Promise<SuiteAssessment> {
   if (!source) return unknown('Review CI observation source is missing')
   try {
     const value = await source.observe(snapshot)
@@ -35,7 +36,7 @@ export async function assessReviewCi(source: ReviewCiSource | undefined, snapsho
       evidence: names.has(name) ? 'Same check name measured red at the pinned base; comparison is by name only and does not clear red CI.' : 'Check is failing on this revision without a matching measured base failure.',
       advisory: names.has(name),
     })) }
-  } catch { return unknown('Review CI host observation failed') }
+  } catch (error) { return unknownCause('Review CI host observation failed', error, runId) }
 }
 
 /** G056: pending and unreadable CI join the nonterminal review deferral vocabulary. */

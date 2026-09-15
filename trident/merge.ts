@@ -87,6 +87,7 @@ import { ARBITER_PROMPT_BYTES_MAX, arbiterPrompt } from './arbiter-prompt.ts'
 // file and `delivery.ts` can import: the announce layer must recognise the reason
 // this file authors, and it may not import this module (the `no-cycles` rule).
 import { MERGE_DIFF_BYTES_MAX, mergeDiffTooLargeReason } from './merge-diff-limit.ts'
+import { unknownCause } from './gates/unknown-cause.ts'
 // The repo's defang + size-cap standard for any text that reaches a prompt, a log
 // or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
 // model-authored: the resolver's escalation question and the arbiter's reasoning.
@@ -1636,7 +1637,7 @@ async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<strin
  * pins again at the write; a readiness observation is not a lock. */
 export async function localMergeReadiness(
   run: RunHostCommand, repo: string, branch: string | null, base: string,
-  worktree: string, head: string,
+  worktree: string, head: string, runId: string,
 ): Promise<import('./build-run.ts').GateResult> {
   if (!branch || branch === base) return { kind: 'blocked', on: 'local-mode merge requires a branch' }
   try {
@@ -1656,14 +1657,14 @@ export async function localMergeReadiness(
     if (drift.branch_head_sha !== head) return { kind: 'blocked', on: 'Local branch differs from reviewed head' }
     if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return { kind: 'blocked', on: 'Local base drift overlaps reviewed changes' }
     return { kind: 'allow' }
-  } catch { return { kind: 'unknown', detail: 'Local merge observation failed' } }
+  } catch (error) { return unknownCause('Local merge observation failed', error, runId) }
 }
 
 /** Land the reviewed commit without rebasing or deleting its branch. The local
  * receive-pack owns checkout safety and the expected-base ref transaction. */
 export async function mergeLocalReviewed(
   run: RunHostCommand, repo: string, branch: string, base: string,
-  worktree: string, head: string,
+  worktree: string, head: string, runId: string,
 ): Promise<import('./build-run.ts').GateResult> {
   let result: import('./build-run.ts').GateResult = { kind: 'unknown', detail: 'Local merge did not complete' }
   try {
@@ -1675,7 +1676,7 @@ export async function mergeLocalReviewed(
         return value.stdout.trim()
       }
       const baseOid = await checked('rev-parse', '--verify', `refs/heads/${base}^{commit}`)
-      const ready = await localMergeReadiness(run, repo, branch, base, worktree, head)
+      const ready = await localMergeReadiness(run, repo, branch, base, worktree, head, runId)
       if (ready.kind !== 'allow') { result = ready; return }
       const tree = await checked('merge-tree', '--write-tree', baseOid, head)
       const commit = await checked('commit-tree', tree, '-p', baseOid, '-p', head, '-m', `Merge ${branch}`)

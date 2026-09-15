@@ -240,7 +240,7 @@ test('observation readiness cannot turn failed acquisition into known checks', a
 
 test('observation CI preserves unknown, pending and named actionable red without base evidence', async () => {
   const f = observationFixture()
-  const assess = () => assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40))
+  const assess = () => assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')
   expect(await assess()).toEqual({ kind: 'known', findings: [] })
   f.raw.rows = [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }]
   expect(await assess()).toMatchObject({ kind: 'known', findings: [{ title: 'CI FAILING: test', advisory: false }] })

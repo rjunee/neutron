@@ -1,5 +1,6 @@
 import type { BuildRunInput, GateResult } from '../build-run.ts'
 import type { RunHostCommand } from '../merge.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 export interface AdmissionProject {
   runId: string
@@ -71,5 +72,5 @@ export async function projectAdmission(source: AdmissionSource | undefined, inpu
       }
     }
     return { kind: 'allow' }
-  } catch { return unknown('Project admission host observation failed') }
+  } catch (error) { return unknownCause('Project admission host observation failed', error, input.run_id) }
 }

@@ -34,7 +34,7 @@ async function fixture() {
   await writeFile(join(wt, 'code'), 'changed\ntwo\nthree\n')
   await git('-C', wt, 'commit', '-am', 'change')
   const head = await git('rev-parse', 'change')
-  const check = (run = host, branch: string | null = 'change', worktree = wt, pin = head) => localMergeReadiness(run, repo, branch, 'base', worktree, pin)
+  const check = (run = host, branch: string | null = 'change', worktree = wt, pin = head) => localMergeReadiness(run, repo, branch, 'base', worktree, pin, 'run')
   return { repo, wt, head, git, check }
 }
 
@@ -95,10 +95,15 @@ test('G109 actual overlapping base drift blocks; unavailable observations remain
   await f.git('commit', '-am', 'base moved')
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: 'Local base drift overlaps reviewed changes' })
   const unavailable: RunHostCommand = async () => ({ ok: false, stdout: '', stderr: 'unavailable', exit_code: 128 })
-  expect(await f.check(async () => { throw new Error('offline') })).toMatchObject({ kind: 'unknown' })
+  expect(await f.check(async () => { throw new Error('recognisable local failure') })).toEqual({ kind: 'unknown', detail: 'Local merge observation failed: Error: recognisable local failure' })
   expect(await f.check(unavailable)).toMatchObject({ kind: 'unknown' })
   expect(await f.check(async (argv, cwd) => argv.includes('--git-common-dir') ? unavailable(argv, cwd) : host(argv, cwd))).toMatchObject({ kind: 'unknown' })
   expect(await f.check(async (argv, cwd) => argv.includes('merge-base') ? unavailable(argv, cwd) : host(argv, cwd))).toMatchObject({ kind: 'unknown', detail: 'Local base drift could not be assessed' })
+})
+
+test('G109 normal refusal text is unchanged', async () => {
+  const f = await fixture()
+  expect(await f.check(host, null)).toEqual({ kind: 'blocked', on: 'local-mode merge requires a branch' })
 })
 
 

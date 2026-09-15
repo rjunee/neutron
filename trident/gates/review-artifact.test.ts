@@ -46,6 +46,14 @@ test('G102 unreadable and malformed files cannot establish an artifact', async (
   await rm(f.path)
   expect(await f.check()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('read or decoded') })
 })
+test('G102 thrown read cause is bounded and normal refusal text is unchanged', async () => {
+  const f = await fixture()
+  expect(await reviewArtifact(f.request, f.snapshot, async () => { throw new Error('recognisable artifact failure') })).toEqual({
+    kind: 'unknown', detail: 'Review context artifact or brief could not be read or decoded: Error: recognisable artifact failure',
+  })
+  await writeFile(f.path, 'different context')
+  expect(await f.check()).toEqual({ kind: 'unknown', detail: 'Review brief does not reference its verified context artifact' })
+})
 
 test('G102 brief integrity and context reference are independently required', async () => {
   const f = await fixture()

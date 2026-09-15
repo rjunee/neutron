@@ -7,6 +7,7 @@ import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, typ
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
 import { pinnedMergeReadiness, publicationReadiness } from './gates/release-readiness.ts'
+import { unknownCause } from './gates/unknown-cause.ts'
 import { mergeLocalReviewed } from './merge.ts'
 import { gitRangeArgv } from './git-range.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
@@ -352,7 +353,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (current.merge_mode !== 'pr') return blocked('Publication requires PR mode')
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
-      const ready = await publicationReadiness(runHost, repo, branch, current.base_sha!, snapshot)
+      const ready = await publicationReadiness(runHost, repo, branch, current.base_sha!, snapshot, runId)
       if (ready.kind !== 'allow') return ready
       const remote = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
       if (!remote.ok || remote.timed_out) return unknown('Publication lease is unreadable')
@@ -380,8 +381,8 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const current = row()
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
-      if (current.merge_mode === 'local') return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head)
-      const ready = await pinnedMergeReadiness(runHost, repo, snapshot)
+      if (current.merge_mode === 'local') return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head, runId)
+      const ready = await pinnedMergeReadiness(runHost, repo, snapshot, runId)
       if (ready.kind !== 'allow') return ready
       // gh pr merge exposes --match-head-commit, but no expected-base option.
       // Readiness above is an observation, not an atomic base precondition:
@@ -396,8 +397,8 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
           basePrecondition: 'not-enforced',
           detail: 'Remote base may move between readiness assessment and merge; only the head is pinned',
         }))
-      } catch {
-        return unknown('Remote merge base-risk evidence could not be persisted')
+      } catch (error) {
+        return unknownCause('Remote merge base-risk evidence could not be persisted', error, runId)
       }
       const result = await runHost(['gh', 'pr', 'merge', String(snapshot.pr!.number), '--squash',
         '--match-head-commit', snapshot.head], repo)

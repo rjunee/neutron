@@ -11,6 +11,7 @@ import { buildRun, type BuildRunOutcome, type BuildRunDeps, type BuildRunInput, 
 import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { projectAdmission, type AdmissionSource } from './gates/project-admission.ts'
+import { unknownCause } from './gates/unknown-cause.ts'
 import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
@@ -80,7 +81,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
   const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
   const localReadiness = (snapshot: BuildSnapshot): Promise<GateResult> => options.local
     ? localMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path,
-      options.mutation.run.branch, options.local.baseBranch, options.local.worktree, snapshot.head)
+      options.mutation.run.branch, options.local.baseBranch, options.local.worktree, snapshot.head, options.mutation.run.id)
     : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
@@ -112,7 +113,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     },
     reviewArtifact,
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
-      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot, options.mutation.run.id),
     checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, reviewedHead, snapshot.head),
     async readReviewCap(runId) {
@@ -144,7 +145,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         const brief = input.workers[role].request.brief
         let text: string
         try { text = await readFile(brief.path, 'utf8') }
-        catch { return unknown(`${role} brief could not be read`) }
+        catch (error) { return unknownCause(`${role} brief could not be read`, error, input.run_id) }
         if (briefIntegrity(text) !== brief.integrity) return { kind: 'blocked', on: `${role} brief integrity mismatch` }
       }
       return projectAdmission(options.admission, input)
@@ -167,14 +168,14 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
       ? localReadiness(snapshot)
       : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
-    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha),
+    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
     reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
       if (!proof.ok) return { kind: 'blocked', on: proof.reason }
-      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
+      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot, options.mutation.run.id)
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },
@@ -183,7 +184,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))
       if (ci.kind === 'cannot-read') return unknown(ci.reason)
       if (ci.kind !== 'green') return { kind: 'blocked', on: `CI: ${ci.kind}` }
-      return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot)
+      return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot, options.mutation.run.id)
     },
   }
   return {

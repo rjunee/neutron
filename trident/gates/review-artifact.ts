@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildSnapshot, GateResult } from '../build-run.ts'
 import { briefIntegrity } from './brief-integrity.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 /** Read back the context produced by prepareWork, through the worker's brief.
  * The host's measured bytes are the reference; a worker trailer is never used.
@@ -22,5 +23,5 @@ export async function reviewArtifact(request: BoundedWorkRequest, snapshot: Buil
       || (snapshot.pr === null ? observed.pr !== null : observed.pr?.number !== snapshot.pr.number
         || observed.pr?.head !== snapshot.pr.head || observed.pr?.state !== snapshot.pr.state)) return unknown('Review context artifact disagrees with the measured revision')
     return { kind: 'allow' }
-  } catch { return unknown('Review context artifact or brief could not be read or decoded') }
+  } catch (error) { return unknownCause('Review context artifact or brief could not be read or decoded', error, request.run_id) }
 }

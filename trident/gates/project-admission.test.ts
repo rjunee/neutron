@@ -48,6 +48,14 @@ test('admission missing facts refuse individually', async () => {
     expect(await f.check()).toMatchObject({ kind: 'unknown' })
   }
 })
+test('admission thrown host cause is bounded and normal refusal text is unchanged', async () => {
+  const thrown = fixture()
+  thrown.source.observe = async () => { throw new Error('recognisable admission failure') }
+  expect(await thrown.check()).toEqual({ kind: 'unknown', detail: 'Project admission host observation failed: Error: recognisable admission failure' })
+  const normal = fixture()
+  normal.project.branch = ''
+  expect(await normal.check()).toEqual({ kind: 'unknown', detail: 'Project admission branch configuration is invalid' })
+})
 test('admission negative ancestry requires repeated negatives bracketed by complete history', async () => {
   for (const [probes, depths, kind] of [
     [[result('', 1, true)], [result('false')], 'unknown'],
