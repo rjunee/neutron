@@ -54,6 +54,27 @@ test('missing credentials refuse the requested model by name without a request',
   expect(calls).toBe(0)
 })
 
+// SECURITY PIN, not an ergonomics test. `api-review.ts`'s catch deliberately reports
+// a CONSTANT — "Provider bodies and exception messages may contain credentials; report
+// only the operation." Every sibling refusal in this repo was just changed to attach
+// its cause (#1009, #1011); this one must not follow, because the thing it would
+// attach is provider exception text that can carry the key. The assertion is that the
+// secret does NOT appear and the message is exactly the operation-only string.
+test('a provider throw reports the operation only, never the exception or the credential', async () => {
+  setup()
+  const secret = process.env['REVIEW_TEST_KEY']!
+  const thrower = (async () => {
+    throw new Error(`connect ECONNREFUSED; authorization: Bearer ${secret}; body={"error":"bad key ${secret}"}`)
+  }) as ReviewFetch
+  const result = await reviewConfiguredSeat(row.tier, '+changed', 'review', thrower)
+  expect(result.status).toBe('deferred')
+  expect(result.reason).toContain('request failed or response was invalid')
+  // The whole point: nothing from the thrown error reaches the refusal.
+  expect(result.reason).not.toContain(secret)
+  expect(result.reason).not.toContain('ECONNREFUSED')
+  expect(result.reason).not.toContain('Bearer')
+})
+
 test('unknown tier refuses by name', async () => {
   setup()
   expect(await reviewConfiguredSeat('unknown-review', '+changed', 'review', reply(answer))).toMatchObject({
