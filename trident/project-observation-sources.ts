@@ -50,6 +50,7 @@ export function createProjectObservationSources(options: {
           checks.push({ name, state })
         }
         return { kind: 'known', head: snapshot.head, configuration,
+          checksComplete: value.checksComplete === true,
           mergeability: value.mergeable === 'MERGEABLE' ? 'mergeable' : value.mergeable === 'CONFLICTING' ? 'conflicting' : 'pending', checks }
       } catch (error) { return unknown(`Review readiness acquisition failed: ${String(error)}`) }
     },

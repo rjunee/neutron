@@ -183,7 +183,7 @@ const observedHead = 'b'.repeat(40)
 const observedSnapshot = { head: observedHead, diff: 'measured diff', pr: { number: 7, head: observedHead, state: 'OPEN' as const } }
 function observationFixture() {
   const config = { kind: 'resolved' as const, required: ['test'], appBound: [] as string[], produced: ['test'] }
-  const raw = { headSha: observedHead, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] as unknown }
+  const raw = { checksComplete: true, headSha: observedHead, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] as unknown }
   const options: Parameters<typeof createProjectObservationSources>[0] = {
     ci: { required: async () => config, readiness: async () => raw }, baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
     suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async () => ({
@@ -313,4 +313,14 @@ test('production composition driver reaches a review panel through all three obs
   const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
   expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)
   expect(result.kind).toBe('blocked')
+})
+
+
+test('G046 observation carries incomplete evidence into waiting', async () => {
+  const f = observationFixture()
+  f.raw.checksComplete = false
+  expect(await f.readiness()).toMatchObject({ kind: 'known', checksComplete: false })
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('pending')
+  f.raw.checksComplete = true
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('passed')
 })

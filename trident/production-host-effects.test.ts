@@ -909,3 +909,61 @@ test('production plan refuses archive transformations of committed bytes', async
   const snapshot = await measured(f)
   await expect(f.modes.probePlan(snapshot.head)).rejects.toThrow('blob could not be verified')
 })
+
+
+test('G046 head lists require integral matching counts from both endpoints', async () => {
+  const head = 'a'.repeat(40)
+  const runRow = { name: 'test', status: 'completed', conclusion: 'success' }
+  const statusRow = { context: 'classic', state: 'success' }
+  for (const field of ['check_runs', 'statuses'] as const) {
+    for (const count of [1, 2, 0, -1, 1.5, '1', null, undefined]) {
+      const calls: string[][] = []
+      const source = productionCiSource(async argv => {
+        calls.push([...argv])
+        if (argv[1] === 'pr') return ok(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE' }))
+        const key = argv[2]!.includes('/check-runs?') ? 'check_runs' : 'statuses'
+        return ok(JSON.stringify({ total_count: key === field ? count : 1, [key]: [key === 'check_runs' ? runRow : statusRow] }))
+      }, '.')
+      expect(await source.readiness(7)).toEqual({ headSha: head, mergeable: 'MERGEABLE',
+        checksComplete: count === 1, rows: count === 1 ? [runRow, statusRow] : [] })
+      expect(calls.slice(1).map(call => call[2])).toEqual([
+        `repos/{owner}/{repo}/commits/${head}/check-runs?per_page=100`,
+        `repos/{owner}/{repo}/commits/${head}/status?per_page=100`,
+      ])
+    }
+  }
+})
+
+test('G046 failed head list reads supply incomplete evidence without refusing', async () => {
+  const head = 'a'.repeat(40)
+  for (const field of ['check-runs', 'status?']) {
+    for (const failure of ['denied', 'timeout', 'json', 'throw', 'shape']) {
+      const source = productionCiSource(async argv => {
+        if (argv[1] === 'pr') return ok(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE' }))
+        if (argv[2]!.includes(field)) {
+          if (failure === 'throw') throw Error('offline')
+          if (failure === 'denied') return { ...bad(), stdout: JSON.stringify({ total_count: 0, check_runs: [], statuses: [] }) }
+          if (failure === 'timeout') return { ...ok(JSON.stringify({ total_count: 0, check_runs: [], statuses: [] })), timed_out: true }
+          return ok(failure === 'json' ? '{' : '{}')
+        }
+        return ok(JSON.stringify({ total_count: 0, check_runs: [], statuses: [] }))
+      }, '.')
+      expect(await source.readiness(7)).toEqual({ headSha: head, mergeable: 'MERGEABLE', checksComplete: false, rows: [] })
+    }
+  }
+  const completeEmpty = productionCiSource(async argv => ok(JSON.stringify(argv[1] === 'pr'
+    ? { headRefOid: head, mergeable: 'MERGEABLE' } : { total_count: 0, check_runs: [], statuses: [] })), '.')
+  expect(await completeEmpty.readiness(7)).toMatchObject({ checksComplete: true, rows: [] })
+})
+
+
+test('G046 malformed PR heads cannot address check probes', async () => {
+  const calls: string[][] = []
+  const source = productionCiSource(async argv => {
+    calls.push([...argv])
+    return ok(JSON.stringify(argv[1] === 'pr' ? { headRefOid: '../main', mergeable: 'MERGEABLE' }
+      : { total_count: 0, check_runs: [], statuses: [] }))
+  }, '.')
+  expect(await source.readiness(7)).toEqual({ unreadable: 'PR head is malformed' })
+  expect(calls).toHaveLength(1)
+})
