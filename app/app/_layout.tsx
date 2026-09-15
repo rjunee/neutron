@@ -12,11 +12,16 @@ import {
   loadAppConfig,
   subscribeServerConfig,
 } from '../lib/config';
-import { installDiagnostics, setDiagnosticsOrigin } from '../lib/diagnostics';
+import {
+  importNativeCrashReport,
+  installDiagnostics,
+  setDiagnosticsOrigin,
+} from '../lib/diagnostics';
 import { AuthSessionProvider } from '../lib/session';
 import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { installPushTapHandler } from '../lib/push';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
+import { AppThemeProvider } from '../lib/theme-runtime';
 
 /**
  * Remote diagnostics — installed at MODULE SCOPE, not in an effect.
@@ -28,8 +33,8 @@ import { THEME } from '../lib/theme';
  * today. `installDiagnostics()` is idempotent, so a re-import (fast refresh)
  * does not chain the handler to itself.
  *
- * See `app/lib/diagnostics.ts` for what this does and does NOT catch — in
- * particular it does not catch native crashes, which still need logcat.
+ * Android crashes that precede this import are staged by the native initializer
+ * and imported after the server configuration has hydrated below.
  */
 installDiagnostics();
 
@@ -167,7 +172,7 @@ function useServerConfigEpoch(): number {
   return epoch;
 }
 
-export default function RootLayout() {
+function RootLayoutContent() {
   const [phase, setPhase] = useState<BootPhase>('hydrating');
   const serverEpoch = useServerConfigEpoch();
   // Read fresh on every render, deliberately NOT memoised. `loadAppConfig()`
@@ -189,7 +194,9 @@ export default function RootLayout() {
       // queued against one instance can never be delivered to another after a
       // server change. Set before the tree mounts, so a crash in the very first
       // screen is already bound.
-      setDiagnosticsOrigin(loadAppConfig().gateway_base_url);
+      const gatewayBaseUrl = loadAppConfig().gateway_base_url;
+      setDiagnosticsOrigin(gatewayBaseUrl);
+      await importNativeCrashReport(gatewayBaseUrl);
       // LOGIN-FIRST: there is no server-setup phase any more. The app opens on
       // login and DISCOVERS its instance URL, so boot goes straight to 'ready'
       // and the login screen decides what the owner sees.
@@ -232,7 +239,15 @@ export default function RootLayout() {
   );
 }
 
-const styles = StyleSheet.create({
+export default function RootLayout() {
+  return (
+    <AppThemeProvider>
+      <RootLayoutContent />
+    </AppThemeProvider>
+  );
+}
+
+const styles = createThemedStyles({
   booting: {
     flex: 1,
     backgroundColor: THEME.background,

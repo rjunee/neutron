@@ -291,6 +291,81 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Live rail unread belongs to each connection's device (#627).
+
+Build each live project frame for its receiving connection using that device's
+own unread mark. If installation identity cannot be resolved, omit unread;
+unknown never borrows an account-wide count. Bootstrap likewise omits unread
+until device identity is available. Native rail unread remains on its per-device
+HTTP refresh; the native live overlay continues to copy activity and live-run
+state only. Acceptance: two connected devices with different marks receive their
+own counts; sharing a frame fails the second device assertion. An unresolved
+device receives no unread field; substituting the account-wide count fails.
+
+### 2026-09-15 — Pi bounded worker delegates through the project extension surface (#938).
+
+Pi is the third base harness at the bounded-worker seam, as requested for the
+post-cutover increment. `in-repl` names who owns delegation; Pi 0.85.1's documented
+subagent extension starts separate ephemeral child processes. Pi therefore meets the placement split but not the
+warm-cache/shared-MCP rationale stated beside it on 2026-09-11. That entry and
+the plan's §3.2 are left exactly as written; whether the rationale binds every
+harness or only explains why the split is cheap for Claude and Codex is the
+owner's to say, and nothing shipped here depends on the answer. Cross-model
+callouts remain headless. The new runner refuses child-thread resume, reserves
+before dispatch, and accepts results only through validated trailer files.
+Project session binding, extension provisioning and enforced child grants remain
+host responsibilities; this worker does not claim a deployed project adapter.
+Acceptance and offline measurement: the Pi bounded-worker section of
+`docs/plans/harness-orchestrator-pivot-2026-09-11.md`.
+
+### 2026-09-15 — Projects declare repos and a default; cards select by name (#935).
+
+A project declares a set of repositories and a default for a nonempty set. A card
+with no repo name selects the default; an undeclared name refuses by name and must
+never select the default. The repository's own name determines `repos/<repo-name>/`.
+Existing `code/` workspaces remain supported while declaration lands; renaming them
+is a separate reversible step. Zero repositories is valid project data and cannot
+resolve a build. The build driver continues to receive a single resolved path.
+The model and its acceptance criteria live in
+`docs/spec-items/project-code-repos-and-vault-split.md`.
+
+### 2026-09-15 — Native Android process-start crashes enter the owner's existing diagnostics queue (#528).
+
+An unexported initializer provider with maximum init order installs the native
+uncaught-exception handler before other providers run. The handler synchronously
+writes one bounded crash envelope to app-private storage and delegates to the
+previous handler; it does not send, authenticate, or run JavaScript. The next
+JS-capable launch binds that envelope to the hydrated gateway, redacts it through
+the existing client-report builder, persists it in the existing diagnostics queue,
+and removes the native file only after confirming the queue copy. Delivery remains
+authenticated to the owner's own gateway, with no third party and no second ingest
+path. This narrows the native-crash limitation in the 2026-07-27 decision below;
+JS capture and every security constraint in that entry remain unchanged.
+Acceptance: `docs/spec-items/native-crash-visibility-for-the-mobile-app.md`.
+
+### 2026-09-14 — Forgotten ritual approvals re-raise daily, at most three times (#586).
+
+The owner chose a 24-hour interval because a weekly reminder would arrive after
+its gated work was stale, and a cap of three because a fourth identical prompt
+becomes noise. An unanswered grant expires with a retained reason at the next
+daily boundary after the third reminder. Unknown age expires with a reason;
+answered grants never re-raise. The policy is maintained by a supervised sweep,
+independent of agent activity. Acceptance lives in
+`docs/spec-items/stale-approval-is-re-raised.md`.
+### 2026-09-14 — Reminder fired means observed durable delivery (#553).
+
+A scheduler attempt is not a delivery receipt. Persist each occurrence's attempt
+count before dispatch and record delivered, known-not-delivered, or not-yet-known
+separately from scheduling status. Only affirmative durable outbound acceptance
+sets a one-shot fired stamp. Missing acknowledgements remain unknown, including
+a crash after sending; retries can duplicate that send. Five attempts and a
+one-hour occurrence window bound retries across restarts. Exhaustion records
+undelivered disposition without inventing a negative observation; recurring
+schedules advance independently. A delivered ritual failure notice counts as a
+turn; silent and skipped rituals do not. Live push and human read receipts are
+outside this delivery boundary.
+
+
 ### 2026-09-14 — Worker prompt evidence overrides elapsed-time inference (#754).
 
 A current interactive selection prompt — a live `❯` cursor, a sibling option and
@@ -524,10 +599,10 @@ SHA-256 coverage for unrelated Git helpers. Decision and acceptance:
   report is bound to the gateway it was captured against and is delivered only there**. Otherwise changing
   servers would hand one instance's diagnostics to another — the self-hosting boundary has to hold for
   diagnostics exactly as it does for everything else.
-  **Honest limit, documented in the product and the docs:** this catches JAVASCRIPT errors only. A native
-  crash (the actual 2026-07-27 blocker: an Android provider dying at process start, before any JS ran) is NOT
-  captured and still needs logcat or an emulator. — [detail: `docs/SYSTEM-OVERVIEW.md` § App remote
-  diagnostics; `docs/AS_BUILT.md` 2026-07-27]
+  **Superseded in part by the 2026-09-15 decision above:** the original implementation caught
+  JAVASCRIPT errors only. Native Android process-start crashes now stage a bounded envelope before
+  other providers and enter the same authenticated queue on the next JS-capable launch. — [detail:
+  `docs/SYSTEM-OVERVIEW.md` § App remote diagnostics; `docs/AS_BUILT.md` 2026-07-27]
 
 ### 2026-07-18
 

@@ -44,6 +44,10 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
 /** COMPLETE set through the boot shell — the composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
+  // The comments AgentWatcher — dormant until #533 started it. It reaches the
+  // boot shell through the composer, so it belongs in BOTH inventories; the
+  // composer-level list alone leaves this one red.
+  'agent-watcher',
   'chunked-upload-sweeper',
   // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
   // uncredentialed box does a cheap env/file check and no network call, so a
@@ -60,6 +64,13 @@ const EXPECTED_RUNNING_LOOPS = [
   'kimi-usage',
   'reflect-consolidation',
   'reminders',
+  // #586 — the approval re-raise sweep. A pending approval nobody answers is
+  // indistinguishable from one nobody needed, so it is re-raised on age and
+  // bounded (24 h, at most 3, then EXPIRED with its reason). It must be a LOOP
+  // for the same reason `terminal-build-decisions` is: the thing it is waiting on
+  // is the owner, so it has to survive a restart or the approval dies silently —
+  // which is the defect it exists to fix.
+  'ritual-approval-sweeper',
   // #796 — the gateway-owned sweep that admits worker questions the project REPL
   // could not take yet. It must be a LOOP and it must be the gateway's: a result
   // that cannot be admitted has to survive a worker exiting, a REPL dying, and a
@@ -188,5 +199,6 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   // loop reds this on the NUMBER, which says nothing about the loop.
   expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
-  expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+  // #533 started the comments AgentWatcher, so it moved from dormant to running.
+  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
 }, 60_000)

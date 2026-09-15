@@ -19,7 +19,7 @@ import { StyleSheet, View, type DimensionValue } from 'react-native';
 
 import { clampFraction, usageBand, type UsageBand } from '@neutronai/contracts/credential-usage.ts';
 
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import type { UsagePayload } from '../lib/usage-client';
 
 /** A measured-but-tiny reading still gets a visible sliver, so "barely used" and
@@ -71,7 +71,7 @@ export function UsageMeter({ usage }: { usage: UsagePayload }) {
 
 const METER_LINE_HEIGHT = 1;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   meter: { flexGrow: 0 },
   line: {
     height: METER_LINE_HEIGHT,

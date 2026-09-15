@@ -126,8 +126,8 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     })
     const router = routeCodegenCancel(legacy(), trident, 'owner-handle', bare())
 
-    expect(await router.status({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'forge-init' })
-    expect(await router.fetch({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'forge-init' })
+    expect(await router.status({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'building' })
+    expect(await router.fetch({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'building' })
     expect(await router.cancel({ task_id: run.id })).toMatchObject({ cancelled: true, phase: 'stopped' })
     expect(trident.get(run.id)?.phase).toBe('stopped')
   })
@@ -169,17 +169,20 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     expect(trident.get('12345678-two')?.phase).toBe('forge-init')
   })
 
-  test('MUTATION: cancel-only routing leaves status and fetch reporting a live Trident run as unknown', async () => {
+  test('MUTATION: status derives the same live step and both counters as the board snapshot', async () => {
     const run = await trident.create({
       id: 'trident-readable', slug: 'readable', project_slug: 'p', repo_path: '/repo', task: 'build widget',
     })
     const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
+    await trident.update(run.id, { ralph_round: 1, round: 1, inner_checkpoint: 'forge-done' })
+
     expect(await router.status({ task_id: run.slug })).toMatchObject({
-      status: 'forge-init', dispatch_path: 'trident', run_id: run.id, already_terminal: false,
+      status: 'reviewing', phase: 'reviewing', round: 1, ralph_round: 1,
+      dispatch_path: 'trident', run_id: run.id, already_terminal: false,
     })
     expect(await router.fetch({ task_id: run.id.slice(0, 8) })).toMatchObject({
-      phase: 'forge-init', dispatch_path: 'trident',
+      phase: 'reviewing', round: 1, ralph_round: 1, dispatch_path: 'trident',
     })
     expect(await router.fetch({ task_id: run.id })).not.toHaveProperty('summary')
   })

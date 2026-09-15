@@ -26,7 +26,7 @@ import { useRef, useEffect } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CurrentFocusPick } from '../lib/focus-client';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 const PICK_BADGE_COPY = "Today's pick";
 
@@ -85,7 +85,7 @@ export function FocusHeroCard({ pick, onPress }: FocusHeroCardProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   wrap: {
     gap: 0,
   },

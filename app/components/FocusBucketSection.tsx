@@ -21,7 +21,7 @@
 import { StyleSheet, Text, View } from 'react-native';
 
 import type { FocusBucket, FocusItem } from '../lib/focus-client';
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { FocusRow } from './FocusRow';
 
 export interface FocusBucketSectionProps {
@@ -66,7 +66,7 @@ export function FocusBucketSection({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   section: {
     gap: SPACING.sm,
   },

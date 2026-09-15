@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { Database } from 'bun:sqlite'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 
-const migration = readFileSync(new URL('../0144_rail_device_marks.sql', import.meta.url), 'utf8')
+const migration = readFileSync(new URL('../0146_rail_device_marks.sql', import.meta.url), 'utf8')
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 

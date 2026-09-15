@@ -39,7 +39,7 @@ that is a reasoned position, not an omission:
 - **It is a different seam with a different consumer.** It implements `Substrate` for
   the gateway's LLM-call path, constructed at
   `gateway/wiring/build-llm-call-substrate.ts:1353` via
-  `selectSubstrateFactory('openai-codex-cli')` — that is "dispatch a Neutron
+  `selectSubstrateFactory('openai-codex')` — that is "dispatch a Neutron
   *judgment turn* to codex instead of Claude". This item is trident's cross-model
   *gate* around a build. Two implementations of **different** paths is not the dual
   path the tree forbids; two implementations of the **same** path would be.

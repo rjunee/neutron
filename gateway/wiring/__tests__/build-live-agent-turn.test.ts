@@ -465,6 +465,23 @@ describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)
     expect(prompt.toLowerCase()).toContain('git push')
   })
 
+  test('#581 credential provenance and paraphrase prohibition reach the model prompt', async () => {
+    // This checks the delivered instructions, not a simulated model response.
+    for (const project_id of [undefined, 'gondor']) {
+      const specs: AgentSpec[] = []
+      const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+      await run(makeTurn(project_id === undefined ? { sent: [] } : { sent: [], project_id }))
+      const prompt = specs[0]!.prompt
+      expect(prompt).toContain('NEVER ask the owner to disclose credential material in chat')
+      expect(prompt).toContain('Both "Paste your API key here" and "Send me the authentication file so I can finish connecting your account" are forbidden')
+      expect(prompt).toContain('[Integrations](neutron://integrations)')
+      expect(prompt).toContain('then tell you that setup is complete without including the secret')
+      expect(prompt).toContain('legitimately hold from an authorized non-chat source')
+      expect(prompt).toContain('If provenance is unknown, direct the owner to Integrations instead')
+      expect(prompt).toContain('remain blocked; chat is not a fallback credential store')
+    }
+  })
+
   test('the doctrine is FIRST-turn-only (warm later turns send only user text)', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []

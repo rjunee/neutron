@@ -978,15 +978,19 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
     // completed correctly. Absent rAF entirely, so nothing schedules the stamp.
     const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
     const original = g.requestAnimationFrame
+    const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
     g.requestAnimationFrame = (): number => 1 // accepted, never called: no frames here
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: { visibilityState: 'hidden' },
+    })
     try {
       const { controller, sessions, records } = setup()
       await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
       await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
       records.length = 0
       controller.setProject('alpha')
-      // Long enough for the paint-settle window, far short of the deadline.
-      await new Promise((r) => setTimeout(r, 400))
+      await tick()
 
       const record = records.find((r) => r.to === 'alpha')
       expect(record).toBeDefined()
@@ -996,6 +1000,8 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
       expect(record!.incomplete).toBe(false)
       expect(record!.marks.transcript).toBeDefined()
     } finally {
+      if (originalDocument === undefined) delete (globalThis as { document?: unknown }).document
+      else Object.defineProperty(globalThis, 'document', originalDocument)
       if (original === undefined) delete g.requestAnimationFrame
       else g.requestAnimationFrame = original
     }

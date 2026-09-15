@@ -23,6 +23,8 @@
  * credentials.
  */
 
+import type { Server, ServerWebSocket } from 'bun'
+import type { AppWsSocketData } from '@neutronai/gateway/http/app-ws-surface.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -56,6 +58,8 @@ let tmpDir: string
 interface Harness {
   base: string
   db: ProjectDb
+  request(path: string, init: RequestInit): Promise<Response>
+  connect(query: string, events: AppWsOutbound[]): Promise<() => Promise<void>>
   close(): Promise<void>
 }
 
@@ -88,27 +92,56 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(inProcess = false): Promise<Harness> {
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   const composer = buildOpenGraphComposer({ env: process.env })
   const composition = await composer({ db, project_slug: 'owner' })
+  const appProjects = composition.app_projects_surface
+  const appWs = composition.app_ws_surface
+  if (appProjects === undefined || appWs === undefined) throw new Error('missing app surfaces')
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined || graph.websocket === undefined) {
     throw new Error('Open composition did not expose graph.fetch/websocket')
   }
   const composedFetch = graph.fetch
   const composedWebsocket = graph.websocket
-  const server = Bun.serve({
+  const server = inProcess ? null : Bun.serve({
     port: 0,
     fetch: (req, srv) => composedFetch(req, srv),
     websocket: composedWebsocket,
   })
   return {
-    base: `http://127.0.0.1:${server.port}`,
+    base: `http://127.0.0.1:${server?.port ?? 80}`,
+    request: async (path, init) => {
+      const result = await appProjects.handler(new Request(`http://localhost${path}`, init))
+      if (result === null) throw new Error('projects handler declined request')
+      return result
+    },
+    connect: async (query, events) => {
+      let data: AppWsSocketData | undefined
+      const upgradeServer = {
+        upgrade: (_request: Request, options: { data: AppWsSocketData }) => {
+          data = options.data
+          return true
+        },
+      } as unknown as Server<unknown>
+      const response = await appWs.handler(
+        new Request(`http://localhost/ws/app/chat?token=dev:owner&platform=web${query}`), upgradeServer,
+      )
+      expect(response?.status).toBe(101)
+      if (data === undefined) throw new Error('upgrade did not produce socket data')
+      const socket = {
+        data,
+        send: (value: string) => { events.push(JSON.parse(value) as AppWsOutbound); return 1 },
+        close: () => {},
+      } as unknown as ServerWebSocket<AppWsSocketData>
+      await appWs.websocket.open?.(socket)
+      return async () => { await appWs.websocket.close?.(socket, 1000, '') }
+    },
     db,
     close: async () => {
-      await server.stop(true)
+      await server?.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
           cleanup()
@@ -136,7 +169,7 @@ describe('Open projects_changed live-refresh wiring', () => {
   test('fans a projects_changed frame after onboarding creates a project', async () => {
     harness = await startHarness()
     const wsUrl = harness.base.replace(/^http/, 'ws')
-    const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
+    const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web&device_id=rail-web`)
     const events: AppWsOutbound[] = []
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => resolve()
@@ -213,7 +246,7 @@ describe('Open projects_changed live-refresh wiring', () => {
     const scoped = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web&project_id=acme`)
     // Socket #2 — General → topic `app:owner`.
     const generalEvents: AppWsOutbound[] = []
-    const general = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
+    const general = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web&device_id=rail-web`)
     await Promise.all([
       new Promise<void>((resolve, reject) => {
         scoped.onopen = () => resolve()
@@ -282,3 +315,75 @@ describe('Open projects_changed live-refresh wiring', () => {
     await sleep(50)
   }, 30_000)
 })
+
+
+test('each connection receives its own unread mark; unresolved devices omit unread', async () => {
+  harness = await startHarness(true)
+  await harness.db.run(
+    `INSERT INTO projects (id, name, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES ('acme', 'Acme', 'private', 'personal', '2026-01-01', '2026-01-01')`, [],
+  )
+  const clients: Array<{ close: () => Promise<void>; events: AppWsOutbound[] }> = []
+  for (const device of ['conn-laptop', 'phone', undefined]) {
+    const events: AppWsOutbound[] = []
+    const query = device === undefined ? '&project_id=acme' : `&device_id=${device}`
+    const close = await harness.connect(query, events)
+    clients.push({ close, events })
+  }
+  try {
+    await waitFor(() => clients.every(({ events }) => events.some((e) => e.type === 'projects_changed')))
+    for (let seq = 1; seq <= 3; seq++) {
+      await harness.db.run(
+        `INSERT INTO app_chat_messages (topic_id, seq, message_id, role, body, project_id, created_at)
+         VALUES ('app:owner:acme', ?, ?, 'agent', 'hello', 'acme', ?)`,
+        [seq, `rail-${seq}`, seq],
+      )
+    }
+    for (const [device, seq] of [['conn-laptop', 3], ['phone', 1]] as const) {
+      await harness.db.run(
+        `INSERT INTO app_chat_receipts (topic_id, message_id, device_id, seq, delivered_at, read_at)
+         VALUES ('app:owner:acme', ?, ?, ?, ?, ?)`,
+        [`rail-${seq}`, device, seq, seq, seq],
+      )
+    }
+    const response = await harness.request(`/api/app/projects`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Beta' }),
+    })
+    expect(response.status).toBe(201)
+    const latest = (events: AppWsOutbound[]) => events.find((e) =>
+      e.type === 'projects_changed' && e.projects.some((p) => p.id === 'beta'))
+    await waitFor(() => clients.every(({ events }) => latest(events) !== undefined))
+    const rows = clients.map(({ events }) => {
+      const frame = latest(events)
+      if (frame?.type !== 'projects_changed') throw new Error('missing rail frame')
+      return frame.projects.find((p) => p.id === 'acme')!
+    })
+    expect(rows[0]!.unread).toBe(0)
+    expect(rows[1]!.unread).toBe(2)
+    expect(rows[2]).not.toHaveProperty('unread')
+
+    // A device-store failure preserves the rest of the rail, with unknown unread.
+    await harness.db.run('DROP TABLE rail_devices', [])
+    const afterFailure = await harness.request('/api/app/projects', {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Gamma' }),
+    })
+    expect(afterFailure.status).toBe(201)
+    const failureFrame = (events: AppWsOutbound[]) => events.find((e) =>
+      e.type === 'projects_changed' && e.projects.some((p) => p.id === 'gamma'))
+    await waitFor(() => clients.every(({ events }) => failureFrame(events) !== undefined))
+    for (const { events } of clients) {
+      const frame = failureFrame(events)
+      if (frame?.type !== 'projects_changed') throw new Error('missing failure rail frame')
+      const row = frame.projects.find((p) => p.id === 'acme')!
+      expect(row.label).toBe('Acme')
+      expect(row).not.toHaveProperty('unread')
+    }
+  } finally {
+    for (const { close } of clients) await close()
+    await sleep(50)
+  }
+}, 30_000)

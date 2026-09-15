@@ -26,7 +26,7 @@ import {
   View,
 } from 'react-native';
 
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import { hapticProjectSwitch } from '../lib/haptics';
 import {
@@ -400,7 +400,7 @@ const DOT = 10;
 /** The create tile, inset inside a project row's 44pt glyph box. */
 const CREATE_TILE = 32;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   rail: {
     width: RAIL_WIDTH,
     backgroundColor: THEME.surface,

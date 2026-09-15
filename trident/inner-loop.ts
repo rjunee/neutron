@@ -177,9 +177,8 @@ export interface InnerLoopInput {
    *
    * VALIDATED HERE TOO, not just at the write path. This is the last typed layer
    * before the value becomes JSON in a launcher prompt, and a config that was written
-   * by an older/looser version of the settings surface must not reach the workflow —
-   * the workflow can only log-and-ignore, which the owner never sees. Invalid entries
-   * are dropped and the reason is returned by `buildWorkflowArgs`'s caller path.
+   * by an older version is revalidated. Explicit peer model selections survive
+   * rejection so the panel refuses by name. Other invalid entries are dropped.
    *
    * Absent/empty → omitted from the args entirely, so a run is byte-identical to one
    * from before this existed.
@@ -539,6 +538,7 @@ export const STAGE_STAMP_SCRIPT_PATH = fileURLToPath(new URL('./stage-stamp.sh',
  *  silently. Threaded via args (the workflow script has no module resolution; the
  *  TARGET repo need not contain trident/), authoritative for ALL projects including Open. */
 export const CODEX_REVIEW_SCRIPT_PATH = fileURLToPath(new URL('./codex-review.sh', import.meta.url))
+export const API_REVIEW_SCRIPT_PATH = fileURLToPath(new URL('./api-review-cli.ts', import.meta.url))
 
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
@@ -640,6 +640,7 @@ export function buildWorkflowArgs(
     codexBuildScript: CODEX_BUILD_SCRIPT_PATH,
     // The harness-authoritative Codex review wrapper; never resolve it from the target repo.
     codexReviewScript: CODEX_REVIEW_SCRIPT_PATH,
+    apiReviewScript: API_REVIEW_SCRIPT_PATH,
     // The checked-in credentialed-`gh` runner the three GitHub READ probes shell
     // into, plus the STORE COORDINATES it resolves the token from. Paths and a
     // handle — never the token, which these args (a launcher prompt) could not
@@ -745,11 +746,11 @@ export function buildWorkflowArgs(
  */
 function modelTierArgs(): Record<
   string,
-  { model_id: string; transport: string; env_var: string | null; group: string }
+  { model_id: string; transport: string; env_var: string | null; group: string; tier?: string; credentialAvailable?: boolean }
 > {
   const out: Record<
     string,
-    { model_id: string; transport: string; env_var: string | null; group: string }
+    { model_id: string; transport: string; env_var: string | null; group: string; tier?: string; credentialAvailable?: boolean }
   > = {}
   for (const entry of modelTierRegistry()) {
     out[entry.tier] = {
@@ -761,6 +762,7 @@ function modelTierArgs(): Record<
       // the answer from `transport` + `env_var` matching, which was a proxy that
       // held only while every phase had exactly one executor — the build has two.
       group: entry.group,
+      ...(entry.credential ? { tier: entry.tier, credentialAvailable: Boolean(process.env[entry.credential]?.trim()) } : {}),
     }
   }
   return out
@@ -769,15 +771,19 @@ function modelTierArgs(): Record<
 /**
  * Validate + shape the per-phase overrides for the workflow args.
  *
- * Returns `{}` (no key at all) when there is nothing valid to send. Rejected entries
- * are dropped here rather than forwarded: the workflow can only log-and-continue, and
- * a log line in a background run is not a channel the owner reads.
+ * Invalid non-review entries are dropped. Explicit cross-model selections survive
+ * validation failures so the panel can refuse the requested model by name.
  */
 function phaseModelArgs(
   raw: Record<string, { model?: string; effort?: string }> | null | undefined,
 ): { phaseModels?: Record<string, { model?: string; effort?: string }> } {
   if (raw === null || raw === undefined) return {}
-  const { config } = parsePhaseModelConfig(raw)
+  const parsed = parsePhaseModelConfig(raw)
+  const config: Record<string, { model?: string; effort?: string }> = { ...parsed.config }
+  // Preserve explicit peer selections for named refusal in the panel, including retired tiers.
+  for (const key of ['review_codex', 'review_kimi']) {
+    if (raw[key]?.model !== undefined && !config[key]) config[key] = raw[key]!
+  }
   return Object.keys(config).length > 0 ? { phaseModels: config } : {}
 }
 
@@ -1112,7 +1118,31 @@ export function buildSubstrateWorkflowFire(
           }
           if (ev.kind === 'error') {
             fireAndForget('inner-loop.cancel', handle.cancel())
-            return { status: 'failed', error: 'fire turn raised an error before settling' }
+            // CARRY WHAT THE PRODUCER KNEW. This used to return a fixed sentence and
+            // drop `ev.message` and `ev.code` on the floor, so every substrate
+            // failure — a refused spawn, a poisoned key, an exhausted credential, a
+            // turn timeout — reached the run row as the same eleven words, and the
+            // only way to tell them apart was to go and read the gateway journal
+            // next to the timestamp.
+            //
+            // Measured 2026-09-14: four runs failed with this string. The first
+            // took 94 seconds and the fourth SEVENTEEN MILLISECONDS between
+            // `fire-dispatched` and `failed` — plainly two different faults wearing
+            // one label, and the row could not say which. The producer stamps
+            // `code` precisely so a consumer does not have to regex `message`; this
+            // seam was discarding both.
+            //
+            // The prefix is kept verbatim because the orchestrator matches on it
+            // (`FIRE_SETTLE_TIMEOUT_ERROR` and friends compare exact strings), so
+            // the detail is APPENDED rather than substituted.
+            const detail = [ev.code, ev.message].filter((part) => typeof part === 'string' && part !== '')
+            return {
+              status: 'failed',
+              error:
+                detail.length === 0
+                  ? 'fire turn raised an error before settling'
+                  : `fire turn raised an error before settling: ${detail.join(': ')}`,
+            }
           }
           // token / thinking / status / tool_* events carry nothing terminal for
           // the launcher turn — ignored.

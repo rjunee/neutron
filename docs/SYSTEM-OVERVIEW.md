@@ -467,11 +467,11 @@ no composer-threaded backend required (unlike `research_core`).
 
 ### Cores→scribe phase-2 fan-out (`gateway/cores/mount-cores-scribe-fan-out.ts`)
 
-The scheduled Calendar + Email Cores feed scribe's extract→GBrain path as
+The scheduled Calendar Core and polled Email Core feed scribe's extract→GBrain path as
 **ambient extraction sources on top of the Cores** (no new pollers): the
-pre-meeting-brief + daily-triage scheduler `fire` callbacks hand their
-already-fetched event/inbox rows to a `scribeFanOut` hook
-(`gateway/cores/{calendar,email-managed}-wiring.ts`), which the composer binds to
+pre-meeting-brief callback and email pipeline hand their already-fetched
+event/inbox rows to a `scribeFanOut` hook
+(`gateway/cores/calendar-wiring.ts`, `gateway/cores/email-pipeline-wiring.ts`), which the composer binds to
 `scribe.extractFromCoresSource(...)`. This complements the chat-turn extractor
 (`scribeOnUserTurn` → `scribe.handleUserTurn`): chat captures what the owner
 *says*; the fan-out captures what their *calendar and inbox* contain.
@@ -936,11 +936,23 @@ so a diagnostics pipeline that required a SaaS would not be the same product.
 Always on — no feature flag, no env gate, one code path.
 
 **What is covered:** JavaScript errors — an uncaught exception, an unhandled
-promise rejection, and a React render crash.
-**What is NOT covered:** **native crashes**. If the process dies before the JS
-bundle runs (e.g. an Android provider failing during process start), no JS
-executes to catch anything and there is no report. Those still need `adb
-logcat` or an emulator. This closes the JS blind spot only.
+promise rejection, and a React render crash — plus Android uncaught exceptions
+raised during process start before the JS bundle runs. The native handler stages
+the crash on the device; a later JS-capable launch puts it through the ordinary
+authenticated delivery path.
+
+- **Native process-start capture (`app/plugins/with-native-crash-reporting.js`).**
+  Expo prebuild registers an unexported `ContentProvider` at maximum init order,
+  ahead of ordinary providers and ahead of `Application.onCreate`. It installs a
+  native uncaught-exception handler that synchronously writes one bounded JSON
+  envelope to app-private files and then delegates to Android's previous handler.
+  The initializer is separate from the component that crashes, so provider
+  startup failure does not disable its own observer. `app/lib/native-crash-import.ts`
+  reads that file after server configuration hydrates, constructs a
+  `native_crash` member of the existing report vocabulary through
+  `buildClientReport` (including redaction), and removes the native file only
+  after the existing queue contains the report. The queue then delivers it with
+  the existing bearer. iOS native crashes remain outside this mechanism.
 
 - **Ring buffer (`app/lib/diagnostic-buffer.ts`).** A capped window of the last
   100 events — errors plus notable lifecycle markers — so a crash arrives with
@@ -4036,13 +4048,19 @@ order by `COALESCE(last_activity_at, updated_at) DESC`. **Emoji** defaults to a
 deterministic pick from the name (`gateway/projects/default-emoji.ts` — keyword
 table + hash fallback; `GENERAL_EMOJI` = 💬), resolved from NULL at serve time so
 legacy rows always show a glyph, and is editable in the Settings tab (PATCH
-`{ emoji }`). **Unread** is honest: `unread_count` = agent messages on the project
-topic (`app:<user>:<project>`) beyond the owner's highest READ receipt seq
-(`app_chat_messages` ⋈ `app_chat_receipts`; the active project's badge is zeroed
-client-side since viewing = read). No fabricated counts — the separate
-`chat-topics-surface` no-fake-unread contract is untouched. The
-`projects_changed` frame (`envelope.ts` `AppWsOutboundProjectsChanged`) carries
-`emoji` / `unread` / `last_activity_at` per project alongside id + label.
+`{ emoji }`). **Unread** counts agent messages beyond the receiving device's
+mark in `rail_device_marks` (gateway/projects/sqlite-store.ts:405-415). Per the
+2026-09-15 decision in `SPEC.md`, live frames are built per connection
+(open/composer.ts:4124-4145; channels/adapters/app-ws/session-registry.ts:158-170).
+Unresolved installation identity or a failed device read omits `unread`; page
+bootstrap also omits it (open/composer.ts:2431-2432). HTTP uses nullable
+`unread_count` (gateway/projects/sqlite-store.ts:399). Native unread continues
+through HTTP while its live overlay copies activity and live-run state only
+(app/app/projects/[id]/_layout.tsx:291-304,372-375). Web badge presentation hides
+an omitted unread value (landing/chat-react/ChatApp.tsx:1691).
+The `projects_changed` frame retains `emoji` / `last_activity_at` and optional
+`unread` alongside id + label (wire-types/app-ws-envelope.ts:368-378).
+
 
 ## Archived projects — reversible archive + global Admin restore
 
@@ -4346,14 +4364,17 @@ per-project `reminders` table. Three parts:
     `0 */6 * * *`). This is the M2-cutover parity target: real cron reminders
     migrate verbatim.
 - **Tick loop** (`reminders/tick.ts`) — a single-flight `setInterval` that
-  claims each due row BEFORE dispatch (crash-safe at-most-once, #319) and
-  advances it. Both cadence kinds resolve through ONE `computeNextFire(reminder,
+  persists each attempt BEFORE dispatch in `reminder_delivery` and records
+  delivered, known-not-delivered, or not-yet-known observations. Only affirmative
+  durable outbound acceptance earns a fired stamp. Five attempts or one hour
+  bound retries across restarts; uncertainty may produce a duplicate within that
+  budget. Exhaustion retains the observation and advances recurring schedules
+  without a delivery stamp. Both cadence kinds resolve through ONE `computeNextFire(reminder,
   now, tz)`: a cron spec computes the next DST-correct wall-clock instant
   strictly after now (via `@neutronai/cron`'s `cron-standard.ts` evaluator — the
   classic-crontab sibling of the systemd-`OnCalendar` parser in `calendar.ts`,
   with Vixie dom/dow OR semantics and spring-forward gap-skip); a coarse label
-  uses the fixed delta. A corrupt cron fires once then retires so it can't wedge
-  the loop.
+  uses the fixed delta. A corrupt cron degrades to a one-shot with the same bounded delivery policy.
   - **Which clock "9pm" means (ISSUES #40).** A cron cadence is resolved in the
     OWNER's zone, read per fire from `instance_metadata.timezone` via
     `readOwnerTimezone` — the same source and the same resolve-at-invocation
@@ -4379,7 +4400,7 @@ per-project `reminders` table. Three parts:
     ONE more time at the old (wrong) hour; `advanceRecurrence` then recomputes in
     the owner's zone and every later occurrence is correct. Nothing is dropped or
     rewritten. `fire_at` is deliberately NOT backfilled at boot: it doubles as
-    the owner's manual reschedule/snooze slot (see `revertRecurrenceAdvance`), so
+    the owner's manual reschedule/snooze slot (protected by the settlement occurrence check), so
     a boot-time recompute would clobber a deliberate one-off move. An owner who
     doesn't want to wait out a long cadence can reschedule or recreate that
     reminder to correct it immediately.
@@ -4688,6 +4709,14 @@ ritual content in chat.
   an approved grant whose content hash still matches the live bytes. There is no
   register-and-fire in one turn, and surface/cadence widening drops approval via
   the content hash.
+- **Forgotten approval reminders.** The supervised `ritual-approval-sweeper`
+  checks pending content and egress grants independently of agent turns
+  (`open/composer.ts:3199`). The store reserves each attempt durably and
+  serializes delivery with owner answers (`tools/approval.ts:206`). It preserves
+  the grant token, verifies the original content hash before rendering, and
+  exposes retained expiry reasons through ritual status
+  (`reminders/ritual-registration.ts:750`). Policy: Decisions Log 2026-09-14,
+  forgotten ritual approvals (#586).
 - **Bundled defs** (`reminders/bundled-rituals.ts`). `morning-brief`,
   `evening-wrap`, and `kaizen` templates ship in-repo, are seeded
   copy-if-absent into `<owner_home>/rituals/` (`seedBundledRituals`,
@@ -4985,8 +5014,8 @@ GBrain (`gbrain serve` over stdio MCP). Provisioned at boot by
 returns the live trio the composer threads in — the `client`, the admin
 "Memory" tab `memoryStore`, and the entity-writer `syncHook` (pages + graph
 fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
-`gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`) and forwards the
-optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
+`gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`), sets
+`GBRAIN_SOURCE` to the project slug, and forwards optional `GBRAIN_BRAIN_ID`.
 
 - **Agent memory RECALL (P0-2) — `memory_search` (`gbrain-memory/agent-tool.ts`).**
   The scribe WRITES entities + facts to this store on every turn; `memory_search`
@@ -7308,6 +7337,15 @@ immediate pickup, so a later turn reflects the new name/persona. The managed
 block is idempotently replaced and never clobbers onboarding-authored SOUL.md
 content. (`NEUTRON_AGENT_NAME` is read once at boot but never composed into the
 prompt, so it is NOT the persistence target.)
+
+**Persona-file ownership and prompt order.** The owner-wide persona editor on
+mobile and web owns exactly `persona/SOUL.md`, `persona/USER.md`, and
+`persona/priority-map.md`; all three are read together by `PersonaPromptLoader`
+as the prompt's base-persona layer. The root-level `USER.md` is a different
+file: `assembleSystemPrompt` owns it as one of the instance context files and
+appends that context after the base persona. Therefore `persona/USER.md` shapes
+the owner-wide persona first, while `<owner_home>/USER.md` supplies later
+instance context; neither editor aliases or rewrites the root-level file.
 
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 

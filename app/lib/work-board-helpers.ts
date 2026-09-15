@@ -15,6 +15,8 @@ import { resolveStepLabel } from './work-board-client';
 import type { RunPhaseLabel, RunProgress, WorkBoardItem, WorkBoardStatus } from './work-board-client';
 import type { PhaseColor } from './theme';
 
+const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled'];
+
 /* ── owner-facing failure copy ───────────────────────────────────────────── */
 
 /**
@@ -230,6 +232,8 @@ export function stepTag(item: WorkBoardItem): PhaseTag | null {
       return { label: 'Fixing', colorKey: 'fix' };
     case 'merging':
       return { label: 'Merging', colorKey: 'merge' };
+    case 'retrying':
+      return { label: 'Retrying', colorKey: 'build' };
     case 'done':
       return { label: 'Merged', colorKey: 'merge' };
     case 'failed':
@@ -312,6 +316,8 @@ export function dotState(item: WorkBoardItem): DotState {
         return { colorKey: 'fix', pulse: true };
       case 'merging':
         return { colorKey: 'merge', pulse: true };
+      case 'retrying':
+        return { colorKey: 'build', pulse: isLinkedRunning(item) };
       case 'done':
         return { colorKey: 'merge', pulse: false };
       case 'failed':
@@ -334,39 +340,30 @@ export function dotState(item: WorkBoardItem): DotState {
   return { colorKey: 'upcoming', pulse: false };
 }
 
-/** `round N` for a live (non-terminal) run; null once merged/failed or when idle. */
+/** `<task>.<review>` for a live run; the persisted Ralph task counter is zero-based. */
 export function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null;
   const step = resolveStepLabel(rp);
   if (step === 'done' || step === 'failed') return null;
-  return `round ${rp.round}`;
+  return `${(rp.ralph_round ?? 0) + 1}.${rp.round}`;
 }
-
-const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled'];
 
 /**
  * True when the item is bound to a run that is still live (not terminal).
  *
- * The durable terminal lane (`status='failed'`, written only by detachRun
- * #340) wins over the missing-rp inference. attachRun atomically sets
- * `status='in_progress'` with every fresh binding, so this cannot mask a live
- * run. A bound run that died without a terminal write is out of scope (#534).
+ * A binding and non-terminal phase are identity/state, not liveness. Only fresh
+ * positive evidence from the run's own wrapper makes this true. Missing or stale
+ * evidence fails closed so a restart-killed run becomes retryable on the clock.
  */
-export function isLinkedRunning(item: WorkBoardItem): boolean {
+export function isLinkedRunning(item: WorkBoardItem, nowMs = Date.now()): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
   if (!linked) return false;
-  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
-  // fall-through below reads "no progress reported" as "still running", which is right
-  // for a card whose run is live and has not reported yet — and wrong for one whose run
-  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
-  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
-  // reported reason stays reachable, so this is the shape that actually occurs. Without
-  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
-  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
-  // wrong reason.
   if (item.status === 'failed' || item.status === 'blocked') return false;
   const rp = item.run_progress;
-  return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label);
+  if (rp === undefined || rp.heartbeat_fresh_until == null) return false;
+  if (TERMINAL_PHASE_LABELS.includes(rp.phase_label)) return false;
+  const freshUntil = Date.parse(rp.heartbeat_fresh_until);
+  return Number.isFinite(freshUntil) && nowMs <= freshUntil;
 }
 
 /**

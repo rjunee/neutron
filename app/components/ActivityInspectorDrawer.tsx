@@ -47,7 +47,7 @@ import {
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import {
   activityScopeKey,
@@ -482,7 +482,7 @@ export function ActivityInspectorDrawer({
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   overlay: {
     position: 'absolute',
     top: 0,

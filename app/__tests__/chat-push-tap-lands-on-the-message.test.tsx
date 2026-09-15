@@ -374,15 +374,10 @@ describe('the surface CONSUMES the pushed message id', () => {
     // arrival hit the `honouredDeepLink === deepLinkTarget` early return and the
     // transcript did not move at all.
     //
-    // WHAT THIS ARM DOES NOT PROVE, stated because the version of this comment written
-    // alongside the fix claimed it: the two arrivals here are `rerender` calls, NOT two
-    // notification taps. A real second tap of the SAME notification never reaches this
-    // component — `installPushTapHandler`'s `dispatch` helper (`app/lib/push.ts`) returns
-    // on a seen `request.identifier`, BEFORE `resolvePushRoute`, so no route is pushed and no
-    // `?message_id=` is re-supplied (7-day TTL; warm taps do not dismiss). This arm
-    // therefore proves the latch releases on a targetless visit — which is real and is
-    // what the mutation kills — and says nothing about tap-twice reachability. The
-    // dedupe gap is filed as #182.
+    // WHAT THIS ARM DOES NOT PROVE: the two arrivals here are `rerender` calls, not two
+    // notification taps. It proves the latch releases on a targetless visit — which is
+    // what the mutation kills. Push-layer coverage for tap-twice reachability lives in
+    // `push-deep-link-routing.test.ts`; issue #182 made warm re-taps route again.
     //
     // Asserted as a NEW ask appended after the no-target render, not as a count, so a
     // fix that re-anchored on the empty render instead would not pass by accident.

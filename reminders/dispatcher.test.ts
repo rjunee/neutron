@@ -157,17 +157,17 @@ describe('buildReminderDispatcher — composition + post', () => {
     expect(outbound.posts[1]!.topic_id).toBe('web:owner')
   })
 
-  test('a rejected (false) post throws so the tick leaves the row pending', async () => {
+  test('a rejected (false) post reports known non-delivery', async () => {
     const rejecting: ReminderOutbound = { post: () => false }
     const d = buildReminderDispatcher({ outbound: rejecting, llm: recordingLlm('x') })
 
-    await expect(d.dispatch(makeReminder())).rejects.toThrow(/post rejected/)
+    await expect(d.dispatch(makeReminder())).resolves.toEqual({ state: 'known-not-delivered', reason: 'outbound post rejected' })
   })
 
   test('an accepted (true) post does not throw', async () => {
     const outbound = recordingOutbound()
     const d = buildReminderDispatcher({ outbound, llm: recordingLlm('x') })
-    await expect(d.dispatch(makeReminder())).resolves.toBeUndefined()
+    await expect(d.dispatch(makeReminder())).resolves.toEqual({ state: 'delivered' })
   })
 
   test('context gather failure is non-fatal — still composes + posts', async () => {
@@ -237,7 +237,7 @@ describe('buildReminderDispatcher — composition + post', () => {
     const d = buildReminderDispatcher({ outbound, llm })
 
     // Returns normally (so the tick advances the row) but posts nothing.
-    await expect(d.dispatch(makeReminder({ message: '   \n  ' }))).resolves.toBeUndefined()
+    await expect(d.dispatch(makeReminder({ message: '   \n  ' }))).resolves.toEqual({ state: 'known-not-delivered', reason: 'dispatch completed without posting a turn' })
     // A reminder that is ONLY a [ROUTING] header has no body either.
     await d.dispatch(makeReminder({ message: '[ROUTING] target_thread: 5\n   ' }))
 

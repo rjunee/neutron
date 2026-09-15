@@ -13,7 +13,7 @@
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import type { LauncherEntry } from '../lib/launcher-client';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface LauncherRenameModalProps {
   entry: LauncherEntry | null;
@@ -76,7 +76,7 @@ export function LauncherRenameModal({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

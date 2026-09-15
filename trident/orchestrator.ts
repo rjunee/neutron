@@ -1,3 +1,4 @@
+import { fixLineage } from './gates/fix-lineage.ts'
 import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type RunWorkerObservation } from './worker-observation.ts'
 /**
  * @neutronai/trident — the orchestration step (Trident v2 · Work Board Phase 2a
@@ -405,6 +406,13 @@ export interface BuildTridentOrchestratorOptions {
    * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
    */
   begin_infra_retry?: (run_id: string) => Promise<TridentRun | null>
+  /**
+   * PUBLISH-CREDENTIAL RETRY CLAIM — spend the shared durable infrastructure
+   * budget while preserving the harvested result. The preserved result is the
+   * publish-only checkpoint: the next tick re-enters `applyResult` and never
+   * launches Forge.
+   */
+  begin_publish_retry?: (run_id: string) => Promise<TridentRun | null>
   /** Maximum measured infrastructure failures retried for one run. */
   max_infra_retries?: number
   /** Best-effort owner/visibility seam, invoked once on durable attempt 1 only. */
@@ -2374,6 +2382,7 @@ export function buildTridentOrchestrator(
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
+  const beginPublishRetry = opts.begin_publish_retry
   const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
   const onInfraRetry = opts.on_infra_retry
   const proveMutation = opts.prove_mutation ?? runMutationProofGate
@@ -2553,26 +2562,8 @@ export function buildTridentOrchestrator(
     // build abandon the reviewed branch?" is still measurable. `--is-ancestor` passes
     // on equality, so a legitimate RESUME republishing or continuing the reviewed
     // head passes with no exemption (the recovery-card interaction).
-    if (run.reviewed_head !== null) {
-      const pin = run.reviewed_head.trim().toLowerCase()
-      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pin)) {
-        throw new Error(
-          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a full 40- or 64-hex commit; refusing to publish ${resolvedHead} unverified`,
-        )
-      }
-      const ancestry = await opts.run_host(
-        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', pin, resolvedHead],
-        run.repo_path,
-      )
-      if (!ancestry.ok) {
-        const detail = ancestry.stderr.trim()
-        throw new Error(
-          detail === ''
-            ? `fix-round refused: produced head ${resolvedHead} of branch ${branch} does not descend from the reviewed head ${pin} — the round abandoned the reviewed branch`
-            : `fix-round refused: could not verify that produced head ${resolvedHead} descends from reviewed head ${pin} (${detail}); refusing to publish unverified`,
-        )
-      }
-    }
+    const lineage = await fixLineage(opts.run_host, run.repo_path, branch, run.reviewed_head, resolvedHead)
+    if (lineage.kind !== 'allow') throw new Error(lineage.kind === 'blocked' ? lineage.on : lineage.detail)
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
       for (let attempt = 1; !result.ok && attempt < attempts; attempt++) {
@@ -5070,6 +5061,38 @@ export function buildTridentOrchestrator(
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
+        if (
+          beginPublishRetry !== undefined &&
+          classifyPublishFailure(reason) === PUBLISH_CREDENTIAL_CLASS
+        ) {
+          if (run.infra_retries >= maxInfraRetries) {
+            return {
+              run: failedRun(
+                run,
+                `publish credential remained unavailable after ${maxInfraRetries} automatic retries ` +
+                  `(budget ${maxInfraRetries}). Reconnect GitHub from the Integrations screen; ` +
+                  `the built commit remains on branch ${run.branch ?? `trident/${run.slug}`}. Last measured cause: ${reason}`,
+                true,
+              ),
+              changed: true,
+              waiting: false,
+              note: 'publish-credential retry budget used → failed',
+            }
+          }
+          const claimed = await beginPublishRetry(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'publish-retry claim lost — re-read next tick' }
+          }
+          const backoffMs =
+            INFRA_RETRY_BACKOFF_MS[claimed.infra_retries - 1] ?? INFRA_RETRY_BACKOFF_MS.at(-1)!
+          infraRetryNotBefore.set(run.id, Date.parse(now()) + backoffMs)
+          return {
+            run: claimed,
+            changed: true,
+            waiting: true,
+            note: `publish credential failure → publish-only retry attempt ${claimed.infra_retries} of ${maxInfraRetries} scheduled`,
+          }
+        }
         return {
           run: failedRun(run, `publish failed: ${reason}`, true),
           changed: true,
@@ -5525,6 +5548,19 @@ export function buildTridentOrchestrator(
     if (run.subagent_run_id !== null || run.subagent_status === 'crashed') {
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
+        const notBefore = infraRetryNotBefore.get(run.id)
+        if (notBefore !== undefined) {
+          const remainingMs = notBefore - Date.parse(now())
+          if (remainingMs > 0) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `publish-retry backoff (${Math.ceil(remainingMs / 1_000)}s remaining)`,
+            }
+          }
+          infraRetryNotBefore.delete(run.id)
+        }
         return applyResult(run, result)
       }
       if (worker.state === 'blocked') {

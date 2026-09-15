@@ -275,6 +275,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at cores/free/email/src/mime.ts:52 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'cores/free/email/src/pipeline/migrate.ts':
     'Broad regex literal at cores/free/email/src/pipeline/migrate.ts:55 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/email/src/pipeline/setup.ts':
+    'Broad regex literal at cores/free/email/src/pipeline/setup.ts:54 matches the underscore in an identity-name candidate while sanitizing an observed sender domain into a proposed category; registered conservatively. No env access.',
   'cores/free/reminders/src/chat-commands.ts':
     'Broad regex literal at cores/free/reminders/src/chat-commands.ts:224 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'cores/free/research/src/render-markdown.ts':
@@ -395,8 +397,12 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at trident/codex-project-owner.ts:17 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/code-command.ts':
     'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/model-tiers.ts':
+    'Broad credential-name validation regex at trident/model-tiers.ts:256 matches identity-name candidates; registered conservatively. Its only env access reads NEUTRON_REVIEW_SEATS at trident/model-tiers.ts:239, not an identity variable.',
   'trident/mutation-prover.ts':
     'Broad regex literal at trident/mutation-prover.ts:1050 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/project-repos.ts':
+    'Broad repo-name regex at trident/project-repos.ts:16 allows underscores and therefore matches an identity-name candidate; registered conservatively. Project resolution takes projectDir as an input and does not read the environment.',
   'trident/slugify-task.ts':
     'Broad regex literal at trident/slugify-task.ts:20 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/wrong-base-remedy.ts':

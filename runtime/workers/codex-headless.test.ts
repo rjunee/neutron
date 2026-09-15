@@ -1,0 +1,197 @@
+import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { buildRun, type BuildSnapshot, type BuildRunDeps } from '@neutronai/trident/build-run.ts'
+import { fakeRunner, type BoundedWorkOutcome } from '../bounded-work.ts'
+import type { BoundedWorkRequest } from '../bounded-work.ts'
+import { createCodexHeadlessRunner } from './codex-headless.ts'
+
+const measured: BuildSnapshot = { head: 'measured-head', diff: '+built\nline=two\n', pr: null }
+
+function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> = {}, extra = '') {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-headless-'))
+  const script = join(dir, 'wrapper.sh')
+  const seen = join(dir, 'seen.env')
+  const threads = join(dir, 'threads')
+  const fields: Record<string, string> = {
+    BRANCH: 'build', HEAD: measured.head, REMOTE_HEAD: '', PR: '', DIFF: 'claim.diff', WORKTREE: dir,
+  }
+  for (const [key, value] of Object.entries(change)) {
+    if (value === null) delete fields[key]
+    else fields[key] = value
+  }
+  writeFileSync(join(dir, 'claim.diff'), measured.diff)
+  writeFileSync(join(dir, 'source.trailer'), Object.entries(fields).map(([key, value]) => `NEUTRON_CODEX_BUILD_${key}=${value}\n`).join('') + extra)
+  // A tempting host snapshot is available in the brief, but is never a claim.
+  writeFileSync(join(dir, 'brief'), JSON.stringify({ snapshot: measured }))
+  writeFileSync(script, `#!/bin/bash\nenv > ${JSON.stringify(seen)}\nprintf '%s\\n' "$NEUTRON_CODEX_THREAD_ID" >> ${JSON.stringify(threads)}\necho 'stdout-is-not-the-result'\ncat source.trailer > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"\n`)
+  chmodSync(script, 0o755)
+  const request = (over: Partial<BoundedWorkRequest> = {}): BoundedWorkRequest => ({
+    run_id: 'run-1', step_id: 'step-1', role: 'build', model_id: 'gpt-test', effort: 'high',
+    cwd: dir, writable: true, network: false, tools: 'edit-and-run',
+    brief: { path: join(dir, 'brief'), integrity: '7:receipt' },
+    result: { schema: 'FORGE', path: join(dir, 'trailer') }, thread: null,
+    budget: { wall_ms: 5_000 }, needs_approval_decision: false, ...over,
+  })
+  return { script, seen, threads, request }
+}
+
+describe('Codex headless WorkerRunner', () => {
+  test('maps the wrapper claim and referenced diff rather than stdout', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const outcome = await runner.run(f.request(), 'headless', new AbortController().signal)
+    expect(outcome.kind).toBe('completed')
+    if (outcome.kind === 'completed') expect(outcome.result).toEqual(measured)
+  })
+
+  test('scrubs every GitHub credential family at spawn and retains an ordinary control', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({
+      buildScript: f.script, probe: { ok: true },
+      env: { PATH: process.env.PATH, GH_TOKEN: 'secret', GH_ENTERPRISE_TOKEN: 'secret', GITHUB_TOKEN: 'secret', RUNNER_CONTROL: 'visible' },
+    })
+    expect((await runner.run(f.request(), 'headless', new AbortController().signal)).kind).toBe('completed')
+    const childEnv = readFileSync(f.seen, 'utf8')
+    expect(childEnv).toContain('RUNNER_CONTROL=visible')
+    expect(childEnv).not.toContain('GH_TOKEN=')
+    expect(childEnv).not.toContain('GH_ENTERPRISE_TOKEN=')
+    expect(childEnv).not.toContain('GITHUB_TOKEN=')
+  })
+
+  test('a second call carries the same durable thread id', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const threaded = f.request({ thread: { id: 'thread-42' } })
+    const first = await runner.run(threaded, 'headless', new AbortController().signal)
+    const second = await runner.run({ ...threaded, step_id: 'step-2' }, 'headless', new AbortController().signal)
+    expect(first.kind === 'completed' && first.thread_id).toBe('thread-42')
+    expect(second.kind === 'completed' && second.thread_id).toBe('thread-42')
+    expect(readFileSync(f.threads, 'utf8')).toBe('thread-42\nthread-42\n')
+  })
+
+  test('unsupported placement and roles are refused, never failed', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    expect(runner.supports('build', 'in-repl')).toEqual(expect.objectContaining({ ok: false, reason: 'placement-unavailable' }))
+    expect(runner.supports('arbitrate', 'headless')).toEqual(expect.objectContaining({ ok: false, reason: 'capability-unsupported' }))
+    expect(await runner.run(f.request({ role: 'arbitrate' }), 'headless', new AbortController().signal)).toEqual({ kind: 'refused', reason: 'capability-unsupported' })
+  })
+
+  test('an unavailable startup probe refuses admission', () => {
+    const runner = createCodexHeadlessRunner({ probe: { ok: false, reason: 'provider-not-connected', detail: 'not logged in' } })
+    expect(runner.supports('build', 'headless')).toEqual({ ok: false, reason: 'provider-not-connected', detail: 'not logged in' })
+  })
+
+  test('approval decisions cannot be requested from a worker', () => {
+    const f = fixture()
+    // @ts-expect-error The bounded-work contract deliberately permits only false.
+    const invalid: BoundedWorkRequest = f.request({ needs_approval_decision: true })
+    expect(invalid.needs_approval_decision as boolean).toBe(true)
+  })
+})
+
+// Exercise the real private corroborates predicate through its driver.
+async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
+  const initial = { ...measured, pr: null }
+  const plan = fakeRunner('anthropic', { outcomes: new Map([
+    ['run:plan:0', { kind: 'completed', result: initial, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }],
+  ]) })
+  const build = fakeRunner('openai-codex', { outcomes: new Map([['run:build:0', outcome]]) })
+  let reads = 0
+  const deps: BuildRunDeps = {
+    readReviewCap: async () => ({ kind: 'known' }),
+    prepareWork: async () => {},
+    measure: async () => ({ kind: 'known', value: ++reads < 3 ? initial : measured }),
+    admissionGate: async () => ({ kind: 'allow' }),
+    runLeakGatePreflight: async () => { throw new Error('unexpected gate') },
+    assessMergeDiff: () => { throw new Error('unexpected gate') },
+    reviewGate: async () => { throw new Error('unexpected review') },
+    publishGate: async () => { throw new Error('unexpected publication') },
+    mergeGate: async () => { throw new Error('unexpected merge') },
+    publish: async () => { throw new Error('unexpected publication') },
+    merge: async () => { throw new Error('unexpected merge') },
+  }
+  const request = fixture().request()
+  return buildRun({
+    run_id: 'run', mode: 'pr', start: 'fresh', repl_provider: 'anthropic',
+    workers: {
+      plan: { runner: plan, request }, build: { runner: build, request },
+      review: { runner: fakeRunner('anthropic'), request }, fix: { runner: build, request },
+    },
+  }, deps, new AbortController().signal)
+}
+
+test('baseline flat claim fails real corroboration even for matching facts', async () => {
+  const outcome: BoundedWorkOutcome = {
+    kind: 'completed', result: { HEAD: 'measured-head', STATUS: 'ok' },
+    usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null,
+  }
+  expect(await compare(outcome, { head: 'measured-head', diff: '+built\n', pr: null }))
+    .toMatchObject({ kind: 'failed', phase: 'build', cause: 'built-head-unverified' })
+  expect(await compare({ ...outcome, result: { head: 'measured-head', diff: '+built\n', pr: null } },
+    { head: 'measured-head', diff: '+built\n', pr: null }))
+    .toMatchObject({ kind: 'unknown', phase: 'review' })
+})
+
+async function runTrailer(change: Parameters<typeof fixture>[0] = {}, extra = '') {
+  const f = fixture(change, extra)
+  return createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    .run(f.request(), 'headless', new AbortController().signal)
+}
+
+test('mapped claim agrees with independent host measurement', async () => {
+  expect(await compare(await runTrailer(), measured)).toMatchObject({ kind: 'unknown', phase: 'review' })
+})
+
+for (const field of ['head', 'diff', 'pr'] as const) {
+  test(`mapped claim disagrees when host ${field} differs`, async () => {
+    const different = { ...measured, [field]: field === 'pr' ? { number: 9, head: 'other', state: 'OPEN' } : 'other' }
+    expect(await compare(await runTrailer(), different))
+      .toMatchObject({ kind: 'failed', phase: 'build', cause: 'built-head-unverified' })
+  })
+}
+
+for (const field of ['HEAD', 'DIFF', 'PR'] as const) {
+  test(`missing ${field} stays unknown despite matching measured snapshot in brief`, async () => {
+    const outcome = await runTrailer({ [field]: null })
+    expect(outcome).toEqual({ kind: 'unknown', detail: `Codex trailer is missing NEUTRON_CODEX_BUILD_${field}` })
+    expect(await compare(outcome, measured)).toMatchObject({ kind: 'unknown', phase: 'build' })
+  })
+}
+
+for (const field of ['HEAD', 'DIFF'] as const) {
+  test(`empty ${field} is unknown`, async () => {
+    expect(await runTrailer({ [field]: '' }))
+      .toEqual({ kind: 'unknown', detail: `Codex trailer has empty NEUTRON_CODEX_BUILD_${field}` })
+  })
+}
+
+test('PR number alone lacks the compared PR head and state', async () => {
+  expect(await runTrailer({ PR: '42' }))
+    .toEqual({ kind: 'unknown', detail: 'Codex trailer is missing pr.head and pr.state for NEUTRON_CODEX_BUILD_PR' })
+})
+
+test('unreadable diff artifact is unknown', async () => {
+  expect(await runTrailer({ DIFF: 'missing.diff' }))
+    .toEqual({ kind: 'unknown', detail: 'Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable' })
+})
+
+test('duplicate fields are ambiguous even when one value matches', async () => {
+  expect(await runTrailer({}, 'NEUTRON_CODEX_BUILD_HEAD=other\n'))
+    .toEqual({ kind: 'unknown', detail: 'Codex trailer repeats NEUTRON_CODEX_BUILD_HEAD' })
+})
+
+test('malformed line is unknown', async () => {
+  expect(await runTrailer({}, 'not a field\n'))
+    .toEqual({ kind: 'unknown', detail: 'Codex wrapper wrote a malformed trailer' })
+})
+
+test('unreadable trailer stays unknown', async () => {
+  const f = fixture()
+  writeFileSync(f.script, '#!/bin/bash\nexit 0\n')
+  const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    .run(f.request(), 'headless', new AbortController().signal)
+  expect(outcome).toEqual({ kind: 'unknown', detail: 'Codex wrapper exited successfully without a readable trailer' })
+})

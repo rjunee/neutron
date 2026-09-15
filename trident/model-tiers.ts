@@ -18,9 +18,9 @@
  * settings pane offer a choice the dispatch cannot honour.
  *
  *   • `transport: 'agent'` — an Anthropic model, dispatched as `agent({model})`.
- *   • `transport: 'cli'`   — a subprocess. The entry NAMES the wrapper the workflow
- *     shells into and the ENV KNOB that wrapper reads, because those two facts are
- *     what the dispatch needs and nothing else in the repo holds them together.
+ *   • `transport: 'cli'`   — a subprocess. Built-in entries name its wrapper and
+ *     model environment knob. Configured API seats pass their tier as an argument;
+ *     the API wrapper resolves that row and credential reference at invocation.
  *
  * ── ONE registry is the point ───────────────────────────────────────────────
  * Retiring a model must be a SINGLE edit here, not a hunt through a settings
@@ -42,8 +42,8 @@ import { FABLE_MODEL, FAST_MODEL, SONNET_MODEL, getBestModel } from '@neutronai/
 export const TRANSPORTS = ['agent', 'cli'] as const
 export type Transport = (typeof TRANSPORTS)[number]
 
-/** Every tier the owner may choose, in the order a pane should offer them. */
-export const MODEL_TIERS = [
+/** Built-in tiers in pane order; modelTierRegistry also includes configured seats. */
+export const MODEL_TIERS: readonly string[] = [
   'none',
   'fable',
   'opus',
@@ -54,10 +54,10 @@ export const MODEL_TIERS = [
   'luna',
   'k3',
 ] as const
-export type ModelTier = (typeof MODEL_TIERS)[number]
+export type ModelTier = string
 
 /** The credential a `cli` tier needs before it can run. `null` → nothing to set up. */
-export type TierRequirement = 'codex' | 'kimi'
+export type TierRequirement = string
 
 /**
  * The EXECUTOR a tier runs on — the partition that decides what can substitute for
@@ -66,14 +66,17 @@ export type TierRequirement = 'codex' | 'kimi'
  * So the group is stated once here and every "can this phase take that tier"
  * question — in the validator, in the workflow, in the pane — answers from it.
  */
-export const TIER_GROUPS = ['none', 'claude', 'codex', 'kimi'] as const
+export const TIER_GROUPS = ['none', 'claude', 'codex', 'kimi', 'api'] as const
 export type TierGroup = (typeof TIER_GROUPS)[number]
 
 /** One tier, fully resolved. */
 export interface ModelTierDescriptor {
   tier: ModelTier
+  /** Configured OpenAI-compatible review endpoint and environment credential reference. */
+  endpoint?: string
+  credential?: string
   /** Who makes the model. Shown in the pane so a cross-model peer is obviously one. */
-  provider: 'none' | 'anthropic' | 'openai' | 'moonshot'
+  provider: string
   group: TierGroup
   /** What the tier resolves to RIGHT NOW. Never persisted — always re-resolved. */
   model_id: string
@@ -90,7 +93,7 @@ export interface ModelTierDescriptor {
    * {@link ModelTierDescriptor.group} instead.
    */
   wrapper: string | null
-  /** `cli` only: the env knob that REVIEW wrapper reads to pick its model. */
+  /** Built-in CLI model knob; configured API seats use a tier argument instead. */
   env_var: string | null
   /** `cli` only: the credential this tier needs. */
   requires: TierRequirement | null
@@ -106,7 +109,7 @@ export interface ModelTierDescriptor {
  * the model this process booted with rather than the one their next build will use.
  */
 const RESOLVERS: Readonly<
-  Record<ModelTier, Omit<ModelTierDescriptor, 'tier' | 'model_id'> & { resolve: () => string }>
+  Record<string, Omit<ModelTierDescriptor, 'tier' | 'model_id'> & { resolve: () => string }>
 > = Object.freeze({
   none: {
     provider: 'none',
@@ -202,13 +205,15 @@ const RESOLVERS: Readonly<
 
 /** True iff `value` names a tier in the registry. */
 export function isModelTier(value: unknown): value is ModelTier {
-  return typeof value === 'string' && (MODEL_TIERS as ReadonlyArray<string>).includes(value)
+  return typeof value === 'string' && (Object.hasOwn(RESOLVERS, value) || configuredReviewSeats().some((seat) => seat.tier === value))
 }
 
 /** One tier, resolved as of NOW, or null when the tier is unknown/retired. */
 export function modelTier(tier: string): ModelTierDescriptor | null {
-  if (!isModelTier(tier)) return null
-  const entry = RESOLVERS[tier]
+  const configured = configuredReviewSeats().find((seat) => seat.tier === tier)
+  if (configured) return configured
+  if (!Object.hasOwn(RESOLVERS, tier)) return null
+  const entry = RESOLVERS[tier]!
   return {
     tier,
     provider: entry.provider,
@@ -223,5 +228,38 @@ export function modelTier(tier: string): ModelTierDescriptor | null {
 
 /** Every tier, resolved as of NOW, in pane order. */
 export function modelTierRegistry(): ReadonlyArray<ModelTierDescriptor> {
-  return MODEL_TIERS.map((tier) => modelTier(tier)!)
+  return [...MODEL_TIERS.map((tier) => modelTier(tier)!), ...configuredReviewSeats()]
+}
+
+/** JSON rows in NEUTRON_REVIEW_SEATS; values are references, never secret keys.
+ * Read on every resolution so the launcher and settings use current configuration.
+ * Malformed rows refuse the configuration rather than silently removing a seat.
+ */
+export function configuredReviewSeats(): ModelTierDescriptor[] {
+  const raw = process.env['NEUTRON_REVIEW_SEATS']
+  if (raw === undefined) return []
+  let rows: unknown
+  try { rows = JSON.parse(raw) } catch { throw new Error('review seats: invalid NEUTRON_REVIEW_SEATS JSON') }
+  if (!Array.isArray(rows)) throw new Error('review seats: expected an array')
+  const seen = new Set<string>(MODEL_TIERS)
+  return rows.map((row: unknown, index) => {
+    const seat = row as Record<string, unknown> | null
+    const name = typeof seat?.['model'] === 'string' ? seat['model'] : `row ${index}`
+    const refuse = (): never => { throw new Error(`review seat ${name}: invalid or duplicate configuration`) }
+    if (!seat || typeof seat !== 'object' || Array.isArray(seat)) return refuse()
+    for (const field of ['tier', 'provider', 'model', 'endpoint', 'credential']) {
+      if (typeof seat[field] !== 'string' || !seat[field].trim() || /[\x00-\x1f\x7f]/.test(seat[field])) return refuse()
+    }
+    const { tier, provider, model, endpoint, credential } = seat as {
+      tier: string; provider: string; model: string; endpoint: string; credential: string
+    }
+    if (seen.has(tier) || !/^[A-Z_][A-Z0-9_]*$/.test(credential)) return refuse()
+    try {
+      const url = new URL(endpoint)
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return refuse()
+    } catch { return refuse() }
+    seen.add(tier)
+    return { tier, provider, model_id: model, endpoint, credential, group: 'api',
+      transport: 'cli', wrapper: 'trident/api-review-cli.ts', env_var: null, requires: credential }
+  })
 }

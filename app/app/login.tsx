@@ -88,7 +88,7 @@ import {
 import { enablePushForUser } from '../lib/push';
 import { LOCAL_DEV_SUGGESTION } from '../lib/server-url';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import { tokenStorage } from '../lib/token-storage';
 
 import type { AuthProvider, AuthUser } from '../lib/auth';
@@ -665,7 +665,7 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   scroll: { flex: 1, backgroundColor: THEME.background },
   container: {
     paddingHorizontal: 32,

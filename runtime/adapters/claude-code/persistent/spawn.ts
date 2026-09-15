@@ -416,6 +416,7 @@ async function spawnSession(
       child = await ptyHost.spawn(argv, {
       cwd,
       env: childEnv,
+      ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
       // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
       // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
       // keeps the detector falling edge working: a cleared screen arrives with nothing

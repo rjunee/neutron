@@ -66,6 +66,15 @@ export interface ApprovalNotifier {
  */
 export const APPROVAL_DEFAULT_TTL_MS = 5 * 60_000
 
+// A day matches the normal response window; a week would leave gated work stale.
+export const APPROVAL_RERAISE_INTERVAL_MS = 24 * 60 * 60_000
+// A fourth identical reminder becomes noise. Keep the expired row as evidence.
+export const APPROVAL_MAX_RERAISES = 3
+
+// Share serialization across managers over the same connection, without holding
+// a SQL transaction open across channel delivery (delivery writes its own rows).
+const approvalOperations = new WeakMap<ProjectDb, Promise<unknown>>()
+
 export interface ApprovalManagerOptions {
   ttl_ms?: number
   /**
@@ -159,25 +168,83 @@ export class ApprovalManager {
     decision: 'approved' | 'denied',
     decided_by: string,
   ): Promise<boolean> {
-    const decided_at = this.now() / 1000
-    // `runSync` inside `transaction` because only the sync form reports
-    // `changes`; the transaction holds the per-instance mutex across the read of
-    // that count, so the claim and its result cannot be split by another writer.
-    const claimed = await this.db.transaction((tx) => {
-      const res = tx.runSync(
-        `UPDATE tool_approvals
-           SET status = ?, decided_at = ?, decided_by = ?
-         WHERE id = ? AND status = 'pending'`,
-        [decision, decided_at, decided_by, id],
-      )
-      return res.changes > 0
+    return this.serialize(async () => {
+      const decided_at = this.now() / 1000
+      // `runSync` inside `transaction` because only the sync form reports
+      // `changes`; the transaction holds the per-instance mutex across the read of
+      // that count, so the claim and its result cannot be split by another writer.
+      const claimed = await this.db.transaction((tx) => {
+        const res = tx.runSync(
+          `UPDATE tool_approvals
+             SET status = ?, decided_at = ?, decided_by = ?
+           WHERE id = ? AND status = 'pending'`,
+          [decision, decided_at, decided_by, id],
+        )
+        return res.changes > 0
+      })
+      const waiter = this.pending.get(id)
+      if (waiter) {
+        this.pending.delete(id)
+        waiter.resolve(decision)
+      }
+      return claimed
     })
-    const waiter = this.pending.get(id)
-    if (waiter) {
-      this.pending.delete(id)
-      waiter.resolve(decision)
-    }
-    return claimed
+  }
+
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const next = (approvalOperations.get(this.db) ?? Promise.resolve()).then(work)
+    approvalOperations.set(this.db, next.catch(() => undefined))
+    return next
+  }
+
+  /** Reserve a daily reminder durably before delivery. Answers and sends share
+   * serialization: an answer committed after selection but before this operation
+   * suppresses it, and an answer during delivery waits for that delivery to finish.
+   * Failed/crashed sends consume an attempt, bounding noise even after restart.
+   * The renderer returns null when the original grant can no longer be rendered.
+   */
+  async reraisePending(
+    id: string,
+    render: (row: ApprovalRow, attempt: number) => (() => Promise<void>) | null,
+  ): Promise<'skipped' | 'raised' | 'expired'> {
+    const reserved = await this.serialize(async (): Promise<'skipped' | 'expired' | (() => Promise<void>)> => {
+      const row = this.get(id)
+      if (row?.status !== 'pending') return 'skipped'
+      let args: Record<string, unknown>
+      try { args = JSON.parse(row.args_json) } catch { args = {} }
+      args = { ...args }
+      const count = args.reraise_count === undefined ? 0 : args.reraise_count
+      const last = args.last_raised_at === undefined ? row.requested_at : args.last_raised_at
+      const now = this.now()
+      const valid = typeof last === 'number' && Number.isFinite(last) && last >= 0 &&
+        last * 1000 <= now && typeof count === 'number' && Number.isInteger(count) && count >= 0
+      if (valid && now - last * 1000 < APPROVAL_RERAISE_INTERVAL_MS) return 'skipped'
+      const attempt = Number(count) + 1
+      const send = valid && Number(count) < APPROVAL_MAX_RERAISES ? render(row, attempt) : null
+      if (send === null) {
+        const reason = !valid ? 'Approval age or reminder history is unreadable' :
+          Number(count) >= APPROVAL_MAX_RERAISES ? 'No answer after three daily reminders' :
+          'Original approval content is no longer available'
+        await this.db.run(
+          `UPDATE tool_approvals SET status = 'expired', decided_at = ?, args_json = ?
+           WHERE id = ? AND status = 'pending'`,
+          [now / 1000, JSON.stringify({ ...args, expiry_reason: reason }), id],
+        )
+        this.pending.get(id)?.resolve('expired')
+        this.pending.delete(id)
+        return 'expired'
+      }
+      await this.mergeArgs(id, { reraise_count: attempt, last_raised_at: now / 1000 })
+      return send
+    })
+    if (typeof reserved !== 'function') return reserved
+    // Queue delivery separately so answers arriving during the reservation win.
+    return this.serialize(async () => {
+      // Re-read after the durable write: an answer or cancellation may have won.
+      if (this.get(id)?.status !== 'pending') return 'skipped'
+      await reserved()
+      return 'raised'
+    })
   }
 
   /**

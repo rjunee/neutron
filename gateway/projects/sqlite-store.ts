@@ -51,6 +51,7 @@ import {
   buildDefaultSettings,
 } from '../http/app-projects-surface.ts'
 import { resolveProjectEmoji } from './default-emoji.ts'
+import type { Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
 
 interface ProjectRow {
   id: string
@@ -61,6 +62,7 @@ interface ProjectRow {
   privacy_mode: PrivacyMode
   billing_mode: BillingMode
   agent_engagement_mode: AgentEngagementMode
+  model_provider: Provider | null
   created_at: string
   updated_at: string
   /** ISO-8601; NULL on legacy rows → sort falls back to updated_at. */
@@ -78,7 +80,7 @@ interface MemberRow {
 }
 
 const PROJECT_COLS =
-  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at, archived_at'
+  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, model_provider, created_at, updated_at, last_activity_at, archived_at'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -112,6 +114,7 @@ function rowToSettings(row: ProjectRow, members: MemberRow[]): ProjectSettings {
     privacy_mode: row.privacy_mode,
     billing_mode: row.billing_mode,
     agent_engagement_mode: row.agent_engagement_mode,
+    model_provider: row.model_provider,
     members: projectMembers,
   }
 }
@@ -242,6 +245,7 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       agent_engagement_mode?: AgentEngagementMode
       name?: string
       emoji?: string
+      model_provider?: Provider | null
     },
   ): Promise<ProjectSettings | null> {
     // Resolve-or-seed so callers always get a coherent doc back. The
@@ -254,6 +258,7 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       patch.agent_engagement_mode === undefined &&
       patch.name === undefined &&
       patch.emoji === undefined
+      && patch.model_provider === undefined
     ) {
       // A no-op PATCH is still a read — it must not create the project either
       // (ISSUES #412).
@@ -272,6 +277,8 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
     const next_privacy = patch.privacy_mode ?? existing.privacy_mode
     const next_engagement = patch.agent_engagement_mode ?? existing.agent_engagement_mode
     const next_name = patch.name ?? existing.name
+    const next_model_provider =
+      patch.model_provider === undefined ? existing.model_provider : patch.model_provider
     // Emoji is written ONLY when the caller explicitly set one — `existing.emoji`
     // is the RESOLVED glyph (a default when the column is NULL), so coalescing it
     // into every UPDATE would freeze that default into the row and stop a legacy
@@ -283,9 +290,10 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
                 emoji = ?,
                 privacy_mode = ?,
                 agent_engagement_mode = ?,
+                model_provider = ?,
                 updated_at = ?
           WHERE id = ?`,
-        [next_name, patch.emoji, next_privacy, next_engagement, ts, project_id],
+        [next_name, patch.emoji, next_privacy, next_engagement, next_model_provider, ts, project_id],
       )
     } else {
       await this.db.run(
@@ -293,15 +301,27 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
             SET name = ?,
                 privacy_mode = ?,
                 agent_engagement_mode = ?,
+                model_provider = ?,
                 updated_at = ?
           WHERE id = ?`,
-        [next_name, next_privacy, next_engagement, ts, project_id],
+        [next_name, next_privacy, next_engagement, next_model_provider, ts, project_id],
       )
     }
     const row = this.readRow(project_id)
     if (row === null) return null
     const members = this.readMembers(project_id)
     return rowToSettings(row, members)
+  }
+
+  /** Synchronous dispatch-time lookup used by the substrate's per-turn resolver. */
+  modelProviderOverride(project_id: string | undefined): Provider | null {
+    if (project_id === undefined || project_id.length === 0) return null
+    const row = this.db
+      .prepare<{ model_provider: Provider | null }, [string]>(
+        'SELECT model_provider FROM projects WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL',
+      )
+      .get(project_id)
+    return row?.model_provider ?? null
   }
 
   /**
@@ -601,8 +621,8 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       // IGNORE keeps the loser idempotent.
       await tx.run(
         `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, model_provider, created_at, updated_at, last_activity_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           seed.id,
           seed.name,
@@ -614,6 +634,7 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
           seed.privacy_mode,
           seed.billing_mode,
           seed.agent_engagement_mode,
+          seed.model_provider,
           ts,
           ts,
           ts,

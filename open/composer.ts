@@ -38,7 +38,11 @@ import {
   resolveApiKeyEnvTier,
   resolveAmbientTier,
 } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
-import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import {
+  assertConversationalProviderWired,
+  normalizeProvider,
+  type Provider,
+} from '@neutronai/runtime/adapters/select-substrate.ts'
 import { LoopRegistry, SupervisedLoop } from '@neutronai/loop'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
@@ -172,6 +176,9 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { TridentUsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
+import { TranscriptUsageIngestor } from '@neutronai/trident/transcript-usage.ts'
+import { findNewestRollout } from '@neutronai/trident/codex-rotation-io.ts'
 import { probeBuildFleet } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
@@ -185,6 +192,7 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { stampExistingUserTimezone } from './wiring/user-timezone-stamp.ts'
 import {
   USAGE_POOLS,
   UsageSamplesStore,
@@ -296,6 +304,7 @@ import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/butt
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
 import { buildTerminalBuildWakeObserver, TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import { buildTerminalDeployWakeObserver, TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS } from '@neutronai/gateway/proactive/terminal-deploy-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
@@ -364,9 +373,12 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
+import { DocVersionStore } from '@neutronai/gateway/git/doc-version-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
+import { AgentWatcher } from '@neutronai/gateway/comments/agent-watcher.ts'
+import { buildAgentWatcherLlmCall } from '@neutronai/gateway/wiring/build-agent-watcher-llm-call.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
 import {
@@ -389,6 +401,7 @@ import {
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '@neutronai/gateway/cores/composer-state.ts'
 import { createAppProjectsSurface } from '@neutronai/gateway/http/app-projects-surface.ts'
+import { createModelProviderResolver } from '@neutronai/gateway/wiring/model-provider-resolution.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import { resolveProjectEmoji } from '@neutronai/contracts/default-emoji.ts'
 import {
@@ -438,6 +451,7 @@ import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-on
 import {
   isValidIanaTimezone,
   readOwnerTimezone,
+  initializeInstanceModelProvider,
   readTranscriptionBackend,
   writeTranscriptionBackend,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -632,6 +646,8 @@ export interface BuildOpenGraphComposerOptions {
   substrateFactory?: (
     opts: import('@neutronai/runtime/adapters/claude-code/index.ts').ClaudeCodeSubstrateOptions,
   ) => import('@neutronai/runtime/substrate.ts').Substrate
+  /** Test-only cadence override for production-composition watcher reachability. */
+  agentWatcherPollIntervalMs?: number
   /**
    * Install-token handoff seam (E2E). Production leaves this undefined →
    * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-
@@ -748,7 +764,7 @@ export function resolveOpenOpenAiPool(env: NodeJS.ProcessEnv): CredentialPool | 
 /**
  * The conversational model provider this box booted with, from
  * `NEUTRON_MODEL_PROVIDER` (Managed-open-contract: env read stays under `open/`).
- * Absent / unknown ⇒ `'anthropic'` (Claude Code — the default).
+ * Absent ⇒ `'anthropic'` (Claude Code — the default); unknown values throw.
  */
 export function resolveOpenModelProvider(env: NodeJS.ProcessEnv): Provider {
   return normalizeProvider(env['NEUTRON_MODEL_PROVIDER'])
@@ -822,7 +838,7 @@ export interface OpenConversationalProviderDeps {
  *                                      conversational turns FAIL LOUDLY per turn
  *                                      (never a silent Anthropic fallback).
  *   - ANY OTHER declared value       → THROW a loud boot error. A declared-but-not-
- *     (`openai-codex-cli` today)       production-wired provider must refuse to boot
+ *     (`pi` today)                     production-wired provider must refuse to boot
  *                                      rather than silently dispatch Claude Code.
  *
  * The exhaustive final `throw` is the invariant: adding a new `Provider` union
@@ -834,34 +850,30 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
-  if (provider === 'anthropic') return {}
-  if (provider === 'openai') {
-    const pool = deps.resolveOpenAiPool(env)
-    if (pool !== null) {
+  assertConversationalProviderWired(provider)
+  const pool = deps.resolveOpenAiPool(env)
+  if (pool !== null) {
+    if (provider !== 'anthropic') {
       log.info('provider_openai_selected', {
-        note: 'conversational turns route to the GPT Responses API adapter (BYO OPENAI_API_KEY); Trident + autonomous builds stay Claude Code',
+        note: 'selected turns route to the configured OpenAI-family adapter',
       })
-      return {
-        provider: 'openai',
-        openaiLlmPool: pool,
-        bindMcpResolver: deps.buildMcpResolver(),
-        toolManifest: deps.buildToolManifest(),
-      }
     }
+    return {
+      provider,
+      openaiLlmPool: pool,
+      bindMcpResolver: deps.buildMcpResolver(),
+      toolManifest: deps.buildToolManifest(),
+    }
+  }
+  if (provider === 'openai' || provider === 'openai-codex') {
     // Honor the explicit selection with NO key: fail loudly per turn (below),
     // never silently fall back to Anthropic.
     log.error('provider_openai_no_key', {
       note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
     })
-    return { provider: 'openai' }
+    return { provider }
   }
-  // Exhaustive: any OTHER declared value (openai-codex-cli today) is NOT wired
-  // for production — refuse to boot rather than silently dispatch Claude Code.
-  throw new Error(
-    `[composer] NEUTRON_MODEL_PROVIDER=${provider} is a declared but NOT production-wired provider — ` +
-      "refusing to boot rather than silently falling back to Claude Code. Use 'openai' (GPT Responses) " +
-      'or leave NEUTRON_MODEL_PROVIDER unset for Claude Code.',
-  )
+  return { provider: 'anthropic' }
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
@@ -982,6 +994,11 @@ export function buildOpenGraphComposer(
     // Shared per-owner persona loader — splices <owner_home>/persona/*.md
     // into every onboarding + chat system prompt.
     const personaLoader = new PersonaPromptLoader({ owner_home })
+    // These two live stores feed both substrate dispatch and the later HTTP
+    // surfaces. Construct them before substrate wiring so provider resolution is
+    // live per turn, never frozen at composition.
+    const projectSettingsStore = new SqliteProjectSettingsStore(db)
+    const chatSessionProjects = new InMemoryWebChatSessionProjectRegistry()
 
     // Shared cron registry — threaded into BOTH the wow-dispatcher (via the
     // landing stack) AND CompositionInput.cron_jobs so the scheduler and the
@@ -1012,21 +1029,19 @@ export function buildOpenGraphComposer(
     // factory. Built once from the narrow wiring context and consumed downstream
     // verbatim. `prewarmSettledRef` is a LIVE reference the pre-warm `.then`
     // flips (cold-window budget elevation reads `.settled`, not a snapshot).
-    // SWAPPABLE PROVIDER — resolve the conversational backend. Default anthropic
-    // (Claude Code) is the untouched path. A box opts into openai via
-    // NEUTRON_MODEL_PROVIDER=openai + an OPENAI_API_KEY; missing prerequisites
-    // degrade LOUDLY to Claude Code (never a broken openai boot). Trident + all
-    // ephemeral/fire substrates stay Claude Code regardless (wired in
-    // wireSubstrates — this provider config reaches ONLY the conversational pair).
-    // COHERENT PROVIDER RESOLUTION — handles EVERY declared provider value: openai
-    // fully wired, openai-without-key honored (fails loud per turn), and any other
-    // declared-but-unwired value (openai-codex-cli) throws a LOUD boot error. Never
-    // a silent Claude fallback for an explicitly-selected non-anthropic provider.
-    const conversationalProviderCtx = resolveOpenConversationalProvider(env, {
+    // Import the former boot setting once; later dispatches read only stored settings.
+    await initializeInstanceModelProvider(db, project_slug,
+      env['NEUTRON_MODEL_PROVIDER']?.trim() ? normalizeProvider(env['NEUTRON_MODEL_PROVIDER']) : null)
+    // Build provider capabilities once; resolve the stored project/instance choice per turn.
+    const conversationalProviderCtx = resolveOpenConversationalProvider({ ...env, NEUTRON_MODEL_PROVIDER: undefined }, {
       resolveOpenAiPool: resolveOpenOpenAiPool,
       buildMcpResolver: buildOpenAiMcpResolver,
       buildToolManifest: buildOpenAiToolManifest,
     })
+    const resolveModelProvider = createModelProviderResolver(db, project_slug, projectSettingsStore)
+    const providerResolver = (projectId?: string) => resolveModelProvider(
+      projectId ?? chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined,
+    )
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1107,6 +1122,7 @@ export function buildOpenGraphComposer(
       db,
       prewarmSubstrate,
       ...conversationalProviderCtx,
+      providerResolver,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1129,7 +1145,7 @@ export function buildOpenGraphComposer(
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
     const tridentFireInnerWorkflow =
-      llmPool !== null
+      liveAgentSubstrate !== null
         ? buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate })
         : null
 
@@ -1385,6 +1401,7 @@ export function buildOpenGraphComposer(
         ? buildLlmCallSubstrate({
             pool: llmPool,
             substrate_instance_id: `cc-synthesis-${owner_handle}`,
+            repl_pane_label: `import · ${project_slug}`,
             cwd: owner_home,
             owner_handle,
             user_id: OWNER_USER_ID,
@@ -1828,8 +1845,6 @@ export function buildOpenGraphComposer(
     const commentStore = new CommentStore({ owner_home })
     // ISSUE #41 — the per-process "which project is the owner's chat pointed
     // at" pin. The escalate route sets it; the resolver's closure reads it.
-    const chatSessionProjects = new InMemoryWebChatSessionProjectRegistry()
-
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
@@ -2411,34 +2426,10 @@ export function buildOpenGraphComposer(
     // The canonical project list (id + label) from the `projects` table — the
     // source of truth onboarding writes. Shared by the page-load bootstrap
     // injection AND the live `projects_changed` app-ws emit (FIX 1) so both
-    // surface the IDENTICAL shape/order. Best-effort: a transient read failure
+    // share project metadata and ordering. Best-effort: a transient read failure
     // degrades to an empty list rather than sinking the request.
-    // Per-project unread = agent messages on the project's chat topic
-    // (`app:<user>:<project>`) beyond the owner's highest READ receipt seq.
-    // Honest (derived from the real chat log + receipt cursor), best-effort
-    // (a read failure — e.g. chat tables absent in a minimal DB — degrades to
-    // 0 rather than sinking the rail refresh).
-    const readProjectUnread = (project_id: string): number => {
-      const topic = appWsProjectTopicId(OWNER_USER_ID, project_id)
-      try {
-        const row = db
-          .prepare<{ n: number }, [string, string]>(
-            `SELECT COUNT(*) AS n
-               FROM app_chat_messages m
-              WHERE m.topic_id = ?
-                AND m.role = 'agent'
-                AND m.seq > (
-                  SELECT COALESCE(MAX(r.seq), 0)
-                    FROM app_chat_receipts r
-                   WHERE r.topic_id = ? AND r.read_at IS NOT NULL
-                )`,
-          )
-          .get(topic, topic)
-        return row?.n ?? 0
-      } catch {
-        return 0
-      }
-    }
+    // Bootstrap has no resolved installation identity and omits unread.
+    // Live frames join these rows with the device-aware project store below.
     // M1 UX REDESIGN — the set of projects with a LIVE chat turn in progress.
     // Maintained at the `agent_typing` start/end seam (the same boundary that
     // drives the typing dots), so the rail's `working` state reflects an
@@ -2569,7 +2560,7 @@ export function buildOpenGraphComposer(
       id: string
       label: string
       emoji: string
-      unread: number
+      unread?: number
       last_activity_at: string
       activity: ProjectActivity
       preview: string | null
@@ -2592,7 +2583,6 @@ export function buildOpenGraphComposer(
             id: r.id,
             label: r.name,
             emoji: resolveProjectEmoji(r.emoji, r.name),
-            unread: readProjectUnread(r.id),
             last_activity_at: r.last_activity_at ?? r.updated_at,
             ...readProjectRailExtras(r.id),
           }))
@@ -2605,7 +2595,7 @@ export function buildOpenGraphComposer(
      *
      * NOT `readProjectRows().map(r => r.id)` (Argus round 1, confirmed x2, on two
      * counts). First, that drags the WHOLE rail computation per call —
-     * `readProjectUnread` + `readProjectRailExtras` (a `boardRunStore.get` per
+     * `readProjectRailExtras` (a `boardRunStore.get` per
      * linked work-board item, a latest-message preview query, a live-run count) —
      * O(projects x board items) of DB work to answer a membership test that is one
      * indexed SELECT. Second, and worse, `readProjectRows` catches and returns `[]`:
@@ -2817,9 +2807,9 @@ export function buildOpenGraphComposer(
         fanOut: pushTransport,
         project_slug,
       }),
-      // The owner, and only the owner: presence is per-user, so a guest sitting
-      // in a shared project cannot silence his phone by having a tab open.
-      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
+      // The owner and the message's project: a guest, or an owner tab looking at
+      // another project, cannot silence this notification.
+      isWebForeground: (project_id) => webPresence.isForeground(OWNER_USER_ID, project_id),
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
@@ -3051,6 +3041,29 @@ export function buildOpenGraphComposer(
             null,
         })
       }
+      const ownerTopic = appWsTopicId(OWNER_USER_ID)
+      const observeTerminalDeployWake = buildTerminalDeployWakeObserver({
+        llm: liveAgentSubstrate === null ? null : {
+          compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
+            spec.metering_context?.project_id === 'general'
+              ? ownerTopic
+              : `${ownerTopic}:${spec.metering_context?.project_id ?? ''}`,
+            spec,
+            { timeout_ms: opts?.timeout_ms ?? TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS },
+          ),
+        },
+        projectChatScope: (topic_id) =>
+          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : 'general',
+        post: async (topic_id, reply, opts) => {
+          const result = await deliver(topic_id, {
+            body: reply,
+            durability: 'inert',
+            ...(opts.loud ? {} : { notify: 'suppress' as const }),
+          })
+          return result.persisted
+        },
+        logger: log,
+      })
       hostDeployService = createHostDeployService({
         approvals,
         // THE CONTROL PLANE RESOLVES THE REF, not this process. Resolving a
@@ -3106,6 +3119,7 @@ export function buildOpenGraphComposer(
         post_notice: async (topic_id, body) => {
           await deliver(topic_id, { body, durability: 'inert' })
         },
+        on_terminal: observeTerminalDeployWake,
         // THE SEAM A STANDING WINDOW MAY NEVER SKIP. While it was absent the
         // service failed closed and every auto-deploy fell back to asking per
         // sha — safe, but it also made the 72h window the owner granted
@@ -3204,6 +3218,19 @@ export function buildOpenGraphComposer(
               log: (m) => log.info('ritual_registration', { detail: m }),
             })
             ritualRegistration = registration
+            const ritualApprovalSweeper = new SupervisedLoop({
+              name: 'ritual-approval-sweeper',
+              intervalMs: 60_000,
+              immediate: true,
+              tick: async () => {
+                if (await isOnboardingActive(OWNER_USER_ID)) return
+                await registration.sweepPendingApprovals()
+              },
+            })
+            loopRegistry.register(ritualApprovalSweeper.describe())
+            realmodeCleanups.push(() => ritualApprovalSweeper.stop())
+            ritualApprovalSweeper.start()
+
             // THE REACHABILITY FIX. Seeding + `registerBundledRituals` above make
             // the three bundled defs KNOWN — registration is NOT approval, and
             // until now nothing ever REQUESTED approval for them. The approval
@@ -3330,7 +3357,8 @@ export function buildOpenGraphComposer(
     // registry, and route LLM work through the SAME warm `cc-llm` substrate the
     // nudge engine / wow picker use (`buildAnthropicLlmCall`).
     const proactiveLlm =
-      llmCallSubstrate !== null
+      llmCallSubstrate !== null &&
+      (llmPool !== null || conversationalProviderCtx.openaiLlmPool !== undefined)
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
         : null
     // The brief posts to the General topic on the SAME app-ws delivery path
@@ -3616,12 +3644,56 @@ export function buildOpenGraphComposer(
     // contract (`anchor-walker.ts:323` — the doc write has already landed, so a
     // walker failure must not surface as a 500 on a successful save).
     //
-    // Note this is NOT the dormant comments `AgentWatcher`
-    // (`gateway/composition.ts:74` DORMANT_LOOPS, decision D-7): that one is a
-    // background LLM tick loop deliberately not started. The walker is a
-    // synchronous hook on a write that already happens.
+    // This walker also lends its per-project lock to the comments `AgentWatcher`
+    // constructed below. The walker remains a synchronous write hook; the watcher
+    // is the independently scheduled LLM reply loop.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
-    const docStore = new DocStore({ owner_home, onMutationSuccess: anchorWalker.handle })
+    let syncPlanDocTitle: ((projectId: string, path: string) => Promise<void>) | null = null
+    const docVersionStore = new DocVersionStore({ owner_home, project_slug })
+    const docStore = new DocStore({
+      owner_home,
+      versionStore: docVersionStore,
+      // Both #903's versioning and #569's title sync hang off one write: the title
+      // must travel through the SAME mutation hook that re-anchors comments, or a
+      // title written by another path leaves those anchors pointing at stale text.
+      onMutationSuccess: async (mutation) => {
+        const titleSync = mutation.op === 'write' && syncPlanDocTitle !== null
+          ? syncPlanDocTitle(mutation.project_id, mutation.path)
+          : Promise.resolve()
+        await Promise.allSettled([anchorWalker.handle(mutation), titleSync])
+      },
+    })
+    const agentWatcherLlmCall = buildAgentWatcherLlmCall({
+      substrate: llmCallSubstrate,
+      url_slug: project_slug,
+      personaLoader,
+    })
+    if (agentWatcherLlmCall !== null) {
+      const projectSettingsStore = new SqliteProjectSettingsStore(db)
+      const agentWatcher = new AgentWatcher({
+        comment_store: commentStore,
+        llm_call: agentWatcherLlmCall,
+        owner_home,
+        doc_read: async (projectId, docPath) => {
+          try {
+            return (await docStore.readDoc(projectId, docPath)).content
+          } catch {
+            return null
+          }
+        },
+        list_active_projects: async () =>
+          (await projectSettingsStore.list(project_slug)).map((project) => project.id),
+        with_project_lock: (projectId, fn) =>
+          anchorWalker.withProjectLockExternal(projectId, fn),
+        chat_session_projects: chatSessionProjects,
+        ...(options.agentWatcherPollIntervalMs !== undefined
+          ? { poll_interval_ms: options.agentWatcherPollIntervalMs }
+          : {}),
+      })
+      loopRegistry.register(agentWatcher.describe())
+      agentWatcher.start()
+      realmodeCleanups.push(() => agentWatcher.stop())
+    }
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
@@ -4049,8 +4121,20 @@ export function buildOpenGraphComposer(
     // bootstrapped with the then-current set) only seeds the baseline so we emit
     // on real CHANGES, never on the initial load.
     let lastProjectsSnapshot: string | null = null
-    const buildProjectsChangedFrame = (): AppWsOutboundProjectsChanged => {
+    const buildProjectsChangedFrame = async (device_id?: string): Promise<AppWsOutboundProjectsChanged> => {
       const projects = readProjectRows()
+      // The registry withholds synthetic receipt ids from this device-aware reader.
+      if (device_id !== undefined) {
+        try {
+          const counts = await projectSettingsStore.list(project_slug, OWNER_USER_ID, device_id)
+          for (const project of projects) {
+            const count = counts.find((row) => row.id === project.id)?.unread_count
+            if (count !== undefined && count !== null) project.unread = count
+          }
+        } catch {
+          // A failed device read leaves unread unknown; the other rail fields survive.
+        }
+      }
       return {
         v: 1,
         type: 'projects_changed',
@@ -4072,24 +4156,23 @@ export function buildOpenGraphComposer(
     // live regardless of which project socket is active. The registry is keyed by
     // exact topic string and each web socket lives on exactly one topic, so no
     // socket receives the frame twice.
-    const fanProjectsChanged = (user_id: string, frame: AppWsOutboundProjectsChanged): void => {
+    const fanProjectsChanged = (user_id: string): void => {
       const base = appWsTopicId(user_id)
-      const scopedPrefix = `${base}:`
-      appWsRegistry.send(base, frame)
       for (const topic of appWsRegistry.topics()) {
-        if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        if (topic === base || topic.startsWith(`${base}:`)) {
+          fireAndForget('composer.project-rail', appWsRegistry.sendEach(topic, buildProjectsChangedFrame))
+        }
       }
     }
     const emitProjectsChangedIfChanged = (user_id: string): void => {
-      const frame = buildProjectsChangedFrame()
-      const snapshot = JSON.stringify(frame.projects)
+      const snapshot = JSON.stringify(readProjectRows())
       if (lastProjectsSnapshot === null) {
         lastProjectsSnapshot = snapshot
         return
       }
       if (snapshot === lastProjectsSnapshot) return
       lastProjectsSnapshot = snapshot
-      fanProjectsChanged(user_id, frame)
+      fanProjectsChanged(user_id)
     }
     // Unconditional fan — a KNOWN mutation (the create-project capability) just
     // changed the project set, so always push the fresh snapshot (and reseed the
@@ -4097,9 +4180,8 @@ export function buildOpenGraphComposer(
     // would no-op on a skip-import owner whose first action is "Create Project"
     // (baseline still null → diff path swallows the first emit).
     const emitProjectsChangedNow = (user_id: string): void => {
-      const frame = buildProjectsChangedFrame()
-      lastProjectsSnapshot = JSON.stringify(frame.projects)
-      fanProjectsChanged(user_id, frame)
+      lastProjectsSnapshot = JSON.stringify(readProjectRows())
+      fanProjectsChanged(user_id)
     }
     // One-shot onboarding-complete signal for the web client (Managed post-
     // onboarding claim redirect). Fanned to the base topic AND every live per-
@@ -4155,6 +4237,7 @@ export function buildOpenGraphComposer(
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {
       get: (id: string): TridentRun | null => boardRunStore.get(id),
+      latestHeartbeatAt: (id: string): string | null => boardRunStore.latestHeartbeatAt(id),
       update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
         boardRunStore.update(id, patch),
       terminate: async (id: string, phase: TridentRun['phase'], reason?: string): Promise<{ won: boolean }> => {
@@ -4192,7 +4275,13 @@ export function buildOpenGraphComposer(
           type: 'work_board_changed',
           items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
-            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+            const run_progress = runProgressForItem(
+              it,
+              (id) => boardRunStore.get(id),
+              nowMs,
+              undefined,
+              (id) => boardRunStore.latestHeartbeatAt(id),
+            )
             return {
               id: it.id,
               title: it.title,
@@ -4345,6 +4434,12 @@ export function buildOpenGraphComposer(
         mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
       },
     })
+    syncPlanDocTitle = (projectId, path) =>
+      workBoardSpecDoc.syncTitleFromDoc(
+        projectId,
+        workBoardScopeKey(project_slug, projectId),
+        path,
+      )
     // #339 — the originating app-ws chat topic for a build, reconstructed from a
     // board scope. The React/Expo client subscribes to the General base topic (no
     // project) or `<base>:<project_id>` for a project — the SAME topic the
@@ -4714,6 +4809,7 @@ export function buildOpenGraphComposer(
     // lapse, and never on a transient network failure. See
     // `credential-lapse-notice.ts` for why each of those three is load-bearing.
     const usageSamplesStore = new UsageSamplesStore({ db })
+    const tridentUsageAnalytics = new TridentUsageAnalytics(db)
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
       // The API base is threaded from THIS composition's env, the same way the Kimi
@@ -4854,11 +4950,13 @@ export function buildOpenGraphComposer(
       // EVERY pool, every time, in the store's own order: a pool is omitted from
       // this payload only by being deleted from `USAGE_POOLS`, so a provider
       // cannot silently vanish from the screen by having no samples.
-      dashboard: () =>
-        USAGE_POOLS.map((pool) => ({
+      dashboard: () => ({
+        pools: USAGE_POOLS.map((pool) => ({
           ...usageSamplesStore.summarise(pool),
           connection: usagePoolConnection(pool),
         })),
+        analytics: tridentUsageAnalytics.read(),
+      }),
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to
@@ -5024,10 +5122,10 @@ export function buildOpenGraphComposer(
     // P4 (table-ownership, 2026-07): bound to a name so the agent-reply
     // activity stamp below routes through the owning store instead of
     // inlining `UPDATE projects` SQL here (migrations/table-ownership.json).
-    const projectSettingsStore = new SqliteProjectSettingsStore(db)
     const appProjectsSurface = createAppProjectsSurface({
       store: projectSettingsStore,
       auth: appOwnerAuth,
+      resolveModelProvider,
       createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
       // Rail-redesign: a Settings PATCH that changes the project name or emoji is
       // rail-visible — fan a fresh `projects_changed` so every connected rail
@@ -5583,6 +5681,9 @@ export function buildOpenGraphComposer(
                 activityInspector.turnFinished(inspectorScopeKey(scope)),
             },
             personaLoader,
+            // Resolve at dispatch time so a zone captured after boot reaches both
+            // cold and already-warm conversations on their next turn.
+            ownerTimezone: (slug) => readOwnerTimezone(db, slug),
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
@@ -5975,6 +6076,11 @@ export function buildOpenGraphComposer(
       readProjectRows,
       activeChatProjects,
       railChatKey,
+      stampUserTimezone: async (timezone): Promise<void> => {
+        const result = await stampExistingUserTimezone(owner_home, timezone)
+        if (result === 'written') personaLoader.invalidate('USER.md')
+        if (result === 'rejected') log.warn('user_timezone_stamp_rejected', { project: project_slug })
+      },
       // O6 / #106 — drain any recovered replies buffered for a topic while the
       // owner was offline, on reconnect (deduped in the shared store). Bound to the
       // SAME `recoveredReplyStore` the live-agent substrate's `onRecoveredReply`
@@ -6334,18 +6440,17 @@ export function buildOpenGraphComposer(
     // M2-1 — ARM the Cores→scribe fan-out with the LIVE Google clients, LAST
     // (same discipline as reflectLoop below): its `stop()` cleanup was registered
     // early in `wireMemory` for shutdown ordering, but arming (build + start the
-    // Calendar + Email schedulers) is deferred to here so (a) it binds the REAL
+    // Calendar scheduler) is deferred to here so (a) it binds the REAL
     // `mountOpenCores` clients — `calendar_core`/`email_managed_core` share these
     // exact instances, so a CONNECTED Google account now actually feeds ambient
-    // events/mail into memory (pre-M2-1 it armed with in-memory fallbacks and fed
+    // calendar events into memory (pre-M2-1 it armed with an in-memory fallback and fed
     // nothing) — and (b) a composition failure before this point leaves no
     // scheduler started. `arm()` is itself failure-atomic. Null (LLM-less box, no
     // scribe) → no-op. OAuth-less → the clients are in-memory fallbacks and the
-    // schedulers fan out nothing (unchanged), which is correct.
+    // scheduler fans out nothing (unchanged), which is correct.
     if (coresScribeFanOut !== null) {
       coresScribeFanOut.arm({
         calendarClient: coresWiring.calendarClient,
-        gmailClient: coresWiring.gmailClient,
       })
     }
 
@@ -6662,6 +6767,7 @@ export function buildOpenGraphComposer(
         // merge left a reference to a name that no longer exists. Same object.
         push: pushTransport,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
+        ...(coresScribeFanOut !== null ? { scribeFanOut: coresScribeFanOut.fanOut } : {}),
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,
         register_cleanup: (fn: () => void): void => {
@@ -6777,6 +6883,8 @@ export function buildOpenGraphComposer(
         chat_ack: workBoardChatAck,
         derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
         removal: workBoardRemoval,
+        project_exists: async (owner_slug, project_id) =>
+          (await projectSettingsStore.list(owner_slug)).some((project) => project.id === project_id),
       },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
@@ -6921,7 +7029,31 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              on_run_terminal: tridentOnRunTerminal,
+              on_run_terminal: async (run): Promise<void> => {
+                await tridentOnRunTerminal(run)
+                const resolvedHome = codexCredentialService.resolveActiveCodexHome(
+                  asOwnerHandle(owner_handle),
+                  run.project_slug,
+                ) ?? codexHome
+                if (resolvedHome === null) return
+                const rollout = findNewestRollout(resolvedHome, Date.parse(run.started_at))
+                if (rollout === null) return
+                const project = run.repo_path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? run.project_slug
+                try {
+                  await new TranscriptUsageIngestor(db).ingest(rollout, {
+                    project,
+                    topic: run.task,
+                    agent: 'codex',
+                    phase: run.inner_checkpoint?.includes('argus') ? 'review_codex' : 'build',
+                    run_id: run.id,
+                    expected_cwds: [run.repo_path, run.worktree].filter(
+                      (value): value is string => typeof value === 'string' && value.length > 0,
+                    ),
+                  })
+                } catch (err) {
+                  log.warn('usage_transcript_ingest_failed', { error: err instanceof Error ? err.message : String(err) })
+                }
+              },
               on_terminal_wake: terminalBuildWake,
               // The SAME sweep the terminal chain runs, also on the tick's own
               // cadence — the only trigger a worktree-only `branch_live` hold

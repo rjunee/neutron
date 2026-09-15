@@ -70,3 +70,27 @@ describe('InMemoryAppWsSessionRegistry — multi-device fan-out', () => {
     expect(registry.topics()).toEqual([])
   })
 })
+
+it('private delivery does not send to a connection removed while its frame builds', async () => {
+  const registry = new InMemoryAppWsSessionRegistry()
+  const received: AppWsOutbound[] = []
+  const send = (frame: AppWsOutbound) => { received.push(frame) }
+  registry.register(TOPIC, send, { device_id: 'device-a' })
+  let release!: (frame: AppWsOutbound) => void
+  const frame = new Promise<AppWsOutbound>((resolve) => { release = resolve })
+  const delivery = registry.sendEach(TOPIC, () => frame)
+  registry.unregister(TOPIC, send)
+  release(readyEnv())
+  await delivery
+  expect(received).toEqual([])
+})
+
+it('private delivery removes a throwing sender and still serves the next connection', async () => {
+  const registry = new InMemoryAppWsSessionRegistry()
+  const received: AppWsOutbound[] = []
+  registry.register(TOPIC, () => { throw new Error('closed') })
+  registry.register(TOPIC, (frame) => { received.push(frame) })
+  await registry.sendEach(TOPIC, async () => readyEnv())
+  expect(received).toEqual([readyEnv()])
+  expect(registry.deviceCount(TOPIC)).toBe(1)
+})

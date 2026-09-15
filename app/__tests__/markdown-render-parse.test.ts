@@ -285,3 +285,10 @@ describe('isAllowedUrl — PRODUCTION URL sanitization predicate', () => {
     expect(isAllowedUrl('\\\\evil.example')).toBe(false); // leading backslashes
   });
 });
+
+it('#581 Integrations link is tappable without permitting credential parameters', () => {
+  expect(isAllowedUrl('neutron://integrations')).toBe(true);
+  for (const suffix of ['?value=example', '#example', '/example', '-other']) {
+    expect(isAllowedUrl(`neutron://integrations${suffix}`)).toBe(false);
+  }
+});

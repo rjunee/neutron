@@ -63,6 +63,7 @@ function baseInput(db: ProjectDb, dispatched: Reminder[]): CompositionInput {
     reminder_dispatcher: {
       dispatch: async (r: Reminder) => {
         dispatched.push(r)
+        return { state: 'delivered' }
       },
     },
     heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
@@ -123,7 +124,7 @@ test('a due RITUAL row reaches the ONE reminder_dispatcher — there is no secon
   const row = await reminderStore.create({
     owner_slug: OWNER,
     topic_id: null,
-    fire_at: 1,
+    fire_at: Date.now() / 1000 - 1,
     message: 'x',
   })
   db.raw().run('UPDATE reminders SET ritual_id = ? WHERE id = ?', ['some-ritual', row.id])

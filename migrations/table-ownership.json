@@ -136,6 +136,25 @@
         "Keyed by (ts, pool, account_label) since 0121, so two accounts of one pool",
         "measured in the same millisecond are two rows rather than one overwrite."
       ]
+    },
+    "code_trident_phase_usage": {
+      "owner": "trident/phase-usage.ts",
+      "writers": [
+        "trident/phase-usage.ts"
+      ],
+      "notes": [
+        "Migration 0144 seeds unknown rows for existing runs and installs the run-insert trigger."
+      ]
+    },
+    "transcript_usage_watermarks": {
+      "owner": "trident/transcript-usage.ts",
+      "writers": ["trident/transcript-usage.ts"],
+      "notes": ["A durable byte cursor and cumulative baseline for each bounded transcript reader."]
+    },
+    "transcript_usage_events": {
+      "owner": "trident/transcript-usage.ts",
+      "writers": ["trident/transcript-usage.ts"],
+      "notes": ["One attributed delta row per accepted cumulative token-count transcript line."]
     }
   }
 }

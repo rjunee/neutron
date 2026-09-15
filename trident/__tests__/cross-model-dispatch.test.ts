@@ -21,8 +21,8 @@
  * reviewed with the wrong model.
  */
 
-import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -37,6 +37,20 @@ import {
 } from '../inner-loop.ts'
 import { classifyInnerFailure } from '../orchestrator.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
+
+const savedSeats = process.env['NEUTRON_REVIEW_SEATS']
+const savedKey = process.env['REVIEW_TEST_KEY']
+afterEach(() => {
+  if (savedSeats === undefined) delete process.env['NEUTRON_REVIEW_SEATS']
+  else process.env['NEUTRON_REVIEW_SEATS'] = savedSeats
+  if (savedKey === undefined) delete process.env['REVIEW_TEST_KEY']
+  else process.env['REVIEW_TEST_KEY'] = savedKey
+})
+function configureSeat() {
+  process.env['NEUTRON_REVIEW_SEATS'] = JSON.stringify([{ tier: 'deep-review', provider: 'deepseek',
+    model: 'deepseek-review', endpoint: 'http://127.0.0.1/completions', credential: 'REVIEW_TEST_KEY' }])
+  process.env['REVIEW_TEST_KEY'] = 'test-key'
+}
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -456,7 +470,8 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
   })
 
   test('both generic seats dispatch every executor family they declare', async () => {
-    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3' } as const
+    configureSeat()
+    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3', api: 'deep-review' } as const
 
     for (const [phase, label] of [
       ['review_codex', 'argus:codex'],
@@ -481,6 +496,11 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
             effort: 'high',
             cli: false,
           })
+        } else if (group === 'api') {
+          expect(seat?.prompt).toContain("api-review-cli.ts' 'deep-review'")
+          expect(seat?.prompt).toContain('deepseek-review')
+          expect(seat?.prompt).toContain(fileURLToPath(new URL('../api-review-cli.ts', import.meta.url)))
+          expect(seat?.prompt).not.toContain('test-key')
         } else {
           expect({ phase, group, cli: seat?.prompt.includes(group === 'kimi' ? 'KIMI K3 CROSS-MODEL REVIEW bridge' : 'CODEX CROSS-MODEL REVIEW bridge') }).toEqual({
             phase,
@@ -859,24 +879,56 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const marker = join(dir, 'completed')
     try {
       // Scaled reproduction of the real mechanism: the foreground caller owns a fresh
-      // process group, and that whole group is killed at 50ms, before the 250ms build
-      // finishes. `setsid` moves the backgrounded wrapper out of the doomed group.
+      // process group, and that whole group is SIGTERMed while the build is still
+      // running. `setsid` moves the backgrounded wrapper out of the doomed group.
+      //
+      // NO TIMER GATES THE PROPERTY, because the property is not about elapsed time.
+      // Two earlier versions had the child `sleep` and raced a deadline against it:
+      // 3 s (12x the 250 ms sleep) failed four CI runs at 3051 ms, and 15 s then failed
+      // at 15052 ms. This test's own comment had already named why — "the scarce resource
+      // on a shared runner is not the child's sleep, it is getting scheduled at all" — so
+      // widening the margin a third time would only measure the runner's load.
+      //
+      // Detachment is a STRUCTURAL fact about process groups, readable the moment the
+      // child exists. `setsid` exists to move the wrapper OUT of the caller's doomed
+      // group, so the question is simply: which group is the child in? That is field 5
+      // (`pgrp`) of /proc/<pid>/stat, and it needs no timer and no kill to answer.
+      //
+      // Two probes that looked structural but were not, both rejected here: `kill(pid, 0)`
+      // after the group kill is ambiguous, because a killed-but-unreaped child is still
+      // reachable and reports alive; and gating the child on a fifo deadlocks the test
+      // when the child IS dead, since the release write blocks forever with no reader.
+      // The child therefore polls for a release FILE, which no failure mode can block.
+      const started = join(dir, 'started')
+      const release = join(dir, 'release')
       const caller = spawn(
         'bash',
-        ['-c', `nohup setsid sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
+        [
+          '-c',
+          `nohup setsid sh -c 'printf $$ > "$1"; until [ -f "$2" ]; do sleep 0.05; done; `
+            + `printf done > "$3"' _ '${started}' '${release}' '${marker}' `
+            + `</dev/null >/dev/null 2>&1 & wait`,
+        ],
         { detached: true, stdio: 'ignore' },
       )
       expect(caller.pid).toBeDefined()
-      await Bun.sleep(50)
+      // Setup, not the measurement: wait for the child to publish its pid. The per-test
+      // timeout is the only bound, so a child that never starts is an environment failure
+      // rather than a false verdict about detachment.
+      while (!existsSync(started)) await Bun.sleep(10)
+      const child = Number(readFileSync(started, 'utf8'))
+      expect(Number.isInteger(child)).toBe(true)
+
+      // THE MEASUREMENT. /proc/<pid>/stat is `pid (comm) state ppid pgrp ...`, and comm
+      // can itself contain spaces and parentheses, so split after the LAST ')'.
+      const fields = readFileSync(`/proc/${child}/stat`, 'utf8')
+      const pgrp = Number(fields.slice(fields.lastIndexOf(')') + 2).split(' ')[2])
+      // Without `setsid` the child shares the caller's group and is killed with it below.
+      expect(pgrp).not.toBe(caller.pid)
+
       process.kill(-caller.pid!, 'SIGTERM')
-      // THE DEADLINE MUST BE REACHABLE, or the assertion below it is dead code: bun's
-      // default per-test timeout is 5 s, so a 10 s deadline could never expire — a child
-      // that never writes killed the test as a runner timeout ('timed out after 5000ms')
-      // and this named assertion never ran. 3 s is 12x the fixture's 250 ms child delay
-      // and still leaves 2 s of the runner's budget, so a real failure fails HERE, by name.
-      const deadline = Date.now() + 3_000
-      while (!existsSync(marker) && Date.now() < deadline) await Bun.sleep(10)
-      expect(existsSync(marker)).toBe(true)
+      writeFileSync(release, 'go') // never blocks: a plain file, not a fifo
+      while (!existsSync(marker)) await Bun.sleep(10)
       expect(readFileSync(marker, 'utf8')).toBe('done')
 
       const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
@@ -889,7 +941,9 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+    // 40 s, so the 15 s deadline above is REACHABLE and a genuine failure fails by name
+    // rather than as an anonymous runner timeout.
+  }, 40_000)
 
   test('an absent completion trailer is DEFERRED and names the killed wrapper artifacts', async () => {
     const { result, logs, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
@@ -1675,20 +1729,31 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     phaseModels,
   })
 
-  test('a RETIRED tier keeps the phase default and names itself in the log', async () => {
-    expect(productionArgs({ review_codex: { model: 'gpt-5.7-nova' } })['phaseModels']).toBeUndefined()
-
-    const { captured, logs } = await runWorkflow(past({ review_codex: { model: 'gpt-5.7-nova' } }))
-    // FALLS BACK, never dispatches the unknown id: a value the registry cannot place
-    // carries no transport, so "send it anyway" means handing it to whichever
-    // executor happens to be wired.
-    const cmd = promptFor(captured, 'argus:codex')
-    expect(cmd).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
-    expect(cmd).not.toContain('gpt-5.7-nova')
-    expect(
-      logs.some((l) => l.includes('IGNORED') && l.includes('unknown-tier') && l.includes('gpt-5.7-nova')),
-    ).toBe(true)
+  test('a RETIRED tier refuses by name through the production launcher', async () => {
+    const args = productionArgs({ review_codex: { model: 'gpt-5.7-nova' } })
+    expect(args['phaseModels']).toEqual({ review_codex: { model: 'gpt-5.7-nova' } })
+    const { captured, result } = await runWorkflow(args)
+    expect(captured.some((call) => call.label === 'argus:codex')).toBe(false)
+    expect(captured.some((call) => call.label === 'argus:claude')).toBe(true)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain('gpt-5.7-nova')
   })
+
+  for (const [phase, label] of [['review_codex', 'argus:codex'], ['review_kimi', 'argus:kimi']] as const) {
+  test(`a configured model without its credential remains a named blocking panel seat: ${phase}`, async () => {
+    configureSeat()
+    delete process.env['REVIEW_TEST_KEY']
+    const args = productionArgs({ [phase]: { model: 'deep-review' } })
+    const { captured, result } = await runWorkflow(args)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain('deepseek-review')
+    expect(JSON.stringify(result)).toContain('missing credential')
+    expect(captured.find((call) => call.label === 'argus:synthesis')?.prompt).toContain('DEFERRED')
+    expect(captured.find((call) => call.label === 'argus:synthesis')?.prompt).toContain('deepseek-review')
+    expect(captured.some((call) => call.label === label)).toBe(false)
+    expect(captured.some((call) => call.label === 'argus:claude')).toBe(true)
+  })
+  }
 
   test('a tier from an executor this step cannot reach is refused, not handed to agent()', async () => {
     // The rubric reviewer has ONE dispatch, `agent({model})`, which resolves against
@@ -1711,4 +1776,27 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     const { logs } = await runWorkflow(past({ review_codex: { effort: 'max' } }))
     expect(logs.some((l) => l.includes('IGNORED') && l.includes('effort-not-settable'))).toBe(true)
   })
+})
+
+for (const [tier, model] of [['k3', 'kimi-k3'], ['sol', 'gpt-5.6-sol']]) {
+  test(`explicit ${tier} without credentials blocks by name`, async () => {
+    const args = productionArgs({ review_codex: { model: tier! } })
+    args['kimiConfigured'] = false
+    args['codexHome'] = null
+    const { result } = await runWorkflow(args)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain(model!)
+  })
+}
+
+
+test('configured API seat refuses a missing harness wrapper path', async () => {
+  configureSeat()
+  const args = productionArgs({ review_codex: { model: 'deep-review' } })
+  delete args['apiReviewScript']
+  const { captured, result, logs } = await runWorkflow(args)
+  expect(result['verdict']).toBe('REQUEST_CHANGES')
+  expect(JSON.stringify(result)).toContain('deepseek-review')
+  expect(logs.some((line) => line.includes('missing apiReviewScript'))).toBe(true)
+  expect(captured.some((call) => call.label === 'argus:codex')).toBe(false)
 })

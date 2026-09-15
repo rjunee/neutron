@@ -13,12 +13,12 @@
  *                        returned no final message (including a refusal)
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -35,6 +35,24 @@ const REQUIRED_CODEX_AUTH_ENV_VARS = [
 // Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH that contains
 // nothing at all, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
+
+const FIXTURE_DIRS: string[] = []
+function fixtureDir(path: string): string {
+  FIXTURE_DIRS.push(path)
+  return path
+}
+function reapFixtures(): void {
+  while (FIXTURE_DIRS.length > 0) {
+    const dir = FIXTURE_DIRS.pop() as string
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Cleanup is best effort: a stale fixture must not hide the test result.
+    }
+  }
+}
+afterEach(reapFixtures)
+process.on('exit', reapFixtures)
 
 interface RunOpts {
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
@@ -65,6 +83,7 @@ interface RunOpts {
 const DEFAULT_DIFF = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n+change\n'
 
 function run(opts: RunOpts = {}): {
+  dir: string
   status: number | null
   stderr: string
   stdout: string
@@ -73,7 +92,7 @@ function run(opts: RunOpts = {}): {
   /** the PROMPT the mock `codex` received on stdin ('' if never run). */
   codexStdin: string
 } {
-  const dir = mkdtempSync(join(tmpdir(), 'trident-codex-'))
+  const dir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-')))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
   if (opts.authed === true) writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
@@ -136,6 +155,7 @@ function run(opts: RunOpts = {}): {
     }
   }
   return {
+    dir,
     status: res.status,
     stderr: res.stderr ?? '',
     stdout: res.stdout ?? '',
@@ -145,6 +165,15 @@ function run(opts: RunOpts = {}): {
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
+  test('resumes the requested Codex thread', () => {
+    const { status, codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_THREAD_ID: 'thread-42' },
+    })
+    expect(status).toBe(0)
+    expect(codexArgv.split('\n').slice(0, 3)).toEqual(['exec', 'resume', 'thread-42'])
+  })
   test('no CODEX_HOME → exit 10 (not connected, graceful)', () => {
     const { status, stderr } = run({ noCodexHome: true })
     expect(status).toBe(10)
@@ -880,5 +909,55 @@ printf '%s\\n' "$rc" > "$STATUSFILE"
       // The EXIT trap is the one form that IS correct here, and it must survive.
       expect(traps).toContain(`trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT`)
     }
+  })
+})
+
+describe('fixture reaping — the review suite removes only its own temp dirs', () => {
+  const FIXTURE_NAME = /^trident-codex-[A-Za-z0-9]{6}$/
+  const fixtureNames = (): Set<string> =>
+    new Set(readdirSync(tmpdir()).filter((name) => FIXTURE_NAME.test(name)))
+  let priorDir = ''
+
+  test('control A: a run fixture remains available throughout its test', () => {
+    const result = run({ noCodexHome: true })
+    expect(existsSync(result.dir)).toBe(true)
+    expect(readdirSync(result.dir).length).toBeGreaterThan(0)
+    priorDir = result.dir
+  })
+
+  test("control B: afterEach removed the previous test's fixture", () => {
+    expect(priorDir).not.toBe('')
+    expect(existsSync(priorDir)).toBe(false)
+  })
+
+  test('control C: registered runs add no surviving fixture directories', () => {
+    const before = fixtureNames()
+    const first = run({ noCodexHome: true })
+    const second = run({ noCodexHome: true })
+    const mine = [basename(first.dir), basename(second.dir)]
+    const during = fixtureNames()
+
+    expect(mine.filter((name) => during.has(name))).toEqual(mine)
+    expect(mine.every((name) => !before.has(name))).toBe(true)
+    reapFixtures()
+    const after = fixtureNames()
+    expect(mine.filter((name) => after.has(name))).toEqual([])
+  })
+
+  test('control D: the reaper preserves an unregistered neighboring fixture', () => {
+    const foreign = mkdtempSync(join(tmpdir(), 'trident-codex-'))
+    writeFileSync(join(foreign, 'still-in-use'), 'live\n')
+    try {
+      const ours = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-')))
+      reapFixtures()
+      expect(existsSync(ours)).toBe(false)
+      expect(readFileSync(join(foreign, 'still-in-use'), 'utf8')).toBe('live\n')
+    } finally {
+      rmSync(foreign, { recursive: true, force: true })
+    }
+  })
+
+  test('control E: the synchronous exit fallback is registered', () => {
+    expect(process.listeners('exit')).toContain(reapFixtures)
   })
 })

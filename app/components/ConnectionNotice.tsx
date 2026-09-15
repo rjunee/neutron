@@ -35,7 +35,7 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import type { ConnStatus } from '@neutronai/chat-core';
 
-import { THEME, TYPOGRAPHY, SPACING } from '../lib/theme';
+import { createThemedStyles, THEME, TYPOGRAPHY, SPACING } from '../lib/theme';
 
 /**
  * How long the connection has to be down before the owner is told anything.
@@ -172,7 +172,7 @@ export function ConnectionNotice({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   // Unchanged from the strip this replaces — a hairline-separated caption band
   // above the transcript. The point of this change is that it is now RARE, not
   // that it looks new; a fresh visual pattern for the exceptional case would be

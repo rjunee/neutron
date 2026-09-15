@@ -18,9 +18,8 @@
  *     file input. The parent owns the upload flow + modal lifecycle;
  *     the composer just surfaces the file event so the chat surface can
  *     route it (image → /api/app/upload, ZIP → /api/upload/<source>).
- *   - The hidden web file input accepts both `image/*` AND
- *     `application/zip` so the user can pick a ChatGPT/Claude export
- *     ZIP without leaving the composer.
+ *   - The hidden web file input accepts attachments, history-export ZIPs, and
+ *     common diagnostic files so the picker does not hide useful evidence.
  *   - `hint` may carry the phase-aware "drag your ZIP" affordance text;
  *     when set, it renders just under the input row with the impeccable
  *     caption styling so the affordance disappears when the phase
@@ -40,7 +39,7 @@ import {
   View,
 } from 'react-native';
 
-import { MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 
 export interface ComposerAttachment {
   /** Local URI (file:// on native, blob:/data: on web). */
@@ -90,8 +89,7 @@ export interface InputComposerProps {
   onFilesPicked?: (files: ReadonlyArray<ComposerFileEvent>) => void;
   /**
    * M2 chat-upload UX — overrides the web file input's `accept` string.
-   * Defaults to `image/*,application/zip,.zip` so ZIP uploads work
-   * without code changes at the call site.
+   * Defaults to attachments, history-export ZIPs, and common diagnostic files.
    */
   file_accept?: string;
   /**
@@ -870,12 +868,10 @@ export function InputComposer({
               fileInputRef.current = el;
             },
             type: 'file',
-            // M2 chat-upload UX — accept both image attachments (the
-            // existing P5.1 path) AND ChatGPT / Claude history-import
-            // ZIPs. The composer surfaces every picked file through
-            // `onFilesPicked`; the parent decides which endpoint each
-            // file targets.
-            accept: file_accept ?? 'image/*,application/zip,.zip',
+            // The composer surfaces every picked file through `onFilesPicked`;
+            // the parent decides which endpoint it targets or names why the
+            // attachment endpoint refused it.
+            accept: file_accept ?? 'image/*,application/zip,.zip,.gz,.json,.log,.csv',
             // Argus r2 BLOCKING #2 — single-file picks only. Pre-r2 the
             // web file input was `multiple` but `useUploadState.start()`
             // aborts any in-flight upload before launching the next, so
@@ -902,7 +898,7 @@ export function InputComposer({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   wrap: {
     paddingHorizontal: SPACING.sm,
     paddingTop: SPACING.sm,

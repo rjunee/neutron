@@ -493,7 +493,7 @@
       },
       {
         "name": "rituals_reapprove",
-        "description": "RE-RAISE the owner's Approve/Deny prompt for an already-enabled ritual, as a FRESH tappable message. Use this when rituals_status shows a ritual as 'pending' or 'none' and the owner cannot act on it \u2014 the original prompt was posted once and scrolls out of view, so a pending approval that the owner never answered becomes permanently invisible and the ritual silently never fires. Also use it after the prompt bytes changed (approval is content-hash-bound, so any edit correctly drops the grant). Requires the ritual to be already enabled with a persisted schedule; it never changes the schedule or the prompt. Returns status 'pending_approval' \u2014 re-raising does NOT approve anything, the owner still decides.",
+        "description": "RE-RAISE the owner's Approve/Deny prompt for an already-enabled ritual, as a FRESH tappable message. Use this when rituals_status shows a ritual as 'pending' or 'none' and the owner cannot act on it \u2014 automatic reminders follow a bounded daily cadence, and explicit reapproval is available when the owner requests a fresh prompt. Also use it after the prompt bytes changed (approval is content-hash-bound, so any edit correctly drops the grant). Requires the ritual to be already enabled with a persisted schedule; it never changes the schedule or the prompt. Returns status 'pending_approval' \u2014 re-raising does NOT approve anything, the owner still decides.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -536,7 +536,7 @@
       },
       {
         "name": "rituals_status",
-        "description": "List every registered ritual with its approval state ('approved' | 'pending' | 'denied' | 'none') and whether it is currently scheduled. Read-only. Use this to see which proposed rituals the owner has approved.",
+        "description": "List every registered ritual with its approval state ('approved' | 'pending' | 'denied' | 'expired' | 'none') and whether it is currently scheduled. Read-only. Use this to see which proposed rituals the owner has approved.",
         "input_schema": {
           "type": "object",
           "properties": {}

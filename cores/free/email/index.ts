@@ -14,7 +14,7 @@
  *
  * S1 (sprint email-managed-core-tier1, 2026-05-20): production
  * Gmail v1 REST client wired through OAuthTokenManager, chat
- * commands, daily-triage + prose-brief agents, mandatory the owner
+ * commands, on-demand triage + prose-brief agents, mandatory the owner
  * 4-point draft policy, per-project Gmail-label filtering, per-
  * project SQLite sidecar.
  *
@@ -50,6 +50,7 @@ export {
   MessageNotFoundError,
   ThreadNotFoundError,
   OAuthMissingError,
+  ClassificationSetupError,
   buildGoogleGmailClient,
   buildInMemoryGmailClient,
   buildRawMessage,
@@ -80,6 +81,7 @@ export {
   type GmailThreadModifyInput,
   type GmailThreadModifyResult,
   type GoogleGmailClientOptions,
+  type ClassificationSetupErrorCode,
   type InMemoryGmailSeed,
   type SeededInMemoryGmailClient,
   type AccountReadOutcome,
@@ -167,17 +169,6 @@ export {
 } from './src/substrate-llm.ts'
 
 export {
-  DEFAULT_DAILY_HOUR,
-  DEFAULT_DAILY_MINUTE,
-  DEFAULT_LOOKBACK_MESSAGES,
-  buildTriageScheduler,
-  type TriageFireInput,
-  type TriageFireResult,
-  type TriageScheduler,
-  type TriageSchedulerOpts,
-} from './src/triage-scheduler.ts'
-
-export {
   executeEmailCommand,
   parseEmailCommand,
   type EmailCommand,
@@ -195,6 +186,16 @@ export {
 
 export { LAUNCHER_ICON, type LauncherIconMeta } from './src/ui/launcher-icon.ts'
 export { APP_TAB_META, type AppTabMeta } from './src/ui/app-tab-surface.ts'
+
+export {
+  CLASSIFICATION_SURVEY_LIMIT,
+  applyClassificationSetup,
+  surveyClassificationSetup,
+  type ClassificationProposal,
+  type ClassificationSetupAction,
+  type ClassificationSetupAnswer,
+  type ClassificationSurvey,
+} from './src/pipeline/setup.ts'
 
 // ── X2: typed Core module contract ──────────────────────────────────────
 // The ONE declaration the install composer (`gateway/cores/install-bundled.ts`)

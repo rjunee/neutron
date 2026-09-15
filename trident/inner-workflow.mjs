@@ -135,6 +135,7 @@ const {
   stageStampScript = null,
   codexBuildScript = null,
   codexReviewScript = null,
+  apiReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
   // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
   // script (dirty → preserve, clean → plain remove) rather than an LLM told to
@@ -315,13 +316,14 @@ const threadedTiers =
  * Falls back to MODELS for the four Claude tiers so a caller that threads `models`
  * but no registry (a dry source check, a legacy launcher) keeps working exactly as
  * before. A name in NEITHER is unknown — retired, misspelled, or an old build's
- * literal vendor id — and the caller must fall back to the default rather than
- * dispatch it: a model id nothing can place is one nothing can reach.
+ * literal vendor id. Explicit cross-model seats refuse these by name; other
+ * phases retain their logged default behavior.
  */
 const resolveTier = (name) => {
   const entry = threadedTiers[name]
   if (entry && typeof entry === 'object' && typeof entry.model_id === 'string' && entry.model_id) {
     return {
+      ...entry,
       model_id: entry.model_id,
       transport: entry.transport === 'cli' ? 'cli' : 'agent',
       env_var: typeof entry.env_var === 'string' && entry.env_var ? entry.env_var : null,
@@ -477,8 +479,8 @@ const ROLE_MODEL = {
   // seats never substitute for one another (`routeAvailable`), they only run what was
   // chosen. The list must match `trident/phase-models.ts`; both are walked by
   // `__tests__/cross-model-dispatch.test.ts`.
-  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
-  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
+  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'] },
+  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'] },
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
@@ -515,8 +517,8 @@ const claudeSeatEffort = () => ROLE_MODEL['argus:claude'].effort
 //
 // VALIDATION ALREADY HAPPENED, in TypeScript, at the settings boundary
 // (`parsePhaseModelConfig`), where a bad entry is an error the owner SEES. Here the
-// requirement is the opposite: a malformed entry must never abort a build that is
-// otherwise fine. So anything unusable is LOGGED BY NAME and the default is used.
+// non-review behavior retains a logged default for a malformed entry that is
+// otherwise unusable. Explicit cross-model seats instead refuse by name.
 // Silently ignoring it is the one thing not allowed — an owner who set xhigh and
 // saw no change would have no way to find out why.
 const threadedPhaseModels =
@@ -555,6 +557,14 @@ function applyPhaseOverride(route, phaseKey) {
   if (typeof override.model === 'string' && override.model.trim()) {
     const requested = override.model.trim()
     const tier = resolveTier(requested)
+    if (phaseKey === 'review_codex' || phaseKey === 'review_kimi') {
+      if (!tier) return { ...route, group: 'api', model: requested, refusal: `review seat ${requested}: unknown model tier` }
+      if (tier.group === 'api') return { ...route, group: 'api', transport: 'cli', effort: null, model: tier.model_id, tier: requested,
+        refusal: tier.credentialAvailable === true ? null : `review seat ${tier.model_id}: missing credential` }
+      if ((tier.group === 'codex' && !codexConfigured) || (tier.group === 'kimi' && !kimiConfigured)) {
+        return { ...route, group: 'api', model: tier.model_id, refusal: `review seat ${tier.model_id}: missing credential` }
+      }
+    }
     if (tier === null) {
       // A RETIRED OR UNKNOWN TIER KEEPS THE DEFAULT. It is not passed through as a
       // literal id: a value the registry cannot place carries no transport, so
@@ -655,6 +665,10 @@ function routeModel(label, tag) {
           : label.startsWith('probe:codex-trailer-')
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
+              ? ROLE_MODEL['ci-probe']
+            // The code-scanning probe has the same fixed-command/transcription shape
+            // as the CI probe and is likewise interpreted by workflow code.
+            : label.startsWith('code-scanning-probe-round-')
               ? ROLE_MODEL['ci-probe']
               // The BASE probe is the same shape as the PR probe — one `gh api` read,
               // transcribed verbatim — so it rides the same seat. Spelled out rather
@@ -4153,6 +4167,51 @@ function ciDeferredPeer(ci) {
   }
 }
 
+/** Parse the paginated open-alert payload without asking synthesis to interpret transport
+ * output. `clean` is earned only by a successful, parseable empty array; every failure is
+ * `unknown`, which authorises neither alert findings nor an alert-derived refusal. */
+function classifyCodeScanningAlerts(probe) {
+  if (probe === null || typeof probe !== 'object') return { status: 'unknown', alerts: [], cause: '' }
+  const raw = typeof probe.raw === 'string' ? probe.raw : ''
+  const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
+  const marker = raw.lastIndexOf('\n___EXIT=')
+  const body = (marker < 0 ? raw : raw.slice(0, marker)).trim()
+  if (exit !== 0 || body === '') return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  let pages
+  try {
+    pages = JSON.parse(body)
+  } catch {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  const alerts = pages.flat()
+  if (alerts.some((alert) => alert === null || typeof alert !== 'object' || Array.isArray(alert))) {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  return { status: alerts.length === 0 ? 'clean' : 'alerts', alerts }
+}
+
+function codeScanningFindings(scan) {
+  return scan.alerts.map((alert) => {
+    const rule = typeof alert?.rule?.id === 'string' && alert.rule.id !== '' ? alert.rule.id : 'unnamed-code-scanning-rule'
+    const location = alert?.most_recent_instance?.location
+    const file = typeof location?.path === 'string' && location.path !== '' ? location.path : 'code-scanning'
+    const line = Number.isInteger(location?.start_line) && location.start_line > 0 ? location.start_line : null
+    const link = typeof alert?.html_url === 'string' && alert.html_url !== '' ? alert.html_url : null
+    return {
+      severity: 'blocker',
+      file,
+      symbol: rule,
+      rule,
+      line,
+      title: `CODE SCANNING ALERT: ${rule}`,
+      evidence: `GitHub reports an open code-scanning alert for this PR at ${file}${line === null ? '' : `:${line}`}. Resolve or dismiss the alert before approval.${link === null ? '' : `\n${link}`}`,
+    }
+  })
+}
+
 /** The one fact the head probe returns. Deliberately just a sha — see `roundLanded`. */
 const BRANCH_HEAD_SCHEMA = {
   type: 'object',
@@ -4395,6 +4454,20 @@ ${cmd}`,
     ),
   )
   return classifyCi(res)
+}
+
+/** Fetch every page of open code-scanning alerts attached to this PR. */
+async function probeCodeScanningAlerts(prForCi, round) {
+  if (prForCi === null || prForCi === undefined) return { status: 'clean', alerts: [] }
+  const api = `api ${shSingleQuote(`repos/{owner}/{repo}/code-scanning/alerts?pr=${String(prForCi)}&state=open&per_page=100`)} --paginate --slurp`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(api)} 2>&1; echo "___EXIT=$?"`
+  const res = await seatAttempt(`code-scanning-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+      withModel({ label: `code-scanning-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
+  )
+  return classifyCodeScanningAlerts(res)
 }
 
 function encodeRefPath(ref) {
@@ -4984,7 +5057,7 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
     // recomposing the expression inline — a comment asserting a guarantee that did not
     // exist, which is the same shape as the two false claims this card already had to
     // retract. One expression, three readers.
-    const offFamily = `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`
+    const offFamily = `Cross-model review 1 (${family === 'claude' ? 'Claude' : family === 'api' ? routes.codex.model : 'Kimi K3'})`
     out.push(rateLimited.codex === true
       ? (family === 'codex'
           ? rateLimitedPeer('Codex', 'Codex cross-model review')
@@ -4995,12 +5068,12 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
     } : {
       name: offFamily,
       title: `${offFamily} DEFERRED — refusing to silently APPROVE`,
-      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
+      evidence: routes.codex?.refusal || `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   if (statuses.kimi === 'deferred') {
     const family = routes.kimi?.group || 'kimi'
-    const offFamily = `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'})`
+    const offFamily = `Cross-model review 2 (${family === 'claude' ? 'Claude' : family === 'api' ? routes.kimi.model : 'Codex'})`
     out.push(rateLimited.kimi === true
       ? (family === 'kimi'
           ? rateLimitedPeer('Kimi K3', 'Kimi K3 cross-model review')
@@ -5013,7 +5086,7 @@ function deferredCrossModelPeers(statuses, routes, rateLimited) {
     } : {
       name: offFamily,
       title: `${offFamily} DEFERRED — refusing to silently APPROVE`,
-      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
+      evidence: routes.kimi?.refusal || `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   return out
@@ -5097,9 +5170,21 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile}
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 
-// The Kimi K3 cross-model reviewer prompt. Mirrors the codex bridge: shell out
-// SYNCHRONOUSLY to a CLI, map its EXIT CODE to a schema result. The CLI reads
-// KIMI_API_KEY from its OWN environment, so the credential never appears here.
+function refusedReviewSeat(route) {
+  return { verdict: 'REQUEST_CHANGES', codexStatus: 'deferred', findings: [{ severity: 'major', title: route.refusal,
+    evidence: route.refusal, file: 'review', symbol: route.model, rule: 'deferred', line: null }] }
+}
+
+function apiReviewerPrompt(diffFile, route) {
+  const shellQuote = shSingleQuote
+  if (typeof apiReviewScript !== 'string' || !apiReviewScript) throw new Error(`review seat ${route.model}: missing apiReviewScript`)
+  return `Run this configured review seat exactly once:
+  bun run ${shellQuote(apiReviewScript)} ${shellQuote(route.tier)} ${shellQuote(diffFile)} ${shellQuote(task)}
+Model: ${route.model}. Exit 0: codexStatus='connected', parse the review verdict and findings.
+Any other exit or failure to run: codexStatus='deferred', verdict='REQUEST_CHANGES', include stderr as evidence and name ${route.model}.
+Never substitute your own review or another model. Return via the schema.`
+}
+
 function kimiReviewerPrompt(diffFile) {
   const opts = arguments[1] || {}
   const uniq = runId || slug
@@ -5193,11 +5278,12 @@ TASK: ${task}${suiteFindingsPrompt}`,
   let kimiSlot = null
   const slotOneRoute = routeModel('argus:codex')
   const slotTwoRoute = routeModel('argus:kimi')
-  const routeAvailable = (route) => !route.group || route.group === 'claude' || (route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false)
+  const routeAvailable = (route) => route.group === 'api' || !route.group || route.group === 'claude' || (route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false)
   const claudePeerPrompt = (slot) => `${ARGUS_RUBRIC}
 You are Cross-model review ${slot}, an independent, read-only reviewer. Review the diff at ${diffFile} for the TASK below. Apply the rubric adversarially, evidence-gate every claim with file:line or a concrete reproduction, and return your verdict + findings. Do NOT modify files.
 TASK: ${task}`
   const peerPrompt = (label, route, slot) => {
+    if (route.group === 'api') return apiReviewerPrompt(diffFile, route)
     if (route.group === 'claude') return claudePeerPrompt(slot)
     const cliOpts = { lane: `seat-${slot}`, envPrefix: crossModelEnvPrefix(label) }
     return route.group === 'kimi' ? kimiReviewerPrompt(diffFile, cliOpts) : codexReviewerPrompt(diffFile, cliOpts)
@@ -5222,7 +5308,7 @@ TASK: ${task}`
     codexSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:codex', () =>
-        agent(peerPrompt('argus:codex', slotOneRoute, 1), peerAgentOpts({ label: 'argus:codex', phase: 'Review', schema: peerSchema(slotOneRoute) }, slotOneRoute)),
+        slotOneRoute.refusal ? refusedReviewSeat(slotOneRoute) : agent(peerPrompt('argus:codex', slotOneRoute, 1), peerAgentOpts({ label: 'argus:codex', phase: 'Review', schema: peerSchema(slotOneRoute) }, slotOneRoute)),
       ),
     )
   }
@@ -5237,7 +5323,7 @@ TASK: ${task}`
     kimiSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:kimi', () =>
-        agent(peerPrompt('argus:kimi', slotTwoRoute, 2), peerAgentOpts({ label: 'argus:kimi', phase: 'Review', schema: peerSchema(slotTwoRoute) }, slotTwoRoute)),
+        slotTwoRoute.refusal ? refusedReviewSeat(slotTwoRoute) : agent(peerPrompt('argus:kimi', slotTwoRoute, 2), peerAgentOpts({ label: 'argus:kimi', phase: 'Review', schema: peerSchema(slotTwoRoute) }, slotTwoRoute)),
       ),
     )
   }
@@ -5282,6 +5368,7 @@ TASK: ${task}`
       const first = name === 'argus:codex'
       const label = first ? 'argus:codex-retry' : 'argus:kimi-retry'
       const route = first ? slotOneRoute : slotTwoRoute
+      if (route.refusal) return refusedReviewSeat(route)
       return await agent(peerPrompt(label, route, first ? 1 : 2), peerAgentOpts({ label, phase: 'Review', schema: peerSchema(route) }, route))
     },
   })
@@ -5297,6 +5384,9 @@ TASK: ${task}`
   // wall-clock.
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
+  const codeScanning = await probeCodeScanningAlerts(prForCi, round)
+  log(`trident-v2 code-scanning: round=${round} status=${codeScanning.status} alerts=${codeScanning.alerts.length}`)
+  const codeScanningAlerts = codeScanning.status === 'alerts' ? codeScanningFindings(codeScanning) : []
 
   // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
   // seat, spent only when the PR is red) and a failing check that is ALSO failing there
@@ -5335,6 +5425,11 @@ TASK: ${task}`
     : `\nCI GATE FINDINGS (generated by the workflow from GitHub's OWN check results — the PR's checks, and the same checks measured at the base commit this branch was cut from):\n${ciFindings
       .map((finding) => redactProbeText(`[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`).slice(0, 2000))
       .join('\n')}\nWeigh these like any reviewer's finding. A check excused as pre-existing is matched by NAME ONLY: the excuse buys this branch no FIX ROUND, and it does NOT clear the red — the merge is held either way — so if this diff touches what an excused check exercises, say so.`
+  const codeScanningPrompt = codeScanningAlerts.length === 0
+    ? ''
+    : `\nOPEN CODE-SCANNING ALERTS (generated by the workflow from GitHub's alert API):\n${codeScanningAlerts
+        .map((finding) => redactProbeText(`[BLOCKER] ${finding.title}\n${finding.evidence}`).slice(0, 2000))
+        .join('\n')}\nTreat each as a code blocker; the deterministic gate refuses approval while any remains open.`
 
   // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
@@ -5354,7 +5449,7 @@ TASK: ${task}`
   // cross-model verdict is a full panelist when connected; a 'not_connected' codex
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
-  const peerRouteLabel = (route) => route.group === 'claude' ? `${route.group}/${route.model}` : route.group
+  const peerRouteLabel = (route) => route.group === 'claude' || route.group === 'api' ? `${route.group}/${route.model}` : route.group
   // THE SEAT'S OWN REASON REACHES THE SYNTHESIS, not just the operator. The deferred line
   // says "the review failed or returned no usable verdict" — one of the three claims this
   // card removed from the operator-facing row for being false over a 429, and it was left
@@ -5372,7 +5467,7 @@ TASK: ${task}`
         : status === 'deferred'
           ? rateLimited === true
             ? `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): RATE LIMITED — the provider REFUSED the call with HTTP 429, so NO REVIEW WAS PERFORMED. Nothing failed and nothing timed out. That code does not say whether it was a per-minute rate limit or an exhausted allowance, so do NOT assert either. Do NOT return APPROVE, and do NOT describe this as a review that found nothing.`
-            : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — configured but the review failed or returned no usable verdict. Do NOT return APPROVE.`
+            : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): DEFERRED — ${route.refusal || 'configured but the review failed or returned no usable verdict'}. Do NOT return APPROVE.`
           : `Verdict ${letter} (Cross-model review ${slot}, ${peerRouteLabel(route)}): NOT CONNECTED — its required credential is unavailable; note it and proceed.`
   const codexPanel = peerPanelLine('C', 1, codexStatus, codexReview, slotOneRoute, slotOneRoute.disabled, crossModelRateLimited(codexSlot, verdicts, seatRateLimitKey(slotOneRoute.group)))
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
@@ -5414,7 +5509,7 @@ Set \`escalate\` to \`{kind, whatIsMissing}\` only for those two. \`whatIsMissin
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
-${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
+${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}${codeScanningPrompt}`,
       withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
     )
   // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
@@ -5495,6 +5590,13 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
             }
           : { findings: [...ciFindings] }
       : severityGated
+  const withCodeScanning = codeScanningAlerts.length > 0
+    ? {
+        ...(withCi && typeof withCi === 'object' ? withCi : {}),
+        verdict: 'REQUEST_CHANGES',
+        findings: [...codeScanningAlerts, ...((withCi && Array.isArray(withCi.findings)) ? withCi.findings : [])],
+      }
+    : withCi
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can
   // have — and note this list is assembled AFTER `enforceSeverityGate`, so its
@@ -5502,7 +5604,7 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   const peers = ci.status === 'pending' || ci.status === 'unknown'
     ? [...missingCore, ...deferred, ciDeferredPeer(ci)]
     : [...missingCore, ...deferred]
-  const gated = enforceCrossModelGate(withCi, peers)
+  const gated = enforceCrossModelGate(withCodeScanning, peers)
   // Carry WHY this is blocked, not just that it is. The fix loop must not re-Forge
   // when the only blocker is a lane that could not run — there is nothing in the
   // code to fix, and a re-Forge then costs a fresh round of four reviewers plus a

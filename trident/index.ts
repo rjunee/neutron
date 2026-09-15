@@ -14,6 +14,11 @@
 export const __MODULE__ = '@neutronai/trident' as const
 
 export { TridentRunStore } from './store.ts'
+export { TridentPhaseUsageStore } from './phase-usage.ts'
+export { TranscriptUsageIngestor } from './transcript-usage.ts'
+export type { PhaseUsageReport, PhaseUsageRow } from './phase-usage.ts'
+export { TridentUsageAnalytics } from './usage-analytics.ts'
+export type { UsageAnalytics, UsageAmount, MeasurementState } from './usage-analytics.ts'
 export type {
   TridentRun,
   TridentPhase,
@@ -213,3 +218,4 @@ export {
 export type { TridentBuildToolDeps } from './work-board-build-tool.ts'
 export { buildBoardReconcileObserver } from './board-reconcile.ts'
 export type { TridentBoardReconciler } from './board-reconcile.ts'
+export { createBuildHost, type BuildHostOptions } from './build-host.ts'

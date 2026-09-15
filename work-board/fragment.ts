@@ -44,7 +44,7 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
   if (activeItems.length === 0) {
     lines.push('(no active or upcoming items yet)')
   } else {
-    lines.push('Active + upcoming items, in order (id in parens — use it to dispatch a build):')
+    lines.push('Active + upcoming items, in order (PR number and title first):')
     for (const item of activeItems.slice(0, MAX_ITEMS_INJECTED)) {
       const title = escapeData(item.title).slice(0, MAX_TITLE_CHARS)
       // Activity marker: a LIVE bound run shows ·building; a FAILED item with a
@@ -68,7 +68,8 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
           : item.inline_active
             ? ' ·inline'
             : ''
-      lines.push(`- [${statusLabel(item.status)}${activity}] (${escapeData(item.id)}) ${title}`)
+      const prPrefix = item.pr !== null ? `PR #${item.pr} — ` : ''
+      lines.push(`- ${prPrefix}${title} [${statusLabel(item.status)}${activity}]`)
     }
     if (activeItems.length > MAX_ITEMS_INJECTED) {
       lines.push(`- …and ${activeItems.length - MAX_ITEMS_INJECTED} more`)

@@ -14,7 +14,7 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import {
   REMINDER_FILTER_CHOICES,
   type ReminderFilterChoice,
@@ -59,7 +59,7 @@ export function ReminderFilterChips({ active, onSelect }: ReminderFilterChipsPro
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'row',
     gap: SPACING.sm,

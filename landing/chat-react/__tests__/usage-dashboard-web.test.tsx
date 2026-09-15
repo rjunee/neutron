@@ -126,7 +126,11 @@ describe('decoding keeps "answered with nothing" apart from "could not ask"', ()
   it('treats an EMPTY pools array as reachable', () => {
     // Collapsing this into "unreachable" would hide a server that answered
     // correctly, and the two render differently on purpose.
-    expect(decodeDashboard({ pools: [] })).toEqual({ reachable: true, pools: [] })
+    const out = decodeDashboard({ pools: [] })
+    expect(out.reachable).toBe(true)
+    if (!out.reachable) return
+    expect(out.pools).toEqual([])
+    expect(out.analytics.spend.total).toEqual({ unit: 'tokens', value: null, state: 'unknown' })
   })
 
   it('nulls a window whose fraction is not a number, rather than coercing it', () => {
@@ -307,6 +311,29 @@ const WEEKLY_ROOMY = window_({
 })
 
 describe('the rendered usage card', () => {
+  it('shows spend, waste and throughput while keeping missing model attribution unknown', async () => {
+    const analytics = {
+      spend: {
+        total: { unit: 'tokens', value: 205, state: 'partial' },
+        by_project: [{ key: 'alpha', amount: { unit: 'tokens', value: 160, state: 'complete' } }],
+        by_phase: [{ key: 'build', amount: { unit: 'tokens', value: 160, state: 'complete' } }],
+        by_model: { state: 'unknown', rows: [] },
+      },
+      waste: {
+        total: { unit: 'tokens', value: 45, state: 'partial' },
+        by_reason: [{ key: 'review rejected', amount: { unit: 'tokens', value: 45, state: 'partial' } }],
+        unclassified_runs: 1,
+      },
+      throughput: { state: 'complete', runs: [{ project: 'beta', seconds: 1800, outcome: 'failed' }] },
+    }
+    const { container, root } = await mount(() => json({ pools: [poolOf()], analytics }))
+    expect(container.querySelector('[data-testid="usage-spend-total"]')?.textContent).toBe('≥ 205 tokens')
+    expect(container.querySelector('[data-testid="usage-waste-total"]')?.textContent).toBe('≥ 45 tokens')
+    expect(container.querySelector('[data-testid="usage-analytics"]')?.textContent).toContain('By modelUnknown')
+    expect(container.querySelector('[data-testid="usage-analytics"]')?.textContent).toContain('beta: 30m (failed)')
+    root.unmount()
+  })
+
   it('shows the percent, the pace and its reading for a measured window', async () => {
     const { container, root } = await mount(() => pool(SESSION_HOT, null))
     expect(

@@ -97,6 +97,8 @@
     --accent-border: rgba(108,170,255,.4);
     /* Code (inline + block) */
     --code-bg: rgba(255,255,255,.08);
+    --code-inline-fg: #9bd7ff;
+    --code-inline-user-fg: #dcefff;
     --code-block-bg: #0c0e12;
     /* Status: danger/error, warn, info, success */
     /* 4.41 on `--agent-bubble` before this; brightened one step to 4.82. */
@@ -139,6 +141,9 @@
     --gallery-label-fg: #fff;
     /* Misc controls */
     --cancel-bg: #3a3f47;
+    /* Scrollbars remain visible on platforms that paint them persistently. */
+    --scrollbar-thumb: #4b515c;
+    --scrollbar-track: transparent;
     /* BUG 1 — centered, constrained chat column width (mirrors .cint-scroll's
        760px); applied to message rows + composer + status lines so the chat is
        a centered column on wide screens, full-width (margins collapse) on mobile. */
@@ -189,6 +194,8 @@
     --accent-flash: rgba(16,100,204,.14);
     --accent-border: rgba(16,100,204,.4);
     --code-bg: rgba(0,0,0,.06);
+    --code-inline-fg: #0b57d0;
+    --code-inline-user-fg: #dcefff;
     --code-block-bg: #f5f5f7;
     /* Darkened from Apple's #d70015 (4.44 on `--agent-bubble`) to the same red
        `--error-fg` already uses, which clears it at 4.57. */
@@ -227,8 +234,17 @@
     --gallery-label-bg: rgba(0,0,0,0.55);
     --gallery-label-fg: #fff;
     --cancel-bg: #d1d1d6;
+    --scrollbar-thumb: #a8a8ad;
+    --scrollbar-track: transparent;
   }
-  * { box-sizing: border-box; }
+  * {
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
+  *::-webkit-scrollbar-track { background: var(--scrollbar-track); }
   /* THE TYPE BASE. The owner compared us to Telegram: its text is "brighter and
      more vivid and easier to read", ours "more difficult", and he asked for a
      larger size. Telegram sits at ~17px; we were at 15.
@@ -269,12 +285,9 @@
   /* Seated tabs (M1 UX redesign) — the tab band reads as the page's top edge: a
      surface strip whose ACTIVE tab lifts onto the content sheet (fused via a
      -1px bottom margin over the band's own bottom border). No sliding underline. */
-  /* The band's bottom edge is NOT drawn here — `.car-usage` below is the seam
-     between the band and the stage, and it owns that line whether or not there
-     is anything to report. */
   .car-topbar {
     display: flex; align-items: flex-end; flex: 0 0 auto; gap: 2px;
-    padding: 8px 10px 0; background: var(--surface);
+    padding: 8px 10px 0; background: var(--surface); border-bottom: 1px solid var(--border);
   }
   /* THE TOP-RIGHT MENU — the web twin of the mobile header's ☰ (owner ask: settings
      must live in ONE place across both clients). `margin-left:auto` pins it to the
@@ -304,17 +317,15 @@
     background: transparent; color: var(--fg); font: inherit; cursor: pointer;
   }
   .car-hmenu-row:hover { background: var(--surface); }
-  /* ── USAGE METER — the line between the tab band and the chat stage ─────────
-     This IS the divider, not a widget near it. Two 1px rules stacked: the
+  /* ── USAGE METER — the hairline directly above the chat composer ────────────
+     Two 1px rules stacked: the
      5-hour SESSION window on top, the 7-day WEEKLY window below. Each fills from
      the left edge, and the ENTIRE fill is one colour that changes as a unit when
      it crosses a threshold (green → amber at 85%, amber → red at 95%). No
      gradient: at one pixel tall a gradient is just a smudge.
 
      Unfilled track is `--border`, so a box with nothing to report renders as the
-     plain divider it always was — and the seated tabs' old "fused" trick (the
-     active tab pulled -1px over the band's border to erase that segment) is gone
-     on purpose. A line that reads as a fill level must not have a hole in it. */
+     plain hairline it always was. */
   .car-usage { flex: 0 0 auto; display: flex; flex-direction: column; }
   .car-usage-line { height: 1px; background: var(--border); overflow: hidden; }
   /* `min-width` is the "measured but barely used" floor: a sub-pixel fill would
@@ -620,11 +631,13 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em;
     background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
   }
+  .car-md :not(pre) > code { color: var(--code-inline-fg); cursor: pointer; }
+  .car-bubble-user .car-md { --code-inline-fg: var(--code-inline-user-fg); }
   .car-md pre {
     background: var(--code-block-bg); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; overflow-x: auto; margin: 0 0 8px;
   }
-  .car-md pre code { background: none; padding: 0; font-size: .9em; }
+  .car-md pre code { background: none; color: inherit; cursor: text; padding: 0; font-size: .9em; }
   /* FIX #359 — Telegram-style one-tap copy button, top-right of the code
      block. Hidden until hover/focus so it stays non-intrusive; `(hover: none)`
      (touch devices) keeps it always visible since there's no hover to reveal
@@ -1533,7 +1546,7 @@
     flex: none; width: 40px; text-align: right;
     font-size: 0.8667rem; opacity: 0.7; font-variant-numeric: tabular-nums;
   }
-  .car-composer-wrap { border-top: 1px solid var(--border); background: var(--surface); }
+  .car-composer-wrap { background: var(--surface); }
   .car-composer-wrap .car-composer { border-top: 0; }
   /* BUG 1 — staged-attachment chips align to the centered composer column. */
   .car-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; width: 100%; max-width: var(--chat-col); margin: 0 auto; }
@@ -1773,6 +1786,7 @@
     border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 0.9333rem; min-width: 0;
   }
   .cset-input:disabled { opacity: .5; cursor: default; }
+  .cset-personality-editor { width: 100%; resize: vertical; line-height: 1.45; }
   .cset-input-emoji { max-width: 80px; text-align: center; }
   .cset-scope { flex-direction: row; align-items: center; gap: 16px; flex-wrap: wrap; }
   .cset-radio { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8667rem; color: var(--fg); cursor: pointer; }

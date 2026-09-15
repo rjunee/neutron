@@ -3,7 +3,10 @@ import { DEAD_HERDR_SOCKET, pinEnvSwitch } from './__tests__/env-switch.ts'
 
 import {
   normalizeProvider,
+  providerCapabilities,
+  KNOWN_PROVIDERS,
   selectSubstrateFactory,
+  resolveProviderSelection,
   type Provider,
 } from './select-substrate.ts'
 import { createClaudeCodeSubstrateAuto } from './claude-code/index.ts'
@@ -28,6 +31,15 @@ import { createCodexCliSubstrate } from './codex-cli/index.ts'
 pinEnvSwitch('HERDR_SOCKET_PATH', DEAD_HERDR_SOCKET)
 
 describe('select-substrate', () => {
+  test('provider capabilities describe continuity and tool wiring', () => {
+    for (const provider of KNOWN_PROVIDERS) {
+      expect(providerCapabilities(provider)).toEqual({
+        continuity: provider === 'anthropic' ? 'pool-key' : 'session-id',
+        nativeToolBridge: provider === 'anthropic',
+      })
+    }
+  })
+
   test("select('anthropic') returns the Claude Code factory VERBATIM (default backend, unchanged)", () => {
     const sel = selectSubstrateFactory('anthropic')
     expect(sel.provider).toBe('anthropic')
@@ -42,9 +54,9 @@ describe('select-substrate', () => {
     expect(sel.create).toBe(createGptResponsesApiSubstrate)
   })
 
-  test("select('openai-codex-cli') returns the Codex CLI factory verbatim", () => {
-    const sel = selectSubstrateFactory('openai-codex-cli')
-    expect(sel.provider).toBe('openai-codex-cli')
+  test("select('openai-codex') returns the Codex CLI factory verbatim", () => {
+    const sel = selectSubstrateFactory('openai-codex')
+    expect(sel.provider).toBe('openai-codex')
     expect(sel.create).toBe(createCodexCliSubstrate)
   })
 
@@ -62,21 +74,41 @@ describe('select-substrate', () => {
     expect(() => normalizeProvider('gemini')).toThrow(/Valid values:/)
     expect(() => normalizeProvider('gpt-9')).toThrow(/Refusing to coerce/)
     // The error names the valid providers.
-    expect(() => normalizeProvider('nonsense')).toThrow(/'anthropic'.*'openai'.*'openai-codex-cli'/)
+    expect(() => normalizeProvider('nonsense')).toThrow(/'anthropic'.*'openai'.*'openai-codex'.*'pi'/)
   })
 
-  test('normalizeProvider preserves the two known alternates (and trims)', () => {
+  test('normalizeProvider preserves every known alternate (and trims)', () => {
     expect(normalizeProvider('openai')).toBe('openai')
-    expect(normalizeProvider('openai-codex-cli')).toBe('openai-codex-cli')
+    expect(normalizeProvider('openai-codex')).toBe('openai-codex')
+    expect(normalizeProvider('pi')).toBe('pi')
     expect(normalizeProvider('  openai  ')).toBe('openai')
   })
 
-  test('every Provider variant maps to a discriminated factory', () => {
-    const providers: Provider[] = ['anthropic', 'openai', 'openai-codex-cli']
+  test('every wired Provider variant maps to a discriminated factory', () => {
+    const providers: Array<Exclude<Provider, 'pi'>> = ['anthropic', 'openai', 'openai-codex']
     for (const p of providers) {
       const sel = selectSubstrateFactory(p)
       expect(sel.provider).toBe(p)
       expect(typeof sel.create).toBe('function')
     }
+  })
+
+  test('the known but unwired pi provider refuses instead of falling back to Claude', () => {
+    expect(() => selectSubstrateFactory('pi')).toThrow(/pi.*no conversational substrate adapter/)
+  })
+
+  test('three-level resolution keeps inheritance distinct from an explicit choice', () => {
+    expect(resolveProviderSelection({})).toEqual({ provider: 'anthropic', source: 'application' })
+    expect(resolveProviderSelection({ instance: 'openai' })).toEqual({
+      provider: 'openai',
+      source: 'instance',
+    })
+    expect(
+      resolveProviderSelection({ instance: 'openai', project: 'anthropic' }),
+    ).toEqual({ provider: 'anthropic', source: 'project' })
+    expect(resolveProviderSelection({ instance: 'openai', project: null })).toEqual({
+      provider: 'openai',
+      source: 'instance',
+    })
   })
 })

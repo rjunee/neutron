@@ -148,6 +148,7 @@ interface Harness {
   retired: Array<{ prompt_id: string; topic_id: string }>
   /** Every inert notice the expiry sweep posted, in order. */
   notices: Array<{ topic_id: string; body: string }>
+  terminalOutcomes: Array<{ topic_id: string; ref: string; sha: string; kind: string; detail: string }>
   /** The option values of the most recent emitted prompt (the tappable set). */
   options(): string[]
   approveValue(): string
@@ -181,6 +182,7 @@ function harness(
   const logs: string[] = []
   const retired: Array<{ prompt_id: string; topic_id: string }> = []
   const notices: Array<{ topic_id: string; body: string }> = []
+  const terminalOutcomes: Array<{ topic_id: string; ref: string; sha: string; kind: string; detail: string }> = []
   const valuesRef = opts.valuesRef ?? {
     current: opts.values ?? { url: URL, token: TOKEN },
   }
@@ -203,6 +205,7 @@ function harness(
       // the grant→prompt link the sweep needs is built from exactly this value.
       return { prompt_id: promptIdFor(emits.length) }
     },
+    on_terminal: async (outcome) => { terminalOutcomes.push(outcome) },
     ...(opts.noSweepSeams === true
       ? {}
       : {
@@ -226,6 +229,7 @@ function harness(
     logs,
     retired,
     notices,
+    terminalOutcomes,
     options,
     approveValue: () => options().find((v) => v.endsWith(':a')) ?? '',
     denyValue: () => options().find((v) => v.endsWith(':d')) ?? '',
@@ -713,6 +717,7 @@ describe('the approval binds to a SPECIFIC sha', () => {
     await settle()
 
     const out = await answer(h, h.approveValue())
+    await settle()
     expect(h.dispatchCalls).toHaveLength(1)
     expect(h.dispatchCalls[0]).toEqual({
       url: URL,
@@ -723,10 +728,19 @@ describe('the approval binds to a SPECIFIC sha', () => {
     expect(out!.body).toContain('Deploy requested')
     expect(out!.body).toContain(TARGET_SHA.slice(0, 8))
     expect(out!.body).toContain('queued as run 4821')
+    expect(h.terminalOutcomes).toEqual([{
+      topic_id: TOPIC,
+      ref: 'origin/main',
+      sha: TARGET_SHA,
+      kind: 'accepted',
+      detail: 'queued as run 4821',
+    }])
 
     // Re-tapping a decided row never fires a second deploy.
     await answer(h, h.approveValue())
+    await settle()
     expect(h.dispatchCalls).toHaveLength(1)
+    expect(h.terminalOutcomes).toHaveLength(1)
   })
 
   test('a ref that vanished from the checkout deploys nothing', async () => {

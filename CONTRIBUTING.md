@@ -76,7 +76,7 @@ To reproduce the full CI gate locally, run the same steps CI runs
 (`.github/workflows/ci.yml`):
 
 ```sh
-bash scripts/ci/typecheck-all.sh    # type-check EVERY tsconfig.json in the repo
+bash scripts/ci/typecheck-all.sh    # type-check every project-owned tsconfig.json
                                     # (not just the root — leaf packages like
                                     # trident/, app/, landing/chat-react/ have
                                     # their own configs and real errors there)

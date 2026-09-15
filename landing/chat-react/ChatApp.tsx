@@ -36,6 +36,8 @@ import type { DeliveryState, ChatViewModel, RenderMessage, ImportProgressVM, Sys
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
+import { UsageMeter } from './UsageMeter.tsx'
+import { USAGE_UNKNOWN, type UsagePayload } from './usage-client.ts'
 import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
 import { isAudioAttachmentUrl, isImageAttachmentUrl } from './message-adapter.ts'
 import { VoiceNotePlayer } from './VoiceNotePlayer.tsx'
@@ -1716,7 +1718,7 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
           {it.status === 'error' ? (
             <span className="car-attach-state" title={it.error}>
               {' '}
-              · failed
+              · failed: {it.error ?? 'upload failed'}
             </span>
           ) : null}
           <button
@@ -1732,6 +1734,10 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
     </div>
   )
 }
+
+const CHAT_FILE_ACCEPT =
+  'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,.gz,.json,.log,.csv'
+const IMPORT_FILE_ACCEPT = `${CHAT_FILE_ACCEPT},application/zip,.zip`
 
 interface ImportState {
   status: 'idle' | 'uploading' | 'done' | 'error'
@@ -1842,11 +1848,7 @@ function Composer({
         <input
           ref={fileInputRef}
           type="file"
-          accept={
-            importActive
-              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,application/zip,.zip'
-              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav'
-          }
+          accept={importActive ? IMPORT_FILE_ACCEPT : CHAT_FILE_ACCEPT}
           multiple
           hidden
           className="car-file-input"
@@ -2125,6 +2127,7 @@ function ChatSurface({
   paneOnOpenDoc,
   fetchImpl,
   onOpenActivity,
+  usage,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -2152,6 +2155,8 @@ function ChatSurface({
   fetchImpl?: FetchImpl
   /** Match mobile: tapping the live-turn indicator opens this scope's inspector. */
   onOpenActivity: () => void
+  /** Active credential usage, rendered as the hairline directly above Composer. */
+  usage: UsagePayload
 }): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
@@ -2425,6 +2430,7 @@ function ChatSurface({
           />
         ) : null}
         </div>
+        <UsageMeter usage={usage} />
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>
       </ChatErrorBoundary>
@@ -2536,6 +2542,7 @@ function MountedConversationImpl({
   paneProjectId,
   paneOnOpenDoc,
   onOpenActivity,
+  usage,
 }: {
   hostVm: ChatViewModel
   active: boolean
@@ -2548,6 +2555,7 @@ function MountedConversationImpl({
   paneProjectId: string
   paneOnOpenDoc?: (projectId: string, path: string) => void
   onOpenActivity: (projectId: string | null) => void
+  usage: UsagePayload
 }): React.JSX.Element {
   const messages = hostVm.messages
   // Indexes are pure over `messages`; memoize on the message-list identity so an
@@ -2694,6 +2702,7 @@ function MountedConversationImpl({
           showPane={showPane}
           paneProjectId={paneProjectId}
           onOpenActivity={() => onOpenActivity(hostVm.projectId)}
+          usage={usage}
           {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
         />
@@ -2747,6 +2756,7 @@ export function ChatApp({
   paneEligible,
   paneOnOpenDoc,
   onOpenActivity,
+  usage = USAGE_UNKNOWN,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -2769,6 +2779,8 @@ export function ChatApp({
   paneOnOpenDoc?: (projectId: string, path: string) => void
   /** Open the Activity Inspector for the tapped conversation scope. */
   onOpenActivity?: (projectId: string | null) => void
+  /** Active credential usage. Omitted by standalone harnesses that do not own polling. */
+  usage?: UsagePayload
 }): React.JSX.Element {
   // FIX #343 — keep the chat surface MOUNTED across project switches instead of
   // remounting it on every switch (the old `key={convId}` on the sole
@@ -2913,6 +2925,7 @@ export function ChatApp({
             // still the single source of truth for which board this surface owns.
             paneProjectId={hostVm.projectId ?? ''}
             onOpenActivity={openActivity}
+            usage={usage}
             {...(paneOpenDoc !== undefined ? { paneOnOpenDoc: paneOpenDoc } : {})}
           />
         )

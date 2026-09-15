@@ -10,8 +10,8 @@ GBrain itself is the memory engine (a Postgres-native personal-knowledge brain: 
 - `gbrain-stdio-client.ts` — the production MCP transport: spawns `gbrain serve` and speaks MCP over stdio.
 - `version-notice.ts` — parses GBrain's `UPGRADE_AVAILABLE` stderr marker (notify mode; Neutron never silent-auto-upgrades an instance's memory substrate).
 
-One GBrain brain per instance; it must NOT share state across instances. The per-instance systemd unit sets `GBRAIN_BRAIN_ID` (+ optionally `GBRAIN_SOURCE`) before launching `gbrain serve`; the brain data lives at `<instance-home>/gbrain/`. The GBrain CLI is platform code; the brain is per-project data — the boundary holds at the file system. Nothing in this module cross-checks instance identity; it trusts the `McpClient` it is handed is already instance-scoped.
+One GBrain brain per instance; it must NOT share state across instances. The per-instance systemd unit may set `GBRAIN_BRAIN_ID`; the gateway sets `GBRAIN_SOURCE` to the active project slug before launching `gbrain serve`. The brain data lives at `<instance-home>/gbrain/`. The GBrain CLI is platform code; the brain is per-project data — the instance boundary holds at the file system and the project boundary holds at the GBrain source. Nothing in this module cross-checks instance identity; it trusts the `McpClient` it is handed is already scoped.
 
-Project-scoped partitioning (`GBRAIN_SOURCE` = one source per project) and the cross-install team-mount layer are M2.6 (Neutron Connect syndication) — out of scope for MM, which ships the single-source (`default`) per-instance brain.
+Project-scoped partitioning uses one `GBRAIN_SOURCE` per project. The cross-install team-mount layer remains separate Neutron Connect work.
 
 Cross-refs: `docs/architecture/memory-adapter-gbrain-2026-06-06.md`, `docs/plans/memory-store-to-gbrain-migration-2026-06-06.md`.

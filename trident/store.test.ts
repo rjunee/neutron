@@ -31,6 +31,22 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('latestHeartbeatAt', () => {
+  test('returns the newest heartbeat for this run and ignores ordinary stages', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'heartbeat', project_slug: 't1', repo_path: '/r', task: 't' })
+    const other = await store.create({ slug: 'other-heartbeat', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.latestHeartbeatAt(run.id)).toBeNull()
+    await store.recordStageEvent(run.id, 'codex-exec-alive')
+    const first = store.latestHeartbeatAt(run.id)
+    await store.recordStageEvent(run.id, 'codex-exec-end')
+    await store.recordStageEvent(other.id, 'codex-review-alive')
+    expect(store.latestHeartbeatAt(run.id)).toBe(first)
+    await store.recordStageEvent(run.id, 'codex-review-alive')
+    expect(store.latestHeartbeatAt(run.id)).not.toBeNull()
+  })
+})
+
 describe('claimAgentWake', () => {
   test('returns true exactly once for a terminal run', async () => {
     const store = new TridentRunStore(db)
@@ -1173,6 +1189,45 @@ describe('TridentRunStore', () => {
         infra_retries: 99,
       })
       expect(store.get(run.id)?.infra_retries).toBe(0)
+    })
+  })
+
+  describe('beginPublishRetry — the result-preserving publish claim', () => {
+    test('spends the durable budget while preserving the completed Forge result', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'publish-claim', project_slug: 't1', repo_path: '/r', task: 't' })
+      const result = '{"publishRequested":true,"publishHead":"abcdef"}'
+      await store.update(run.id, {
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+        inner_result: result,
+      })
+
+      const claimed = await store.beginPublishRetry(run.id)
+
+      expect(claimed).toMatchObject({
+        infra_retries: 1,
+        inner_result: result,
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+      })
+    })
+
+    test('refuses rows without both a stored result and completed dispatch', async () => {
+      const store = new TridentRunStore(db)
+      const missing = await store.create({ slug: 'publish-missing', project_slug: 't1', repo_path: '/r', task: 't' })
+      expect(await store.beginPublishRetry(missing.id)).toBeNull()
+
+      const running = await store.create({ slug: 'publish-running', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(running.id, {
+        subagent_status: 'running',
+        inner_result: '{"publishRequested":true}',
+      })
+      expect(await store.beginPublishRetry(running.id)).toBeNull()
+      expect(store.get(missing.id)?.infra_retries).toBe(0)
+      expect(store.get(running.id)?.infra_retries).toBe(0)
     })
   })
 

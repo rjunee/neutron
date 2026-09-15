@@ -63,7 +63,7 @@ import {
   type RailOverlayEntry,
 } from '../../../components/ProjectRail';
 import { ComposerDock, ComposerDockProvider } from '../../../lib/composer-dock';
-import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
+import { createThemedStyles, BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
 import { loadAppConfig } from '../../../lib/config';
 import { createProjectErrorCopy } from '../../../lib/create-project-helpers';
 import { chatRouteForProject, GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
@@ -962,7 +962,7 @@ function ProjectNotFoundFallback({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     backgroundColor: THEME.background,

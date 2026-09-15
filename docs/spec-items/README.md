@@ -55,6 +55,7 @@ branch is cut (standard §3.1, §3.2).
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |
 | [`codex-project-directory-names-its-owner`](codex-project-directory-names-its-owner.md) | Codex project credential directories name their owning project | P2 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
+| [`trident-phase-accounting`](trident-phase-accounting.md) | Store per-phase token and cost accounting for every Trident run | P2 | — |
 
 ### deploy
 
@@ -93,9 +94,11 @@ branch is cut (standard §3.1, §3.2).
 | [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) | A gateway restart keeps the project REPLs, conversation and all | P0 | yes |
 | [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
+| [`instance-project-provider-resolution`](instance-project-provider-resolution.md) | Resolve the model provider per instance and project | P1 | — |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
+| [`stale-approval-is-re-raised`](stale-approval-is-re-raised.md) | Re-raise forgotten ritual approvals at a bounded daily cadence | P2 | — |
 | [`start-the-comments-agent-watcher-loop`](start-the-comments-agent-watcher-loop.md) | Start the dormant comments AgentWatcher loop | P2 | — |
 | [`start-the-project-backup-scheduler-loop`](start-the-project-backup-scheduler-loop.md) | Start the dormant per-project backup scheduler loop | P2 | — |
 | [`hitl-prompt-user-enforcement-policy`](hitl-prompt-user-enforcement-policy.md) | Lock the HITL prompt-user enforcement policy | P3 | — |

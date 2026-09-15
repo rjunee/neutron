@@ -1,23 +1,22 @@
 ---
 title: Re-publish a built commit after a credential blink, without rebuilding
 group: trident
-status: open
+status: done
 priority: P1
 cutover: false
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
 > **NARROWED 2026-09-12, at the split.** Acceptance (a) LANDED — the publish-failure
-> classifier exists (`PublishFailureClass`, `trident/orchestrator.ts:855`), and a
+> classifier exists (`PublishFailureClass`, `trident/orchestrator.ts:927`), and a
 > stored reason distinguishes a credential failure from a rejected ref. But
-> `PUBLISH_CREDENTIAL_CLASS` (`trident/orchestrator.ts:856`) has **zero production
-> consumers**: a whole-tree search finds exactly one occurrence, its own `export`.
-> It is dead code, so (c) — `publish-credential` joining the auto-retry class list —
-> is declared and not wired.
+> Before issue #532, `PUBLISH_CREDENTIAL_CLASS` had **zero production consumers**:
+> a whole-tree search found exactly one occurrence, its own `export`. Issue #532
+> wired it into the publish-only retry path.
 >
-> **What is still wanted is (b), and (c) behind it:** a publish-only resume that
-> re-pushes the SAME sha without re-running Forge. The commit is already made; only
-> the push failed. (a) is kept below as context, not as work.
+> Issue #532 completed (b), and (c) behind it: a publish-only resume now re-pushes
+> the SAME sha without re-running Forge. The commit is already made; only the push
+> is retried. (a) is kept below as context.
 
 **The push credential can vanish mid-run, and when it does a FINISHED, REVIEWED build is
 thrown away** (measured 2026-08-14 overnight, runs `9bb31a2e` and `9e0f1a8b`). Both reached
@@ -56,18 +55,17 @@ should also make that state visible enough that a queue is not fed into a wall.
 
 ## Acceptance
 
-- [ ] A publish-credential failure leaves the run in a state that can publish LATER
+- [x] A publish-credential failure leaves the run in a state that can publish LATER
       without rebuilding. Assert a re-publish after the credential returns produces
       **the same sha**, and does NOT re-run Forge — a test that only proves the push
       eventually succeeds would also pass if the whole build were redone.
-- [ ] `PUBLISH_CREDENTIAL_CLASS` has a production consumer. It is dead today
-      (`trident/orchestrator.ts:856` is its only occurrence in the tree), so a search
-      finding only its own export means this is not built.
+- [x] `PUBLISH_CREDENTIAL_CLASS` has a production consumer. A search finding only
+      its own export means this is not built.
       verify: `rg -n "PUBLISH_CREDENTIAL_CLASS" --glob '!**/*.test.ts'` names a caller
-- [ ] `publish-credential` auto-retries with a backoff long enough to outlast a token
+- [x] `publish-credential` auto-retries with a backoff long enough to outlast a token
       refresh, and `publish-ref-rejected` / `publish-unknown` still NEVER auto-retry.
       Assert the negative with a mutant that broadens the class list.
-- [ ] The stored reason still never contains credential material, with a positive
+- [x] The stored reason still never contains credential material, with a positive
       control proving that assertion can fail.
-- [ ] When it is genuinely unrecoverable, the owner is told WHICH surface reconnects
+- [x] When it is genuinely unrecoverable, the owner is told WHICH surface reconnects
       GitHub — never a shell command, per the credential doctrine.

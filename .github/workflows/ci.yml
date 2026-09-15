@@ -165,7 +165,19 @@ name: ci
 # putting the content in the tree under review instead of behind a fetch.
 #
 # THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` is the
-# sole REQUIRED status check on `main`, with a strict up-to-date policy.
+# sole REQUIRED status check on `main`. Enforced by a RULESET, not classic branch
+# protection: `/repos/{owner}/{repo}/branches/main/protection` returns 404 and that
+# 404 means the OLD mechanism is unused, NOT that main is unprotected. The live
+# rules are at `/repos/{owner}/{repo}/rules/branches/main` — `deletion`,
+# `non_fast_forward`, `pull_request`, and `required_status_checks` naming exactly
+# one context, `test`.
+#
+# THE UP-TO-DATE POLICY IS OFF. `strict_required_status_checks_policy` is `false`,
+# so a PR can merge without being rebased onto the tip. Measured 2026-09-15; an
+# earlier version of this comment claimed the strict policy was on, and the merge
+# queue rationale further down still assumes it. That assumption is now wrong: a
+# green `test` certifies the PR's own head, not the head merged with current main,
+# so two independently-green PRs can still break main together.
 # A required context that never reports blocks every PR forever, so the shards
 # are named `shard` and `test` is an AGGREGATOR that needs them all. Renaming
 # `test`, or making it anything other than a job that fails when any gate fails,
@@ -207,11 +219,12 @@ on:
   push:
     branches: [main]
 
-# Least-privilege default token: this workflow only reads the checkout, runs
-# typecheck + tests, and grants no write scopes (fixes the CodeQL alert
-# actions/missing-workflow-permissions).
+# Least-privilege default token: this workflow reads the checkout and open-PR
+# metadata, runs typecheck + tests, and grants no write scopes (fixes the CodeQL
+# alert actions/missing-workflow-permissions).
 permissions:
   contents: read
+  pull-requests: read
 
 # Cancel superseded runs to save runner minutes. Key PR runs on the PR NUMBER
 # (always slash-free) and push runs on the ref, namespaced by workflow. The
@@ -245,9 +258,10 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
-      # G5 — typecheck completeness: `tsc -p` for EVERY tsconfig.json in the repo,
+      # G5 — typecheck completeness: `tsc -p` for every project-owned tsconfig.json,
       # not just the root config. Discovery is dynamic, so a new package with a
-      # tsconfig is covered automatically; ci-workflow.test.ts guards that.
+      # tsconfig is covered automatically; tool-managed `.claude` worktrees are
+      # excluded, and ci-workflow.test.ts guards both sides.
       - run: bash scripts/ci/typecheck-all.sh
 
   lint:
@@ -294,6 +308,9 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
+      - name: Resolve deterministic commit-message base
+        id: leak-window
+        run: main="$(git rev-parse origin/main)" && head="$(git rev-parse HEAD)" && { [ "$main" != "$head" ] && base="$(git merge-base origin/main HEAD)" || base="$(git rev-parse HEAD^)"; } && echo "base=${base}" >> "$GITHUB_OUTPUT"
       # Fails the build if multi-instance vocabulary, owner PII or a Managed
       # module ever regresses into this public tree.
       - name: leak gate
@@ -309,8 +326,8 @@ jobs:
           # secrets by design. That is the ONLY context allowed to skip Tier-1;
           # leak-gate-nightly.yml re-scans the merged tree with the secret.
           LEAK_GATE_PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          # Commit-message scan window: the PR base, or the pre-push sha.
-          LEAK_GATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Derived only from repository history, so event shape cannot change it.
+          LEAK_GATE_BASE_SHA: ${{ steps.leak-window.outputs.base }}
           # PR title/body are attacker-controlled text. Passing them through `env:`
           # is safe; interpolating `${{ github.event… }}` into `run:` would be a
           # shell-injection sink.
@@ -376,6 +393,11 @@ jobs:
       # .gitattributes alone, so a clone carrying the opt-in entry-aware driver
       # cannot mask a deleted floor.
       - run: bun scripts/ci/check-governed-repo-attributes.ts .
+      - name: Check migration ordinals across open PRs
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/open-pr-migration-ordinal-check.ts
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:

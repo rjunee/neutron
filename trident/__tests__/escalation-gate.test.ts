@@ -12,10 +12,9 @@
  * repo recently:
  *
  *  1. NOTHING IN THE ARRANGEMENT MAY DO THE ESCALATING. Every function under test is
- *     sliced out of the SHIPPED `inner-workflow.mjs` (`loadEscalationGate`) and
- *     evaluated; no fixture implements a rule, and no expectation is compared against a
- *     value that merely happens to equal it here. Revert the gate and these go red —
- *     which is the only thing that makes them measurements.
+ *     imported from the gate modules; no fixture implements a rule, and no expectation
+ *     is compared against a value that merely happens to equal it here. Revert the gate
+ *     and these go red — which is the only thing that makes them measurements.
  *  2. `false`, `threw` and `succeeded-with-impossible-output` ARE ALL UNKNOWN, and none
  *     may share a branch with a definite answer. A finding with no identity is not a NEW
  *     finding; an unreadable finding list is not an EMPTY one; an uncountable round is
@@ -25,10 +24,30 @@
 
 import { describe, expect, test } from 'bun:test'
 import {
-  type GateFinding,
-  loadEscalationGate,
-  WORKFLOW_SRC,
-} from '../testing/load-escalation-gate.ts'
+  blockingFindingCount,
+  decideEscalation,
+  findingIdentity,
+  progressVerdict,
+  repeatVerdict,
+  roundIdentity,
+  validateEscalationClaim,
+} from '../gates/escalation.ts'
+import { eligibleFixFindings, type GateFinding } from '../gates/verdict.ts'
+
+const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
+
+const escalationGate = {
+  findingIdentity,
+  roundIdentity,
+  repeatVerdict,
+  blockingFindingCount,
+  progressVerdict,
+  validateEscalationClaim,
+  decideEscalation,
+  eligibleFixFindings,
+}
+
+const loadEscalationGate = () => escalationGate
 
 /** A finding in the shape `VERDICT_SCHEMA` asks for. */
 const f = (identity: string, severity = 'blocker'): GateFinding => {
@@ -50,9 +69,9 @@ const RECURRING: GateFinding[] = [
 const RECORDED_BLOCKING_COUNTS = [4, 2, 6, 4, 2, 4, 4, 4, 5]
 
 describe('finding identity — constructed from named fields, never a title', () => {
-  test('the extraction MATCHED — every assertion below is vacuous otherwise', () => {
-    // Asserted first and alone. A `loadEscalationGate` that silently returned an object
-    // of undefineds would make every test below pass against nothing.
+  test('the module exports MATCHED — every assertion below is vacuous otherwise', () => {
+    // Asserted first and alone. A module namespace containing undefined exports would
+    // make every test below pass against nothing.
     const gate = loadEscalationGate()
     for (const name of [
       'findingIdentity',

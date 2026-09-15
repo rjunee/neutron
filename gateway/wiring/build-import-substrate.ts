@@ -58,6 +58,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import {
+  assertConversationalProviderWired,
   normalizeProvider,
   type Provider,
 } from '@neutronai/runtime/adapters/select-substrate.ts'
@@ -248,6 +249,7 @@ export function buildImportSubstrate(
           ? resolvedProvider
           : input.provider
       const provider = normalizeProvider(effectiveProvider)
+      assertConversationalProviderWired(provider)
       if (provider !== 'anthropic') {
         return startOpenAiFamilySession({
           provider,
@@ -394,6 +396,7 @@ export function buildImportSubstrate(
         }
         const opts: ClaudeCodeSubstrateOptions = {
           substrate_instance_id: input.substrate_instance_id,
+          repl_pane_label: `import · ${input.project_slug ?? 'history'}`,
           env,
         }
         if (input.cwd !== undefined) opts.cwd = input.cwd

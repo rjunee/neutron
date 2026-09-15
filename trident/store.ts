@@ -1039,6 +1039,22 @@ export class TridentRunStore {
     return row === null ? null : rowToRun(row)
   }
 
+  /** SQLite compares the last host-state event in the same statement as the append.
+   * A stale host cannot overwrite a newer checkpoint or consume a task twice. */
+  async appendBuildModeState(runId: string, expected: number | null, meta: string): Promise<number | null> {
+    return this.db.transaction(tx => {
+      const result = tx.runSync(
+        `INSERT INTO code_trident_stage_events (run_id, stage, at, meta)
+         SELECT id, 'build-mode-state', ?, ? FROM code_trident_runs
+         WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+           AND (SELECT MAX(id) FROM code_trident_stage_events
+                WHERE run_id = ? AND stage = 'build-mode-state') IS ?`,
+        [this.now(), meta, runId, runId, expected],
+      )
+      return result.changes === 1 ? tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id : null
+    })
+  }
+
   async recordStageEvent(
     run_id: string,
     stage: string,
@@ -1070,6 +1086,21 @@ export class TridentRunStore {
         `SELECT at
            FROM code_trident_stage_events
           WHERE run_id = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+      )
+      .get(run_id)
+    return row === null ? null : row.at
+  }
+
+  /** Latest per-run wrapper heartbeat, excluding ordinary phase/stage events. */
+  latestHeartbeatAt(run_id: string): string | null {
+    const row = this.db
+      .prepare<{ at: string }, [string]>(
+        `SELECT at
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+            AND stage IN ('codex-exec-alive', 'codex-review-alive')
           ORDER BY id DESC
           LIMIT 1`,
       )
@@ -1553,6 +1584,27 @@ export class TridentRunStore {
                 last_advanced_at = ?
           WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
             AND subagent_status IS NOT 'crashed'`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
+  }
+
+  /**
+   * Atomically claim a publish-only retry. Unlike `beginInfraRetry`, this keeps
+   * `inner_result` and the completed dispatch slot intact: they are the durable
+   * proof that Forge already finished and the next tick must retry only publish.
+   */
+  async beginPublishRetry(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET infra_retries = COALESCE(infra_retries, 0) + 1,
+                last_advanced_at = ?
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND inner_result IS NOT NULL
+            AND subagent_status = 'completed'`,
         [this.now(), id],
       )
       return res.changes > 0

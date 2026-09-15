@@ -48,6 +48,7 @@ import {
   isAgentEngagementMode,
 } from '@neutronai/connect/agent-engagement.ts'
 import { defaultProjectEmoji, normaliseEmojiInput } from '../projects/default-emoji.ts'
+import type { Provider, ProviderSelection } from '@neutronai/runtime/adapters/select-substrate.ts'
 import {
   handleAppProjectInvite,
   httpStatusForInvite,
@@ -97,6 +98,8 @@ export interface ProjectSettings {
    * engages only on an `@neutron` mention. See connect/agent-engagement.ts.
    */
   agent_engagement_mode: AgentEngagementMode
+  /** NULL means this project follows the instance default. */
+  model_provider: Provider | null
   members: ProjectMember[]
 }
 
@@ -211,6 +214,7 @@ export interface ProjectSettingsStore {
       agent_engagement_mode?: AgentEngagementMode
       name?: string
       emoji?: string
+      model_provider?: Provider | null
     },
   ): Promise<ProjectSettings | null>
   /**
@@ -256,6 +260,7 @@ export function buildDefaultSettings(project_id: string): ProjectSettings {
     privacy_mode: 'private',
     billing_mode: 'personal',
     agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
+    model_provider: null,
     members: [],
   }
 }
@@ -307,6 +312,7 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
       agent_engagement_mode?: AgentEngagementMode
       name?: string
       emoji?: string
+      model_provider?: Provider | null
     },
   ): Promise<ProjectSettings | null> {
     const current = await this.get(project_slug, project_id)
@@ -316,6 +322,7 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
       patch.agent_engagement_mode === undefined &&
       patch.name === undefined &&
       patch.emoji === undefined
+      && patch.model_provider === undefined
     ) {
       // Twin of the SQLite store's no-op guard: a PATCH that changes nothing is
       // a read, and must not materialise the project (ISSUES #412). Without
@@ -330,6 +337,8 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
       emoji: patch.emoji ?? current.emoji,
       privacy_mode: patch.privacy_mode ?? current.privacy_mode,
       agent_engagement_mode: patch.agent_engagement_mode ?? current.agent_engagement_mode,
+      model_provider:
+        patch.model_provider === undefined ? current.model_provider : patch.model_provider,
     }
     this.rows.set(this.keyFor(project_slug, project_id), updated)
     return cloneSettings(updated)
@@ -387,6 +396,14 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
     this.rows.clear()
     this.archived.clear()
   }
+
+  /** Test-seam twin of the SQLite dispatch-time lookup. */
+  modelProviderOverrideForTests(project_id: string): Provider | null {
+    for (const [key, value] of this.rows) {
+      if (key.endsWith(`::${project_id}`)) return value.model_provider
+    }
+    return null
+  }
 }
 
 function cloneSettings(s: ProjectSettings): ProjectSettings {
@@ -399,6 +416,7 @@ function cloneSettings(s: ProjectSettings): ProjectSettings {
     privacy_mode: s.privacy_mode,
     billing_mode: s.billing_mode,
     agent_engagement_mode: s.agent_engagement_mode,
+    model_provider: s.model_provider,
     members: s.members.map((m) => ({ ...m })),
   }
 }
@@ -415,6 +433,8 @@ export interface AppProjectsSurfaceOptions {
    * refresh). Best-effort — a throw here must not fail the PATCH response.
    */
   onRailFieldChanged?: (input: { user_id: string }) => void
+  /** Inspectable effective provider and the hierarchy level that supplied it. */
+  resolveModelProvider?: (project_id: string) => ProviderSelection
   /**
    * In-app invite generation deps (M2.4). When omitted, the
    * `POST /api/app/projects/<id>/invite` route returns 501
@@ -572,14 +592,14 @@ const CONNECT_MEMBERS_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members$/
 const CONNECT_REVOKE_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members\/([^/]+)\/revoke$/
 
 const ALLOWED_PATCH_FIELDS: ReadonlyArray<
-  'privacy_mode' | 'agent_engagement_mode' | 'name' | 'emoji'
-> = ['privacy_mode', 'agent_engagement_mode', 'name', 'emoji']
+  'privacy_mode' | 'agent_engagement_mode' | 'name' | 'emoji' | 'model_provider'
+> = ['privacy_mode', 'agent_engagement_mode', 'name', 'emoji', 'model_provider']
 /** Project display-name (rename) bounds. */
 const MAX_PROJECT_NAME_LEN = 120
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
 
 export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppProjectsSurface {
-  const { store, auth, invite, sharedProjects, connect, createProject, onRailFieldChanged } = opts
+  const { store, auth, invite, sharedProjects, connect, createProject, onRailFieldChanged, resolveModelProvider } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -786,10 +806,10 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
       }
 
       if (method === 'GET') {
-        return handleGet(store, resolved.project_slug, project_id)
+        return handleGet(store, resolved.project_slug, project_id, resolveModelProvider)
       }
       if (method === 'PATCH') {
-        return handlePatch(req, store, resolved.project_slug, project_id, resolved.user_id, onRailFieldChanged)
+        return handlePatch(req, store, resolved.project_slug, project_id, resolved.user_id, onRailFieldChanged, resolveModelProvider)
       }
       return jsonError(
         405,
@@ -975,6 +995,7 @@ function sharedItemToListItem(item: SharedProjectItem): ProjectListItem {
     // A shared item carries the cross-instance projection only; a member
     // doesn't own the origin's settings, so the engagement mode defaults.
     agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
+    model_provider: null,
     members: [],
     // No local chat log for a foreign project → no activity key / unread.
     last_activity_at: '',
@@ -989,12 +1010,20 @@ async function handleGet(
   store: ProjectSettingsStore,
   project_slug: string,
   project_id: string,
+  resolveModelProvider?: (project_id: string) => ProviderSelection,
 ): Promise<Response> {
   const project = await store.get(project_slug, project_id)
   if (project === null) {
     return jsonError(404, 'project_not_found', `project_id=${project_id}`)
   }
-  return jsonOk({ project, project_id, project_slug })
+  return jsonOk({
+    project,
+    project_id,
+    project_slug,
+    ...(resolveModelProvider !== undefined
+      ? { model_provider_resolution: resolveModelProvider(project_id) }
+      : {}),
+  })
 }
 
 async function handlePatch(
@@ -1004,6 +1033,7 @@ async function handlePatch(
   project_id: string,
   user_id: string,
   onRailFieldChanged?: (input: { user_id: string }) => void,
+  resolveModelProvider?: (project_id: string) => ProviderSelection,
 ): Promise<Response> {
   const body = await readJsonBody(req)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -1023,11 +1053,12 @@ async function handlePatch(
   const hasEngagement = 'agent_engagement_mode' in fields
   const hasName = 'name' in fields
   const hasEmoji = 'emoji' in fields
-  if (!hasPrivacy && !hasEngagement && !hasName && !hasEmoji) {
+  const hasModelProvider = 'model_provider' in fields
+  if (!hasPrivacy && !hasEngagement && !hasName && !hasEmoji && !hasModelProvider) {
     return jsonError(
       400,
       'empty_patch',
-      'PATCH body must include at least one writable field (name, emoji, privacy_mode, agent_engagement_mode)',
+      'PATCH body must include at least one writable field (name, emoji, privacy_mode, agent_engagement_mode, model_provider)',
     )
   }
 
@@ -1036,7 +1067,21 @@ async function handlePatch(
     agent_engagement_mode?: AgentEngagementMode
     name?: string
     emoji?: string
+    model_provider?: Provider | null
   } = {}
+
+  if (hasModelProvider) {
+    const raw = fields['model_provider']
+    if (raw !== null && raw !== 'anthropic' && raw !== 'openai' && raw !== 'openai-codex' && raw !== 'pi') {
+      return jsonError(
+        400,
+        'invalid_model_provider',
+        'model_provider must be null or one of: anthropic, openai, openai-codex, pi',
+        { field: 'model_provider' },
+      )
+    }
+    patch.model_provider = raw
+  }
 
   if (hasEmoji) {
     const normalised = normaliseEmojiInput(fields['emoji'])
@@ -1105,7 +1150,14 @@ async function handlePatch(
       /* a live-refresh push must never fail the persisted PATCH */
     }
   }
-  return jsonOk({ project: updated, project_id, project_slug })
+  return jsonOk({
+    project: updated,
+    project_id,
+    project_slug,
+    ...(resolveModelProvider !== undefined
+      ? { model_provider_resolution: resolveModelProvider(project_id) }
+      : {}),
+  })
 }
 
 async function handleInviteRoute(
@@ -1266,4 +1318,3 @@ async function handleConnectRevokeRoute(
   }
   return jsonOk({ revoked: result.revoked, project_id, local_slug })
 }
-

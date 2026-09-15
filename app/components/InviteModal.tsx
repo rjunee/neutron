@@ -30,7 +30,7 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { formatInviteExpiry, isValidInviteeEmail } from '../lib/invite-helpers';
 
 export interface InviteModalResult {
@@ -213,7 +213,7 @@ export function InviteModal({
 
 const LINK_MIN_HEIGHT = 56;
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

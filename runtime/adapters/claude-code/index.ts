@@ -81,6 +81,8 @@ export interface ClaudeCodeSubstrateOptions {
    * the same instance.
    */
   substrate_instance_id: string
+  /** Human-legible pane label composed from the substrate's role and card. */
+  repl_pane_label?: string
   /**
    * Working directory for the REPL. Affects both the binary's `--session-id`
    * transcript path (`~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`) and
@@ -414,6 +416,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   const p: PersistentReplSubstrateOptions = {
     substrate_instance_id: options.substrate_instance_id,
   }
+  if (options.repl_pane_label !== undefined) p.repl_pane_label = options.repl_pane_label
   // NORMALIZED ONCE, USED FOR BOTH SLOTS — see {@link resolveReplCwdAndHome}.
   // An earlier revision of this change trimmed only the supervision home and
   // still forwarded `options.cwd` raw, which is the worse half of the pair:

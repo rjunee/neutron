@@ -45,7 +45,7 @@ import {
 } from 'react-native';
 
 import { copyToClipboard } from '../lib/clipboard';
-import { BREAKPOINTS, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { createThemedStyles, BREAKPOINTS, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { loadAppConfig } from '../lib/config';
 import {
   type ConnectBadgeTone,
@@ -976,7 +976,7 @@ function nonEmpty(value: string | null | undefined, fallback: string): string {
   return trimmed.length === 0 ? fallback : trimmed;
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   overlay: {
     position: 'absolute',
     top: 0,

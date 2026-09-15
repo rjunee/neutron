@@ -1,53 +1,14 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createLogger } from '@neutronai/logger'
+export { briefIntegrity } from './gates/brief-integrity.ts'
+import { briefIntegrity } from './gates/brief-integrity.ts'
 
 const log = createLogger('trident-brief-parts')
 
 /**
- * Launcher-side twin of `briefIntegrity` in `inner-workflow.mjs`, pinned by a
- * parity test and MUST NOT drift. The receipt enforced by the codex wrapper is
- * computed by the `.mjs` function over the same string.
+ * The receipt enforced by the codex wrapper is computed over the same string.
  */
-export function briefIntegrity(text: string): string {
-  let bytes = 0
-  let h = 0x811c9dc5
-  const push = (b: number) => {
-    bytes++
-    h = Math.imul(h ^ b, 0x01000193) >>> 0
-  }
-  for (let i = 0; i < text.length; i++) {
-    let cp = text.charCodeAt(i)
-    if (cp >= 0xd800 && cp <= 0xdbff) {
-      const lo = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
-      if (lo >= 0xdc00 && lo <= 0xdfff) {
-        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)
-        i++
-      } else {
-        cp = 0xfffd
-      }
-    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
-      cp = 0xfffd
-    }
-    if (cp < 0x80) {
-      push(cp)
-    } else if (cp < 0x800) {
-      push(0xc0 | (cp >> 6))
-      push(0x80 | (cp & 0x3f))
-    } else if (cp < 0x10000) {
-      push(0xe0 | (cp >> 12))
-      push(0x80 | ((cp >> 6) & 0x3f))
-      push(0x80 | (cp & 0x3f))
-    } else {
-      push(0xf0 | (cp >> 18))
-      push(0x80 | ((cp >> 12) & 0x3f))
-      push(0x80 | ((cp >> 6) & 0x3f))
-      push(0x80 | (cp & 0x3f))
-    }
-  }
-  return `${bytes}:${h.toString(16).padStart(8, '0')}`
-}
-
 /**
  * Byte-domain twin of `briefIntegrity` and `codex-build.sh`'s `fnv_receipt`.
  * For every string, including lone surrogates, this invariant holds:

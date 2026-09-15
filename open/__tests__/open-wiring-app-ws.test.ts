@@ -125,7 +125,7 @@ function buildDeps() {
       buttonStore: { emit: async () => ({ prompt_id: 'p', was_new: true }), latestTurnByTopic: async () => null },
     } as unknown as LandingStackWithEngine,
     emitProjectsChangedIfChanged: () => {},
-    buildProjectsChangedFrame: () => ({
+    buildProjectsChangedFrame: async () => ({
       v: 1 as const,
       type: 'projects_changed' as const,
       ts: 0,
