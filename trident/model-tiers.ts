@@ -1,3 +1,4 @@
+import { BUILTIN_MODEL_TIERS, configuredModels } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/trident — THE ONE MODEL-TIER REGISTRY: what a tier resolves to, who
  * provides it, and HOW the workflow reaches it.
@@ -43,17 +44,7 @@ export const TRANSPORTS = ['agent', 'cli'] as const
 export type Transport = (typeof TRANSPORTS)[number]
 
 /** Built-in tiers in pane order; modelTierRegistry also includes configured seats. */
-export const MODEL_TIERS: readonly string[] = [
-  'none',
-  'fable',
-  'opus',
-  'sonnet',
-  'fast',
-  'sol',
-  'terra',
-  'luna',
-  'k3',
-] as const
+export const MODEL_TIERS: readonly string[] = BUILTIN_MODEL_TIERS
 export type ModelTier = string
 
 /** The credential a `cli` tier needs before it can run. `null` → nothing to set up. */
@@ -236,30 +227,8 @@ export function modelTierRegistry(): ReadonlyArray<ModelTierDescriptor> {
  * Malformed rows refuse the configuration rather than silently removing a seat.
  */
 export function configuredReviewSeats(): ModelTierDescriptor[] {
-  const raw = process.env['NEUTRON_REVIEW_SEATS']
-  if (raw === undefined) return []
-  let rows: unknown
-  try { rows = JSON.parse(raw) } catch { throw new Error('review seats: invalid NEUTRON_REVIEW_SEATS JSON') }
-  if (!Array.isArray(rows)) throw new Error('review seats: expected an array')
-  const seen = new Set<string>(MODEL_TIERS)
-  return rows.map((row: unknown, index) => {
-    const seat = row as Record<string, unknown> | null
-    const name = typeof seat?.['model'] === 'string' ? seat['model'] : `row ${index}`
-    const refuse = (): never => { throw new Error(`review seat ${name}: invalid or duplicate configuration`) }
-    if (!seat || typeof seat !== 'object' || Array.isArray(seat)) return refuse()
-    for (const field of ['tier', 'provider', 'model', 'endpoint', 'credential']) {
-      if (typeof seat[field] !== 'string' || !seat[field].trim() || /[\x00-\x1f\x7f]/.test(seat[field])) return refuse()
-    }
-    const { tier, provider, model, endpoint, credential } = seat as {
-      tier: string; provider: string; model: string; endpoint: string; credential: string
-    }
-    if (seen.has(tier) || !/^[A-Z_][A-Z0-9_]*$/.test(credential)) return refuse()
-    try {
-      const url = new URL(endpoint)
-      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return refuse()
-    } catch { return refuse() }
-    seen.add(tier)
-    return { tier, provider, model_id: model, endpoint, credential, group: 'api',
-      transport: 'cli', wrapper: 'trident/api-review-cli.ts', env_var: null, requires: credential }
-  })
+  return configuredModels(process.env).map(({ tier, provider, model, endpoint, credential }) => ({
+    tier, provider, model_id: model, endpoint, credential, group: 'api',
+    transport: 'cli', wrapper: 'trident/api-review-cli.ts', env_var: null, requires: credential,
+  }))
 }

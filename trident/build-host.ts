@@ -1,4 +1,8 @@
+import { assessReviewCi, type ReviewCiSource } from './gates/review-ci.ts'
+import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
+import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
+import { checkBuildClaim } from './gates/build-claim.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -18,6 +22,7 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  modes?: BuildRunDeps['modes']
   boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
@@ -27,12 +32,16 @@ export interface BuildHostOptions {
   phaseUsage: Pick<TridentPhaseUsageStore, 'list' | 'record'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
+    run: MutationGateInput['run'] & { max_rounds?: number | undefined }
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
   /** Persisted previous review pin; explicit null for a fresh first round. */
   reviewed_head: string | null
   local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
+  reviewReadiness?: ReviewReadinessSource
+  reviewCi?: ReviewCiSource
+  reviewSuite?: ReviewSuiteSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
@@ -100,6 +109,17 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (result !== 'recorded') throw new Error(`Phase usage write was ${result}`)
       usageLastObserved.set(key, absolute.observed_at)
     },
+    checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
+    async readReviewCap(runId) {
+      const row = options.mutation.run
+      if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
+      return { kind: 'known', max_rounds: row.max_rounds }
+    },
+    // A missing run row is the cap reader's `unknown`, not a crash here: the same
+    // test deletes the row to exercise that refusal.
+    assignedBranch: options.mutation.run?.branch ?? (options.mutation.run?.slug ? `trident/${options.mutation.run.slug}` : undefined),
+    ...(options.modes ? { modes: options.modes } : {}),
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host
@@ -140,7 +160,12 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       return result
     },
     assessMergeDiff,
-    reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed),
+    reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
+      ? localReadiness(snapshot)
+      : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
+    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha),
+    reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
+    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })

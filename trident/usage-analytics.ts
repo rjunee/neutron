@@ -20,6 +20,8 @@ export interface UsageAnalytics {
     total: UsageAmount
     by_project: UsageBreakdownRow[]
     by_phase: UsageBreakdownRow[]
+    by_topic: UsageBreakdownRow[]
+    by_agent: UsageBreakdownRow[]
     /** Historical model identity is not stored yet. Keep the seam without guessing. */
     by_model: { state: 'unknown'; rows: UsageBreakdownRow[] }
   }
@@ -27,6 +29,7 @@ export interface UsageAnalytics {
     total: UsageAmount
     by_reason: UsageBreakdownRow[]
     unclassified_runs: number
+    bands: Array<{ key: 'merged' | 'recoverable' | 'unrecoverable'; amount: UsageAmount }>
   }
   throughput: {
     state: MeasurementState
@@ -37,13 +40,15 @@ export interface UsageAnalytics {
 interface RawUsage {
   run_id: string
   usage_phase: string
+  usage_topic: string
+  usage_agent: string
   status: 'unknown' | 'partial' | 'complete'
   input_tokens: number | null
   output_tokens: number | null
   cache_read_tokens: number | null
   cache_creation_tokens: number | null
   repo_path: string
-  run_phase: TridentRun['phase']
+  run_phase: TridentRun['phase'] | null
   inner_verdict: TridentRun['inner_verdict']
   inner_checkpoint: string | null
   inner_checkpoint_findings: string | null
@@ -51,11 +56,16 @@ interface RawUsage {
   failure_reason: string | null
   started_at: string
   last_advanced_at: string
+  inner_checkpoint_head: string | null
+  base_sha: string | null
+  cache_is_subset: number
 }
 
 function tokens(row: RawUsage): number | null {
   const fields = [row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_creation_tokens]
-  return fields.every((v) => v === null) ? null : fields.reduce<number>((sum, v) => sum + (v ?? 0), 0)
+  if (fields.every((v) => v === null)) return null
+  return (row.input_tokens ?? 0) + (row.output_tokens ?? 0) +
+    (row.cache_is_subset === 1 ? 0 : (row.cache_read_tokens ?? 0) + (row.cache_creation_tokens ?? 0))
 }
 
 function projectName(path: string): string {
@@ -86,6 +96,8 @@ function terminalCause(row: RawUsage): string | null {
 }
 
 function wasteReason(row: RawUsage): string | null {
+  if (wasteClass(row) !== 'unrecoverable') return null
+  if (row.run_phase === null) return null
   const disposition = terminalRunDisposition({
     phase: row.run_phase,
     inner_verdict: row.inner_verdict,
@@ -101,15 +113,32 @@ function wasteReason(row: RawUsage): string | null {
   return 'failed before build'
 }
 
+function wasteClass(row: RawUsage): 'merged' | 'recoverable' | 'unrecoverable' | null {
+  if (row.run_phase === null || (row.run_phase !== 'done' && row.run_phase !== 'failed' && row.run_phase !== 'stopped')) return null
+  if (row.run_phase === 'done' && row.inner_verdict === 'APPROVE') return 'merged'
+  if (row.inner_checkpoint_head !== null && row.base_sha !== null && row.inner_checkpoint_head !== row.base_sha) return 'recoverable'
+  return 'unrecoverable'
+}
+
 export class TridentUsageAnalytics {
   constructor(private readonly db: ProjectDb) {}
 
   read(): UsageAnalytics {
-    const rows = this.db.all<RawUsage>(`SELECT u.run_id, u.phase AS usage_phase, u.status,
+    const rows = this.db.all<RawUsage>(`SELECT u.run_id, u.phase AS usage_phase, '' AS usage_topic,
+      'trident' AS usage_agent, u.status,
       u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens,
       r.repo_path, r.phase AS run_phase, r.inner_verdict, r.inner_checkpoint,
-      r.inner_checkpoint_findings, r.inner_result, r.failure_reason, r.started_at, r.last_advanced_at
-      FROM code_trident_phase_usage u JOIN code_trident_runs r ON r.id = u.run_id`)
+      r.inner_checkpoint_findings, r.inner_result, r.failure_reason, r.started_at, r.last_advanced_at,
+      r.inner_checkpoint_head, r.base_sha, 0 AS cache_is_subset
+      FROM code_trident_phase_usage u JOIN code_trident_runs r ON r.id = u.run_id
+      UNION ALL
+      SELECT e.run_id, e.phase, e.topic, e.agent, 'complete', e.input_tokens, e.output_tokens,
+      e.cache_read_tokens, 0, e.project, r.phase, r.inner_verdict, r.inner_checkpoint,
+      r.inner_checkpoint_findings, r.inner_result, r.failure_reason,
+      COALESCE(r.started_at, datetime(e.observed_at / 1000, 'unixepoch')),
+      COALESCE(r.last_advanced_at, datetime(e.observed_at / 1000, 'unixepoch')),
+      r.inner_checkpoint_head, r.base_sha, 1
+      FROM transcript_usage_events e LEFT JOIN code_trident_runs r ON r.id = e.run_id`)
     // Keep the unknown phase rows in each wasted run. Dropping them would turn a
     // measured subset into an exact-looking total.
     const wasteRows = rows.filter((row) => wasteReason(row) !== null)
@@ -125,7 +154,7 @@ export class TridentUsageAnalytics {
       const start = Date.parse(row.started_at)
       const end = Date.parse(row.last_advanced_at)
       if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) { invalidDurations += 1; continue }
-      durations.push({ project: projectName(row.repo_path), seconds: Math.round((end - start) / 1000), outcome: row.run_phase })
+      durations.push({ project: projectName(row.repo_path), seconds: Math.round((end - start) / 1000), outcome: row.run_phase! })
     }
     durations.sort((a, b) => b.seconds - a.seconds)
     const unclassified = [...terminalRuns.values()].filter((row) => {
@@ -137,12 +166,18 @@ export class TridentUsageAnalytics {
         total: amount(rows),
         by_project: breakdown(rows, (row) => projectName(row.repo_path)),
         by_phase: breakdown(rows, (row) => row.usage_phase),
+        by_topic: breakdown(rows.filter((row) => row.usage_topic !== ''), (row) => row.usage_topic),
+        by_agent: breakdown(rows, (row) => row.usage_agent),
         by_model: { state: 'unknown', rows: [] },
       },
       waste: {
         total: amount(wasteRows),
         by_reason: breakdown(wasteRows, (row) => wasteReason(row)!),
         unclassified_runs: unclassified,
+        bands: (['merged', 'recoverable', 'unrecoverable'] as const).map((key) => ({
+          key,
+          amount: amount(rows.filter((row) => wasteClass(row) === key)),
+        })),
       },
       throughput: {
         state: terminalRuns.size === 0 ? 'unknown' : invalidDurations === 0 ? 'complete' : 'partial',

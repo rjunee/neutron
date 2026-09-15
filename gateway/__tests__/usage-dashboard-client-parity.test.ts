@@ -684,6 +684,19 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     expect(line(pool, NOW)).not.toContain('97%')
   })
 
+  test('the all-accounts-capped band spans now to first proven capacity and refuses unknown accounts', () => {
+    const now = 1_800_000_000_000
+    const spent = poolOf([
+      { account_label: 'one', session: win({ fraction: 0.99, reset_at: now + 20_000 }), weekly: win({ fraction: 0.99, reset_at: now + 40_000 }) },
+      { account_label: 'two', session: win({ fraction: 0.99, reset_at: now + 10_000 }), weekly: win({ fraction: 0.99, reset_at: now + 30_000 }) },
+    ])
+    expect(mobile.projectPool(spent, now).all_accounts_capped).toEqual({ from: now, to: now + 30_000 })
+    expect(web.projectPool(spent, now).all_accounts_capped).toEqual({ from: now, to: now + 30_000 })
+    spent.accounts.push({ ...spent.accounts[0]!, account_label: 'unknown', weekly: null })
+    expect(mobile.projectPool(spent, now).all_accounts_capped).toBeNull()
+    expect(web.projectPool(spent, now).all_accounts_capped).toBeNull()
+  })
+
   test('between two AVAILABLE accounts the headline names the roomier one, not the first', () => {
     // ARGUS ROUND 4: `capacityRank` maps every `available` standing to one sentinel,
     // so a strict comparison kept `accounts[0]` — and the store returns accounts

@@ -18,6 +18,7 @@ import { TaskStore } from '@neutronai/tasks/store.ts'
 import { PersonaPromptLoader } from '../../../wiring/persona-loader.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
+import { resolveModelPricingTarget } from '@neutronai/runtime/model-pricing.ts'
 import {
   DEFAULT_NUDGE_MODEL,
   clampRationale,
@@ -454,7 +455,9 @@ describe('runNudgePass', () => {
 })
 
 describe('DEFAULT_NUDGE_MODEL — resolver reference', () => {
-  it('DEFAULT_NUDGE_MODEL equals FAST_MODEL from runtime/models.ts', () => {
-    expect(DEFAULT_NUDGE_MODEL).toBe(FAST_MODEL)
+  it('DEFAULT_NUDGE_MODEL resolves from the fast class', () => {
+    expect(resolveModelPricingTarget(DEFAULT_NUDGE_MODEL)).toBe(
+      resolveModelPricingTarget(FAST_MODEL),
+    )
   })
 })

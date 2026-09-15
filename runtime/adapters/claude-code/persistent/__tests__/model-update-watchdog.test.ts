@@ -22,6 +22,7 @@ import {
   isFallbackModel,
   parseModelId,
   compareModelRecency,
+  isModelClass,
   shouldRunModelUpdateCheck,
   decideModelUpdate,
   isSessionIdleForUpgrade,
@@ -122,6 +123,33 @@ describe('compareModelRecency — the newness signal (ISSUES #491)', () => {
     expect(parseModelId('claude-haiku-4-5-20251001')).toEqual({ family: 'haiku', version: [4, 5] })
     expect(parseModelId('claude-opus-5')).toEqual({ family: 'opus', version: [5] })
     expect(parseModelId('gpt-4')).toBeUndefined()
+  })
+})
+
+describe('model-class baselines', () => {
+  it('recognizes only the supported version-free Claude classes', () => {
+    expect(['opus', 'fable', 'sonnet', 'haiku'].every(isModelClass)).toBe(true)
+    expect(isModelClass('claude-opus-5')).toBe(false)
+  })
+
+  it('seeds the resolved concrete id without replacing a matching class alias', () => {
+    expect(decideModelUpdate({
+      probe: { ok: true, model: 'claude-opus-6' },
+      configuredModel: 'opus',
+      state: {},
+      knownFallbacks: FALLBACKS,
+      now: 1_700_000_000_000,
+    })).toEqual({ action: 'no-change', current: 'claude-opus-6', seed: 'claude-opus-6' })
+  })
+
+  it('refuses a concrete id from a different family than the configured class', () => {
+    expect(decideModelUpdate({
+      probe: { ok: true, model: 'claude-sonnet-6' },
+      configuredModel: 'opus',
+      state: {},
+      knownFallbacks: new Set(),
+      now: 1_700_000_000_000,
+    }).action).toBe('skip-unrecognized')
   })
 })
 

@@ -29,7 +29,7 @@ import {
 } from '../persistent-repl-substrate.ts'
 import { BEST_MODEL, getBestModel, setBestModelOverride } from '../../../../models.ts'
 import { compareModelRecency, type ProbeResult } from '../model-update-watchdog.ts'
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -161,18 +161,18 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
     const stateDir = mkdtempSync(join(tmpdir(), 'neutron-mu-wire-'))
     mkdirSync(stateDir, { recursive: true })
     try {
-      // The fixture must genuinely outrank the seed, or this test proves nothing.
-      expect(compareModelRecency(NEWER_THAN_SEED, BEST_MODEL)).toBe('newer')
+      const priorResolved = 'claude-opus-98'
+      expect(compareModelRecency(NEWER_THAN_SEED, priorResolved)).toBe('newer')
       const { host, spawns } = makeHost()
       const notices: Array<{ newModel: string; oldModel: string }> = []
       const opts = optsWith(host, stateDir, { ok: true, model: NEWER_THAN_SEED }, {
         onModelUpdate: (notice) => notices.push({ newModel: notice.newModel, oldModel: notice.oldModel }),
       })
+      writeFileSync(opts.modelUpdateStatePath as string, JSON.stringify({ last_known_model: priorResolved }))
       registerSupervisedSubstrate(opts)
 
       const sub = createPersistentReplSubstrate(opts)
       await drainOK(sub.start({ prompt: 'hi', tools: [], model_preference: ['claude-opus-4-7'] }))
-      const key = poolKeyFor(opts)
       const spawnsBefore = spawns().length
 
       // Start + drive the model-update watchdog tick deterministically.
@@ -182,30 +182,12 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       await wd!.tick()
 
       // 1. The notice fired once (edge).
-      expect(notices).toEqual([{ newModel: NEWER_THAN_SEED, oldModel: BEST_MODEL }])
-      // 2. The model was adopted as the runtime default.
-      expect(getBestModel()).toBe(NEWER_THAN_SEED)
+      expect(notices).toEqual([{ newModel: NEWER_THAN_SEED, oldModel: priorResolved }])
+      // 2. The runtime remains pinned to the class, never the detected version.
+      expect(getBestModel()).toBe('opus')
 
-      // 3. The idle session was respawned onto the new model (fire-and-forget
-      //    upgrade — poll for the respawn argv).
-      const respawned = await until(() =>
-        spawns()
-          .slice(spawnsBefore)
-          .some((argv) => argv.includes('--resume') && argv.includes(NEWER_THAN_SEED)),
-      )
-      expect(respawned).toBe(true)
-
-      const upgradeSpawn = spawns()
-        .slice(spawnsBefore)
-        .find((argv) => argv.includes('--resume'))
-      expect(upgradeSpawn).toBeDefined()
-      // `--model` is emitted LAST and carries the new id.
-      const mIdx = upgradeSpawn!.indexOf('--model')
-      expect(upgradeSpawn![mIdx + 1]).toBe(NEWER_THAN_SEED)
-
-      // The registry record's model was rewritten BEFORE the respawn.
-      await until(() => getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model === NEWER_THAN_SEED)
-      expect(getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model).toBe(NEWER_THAN_SEED)
+      // 3. A running child is not bounced merely because the alias resolved anew.
+      expect(spawns().slice(spawnsBefore).filter((argv) => argv.includes('--resume'))).toEqual([])
     } finally {
       rmSync(stateDir, { recursive: true, force: true })
     }
@@ -244,13 +226,14 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
     const stateDir = mkdtempSync(join(tmpdir(), 'neutron-mu-wire-'))
     mkdirSync(stateDir, { recursive: true })
     try {
-      // The fixture must genuinely be a downgrade, or this test proves nothing.
-      expect(compareModelRecency(OLDER_THAN_SEED, BEST_MODEL)).toBe('older')
+      const priorResolved = 'claude-opus-5'
+      expect(compareModelRecency(OLDER_THAN_SEED, priorResolved)).toBe('older')
       const { host, spawns } = makeHost()
       const notices: unknown[] = []
       const opts = optsWith(host, stateDir, { ok: true, model: OLDER_THAN_SEED }, {
         onModelUpdate: (n2) => notices.push(n2),
       })
+      writeFileSync(opts.modelUpdateStatePath as string, JSON.stringify({ last_known_model: priorResolved }))
       registerSupervisedSubstrate(opts)
 
       const sub = createPersistentReplSubstrate(opts)

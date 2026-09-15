@@ -32,6 +32,9 @@ async function fixture() {
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
   const options: BuildHostOptions = {
+    reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checks: [{ name: 'checks', state: 'passed' }] }) },
+    reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
+    reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
@@ -300,7 +303,9 @@ test('host admission and review reach authoritative policy sources', async () =>
   }
   const host = f.make()
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
+  const progress: unknown[] = []
+  expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
+  expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
@@ -528,7 +533,7 @@ async function boundFixture(failure = false) {
   // Reachable permissive build control: a routing regression must actually build,
   // publish and merge, rather than stop at an unrelated admission or leak gate.
   host.deps.admissionGate = async () => ({ kind: 'allow' })
-  host.deps.reviewGate = async () => ({ kind: 'approve' })
+  host.deps.reviewGate = async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.mergeGate = async () => ({ kind: 'allow' })
@@ -602,3 +607,123 @@ for (const status of ['findings-unresolved', 'gate-error'] as const) {
     if (status === 'findings-unresolved') expect(result.findings).toEqual([{ rule: 'vocabulary', file: 'README.md', line: 7 }])
   })
 }
+
+test('host review readiness uses independent facts and fails closed when unwired', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toEqual({ kind: 'allow' })
+  f.options.reviewReadiness = { observe: async () => ({ kind: 'unknown', detail: 'required configuration unreadable' }) }
+  expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toEqual({ kind: 'unknown', detail: 'required configuration unreadable' })
+  delete f.options.reviewReadiness
+  expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('source is missing') })
+})
+
+test('host composes suite observations with host run and round identity', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toEqual({ kind: 'known', findings: [] })
+  f.options.reviewSuite = { observe: async (subject, round) => ({ kind: 'known', runId: 'test', head: subject.head, round, strategy: 'full suite', scope: 'full-suite', report: { testsPassed: false, suiteOutcome: 'not-run' } }) }
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
+  f.options.mutation.run.id = 'other'
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
+  delete f.options.reviewSuite
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
+})
+
+for (const cap of [undefined, 2, 7]) {
+  test(`G076 host threads run row cap ${String(cap)} into the driver`, async () => {
+    const f = await fixture()
+    f.options.mutation.run.max_rounds = cap
+    const calls: string[] = []
+    // G042 stops a fix round that leaves the measured head where it was, so this
+    // fixer moves the head the way a real one does. Without it the run ends on
+    // lost work instead of on the cap this test exists to count.
+    let landed = 0
+    const head = () => landed === 0 ? snapshot.head : `${'c'.repeat(39)}${landed % 10}`
+    f.options.runners.pi = {
+      ...fakeRunner('pi'),
+      run: async request => {
+        calls.push(request.step_id)
+        if (request.role === 'fix') landed++
+        return { kind: 'completed', result: { ...snapshot, head: head(), payload: { round: 0, max_rounds: 100 } },
+          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+      },
+    }
+    const host = f.make()
+    host.deps.admissionGate = async () => ({ kind: 'allow' })
+    host.deps.measure = async () => ({ kind: 'known', value: { ...snapshot, head: head() } })
+    // Readiness observes its own revision and refuses one that has moved; this
+    // test moves the head deliberately, so readiness is scripted here and is
+    // certified by its own tests instead.
+    host.deps.reviewReadiness = async () => ({ kind: 'allow' })
+    // A real panel reports its findings to the host; this stub must too, or the
+    // driver's progress gate has nothing to read and this test stops on that
+    // instead of on the cap it exists to measure.
+    host.deps.reviewGate = async (_payload, _snapshot, round, _used, record) => {
+      record?.({ findings: [`bug-${round}`], blockingCount: 0 })
+      return { kind: 'fix', findings: [`bug-${round}`] }
+    }
+    expect(await host.run(f.input(host), new AbortController().signal)).toMatchObject({
+      kind: 'blocked', on: expect.stringContaining('round ceiling'),
+    })
+    expect(calls.filter(call => call.includes(':review:'))).toEqual(
+      Array.from({ length: cap ?? 10 }, (_, i) => `test:review:${i + 1}`))
+  })
+}
+
+test('G076 host refuses a missing or mismatched cap row', async () => {
+  for (const missing of [false, true]) {
+    const f = await fixture()
+    if (missing) f.options.mutation.run = undefined as unknown as BuildHostOptions['mutation']['run']
+    else f.options.mutation.run.id = 'other-run'
+    const host = f.make()
+    host.deps.admissionGate = async () => ({ kind: 'allow' })
+    expect(await host.run(f.input(host), new AbortController().signal)).toMatchObject({
+      kind: 'unknown', detail: 'Review round cap run row is missing or mismatched',
+    })
+  }
+})
+
+test('G100 composed host preserves a real Git branch before reporting conflict', async () => {
+  const f = await fixture()
+  const repo = f.options.mutation.run.repo_path
+  const remote = join(repo, 'origin.git')
+  const run: BuildHostOptions['mutation']['run_host'] = async (argv, cwd) => {
+    const child = Bun.spawn(argv, { cwd: cwd ?? repo, stdout: 'pipe', stderr: 'pipe' })
+    const [stdout, stderr, exit_code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { ok: exit_code === 0, stdout, stderr, exit_code }
+  }
+  const git = async (...args: string[]) => {
+    const result = await run(['git', ...args], repo)
+    expect(result.ok).toBe(true)
+    return result.stdout.trim()
+  }
+  await git('init', '-b', 'change')
+  await git('init', '--bare', remote)
+  await git('remote', 'add', 'origin', remote)
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base')
+  const old = await git('rev-parse', 'HEAD')
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'built')
+  const built = await git('rev-parse', 'HEAD')
+  f.options.mutation.run_host = run
+  const deps = f.make().deps
+  expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toMatchObject({ kind: 'blocked' })
+  expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+  expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+})
+
+test('G023 host derives branch assignment from the run', async () => {
+  const f = await fixture()
+  f.options.mutation.run.branch = 'assigned'
+  expect(f.make().deps.assignedBranch).toBe('assigned')
+  f.options.mutation.run.branch = null
+  expect(f.make().deps.assignedBranch).toBe(`trident/${f.options.mutation.run.slug}`)
+})
+
+test('G055 G056 host composes measured CI with its pinned base', async () => {
+  const f = await fixture()
+  f.options.reviewCi = { observe: async value => ({ kind: 'known', head: value.head, status: 'red', failing: ['unit'], base: { head: f.options.leak.base_sha, status: 'red', failing: ['unit'] } }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'known', findings: [{ advisory: true }] })
+  f.options.reviewCi = { observe: async () => ({ kind: 'unknown', detail: 'CI unavailable' }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'unknown' })
+})

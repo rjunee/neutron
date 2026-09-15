@@ -103,10 +103,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
 
   // SWAPPABLE PROVIDER — one live, project-aware provider option bag shared by
   // conversational, utility, and build substrates below.
-  // EXPLICIT operator selection vs FULLY-WIRED. `ctx.provider === 'openai'` is the
-  // operator's explicit choice (NEUTRON_MODEL_PROVIDER=openai); it is honored even
-  // when incomplete so the substrate FAILS LOUDLY rather than silently routing the
-  // operator's prompts to Anthropic — the provider they did NOT select (audit High).
+  // Keep credentials available for live provider changes. Incomplete selections
+  // reach the dispatch refusal instead of routing to another provider.
   const openaiFullyWired =
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
@@ -124,17 +122,22 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const conversationalProviderFor = (
     withToolBridge: boolean,
   ): Partial<BuildLlmCallSubstrateInput> =>
-    ctx.provider !== undefined || ctx.providerResolver !== undefined
+    ctx.provider !== undefined || ctx.providerResolver !== undefined || ctx.env['NEUTRON_PROJECT_MODELS'] !== undefined
       ? {
-          // ALWAYS set provider='openai' for an explicit selection. When fully wired
-          // the `openai` config is included; when NOT, it is omitted so the substrate
-          // emits its LOUD terminal error (never a silent Anthropic fallback).
+          configuredChat: {
+            env: ctx.env,
+            ...(ctx.bindMcpResolver === undefined ? {} : { bindMcpResolver: ctx.bindMcpResolver }),
+            ...(withToolBridge && ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
+            ...(ctx.openaiFetchImpl === undefined ? {} : { fetchImpl: ctx.openaiFetchImpl }),
+          },
+          // The resolver chooses per turn, with its selection source attached.
           ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
           ...(ctx.providerResolver !== undefined ? { providerResolver: ctx.providerResolver } : {}),
           ...(openaiFullyWired
             ? {
                 openai: {
                   pool: ctx.openaiLlmPool!,
+                  ...(ctx.codexSpawnImpl !== undefined ? { spawnImpl: ctx.codexSpawnImpl } : {}),
                   bindMcpResolver: ctx.bindMcpResolver!,
                   // OPERATOR OVERRIDE (audit round 11) — resolve the model ids from the
                   // COMPOSER'S selected env (`ctx.env`), NOT the ambient global
@@ -158,21 +161,15 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // tool bridge ON (mirrors enableToolBridge), so both reuse `liveAgentProvider`.
   const phaseSpecProvider = conversationalProviderFor(false)
   const liveAgentProvider = conversationalProviderFor(true)
+  const buildProvider = { ...phaseSpecProvider }
+  delete buildProvider.configuredChat
 
-  // Codex-fix — the CONVERSATIONAL substrates build when the SELECTED provider's
-  // pool is available, NOT solely on the Anthropic `llmPool`. An OpenAI-only box
-  // (valid OPENAI_API_KEY, no Claude credential) must still get its conversational
-  // pair; otherwise `llmPool === null` silently nulls them while the OpenAI pool is
-  // never consulted (repro: NEUTRON_MODEL_PROVIDER=openai + OPENAI_API_KEY, no Claude).
-  //
-  // The Anthropic `pool`/`resolvePool` arg is required by the composer contract but
-  // is NEVER consulted on an openai turn (`start()` delegates to the openai branch
-  // before touching it). When there's no Anthropic pool we thread a lazy resolver
-  // that returns null so construction still yields a non-null Substrate. When NOT
-  // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
-  // to before.
-  const conversationalAvailable =
-    ctx.providerResolver !== undefined || ctx.provider !== undefined || llmPool !== null
+  // Credential availability and provider selection are independent. A live
+  // resolver can exist before any credential does; that boot must retain the
+  // null substrates consumed by deterministic callers. With credentials, keep
+  // resolution live so project overrides and instance changes apply per turn.
+  const harnessAvailable = llmPool !== null || openaiFullyWired
+  const conversationalAvailable = harnessAvailable || ctx.env['NEUTRON_PROJECT_MODELS'] !== undefined
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 
@@ -481,22 +478,17 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // so per-worktree dispatch HAS to re-root the substrate per turn; this
   // closes the two hardening items the first prod-boot wiring PR deferred.)
   //
-  // When no credential resolves (`llmPool === null`) the dispatch stays null
-  // and `composition.trident` is left unset — the tick loop runs its
-  // restart-safe `stubAdvanceDeps` no-op, the unchanged LLM-less behaviour.
-  // A FRESH ephemeral CC-subprocess substrate per turn, rooted at the call's
-  // cwd. Shared by the Trident build loop and the agent-dispatch family below
-  // (each passes its own `instance_id` prefix) so both spawn through the SAME
-  // path (NEVER a direct api.anthropic.com call). Throws on an empty pool so a
-  // dispatch surfaces as a crashed turn rather than a silent no-op.
+  // Build wrappers use the same live resolution as conversation. The selected
+  // adapter checks its credentials at dispatch. They omit the MCP manifest,
+  // matching the Claude build profile that omits enableToolBridge.
   const makeEphemeralSubstrate =
     (instance_prefix: string, profile: SubstrateProfile = PROFILE_EPHEMERAL) =>
     (cwd: string): Substrate => {
       const s =
-        llmPool === null
+        !harnessAvailable
           ? null
           : buildLlmCallSubstrate({
-              pool: llmPool,
+              ...anthropicPoolArg,
               substrate_instance_id: `${instance_prefix}-${owner_handle}`,
               repl_pane_label: instance_prefix === 'cc-dispatch' ? 'agent · research' : `build · ${project_slug}`,
               cwd,
@@ -510,7 +502,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               // profile rather than inheriting an unused credential.
               profile,
               ephemeral: true,
-              ...liveAgentProvider,
+              ...buildProvider,
               ...(substrateFactory !== undefined ? { substrateFactory } : {}),
             })
       if (s === null) {
@@ -539,19 +531,19 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // workflows accumulate in ONE responsive REPL (the verified N-parallel model)
   // and survive the turn settle. NO `enableToolBridge` (Workflow is a native CC
   // tool, not an MCP bridge tool); NO `ephemeral` (warm — an ephemeral REPL
-  // would be disposed on settle and abort the detached workflow). Null pool
-  // leaves `composition.trident` unset → the loop's restart-safe stub no-op.
+  // would be disposed on settle and abort the detached workflow). Provider
+  // selection and credential refusal happen at dispatch, including cached wrappers.
   const fireSubstrateByCwd = new Map<string, Substrate>()
   const tridentRuns = new TridentRunStore(ctx.db)
   const makeWarmFireSubstrate = (cwd: string): Substrate => {
     const cached = fireSubstrateByCwd.get(cwd)
     if (cached !== undefined) return cached
-    if (llmPool === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')
+    if (!harnessAvailable) throw new Error('cc-trident-fire: empty Anthropic credential pool')
     // djb2 over the cwd → a short, stable, per-repo instance discriminator.
     let h = 5381
     for (let i = 0; i < cwd.length; i++) h = (((h << 5) + h) ^ cwd.charCodeAt(i)) >>> 0
     const built = buildLlmCallSubstrate({
-      pool: llmPool,
+      ...anthropicPoolArg,
       substrate_instance_id: `cc-trident-fire-${owner_handle}-${h.toString(36)}`,
       repl_pane_label: `build · ${project_slug}`,
       cwd,
@@ -561,7 +553,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
       // profile — see substrate-profiles.ts.
       profile: PROFILE_WARM_FIRE,
-      ...liveAgentProvider,
+      ...buildProvider,
       // #514 / #518 — the supervision watchdog and the shutdown path both know
       // when this warm launcher's child is gone. The sink stamps every still-live
       // workflow the dead generation owned (so the tick performs the normal terminal

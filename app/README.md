@@ -437,18 +437,12 @@ bun run build:web       # expo export --platform web → dist/
 
 ### Running the app unit tests
 
-`bun test app/__tests__/` is **NOT** a supported invocation and will report
-~12 failures that every one of those files passes on its own. The mobile
-device-harness files (the ones that call `installNativeHarness()`) register a
-process-global happy-dom DOM and rewrite the app's own `react-native` imports;
-Bun runs many test *files* per process, so in a shared process that harness
-collides with the sibling files that own the `react-native` specifier with
-`mock.module(…)` and with the `typeof window` / `typeof XMLHttpRequest`
-capability probes in `lib/upload-client.ts`. Neither half is wrong — they are
-two incompatible module graphs, which is why `scripts/run-tests.sh` gives the
-harness its own process (§ device-harness isolation lane, and
-`docs/testing-runner.md`). Nothing is skipped: every file runs, in the lane
-where it is clean.
+The app suite must run with Bun's per-file isolation. Some files intentionally
+install process-global DOM or module mocks, so sharing one global object makes
+their result depend on which files happen to be co-resident. `--isolate` keeps
+all app files in one invocation while giving each file a fresh global and module
+registry. CI runs this whole-directory check on one shard leg before the normal
+partitioned suite, so changing the shard count cannot hide a collision.
 
 From the repo root:
 
@@ -457,9 +451,8 @@ From the repo root:
 # This is what CI runs.
 bash scripts/run-tests.sh
 
-# App-only, the same two lanes, one bun process each:
-bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
-bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
+# App-only, every file in one isolated invocation (the CI co-residency guard):
+bun test --isolate app/__tests__/ --max-concurrency=4
 
 # A single file is always safe:
 bun test app/__tests__/upload-client.test.ts

@@ -51,10 +51,10 @@ export type EnvBag = Record<string, string | undefined>
 
 export const DEFAULTS = {
   // runtime/models.ts:53/71/89/96
-  bestModel: 'claude-opus-5',
-  fableModel: 'claude-fable-5',
-  sonnetModel: 'claude-sonnet-5',
-  fastModel: 'claude-haiku-4-5-20251001',
+  bestModel: 'opus',
+  fableModel: 'fable',
+  sonnetModel: 'sonnet',
+  fastModel: 'haiku',
   // runtime/adapters/claude-code/index.ts (CLAUDE_BIN ?? 'claude')
   claudeBin: 'claude',
   // gateway/index.ts:308 (NEUTRON_HOST ?? '127.0.0.1')

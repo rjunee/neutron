@@ -1,3 +1,4 @@
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/open — single-owner graph composer (Sprint D boot shell).
  *
@@ -41,7 +42,6 @@ import {
 import {
   assertConversationalProviderWired,
   normalizeProvider,
-  resolveProviderSelection,
   type Provider,
 } from '@neutronai/runtime/adapters/select-substrate.ts'
 import { LoopRegistry, SupervisedLoop } from '@neutronai/loop'
@@ -178,6 +178,8 @@ import {
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { TridentUsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
+import { TranscriptUsageIngestor } from '@neutronai/trident/transcript-usage.ts'
+import { findNewestRollout } from '@neutronai/trident/codex-rotation-io.ts'
 import { probeBuildFleet } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
@@ -400,6 +402,7 @@ import {
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '@neutronai/gateway/cores/composer-state.ts'
 import { createAppProjectsSurface } from '@neutronai/gateway/http/app-projects-surface.ts'
+import { createModelProviderResolver } from '@neutronai/gateway/wiring/model-provider-resolution.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import { resolveProjectEmoji } from '@neutronai/contracts/default-emoji.ts'
 import {
@@ -449,6 +452,7 @@ import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-on
 import {
   isValidIanaTimezone,
   readOwnerTimezone,
+  initializeInstanceModelProvider,
   readTranscriptionBackend,
   writeTranscriptionBackend,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -847,7 +851,12 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
+  projectModelTier(env) // Validate project routes at boot, before accepting chat.
   assertConversationalProviderWired(provider)
+  // Configured chat uses its own credential references, independent of an OpenAI key.
+  const configuredTools = env['NEUTRON_PROJECT_MODELS'] === undefined ? {} : {
+    bindMcpResolver: deps.buildMcpResolver(), toolManifest: deps.buildToolManifest(),
+  }
   const pool = deps.resolveOpenAiPool(env)
   if (pool !== null) {
     if (provider !== 'anthropic') {
@@ -868,9 +877,9 @@ export function resolveOpenConversationalProvider(
     log.error('provider_openai_no_key', {
       note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
     })
-    return { provider }
+    return { provider, ...configuredTools }
   }
-  return { provider: 'anthropic' }
+  return { provider: 'anthropic', ...configuredTools }
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
@@ -1026,29 +1035,19 @@ export function buildOpenGraphComposer(
     // factory. Built once from the narrow wiring context and consumed downstream
     // verbatim. `prewarmSettledRef` is a LIVE reference the pre-warm `.then`
     // flips (cold-window budget elevation reads `.settled`, not a snapshot).
-    // SWAPPABLE PROVIDER — resolve the conversational backend. Default anthropic
-    // (Claude Code) is the untouched path. A box opts into openai via
-    // NEUTRON_MODEL_PROVIDER=openai + an OPENAI_API_KEY; missing prerequisites
-    // degrade LOUDLY to Claude Code (never a broken openai boot). Trident + all
-    // ephemeral/fire substrates stay Claude Code regardless (wired in
-    // wireSubstrates — this provider config reaches ONLY the conversational pair).
-    // COHERENT PROVIDER RESOLUTION — handles EVERY declared provider value: openai
-    // fully wired, openai-without-key honored (fails loud per turn), and any other
-    // declared-but-unwired value (pi) throws a LOUD boot error. Never
-    // a silent Claude fallback for an explicitly-selected non-anthropic provider.
-    const conversationalProviderCtx = resolveOpenConversationalProvider(env, {
+    // Import the former boot setting once; later dispatches read only stored settings.
+    await initializeInstanceModelProvider(db, project_slug,
+      env['NEUTRON_MODEL_PROVIDER']?.trim() ? normalizeProvider(env['NEUTRON_MODEL_PROVIDER']) : null)
+    // Build provider capabilities once; resolve the stored project/instance choice per turn.
+    const conversationalProviderCtx = resolveOpenConversationalProvider({ ...env, NEUTRON_MODEL_PROVIDER: undefined }, {
       resolveOpenAiPool: resolveOpenOpenAiPool,
       buildMcpResolver: buildOpenAiMcpResolver,
       buildToolManifest: buildOpenAiToolManifest,
     })
-    const instanceProvider = env['NEUTRON_MODEL_PROVIDER']
-    const providerResolver = () => {
-      const activeProject = chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined
-      return resolveProviderSelection({
-        ...(instanceProvider !== undefined ? { instance: instanceProvider } : {}),
-        project: projectSettingsStore.modelProviderOverride(activeProject),
-      })
-    }
+    const resolveModelProvider = createModelProviderResolver(db, project_slug, projectSettingsStore)
+    const providerResolver = (projectId?: string) => resolveModelProvider(
+      projectId ?? chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined,
+    )
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1152,7 +1151,7 @@ export function buildOpenGraphComposer(
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
     const tridentFireInnerWorkflow =
-      llmPool !== null
+      liveAgentSubstrate !== null
         ? buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate })
         : null
 
@@ -5147,11 +5146,7 @@ export function buildOpenGraphComposer(
     const appProjectsSurface = createAppProjectsSurface({
       store: projectSettingsStore,
       auth: appOwnerAuth,
-      resolveModelProvider: (project_id) =>
-        resolveProviderSelection({
-          ...(instanceProvider !== undefined ? { instance: instanceProvider } : {}),
-          project: projectSettingsStore.modelProviderOverride(project_id),
-        }),
+      resolveModelProvider,
       createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
       // Rail-redesign: a Settings PATCH that changes the project name or emoji is
       // rail-visible — fan a fresh `projects_changed` so every connected rail
@@ -5681,6 +5676,7 @@ export function buildOpenGraphComposer(
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
+            configuredModel: (projectId) => projectModelTier(env, projectId),
             substrate: liveAgentSubstrate,
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,
@@ -7055,7 +7051,31 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              on_run_terminal: tridentOnRunTerminal,
+              on_run_terminal: async (run): Promise<void> => {
+                await tridentOnRunTerminal(run)
+                const resolvedHome = codexCredentialService.resolveActiveCodexHome(
+                  asOwnerHandle(owner_handle),
+                  run.project_slug,
+                ) ?? codexHome
+                if (resolvedHome === null) return
+                const rollout = findNewestRollout(resolvedHome, Date.parse(run.started_at))
+                if (rollout === null) return
+                const project = run.repo_path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? run.project_slug
+                try {
+                  await new TranscriptUsageIngestor(db).ingest(rollout, {
+                    project,
+                    topic: run.task,
+                    agent: 'codex',
+                    phase: run.inner_checkpoint?.includes('argus') ? 'review_codex' : 'build',
+                    run_id: run.id,
+                    expected_cwds: [run.repo_path, run.worktree].filter(
+                      (value): value is string => typeof value === 'string' && value.length > 0,
+                    ),
+                  })
+                } catch (err) {
+                  log.warn('usage_transcript_ingest_failed', { error: err instanceof Error ? err.message : String(err) })
+                }
+              },
               on_terminal_wake: terminalBuildWake,
               // The SAME sweep the terminal chain runs, also on the tick's own
               // cadence — the only trigger a worktree-only `branch_live` hold

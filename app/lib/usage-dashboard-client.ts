@@ -137,8 +137,8 @@ export type MeasurementState = 'unknown' | 'partial' | 'complete'
 export interface UsageAmount { unit: 'tokens'; value: number | null; state: MeasurementState }
 export interface UsageBreakdownRow { key: string; amount: UsageAmount }
 export interface UsageAnalytics {
-  spend: { total: UsageAmount; by_project: UsageBreakdownRow[]; by_phase: UsageBreakdownRow[]; by_model: { state: 'unknown'; rows: UsageBreakdownRow[] } }
-  waste: { total: UsageAmount; by_reason: UsageBreakdownRow[]; unclassified_runs: number }
+  spend: { total: UsageAmount; by_project: UsageBreakdownRow[]; by_phase: UsageBreakdownRow[]; by_topic: UsageBreakdownRow[]; by_agent: UsageBreakdownRow[]; by_model: { state: 'unknown'; rows: UsageBreakdownRow[] } }
+  waste: { total: UsageAmount; by_reason: UsageBreakdownRow[]; unclassified_runs: number; bands: UsageBreakdownRow[] }
   throughput: { state: MeasurementState; runs: Array<{ project: string; seconds: number; outcome: string }> }
 }
 
@@ -149,8 +149,8 @@ export type UsageDashboard =
 
 export const DASHBOARD_UNREACHABLE: UsageDashboard = { reachable: false }
 const UNKNOWN_ANALYTICS: UsageAnalytics = {
-  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_model: { state: 'unknown', rows: [] } },
-  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0 },
+  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_topic: [], by_agent: [], by_model: { state: 'unknown', rows: [] } },
+  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0, bands: [] },
   throughput: { state: 'unknown', runs: [] },
 }
 
@@ -321,8 +321,8 @@ function decodeAnalytics(raw: unknown): UsageAnalytics {
     return typeof row['project'] === 'string' && typeof row['seconds'] === 'number' && Number.isFinite(row['seconds']) && typeof row['outcome'] === 'string' ? [{ project: row['project'], seconds: row['seconds'], outcome: row['outcome'] }] : []
   }) : []
   return {
-    spend: { total: decodeAmount(spend['total']), by_project: decodeRows(spend['by_project']), by_phase: decodeRows(spend['by_phase']), by_model: { state: 'unknown', rows: [] } },
-    waste: { total: decodeAmount(waste['total']), by_reason: decodeRows(waste['by_reason']), unclassified_runs: typeof waste['unclassified_runs'] === 'number' ? waste['unclassified_runs'] : 0 },
+    spend: { total: decodeAmount(spend['total']), by_project: decodeRows(spend['by_project']), by_phase: decodeRows(spend['by_phase']), by_topic: decodeRows(spend['by_topic']), by_agent: decodeRows(spend['by_agent']), by_model: { state: 'unknown', rows: [] } },
+    waste: { total: decodeAmount(waste['total']), by_reason: decodeRows(waste['by_reason']), unclassified_runs: typeof waste['unclassified_runs'] === 'number' ? waste['unclassified_runs'] : 0, bands: decodeRows(waste['bands']) },
     throughput: { state: state === 'complete' || state === 'partial' ? state : 'unknown', runs },
   }
 }
@@ -450,6 +450,8 @@ export interface ProjectedPool {
   age_ms: number | null
   accounts: ProjectedAccount[]
   capacity: PoolCapacity
+  /** Proven interval where every known account is spent; null if any standing is unknown. */
+  all_accounts_capped: { from: number; to: number } | null
 }
 
 /**
@@ -786,12 +788,16 @@ export function projectPool(pool: UsagePool, now: number): ProjectedPool {
       capacity,
     }
   })
+  const capacity = poolCapacity(accounts)
   return {
     pool: pool.pool,
     connection: pool.connection,
     age_ms: pool.measured_at === null ? null : now - pool.measured_at,
     accounts,
-    capacity: poolCapacity(accounts),
+    capacity,
+    all_accounts_capped: capacity.available_now === 0 && capacity.unknown === 0 && capacity.returning > 0 && capacity.next.state === 'returns'
+      ? { from: now, to: capacity.next.at }
+      : null,
   }
 }
 

@@ -52,7 +52,7 @@
  * one word cannot honestly cover two gates) or the proof that failed.
  *
  * Before creating the run it resolves THIS project's own git-initialized build
- * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
+ * workspace (the card-selected repo, via `ensureProjectBuildWorkspace`)
  * and writes that onto the run row's `repo_path` — so a brand-new project with
  * no pre-existing code repo is still buildable (the inner workflow's
  * `git worktree add` needs a real repo with a commit). A fresh local project has
@@ -264,6 +264,7 @@ export interface TridentBoardBinder {
     id: string,
   ): (DispatchReadinessTarget & {
     id: string
+    repo_name?: string | null
     linked_run_id?: string | null
     ralph_round?: number
     max_ralph_rounds?: number | null
@@ -351,7 +352,7 @@ export interface BoardBoundBuildDeps {
    * workspace, returning its absolute path. Defaults to
    * `ensureProjectBuildWorkspace` over the production fs/git probe. Test seam.
    */
-  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
+  resolveBuildRepo?: (owner_home: string, project_slug: string, repo_name?: string | null) => Promise<string>
   /**
    * Resolve the repo's merge mode. An injected resolver wins. Direct callers
    * may instead provide the secrets store and owner handle below; that fallback
@@ -892,9 +893,10 @@ export async function dispatchBoardBoundBuild(
   let credentialedRunner: EnvCapableHostRunner | undefined = deps.hostRunner
   try {
     repo_path = await (deps.resolveBuildRepo ??
-      ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.build_repo_path)))(
+      ((home, slug, repo) => ensureProjectBuildWorkspace(home, slug, undefined, repo).then((r) => r.build_repo_path)))(
       deps.repo_path,
       deps.project_slug,
+      item.repo_name,
     )
     let mergeModeFn = deps.resolveMergeMode
     if (deps.secretsStore !== undefined && deps.owner_handle !== undefined) {

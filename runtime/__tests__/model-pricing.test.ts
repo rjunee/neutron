@@ -158,9 +158,8 @@ describe('resolveModelPricing', () => {
   })
 
   test('returns the entry for the production runtime/models.ts aliases', () => {
-    // BEST_MODEL + SONNET_MODEL default to the un-suffixed canonical name;
-    // FAST_MODEL defaults to the date-suffixed snapshot. The registry MUST
-    // resolve all three at startup so a fresh import doesn't crash.
+    // Version-free classes resolve through today's verified concrete pricing
+    // rows so a fresh import does not crash.
     expect(() => resolveModelPricing(BEST_MODEL)).not.toThrow()
     expect(() => resolveModelPricing(SONNET_MODEL)).not.toThrow()
     expect(() => resolveModelPricing(FAST_MODEL)).not.toThrow()
