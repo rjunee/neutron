@@ -35,7 +35,7 @@ async function fixture() {
   const commands: string[][] = []
   let spawnProjectSession = async (_projectId: string): Promise<void> => {}
   const context: ProjectBuildContext = { store, phaseUsage: new TridentPhaseUsageStore(db), projectDir: dir, projectId: 'fixture-project',
-    stateRoot: join(dir, 'state'), provider: 'anthropic', env: {}, spawnProjectSession: projectId => spawnProjectSession(projectId), runHost: async argv => {
+    stateRoot: join(dir, 'state'), provider: 'anthropic', providerSource: 'application', env: {}, spawnProjectSession: projectId => spawnProjectSession(projectId), runHost: async argv => {
       commands.push([...argv])
       return { ok: true, exit_code: 0, stdout: argv.includes('symbolic-ref') ? 'refs/heads/change' : '', stderr: '' }
     } }
@@ -156,6 +156,31 @@ test('acting turn requires the selected live project session and observed grants
   f.context.provider = 'pi'
   await f.prepare()
   expect((await f.captured().actingTurn({ ...turn, conversation: f.captured().conversation })).kind).toBe('refused')
+})
+
+test('unwired provider refusal names the project, instance, and application selection levels', async () => {
+  const f = await fixture()
+  f.context.provider = 'pi'
+  const details: string[] = []
+  for (const source of ['project', 'instance', 'application'] as const) {
+    f.context.providerSource = source
+    const options = await f.prepare()
+    const captured = f.captured()
+    const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+    const outcome = await captured.actingTurn({
+      conversation: captured.conversation,
+      request,
+      spec: { ...captured.conversation.spec, prompt: 'bounded work' },
+      timeout_ms: 50,
+      signal: new AbortController().signal,
+    })
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind === 'refused') {
+      expect(outcome.detail).toContain(`selected at ${source} level`)
+      details.push(outcome.detail)
+    }
+  }
+  expect(new Set(details).size).toBe(3)
 })
 
 test('acting turn lazily starts and retains a cold project session', async () => {

@@ -6,6 +6,7 @@ import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
+import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
@@ -22,6 +23,7 @@ export interface ProjectBuildContext {
   projectDir: string
   projectId: string
   provider: Provider
+  providerSource: ProviderSelectionSource
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
 }
@@ -55,7 +57,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       spec: { tools: [], model_preference: [], metering_context: { project_id: context.projectId } } },
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
-      if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider}` }
+      if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
       let candidates = [...supervisedBySessionKey].filter(([, options]) =>
         options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
       if (candidates.length > 1) return { kind: 'unknown', detail: 'Project conversation session is missing or ambiguous' }

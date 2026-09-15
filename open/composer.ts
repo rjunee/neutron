@@ -1163,11 +1163,12 @@ export function buildOpenGraphComposer(
             get store() { return boardRunStore },
             prepare: (input, signal) => {
               const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
+              const providerSelection = resolveModelProvider(id)
               return prepareProjectBuild(input, {
                 store: boardRunStore, phaseUsage: new TridentPhaseUsageStore(db), runHost: tridentHostRunner,
                 stateRoot: joinPath(owner_home, '.trident', 'project-builds'),
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
-                projectId: id, provider: resolveModelProvider(id).provider, env,
+                projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
