@@ -882,7 +882,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         if (presence !== null) {
           if (web_presence !== undefined && data.platform === 'web') {
             if (presence.state === 'foreground') {
-              web_presence.foreground(data.user_id, data.conn_id)
+              web_presence.foreground(data.user_id, data.project_id ?? null, data.conn_id)
             } else {
               web_presence.background(data.conn_id)
             }

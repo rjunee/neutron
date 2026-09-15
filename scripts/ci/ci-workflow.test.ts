@@ -301,10 +301,12 @@ describe('leak gate wiring — the env the script needs actually reaches it', ()
     )
   })
 
-  test('the commit-message scan window is passed', () => {
-    expect(purity).toContain('LEAK_GATE_BASE_SHA:')
-    expect(purity).toContain('github.event.pull_request.base.sha')
-    expect(purity).toContain('github.event.before')
+  test('the commit-message scan window is derived from history, independent of event shape', () => {
+    expect(purity).toContain('git merge-base origin/main HEAD')
+    expect(purity).toContain('git rev-parse HEAD^')
+    expect(purity).toContain('LEAK_GATE_BASE_SHA: ${{ steps.leak-window.outputs.base }}')
+    expect(purity).not.toContain('github.event.pull_request.base.sha')
+    expect(purity).not.toContain('github.event.before')
   })
 
   test('PR title and body are passed for scanning', () => {
