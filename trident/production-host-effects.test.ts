@@ -971,3 +971,34 @@ test('G046 malformed PR heads cannot address check probes', async () => {
   expect(await source.readiness(7)).toEqual({ unreadable: 'PR head is malformed' })
   expect(calls).toHaveLength(1)
 })
+
+// THE ROW GUARD NAMES THE FIELD THAT MOVED. It had no test at all, and its message
+// named all four things it compares — so a live acceptance dispatch on 2026-09-15
+// failed with "identity, branch or worktree is missing or changed" and there was no
+// way to tell which. By the time the row could be read, cleanup had nulled `worktree`,
+// so the post-hoc state could not distinguish the field that mismatched from one
+// mutated afterwards. A refusal that names a category instead of a fact costs a run.
+test('the run-row guard names which field moved, and never leaks the path', async () => {
+  const f = await fixture()
+  const { effects } = createProductionHostEffects(f.options)
+  // Baseline: the bound row matches, so the guard is silent.
+  expect((await effects.measure()).kind).toBe('known')
+
+  // NAMES ONLY THE FIELD THAT MOVED. Asserting merely that the message *contains*
+  // "worktree" is a tautology — the old unspecific message named all four fields, so
+  // it satisfied that too and a mutation back to it stayed green. The property is
+  // exclusivity: when the branch moved, the message must NOT say worktree.
+  await f.store.update(f.options.runId, { worktree: '/somewhere/else' })
+  const movedWorktree = await effects.measure()
+  // Exact shape, so a message that merely mentions the word cannot satisfy it.
+  expect((movedWorktree as { detail: string }).detail)
+    .toMatch(/Build run identity changed: worktree no longer matches the bound build/)
+
+  await f.store.update(f.options.runId, { worktree: f.options.worktree, branch: 'trident/moved' })
+  const movedBranch = await effects.measure()
+  expect((movedBranch as { detail: string }).detail)
+    .toMatch(/Build run identity changed: branch no longer matches the bound build/)
+  // The VALUES are never interpolated — this string reaches inner_result and the chat.
+  expect(JSON.stringify(movedBranch)).not.toContain('trident/moved')
+  expect(JSON.stringify(movedBranch)).not.toContain(f.options.worktree)
+})
