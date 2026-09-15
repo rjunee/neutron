@@ -13,7 +13,6 @@
     "./draft-policy": "./src/draft-policy.ts",
     "./triage": "./src/triage.ts",
     "./summarizer": "./src/summarizer.ts",
-    "./triage-scheduler": "./src/triage-scheduler.ts",
     "./substrate-llm": "./src/substrate-llm.ts",
     "./per-project-resolver": "./src/per-project-resolver.ts",
     "./cache": "./src/cache.ts",

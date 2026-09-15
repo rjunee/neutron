@@ -6382,18 +6382,17 @@ export function buildOpenGraphComposer(
     // M2-1 — ARM the Cores→scribe fan-out with the LIVE Google clients, LAST
     // (same discipline as reflectLoop below): its `stop()` cleanup was registered
     // early in `wireMemory` for shutdown ordering, but arming (build + start the
-    // Calendar + Email schedulers) is deferred to here so (a) it binds the REAL
+    // Calendar scheduler) is deferred to here so (a) it binds the REAL
     // `mountOpenCores` clients — `calendar_core`/`email_managed_core` share these
     // exact instances, so a CONNECTED Google account now actually feeds ambient
-    // events/mail into memory (pre-M2-1 it armed with in-memory fallbacks and fed
+    // calendar events into memory (pre-M2-1 it armed with an in-memory fallback and fed
     // nothing) — and (b) a composition failure before this point leaves no
     // scheduler started. `arm()` is itself failure-atomic. Null (LLM-less box, no
     // scribe) → no-op. OAuth-less → the clients are in-memory fallbacks and the
-    // schedulers fan out nothing (unchanged), which is correct.
+    // scheduler fans out nothing (unchanged), which is correct.
     if (coresScribeFanOut !== null) {
       coresScribeFanOut.arm({
         calendarClient: coresWiring.calendarClient,
-        gmailClient: coresWiring.gmailClient,
       })
     }
 
@@ -6710,6 +6709,7 @@ export function buildOpenGraphComposer(
         // merge left a reference to a name that no longer exists. Same object.
         push: pushTransport,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
+        ...(coresScribeFanOut !== null ? { scribeFanOut: coresScribeFanOut.fanOut } : {}),
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,
         register_cleanup: (fn: () => void): void => {
