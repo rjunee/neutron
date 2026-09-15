@@ -172,6 +172,22 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (current.merge_mode === 'local') return unknown('Atomic local merge effect is not connected')
       const ready = await pinnedMergeReadiness(runHost, repo, snapshot)
       if (ready.kind !== 'allow') return ready
+      // gh pr merge exposes --match-head-commit, but no expected-base option.
+      // Readiness above is an observation, not an atomic base precondition:
+      // the remote base can move before GitHub accepts this merge. Persist that
+      // limitation before writing; neither the head pin nor the merged witness
+      // below proves the base stayed fixed. This event is not a merge result.
+      try {
+        await store.recordStageEvent(runId, 'build-remote-merge-attempt', JSON.stringify({
+          pr: snapshot.pr!.number,
+          head: snapshot.head,
+          baseBranch,
+          basePrecondition: 'not-enforced',
+          detail: 'Remote base may move between readiness assessment and merge; only the head is pinned',
+        }))
+      } catch {
+        return unknown('Remote merge base-risk evidence could not be persisted')
+      }
       const result = await runHost(['gh', 'pr', 'merge', String(snapshot.pr!.number), '--squash',
         '--match-head-commit', snapshot.head], repo)
       if (!result.ok || result.timed_out) return unknown('Pinned PR merge was not confirmed')
