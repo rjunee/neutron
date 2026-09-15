@@ -6,6 +6,7 @@ import {
 } from '@neutronai/codegen-core'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { TridentRunReferenceAmbiguousError, type TridentRunStore } from '@neutronai/trident/store.ts'
+import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 
 export interface UnifiedCancelResult {
@@ -28,6 +29,8 @@ export interface UnifiedTridentState {
   worktree?: string
   pr_number?: number
   summary?: string
+  round: number
+  ralph_round: number
 }
 
 export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> & {
@@ -99,17 +102,22 @@ export function routeCodegenCancel(
       throw error
     }
   }
-  const state = (run: NonNullable<ReturnType<typeof resolve>>): UnifiedTridentState => ({
-    status: run.phase,
-    dispatch_path: 'trident',
-    run_id: run.id,
-    phase: run.phase,
-    reason: run.failure_reason,
-    already_terminal: isTerminalPhase(run.phase),
-    ...(run.branch !== null ? { branch: run.branch } : {}),
-    ...(run.worktree !== null ? { worktree: run.worktree } : {}),
-    ...(run.pr !== null ? { pr_number: run.pr } : {}),
-  })
+  const state = (run: NonNullable<ReturnType<typeof resolve>>): UnifiedTridentState => {
+    const progress = deriveRunProgress(run, Date.now())
+    return {
+      status: progress.step_label,
+      dispatch_path: 'trident',
+      run_id: run.id,
+      phase: progress.step_label,
+      round: progress.round,
+      ralph_round: progress.ralph_round,
+      reason: run.failure_reason,
+      already_terminal: isTerminalPhase(run.phase),
+      ...(run.branch !== null ? { branch: run.branch } : {}),
+      ...(run.worktree !== null ? { worktree: run.worktree } : {}),
+      ...(run.pr !== null ? { pr_number: run.pr } : {}),
+    }
+  }
   return new Proxy(legacy, {
     get(target, prop) {
       if (prop === 'status' || prop === 'fetch') {
