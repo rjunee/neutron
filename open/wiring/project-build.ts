@@ -23,6 +23,7 @@ export interface ProjectBuildContext {
   projectId: string
   provider: Provider
   env: NodeJS.ProcessEnv
+  spawnProjectSession: (projectId: string) => Promise<void>
 }
 
 /** Bind one dispatched project, using the host's retained session launch options. */
@@ -55,8 +56,23 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider}` }
-      const candidates = [...supervisedBySessionKey].filter(([, options]) =>
+      let candidates = [...supervisedBySessionKey].filter(([, options]) =>
         options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
+      if (candidates.length > 1) return { kind: 'unknown', detail: 'Project conversation session is missing or ambiguous' }
+      if (candidates.length === 1) {
+        const [, options] = candidates[0]!
+        if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+      }
+      const candidatePending = candidates.length === 1 ? pool.get(candidates[0]![0]) : undefined
+      const candidateSession = candidatePending !== undefined && Bun.peek.status(candidatePending) === 'fulfilled'
+        ? await candidatePending
+        : undefined
+      if (candidateSession === undefined || candidateSession.hasChildExited()) {
+        try { await context.spawnProjectSession(context.projectId) }
+        catch { return { kind: 'unknown', detail: 'Project conversation session could not be started' } }
+        candidates = [...supervisedBySessionKey].filter(([, options]) =>
+          options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
+      }
       if (candidates.length !== 1) return { kind: 'unknown', detail: 'Project conversation session is missing or ambiguous' }
       const [key, options] = candidates[0]!
       const pending = pool.get(key)

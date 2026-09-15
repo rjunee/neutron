@@ -1149,6 +1149,7 @@ export function buildOpenGraphComposer(
     const {
       llmCallSubstrate,
       liveAgentSubstrate,
+      makeProjectLiveAgentSubstrate,
       makeComposeSubstrate,
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
@@ -1167,6 +1168,11 @@ export function buildOpenGraphComposer(
                 stateRoot: joinPath(owner_home, '.trident', 'project-builds'),
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: resolveModelProvider(id).provider, env,
+                spawnProjectSession: async projectId => {
+                  const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
+                  if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
+                  await prewarmSubstrate(projectSubstrate)
+                },
               }, signal)
             },
             onError: error => log.error('project_build_outcome_write_failed', { error: String(error) }),

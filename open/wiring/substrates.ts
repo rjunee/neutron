@@ -54,6 +54,8 @@ export interface WiredSubstrates {
   llmCallSubstrate: Substrate | null
   /** Warm live-chat substrate (`cc-agent-*`, tool-bridge on); null LLM-less. */
   liveAgentSubstrate: Substrate | null
+  /** Build a live-chat substrate pinned to one project for lazy REPL creation. */
+  makeProjectLiveAgentSubstrate: (project_id: string) => Substrate | null
   /**
    * PER-PROJECT ISOLATED-COMPOSE factory (`cc-compose-*`; #377/#378, Approach A).
    * Builds a substrate keyed to ONE `project_id` for composing that project's
@@ -253,7 +255,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
 
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
-  const liveAgentSubstrate =
+  const makeLiveAgentSubstrate = (projectIdResolver?: () => string): Substrate | null =>
     conversationalAvailable
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
@@ -263,6 +265,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
+          ...(projectIdResolver === undefined ? {} : { projectIdResolver }),
           // Owner's WARM conversational REPL (cc-agent) — TRUSTED live chat.
           // Security knobs live on the profile — see substrate-profiles.ts. Kept
           // DISTINCT from the untrusted-import profile even though identical today.
@@ -311,6 +314,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
       : null
+  const liveAgentSubstrate = makeLiveAgentSubstrate()
+  const makeProjectLiveAgentSubstrate = (project_id: string): Substrate | null =>
+    makeLiveAgentSubstrate(() => project_id)
 
   // PER-PROJECT ISOLATED COMPOSE substrate (`cc-compose-*`; #377/#378, Approach A,
   // Ryan-approved 2026-07-20). The onboarding-doc composer (README/transcript-
@@ -575,6 +581,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   return {
     llmCallSubstrate,
     liveAgentSubstrate,
+    makeProjectLiveAgentSubstrate,
     makeComposeSubstrate,
     reminderComposeSubstrate,
     makeEphemeralSubstrate,
