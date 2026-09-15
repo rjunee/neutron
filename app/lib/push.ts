@@ -40,6 +40,7 @@ import {
   pushTapDedupeStore,
   type PushTapDedupeStore,
 } from './push-tap-dedupe-store';
+import { shouldSkipPushTap, type PushTapSource } from './push-tap-replay';
 
 export type PushEnableSkipReason =
   | 'unsupported_platform'
@@ -232,7 +233,8 @@ export async function disablePushForUser(input: {
  * AND consults `getLastNotificationResponseAsync()` for cold-start
  * taps. Each response's `request.content.data` is parsed by
  * `resolvePushRoute(...)`; a non-null path drives the supplied
- * router-push callback exactly once.
+ * router-push callback. Cached cold-start responses route at most once; each
+ * warm-listener response represents a new user interaction and routes again.
  *
  * Lifecycle:
  *   - install once at app boot (typically from `_layout.tsx`).
@@ -300,9 +302,10 @@ export function installPushTapHandler(
   // from a prior launch can be deduped before we dispatch.
   const hydrated = store.hydrate();
 
-  // Dispatch helper — dedupes by request.identifier so the same
-  // notification can't drive `push()` twice (Codex r1 P2 + Argus r1
-  // I2 round 2). Cold-start + warm listener share the same store;
+  // Dispatch helper — dedupes cached cold-start responses by
+  // request.identifier. Warm-listener responses are fresh user actions and
+  // route even when the notification was tapped before. Both paths mark the
+  // shared store so a later cold-start cannot replay either response;
   // every routed cold-start response is also dismissed via
   // `dismissNotificationAsync` so Expo itself stops re-surfacing it
   // on a future cold-start before the TTL prunes the persisted id.
@@ -311,11 +314,11 @@ export function installPushTapHandler(
   // because there's nothing to remember.
   const dispatch = (
     response: import('expo-notifications').NotificationResponse,
-    opts: { dismiss: boolean },
+    opts: { dismiss: boolean; source: PushTapSource },
   ): void => {
     const id = response.notification.request.identifier;
     if (typeof id === 'string' && id.length > 0) {
-      if (store.has(id)) return;
+      if (shouldSkipPushTap(store, id, opts.source)) return;
       // Fire-and-forget persist — the in-memory `has` check above
       // already deduped the current dispatch synchronously. The
       // markSeen await is only material for the post-launch persisted
@@ -347,14 +350,14 @@ export function installPushTapHandler(
     .then(() => Notifications.getLastNotificationResponseAsync())
     .then((response) => {
       if (response === null) return;
-      dispatch(response, { dismiss: true });
+      dispatch(response, { dismiss: true, source: 'cold-start' });
     })
     .catch(() => undefined);
   // Warm tap: app was already foreground/backgrounded and the user
   // tapped a notification. `addNotificationResponseReceivedListener`
   // fires synchronously on tap.
   const sub = Notifications.addNotificationResponseReceivedListener(
-    (response) => dispatch(response, { dismiss: false }),
+    (response) => dispatch(response, { dismiss: false, source: 'warm-listener' }),
   );
   return { remove: (): void => sub.remove() };
 }
