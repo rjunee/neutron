@@ -18,7 +18,7 @@
 
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 export interface LauncherBuildMeModalProps {
   open: boolean;
@@ -94,7 +94,7 @@ export function LauncherBuildMeModal({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

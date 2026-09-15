@@ -44,7 +44,7 @@ import {
   type DimensionValue,
 } from 'react-native';
 
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import type {
   TranscriptionBackendChoice,
   VoiceTranscriptionStatus,
@@ -446,7 +446,7 @@ function ModelRow(props: {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   card: {
     gap: 10,
     padding: 16,

@@ -65,7 +65,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 
-import {
+import { createThemedStyles,
   BREAKPOINTS,
   DENSITY,
   MOTION,
@@ -729,7 +729,7 @@ function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
   });
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   overlay: {
     position: 'absolute',
     top: 0,

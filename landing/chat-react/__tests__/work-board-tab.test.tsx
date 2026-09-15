@@ -219,6 +219,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,
@@ -245,6 +247,53 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('shows retrying without claiming a pulse until the linked run has a fresh heartbeat', async () => {
+    const retryProgress = (freshUntil: string | null): RunProgress => ({
+      run_id: 'run_retry',
+      phase_label: 'building',
+      step_label: 'retrying',
+      round: 2,
+      ralph_round: 1,
+      infra_retries: 2,
+      started_at: '2026-07-02T00:00:00Z',
+      last_advanced_at: '2026-07-02T00:01:00Z',
+      heartbeat_at: freshUntil === null ? null : '2099-01-01T00:00:00Z',
+      heartbeat_fresh_until: freshUntil,
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: null,
+    })
+    const rows = [
+      item({
+        id: 'stale',
+        title: 'Retry without life evidence',
+        status: 'in_progress',
+        linked_run_id: 'run_retry',
+        run_progress: retryProgress(null),
+      }),
+      item({
+        id: 'fresh',
+        title: 'Live retry',
+        status: 'in_progress',
+        linked_run_id: 'run_retry',
+        run_progress: retryProgress('2099-01-01T00:05:00Z'),
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const activeRows = Array.from(container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-row'))
+
+    expect(activeRows[0]!.querySelector('.cwb-tag')!.textContent).toBe('Retrying')
+    expect(activeRows[0]!.querySelector('.cwb-round')!.textContent).toBe('2.2')
+    expect(activeRows[0]!.querySelector('.cwb-dot')!.className).not.toContain('cwb-dot-pulse')
+    expect(activeRows[1]!.querySelector('.cwb-dot')!.className).toContain('cwb-dot-pulse')
+
+    await act(async () => root.unmount())
+  })
+
   it('renders the phase tag + round for a bound run (dot+tag+round, no emoji/timer)', async () => {
     const rows = [
       item({
@@ -257,6 +306,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           phase_label: 'building',
           step_label: 'fixing',
           round: 2,
+          ralph_round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
           elapsed_ms: 120000,
@@ -274,7 +324,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(tag).not.toBeNull()
     expect(tag!.textContent).toBe('Fixing')
     expect(tag!.className).toContain('cwb-tag-fix')
-    expect(container.querySelector('.cwb-round')!.textContent).toBe('round 2')
+    expect(container.querySelector('.cwb-round')!.textContent).toBe('2.2')
     // No emoji glyphs, no elapsed-minutes timer, no old sub-label.
     expect(container.querySelector('.cwb-run-progress')).toBeNull()
     expect(container.textContent).not.toContain('🔨')
@@ -619,6 +669,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,
@@ -640,7 +692,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     const meta = buildingRow.querySelector('.cwb-row-meta')
     expect(meta).not.toBeNull()
     expect(meta!.querySelector('.cwb-tag')!.textContent).toBe('Building')
-    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('round 1')
+    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('1.1')
     // Queued row → its durable state, without inventing a round.
     const queuedRow = liRows[1]!
     expect(queuedRow.querySelector('.cwb-title')!.textContent).toBe('Just queued')
@@ -663,6 +715,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,

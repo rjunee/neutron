@@ -33,7 +33,7 @@ import {
   DEFAULT_CREATE_PRESET_ID,
   type ReminderPreset,
 } from '../lib/reminder-presets';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 const MAX_MESSAGE_LEN = 4096;
 
@@ -177,7 +177,7 @@ export function ReminderCreateModal({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

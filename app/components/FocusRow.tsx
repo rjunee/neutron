@@ -51,7 +51,7 @@ import {
   type PriorityChipKind,
 } from '../lib/focus-row-formatters';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 /**
  * Dot diameter in CSS px. Inline literal authorized by brief § 4.8 as
@@ -213,7 +213,7 @@ function dueChipText(kind: DueChipKind) {
   return styles.chipTextMuted;
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-start',

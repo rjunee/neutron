@@ -31,11 +31,11 @@
 
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 
 import { GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
 import { projectTabRoute } from '../../../lib/project-tab-route';
-import { THEME } from '../../../lib/composer-constants';
+import { createThemedStyles, THEME } from '../../../lib/composer-constants';
 
 // Re-exported so the timeout keeps ONE home while the tests that assert the
 // handoff's deadline keep importing it from the screen that spends it.
@@ -77,7 +77,7 @@ export default function ProjectIndexRedirect() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   container: {
     flex: 1,
     alignItems: 'center',

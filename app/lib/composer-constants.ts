@@ -14,4 +14,4 @@
 
 export const MAX_USER_MESSAGE_LEN_CLIENT = 16_384;
 
-export { BREAKPOINTS, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
+export { BREAKPOINTS, createThemedStyles, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';

@@ -695,7 +695,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
   })
 })
 
-describe('wireSubstrates — swappable provider (trident stays Claude Code)', () => {
+describe('wireSubstrates — project-aware provider across chat and builds', () => {
   function openaiCtxOverrides(): Partial<OpenWiringContext> {
     return {
       provider: 'openai',
@@ -746,15 +746,22 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     expect(liveTools.map((t) => t.name)).toEqual(['work_board_add'])
   })
 
-  test('provider=openai: trident-fire + ephemeral substrates STILL dispatch through the Claude Code factory', async () => {
-    // The CC-typed `substrateFactory` is used ONLY by the anthropic path. If the
-    // trident substrates recorded into `captured`, they are on Claude Code —
-    // exactly the hard constraint (trident's Workflow inner loop is CC-only).
-    const { ctx, captured } = makeCtx(openaiCtxOverrides())
+  test('build substrates honor the project provider; Codex has no silent Claude run and Claude is a positive control', async () => {
+    let selected: 'openai' | 'anthropic' = 'openai'
+    const rec = recordingOpenAiFetch()
+    const { ctx, captured } = makeCtx({
+      ...openaiCtxOverrides(),
+      providerResolver: () => ({ provider: selected, source: 'project' }),
+      openaiFetchImpl: rec.fetchImpl,
+    })
     const w = wireSubstrates(ctx)
     await drain(w.makeWarmFireSubstrate('/repo/alpha'))
     await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    expect(captured.some((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))).toBe(true)
+    expect(rec.bodies).toHaveLength(2)
+    expect(captured.filter((o) => o.substrate_instance_id.includes('trident'))).toHaveLength(0)
+
+    selected = 'anthropic'
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/two'))
     expect(captured.some((o) => o.substrate_instance_id === 'cc-trident-owner')).toBe(true)
   })
 
@@ -781,7 +788,7 @@ describe('wireSubstrates — swappable provider (trident stays Claude Code)', ()
     // No Anthropic pool → no CC pre-warm fired (openai is stateless HTTP).
     expect(w.prewarmReady).toBeNull()
     expect(w.prewarmSettledRef.settled).toBe(true)
-    // Trident stays Claude-Code-ONLY: with no Anthropic pool an autonomous build
+    // Without either provider credential an autonomous build
     // cannot run, and the factory throws LOUDLY (never silently no-ops on GPT).
     expect(() => w.makeWarmFireSubstrate('/repo')).toThrow(/empty Anthropic credential pool/)
     expect(() => w.makeEphemeralSubstrate('cc-trident')('/repo')).toThrow(
@@ -920,14 +927,14 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     buildToolManifest: buildOpenAiToolManifest,
   })
 
-  test('unset / anthropic → {} (Claude Code, no provider override)', () => {
-    expect(resolveOpenConversationalProvider({} as NodeJS.ProcessEnv, deps(false))).toEqual({})
+  test('unset / anthropic → explicit application-default Claude selection', () => {
+    expect(resolveOpenConversationalProvider({} as NodeJS.ProcessEnv, deps(false))).toEqual({ provider: 'anthropic' })
     expect(
       resolveOpenConversationalProvider(
         { NEUTRON_MODEL_PROVIDER: 'anthropic' } as unknown as NodeJS.ProcessEnv,
         deps(false),
       ),
-    ).toEqual({})
+    ).toEqual({ provider: 'anthropic' })
   })
 
   test('openai + OPENAI_API_KEY → fully-wired GPT ctx', () => {
@@ -971,24 +978,13 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     expect(threw).toBe(true)
   })
 
-  test('openai-codex-cli (declared but NOT production-wired) → THROWS a loud boot error (never silent Claude)', () => {
-    expect(() =>
-      resolveOpenConversationalProvider(
-        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
-        deps(true),
-      ),
-    ).toThrow(/not.*production-wired|refusing to boot/i)
-    // Mutation check: it must NOT silently return {} (Claude fallback).
-    let threw = false
-    try {
-      resolveOpenConversationalProvider(
-        { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
-        deps(true),
-      )
-    } catch {
-      threw = true
-    }
-    expect(threw).toBe(true)
+  test('openai-codex-cli + credentials is wired instead of falling back to Claude', () => {
+    const ctx = resolveOpenConversationalProvider(
+      { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
+      deps(true),
+    )
+    expect(ctx.provider).toBe('openai-codex-cli')
+    expect(ctx.openaiLlmPool).toBeDefined()
   })
 })
 

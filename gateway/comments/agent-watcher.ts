@@ -84,6 +84,7 @@ import type { WebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
 import type { EscalateCommentBodyHistoryEntry } from '../wiring/escalation-loader.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import type { LoopDescriptor } from '@neutronai/loop'
 
 const moduleLog = createLogger('agent-watcher')
 
@@ -292,6 +293,9 @@ export class AgentWatcher {
   private interval: NodeJS.Timeout | null = null
   private running = false
   private stopped = false
+  private started_at = 0
+  private last_tick_at: number | null = null
+  private last_error: unknown = null
 
   constructor(opts: AgentWatcherOptions) {
     this.comment_store = opts.comment_store
@@ -318,6 +322,7 @@ export class AgentWatcher {
   start(): void {
     if (this.interval !== null) return
     this.stopped = false
+    this.started_at = this.nowFn()
     this.interval = this.setIntervalFn(() => {
       fireAndForget('agent-watcher.runTickGuarded', this.runTickGuarded())
     }, this.poll_interval_ms)
@@ -333,6 +338,20 @@ export class AgentWatcher {
     if (this.interval !== null) {
       this.clearIntervalFn(this.interval)
       this.interval = null
+    }
+  }
+
+  /** Live loop-inventory descriptor for the composition's shared registry. */
+  describe(): LoopDescriptor {
+    const self = this
+    return {
+      name: 'agent-watcher',
+      cadenceMs: this.poll_interval_ms,
+      get startedAt(): number {
+        return self.started_at
+      },
+      health: () => ({ lastTickAt: self.last_tick_at, lastError: self.last_error }),
+      isActive: () => self.interval !== null,
     }
   }
 
@@ -353,7 +372,9 @@ export class AgentWatcher {
     this.running = true
     try {
       await this.runTick()
+      this.last_error = null
     } catch (err) {
+      this.last_error = err
       // Top-level guard — the per-project body already catches; this
       // is defense-in-depth so an enumeration failure can never
       // crash the gateway.
@@ -361,6 +382,7 @@ export class AgentWatcher {
         error_message: stringifyError(err),
       })
     } finally {
+      this.last_tick_at = this.nowFn()
       this.running = false
     }
   }

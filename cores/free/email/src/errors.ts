@@ -124,3 +124,21 @@ export class EmailHeaderInjectionError extends Error {
     this.field = field
   }
 }
+
+export type ClassificationSetupErrorCode =
+  | 'classification_survey_invalid'
+  | 'classification_survey_incomplete'
+  | 'classification_answer_unknown'
+  | 'classification_answer_duplicate'
+  | 'classification_answers_incomplete'
+
+/**
+ * A setup refusal. Like the other Core errors in this module it carries a stable
+ * code; an unrecognised code still follows the caller's generic error path.
+ */
+export class ClassificationSetupError extends Error {
+  constructor(readonly code: ClassificationSetupErrorCode, message: string) {
+    super(message)
+    this.name = 'ClassificationSetupError'
+  }
+}

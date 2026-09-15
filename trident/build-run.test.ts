@@ -457,26 +457,23 @@ test('resume pending worker preserves phase and exact step without dispatch', as
   expect(f.cross.calls).toHaveLength(0)
 })
 
-test('bound PR builds reviews and merges only the requested open identity', async () => {
-  const f = modeFixture('bound_pr'); f.input.bound_pr = 1
-  f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
-  for (const role of ['plan', 'build', 'review']) f.outcomes.set(`run:${role}:${role === 'review' ? 1 : 0}`, f.completed())
-  expect((await f.run()).kind).toBe('merged')
-  expect(f.cross.calls).toHaveLength(1)
-  for (const pr of [null, { number: 2, head: 'a'.repeat(40), state: 'OPEN' as const }, { number: 1, head: 'a'.repeat(40), state: 'CLOSED' as const }]) {
-    const bad = modeFixture('bound_pr'); bad.input.bound_pr = 1; bad.snapshot.pr = pr
-    expect((await bad.run()).kind).toBe('blocked')
-    expect(bad.runner.calls).toHaveLength(0)
-  }
-})
+for (const start of ['fresh', 'resume'] as const) {
+  test(`G019 driver refuses bound_pr before any build or release effect on ${start}`, async () => {
+    const f = modeFixture('bound_pr')
+    f.input.start = start
+    // A valid build fixture makes removal of the refusal reach real effects.
+    if (start === 'resume') f.resume('approved')
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'bound_pr requires the retained review-only executor' })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).toEqual([])
+  })
+}
 
-for (const mode of ['ralph', 'wave', 'bound_pr'] as const) {
+for (const mode of ['ralph', 'wave'] as const) {
   test(`${mode} still corroborates worker trailers and preserves worker unknown`, async () => {
     for (const unknown of [false, true]) {
       const f = modeFixture(mode); f.input.pinnedTaskId = 'T1'
-      if (mode === 'bound_pr') {
-        f.input.bound_pr = 1; f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }; f.setPlan()
-      }
       f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
       expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: mode === 'ralph' ? 'run:task:0:build:0' : 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
       expect(f.cross.calls).toHaveLength(0)
@@ -524,20 +521,127 @@ test('resume rejection retains previous finding classes at round three', async (
   expect(f.runner.calls).toHaveLength(0)
 })
 
-for (const at of ['worker', 'publication'] as const) {
-  test(`bound PR identity cannot change during ${at}`, async () => {
-    const f = modeFixture('bound_pr'); f.input.bound_pr = 1
-    f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
-    f.setPlan()
-    for (const role of ['build', 'review']) f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed())
-    if (at === 'worker') {
-      const measure = f.deps.measure; let reads = 0
-      f.deps.measure = async () => { if (++reads === 3) f.snapshot.pr!.number = 2; return measure() }
-      f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, pr: { ...f.snapshot.pr, number: 2 } }))
-    } else {
-      f.deps.publish = async () => { f.snapshot.pr!.number = 2 }
-    }
-    expect(await f.run()).toMatchObject({ kind: 'blocked', on: at === 'worker' ? 'Worker changed the bound PR identity' : 'Published PR does not match reviewed revision' })
-    expect(f.events).not.toContain('merge')
+function localFixture() {
+  const f = fixture()
+  f.input.merge_mode = 'local'
+  let landed = false
+  f.deps.merge = async () => { f.events.push('local-merge'); landed = true }
+  f.deps.confirmLocalMerge = async () => landed ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
+  return f
+}
+
+test('local mode reaches merged with no PR and no publication effect', async () => {
+  const f = localFixture()
+  expect(await f.run()).toMatchObject({ kind: 'merged', snapshot: { pr: null } })
+  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'mergeGate', 'local-merge'])
+})
+
+test('local mode requires independent merge confirmation', async () => {
+  const f = localFixture()
+  f.deps.merge = async () => {}
+  expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator', on: 'not landed' })
+  f.deps.confirmLocalMerge = async () => ({ kind: 'unknown', detail: 'unreadable' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'merge' })
+  delete f.deps.confirmLocalMerge
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'Local merge confirmation source is missing' })
+})
+
+test('local mode preserves worker uncertainty and rejects invented trailers', async () => {
+  for (const unknown of [true, false]) {
+    const f = localFixture()
+    f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
+    expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
+    expect(f.events).not.toContain('local-merge')
+  }
+})
+
+test('local mode rejects PR identity and changed landing revision', async () => {
+  const bound = localFixture(); bound.input.mode = 'bound_pr'
+  expect(await bound.run()).toMatchObject({ kind: 'blocked', on: 'bound_pr requires the retained review-only executor' })
+  const existing = localFixture(); existing.input.start = 'resume'
+  existing.deps.modes = { loadResume: async () => null } as NonNullable<BuildRunDeps['modes']>
+  existing.snapshot.pr = { number: 1, head: existing.snapshot.head, state: 'OPEN' }
+  expect(await existing.run()).toMatchObject({ kind: 'blocked', on: 'Local build has a PR' })
+  const moved = localFixture(); moved.deps.merge = async () => { moved.snapshot.head = 'b'.repeat(40) }
+  expect(await moved.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed during merge' })
+})
+
+test('PR mode still requires a real PR after publication', async () => {
+  const f = fixture(); f.deps.publish = async () => {}
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match reviewed revision' })
+  expect(f.events).not.toContain('merge')
+})
+
+
+test('local revision is pinned across the publication boundary', async () => {
+  const f = localFixture()
+  const measure = f.deps.measure
+  let reads = 0
+  f.deps.measure = async () => {
+    if (++reads === 7) f.snapshot.head = 'b'.repeat(40)
+    return measure()
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed before merge' })
+  expect(f.events).not.toContain('local-merge')
+})
+
+const gap: ReviewDecision = { kind: 're-plan', whatIsMissing: 'revise the execution spec', findings: ['old'], blockingCount: 2 }
+test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
+  const f = fixture()
+  f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
+  const counts: number[] = []
+  const gate = f.deps.reviewGate
+  f.deps.reviewGate = (payload, snapshot, round, used) => { counts.push(used!); return gate(payload, snapshot, round, used) }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
+  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
+  expect(counts).toEqual([0, 1, 1])
+  expect(f.reads()).toBe(14)
+})
+test('host refuses a second re-plan even when worker claims zero spent', async () => {
+  const f = fixture()
+  f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
+  f.deps.reviewGate = async (_payload, _snapshot, _round, used) => ({ ...gap, whatIsMissing: `host count ${used}` })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
+  expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
+})
+for (const decision of [
+  { kind: 'fix', findings: ['old'], blockingCount: 1 },
+  { kind: 'fix', findings: ['new'], blockingCount: 2 },
+] satisfies ReviewDecision[]) {
+  test(`post-re-plan trigger stops: ${decision.findings[0]}`, async () => {
+    const f = fixture(); f.decisions.push(gap, decision)
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
+    expect(f.runner.calls.some(c => c.role === 'fix')).toBe(false)
   })
 }
+for (const role of ['plan', 'build'] as const) {
+  test(`re-plan ${role} claim is measured again`, async () => {
+    const f = fixture(); f.decisions.push(gap)
+    f.outcomes.set(`run:${role}:1`, f.completed({ ...f.snapshot, head: 'invented' }))
+    expect(await f.run()).toMatchObject({ kind: 'failed', phase: role, cause: 'built-head-unverified' })
+  })
+}
+
+test('resume keeps the host re-plan count and rejects invalid counts', async () => {
+  for (const used of [1, 2]) {
+    const f = fixture(); f.input.start = 'resume'
+    f.deps.modes = {
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
+      regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+    }
+    f.decisions.push(gap)
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: used === 1 ? expect.stringContaining('already spent') : 'Invalid recorded re-plan count' })
+  }
+})
+test('resumed rejection after re-plan stops before another fix', async () => {
+  const f = fixture(); f.input.start = 'resume'
+  f.deps.modes = {
+    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
+    regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+    probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
+  expect(f.runner.calls).toHaveLength(0)
+})

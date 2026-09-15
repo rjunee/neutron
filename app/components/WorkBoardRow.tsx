@@ -2,7 +2,7 @@
  * @neutronai/app — WORK BOARD row (Work Board Phase 1b; M1 UX redesign).
  *
  * A FLAT one-line row (NOT a card — that's Tasks). Left-to-right: a status dot
- * that reflects the build lifecycle, the one-line
+ * that reflects the build lifecycle (tap to inspect its worker), the one-line
  * title (tap to edit), a phase TAG capsule + a muted `round N` trail for a
  * bound run, then a drag grip / ▶-or-↻ / ✕ action cluster. The completed
  * variant is dimmed with a strikethrough title + a right-aligned "Merged · Jul
@@ -41,7 +41,7 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import {
   canPlay,
   dotState,
@@ -241,7 +241,14 @@ function WorkBoardRowImpl({
       testID={`wb-row-${item.id}`}
     >
       <View style={styles.line1}>
-        <View style={styles.dotHit} testID={`wb-status-indicator-${item.id}`}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Inspect worker for ${item.title}`}
+          disabled={busy || onInspect === undefined}
+          onPress={onInspect}
+          style={styles.dotHit}
+          testID={`wb-status-indicator-${item.id}`}
+        >
           <Animated.View
             style={[
               styles.dot,
@@ -252,7 +259,7 @@ function WorkBoardRowImpl({
               },
             ]}
           />
-        </View>
+        </Pressable>
 
         {editing ? (
           <TextInput
@@ -301,14 +308,6 @@ function WorkBoardRowImpl({
             disabled={busy}
             onPress={requestAdvance}
           />
-          {onInspect !== undefined ? (
-            <IconButton
-              label={`Inspect worker for ${item.title}`}
-              glyph="⌕"
-              disabled={busy}
-              onPress={onInspect}
-            />
-          ) : null}
           <View
             {...panResponder.panHandlers}
             accessible
@@ -464,7 +463,7 @@ function IconButton({
 export const WorkBoardRow = memo(WorkBoardRowImpl);
 export const WorkBoardCompletedRow = memo(WorkBoardCompletedRowImpl);
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   row: {
     flexDirection: 'column',
     gap: 1,

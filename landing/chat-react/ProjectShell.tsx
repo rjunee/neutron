@@ -59,8 +59,6 @@ import { ThemeToggle } from './ThemeToggle.tsx'
 // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the panel behind the clickable rail dot.
 import { ActivityInspectorPanel } from './ActivityInspectorPanel.tsx'
 import { WebActivityClient, type ActivityRow } from './activity-client.ts'
-// The tab-band/stage divider IS the active credential's usage meter.
-import { UsageMeter } from './UsageMeter.tsx'
 import { WebUsageClient, USAGE_UNKNOWN, type UsagePayload } from './usage-client.ts'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
@@ -366,9 +364,9 @@ export function ProjectShell({
       ? 'General'
       : (vm.projects.find((p) => p.id === activityScope)?.label ?? activityScope)
 
-  // USAGE METER — the divider between the tab band and the stage. Polled here at
-  // the shell root because the divider is shell chrome: it belongs to no tab and
-  // must keep ticking while the owner sits on Documents or Plan.
+  // USAGE METER — the hairline immediately above the chat composer. Polling stays
+  // at the shell root so it continues while another tab is active; the reading is
+  // handed to ChatApp for placement on the chat surface.
   //
   // The server caches its reading and re-measures on its own minute-long timer,
   // so this poll is a cheap local read and never a round-trip to Anthropic. The
@@ -796,10 +794,6 @@ export function ProjectShell({
           {isDesktop ? <ThemeToggle /> : null}
           <HeaderMenu items={menuItems} onSelect={setActiveKey} />
         </div>
-        {/* The seam between the band and the stage. It is the usage meter — two
-            1px lines, session over weekly — or, when there is nothing measured,
-            the plain 2px divider it looks like anyway. */}
-        <UsageMeter usage={usage} />
         {/* The chat STAGE (below the band): the tab panels. The desktop Work
             slide-out no longer lives here — it's mounted INSIDE the Chat view
             (`ChatApp`) so it's scoped to the Chat tab and never bleeds onto
@@ -823,6 +817,7 @@ export function ProjectShell({
                 controller={controller}
                 config={config}
                 draft={draft}
+                usage={usage}
                 onOpenDocLink={onOpenDocLink}
                 paneEligible={paneEligible}
                 onOpenActivity={(id) => {

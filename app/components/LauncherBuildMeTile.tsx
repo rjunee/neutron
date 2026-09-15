@@ -16,7 +16,7 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { createThemedStyles, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 const TILE_RADIUS = DENSITY.bubble_radius + 4;
 const TILE_EMOJI_FONT_SIZE = Math.round(TYPOGRAPHY.h1.fontSize * 1.55);
@@ -48,7 +48,7 @@ export function LauncherBuildMeTile({ size, onPress }: LauncherBuildMeTileProps)
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   tileWrap: {},
   tile: {
     borderRadius: TILE_RADIUS,

@@ -40,7 +40,7 @@ import {
   describeInsecureOrigin,
   normalizeServerUrl,
 } from '../lib/server-url';
-import { THEME } from '../lib/theme';
+import { createThemedStyles, THEME } from '../lib/theme';
 import { tokenStorage } from '../lib/token-storage';
 
 export interface ServerSavedResult {
@@ -199,7 +199,7 @@ export function ServerConnectForm({
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles({
   form: { gap: 10 },
   input: {
     color: THEME.text_primary,

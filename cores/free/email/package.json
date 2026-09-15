@@ -18,6 +18,7 @@
     "./cache": "./src/cache.ts",
     "./pipeline/store": "./src/pipeline/store.ts",
     "./pipeline/classify": "./src/pipeline/classify.ts",
+    "./pipeline/setup": "./src/pipeline/setup.ts",
     "./pipeline/prompts": "./src/pipeline/prompts.ts",
     "./pipeline/escalate": "./src/pipeline/escalate.ts",
     "./pipeline/poller": "./src/pipeline/poller.ts",

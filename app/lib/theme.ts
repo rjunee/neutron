@@ -1,5 +1,5 @@
 /**
- * @neutronai/app — locked dark palette + typography / spacing / motion
+ * @neutronai/app — resolved light/dark palette + typography / spacing / motion
  * tokens (P5.0 palette, P5.1 extensions).
  *
  * P5.0 locked the dark color palette so every component reads colors
@@ -16,6 +16,8 @@
  * MUST come from these tokens. If a new value is needed, add it here
  * first and reference the token from the component.
  */
+
+import type { ImageStyle, TextStyle, ViewStyle } from 'react-native';
 
 export interface NeutronTheme {
   /** Page background. */
@@ -87,7 +89,7 @@ export interface NeutronTheme {
  * by a comparable amount, so "raised" reads as raised at every level rather than
  * only where the delta happened to be big enough.
  */
-export const THEME: NeutronTheme = Object.freeze({
+export const DARK_THEME: NeutronTheme = Object.freeze({
   background: '#101419',
   surface: '#171d25',
   surface_raised: '#222834',
@@ -127,6 +129,176 @@ export const THEME: NeutronTheme = Object.freeze({
   usage_critical: '#e0553f',
 });
 
+/** Light values mirror the web variables in `landing/chat-react.html`. */
+export const LIGHT_THEME: NeutronTheme = Object.freeze({
+  background: '#ffffff',
+  surface: '#f5f5f7',
+  surface_raised: '#e9e9eb',
+  text_primary: '#1c1c1e',
+  text_secondary: '#3a3f4a',
+  text_muted: '#66666a',
+  accent: '#1064cc',
+  hairline: '#d1d1d6',
+  danger: '#c9252d',
+  warning: '#8a5f00',
+  link: '#0b57d0',
+  user_bubble: '#1064cc',
+  user_ink: '#ffffff',
+  rail_selected: 'rgba(16,100,204,.12)',
+  work: '#1064cc',
+  attention: '#e0a020',
+  usage_nominal: '#1a7f37',
+  usage_warning: '#b07407',
+  usage_critical: '#c9252d',
+});
+
+export type ResolvedTheme = 'light' | 'dark';
+export type ThemePreference = 'system' | ResolvedTheme;
+
+export function isThemePreference(value: unknown): value is ThemePreference {
+  return value === 'system' || value === 'light' || value === 'dark';
+}
+
+export function resolveTheme(
+  preference: ThemePreference,
+  systemAppearance: ResolvedTheme | null | undefined,
+): ResolvedTheme {
+  if (preference === 'light' || preference === 'dark') return preference;
+  return systemAppearance === 'light' ? 'light' : 'dark';
+}
+
+export interface ThemeStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<unknown>;
+}
+
+export const THEME_STORAGE_KEY = 'neutron-theme';
+
+export async function readThemePreference(storage: ThemeStorage): Promise<ThemePreference> {
+  try {
+    const stored = await storage.getItem(THEME_STORAGE_KEY);
+    return isThemePreference(stored) ? stored : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+export async function writeThemePreference(
+  storage: ThemeStorage,
+  preference: ThemePreference,
+): Promise<void> {
+  try {
+    await storage.setItem(THEME_STORAGE_KEY, preference);
+  } catch {
+    // Persistence failure must not prevent the in-memory choice from applying.
+  }
+}
+
+let resolvedTheme: ResolvedTheme = 'dark';
+
+/** Called by the root theme owner before it renders its keyed subtree. */
+export function setResolvedTheme(next: ResolvedTheme): void {
+  resolvedTheme = next;
+}
+
+export function getResolvedTheme(): ResolvedTheme {
+  return resolvedTheme;
+}
+
+/** Runtime palette. Property reads resolve against the current appearance. */
+export const THEME: NeutronTheme = new Proxy({} as NeutronTheme, {
+  get(_target, property: keyof NeutronTheme) {
+    return (resolvedTheme === 'light' ? LIGHT_THEME : DARK_THEME)[property];
+  },
+  ownKeys: () => Reflect.ownKeys(DARK_THEME),
+  getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+});
+
+type NamedStyles<T> = { [P in keyof T]: ViewStyle | TextStyle | ImageStyle };
+
+const paletteKeys = Object.keys(DARK_THEME) as (keyof NeutronTheme)[];
+
+function rgbaReplacement(value: string): string | undefined {
+  const match = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/.exec(value);
+  if (match === null) return undefined;
+  const sourceRgb = `${Number(match[1]).toString(16).padStart(2, '0')}${Number(match[2]).toString(16).padStart(2, '0')}${Number(match[3]).toString(16).padStart(2, '0')}`;
+  const active = resolvedTheme === 'light' ? LIGHT_THEME : DARK_THEME;
+  const inactive = resolvedTheme === 'light' ? DARK_THEME : LIGHT_THEME;
+  for (const palette of [active, inactive]) {
+    for (const key of paletteKeys) {
+      if (palette[key].slice(1).toLowerCase() !== sourceRgb) continue;
+      const color = THEME[key];
+      const rgb = /^#(..)(..)(..)$/.exec(color);
+      if (rgb === null) return color;
+      return `rgba(${parseInt(rgb[1], 16)},${parseInt(rgb[2], 16)},${parseInt(rgb[3], 16)},${match[4]})`;
+    }
+  }
+  return undefined;
+}
+
+function phaseReplacement(value: string): string | undefined {
+  const active = resolvedTheme === 'light' ? LIGHT_PHASE : DARK_PHASE;
+  const inactive = resolvedTheme === 'light' ? DARK_PHASE : LIGHT_PHASE;
+  for (const phases of [active, inactive]) {
+    for (const key of Object.keys(phases) as (keyof NeutronPhaseColors)[]) {
+      for (const field of ['fg', 'bg'] as const) {
+        if (value === phases[key][field]) return PHASE[key][field];
+      }
+    }
+  }
+  return undefined;
+}
+
+function resolvePaletteValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const resolvedRgba = rgbaReplacement(value);
+  if (resolvedRgba !== undefined) return resolvedRgba;
+  const resolvedPhase = phaseReplacement(value);
+  if (resolvedPhase !== undefined) return resolvedPhase;
+  const active = resolvedTheme === 'light' ? LIGHT_THEME : DARK_THEME;
+  const inactive = resolvedTheme === 'light' ? DARK_THEME : LIGHT_THEME;
+  for (const palette of [active, inactive]) {
+    for (const key of paletteKeys) {
+      const color = palette[key];
+      if (value === color) return THEME[key];
+      if (value.startsWith(color) && value.length > color.length) return THEME[key] + value.slice(color.length);
+    }
+  }
+  return value;
+}
+
+function isPaletteValue(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  return rgbaReplacement(value) !== undefined || phaseReplacement(value) !== undefined
+    || paletteKeys.some((key) => value.startsWith(DARK_THEME[key]) || value.startsWith(LIGHT_THEME[key]));
+}
+
+/**
+ * StyleSheet.create is an identity function in React Native, which means a
+ * module-level color read normally freezes the startup palette. These getters
+ * preserve the same style objects while resolving palette values at render.
+ */
+export function createThemedStyles<T extends NamedStyles<T> | NamedStyles<unknown>>(
+  styles: T & NamedStyles<unknown>,
+): T {
+  for (const style of Object.values(styles) as Array<Record<string, unknown>>) {
+    for (const property of Object.keys(style)) {
+      const initial = style[property];
+      if (!isPaletteValue(initial)) continue;
+      Object.defineProperty(style, property, {
+        enumerable: true,
+        configurable: false,
+        get: () => resolvePaletteValue(initial),
+      });
+    }
+  }
+  // Keep React Native's Flow-typed package root off pure Bun test import paths.
+  // Component tests install the existing device harness before reaching this
+  // call; device/runtime calls still use the real StyleSheet registry.
+  const { StyleSheet } = require('react-native') as typeof import('react-native');
+  return StyleSheet.create(styles as NamedStyles<T>) as T;
+}
+
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */
 export interface PhaseColor {
   fg: string;
@@ -136,7 +308,7 @@ export interface PhaseColor {
 /**
  * M1 redesign — Work-list row phase colors (dot / tag). Mirror of the web
  * `cwb-tag-*` / `cwb-dot-*` CSS colors (`landing/chat-react/chat-react.html`);
- * mobile is dark-only so these are the literal values, not a light/dark pair.
+ * the runtime proxy selects the matching light/dark pair with the core palette.
  * Keyed by the same coarse phase the row derives from `RunStepLabel`
  * (`merge` covers both the live "merging" step and the terminal "done"/merged
  * state — same green, mirroring the web `cwb-tag-merge` class reuse).
@@ -152,13 +324,28 @@ export interface NeutronPhaseColors {
   blocked: PhaseColor;
 }
 
-export const PHASE: NeutronPhaseColors = Object.freeze({
+export const DARK_PHASE: NeutronPhaseColors = Object.freeze({
   build: { fg: '#8cc6ff', bg: 'rgba(140,198,255,0.14)' },
   review: { fg: '#a8a2ff', bg: 'rgba(168,162,255,0.14)' },
   fix: { fg: '#ffd27d', bg: 'rgba(255,210,125,0.14)' },
   merge: { fg: '#7ddf9b', bg: 'rgba(125,223,155,0.14)' },
   failed: { fg: '#ff8a8a', bg: 'rgba(255,138,138,0.14)' },
   blocked: { fg: '#ffa94d', bg: 'rgba(255,169,77,0.14)' },
+});
+
+export const LIGHT_PHASE: NeutronPhaseColors = Object.freeze({
+  build: { fg: '#0b57d0', bg: 'rgba(11,87,208,.10)' },
+  review: { fg: '#5b4bd6', bg: 'rgba(91,75,214,.12)' },
+  fix: { fg: '#8a5f00', bg: 'rgba(138,95,0,.12)' },
+  merge: { fg: '#146c2e', bg: 'rgba(20,108,46,.12)' },
+  failed: { fg: '#c9252d', bg: 'rgba(201,37,45,.10)' },
+  blocked: { fg: '#a14f00', bg: 'rgba(161,79,0,.12)' },
+});
+
+export const PHASE: NeutronPhaseColors = new Proxy({} as NeutronPhaseColors, {
+  get(_target, property: keyof NeutronPhaseColors) {
+    return (resolvedTheme === 'light' ? LIGHT_PHASE : DARK_PHASE)[property];
+  },
 });
 
 export interface TypographyToken {

@@ -77,8 +77,8 @@ export function readGbrainSyncState(input: { db: ProjectDb; scope: string }): Gb
  * Build the `gbrain_sync_state` observability sink for one GBrain scope.
  *
  * @param db    the per-instance ProjectDb (the migrated instance DB).
- * @param scope the GBrain scope key — the project slug today (one brain per
- *              instance; project partitioning lands in M2.6).
+ * @param scope the GBrain scope key — the project slug (one brain per instance,
+ *              partitioned by project source).
  */
 export function createGbrainSyncStateStore(input: {
   db: ProjectDb
