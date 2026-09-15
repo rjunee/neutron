@@ -8,11 +8,13 @@ explicitly requires this shard location and additive delivery; those instruction
 override the general shard-location and immediate-replacement rules for this lane.
 
 HOSTFX3 connects local landing; see `host-effects-3.md` for current evidence.
-Resume/Ralph persistence remains outstanding. The foundation details and mutation
-table below are historical; their line numbers describe their original delivery.
+HOSTFX4 connects mode persistence and preserves host-owned budgets; see
+`host-effects-4.md` for the current evidence and recovery boundary. The foundation
+details and mutation table below are historical; their line numbers describe their
+original delivery.
 
 The production factory supplies measurement, preparation, publication and PR merge
-adapters at `trident/production-host-effects.ts:203`. The project factory assembles
+adapters at `trident/production-host-effects.ts:301`. The project factory assembles
 those effects and existing gates at `trident/project-build-host.ts:59`. Its inputs
 are an initialized durable run, resolved project substrate bindings, role requests,
 and policy-specific sources (`trident/project-build-host.ts:26`).
@@ -21,18 +23,20 @@ Outstanding work before cutover:
 
 - Remote **base** enforcement remains non-atomic. HOSTFX2 now explicitly records
   this limitation before every PR merge attempt
-  (`trident/production-host-effects.ts:175`), and refuses if the risk evidence
-  cannot be persisted (`trident/production-host-effects.ts:189`). The installed
+  (`trident/production-host-effects.ts:279`), and refuses if the risk evidence
+  cannot be persisted (`trident/production-host-effects.ts:287`). The installed
   CLI exposes a head precondition only; this delivery does not establish whether
   a different platform API could enforce the base. See the evidence and bounded
   validation in `host-effects-2.md`. No atomic-base guarantee is claimed.
-- Resume/Ralph mode persistence and reconciliation of pending workers. The driver
-  requires its mode host for these calls (`trident/build-run.ts:168`); this
-  composition supplies the four effects listed at
-  `trident/production-host-effects.ts:203` and does not add that mode host.
-- Full lifecycle persistence, checkpoint transitions, and terminal-result harvest
-  integration. This subset writes PR identity (`trident/production-host-effects.ts:161`)
-  and preparation stage evidence (`trident/production-host-effects.ts:216`). Those
+- Pending-worker result reconciliation remains external. HOSTFX4 persists the
+  run and step identity before dispatch (`trident/build-run.ts:250`), connects the
+  mode host (`trident/project-build-host.ts:69`), and reloads its state
+  (`trident/production-host-effects.ts:143`). A pending observation still returns
+  unknown without redispatch (`trident/build-run.ts:173`). It does not harvest a
+  result or clear a pending worker based on an unreadable liveness probe.
+- Full run lifecycle transitions and terminal-result harvest
+  integration. This subset writes PR identity (`trident/production-host-effects.ts:261`)
+  and preparation stage evidence (`trident/production-host-effects.ts:314`). Those
   writes are not a terminal-result protocol.
 - Caller-side initialization and resolving actual project adapter bindings remain
   composition responsibilities. The factory requires matching initialized row
@@ -48,7 +52,7 @@ by this partial implementation.
 The positive driver test reaches `merged` through production measurement,
 preparation and landing, using real git and scripted policy/worker seams
 (`trident/production-host-effects.test.ts:414`). The production local effect now
-calls the kept merge module (`trident/production-host-effects.ts:171`). Its new
+calls the kept merge module (`trident/production-host-effects.ts:270`). Its new
 callable landing reuses G109 readiness (`trident/merge.ts:1679`) and preserves the
 reviewed branch. A local receiver enforces the expected-base lease and checked-out
 base safety (`trident/merge.ts:1685`). This is a local filesystem push, not remote
@@ -56,8 +60,8 @@ publication. Validation and mutations are recorded in `host-effects-3.md`.
 
 The readiness-bypass mutation makes the dirty-worktree and silent-overlap tests
 RED (`trident/production-host-effects.test.ts:388`); restoring it makes both GREEN.
-No resume-count mutation is claimed: gap 2 is not implemented. The outstanding
-mode-host entry above remains binding for the next lane.
+The foundation claimed no resume-count mutation; HOSTFX4 supplies that evidence.
+The pending-result reconciliation boundary above remains outstanding.
 
 ### What changed and why
 

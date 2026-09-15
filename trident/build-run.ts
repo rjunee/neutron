@@ -56,10 +56,12 @@ export interface ResumeCheckpoint {
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** A running/unobserved turn must be settled by its host, never dispatched again. */
-  pending?: { phase: WorkPhase; step_id: string }
+  pending?: { phase: WorkPhase; step_id: string } | undefined
 }
 export interface BuildModeHost {
   loadResume(): Promise<ResumeCheckpoint | null>
+  /** Only the driver supplies this state; never pass a worker trailer here. */
+  saveCheckpoint(checkpoint: ResumeCheckpoint): Promise<void>
   /** Diff must be generated using this exact OID, not a moving branch name. */
   regenerateDiff(head: string): Promise<{ kind: 'known'; diff: string } | { kind: 'unknown'; detail: string }>
   probePlan(head: string): Promise<PlanProbe | null>
@@ -230,6 +232,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
     }
 
+    let durable: ResumeCheckpoint = resume ?? { head: null, stage: 'built', round: 0,
+      replansUsed: 0, findings: [], previousFindings: [] }
+    async function checkpoint(patch: Partial<ResumeCheckpoint>) {
+      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount, ...patch }
+      await modes?.saveCheckpoint(structuredClone(durable))
+    }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown } | { stop: BuildRunOutcome }> {
@@ -239,6 +247,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const boundedRequest: BoundedWorkRequest = {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
+      await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
       const outcome: BoundedWorkOutcome = await runner.run(
         boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
@@ -258,6 +267,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return { stop: blocked('Reviewed revision changed during review') }
       }
       snapshot = measured
+      if (role === 'build' || role === 'fix') {
+        await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
+          round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [] })
+      }
       previousPayload = outcome.result.payload
       return { payload: outcome.result.payload }
     }
@@ -322,19 +335,25 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const decision = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
-      if (decision.kind === 'approve') break
+      if (decision.kind === 'approve') {
+        await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
+        break
+      }
       if (decision.kind === 're-plan') {
         if (replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
         replansUsed++
         findings = [decision.whatIsMissing, ...decision.findings]
         previous = decision.findings
         previousBlockingCount = decision.blockingCount ?? decision.findings.length
+        await checkpoint({ head: null, stage: 'built', round: round + 1, pending: undefined, findings: [] })
         planner = 'full'
         committedPlan = undefined
         const stop = await planAndBuild(round)
         if (stop) return stop
         continue
       }
+      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       if (replansUsed > 0 && (decision.findings.some(finding => previous.includes(finding)) || (decision.blockingCount ?? decision.findings.length) >= previousBlockingCount)) {
         return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
       }

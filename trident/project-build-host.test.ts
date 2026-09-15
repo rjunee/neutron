@@ -88,3 +88,23 @@ test('project composition refuses changed source integrity and absent launch pin
   await f.options.production.store.update(f.options.production.runId, { base_sha: null })
   await expect(createProjectBuildHost(f.options)).rejects.toThrow('initialized run')
 })
+
+test('project reconstruction supplies persisted modes and refuses altered host briefs', async () => {
+  const f = await fixture()
+  const host = await createProjectBuildHost(f.options)
+  const checkpoint = { head: null, stage: 'built' as const, round: 3, replansUsed: 1, findings: [], previousFindings: [] }
+  await host.deps.modes!.saveCheckpoint!(checkpoint)
+  const restarted = await createProjectBuildHost(f.options)
+  expect(await restarted.deps.modes!.loadResume()).toEqual(checkpoint)
+  await writeFile(host.workers.fix.request.brief.path, 'altered')
+  await expect(createProjectBuildHost(f.options)).rejects.toThrow()
+})
+
+test('project Ralph state read failure is unknown', async () => {
+  const f = await fixture()
+  const host = await createProjectBuildHost(f.options)
+  await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-mode-state', '{}')
+  expect(await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)).toMatchObject({
+    kind: 'unknown', detail: expect.stringContaining('valid identity or state'),
+  })
+})
