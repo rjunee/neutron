@@ -67,8 +67,8 @@ to save it in. Phases 1 and 2 are ALREADY BUILT — the work is deciding the mod
 reconciling them against the materialize `.git`, NOT writing a third mechanism.
 OPEN, owner's call, deliberately not decided here: whether the vault's canonical git is the materialize
 `.git` or Phase 2's `.project-backup/` (three repos over one tree is one too many); whether the master
-backup remote is per-project or one owner-level remote holding every vault; and whether a code repo
-lives inside the project folder as today (`<project>/code/`) or beside it with a declared link.
+backup remote is per-project or one owner-level remote holding every vault.
+Repo location and selection are resolved by Decisions Log 2026-09-15 (#935).
 
 ## Acceptance
 
@@ -89,3 +89,41 @@ lives inside the project folder as today (`<project>/code/`) or beside it with a
 - [ ] No third mechanism is written. The change reconciles the materialize `.git`,
       `doc-version-store.ts` and `project-backup-store.ts`; a diff that adds a fourth
       store fails this criterion.
+
+### Repo declaration model (#935)
+
+The model lane implements repo declaration and card selection; the vault work above
+remains open. A project may write `project-repos.json` in its root:
+
+```json
+{
+  "repos": [
+    { "name": "widgets", "path": "code", "remote": null },
+    { "name": "docs", "path": "repos/docs", "remote": null }
+  ],
+  "default": "widgets"
+}
+```
+
+`remote` is declaration metadata; cloning and remote reconciliation are outside this
+lane. A remote-bearing entry requires an existing checkout before dispatch. New
+named paths are `repos/<repo-name>`; `code` is accepted for the existing workspace.
+Without a declaration, the compatibility model names the single `code` workspace
+after the project slug. Write a declaration to give it its repository name. An
+explicit empty set (`repos: [], default: null`) is valid and refuses a build.
+`WorkBoardStore.create/update` accepts nullable `repo_name`; null selects the default.
+The declaration is checked on each resolution, including external edits. Missing
+names, invalid defaults, duplicate names/paths, malformed declarations and read
+failures other than a missing file refuse preparation.
+
+- [x] Named card selects that repo, omitted name selects the default, and an unknown
+      name refuses by name with a populated default available.
+      Verify: `bun test trident/project-repos.test.ts trident/board-dispatch.test.ts`.
+- [x] Existing single-code projects resolve unchanged; explicit zero and multiple
+      repo declarations are tested. Verify: `bun test trident/project-repos.test.ts`.
+- [x] Card repo selection persists and can be cleared to the default.
+      Verify: `bun test work-board/store.test.ts`.
+
+Evidence: `trident/project-repos.ts:19`, `trident/project-repos.ts:49`,
+`trident/project-repos.ts:60`, `trident/build-workspace.ts:74`,
+`work-board/store.ts:731`, `work-board/store.ts:995`.
