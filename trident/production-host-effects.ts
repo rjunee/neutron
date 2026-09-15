@@ -6,6 +6,7 @@ import type { CiRunObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
 import { pinnedMergeReadiness, publicationReadiness } from './gates/release-readiness.ts'
+import { mergeLocalReviewed } from './merge.ts'
 import { gitRangeArgv } from './git-range.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
@@ -167,9 +168,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const current = row()
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
-      // Local merge needs an atomic base update and checkout coordination. Do not
-      // substitute an unpinned checkout/merge sequence for that host capability.
-      if (current.merge_mode === 'local') return unknown('Atomic local merge effect is not connected')
+      if (current.merge_mode === 'local') return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head)
       const ready = await pinnedMergeReadiness(runHost, repo, snapshot)
       if (ready.kind !== 'allow') return ready
       // gh pr merge exposes --match-head-commit, but no expected-base option.

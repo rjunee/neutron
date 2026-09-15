@@ -3,13 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
 import { createProductionHostEffects, workContextPath } from './production-host-effects.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import type { BuildSnapshot } from './build-run.ts'
+import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -32,7 +32,7 @@ async function fixture() {
   await command(['git', 'init', '--initial-branch=main', repo])
   await command(['git', '-C', repo, 'config', 'user.name', 'Build Fixture'])
   await command(['git', '-C', repo, 'config', 'user.email', 'fixture@example.invalid'])
-  await writeFile(join(repo, 'code.txt'), 'before\n')
+  await writeFile(join(repo, 'code.txt'), 'before\n' + 'stable\n'.repeat(20))
   await command(['git', '-C', repo, 'add', 'code.txt'])
   await command(['git', '-C', repo, 'commit', '-m', 'Initial fixture'])
   const base = await command(['git', '-C', repo, 'rev-parse', 'HEAD'])
@@ -41,7 +41,7 @@ async function fixture() {
   await command(['git', '-C', repo, 'push', 'origin', 'main'])
   await command(['git', '-C', repo, 'worktree', 'add', '-b', 'change', worktree])
   // A file-backed diff must retain the entire payload and its trailing newline.
-  await writeFile(join(worktree, 'code.txt'), 'after\n' + 'payload\n'.repeat(1000))
+  await writeFile(join(worktree, 'code.txt'), 'after\n' + 'stable\n'.repeat(20) + 'payload\n'.repeat(1000))
   await command(['git', '-C', worktree, 'commit', '-am', 'Build fixture'])
   const tip = await command(['git', '-C', worktree, 'rev-parse', 'HEAD'])
   const store = new TridentRunStore(db)
@@ -246,11 +246,14 @@ for (const failure of ['command', 'witness']) {
   })
 }
 
-test('local merge explicitly remains unknown and never runs gh merge', async () => {
+test('local merge preserves the reviewed branch and updates the checked-out base', async () => {
   const f = await fixture()
   await f.store.update(f.row.id, { merge_mode: 'local' })
   const snapshot = await measured(f)
-  expect(await f.mergeChecked(snapshot)).toEqual({ kind: 'unknown', detail: 'Atomic local merge effect is not connected' })
+  expect(await f.mergeChecked(snapshot)).toEqual({ kind: 'allow' })
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'change'])).toBe(f.tip)
+  expect(await f.command(['git', '-C', f.repo, 'status', '--porcelain'])).toBe('')
+  expect(await readFile(join(f.repo, 'code.txt'), 'utf8')).toBe(await readFile(join(f.worktree, 'code.txt'), 'utf8'))
   expect(f.calls.some(argv => argv[0] === 'gh')).toBe(false)
 })
 
@@ -381,3 +384,82 @@ test('PR and CI OIDs must be strings, not coercible JSON values', async () => {
   f.setCi([{ headSha: [f.tip], status: 'completed', conclusion: 'success' }])
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
 })
+
+for (const condition of ['dirty-worktree', 'overlap', 'base-race', 'dirty-base'] as const) {
+  test(`local effect refuses ${condition}`, async () => {
+    const f = await fixture()
+    await f.store.update(f.row.id, { merge_mode: 'local' })
+    const snapshot = await measured(f)
+    if (condition === 'dirty-worktree') await writeFile(join(f.worktree, 'untracked'), 'preserve')
+    if (condition === 'dirty-base') await writeFile(join(f.repo, 'code.txt'), 'preserve')
+    if (condition === 'overlap') {
+      await writeFile(join(f.repo, 'code.txt'), 'before\n' + 'stable\n'.repeat(10) + 'base changed\n' + 'stable\n'.repeat(9))
+      await f.command(['git', '-C', f.repo, 'commit', '-am', 'Move base'])
+    }
+    const before = await f.command(['git', '-C', f.repo, 'rev-parse', 'main'])
+    if (condition === 'base-race') f.intercept(async argv => {
+      if (argv.includes('push')) {
+        await writeFile(join(f.repo, 'other.txt'), 'concurrent base')
+        await f.command(['git', '-C', f.repo, 'add', 'other.txt'])
+        await f.command(['git', '-C', f.repo, 'commit', '-m', 'Concurrent base'])
+      }
+      return undefined
+    })
+    expect((await f.mergeChecked(snapshot)).kind).not.toBe('allow')
+    if (condition !== 'base-race') expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'main'])).toBe(before)
+    expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'change'])).toBe(f.tip)
+  })
+}
+
+test('local-mode driver reaches merged through the real production effect', async () => {
+  const f = await fixture()
+  await f.store.update(f.row.id, { merge_mode: 'local' })
+  const snapshot = await measured(f)
+  const outcomes = new Map<string, BoundedWorkOutcome>()
+  for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
+    outcomes.set(`${f.row.id}:${role}:${round}`, { kind: 'completed', result: { ...snapshot, payload: {} },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null })
+  }
+  const path = join(f.dir, 'driver-brief')
+  await writeFile(path, workContextPath(path))
+  const request: BuildRunInput['workers']['build']['request'] = { model_id: 'test', effort: null, cwd: f.worktree, writable: true, network: false,
+    tools: 'edit-and-run', brief: { path, integrity: briefIntegrity(workContextPath(path)) },
+    result: { schema: 'test', path: join(f.dir, 'result') }, thread: null, budget: { wall_ms: 1000 } }
+  const runner = fakeRunner('pi', { outcomes })
+  const input: BuildRunInput = { run_id: f.row.id, mode: 'pr', start: 'fresh', merge_mode: 'local', repl_provider: 'pi',
+    workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
+  // Policy seams are scripted here; git measurement, preparation, landing and
+  // the final ancestry witness use the real local repository.
+  const deps: BuildRunDeps = { ...f.effects,
+    admissionGate: async () => ({ kind: 'allow' }),
+    runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
+    assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }), reviewGate: async () => ({ kind: 'approve' }),
+    publishGate: async () => ({ kind: 'allow' }), mergeGate: async () => ({ kind: 'allow' }),
+    confirmLocalMerge: async () => {
+      await f.command(['git', '-C', f.repo, 'merge-base', '--is-ancestor', f.tip, 'main'])
+      return { kind: 'allow' }
+    },
+  }
+  expect(await buildRun(input, deps, new AbortController().signal)).toMatchObject({ kind: 'merged' })
+})
+
+for (const failure of ['during-assessment', 'push-failure', 'push-timeout'] as const) {
+  test(`local effect refuses ${failure}`, async () => {
+    const f = await fixture()
+    await f.store.update(f.row.id, { merge_mode: 'local' })
+    const snapshot = await measured(f)
+    let changed = false
+    f.intercept(async argv => {
+      if (failure === 'push-failure' && argv.includes('push')) return bad()
+      if (failure === 'push-timeout' && argv.includes('push')) return { ...ok(), timed_out: true }
+      if (failure === 'during-assessment' && !changed && argv.includes('--show-toplevel')) {
+        changed = true
+        await writeFile(join(f.repo, 'other.txt'), 'new base')
+        await f.command(['git', '-C', f.repo, 'add', 'other.txt'])
+        await f.command(['git', '-C', f.repo, 'commit', '-m', 'Move during assessment'])
+      }
+      return undefined
+    })
+    expect((await f.mergeChecked(snapshot)).kind).toBe('unknown')
+  })
+}
