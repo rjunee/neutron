@@ -811,6 +811,10 @@ export function buildCoreModules(
         orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
         orchestratorOpts.begin_project_build_driver_recovery = (id, reservation) =>
           store.beginProjectBuildDriverRecovery(id, reservation)
+        // The project launcher assigns and PERSISTS branch/worktree/base_sha during the
+        // fire; without this re-read the post-fire row write spreads the pre-launch
+        // snapshot back over them and the driver's next row check refuses.
+        orchestratorOpts.read_run = (id) => store.get(id) ?? null
         // "An infrastructure failure must retry itself" — atomically spend the
         // durable executor/transport retry budget and release the run slot.
         orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
