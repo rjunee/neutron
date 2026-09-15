@@ -705,7 +705,12 @@ test('G076 approval on the last configured round can publish', async () => {
 test('G076 unreadable cap never dispatches work', async () => {
   for (const read of [undefined, async () => ({ kind: 'unknown' as const, detail: 'offline' }),
     async () => { throw new Error('read failed') }]) {
-    const f = fixture(); if (read) f.deps.readReviewCap = read; else delete f.deps.readReviewCap
+    const f = fixture()
+    if (read) f.deps.readReviewCap = read
+    else {
+      // @ts-expect-error Required for typed callers; exercise an untyped caller's omission.
+      delete f.deps.readReviewCap
+    }
     expect((await f.run()).kind).toBe('unknown')
     expect(f.runner.calls).toHaveLength(0)
   }

@@ -101,6 +101,7 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
   const build = fakeRunner('openai-codex', { outcomes: new Map([['run:build:0', outcome]]) })
   let reads = 0
   const deps: BuildRunDeps = {
+    readReviewCap: async () => ({ kind: 'known' }),
     prepareWork: async () => {},
     measure: async () => ({ kind: 'known', value: ++reads < 3 ? initial : measured }),
     admissionGate: async () => ({ kind: 'allow' }),

@@ -89,8 +89,8 @@ export interface BuildRunInput {
  * exports WorkerRunner but no BuildHost; keep host effects here until that lands.
  */
 export interface BuildRunDeps {
-  /** Read the host run row; an omitted field on a known row uses the stored default. */
-  readReviewCap?(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
+  /** Required host run-row reader; only an omitted field on a known row uses the stored default. */
+  readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
   measure(): Promise<Measurement>

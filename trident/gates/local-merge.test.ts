@@ -47,6 +47,7 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
     tools: 'edit-and-run', brief: { path: 'brief', integrity: 'test' }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
   const worker = { runner, request }
   const deps: BuildRunDeps = {
+    readReviewCap: async () => ({ kind: 'known' }),
     prepareWork: async () => {}, admissionGate: async () => f.check(),
     measure: async () => ({ kind: 'known', value: { ...snapshot, head: await f.git('rev-parse', 'change'), diff: await f.git('diff', 'base...change') } }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
