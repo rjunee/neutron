@@ -6333,7 +6333,7 @@ deleted, no dual path):
   `REDIRECT_RULE` (redirect verbose build/test output to a log, read only the
   tail). `state-machine.ts` (`computeTransition`/`advanceTridentRun`) is kept
   intact for its unit tests + revertibility.
-- **FIRE + SETTLE (the exec model):** `trident/inner-loop.ts` `buildWorkflowFirer`
+- **Retained legacy FIRE + SETTLE implementation (superseded in production by the typed project launcher below):** `trident/inner-loop.ts` `buildWorkflowFirer`
   fires the workflow via a FIRE seam (`buildSubstrateWorkflowFire`) — ONE turn on
   a **WARM, NON-EPHEMERAL** substrate that invokes the `Workflow` tool and then
   `reply()`s. The launching turn SETTLES in seconds while the workflow keeps
@@ -6554,28 +6554,16 @@ deleted, no dual path):
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
-- **The production runner (LIVE + hardened).** The Open composer
-  (`open/composer.ts`) threads `composition.trident = { fire_inner_workflow }` (a
-  warm-substrate FIRE seam built over a memoized per-cwd `cc-trident-fire-*`
-  factory), which flips the tick loop from its `stubAdvanceDeps` no-op to the real
-  `buildWorkflowFirer` + `buildTridentOrchestrator` step in `build-core-modules.ts`
-  (passed the project `db_path` for the workflow's checkpoint + terminal-result
-  Bash steps). On a server-gated APPROVE the step merges + cleans up; on
-  REQUEST_CHANGES (maxRounds exhausted), a provenance-gate rejection, a stalled
-  workflow, or a fire that never settled it fails loudly.
-- **Billing-exempt + responsive (DONE).** The fire substrate is WARM
-  (non-ephemeral) so the launching turn settles immediately and the detached
-  workflow runs on the owner's Max-OAuth pool — NO per-build `claude -p` (the
-  whole reason for the rearchitecture). One warm `cc-trident-fire-*` REPL per repo
-  carries N background workflows in parallel and stays responsive. The workflow's
-  Forge agent still gets its OWN `isolation:'worktree'` worktree, so one build
-  never inherits another's working context. **Paused ≠ finished (false-completion
-  guard):** a fire turn whose stream ends WITHOUT a terminal `completion` event
-  maps to `failed`, never `fired` (Open analog of the legacy harness's fleet "paused vs
-  finished" reap fix #160). The inlined Forge contract still hard-rules cross-model
-  review as **best-effort, after the PR is open, never a turn-yielding hang
-  point** (Open analog of the legacy harness PR #164). See
-  `docs/research/legacy-neutron-fix-reconciliation-2026-06-24.md`.
+- **Typed project launcher.** The composer supplies a typed firer that constructs
+  the project host and starts its driver in Neutron (`open/composer.ts:1159`,
+  `trident/project-launcher.ts:54`). The gateway forwards the typed input directly.
+  Terminal outcomes use `inner_result`; unknown outcomes retain the worker and
+  step for reconciliation (`trident/project-launcher.ts:12`,
+  `trident/orchestrator.ts:6342`). Credential-free boots retain the null launcher.
+- **Evidence limits.** The suite report reader currently returns no record
+  (`open/wiring/project-build.ts:123`). Non-Claude acting-turn bindings and
+  unsupported review transports remain explicit unavailable outcomes. This wiring
+  does not establish the live card-to-merged acceptance.
 - **One-commit revert runbook.** Migrations 0089/0091's columns are additive +
   nullable, so a `git revert <sha>` leaves them harmlessly unused.
 - **Phase 2b (DONE):** every trident/agent dispatch is now BOUND to a Work Board

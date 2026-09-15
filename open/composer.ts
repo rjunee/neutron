@@ -1,3 +1,6 @@
+import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
+import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { prepareProjectBuild } from './wiring/project-build.ts'
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/open — single-owner graph composer (Sprint D boot shell).
@@ -86,7 +89,6 @@ import {
   PROFILE_LEAK_FIXER,
   PROFILE_UNTRUSTED_IMPORT,
 } from '@neutronai/gateway/wiring/substrate-profiles.ts'
-import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import {
@@ -1150,14 +1152,25 @@ export function buildOpenGraphComposer(
       makeComposeSubstrate,
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
-      makeWarmFireSubstrate,
       prewarmReady,
       prewarmSettledRef,
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
     const tridentFireInnerWorkflow =
       liveAgentSubstrate !== null
-        ? buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate })
+        ? createProjectLauncher({
+            get store() { return boardRunStore },
+            prepare: (input, signal) => {
+              const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
+              return prepareProjectBuild(input, {
+                store: boardRunStore, phaseUsage: new TridentPhaseUsageStore(db), runHost: tridentHostRunner,
+                stateRoot: joinPath(owner_home, '.trident', 'project-builds'),
+                projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
+                projectId: id, provider: resolveModelProvider(id).provider, env,
+              }, signal)
+            },
+            onError: error => log.error('project_build_outcome_write_failed', { error: String(error) }),
+          })
         : null
 
     // Agent-dispatch family (parity gap #3) — the general named-specialist +
@@ -7032,18 +7045,9 @@ export function buildOpenGraphComposer(
           return result.persisted
         },
       },
-      // Foundational Trident v2 (Work Board Phase 2a exec-model) — the
-      // `/code <task>` autonomous Forge→Argus→merge loop, inner loop a native CC
-      // Dynamic Workflow. Threading `fire_inner_workflow` here flips the trident
-      // tick loop (built in `build-core-modules.ts`) from its `stubAdvanceDeps`
-      // no-op to the REAL `buildWorkflowFirer` + `buildTridentOrchestrator` step,
-      // so a `code_trident_runs` row is driven end-to-end: FIRE the `Workflow`
-      // tool on a warm substrate + settle the launching turn (billing-exempt, no
-      // `claude -p`), the workflow persists its typed result to the DB, and the
-      // durable loop harvests it by runId + merges on a server-gated APPROVE (see
-      // `tridentFireInnerWorkflow` above). Omitted when no credential resolves
-      // (`tridentFireInnerWorkflow === null`) → unchanged LLM-less behaviour (loop
-      // stays live + restart-safe but advances nothing). The `on_run_terminal`
+      // The typed project launcher starts the host driver and persists outcomes
+      // in inner_result for the outer loop. Credential-free boots omit this bag.
+      // The on_run_terminal
       // observer fires Skill Forge's auto-skillify audit (parity gap #5) on every
       // terminal run — the audit drops non-`done` runs. Wired only on the live
       // (dispatch) path; an LLM-less box never advances a run to terminal, so

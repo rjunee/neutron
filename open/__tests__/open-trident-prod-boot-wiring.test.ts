@@ -1,35 +1,16 @@
+import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
+import { execFileSync } from 'node:child_process'
+import * as projectHost from '@neutronai/trident/project-build-host.ts'
+import * as codexWorker from '@neutronai/runtime/workers/codex-headless.ts'
+import { fakeRunner } from '@neutronai/runtime/bounded-work.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { spyOn } from 'bun:test'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
-/**
- * Open foundational-Trident prod-boot wiring — the anti-"built-but-not-wired"
- * gate for the `/code <task>` autonomous build runner.
- *
- * THE GAP (Trident-port, this PR): `cores/free/code-gen/src/backend.ts` throws
- * `CodegenNotConfiguredError` because the production runner was never wired into
- * prod boot — the Open composer never set `CompositionInput.trident`, so the
- * trident tick loop fell back to `stubAdvanceDeps()` (advances nothing) and
- * `/code` could not dispatch a real build.
- *
- * THE FIX (Trident v2 · Phase 2a exec-model): `open/composer.ts` builds a warm
- * FIRE seam (`buildSubstrateWorkflowFire`, over a non-ephemeral `cc-trident-fire-*`
- * substrate on the single-owner credential pool) and threads
- * `trident: { fire_inner_workflow }` onto the returned `CompositionInput`, so
- * `build-core-modules.ts` wires the REAL `buildWorkflowFirer` +
- * `buildTridentOrchestrator` step (the inner loop is a CC Dynamic Workflow, FIRED
- * on the warm substrate + harvested from the DB — billing-exempt, no `claude -p`).
- *
- * Per CLAUDE.md (the 2026-05-13 "built but never invoked" incident class) this
- * asserts the wiring ACTUALLY produces a working runner — it boots the REAL Open
- * composer with a SYNTHETIC credential, then:
- *   1. `composition.trident.fire_inner_workflow` is a wired function (not
- *      skeleton/stub). The live `Workflow`-fire exercise is the real-run
- *      acceptance, not this unit test.
- *   2. With NO credential the runner degrades cleanly: `composition.trident` is
- *      unset (the loop stays on its restart-safe no-op).
- */
+/** Production boot and typed project-launch composition checks. */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import ts from 'typescript'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -118,28 +99,65 @@ function recordingSubstrate(prompts: string[]): Substrate {
   }
 }
 
+test.each(['anthropic', 'pi'] as const)('production composition constructs project host and starts its typed run for %s', async provider => {
+  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
+  const original = projectHost.createProjectBuildHost
+  const starts: unknown[] = []
+  const optionsSeen: projectHost.ProjectBuildHostOptions[] = []
+  const codex = spyOn(codexWorker, 'createCodexHeadlessRunner').mockReturnValue(fakeRunner('openai-codex'))
+  const construct = spyOn(projectHost, 'createProjectBuildHost').mockImplementation(async options => {
+    optionsSeen.push(options)
+    const host = await original({ ...options, production: { ...options.production,
+      runHost: async () => ({ ok: false, exit_code: 1, stdout: '', stderr: 'fixture observation unavailable', timed_out: false }) } })
+    const run = host.run.bind(host)
+    host.run = (...args) => { starts.push(args[0]); return run(...args) }
+    return host
+  })
+  try {
+    const composer = buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })
+    const composition = await composer({ db, project_slug: 'owner' })
+    const store = new TridentRunStore(db)
+    await new SqliteProjectSettingsStore(db).update('owner', 'project-one', { name: 'Project One', model_provider: provider })
+    const projectDir = join(tmpDir, 'Projects', 'project-one')
+    const repo = join(projectDir, 'code')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(projectDir, 'project-repos.json'), JSON.stringify({ repos: [{ name: 'main', path: 'code', remote: null, ciWorkflow: 'project-ci.yml' }], default: 'main' }))
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'Fixture'], { stdio: 'ignore' })
+    const base = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    const created = await store.create({ slug: 'launch', project_slug: 'project-one', repo_path: repo, task: 'Build the card' })
+    await store.update(created.id, { branch: 'change', worktree: join(tmpDir, 'work'), base_sha: base })
+    const run = store.get(created.id)!
+    const fired = await composition.trident!.fire_inner_workflow({ run, base_branch: 'main', db_path: join(tmpDir, 'project.db'), max_rounds: 3, test_strategy: 'Run the configured suite' })
+    expect(fired.status).toBe('fired')
+    expect(optionsSeen).toHaveLength(1)
+    expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
+    expect(optionsSeen[0]!.production.runId).toBe(run.id)
+    expect(optionsSeen[0]!.substrate.provider).toBe(provider)
+    expect(optionsSeen[0]!.production.ciWorkflow).toBe('project-ci.yml')
+    expect(optionsSeen[0]!.policy.reviewSuite?.strategy).toBe('Run the configured suite')
+    expect(optionsSeen[0]!.policy.reviewSuite?.scope).toBe('full-suite')
+    for (let i = 0; i < 100 && !store.get(run.id)!.inner_result?.includes('cleanup'); i++) await Bun.sleep(1)
+    const result = JSON.parse(store.get(run.id)!.inner_result!)
+    expect(result.projectBuild.kind).toBe(provider === 'anthropic' ? 'unknown' : 'refused')
+    expect(result.projectBuild.cleanup).toBeDefined()
+  } finally { construct.mockRestore(); codex.mockRestore() }
+})
+
 describe('Open foundational-Trident prod-boot wiring', () => {
-  test('a credentialed boot wires composition.trident.fire_inner_workflow to a REAL warm-substrate fire seam', async () => {
+  test('a credentialed boot wires the typed project launcher', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
     const prompts: string[] = []
     const composer = buildOpenGraphComposer({
       env: process.env,
-      // Mock every substrate the composer builds (no real `claude`) — including
-      // the warm `cc-trident-fire-*` substrate the fire seam runs its launching
-      // turn on.
+      // Fake conversational substrates keep this boot check offline.
       substrateFactory: ((_opts: { cwd?: string }) => {
         return recordingSubstrate(prompts)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }) as any,
     })
     const composition = await composer({ db, project_slug: 'owner' })
 
-    // The runner is wired — not the skeleton/stub. Phase 2a threads a warm
-    // FIRE seam that invokes the `Workflow` tool + settles the launching turn;
-    // the workflow's result is harvested from the DB. The fire closure is built
-    // eagerly (no turn until a real run), so a credentialed boot exposes it as a
-    // function. The live `Workflow`-fire round-trip is the real-run acceptance,
-    // not this unit test.
+    // Availability is checked separately from the construction/start test above.
     expect(composition.trident).toBeDefined()
     expect(typeof composition.trident!.fire_inner_workflow).toBe('function')
 
@@ -169,7 +187,6 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     await delivery.onTerminal({
       // Minimal terminal run shape the delivery path reads (phase/task/chat_id/
       // channel_kind); other fields are unread by `buildTridentDelivery`.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       phase: 'done',
       task: 'X5 seam smoke',
       chat_id: 'app:owner',
@@ -178,7 +195,6 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       merge_mode: 'local',
       pr: null,
       failure_reason: null,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any)
     expect(delivered).toBe(true)
 

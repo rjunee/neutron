@@ -58,31 +58,10 @@ export interface MiscCompositionInput {
    * aborts the tick. Safe to omit (dev/test paths that don't drive a heartbeat).
    */
   on_gateway_tick?: () => void
-  /**
-   * Trident v2 (Work Board Phase 2a exec-model) — drive the foundational
-   * Forge→Argus→merge loop live. When `fire_inner_workflow` is supplied, the
-   * `trident` module wires the REAL orchestrator `step`
-   * (`buildTridentOrchestrator` + `buildWorkflowFirer`) so every non-terminal
-   * `code_trident_runs` row (created by `/code <task>` or a governed Ralph run)
-   * is advanced end-to-end by the tick loop: FIRE the inner CC Dynamic Workflow
-   * (Forge build → parallel Argus review → synthesis → bounded fix loop) → on a
-   * server-gated APPROVE merge (per git-mode) → done. When omitted, the module
-   * falls back to `stubAdvanceDeps` (classify always "running") so the loop is
-   * live + restart-safe but advances nothing — the unchanged Open dev/default
-   * behaviour.
-   *
-   * `fire_inner_workflow(input)` invokes the `Workflow` tool on a WARM substrate
-   * and SETTLES the launching turn immediately (the production composer passes
-   * `buildSubstrateWorkflowFire` over a non-ephemeral `cc-trident-fire-*`
-   * substrate on the per-instance Max-OAuth pool). It is billing-exempt — NOT a
-   * per-build `claude -p`. The workflow then runs DETACHED in the background and
-   * persists its TYPED terminal result to `code_trident_runs.inner_result`, which
-   * the durable tick loop HARVESTS by runId (the fire seam carries NO build
-   * result). `run_host` runs the git/gh host commands (defaults to a `Bun.spawn`
-   * runner).
-   */
+  /** Typed host launcher. Returns after start; the outer loop harvests inner_result.
+   * Omission retains the credential-free boot's inactive advance dependencies. */
   trident?: {
-    fire_inner_workflow: import('@neutronai/trident/inner-loop.ts').FireInnerWorkflow
+    fire_inner_workflow: import('@neutronai/trident/inner-loop.ts').TridentWorkflowFirer
     run_host?: import('@neutronai/trident/git-mode.ts').DiffOutputHost
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**

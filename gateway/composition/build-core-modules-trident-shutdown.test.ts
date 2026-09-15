@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
-import type { FireInnerWorkflow } from '@neutronai/trident/inner-loop.ts'
+import type { TridentWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 
 import { buildCoreModules } from './build-core-modules.ts'
@@ -70,13 +70,15 @@ function baseInput(): CompositionInput {
 describe('trident module shutdown — §F1 quiesce + drain wiring', () => {
   test('wired path: captures drain() and shutdown quiesces an in-flight fire', async () => {
     let entered = false
+    let dispatched: Parameters<TridentWorkflowFirer>[0] | undefined
     let release!: () => void
     const gate = new Promise<void>((r) => {
       release = r
     })
     // Gated fire seam: the launching turn blocks until we release the gate,
     // holding the tick (and thus the orchestrator FIRE turn) in flight.
-    const fire_inner_workflow: FireInnerWorkflow = async () => {
+    const fire_inner_workflow: TridentWorkflowFirer = async value => {
+      dispatched = value
       entered = true
       await gate
       return { status: 'fired', error: null }
@@ -108,6 +110,9 @@ describe('trident module shutdown — §F1 quiesce + drain wiring', () => {
     try {
       for (let i = 0; i < 100 && !entered; i++) await sleep(2)
       expect(entered).toBe(true)
+      expect(dispatched?.run.task).toBe('do a thing')
+      expect(dispatched?.run.worktree).toContain('.trident-worktrees/')
+      expect(dispatched?.run.branch).toBe('trident/r1')
 
       // (b) shutdown() must stay PENDING while the fire is in flight.
       let shutdownDone = false

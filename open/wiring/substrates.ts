@@ -511,15 +511,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       return s
     }
 
-  // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
-  // loop is one native CC Dynamic Workflow. The composer threads a FIRE seam
-  // (`buildSubstrateWorkflowFire`); the build-core trident module wraps it with
-  // `buildWorkflowFirer`. The fire seam invokes the `Workflow` tool on a WARM
-  // (non-ephemeral) substrate and SETTLES the launching turn immediately —
-  // billing-exempt (the owner's Max-OAuth pool, NOT a per-build `claude -p`).
-  // The workflow then runs DETACHED in the background and persists its TYPED
-  // result to `code_trident_runs.inner_result`, which the durable tick loop
-  // harvests by runId.
+  // Retained legacy workflow substrate factory. The production project launcher
+  // no longer consumes this factory; deletion belongs to the old-path cleanup.
   //
   // WARM-PER-REPO: the persistent pool keys on (instance, user, project,
   // credential) — NOT cwd — so a single shared instance id would pin every

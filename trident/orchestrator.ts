@@ -1,3 +1,4 @@
+import { projectBuildPending } from './project-launcher.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type RunWorkerObservation } from './worker-observation.ts'
 /**
@@ -4170,7 +4171,10 @@ export function buildTridentOrchestrator(
       const oid = resolved.stdout.trim().toLowerCase()
       if (resolved.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) base_sha = oid
     }
-    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+    const pinnedRun = { ...(freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun),
+      branch: launchRun.branch ?? `trident/${launchRun.slug}`,
+      worktree: launchRun.worktree ?? runWorktreePath(launchRun.repo_path, launchRun),
+    }
 
     // THE LOCAL-BRANCH OWNERSHIP CHECK RUNS FOR EVERY ROW THAT HAS NOT FIRED, not
     // only for `freshLaunch` ones (Argus r3 blocker). It used to be gated on
@@ -6335,6 +6339,9 @@ export function buildTridentOrchestrator(
   }
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    if (!isTerminalPhase(run.phase) && projectBuildPending(run.inner_result)) {
+      return { run, changed: false, waiting: true, note: 'Project driver outcome unknown; preserving worker and step for reconciliation' }
+    }
     let worker = unknownWorkerObservation('worker observer unavailable', now())
     if (!isTerminalPhase(run.phase) && opts.observe_run_worker !== undefined) {
       try { worker = await opts.observe_run_worker(run) }
