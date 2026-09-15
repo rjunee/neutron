@@ -26,8 +26,8 @@ export interface ProductionHostOptions {
   branch: string
   baseBranch: string
   runHost: EnvCapableHostRunner
-  /** The required workflow, as configured by the project. */
-  ciWorkflow: string
+  /** The repo's declared workflow; undefined means CI configuration is unknown. */
+  ciWorkflow: string | undefined
   ciSource?: ProductionCiSource
   ciNow?: () => number
   publication: { title: string; bodyFile: string }
@@ -288,7 +288,8 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
   async function observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation> {
     try {
       row()
-      if (!options.ciWorkflow || !oid.test(snapshot.head) || !snapshot.pr) throw new Error('CI workflow, PR or full head is missing')
+      if (typeof options.ciWorkflow !== 'string' || options.ciWorkflow.trim() === '') throw new Error('Repository CI workflow is missing from project-repos.json')
+      if (!oid.test(snapshot.head) || !snapshot.pr) throw new Error('CI PR or full head is missing')
       const [config, readiness] = await Promise.all([ciSource.required(baseBranch), ciSource.readiness(snapshot.pr.number)])
       if ('unreadable' in readiness) throw new Error(readiness.unreadable)
       if (readiness.headSha !== snapshot.head) throw new Error('CI readiness head is missing or mismatched')

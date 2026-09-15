@@ -11,6 +11,8 @@ import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from 
 import { createProductionHostEffects, productionCiSource, workContextPath } from './production-host-effects.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
+import { readProjectRepos, resolveProjectRepo } from './project-repos.ts'
+import { ciReadinessForHead } from './ci-readiness.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -390,6 +392,33 @@ test('CI refuses absent workflow even with a successful response', async () => {
   const snapshot = await measured(f)
   f.options.ciWorkflow = ''
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('workflow') })
+})
+
+test('undeclared repo workflow is unreadable before acquisition, with valid PR and green CI available', async () => {
+  const f = await fixture()
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+  const snapshot = await measured(f)
+  expect(snapshot.pr?.number).toBe(12)
+  let acquisitions = 0
+  const declared = (workflow: string | undefined) => ({
+    repos: [{ name: 'project', path: 'code', remote: null, ...(workflow === undefined ? {} : { ciWorkflow: workflow }) }],
+    default: 'project',
+  })
+  const observe = async () => {
+    const repo = resolveProjectRepo(readProjectRepos(f.dir, 'project'))
+    return createProductionHostEffects({ ...f.options, ciWorkflow: repo.ciWorkflow,
+      ciSource: { ...f.options.ciSource, async required() { acquisitions++; return f.options.ciSource.required() } },
+    }).observeCi(snapshot)
+  }
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared(undefined)))
+  expect(await observe()).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('project-repos.json') })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('cannot-read')
+  expect(acquisitions).toBe(0)
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared('ci.yml')))
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('green')
+  expect(acquisitions).toBe(1)
+  f.setCiReadiness({ headSha: snapshot.head, mergeable: 'MERGEABLE', rows: [] })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('no-run')
 })
 
 test('prepare requires a context reference and an unchanged host snapshot', async () => {
