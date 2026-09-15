@@ -12,7 +12,11 @@ import {
   loadAppConfig,
   subscribeServerConfig,
 } from '../lib/config';
-import { installDiagnostics, setDiagnosticsOrigin } from '../lib/diagnostics';
+import {
+  importNativeCrashReport,
+  installDiagnostics,
+  setDiagnosticsOrigin,
+} from '../lib/diagnostics';
 import { AuthSessionProvider } from '../lib/session';
 import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { installPushTapHandler } from '../lib/push';
@@ -29,8 +33,8 @@ import { AppThemeProvider } from '../lib/theme-runtime';
  * today. `installDiagnostics()` is idempotent, so a re-import (fast refresh)
  * does not chain the handler to itself.
  *
- * See `app/lib/diagnostics.ts` for what this does and does NOT catch — in
- * particular it does not catch native crashes, which still need logcat.
+ * Android crashes that precede this import are staged by the native initializer
+ * and imported after the server configuration has hydrated below.
  */
 installDiagnostics();
 
@@ -190,7 +194,9 @@ function RootLayoutContent() {
       // queued against one instance can never be delivered to another after a
       // server change. Set before the tree mounts, so a crash in the very first
       // screen is already bound.
-      setDiagnosticsOrigin(loadAppConfig().gateway_base_url);
+      const gatewayBaseUrl = loadAppConfig().gateway_base_url;
+      setDiagnosticsOrigin(gatewayBaseUrl);
+      await importNativeCrashReport(gatewayBaseUrl);
       // LOGIN-FIRST: there is no server-setup phase any more. The app opens on
       // login and DISCOVERS its instance URL, so boot goes straight to 'ready'
       // and the login screen decides what the owner sees.

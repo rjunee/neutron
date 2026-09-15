@@ -13,15 +13,16 @@
  * `read:project_data` / `write:project_data` capability (mirrors
  * `memory_search`).
  *
- * SECURITY + SCOPE: the storage scope is NEVER an agent-supplied argument. It is
- * derived at dispatch time from the server-injected `ToolCallContext` via
- * `workBoardScopeKey(ctx.project_slug, ctx.project_id)` — `project_slug` is the
- * owner/instance boundary (`mcp/server.ts` overrides it on every dispatch, so the
- * model cannot spoof it) and `project_id` is the ACTIVE project of the composing
- * turn (threaded from the topic-agnostic warm REPL's per-project session scope).
+ * SECURITY + SCOPE: the owner/instance boundary is NEVER an agent-supplied
+ * argument. It comes from the server-injected `ToolCallContext` (`mcp/server.ts`
+ * overrides `project_slug` on every dispatch, so the model cannot spoof it).
+ * The default board comes from the context's active `project_id`; add alone may
+ * request a different project id after the server validates it.
  * So a card added while chatting in project X lands on X's board; a General turn
  * (no active project) still scopes to the owner slug (the General board). The
- * input schemas expose only `title / status / design_doc_ref / id / before|after|precedes`.
+ * Only `work_board_add` may select a different project, through `target_project`;
+ * the server validates that id against the owner's live-project list before any
+ * write. Other tools remain pinned to the active project.
  * `design_doc_ref` schemes are allow-listed at the store.
  */
 
@@ -120,6 +121,7 @@ interface AddArgs {
   status?: unknown
   design_doc_ref?: unknown
   spec?: unknown
+  target_project?: unknown
 }
 interface UpdateArgs {
   id?: unknown
@@ -209,12 +211,15 @@ export function registerWorkBoardToolSurface(
      * boots) → the tool is NOT registered and the other five register unchanged.
      */
     removal?: WorkBoardRemovalService
+    /** Resolve whether a requested destination is a live project for this owner. */
+    projectExists?: (owner_slug: string, project_id: string) => boolean | Promise<boolean>
   },
 ): string[] {
   const specDoc = opts?.specDoc
   const chatAck = opts?.chatAck
   const deriveInlineActive = opts?.deriveInlineActive
   const removal = opts?.removal
+  const projectExists = opts?.projectExists
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -249,7 +254,8 @@ export function registerWorkBoardToolSurface(
       'anything more than a trivial one-liner, ALSO pass `spec` = the FULL context/ask (the ' +
       "user's request + any clarifying detail): it is persisted to a per-project plans/ doc so it " +
       "survives session resets and drives the ▶ build. A short one-liner needs no `spec`. Returns " +
-      'the created item.',
+      'the created item. To file the new card on a different live project, pass its project id as ' +
+      '`target_project`.',
     input_schema: {
       type: 'object',
       properties: {
@@ -262,6 +268,12 @@ export function registerWorkBoardToolSurface(
             'The FULL context/ask for this item (multi-line ok). When substantial it is saved to a ' +
             'plans/ doc and the item is linked to it; a short one-liner is left title-only. Omit ' +
             'when `design_doc_ref` already points at a doc.',
+        },
+        target_project: {
+          type: 'string',
+          description:
+            'Optional destination project id. Omit to add to the current project. The destination ' +
+            'must be a live project belonging to this owner.',
         },
       },
       required: ['title'],
@@ -276,7 +288,14 @@ export function registerWorkBoardToolSurface(
       const status = asStatus(a.status)
       const ref = asString(a.design_doc_ref)
       const spec = asString(a.spec)
-      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      const requestedProject = asString(a.target_project)
+      if (requestedProject !== undefined) {
+        if (projectExists === undefined || !(await projectExists(ctx.project_slug, requestedProject))) {
+          return { ok: false, error: `no such destination project: ${requestedProject}` }
+        }
+      }
+      const destinationProject = requestedProject ?? ctx.project_id
+      const scope = workBoardScopeKey(ctx.project_slug, destinationProject)
       try {
         let item: WorkBoardItem
         if (specDoc !== undefined) {
@@ -291,7 +310,7 @@ export function registerWorkBoardToolSurface(
           // board's collapse and the docs root can never drift apart again.
           item = await specDoc.createCardWithOptionalSpec(
             scope,
-            ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID,
+            destinationProject ?? GENERAL_WORK_BOARD_PROJECT_ID,
             {
             title,
             ...(status !== undefined ? { status } : {}),
@@ -309,7 +328,7 @@ export function registerWorkBoardToolSurface(
         // the chat is not silent until the turn's single reply() lands at turn
         // end. Never perturbs the tool result (the ack self-swallows).
         chatAck?.post({
-          project_id: ctx.project_id,
+          project_id: destinationProject,
           item_id: item.id,
           title: item.title,
           kind: 'card_added',
