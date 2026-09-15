@@ -45,7 +45,7 @@ function unavailableRunner(provider: Provider): WorkerRunner {
   }
 }
 
-/** Compose the kept gates. Partial gate evidence never authorizes publication. */
+/** Compose the kept gates and the advisory leak preflight. */
 export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers; run(input: BuildRunInput, signal: AbortSignal): Promise<BuildRunOutcome | BoundReviewOutcome> } {
   const workers = {} as Workers
   for (const role of roles) {
@@ -95,7 +95,20 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       }
       return projectAdmission(options.admission, input)
     },
-    runLeakGatePreflight: (snapshot) => runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0 }),
+    async runLeakGatePreflight(snapshot) {
+      let gateReturned = false
+      const result = await runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0,
+        run_host: async (argv, cwd, env, timeout) => {
+          const result = await options.leak.run_host(argv, cwd, env, timeout)
+          // The scanner returned an observation, including a gate error. Setup
+          // failures and thrown invocations provide no such observation.
+          if (argv.includes('bash') && argv.includes('--tree')) gateReturned = true
+          return result
+        },
+      })
+      if (!gateReturned) return { ...result, status: 'unknown' }
+      return result
+    },
     assessMergeDiff,
     reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed),
     async publishGate(snapshot, mergeMode) {
