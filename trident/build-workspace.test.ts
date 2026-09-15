@@ -72,23 +72,26 @@ describe('ensureProjectBuildWorkspace (pure probe)', () => {
     expect(res.build_repo_path).toBe(expected)
     expect(res.created).toBe(true)
     expect(made).toContain(expected)
-    // init then commit (with --allow-empty so a fileless new project still gets a HEAD).
+    // init, persistent local identity, then commit.
     expect(calls[0]).toEqual(['init', '-q', '--initial-branch=main'])
+    expect(calls).toContainEqual(['config', '--local', 'user.name', 'Neutron'])
+    expect(calls).toContainEqual(['config', '--local', 'user.email', 'neutron@localhost'])
     const commit = calls.find((c) => c.includes('commit'))!
     expect(commit).toContain('--allow-empty')
   })
 
-  test('existing repo WITH a commit → idempotent no-op (never re-commits)', async () => {
+  test('existing repo WITH a commit → refreshes local identity but never re-commits', async () => {
     const workspace = join('/home', 'Projects', 'meditation', PROJECT_CODE_DIRNAME)
     const existing = new Set([workspace, join(workspace, '.git')])
-    const { probe, calls } = stubProbe(existing, (args) =>
-      args[0] === 'rev-parse' ? ok : fail,
-    )
+    const { probe, calls } = stubProbe(existing, () => ok)
     const res = await ensureProjectBuildWorkspace('/home', 'meditation', probe)
 
     expect(res.created).toBe(false)
-    // Only the HEAD probe ran — no init, no commit against a healthy workspace.
-    expect(calls).toEqual([['rev-parse', '--verify', 'HEAD']])
+    expect(calls).toEqual([
+      ['rev-parse', '--verify', 'HEAD'],
+      ['config', '--local', 'user.name', 'Neutron'],
+      ['config', '--local', 'user.email', 'neutron@localhost'],
+    ])
   })
 
   test('repo dir exists but has NO commit → makes the initial commit (no re-init)', async () => {
@@ -107,6 +110,15 @@ describe('ensureProjectBuildWorkspace (pure probe)', () => {
   test('git init failure → throws (chokepoint maps to backend_error)', async () => {
     const { probe } = stubProbe(new Set(), (args) => (args[0] === 'init' ? fail : ok))
     await expect(ensureProjectBuildWorkspace('/home', 'x', probe)).rejects.toThrow(/git init failed/)
+  })
+
+  test('identity configuration failure → throws instead of inheriting a global identity', async () => {
+    const workspace = join('/home', 'Projects', 'x', PROJECT_CODE_DIRNAME)
+    const existing = new Set([workspace, join(workspace, '.git')])
+    const { probe } = stubProbe(existing, (args) => (args[0] === 'config' ? fail : ok))
+    await expect(ensureProjectBuildWorkspace('/home', 'x', probe)).rejects.toThrow(
+      /git identity configuration failed/,
+    )
   })
 })
 
@@ -129,6 +141,8 @@ describe('ensureProjectBuildWorkspace (real git)', () => {
     expect(head.ok).toBe(true)
     const log = await git(expected, 'log', '--oneline')
     expect(log.stdout).toContain('initialize dagrunner build workspace')
+    expect((await git(expected, 'config', '--local', 'user.name')).stdout.trim()).toBe('Neutron')
+    expect((await git(expected, 'config', '--local', 'user.email')).stdout.trim()).toBe('neutron@localhost')
 
     // The real proof: a worktree + build branch can be created off it.
     const wt = join(home, 'wt')
