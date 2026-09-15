@@ -86,8 +86,8 @@ export { WEB_PRESENCE_TTL_MS }
  * is what its own client just told it.
  */
 export interface WebPresenceReporter {
-  /** This web connection's client says the owner is looking at it right now. */
-  foreground(user_id: string, connection_id: string): void
+  /** This web connection's client says the owner is looking at this project now. */
+  foreground(user_id: string, project_id: string | null, connection_id: string): void
   /** …and now he isn't. Same effect as {@link drop}; kept distinct so the call
    *  site reads as the client's report rather than as a teardown. */
   background(connection_id: string): void
@@ -98,12 +98,12 @@ export interface WebPresenceReporter {
 /** The read-side the push decision holds, plus the write-side above. */
 export interface WebPresenceTracker extends WebPresenceReporter {
   /**
-   * Is at least one web client for this owner CURRENTLY foregrounded?
+   * Is at least one web client for this owner and project CURRENTLY foregrounded?
    *
    * "Currently" is load-bearing: a declaration older than
    * {@link WEB_PRESENCE_TTL_MS} is not evidence about now, and reads as absent.
    */
-  isForeground(user_id: string): boolean
+  isForeground(user_id: string, project_id: string | null): boolean
   /** Live (unexpired) foreground connections — diagnostics and tests only. */
   size(): number
 }
@@ -119,7 +119,7 @@ export interface CreateWebPresenceTrackerInput {
  * An in-memory, per-connection record of which web clients are foregrounded.
  *
  * IN-MEMORY IS CORRECT, not a shortcut deferred to later. The fact being stored
- * is "a socket held by this process has a human in front of it", which is
+ * is "a socket held by this process has a human in front of this project", which is
  * meaningless the moment the process ends — a restart that resurrected it would
  * be restoring a claim about a browser that is no longer connected, i.e.
  * manufacturing exactly the stale silence the TTL exists to prevent.
@@ -131,8 +131,8 @@ export interface CreateWebPresenceTrackerInput {
  * and a socket close would then wrongly forget the survivor.
  *
  * ONLY FOREGROUND ENTRIES ARE STORED. A `background` report deletes rather than
- * writing a `false`, so the map's size is the number of screens the owner could
- * be looking at, and "no entry" has exactly one meaning everywhere: not present.
+ * writing a `false`, so the map's size is the number of project screens the owner
+ * could be looking at, and "no entry" has exactly one meaning: not present.
  */
 export function createWebPresenceTracker(
   input: CreateWebPresenceTrackerInput = {},
@@ -146,7 +146,7 @@ export function createWebPresenceTracker(
     typeof input.ttl_ms === 'number' && Number.isFinite(input.ttl_ms) && input.ttl_ms > 0
       ? input.ttl_ms
       : WEB_PRESENCE_TTL_MS
-  const live = new Map<string, { user_id: string; at: number }>()
+  const live = new Map<string, { user_id: string; project_id: string | null; at: number }>()
 
   /** Drop every declaration older than the TTL. Runs on read — no timer to leak,
    *  and the map is bounded by concurrent sockets in the meantime. */
@@ -157,12 +157,12 @@ export function createWebPresenceTracker(
   }
 
   return {
-    foreground(user_id, connection_id): void {
+    foreground(user_id, project_id, connection_id): void {
       // An empty id on either side cannot be matched by a later read, so it
       // could only ever suppress nothing or (worse) collide with another empty
       // id. Refuse it: the owner gets notified, which is the safe direction.
       if (user_id.length === 0 || connection_id.length === 0) return
-      live.set(connection_id, { user_id, at: now() })
+      live.set(connection_id, { user_id, project_id, at: now() })
     },
     background(connection_id): void {
       live.delete(connection_id)
@@ -170,12 +170,12 @@ export function createWebPresenceTracker(
     drop(connection_id): void {
       live.delete(connection_id)
     },
-    isForeground(user_id): boolean {
+    isForeground(user_id, project_id): boolean {
       if (user_id.length === 0) return false
       const at = now()
       prune(at)
       for (const entry of live.values()) {
-        if (entry.user_id === user_id) return true
+        if (entry.user_id === user_id && entry.project_id === project_id) return true
       }
       return false
     },
@@ -189,8 +189,8 @@ export function createWebPresenceTracker(
 export interface SuppressPushWhileWebForegroundInput {
   /** The real push sink — `buildChatMessagePushSink`'s result. */
   sink: ChatMessagePushSink
-  /** Answers "is the owner in front of a web client right now?" */
-  isWebForeground: () => boolean
+  /** Answers "is the owner viewing this message's project in a web client now?" */
+  isWebForeground: (project_id: string | null) => boolean
   log?: (msg: string) => void
 }
 
@@ -218,7 +218,7 @@ export function suppressPushWhileWebForeground(
   return async (msg): Promise<boolean> => {
     let present: boolean
     try {
-      present = input.isWebForeground()
+      present = input.isWebForeground(msg.project_id)
     } catch (err) {
       // See property 3 in the module docblock: an unanswerable question is not a
       // reason to withhold a notification.

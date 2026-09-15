@@ -215,3 +215,4 @@ export {
 export type { TridentBuildToolDeps } from './work-board-build-tool.ts'
 export { buildBoardReconcileObserver } from './board-reconcile.ts'
 export type { TridentBoardReconciler } from './board-reconcile.ts'
+export { createBuildHost, type BuildHostOptions } from './build-host.ts'

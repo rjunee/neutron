@@ -16,7 +16,17 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1007,6 +1017,42 @@ describe('pre-push hook — the control fires before anything is published', () 
     }
   }, 60_000)
 
+  test('the installer links every executable hook in the versioned hook directory', () => {
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      const addedHook = join(fx.root, '.githooks', 'post-merge')
+      writeFileSync(addedHook, '#!/usr/bin/env bash\nexit 0\n')
+      chmodSync(addedHook, 0o755)
+
+      expect(fx.install().code).toBe(0)
+      const cfg = execFileSync('git', ['-C', fx.root, 'config', '--get', 'core.hooksPath'], {
+        encoding: 'utf8',
+      }).trim()
+      expect(readlinkSync(join(cfg, 'post-merge'))).toBe(addedHook)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('pre-commit refuses after a new executable hook arrives without a managed link', () => {
+    const fx = pushFixture(null)
+    try {
+      expect(fx.install().code).toBe(0)
+      const addedHook = join(fx.root, '.githooks', 'post-merge')
+      writeFileSync(addedHook, '#!/usr/bin/env bash\nexit 0\n')
+      chmodSync(addedHook, 0o755)
+
+      expect(() =>
+        execFileSync('git', ['-C', fx.root, 'hook', 'run', 'pre-commit'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }),
+      ).toThrow(/managed hook 'post-merge' is not linked/)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
   test('an ARMED hook BLOCKS when the denylist later disappears', () => {
     // "Could not check" is not "checked and clean". If the file is deleted or
     // renamed after install, the push must stop — the silent-skip version of
@@ -1282,6 +1328,21 @@ describe('structural private-path rule (needs no secret)', () => {
 })
 
 describe('commit-message + PR-body scan', () => {
+  test('an explicitly supplied unresolvable base is fatal rather than substituted', () => {
+    const { dir } = gitFixture()
+    try {
+      const { code, out } = runGate(dir, {
+        ...CANONICAL_PUSH,
+        LEAK_GATE_BASE_SHA: '1111111111111111111111111111111111111111',
+        LEAK_GATE_PII_DENYLIST_B64: DENYLIST,
+      })
+      expect(out).toContain('FATAL — could not determine a commit range to scan')
+      expect(code).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('RED on a denylisted token in a COMMIT MESSAGE', () => {
     // GHArchive/BigQuery mirror this permanently; there is no removal path, so
     // the gate has to stop it before the push, not after.

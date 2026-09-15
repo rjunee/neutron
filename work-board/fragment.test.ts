@@ -40,20 +40,22 @@ describe('formatWorkBoardFragment', () => {
     expect(frag.toLowerCase()).toContain('add one first')
   })
 
-  test('renders status labels + the inline marker + the item id', () => {
+  test('leads with PR number and title, and does not expose the internal item id', () => {
     const frag = formatWorkBoardFragment([
-      item({ id: 'wb-A', title: 'A', status: 'in_progress', inline_active: true }),
+      item({ id: 'wb-A', pr: 265, title: 'A', status: 'in_progress', inline_active: true }),
       item({ id: 'wb-B', title: 'B', status: 'upcoming' }),
     ])
-    expect(frag).toContain('[in progress ·inline] (wb-A) A')
-    expect(frag).toContain('[upcoming] (wb-B) B')
+    expect(frag).toContain('- PR #265 — A [in progress ·inline]')
+    expect(frag).toContain('- B [upcoming]')
+    expect(frag).not.toContain('wb-A')
+    expect(frag).not.toContain('wb-B')
   })
 
   test('a bound run shows the ·building (sub-agent) marker, superseding inline', () => {
     const frag = formatWorkBoardFragment([
       item({ id: 'wb-C', title: 'C', status: 'in_progress', linked_run_id: 'run-9', inline_active: true }),
     ])
-    expect(frag).toContain('[in progress ·building] (wb-C) C')
+    expect(frag).toContain('- C [in progress ·building]')
     expect(frag).not.toContain('·inline')
   })
 
@@ -66,7 +68,7 @@ describe('formatWorkBoardFragment', () => {
     const frag = formatWorkBoardFragment([
       item({ id: 'wb-D', title: 'D', status: 'blocked', linked_run_id: 'run-esc' }),
     ])
-    expect(frag).toContain('[blocked] (wb-D) D')
+    expect(frag).toContain('- D [blocked]')
     expect(frag).not.toContain('·building')
   })
 
@@ -77,7 +79,7 @@ describe('formatWorkBoardFragment', () => {
     const frag = formatWorkBoardFragment([
       item({ id: 'wb-E', title: 'E', status: 'in_progress', linked_run_id: 'run-esc' }),
     ])
-    expect(frag).toContain('[in progress ·building] (wb-E) E')
+    expect(frag).toContain('- E [in progress ·building]')
   })
 
   test('escapes a title that tries to break out of the tag (no breakout)', () => {

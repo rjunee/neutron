@@ -25,9 +25,9 @@
  * foreign-origin quarantine pre-filter was removed with the Connect mesh,
  * connect-spec §2.1 — a single-hosted shared project has no foreign content to
  * refuse; scribe stamps own-origin author attribution via `write-to-gbrain.ts`'s
- * `ownSlug`.) The fan-out is decorated onto the Cores' existing scheduler `fire`
- * callbacks at `gateway/cores/calendar-wiring.ts` +
- * `gateway/cores/email-managed-wiring.ts`. `meeting` stays a reserved trigger
+ * `ownSlug`.) The fan-out is decorated onto Calendar's scheduler callback and
+ * Email's existing pipeline poll at `gateway/cores/calendar-wiring.ts` and
+ * `gateway/cores/email-pipeline-wiring.ts`. `meeting` stays a reserved trigger
  * (no meeting Core to ride).
  *
  * Wiring (live, not built-but-unwired): `createScribe(...)` is constructed at
@@ -35,7 +35,7 @@
  * instance data dir + budget state. `handleUserTurn` is threaded into the
  * chat-bridge's `scribeOnUserTurn` hook (fired after `engine.advance` on every
  * real user message); `extractFromCoresSource` is threaded into the Calendar +
- * Email Cores' fire callbacks. See `gateway/index.ts` + `gateway/http/chat-bridge.ts`.
+ * Email producers. See `gateway/index.ts` + `gateway/http/chat-bridge.ts`.
  */
 
 import type { Substrate } from '@neutronai/runtime/substrate.ts'

@@ -185,6 +185,7 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { stampExistingUserTimezone } from './wiring/user-timezone-stamp.ts'
 import {
   USAGE_POOLS,
   UsageSamplesStore,
@@ -365,6 +366,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
+import { DocVersionStore } from '@neutronai/gateway/git/doc-version-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
@@ -2819,9 +2821,9 @@ export function buildOpenGraphComposer(
         fanOut: pushTransport,
         project_slug,
       }),
-      // The owner, and only the owner: presence is per-user, so a guest sitting
-      // in a shared project cannot silence his phone by having a tab open.
-      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
+      // The owner and the message's project: a guest, or an owner tab looking at
+      // another project, cannot silence this notification.
+      isWebForeground: (project_id) => webPresence.isForeground(OWNER_USER_ID, project_id),
     })
     /**
      * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
@@ -3660,7 +3662,12 @@ export function buildOpenGraphComposer(
     // background LLM tick loop deliberately not started. The walker is a
     // synchronous hook on a write that already happens.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
-    const docStore = new DocStore({ owner_home, onMutationSuccess: anchorWalker.handle })
+    const docVersionStore = new DocVersionStore({ owner_home, project_slug })
+    const docStore = new DocStore({
+      owner_home,
+      versionStore: docVersionStore,
+      onMutationSuccess: anchorWalker.handle,
+    })
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
@@ -5622,6 +5629,9 @@ export function buildOpenGraphComposer(
                 activityInspector.turnFinished(inspectorScopeKey(scope)),
             },
             personaLoader,
+            // Resolve at dispatch time so a zone captured after boot reaches both
+            // cold and already-warm conversations on their next turn.
+            ownerTimezone: (slug) => readOwnerTimezone(db, slug),
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
@@ -6014,6 +6024,11 @@ export function buildOpenGraphComposer(
       readProjectRows,
       activeChatProjects,
       railChatKey,
+      stampUserTimezone: async (timezone): Promise<void> => {
+        const result = await stampExistingUserTimezone(owner_home, timezone)
+        if (result === 'written') personaLoader.invalidate('USER.md')
+        if (result === 'rejected') log.warn('user_timezone_stamp_rejected', { project: project_slug })
+      },
       // O6 / #106 — drain any recovered replies buffered for a topic while the
       // owner was offline, on reconnect (deduped in the shared store). Bound to the
       // SAME `recoveredReplyStore` the live-agent substrate's `onRecoveredReply`
@@ -6373,18 +6388,17 @@ export function buildOpenGraphComposer(
     // M2-1 — ARM the Cores→scribe fan-out with the LIVE Google clients, LAST
     // (same discipline as reflectLoop below): its `stop()` cleanup was registered
     // early in `wireMemory` for shutdown ordering, but arming (build + start the
-    // Calendar + Email schedulers) is deferred to here so (a) it binds the REAL
+    // Calendar scheduler) is deferred to here so (a) it binds the REAL
     // `mountOpenCores` clients — `calendar_core`/`email_managed_core` share these
     // exact instances, so a CONNECTED Google account now actually feeds ambient
-    // events/mail into memory (pre-M2-1 it armed with in-memory fallbacks and fed
+    // calendar events into memory (pre-M2-1 it armed with an in-memory fallback and fed
     // nothing) — and (b) a composition failure before this point leaves no
     // scheduler started. `arm()` is itself failure-atomic. Null (LLM-less box, no
     // scribe) → no-op. OAuth-less → the clients are in-memory fallbacks and the
-    // schedulers fan out nothing (unchanged), which is correct.
+    // scheduler fans out nothing (unchanged), which is correct.
     if (coresScribeFanOut !== null) {
       coresScribeFanOut.arm({
         calendarClient: coresWiring.calendarClient,
-        gmailClient: coresWiring.gmailClient,
       })
     }
 
@@ -6701,6 +6715,7 @@ export function buildOpenGraphComposer(
         // merge left a reference to a name that no longer exists. Same object.
         push: pushTransport,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
+        ...(coresScribeFanOut !== null ? { scribeFanOut: coresScribeFanOut.fanOut } : {}),
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,
         register_cleanup: (fn: () => void): void => {

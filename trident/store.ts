@@ -1561,6 +1561,27 @@ export class TridentRunStore {
   }
 
   /**
+   * Atomically claim a publish-only retry. Unlike `beginInfraRetry`, this keeps
+   * `inner_result` and the completed dispatch slot intact: they are the durable
+   * proof that Forge already finished and the next tick must retry only publish.
+   */
+  async beginPublishRetry(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET infra_retries = COALESCE(infra_retries, 0) + 1,
+                last_advanced_at = ?
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND inner_result IS NOT NULL
+            AND subagent_status = 'completed'`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
+  }
+
+  /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if
    * the id no longer exists).

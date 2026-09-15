@@ -154,11 +154,24 @@ describe('attachment compose + authed render (happy-dom)', () => {
       await tick()
     })
 
-    // The compose affordance is present (file picker, images only, multiple).
+    // The compose affordance is present and lets diagnostic evidence reach the
+    // upload path, where unsupported content receives a visible explanation.
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement | null
     expect(fileInput).not.toBeNull()
     expect(fileInput!.accept).toContain('image/png')
+    for (const suffix of ['.gz', '.json', '.log', '.csv']) {
+      expect(fileInput!.accept.split(',')).toContain(suffix)
+    }
     expect(fileInput!.multiple).toBe(true)
+
+    await act(async () => {
+      draftRef!.addFiles([new File(['trace'], 'agent.log', { type: 'text/plain' })])
+      await tick()
+      await tick()
+    })
+    expect(container.textContent).toContain(
+      'agent.log · failed: agent.log is text/plain — only PNG, JPEG, GIF, WEBP images, PDF documents, and MP3/M4A/WAV voice notes are supported.',
+    )
 
     // Stage an image → it uploads (bearer-authed) and a chip appears.
     await act(async () => {

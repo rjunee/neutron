@@ -6,8 +6,9 @@
 #   bash scripts/install-git-hooks.sh --uninstall  # revert to the default hooks
 #
 # Idempotent. A dedicated directory under the git directory links to the hooks in
-# the worktree, so hook improvements arrive on pull without taking over
-# user-managed .git/hooks.
+# the worktree, so edits to installed hooks arrive on pull without taking over
+# user-managed .git/hooks. The installed pre-commit hook also refuses when a new
+# executable hook has arrived without a corresponding managed link.
 #
 # WHO THIS IS FOR. The pre-push hook checks commit messages against the OWNER PII
 # denylist — a list of the maintainer's proper nouns and private paths. Outside
@@ -50,9 +51,25 @@ mkdir -p "$HOOKS_DIR" || {
   echo "install-git-hooks: cannot create managed hook directory" >&2
   exit 1
 }
-ln -s "$ROOT/.githooks/pre-commit" "$HOOKS_DIR/pre-commit" || exit 1
-
 chmod +x "$ROOT/.githooks/pre-commit" 2>/dev/null
+chmod +x "$ROOT/.githooks/pre-push" 2>/dev/null
+
+# The marker lets pre-commit distinguish this managed directory from a
+# contributor's own core.hooksPath. The exclusion marker preserves the rule that
+# pre-push and its local pattern source are armed together or not at all.
+: > "$HOOKS_DIR/.neutron-managed-hooks"
+if [ ! -s "$DENYLIST_PATH" ]; then
+  : > "$HOOKS_DIR/.pre-push-disabled"
+fi
+
+for hook_path in "$ROOT"/.githooks/*; do
+  [ -f "$hook_path" ] && [ -x "$hook_path" ] || continue
+  hook_name=${hook_path##*/}
+  if [ "$hook_name" = "pre-push" ] && [ ! -s "$DENYLIST_PATH" ]; then
+    continue
+  fi
+  ln -s "$hook_path" "$HOOKS_DIR/$hook_name" || exit 1
+done
 
 if [ ! -s "$DENYLIST_PATH" ]; then
   git -C "$ROOT" config --worktree core.hooksPath "$HOOKS_DIR"
@@ -89,8 +106,6 @@ fi
 chmod 700 "$(dirname "$DENYLIST_PATH")" 2>/dev/null
 chmod 600 "$DENYLIST_PATH" 2>/dev/null
 
-chmod +x "$ROOT/.githooks/pre-push" 2>/dev/null
-ln -s "$ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push" || exit 1
 git -C "$ROOT" config --worktree core.hooksPath "$HOOKS_DIR"
 
 echo "hooks: FULLY INSTALLED — core.hooksPath set to the managed hook directory"
