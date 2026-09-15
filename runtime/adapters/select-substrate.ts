@@ -96,6 +96,28 @@ export function providerCapabilities(provider: Provider): ProviderCapabilities {
 /** The known provider values, for validation + actionable error messages. */
 export const KNOWN_PROVIDERS: readonly Provider[] = ['anthropic', 'openai', 'openai-codex-cli']
 
+export type ProviderSelectionSource = 'application' | 'instance' | 'project'
+
+export interface ProviderSelection {
+  provider: Provider
+  source: ProviderSelectionSource
+}
+
+/** Resolve the three-level provider hierarchy without collapsing an absent
+ * project override into an explicit choice. Most-specific non-empty value wins. */
+export function resolveProviderSelection(input: {
+  instance?: string | null
+  project?: string | null
+}): ProviderSelection {
+  if (input.project !== undefined && input.project !== null && input.project.trim() !== '') {
+    return { provider: normalizeProvider(input.project), source: 'project' }
+  }
+  if (input.instance !== undefined && input.instance !== null && input.instance.trim() !== '') {
+    return { provider: normalizeProvider(input.instance), source: 'instance' }
+  }
+  return { provider: 'anthropic', source: 'application' }
+}
+
 /**
  * Normalize a provider string to a known `Provider` — the single chokepoint that
  * decides "which backend" from raw config (`NEUTRON_MODEL_PROVIDER`).
