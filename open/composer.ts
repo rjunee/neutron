@@ -3660,7 +3660,16 @@ export function buildOpenGraphComposer(
     // background LLM tick loop deliberately not started. The walker is a
     // synchronous hook on a write that already happens.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
-    const docStore = new DocStore({ owner_home, onMutationSuccess: anchorWalker.handle })
+    let syncPlanDocTitle: ((projectId: string, path: string) => Promise<void>) | null = null
+    const docStore = new DocStore({
+      owner_home,
+      onMutationSuccess: async (mutation) => {
+        const titleSync = mutation.op === 'write' && syncPlanDocTitle !== null
+          ? syncPlanDocTitle(mutation.project_id, mutation.path)
+          : Promise.resolve()
+        await Promise.allSettled([anchorWalker.handle(mutation), titleSync])
+      },
+    })
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
@@ -4384,6 +4393,12 @@ export function buildOpenGraphComposer(
         mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
       },
     })
+    syncPlanDocTitle = (projectId, path) =>
+      workBoardSpecDoc.syncTitleFromDoc(
+        projectId,
+        workBoardScopeKey(project_slug, projectId),
+        path,
+      )
     // #339 — the originating app-ws chat topic for a build, reconstructed from a
     // board scope. The React/Expo client subscribes to the General base topic (no
     // project) or `<base>:<project_id>` for a project — the SAME topic the

@@ -14,7 +14,10 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from './store.ts'
-import { WorkBoardSpecDocService, type SpecDocStore,
+import {
+  firstMarkdownH1,
+  WorkBoardSpecDocService,
+  type SpecDocStore,
   stripFrontmatter,
 } from './spec-doc-service.ts'
 import { docPathFromDesignRef } from './spec-doc.ts'
@@ -24,6 +27,7 @@ const PROJECT = 'proj-1'
 /** In-memory docs stub — records writes + serves reads by exact path. */
 class FakeDocs implements SpecDocStore {
   readonly writes: Array<{ project_id: string; path: string; content: string }> = []
+  readonly reads: Array<{ project_id: string; path: string }> = []
   readonly files = new Map<string, string>()
   failWrite = false
   async writeDoc(input: { project_id: string; path: string; content: string }): Promise<unknown> {
@@ -32,7 +36,8 @@ class FakeDocs implements SpecDocStore {
     this.files.set(input.path, input.content)
     return {}
   }
-  async readDoc(_project_id: string, path: string): Promise<{ content: string }> {
+  async readDoc(project_id: string, path: string): Promise<{ content: string }> {
+    this.reads.push({ project_id, path })
     const c = this.files.get(path)
     if (c === undefined) throw new Error(`no doc at ${path}`)
     return { content: c }
@@ -136,6 +141,52 @@ describe('createCardWithOptionalSpec', () => {
     expect(item.title).toBe('important work')
     expect(item.design_doc_ref).toBeNull()
     expect(store.get(PROJECT, item.id)).not.toBeNull()
+  })
+})
+
+describe('plan title sync', () => {
+  test('a linked plan H1 renames its card after a document write', async () => {
+    const item = await store.create(PROJECT, {
+      title: 'Old title',
+      design_doc_ref: 'neutron-docs:plans/rename-me.md',
+    })
+    docs.files.set('plans/rename-me.md', '---\ntype: plan\n---\n\n# New title\n\nDetails')
+
+    await svc.syncTitleFromDoc(PROJECT, PROJECT, 'plans/rename-me.md')
+
+    expect(store.get(PROJECT, item.id)?.title).toBe('New title')
+  })
+
+  test('General reads its docs project while updating the distinct owner board scope', async () => {
+    const item = await store.create('owner-scope', {
+      title: 'Old General title',
+      design_doc_ref: 'neutron-docs:plans/general.md',
+    })
+    docs.files.set('plans/general.md', '# General doc title')
+
+    await svc.syncTitleFromDoc('general', 'owner-scope', 'plans/general.md')
+
+    expect(docs.reads.at(-1)).toEqual({ project_id: 'general', path: 'plans/general.md' })
+    expect(store.get('owner-scope', item.id)?.title).toBe('General doc title')
+  })
+
+  test('an unlinked doc or a linked doc without an H1 leaves titles unchanged', async () => {
+    const item = await store.create(PROJECT, {
+      title: 'Keep me',
+      design_doc_ref: 'neutron-docs:plans/linked.md',
+    })
+    docs.files.set('plans/unlinked.md', '# Ignore me')
+    docs.files.set('plans/linked.md', 'No level-one heading')
+
+    await svc.syncTitleFromDoc(PROJECT, PROJECT, 'plans/unlinked.md')
+    await svc.syncTitleFromDoc(PROJECT, PROJECT, 'plans/linked.md')
+
+    expect(store.get(PROJECT, item.id)?.title).toBe('Keep me')
+  })
+
+  test('firstMarkdownH1 ignores frontmatter and strips a closing marker', () => {
+    expect(firstMarkdownH1('---\ntitle: Metadata\n---\n# Visible title #\n## Child')).toBe('Visible title')
+    expect(firstMarkdownH1('## Child only')).toBeNull()
   })
 })
 

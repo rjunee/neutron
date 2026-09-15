@@ -157,7 +157,6 @@ async function startHarness(): Promise<Harness> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
   const composer = buildOpenGraphComposer({
     env: process.env,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     substrateFactory: (() => mockSubstrate()) as any,
   })
   const composition = await composer({ db, project_slug: OWNER_SLUG })
@@ -447,6 +446,30 @@ describe('link 4 — a doc edit re-anchors its comments (AnchorWalker)', () => {
     expect(afterAnchor?.current_start).toBe((beforeStart as number) + inserted.length)
     expect(afterAnchor?.status).not.toBe('orphaned')
     expect(afterAnchor?.status).not.toBe('dead')
+  })
+
+  test('editing a linked plan H1 updates the card title through the same mutation hook', async () => {
+    const planPath = 'plans/title-sync.md'
+    const create = await call(`/api/app/projects/${PROJECT}/work-board`, {
+      method: 'POST',
+      body: {
+        title: 'Old card title',
+        design_doc_ref: `neutron-docs:${planPath}`,
+      },
+    })
+    expect(create.status).toBe(200)
+
+    const write = await call(`/api/app/projects/${PROJECT}/docs/file`, {
+      method: 'PUT',
+      body: { path: planPath, content: '# Title from the plan\n\nDetails.' },
+    })
+    expect(write.status).toBe(200)
+
+    const board = await call(`/api/app/projects/${PROJECT}/work-board`)
+    expect(board.status).toBe(200)
+    const body = (await board.json()) as { items?: Array<{ title?: string }> }
+    expect(body.items?.some((item) => item.title === 'Title from the plan')).toBe(true)
+    expect(body.items?.some((item) => item.title === 'Old card title')).toBe(false)
   })
 })
 

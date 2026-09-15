@@ -904,7 +904,9 @@ export function WorkBoardTab({
                   }}
                   onMoveUp={() => moveByKey(i, -1)}
                   onMoveDown={() => moveByKey(i, 1)}
-                  {...(onOpenDoc !== undefined ? { onOpenDoc: () => openDoc(it) } : {})}
+                  {...(onOpenDoc !== undefined && docPathFromDesignRef(it.design_doc_ref) !== null
+                    ? { onOpenDoc: () => openDoc(it) }
+                    : {})}
                 />
               ))}
             </ul>
@@ -934,9 +936,21 @@ export function WorkBoardTab({
                       <li key={it.id} className="cwb-row cwb-row-done">
                         <div className="cwb-row-line1">
                           <span className="cwb-dot cwb-dot-upcoming" aria-label="Shelved" />
-                          <span className="cwb-title" title={it.title}>
-                            {it.title}
-                          </span>
+                          {onOpenDoc !== undefined &&
+                          docPathFromDesignRef(it.design_doc_ref) !== null ? (
+                            <button
+                              type="button"
+                              className="cwb-title cwb-title-btn"
+                              title={it.title}
+                              onClick={() => openDoc(it)}
+                            >
+                              {it.title}
+                            </button>
+                          ) : (
+                            <span className="cwb-title" title={it.title}>
+                              {it.title}
+                            </span>
+                          )}
                           {confirmDelete?.id === it.id ? (
                             <InlineConfirm
                               running={false}
@@ -982,9 +996,21 @@ export function WorkBoardTab({
                         <li key={it.id} className="cwb-row cwb-row-done">
                           <div className="cwb-row-line1">
                             <span className="cwb-dot cwb-dot-done" aria-label="Done" />
-                            <span className="cwb-title" title={it.title}>
-                              {it.title}
-                            </span>
+                            {onOpenDoc !== undefined &&
+                            docPathFromDesignRef(it.design_doc_ref) !== null ? (
+                              <button
+                                type="button"
+                                className="cwb-title cwb-title-btn"
+                                title={it.title}
+                                onClick={() => openDoc(it)}
+                              >
+                                {it.title}
+                              </button>
+                            ) : (
+                              <span className="cwb-title" title={it.title}>
+                                {it.title}
+                              </span>
+                            )}
                             {confirmDelete?.id === it.id ? (
                               <InlineConfirm
                                 running={false}
@@ -1166,7 +1192,7 @@ function WorkBoardRow({
             <button
               type="button"
               className="cwb-title cwb-title-btn"
-              onClick={onStartEdit}
+              onClick={onOpenDoc ?? onStartEdit}
               title={item.title}
             >
               {item.title}

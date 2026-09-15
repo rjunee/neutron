@@ -88,6 +88,7 @@ async function mount(
   live?: {
     onWorkBoardChanged(fn: (items: WorkBoardItem[], pid: string | undefined) => void): () => void
   },
+  onOpenDoc?: (projectId: string, path: string) => void,
 ): Promise<{
   container: HTMLElement
   root: { unmount: () => void }
@@ -121,6 +122,7 @@ async function mount(
           config={config}
           {...(live !== undefined ? { liveSource: live } : {})}
           fetchImpl={fetchImpl}
+          {...(onOpenDoc !== undefined ? { onOpenDoc } : {})}
         />
       </React.StrictMode>,
     )
@@ -152,6 +154,28 @@ function listOf(rows: WorkBoardItem[]): Handler {
 }
 
 describe('WorkBoardTab (happy-dom)', () => {
+  it('opens a linked plan from the card title while an unlinked title remains editable', async () => {
+    const opened: Array<{ projectId: string; path: string }> = []
+    const rows = [
+      item({ id: 'linked', title: 'Linked plan', design_doc_ref: 'neutron-docs:plans/linked.md' }),
+      item({ id: 'plain', title: 'Plain card', sort_order: 2 }),
+    ]
+    const { container, root, act } = await mount(listOf(rows), undefined, (projectId, path) => {
+      opened.push({ projectId, path })
+    })
+    const titles = Array.from(container.querySelectorAll('.cwb-title')) as HTMLButtonElement[]
+
+    await act(async () => titles[0]!.click())
+    expect(opened).toEqual([{ projectId: PROJECT, path: 'plans/linked.md' }])
+    expect(container.querySelector('input[aria-label="Edit item title"]')).toBeNull()
+
+    await act(async () => titles[1]!.click())
+    expect(container.querySelector('input[aria-label="Edit item title"]')).not.toBeNull()
+    expect(opened).toHaveLength(1)
+
+    await act(async () => root.unmount())
+  })
+
   it('renders active rows in server order + the completed disclosure', async () => {
     const rows = [
       item({ id: 'a', title: 'Active one', status: 'in_progress', sort_order: 1 }),
