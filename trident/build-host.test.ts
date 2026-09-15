@@ -578,3 +578,40 @@ for (const status of ['findings-unresolved', 'gate-error'] as const) {
     if (status === 'findings-unresolved') expect(result.findings).toEqual([{ rule: 'vocabulary', file: 'README.md', line: 7 }])
   })
 }
+
+for (const cap of [undefined, 2, 7]) {
+  test(`G076 host threads run row cap ${String(cap)} into the driver`, async () => {
+    const f = await fixture()
+    f.options.mutation.run.max_rounds = cap
+    const calls: string[] = []
+    f.options.runners.pi = {
+      ...fakeRunner('pi'),
+      run: async request => {
+        calls.push(request.step_id)
+        return { kind: 'completed', result: { ...snapshot, payload: { round: 0, max_rounds: 100 } },
+          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+      },
+    }
+    const host = f.make()
+    host.deps.admissionGate = async () => ({ kind: 'allow' })
+    host.deps.reviewGate = async (_payload, _snapshot, round) => ({ kind: 'fix', findings: [`bug-${round}`] })
+    expect(await host.run(f.input(host), new AbortController().signal)).toMatchObject({
+      kind: 'blocked', on: expect.stringContaining('round ceiling'),
+    })
+    expect(calls.filter(call => call.includes(':review:'))).toEqual(
+      Array.from({ length: cap ?? 10 }, (_, i) => `test:review:${i + 1}`))
+  })
+}
+
+test('G076 host refuses a missing or mismatched cap row', async () => {
+  for (const missing of [false, true]) {
+    const f = await fixture()
+    if (missing) f.options.mutation.run = undefined as unknown as BuildHostOptions['mutation']['run']
+    else f.options.mutation.run.id = 'other-run'
+    const host = f.make()
+    host.deps.admissionGate = async () => ({ kind: 'allow' })
+    expect(await host.run(f.input(host), new AbortController().signal)).toMatchObject({
+      kind: 'unknown', detail: 'Review round cap run row is missing or mismatched',
+    })
+  }
+})
