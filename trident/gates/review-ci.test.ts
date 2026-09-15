@@ -4,7 +4,7 @@ import type { SuiteAssessment } from './review-suite.ts'
 const head = 'a'.repeat(40), baseHead = 'b'.repeat(40)
 const snapshot = { head, diff: '+code', pr: null }
 const observed = (): ReviewCiObservation => ({ kind: 'known', head, status: 'red', failing: ['unit'], base: { head: baseHead, status: 'red', failing: ['unit'] } })
-const assess = (value = observed()) => assessReviewCi({ observe: async () => value }, snapshot, baseHead)
+const assess = (value = observed()) => assessReviewCi({ observe: async () => value }, snapshot, baseHead, 'run')
 
 test('G055 new red forces repair and matching base red holds without buying a fix', async () => {
   const advisory = await assess()
@@ -21,7 +21,7 @@ test('G055 base excuses only named measured red at the full pinned base', async 
     expect(await assess({ ...observed(), base } as ReviewCiObservation)).toMatchObject({ kind: 'known', findings: [{ advisory: false }] })
   }
   for (const name of ['', ' ', 'unnamed check']) expect(await assess({ ...observed(), failing: [name], base: { ...observed().base!, failing: [name] } })).toMatchObject({ kind: 'known', findings: [{ advisory: false }] })
-  expect(await assessReviewCi({ observe: async () => ({ ...observed(), base: { ...observed().base!, head: 'short' } }) }, snapshot, 'short')).toMatchObject({ kind: 'known', findings: [{ advisory: false }] })
+  expect(await assessReviewCi({ observe: async () => ({ ...observed(), base: { ...observed().base!, head: 'short' } }) }, snapshot, 'short', 'run')).toMatchObject({ kind: 'known', findings: [{ advisory: false }] })
 })
 
 test('G056 unknown CI observations defer and known green is a successful control', async () => {
@@ -30,11 +30,19 @@ test('G056 unknown CI observations defer and known green is a successful control
     { observe: async () => ({ kind: 'unknown', detail: 'missing check record' }) },
     ...[{ ...observed(), head: baseHead }, { ...observed(), status: 'pending' }, { ...observed(), status: 'unreadable' }, { ...observed(), failing: [] }, { ...observed(), failing: [7] }, { ...observed(), failing: null }].map(value => ({ observe: async () => value as ReviewCiObservation })),
   ]
-  for (const source of sources) expect((await assessReviewCi(source, snapshot, baseHead)).kind).toBe('unknown')
+  for (const source of sources) expect((await assessReviewCi(source, snapshot, baseHead, 'run')).kind).toBe('unknown')
   expect(await assess({ ...observed(), status: 'green', failing: [] })).toEqual({ kind: 'known', findings: [] })
   expect(deferReviewCi('pending')?.kind).toBe('unknown')
   expect(deferReviewCi('unknown')?.kind).toBe('unknown')
   expect(deferReviewCi('green')).toBeNull()
+})
+test('CI thrown host cause is bounded and normal refusal text is unchanged', async () => {
+  expect(await assessReviewCi({ observe: async () => { throw new Error('recognisable CI failure') } }, snapshot, baseHead, 'run')).toEqual({
+    kind: 'unknown', detail: 'Review CI host observation failed: Error: recognisable CI failure',
+  })
+  expect(await assessReviewCi({ observe: async () => ({ ...observed(), head: baseHead }) }, snapshot, baseHead, 'run')).toEqual({
+    kind: 'unknown', detail: 'Review CI head does not match reviewed revision',
+  })
 })
 
 test('G055 CI composition preserves panel stops and includes blockers in code or design repairs', async () => {

@@ -28,6 +28,10 @@ describe('the COMPOSER supplies crash-recovery claims', () => {
       src.includes('orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)'),
     ).toBe(true)
     expect(
+      src.includes('orchestratorOpts.begin_project_build_driver_recovery = (id, reservation) =>'),
+    ).toBe(true)
+    expect(src.includes('store.beginProjectBuildDriverRecovery(id, reservation)')).toBe(true)
+    expect(
       src.includes('orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)'),
     ).toBe(true)
     expect(src.includes('orchestratorOpts.on_infra_retry = (run, attempt, cause) =>')).toBe(true)

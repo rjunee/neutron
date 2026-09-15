@@ -6,6 +6,7 @@ import { MERGE_DIFF_BYTES_MAX, mergeDiffTooLargeReason } from '../merge-diff-lim
 import type { BuildSnapshot, GateResult } from '../build-run.ts'
 import type { RunHostCommand } from '../merge.ts'
 import { assessBaseDrift, shouldHoldForBaseDrift } from '../merge.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 const fullOid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
@@ -15,7 +16,7 @@ const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
  * Lease enforcement and the post-push witness stay in the publication effect.
  */
 export async function publicationReadiness(
-  run: RunHostCommand, repo: string, branch: string, launchBase: string, snapshot: BuildSnapshot,
+  run: RunHostCommand, repo: string, branch: string, launchBase: string, snapshot: BuildSnapshot, runId: string,
 ): Promise<GateResult> {
   try {
     const local = await run(['git', '-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}`], repo)
@@ -35,7 +36,7 @@ export async function publicationReadiness(
         : unknown('Publication launch ancestry could not be established')
     }
     return { kind: 'allow' }
-  } catch { return unknown('Publication host observation failed') }
+  } catch (error) { return unknownCause('Publication host observation failed', error, runId) }
 }
 
 function escapeRegex(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
@@ -44,7 +45,7 @@ function escapeRegex(value: string): string { return value.replace(/[.*+?^${}()|
  * The merge effect must enforce --match-head-commit (build-run.ts:195).
  */
 export async function pinnedMergeReadiness(
-  run: RunHostCommand, repo: string, snapshot: BuildSnapshot,
+  run: RunHostCommand, repo: string, snapshot: BuildSnapshot, runId: string,
 ): Promise<GateResult> {
   if (!fullOid.test(snapshot.head) || snapshot.pr === null || !Number.isSafeInteger(snapshot.pr.number) || snapshot.pr.number <= 0) {
     return blocked('Merge requires a PR number and full reviewed head OID')
@@ -85,5 +86,5 @@ export async function pinnedMergeReadiness(
     if (drift.branch_head_sha !== snapshot.head) return blocked('Fetched PR head differs from reviewed head')
     if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return blocked('Base drift overlaps reviewed changes')
     return { kind: 'allow' }
-  } catch { return unknown('Merge host observation could not be decoded') }
+  } catch (error) { return unknownCause('Merge host observation could not be decoded', error, runId) }
 }
