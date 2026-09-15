@@ -22,6 +22,7 @@ import {
   type EmailPipelineStore,
 } from '@neutronai/email-managed-core/pipeline/store'
 import { runEmailPipelineTick } from '@neutronai/email-managed-core/pipeline/poller'
+import { deliverDueDigest } from '@neutronai/email-managed-core/digest'
 import { composeEmailPayload } from '@neutronai/scribe/index.ts'
 
 import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
@@ -71,6 +72,7 @@ export interface EmailPipelineCompositionConfig {
    * READ IT — escalation is event-driven, not clock-driven.
    */
   resolveTimezone?: (owner_slug: string) => string | undefined
+  readDigestEnabled?: (owner_slug: string) => boolean
   interval_ms?: number
   now?: () => number
   /** Register the store's close on the composer's cleanup list. */
@@ -98,7 +100,7 @@ export function buildEmailPipelinePollHandler(
   const activated_at = now()
   let store: EmailPipelineStore | null = null
 
-  return async () => {
+  return async (ctx) => {
     try {
       if (store === null) {
         store = openEmailPipelineStore({ owner_home: cfg.owner_home, now })
@@ -128,12 +130,21 @@ export function buildEmailPipelinePollHandler(
         },
         now,
         activation_at: activated_at,
+        mailbox_writes: 'held_back',
         ...(cfg.scribeFanOut !== undefined
           ? {
               on_message_processed: (message) =>
                 cfg.scribeFanOut!('email', composeEmailPayload(message), `email:${message.id}`),
             }
           : {}),
+      })
+      const digest = await deliverDueDigest({
+        gmail: cfg.gmail,
+        store: handle,
+        now_ms: now(),
+        time_zone: cfg.resolveTimezone?.(ctx.owner_slug) ?? 'America/Los_Angeles',
+        enabled: cfg.readDigestEnabled?.(ctx.owner_slug) ?? true,
+        llm: cfg.llm,
       })
       // Every kind of work the tick can do has to appear in BOTH lines. A tick
       // that only finished an owed Gmail write reported `skipped` while having
@@ -143,9 +154,9 @@ export function buildEmailPipelinePollHandler(
       const detail =
         `scanned=${r.scanned} escalated=${r.escalated} archived=${r.archived} ` +
         `precutoff=${r.precutoff} resumed=${r.resumed} remutated=${r.remutated} ` +
-        `arrived_during_sweep=${r.arrived_during_sweep} errors=${r.errors}`
+        `arrived_during_sweep=${r.arrived_during_sweep} errors=${r.errors} digest=${digest}`
       const acted =
-        r.escalated + r.archived + r.precutoff + r.resumed + r.remutated > 0
+        r.escalated + r.archived + r.precutoff + r.resumed + r.remutated > 0 || digest === 'delivered'
       return { status: acted ? 'ok' : 'skipped', detail }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

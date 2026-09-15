@@ -22,6 +22,7 @@ import {
   type AppStateStatus,
   Pressable,
   ScrollView,
+  Switch,
   StyleSheet,
   Text,
   View,
@@ -40,6 +41,7 @@ import {
   type DiagnosticsSendState,
 } from '../lib/diagnostics-send-state';
 import { disablePushForUser } from '../lib/push';
+import { EmailDigestClient } from '../lib/email-digest-client';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
 import {
@@ -60,6 +62,22 @@ export default function SettingsScreen() {
   const [serverUrl, setServerUrl] = useState(() => loadAppConfig().gateway_base_url);
   const [sendState, setSendState] = useState<DiagnosticsSendState>('idle');
   const [sendMessage, setSendMessage] = useState('');
+  const digestClient = useMemo(
+    () => user === null ? null : new EmailDigestClient({ base_url: loadAppConfig().base_url, token: user.token }),
+    [user],
+  );
+  const [digestEnabled, setDigestEnabled] = useState(true);
+  const [digestBusy, setDigestBusy] = useState(false);
+  useEffect(() => {
+    if (digestClient !== null) void digestClient.status().then((s) => setDigestEnabled(s.enabled));
+  }, [digestClient]);
+  const handleDigestToggle = useCallback((enabled: boolean): void => {
+    if (digestClient === null) return;
+    setDigestBusy(true);
+    void digestClient.setEnabled(enabled)
+      .then((s) => setDigestEnabled(s.enabled))
+      .finally(() => setDigestBusy(false));
+  }, [digestClient]);
 
   // ISSUES #385 — changing the server invalidates the session (the old
   // instance minted the token). `commitServerConfig` already wiped
@@ -443,6 +461,19 @@ export default function SettingsScreen() {
           onSaveOpenAiKey={handleSaveOpenAiKey}
           onRemoveOpenAiKey={handleRemoveOpenAiKey}
         />
+
+        <View style={styles.navRow} testID="settings-email-digest">
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Twice-daily email brief</Text>
+            <Text style={styles.navRowSubtitle}>Receive inbox summaries at 10:00 and 15:00 in your timezone.</Text>
+          </View>
+          <Switch
+            testID="settings-email-digest-toggle"
+            value={digestEnabled}
+            disabled={digestBusy}
+            onValueChange={handleDigestToggle}
+          />
+        </View>
 
         <View style={styles.serverCard} testID="settings-diagnostics-card">
           <Text style={styles.navRowTitle}>Diagnostics</Text>

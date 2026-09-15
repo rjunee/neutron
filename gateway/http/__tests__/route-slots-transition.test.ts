@@ -99,6 +99,7 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   // Connect GitHub — added 2026-08-07. This snapshot caught the new slot and forced
   // the addition to be deliberate, which is what it is for.
   ['app-github-connect', 'appGitHubConnect', 'app_github_connect_surface', true],
+  ['app-email-digest', 'appEmailDigest', 'app_email_digest_surface', true],
   ['app-projects', 'appProjects', 'app_projects_surface', true],
   ['app-connect-auth', 'appConnectAuth', 'app_connect_auth_surface', true],
   ['app-focus-current', 'appFocusCurrent', 'app_focus_current_surface', true],
@@ -489,6 +490,7 @@ function fullComposition(): RouteSlotComposition {
     app_project_credentials_surface: { handler: h() },
     app_codex_credential_surface: { handler: h() },
     app_github_connect_surface: { handler: h() },
+    app_email_digest_surface: { handler: h() },
     app_backups_surface: { handler: h() },
     cores_surface: { handler: h() },
     cores_oauth_broker_surface: { handler: h() },
@@ -546,6 +548,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   // Connect GitHub — added 2026-08-07 (ratchet extension). Gated like every other
   // owner-scoped surface: it starts a device flow and reads the secrets store.
   'app_github_connect_surface',
+  'app_email_digest_surface',
   'app_backups_surface',
   'cores_surface',
   'cores_oauth_broker_surface',
