@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type {
   BoundedWorkOutcome,
-  BoundedWorkRequest,
   Placement,
   RefusalReason,
   Unsupported,
@@ -40,15 +39,40 @@ function scrubGithubEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   )
 }
 
-function parseTrailer(text: string): Record<string, string> | null {
-  const result: Record<string, string> = {}
+type TrailerClaim = { head: string; diff: string; pr: null }
+type TrailerMapping = { kind: 'mapped'; result: TrailerClaim } | Extract<BoundedWorkOutcome, { kind: 'unknown' }>
+
+// The wrapper names a diff artifact, not inline diff text. Both remain claims;
+// only the driver can corroborate them with its independent measurement.
+async function mapTrailer(text: string, cwd: string): Promise<TrailerMapping> {
+  const fields = new Map<string, string>()
   for (const line of text.split('\n')) {
     if (line === '') continue
     const separator = line.indexOf('=')
-    if (separator <= 0) return null
-    result[line.slice(0, separator)] = line.slice(separator + 1)
+    if (separator <= 0) return { kind: 'unknown', detail: 'Codex wrapper wrote a malformed trailer' }
+    const key = line.slice(0, separator)
+    if (fields.has(key)) return { kind: 'unknown', detail: `Codex trailer repeats ${key}` }
+    fields.set(key, line.slice(separator + 1))
   }
-  return Object.keys(result).length > 0 ? result : null
+  for (const field of ['HEAD', 'DIFF', 'PR']) {
+    if (!fields.has(`NEUTRON_CODEX_BUILD_${field}`)) {
+      return { kind: 'unknown', detail: `Codex trailer is missing NEUTRON_CODEX_BUILD_${field}` }
+    }
+  }
+  const head = fields.get('NEUTRON_CODEX_BUILD_HEAD')!
+  const diffPath = fields.get('NEUTRON_CODEX_BUILD_DIFF')!
+  const pr = fields.get('NEUTRON_CODEX_BUILD_PR')!
+  if (head === '') return { kind: 'unknown', detail: 'Codex trailer has empty NEUTRON_CODEX_BUILD_HEAD' }
+  if (diffPath === '') return { kind: 'unknown', detail: 'Codex trailer has empty NEUTRON_CODEX_BUILD_DIFF' }
+  // The current wrapper asserts no PR with an explicit empty value. A number
+  // alone cannot supply the PR head and state required by the driver.
+  if (pr !== '') return { kind: 'unknown', detail: 'Codex trailer is missing pr.head and pr.state for NEUTRON_CODEX_BUILD_PR' }
+  try {
+    const diff = await readFile(resolve(cwd, diffPath), 'utf8')
+    return { kind: 'mapped', result: { head, diff, pr: null } }
+  } catch {
+    return { kind: 'unknown', detail: 'Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable' }
+  }
 }
 
 function waitFor(child: ChildProcess, signal: AbortSignal): Promise<{ code: number | null; killed: boolean }> {
@@ -128,11 +152,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       } catch {
         return { kind: 'unknown', detail: 'Codex wrapper exited successfully without a readable trailer' }
       }
-      const result = parseTrailer(trailerText)
-      if (!result) return { kind: 'unknown', detail: 'Codex wrapper wrote a malformed trailer' }
+      const mapped = await mapTrailer(trailerText, req.cwd)
+      if (mapped.kind === 'unknown') return mapped
       return {
         kind: 'completed',
-        result,
+        result: mapped.result,
         usage: { input_tokens: 0, output_tokens: 0 },
         model_reported: req.model_id,
         thread_id: req.thread?.id ?? null,
