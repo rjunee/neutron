@@ -309,6 +309,11 @@ test('production composition driver reaches a review panel through all three obs
     } }),
   }
   const host = await createProjectBuildHost(f.options)
+  // This test owns observation/panel composition; publication now precedes it.
+  // Model an already published candidate while keeping all three sources real.
+  host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head: observedHead, findings: [], skipped_rules: [], attempts: 0, note: '' })
+  host.deps.publishGate = async () => ({ kind: 'allow' })
+  host.deps.publish = async () => {}
   await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
   const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
   expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)

@@ -358,13 +358,12 @@ test('fresh null reviewed_head reaches allow and publishes through the driver', 
   expect(await host.deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
   // Stop after publication: this fixture deliberately does not create a remote PR.
   expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toEqual({
-    kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision', recipient: 'orchestrator',
+    kind: 'blocked', phase: 'publish', on: 'Published PR does not match candidate revision', recipient: 'orchestrator',
   })
   expect(publications).toBe(1)
   expect(f.usageRecords).toEqual([
     { runId: 'test', phase: 'decomposition' },
     { runId: 'test', phase: 'build' },
-    { runId: 'test', phase: 'review_adversarial' },
   ])
 })
 
@@ -579,7 +578,7 @@ for (const failure of [false, true]) {
 test('G019 routing fixture positive control reaches build publish and merge for pr mode', async () => {
   const f = await boundFixture()
   expect(await f.host.run({ ...f.input, mode: 'pr' }, new AbortController().signal)).toMatchObject({ kind: 'merged' })
-  expect(f.effects).toEqual(['plan', 'build', 'review', 'publish', 'merge'])
+  expect(f.effects).toEqual(['plan', 'build', 'publish', 'review', 'merge'])
   expect(f.panels()).toBe(0)
 })
 
@@ -661,6 +660,7 @@ for (const cap of [undefined, 2, 7]) {
     // G042 stops a fix round that leaves the measured head where it was, so this
     // fixer moves the head the way a real one does. Without it the run ends on
     // lost work instead of on the cap this test exists to count.
+    let pr: BuildSnapshot['pr'] = null
     let landed = 0
     const head = () => landed === 0 ? snapshot.head : `${'c'.repeat(39)}${landed % 10}`
     f.options.runners.pi = {
@@ -668,13 +668,18 @@ for (const cap of [undefined, 2, 7]) {
       run: async request => {
         calls.push(request.step_id)
         if (request.role === 'fix') landed++
-        return { kind: 'completed', result: { ...snapshot, head: head(), payload: { round: 0, max_rounds: 100 } },
+        return { kind: 'completed', result: { ...snapshot, head: head(), pr, payload: { round: 0, max_rounds: 100 } },
           usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
       },
     }
     const host = f.make()
     host.deps.admissionGate = async () => ({ kind: 'allow' })
-    host.deps.measure = async () => ({ kind: 'known', value: { ...snapshot, head: head() } })
+    host.deps.measure = async () => ({ kind: 'known', value: { ...snapshot, head: head(), pr } })
+    // Publication now precedes review. Script its policy/effect while this test
+    // measures only the persisted cap and keeps the PR at the published head.
+    host.deps.publishGate = async () => ({ kind: 'allow' })
+    host.deps.publish = async candidate => { pr = { number: 1, head: candidate.head, state: 'OPEN' } }
+    host.deps.runLeakGatePreflight = async candidate => ({ status: 'clean', head: candidate.head, findings: [], skipped_rules: [], attempts: 0, note: '' })
     // Readiness observes its own revision and refuses one that has moved; this
     // test moves the head deliberately, so readiness is scripted here and is
     // certified by its own tests instead.

@@ -435,12 +435,51 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if ('stop' in fixed) return fixed.stop
       firstRound++
     }
+    async function publishCandidate(): Promise<BuildRunOutcome | null> {
+      const candidate = snapshot
+      phase = 'publish'
+      step_id = null
+      const leak = await deps.runLeakGatePreflight(candidate)
+      // G139: completed scans are advisory; CI enforces the findings.
+      const emit = leak.status === 'clean' || leak.status === 'fixed' ? log.info : log.warn
+      emit('leak_preflight', { run_id: input.run_id, status: leak.status, note: leak.note,
+        findings: JSON.stringify(leak.findings), skipped_rules: leak.skipped_rules.join(', ') })
+      if (leak.status === 'unknown' || leak.status === 'skipped-no-gate') return unknown(`Leak preflight did not run: ${leak.note}`)
+      const publishObservation = await deps.measure()
+      if (publishObservation.kind === 'unknown') return unknown(publishObservation.detail)
+      snapshot = publishObservation.value
+      if (leak.head !== candidate.head || !corroborates(candidate, snapshot)) return blocked('Revision changed during publication preflight')
+      const diff = deps.assessMergeDiff(snapshot.diff)
+      if (!diff.allow) return blocked(diff.reason)
+      const publishGate = gateStop(await deps.publishGate(snapshot, input.merge_mode))
+      if (publishGate) return publishGate
+      const beforePublish = await deps.measure()
+      if (beforePublish.kind === 'unknown') return unknown(beforePublish.detail)
+      if (!corroborates(snapshot, beforePublish.value)) return blocked('Revision changed during publication gates')
+      if (!local) await deps.publish(snapshot)
+
+      const published = await deps.measure()
+      if (published.kind === 'unknown') return unknown(published.detail)
+      snapshot = published.value
+      if (snapshot.head !== candidate.head || snapshot.diff !== candidate.diff
+          || (!local && (snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== candidate.head
+            || (candidate.pr !== null && snapshot.pr.number !== candidate.pr.number)))) {
+        return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match candidate revision')
+      }
+      return null
+    }
+
     for (let round = firstRound; !approved; round++) {
       if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       phase = 'review'
       step_id = null
       // G035/G043: both fresh builds and fixes need a measured review artifact.
       if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
+      if (!local) {
+        const stop = await publishCandidate()
+        if (stop) return stop
+        phase = 'review'
+      }
       if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
       const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
       if (readiness) return readiness
@@ -505,33 +544,17 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if ('stop' in fix) return fix.stop
     }
 
-    const reviewed = snapshot
-    phase = 'publish'
-    step_id = null
-    const leak = await deps.runLeakGatePreflight(reviewed)
-    // G139: completed scans are advisory; CI enforces the findings.
-    const emit = leak.status === 'clean' || leak.status === 'fixed' ? log.info : log.warn
-    emit('leak_preflight', { run_id: input.run_id, status: leak.status, note: leak.note,
-      findings: JSON.stringify(leak.findings), skipped_rules: leak.skipped_rules.join(', ') })
-    if (leak.status === 'unknown' || leak.status === 'skipped-no-gate') return unknown(`Leak preflight did not run: ${leak.note}`)
-    const publishObservation = await deps.measure()
-    if (publishObservation.kind === 'unknown') return unknown(publishObservation.detail)
-    snapshot = publishObservation.value
-    if (leak.head !== reviewed.head || !corroborates(reviewed, snapshot)) return blocked('Revision changed after review')
-    const diff = deps.assessMergeDiff(snapshot.diff)
-    if (!diff.allow) return blocked(diff.reason)
-    const publishGate = gateStop(await deps.publishGate(snapshot, input.merge_mode))
-    if (publishGate) return publishGate
-    const beforePublish = await deps.measure()
-    if (beforePublish.kind === 'unknown') return unknown(beforePublish.detail)
-    if (!corroborates(snapshot, beforePublish.value)) return blocked('Revision changed during publication gates')
-    if (!local) await deps.publish(snapshot)
+    if (local || approved) {
+      const stop = await publishCandidate()
+      if (stop) return stop
+    }
 
+    const reviewed = snapshot
     phase = 'merge'
     const published = await deps.measure()
     if (published.kind === 'unknown') return unknown(published.detail)
     snapshot = published.value
-    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
+    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : !corroborates(reviewed, snapshot) || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
       return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
     }
     const mergeGate = gateStop(await deps.mergeGate(snapshot, input.merge_mode))
