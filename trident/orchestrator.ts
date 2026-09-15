@@ -2411,8 +2411,14 @@ export function buildTridentOrchestrator(
             round: launchRun.round,
             checkpoint,
             block_kind: 'infra-only',
+            // An unreadable resume head is an INFRASTRUCTURE stop, not an escalation: no
+            // panel judged anything here, so there is no plan defect to report.
             escalation: null,
             terminal_cause: cause,
+            // THE ORCHESTRATOR'S OWN INSTANCE OF THE WORKFLOW'S RESUME STOP (#520) —
+            // same exit, same name. This site never fires the workflow, so the kind is
+            // authored here rather than harvested; it is the one place in this file
+            // entitled to author one, because it is the site that MADE the decision.
             terminal_cause_kind: 'resume-head-unreadable',
             findings_present: false,
           }),
