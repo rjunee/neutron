@@ -70,6 +70,28 @@ export async function writeOwnerTimezone(
   )
 }
 
+/** NULL is the product default: briefs are enabled unless explicitly disabled. */
+export function readEmailDigestEnabled(db: ProjectDb, project_slug: string): boolean {
+  const row = db
+    .prepare<{ email_digest_enabled: number | null }, [string]>(
+      `SELECT email_digest_enabled FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
+    )
+    .get(project_slug)
+  return row?.email_digest_enabled !== 0
+}
+
+export async function writeEmailDigestEnabled(
+  db: ProjectDb,
+  project_slug: string,
+  enabled: boolean,
+): Promise<void> {
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, email_digest_enabled) VALUES (?, ?)
+       ON CONFLICT(instance_slug) DO UPDATE SET email_digest_enabled = excluded.email_digest_enabled`,
+    [project_slug, enabled ? 1 : 0],
+  )
+}
+
 /**
  * Read the owner's chosen voice-note transcriber (migration 0111).
  *

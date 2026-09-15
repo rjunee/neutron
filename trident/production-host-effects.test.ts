@@ -1,3 +1,5 @@
+import { reviewArtifact } from './gates/review-artifact.ts'
+import { fixLineage } from './gates/fix-lineage.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -10,6 +12,8 @@ import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from 
 import { createProductionHostEffects, productionCiSource, workContextPath } from './production-host-effects.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
+import { readProjectRepos, resolveProjectRepo } from './project-repos.ts'
+import { ciReadinessForHead } from './ci-readiness.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -391,6 +395,33 @@ test('CI refuses absent workflow even with a successful response', async () => {
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('workflow') })
 })
 
+test('undeclared repo workflow is unreadable before acquisition, with valid PR and green CI available', async () => {
+  const f = await fixture()
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+  const snapshot = await measured(f)
+  expect(snapshot.pr?.number).toBe(12)
+  let acquisitions = 0
+  const declared = (workflow: string | undefined) => ({
+    repos: [{ name: 'project', path: 'code', remote: null, ...(workflow === undefined ? {} : { ciWorkflow: workflow }) }],
+    default: 'project',
+  })
+  const observe = async () => {
+    const repo = resolveProjectRepo(readProjectRepos(f.dir, 'project'))
+    return createProductionHostEffects({ ...f.options, ciWorkflow: repo.ciWorkflow,
+      ciSource: { ...f.options.ciSource, async required() { acquisitions++; return f.options.ciSource.required() } },
+    }).observeCi(snapshot)
+  }
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared(undefined)))
+  expect(await observe()).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('project-repos.json') })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('cannot-read')
+  expect(acquisitions).toBe(0)
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared('ci.yml')))
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('green')
+  expect(acquisitions).toBe(1)
+  f.setCiReadiness({ headSha: snapshot.head, mergeable: 'MERGEABLE', rows: [] })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('no-run')
+})
+
 test('prepare requires a context reference and an unchanged host snapshot', async () => {
   const f = await fixture()
   const snapshot = await measured(f)
@@ -467,17 +498,29 @@ test('local-mode driver reaches merged through the real production effect', asyn
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   // Policy seams are scripted here; git measurement, preparation, landing and
   // the final ancestry witness use the real local repository.
-  const deps: BuildRunDeps = { ...f.effects,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...f.effects,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
@@ -524,30 +567,55 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     cwd: f.worktree, writable: true, network: false, tools: 'edit-and-run',
     brief: { path, integrity: briefIntegrity(workContextPath(path)) }, result: { schema: 'test', path: join(f.dir, 'result') },
     thread: null, budget: { wall_ms: 1000 } }
-  const runner = fakeRunner('pi', { outcomes: new Map<string, BoundedWorkOutcome>(
-    ['fix', 'review', 'plan', 'build'].flatMap(role => Array.from({ length: 7 }, (_, n) => [
-      `${f.row.id}:${role}:${n}`, { kind: 'completed', result: { ...snapshot,
-        // A resumed run has a re-plan already spent, so G075 requires the planner
-        // to return a revised execution spec; the counters stay wrong on purpose,
-        // because the host's are the ones that must win.
-        payload: role === 'plan' ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 } : { round: 0, replansUsed: 0 },
-        round: 0, replansUsed: 0 } } as BoundedWorkOutcome] as const))) })
+  // Every role reports what the repository ACTUALLY holds at the moment it answers,
+  // because the fixer below commits for real and a trailer pinned to the fixture's
+  // opening snapshot would disagree with the host's measurement one round later.
+  // The counters stay wrong on purpose: the host's are the ones that must win, and
+  // a resumed run has a re-plan already spent, so G075 needs a revised spec.
+  const runner = fakeRunner('pi')
+  runner.run = async request => {
+    runner.calls.push(request)
+    if (request.role === 'fix') {
+      await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', `fix ${request.step_id}`])
+    }
+    const now = await measured(f)
+    const payload = request.role === 'plan'
+      ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 }
+      : { round: 0, replansUsed: 0 }
+    return { kind: 'completed', result: { ...now, payload, round: 0, replansUsed: 0 },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
   const restarted = createProductionHostEffects(f.options)
   const rounds: number[][] = []
-  const deps: BuildRunDeps = { ...restarted.effects, modes: restarted.modes,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...restarted.effects, modes: restarted.modes,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     reviewGate: async (_payload, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
-    runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
+    // The preflight reports the head it scanned, and the driver refuses to publish a
+    // revision the scan did not see. The fixer commits for real, so pinning this to
+    // the fixture's opening tip reads as the revision changing after review.
+    runLeakGatePreflight: async reviewed => ({ status: 'clean', head: reviewed.head, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     publishGate: async () => ({ kind: 'blocked', on: 'fixture stops before publication' }),
     mergeGate: async () => ({ kind: 'unknown', detail: 'not reached' }),
@@ -562,8 +630,12 @@ test('production resume reloads rejected state, inherits rounds, and ignores wor
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
   expect(f.rounds).toEqual([[4, 1]])
+  // The fix commits for real, so the approved head is the one the repository now
+  // holds, not the tip the fixture opened on — and it must not be that tip.
+  const landed = (await measured(f)).head
+  expect(landed).not.toBe(f.tip)
   expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({
-    stage: 'approved', round: 4, replansUsed: 1, head: f.tip,
+    stage: 'approved', round: 4, replansUsed: 1, head: landed,
   })
 })
 

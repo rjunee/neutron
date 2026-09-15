@@ -78,6 +78,9 @@ export interface AppSurfacesCompositionInput {
   app_voice_transcription_surface?: {
     handler: (req: Request) => Promise<Response | null>
   }
+  app_email_digest_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
   /**
    * Installable MCP servers — `/api/app/mcp-servers` and
    * `/api/app/mcp-servers/decision`.

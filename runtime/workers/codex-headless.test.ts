@@ -102,6 +102,10 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
   let reads = 0
   const deps: BuildRunDeps = {
     readReviewCap: async () => ({ kind: 'known' }),
+    // G023: the builder's branch is the host's assignment, and a missing one is
+    // `unknown` rather than agreement. Production takes it from the run row; this
+    // helper is comparing trailers, so it supplies the assignment the same way.
+    assignedBranch: 'change',
     prepareWork: async () => {},
     measure: async () => ({ kind: 'known', value: ++reads < 3 ? initial : measured }),
     admissionGate: async () => ({ kind: 'allow' }),
@@ -112,6 +116,7 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
     mergeGate: async () => { throw new Error('unexpected merge') },
     publish: async () => { throw new Error('unexpected publication') },
     merge: async () => { throw new Error('unexpected merge') },
+    recordPhaseUsage: async () => {},
   }
   const request = fixture().request()
   return buildRun({

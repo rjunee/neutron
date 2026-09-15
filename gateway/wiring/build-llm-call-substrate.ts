@@ -1,3 +1,5 @@
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
  * @neutronai/gateway/wiring — shared CC-subprocess LLM-call substrate.
  *
@@ -570,6 +572,8 @@ export interface BuildLlmCallSubstrateInput {
    * SCOPE — every project-owned LLM turn, including build orchestration. The
    * construction site decides which turns share the live project resolver.
    */
+  /** Configured project chat routes, scoped to the composition's environment. */
+  configuredChat?: Pick<OpenAiFamilyProviderConfig, 'env' | 'bindMcpResolver' | 'toolManifest' | 'fetchImpl'>
   provider?: Provider
   /**
    * PER-TURN provider resolver — mirrors `projectIdResolver`. Re-evaluated on
@@ -707,6 +711,23 @@ export function buildLlmCallSubstrate(
       // straight to normalizeProvider would resolve to Anthropic and SILENTLY route
       // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
       // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
+      const chat = input.configuredChat
+      const projectId = input.projectIdResolver?.() ?? spec.metering_context?.project_id
+      const tier = chat?.env === undefined ? undefined : projectModelTier(chat.env, projectId)
+      if (tier !== undefined) {
+        openaiSessions.delete(openAiSessionScopeKey(input.user_id ?? '_platform', projectId))
+        const tools: ToolDef[] = (chat!.toolManifest?.() ?? []).map((tool) => ({
+          ...tool, input_schema: tool.input_schema as Record<string, unknown>,
+          output_schema: { type: 'object' }, capability_required: 'fs:project_data',
+        }))
+        const resolver = chat!.bindMcpResolver?.(projectId === undefined ? {} : { project_id: projectId })
+        if (tools.length > 0 && resolver === undefined) throw new Error(`configured model ${tier}: missing tool resolver`)
+        return createConfiguredChatSubstrate({
+          tier, env: chat!.env!, substrate_instance_id: input.substrate_instance_id,
+          resolver: resolver ?? (async () => { throw new Error('no tools configured') }),
+          ...(chat!.fetchImpl === undefined ? {} : { fetchImpl: chat!.fetchImpl }),
+        }).start({ ...spec, tools })
+      }
       const resolvedSelection = input.providerResolver?.(input.projectIdResolver?.() ?? spec.metering_context?.project_id)
       const resolvedProvider =
         typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection

@@ -22,6 +22,7 @@
     "./pipeline/prompts": "./src/pipeline/prompts.ts",
     "./pipeline/escalate": "./src/pipeline/escalate.ts",
     "./pipeline/poller": "./src/pipeline/poller.ts",
+    "./digest": "./src/digest.ts",
     "./ui/launcher-icon": "./src/ui/launcher-icon.ts",
     "./ui/app-tab-surface": "./src/ui/app-tab-surface.ts"
   },

@@ -7,10 +7,13 @@ cutover: false
 legacy_ref: "#869"
 ---
 
-The most specific explicit choice wins: project override, instance default,
+Within the harness hierarchy, the most specific explicit choice wins: project override, instance default,
 application default (Claude Code). A null project override follows live instance
 changes; an explicit Claude Code choice does not. Resolution includes its source.
 An unwired selection refuses visibly instead of falling back to another provider.
+An explicit [configured API project route](configured-models-for-review-and-chat.md)
+selects the conversational model before this hierarchy (Decisions Log 2026-09-15,
+configured model access); the provider settings continue to describe the harness.
 
 ### Configuration
 

@@ -244,6 +244,11 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
       'starting and observing the GitHub device flow — the only way the stored token ever comes to exist',
   },
   {
+    rung: 'app-email-digest',
+    composition: 'app_email_digest_surface',
+    serves: 'reading and changing the owner-level twice-daily email-brief preference',
+  },
+  {
     rung: 'app-projects',
     composition: 'app_projects_surface',
     serves: 'the project list and per-project settings drawer',

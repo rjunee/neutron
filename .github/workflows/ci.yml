@@ -401,7 +401,7 @@ jobs:
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:
-    name: shard ${{ matrix.shard }}/8
+    name: shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
     strategy:
       # fail-fast: false — one shard failing must not cancel the others. Cancelling
@@ -410,34 +410,40 @@ jobs:
       # round-trip per remaining failure.
       fail-fast: false
       matrix:
-        # EIGHT legs, not four. A PR waits on the SLOWEST shard, so the only thing
-        # that shortens the wait is less work on that one runner — and these are
-        # GitHub-hosted runners, so the extra legs cost CI minutes and nothing on
-        # any developer machine. Measured against the cost model in run-tests.sh
-        # §2c over the 1296 general-lane files on this tree: the slowest shard's
-        # estimated test time falls from 70.4s at four legs to 35.2s at eight.
+        # FOUR legs, and this number tracks WHICH RESOURCE IS SCARCE — it was
+        # eight while runners were free and latency was the cost.
         #
-        # Eight rather than twelve because each leg pays a fixed toll — checkout,
-        # `bun install`, and the ~15s full discovery + bun cross-check that EVERY
-        # shard runs (deliberately: that is what keeps a coverage drift visible on
-        # every runner). Past eight, that toll starts to dominate the shrinking
-        # test slice, and each additional leg is one more chance for a transient
-        # failure to red a PR that has nothing wrong with it.
+        # The toll this comment used to describe as a reason not to go past eight
+        # turns out to already dominate AT eight. Each leg pays checkout, `bun
+        # install`, and the ~15s full discovery + bun cross-check that EVERY shard
+        # runs (deliberately: that is what keeps coverage drift visible on every
+        # runner). Measured 2026-09-14 on a real green run: mean shard wall time
+        # 150s against an estimated test slice of 35.2s, so ~115s of every leg is
+        # toll. Eight legs = 1200 job-seconds of which ~920 is not testing.
+        #
+        # That is 79% of the whole CI run (1527 job-seconds across 13 jobs) spent
+        # on a matrix width chosen for a constraint we no longer have. Measured
+        # the same day: 22 runs QUEUED against 7 running. When the queue is the
+        # bottleneck, total job-seconds is the thing to cut, and halving the legs
+        # removes four tolls (~460 job-seconds, 30% of the run) while the slowest
+        # shard's test slice only returns to 70.4s — the number this matrix had at
+        # four legs before, and still well inside the longest job (typecheck, 163s).
+        #
+        # If runner concurrency is raised, revisit: at that point latency is the
+        # cost again and the arithmetic flips back.
         #
         # If you change this list you MUST change the /N in NEUTRON_TEST_SHARD
-        # below to match. That pairing is asserted by
-        # scripts/ci/ci-workflow.test.ts ('the shard matrix size MATCHES the /N'),
+        # below to match — `scripts/ci/ci-workflow.test.ts` asserts the pairing,
         # because widening the matrix while leaving the denominator behind makes
-        # the extra shards run NOTHING while reporting green — a silent coverage
-        # hole that looks exactly like a faster suite.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # the extra shards run NOTHING while reporting green.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.13
       # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
-      # This is the leg that multiplies: eight shards, eight identical installs.
+      # This is the leg that multiplies: four shards, four identical installs.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
@@ -454,14 +460,15 @@ jobs:
       - name: App suite — every file co-resident and isolated
         if: matrix.shard == 1
         run: bun test --isolate app/__tests__/ --max-concurrency=4
-      - name: Test (shard ${{ matrix.shard }} of 8)
+      - name: Test (shard ${{ matrix.shard }} of 4)
         env:
-          NEUTRON_TEST_SHARD: ${{ matrix.shard }}/8
-          # Each shard carries ~1/8 of the files on its own 7 GB runner, so the OOM
+          NEUTRON_TEST_SHARD: ${{ matrix.shard }}/4
+          # Each shard carries ~1/4 of the files on its own 7 GB runner, so the OOM
           # pressure that forced concurrency 4→2 and chunk 100→75 (#193) is divided
           # further still. The documented defaults stay; peak RSS per runner is well
-          # below where it tipped, because the file COUNT per runner is now an
-          # eighth of what it was when it tipped.
+          # below where it tipped, because the file COUNT per runner is a QUARTER
+          # of what it was when it tipped — the width this was measured at before
+          # the matrix went to eight.
           NEUTRON_TEST_CONCURRENCY: "4"
           NEUTRON_TEST_CHUNK_SIZE: "100"
         run: bash scripts/run-tests.sh

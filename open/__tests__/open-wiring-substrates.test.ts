@@ -1119,3 +1119,59 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(w.cleanups).toEqual([])
   })
 })
+
+test('configured project chat boots without either built-in key and binds tools only for live chat', async () => {
+  const row = { tier: 'glm', provider: 'zai', model: 'glm-test', endpoint: 'http://127.0.0.1/chat/completions', credential: 'CHAT_TEST_KEY' }
+  const env = { NEUTRON_PROJECT_MODELS: '{"one":"glm","two":"deepseek","missing":"unconfigured"}',
+    NEUTRON_REVIEW_SEATS: JSON.stringify([row, { ...row, tier: 'deepseek', provider: 'deepseek', model: 'deepseek-test' }]), CHAT_TEST_KEY: 'test-key' }
+  const bound: unknown[] = []
+  const bodies: any[] = []
+  const opts = resolveOpenConversationalProvider(env, {
+    resolveOpenAiPool: () => null,
+    buildMcpResolver: () => (bind) => { bound.push(bind); return async () => ({ ok: true }) },
+    buildToolManifest: () => () => [{ name: 'lookup', description: 'lookup', input_schema: {} }],
+  })
+  const { ctx, captured } = makeCtx({ ...opts, env, llmPool: null,
+    openaiFetchImpl: (async (_url, init) => {
+      const body = JSON.parse(String(init!.body)); bodies.push(body)
+      return new Response(`data: ${JSON.stringify({ model: body.model, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`)
+    }) as typeof fetch,
+  })
+  const wired = wireSubstrates(ctx)
+  for (const project_id of ['one', 'two']) {
+    const events = await Array.fromAsync(wired.liveAgentSubstrate!.start({ ...SESSIONLESS_SPEC,
+      messages: [{ role: 'user', content: 'history' }], metering_context: { project_id } }).events)
+    expect(events.at(-1)?.kind).toBe('completion')
+  }
+  expect(bodies.map((b) => b.model)).toEqual(['glm-test', 'deepseek-test'])
+  expect(bodies[0].messages[0]).toEqual({ role: 'user', content: 'history' })
+  expect(bodies[0].tools[0].function.name).toBe('lookup')
+  expect(bound).toEqual([{ project_id: 'one' }, { project_id: 'two' }])
+  expect(captured).toHaveLength(0)
+  const phase = await Array.fromAsync(wired.llmCallSubstrate!.start({ ...SESSIONLESS_SPEC, metering_context: { project_id: 'one' } }).events)
+  expect(phase.at(-1)?.kind).toBe('completion')
+  expect(bodies[2].tools).toBeUndefined()
+  const refused = await Array.fromAsync(wired.liveAgentSubstrate!.start({ ...SESSIONLESS_SPEC, metering_context: { project_id: 'missing' } }).events)
+  expect(refused).toEqual([{ kind: 'error', code: 'spawn_configuration', retryable: false,
+    message: 'configured model unconfigured: unknown configured model' }])
+  expect(bodies).toHaveLength(3)
+  expect(captured).toHaveLength(0)
+  expect(() => wired.makeEphemeralSubstrate('build')('/tmp/configured-build')).toThrow('empty Anthropic credential pool')
+  expect(() => wired.makeWarmFireSubstrate('/tmp/configured-build')).toThrow('empty Anthropic credential pool')
+
+  const harness = makeCtx({ ...opts, env, openaiFetchImpl: ctx.openaiFetchImpl! })
+  const native = wireSubstrates(harness.ctx)
+  const build = native.makeEphemeralSubstrate('build')('/tmp/configured-build')
+  const buildEvents = await Array.fromAsync(build.start({ ...SESSIONLESS_SPEC, metering_context: { project_id: 'one' } }).events)
+  expect(buildEvents.at(-1)?.kind).toBe('completion')
+  expect(harness.captured).toHaveLength(1)
+  expect(bodies).toHaveLength(3)
+})
+
+test('Open boot refuses malformed configured project routes', () => {
+  expect(() => resolveOpenConversationalProvider({ NEUTRON_PROJECT_MODELS: '[]' }, {
+    resolveOpenAiPool: () => null,
+    buildMcpResolver: () => () => async () => null,
+    buildToolManifest: () => () => [],
+  })).toThrow('invalid NEUTRON_PROJECT_MODELS')
+})
