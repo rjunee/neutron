@@ -71,7 +71,7 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
         fireAndForget('project-build-outcome', running.then(async outcome => {
           const written = await options.store.compareProjectBuildResult(input.run.id, reservation, projectBuildResult(outcome, { ...input, run: options.store.get(input.run.id) ?? input.run }))
           if (!written) throw Error('Project outcome write was not confirmed')
-        }, async error => {
+        }).catch(async (error: unknown) => {
           await options.store.compareProjectBuildResult(input.run.id, reservation, JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: String(error) })).catch(options.onError)
           throw error
         }), options.onError)
