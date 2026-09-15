@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ReviewDecision } from './build-run.ts'
 
@@ -156,14 +156,41 @@ test('review cannot change its subject even with a matching trailer', async () =
   f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, head: 'c'.repeat(40) }))
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Reviewed revision changed during review' })
 })
-for (const status of ['incomplete', 'findings-unresolved', 'skipped-no-gate', 'gate-error'] as const) {
-  test(`leak ${status} cannot publish`, async () => {
+for (const status of ['incomplete', 'findings-unresolved', 'gate-error'] as const) {
+  test(`leak ${status} logs and publishes after preflight`, async () => {
     const f = fixture(); const leak = f.deps.runLeakGatePreflight
-    f.deps.runLeakGatePreflight = async s => ({ ...await leak(s), status })
-    expect((await f.run()).kind).toBe('blocked')
+    const warning = spyOn(console, 'warn').mockImplementation(() => {})
+    f.deps.runLeakGatePreflight = async s => {
+      f.events.push('preflight')
+      return { ...await leak(s), status, note: 'scan needs attention',
+        findings: [{ rule: 'vocabulary', file: 'README.md', line: 7 }] }
+    }
+    try {
+      expect((await f.run()).kind).toBe('merged')
+      expect(f.events.filter(e => e === 'preflight' || e === 'publish')).toEqual(['preflight', 'publish'])
+      const logged = warning.mock.calls.flat().join(' ')
+      expect(logged).toContain(`status=${status}`)
+      expect(logged).toContain('scan needs attention')
+      expect(logged).toContain('README.md')
+      expect(logged).toContain('vocabulary')
+    } finally { warning.mockRestore() }
+  })
+}
+for (const status of ['unknown', 'skipped-no-gate'] as const) {
+  test(`leak ${status} cannot publish without a scan`, async () => {
+    const f = fixture(); const leak = f.deps.runLeakGatePreflight
+    f.deps.runLeakGatePreflight = async s => ({ ...await leak(s), status, note: 'scanner unavailable' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'publish', step_id: null,
+      detail: 'Leak preflight did not run: scanner unavailable' })
     expect(f.events).not.toContain('publish')
   })
 }
+test('leak preflight invocation throwing stays unknown', async () => {
+  const f = fixture()
+  f.deps.runLeakGatePreflight = async () => { throw new Error('scanner unavailable') }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'publish', detail: 'scanner unavailable' })
+  expect(f.events).not.toContain('publish')
+})
 test('leak fixer moving the head requires new review', async () => {
   const f = fixture(); const leak = f.deps.runLeakGatePreflight
   f.deps.runLeakGatePreflight = async s => { f.snapshot.head = 'd'.repeat(40); return { ...await leak(s), status: 'fixed' } }

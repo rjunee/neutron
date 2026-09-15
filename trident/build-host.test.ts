@@ -544,3 +544,37 @@ for (const mismatch of ['missing', 'run', 'pr'] as const) {
     expect(f.effects).toEqual([])
   })
 }
+
+for (const failure of ['missing-gate', 'worktree', 'throw'] as const) {
+  test(`leak preflight reports unknown when ${failure} prevents a scan`, async () => {
+    const f = await fixture()
+    const run = f.options.leak.run_host
+    let scans = 0
+    f.options.leak.run_host = async (argv, ...rest) => {
+      if (failure === 'missing-gate' && argv[0] === 'test') return { ok: false, exit_code: 1, stdout: '', stderr: '' }
+      if (failure === 'worktree' && argv.includes('add')) return { ok: false, exit_code: 128, stdout: '', stderr: 'worktree unavailable' }
+      if (argv.includes('bash')) {
+        scans++
+        if (failure === 'throw') throw new Error('scanner unavailable')
+      }
+      return run(argv, ...rest)
+    }
+    const result = await f.make().deps.runLeakGatePreflight(snapshot)
+    expect(result.status).toBe('unknown')
+    expect(result.note.length).toBeGreaterThan(0)
+    expect(scans).toBe(failure === 'throw' ? 1 : 0)
+  })
+}
+for (const status of ['findings-unresolved', 'gate-error'] as const) {
+  test(`leak preflight preserves observed ${status} for advisory publication`, async () => {
+    const f = await fixture()
+    const run = f.options.leak.run_host
+    f.options.leak.run_host = async (argv, ...rest) => argv.includes('bash')
+      ? { ok: false, exit_code: status === 'gate-error' ? 2 : 1,
+          stdout: status === 'gate-error' ? '' : 'LEAK GATE: FAIL\n  [vocabulary] README.md:7:sample', stderr: 'scan report' }
+      : run(argv, ...rest)
+    const result = await f.make().deps.runLeakGatePreflight(snapshot)
+    expect(result.status).toBe(status)
+    if (status === 'findings-unresolved') expect(result.findings).toEqual([{ rule: 'vocabulary', file: 'README.md', line: 7 }])
+  })
+}

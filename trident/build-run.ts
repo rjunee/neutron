@@ -1,3 +1,4 @@
+import { createLogger } from '@neutronai/logger'
 import { createHash } from 'node:crypto'
 import {
   placementFor,
@@ -9,6 +10,12 @@ import {
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
 import type { TerminalCause } from './terminal-cause.ts'
+
+const log = createLogger('trident')
+
+export type BuildLeakPreflightOutcome = Omit<LeakPreflightOutcome, 'status'> & {
+  status: LeakPreflightOutcome['status'] | 'unknown'
+}
 
 export type BuildPhase = 'plan' | 'build' | 'review' | 'fix' | 'publish' | 'merge'
 type WorkPhase = Extract<BuildPhase, 'plan' | 'build' | 'review' | 'fix'>
@@ -87,7 +94,7 @@ export interface BuildRunDeps {
   measure(): Promise<Measurement>
   admissionGate(input: BuildRunInput): Promise<GateResult>
   // Existing module vocabularies are preserved across extraction.
-  runLeakGatePreflight(snapshot: BuildSnapshot): Promise<LeakPreflightOutcome>
+  runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
   // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number): Promise<ReviewDecision>
@@ -345,7 +352,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     phase = 'publish'
     step_id = null
     const leak = await deps.runLeakGatePreflight(reviewed)
-    if (leak.status !== 'clean' && leak.status !== 'fixed') return blocked(`Leak preflight: ${leak.status}`)
+    // G139: completed scans are advisory; CI enforces the findings.
+    const emit = leak.status === 'clean' || leak.status === 'fixed' ? log.info : log.warn
+    emit('leak_preflight', { run_id: input.run_id, status: leak.status, note: leak.note,
+      findings: JSON.stringify(leak.findings), skipped_rules: leak.skipped_rules.join(', ') })
+    if (leak.status === 'unknown' || leak.status === 'skipped-no-gate') return unknown(`Leak preflight did not run: ${leak.note}`)
     const publishObservation = await deps.measure()
     if (publishObservation.kind === 'unknown') return unknown(publishObservation.detail)
     snapshot = publishObservation.value
