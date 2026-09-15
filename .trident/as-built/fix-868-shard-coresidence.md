@@ -23,6 +23,20 @@ The filed fetch citation moved: gateway installation is now `app/__tests__/reach
 
 Focused validation passed: `bun test scripts/ci/ci-workflow.test.ts tests/integration/identity-env-readers-registry.test.ts` (102 pass), `bun test gateway/wiring/__tests__/persona-loader.test.ts`, `bash scripts/ci/typecheck-all.sh` (51 configurations), and `bash scripts/ci/lint.sh`. The root package has no `typecheck` script, so `bun run typecheck` refused with `Script not found`; the CI-owned typecheck matrix was run instead (`.github/workflows/ci.yml:261-265`).
 
+### Co-resident app failure found by the new leg
+
+The new leg exposed a real test-harness race in the queue-depth mutation guard. Production schedules the outage transition from a timer (`app/components/ConnectionNotice.tsx:61-64`, `app/components/ConnectionNotice.tsx:120-126`), but the old fixture waited on an unrelated timer and therefore inferred that React had committed the state update from elapsed wall time. The isolated focused run passed while printing React's outside-`act` warning; under co-resident runner load the assertion could arrive before React's timer-driven render flush.
+
+The component now accepts a test-only deadline scheduler while its default remains the same real `setTimeout`/`clearTimeout` implementation (`app/components/ConnectionNotice.tsx:59-64`, `app/components/ConnectionNotice.tsx:150-163`). The queue-depth guard captures that deadline and fires it inside `act`, then still asserts the mounted notice and exact queue-depth text (`app/__tests__/connection-notice-quiet.test.tsx:179-204`). A complete `rg -n "scheduleDeadline|offlineAfterMs" app` enumeration found the scheduler seam only in the component and this test; production call sites do not select it. The old “Time is REAL here” claim was searched tree-wide together with its known replacement and had no remaining hit; the replacement is at `app/__tests__/connection-notice-quiet.test.tsx:28-30`.
+
+| Guard | Mutation | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| Deterministic mounted queue-depth guard | Change `setElapsed(true)` to `setElapsed(false)` at `app/components/ConnectionNotice.tsx:125` | Focused file: 10 pass / 3 fail; the subject guard failed at `app/__tests__/connection-notice-quiet.test.tsx:202` | Focused file: 13 pass / 0 fail |
+
+Bounded validation passed after restoration: `bun test app/__tests__/connection-notice-quiet.test.tsx` (13 pass), `bun test --isolate app/__tests__/ --max-concurrency=4` (2,007 pass across 159 files), `bash scripts/ci/typecheck-all.sh` (51 configurations), and `bash scripts/ci/lint.sh`. No result vocabulary changed: the notice still returns only the existing text-or-null outcomes (`app/components/ConnectionNotice.tsx:87-97`), and the injected scheduler changes only how the test reaches the existing elapsed state.
+
 ### Deliberately not changed
 
 The shard count remains eight (`.github/workflows/ci.yml:433`); pinning that count would only preserve an accidental grouping. The device-harness process lane remains in the bounded-memory runner (`scripts/run-tests.sh:657-675`) because it protects non-app packages and bounds the full-suite module graph; the new app-wide check is an additional CI assertion, not a second production path. No migration or environment read was added.
+
+The production outage duration and rendering policy were deliberately not changed. The flapping guard retains real time because it measures continuity across status transitions (`app/__tests__/connection-notice-quiet.test.tsx:207-238`); only the loaded-runner-sensitive queue-depth fixture uses the controlled scheduler.
