@@ -36,7 +36,7 @@ export interface ProductionHostOptions {
 
 export interface ProductionCiSource {
   required(baseBranch: string): Promise<RequiredCheckObservation>
-  readiness(pr: number): Promise<{ headSha: unknown; mergeable: unknown; rows: unknown } | { unreadable: string }>
+  readiness(pr: number): Promise<{ headSha: unknown; mergeable: unknown; rows: unknown; checksComplete?: boolean } | { unreadable: string }>
 }
 
 export type CleanupOutcome =
@@ -112,10 +112,28 @@ export function productionCiSource(run: EnvCapableHostRunner, repo: string): Pro
     },
     async readiness(pr) {
       try {
-        const result = await run(['gh', 'pr', 'view', String(pr), '--json', 'headRefOid,mergeable,statusCheckRollup'], repo)
+        const result = await run(['gh', 'pr', 'view', String(pr), '--json', 'headRefOid,mergeable'], repo)
         if (!result.ok || result.timed_out) return { unreadable: 'PR readiness could not be read' }
         const value: any = json(result.stdout)
-        return { headSha: value?.headRefOid, mergeable: value?.mergeable, rows: value?.statusCheckRollup }
+        if (typeof value?.headRefOid !== 'string' || !oid.test(value.headRefOid)) return { unreadable: 'PR head is malformed' }
+        // Read both lists at the measured revision. A bounded page is evidence only
+        // when its authoritative count equals its length; never infer a count.
+        const readList = async (path: string, field: 'check_runs' | 'statuses'): Promise<unknown[] | null> => {
+          try {
+            const result = await api(path)
+            if (!result.ok || result.timed_out) return null
+            const payload: any = json(result.stdout)
+            return payload && Number.isSafeInteger(payload.total_count) && Array.isArray(payload[field])
+              && payload.total_count === payload[field].length ? payload[field] : null
+          } catch { return null }
+        }
+        const [runs, statuses] = await Promise.all([
+          readList(`repos/{owner}/{repo}/commits/${value.headRefOid}/check-runs?per_page=100`, 'check_runs'),
+          readList(`repos/{owner}/{repo}/commits/${value.headRefOid}/status?per_page=100`, 'statuses'),
+        ])
+        const checksComplete = runs !== null && statuses !== null
+        return { headSha: value.headRefOid, mergeable: value.mergeable, checksComplete,
+          rows: checksComplete ? [...runs!, ...statuses!] : [] }
       } catch (error) { return { unreadable: String(error) } }
     },
   }
