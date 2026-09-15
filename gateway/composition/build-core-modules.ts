@@ -77,7 +77,6 @@ import {
   buildTridentOrchestrator,
   sweepStrandedFailures,
 } from '@neutronai/trident/orchestrator.ts'
-import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery, deliverInfraRetry } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
@@ -499,14 +498,8 @@ export function buildCoreModules(
   // it via the state machine, exactly as the reminders loop sweeps due
   // reminders.
   //
-  // Trident v2 (Work Board Phase 2a exec-model): the INNER Forge→Argus→fix loop
-  // is one native CC Dynamic Workflow (`trident/inner-workflow.mjs`). When the
-  // composer threads `input.trident.fire_inner_workflow` (the warm-substrate FIRE
-  // seam), the module builds the real `step` here — `buildWorkflowFirer` (fires
-  // the workflow + settles the launching turn) + `buildTridentOrchestrator`
-  // (harvests the typed result from `code_trident_runs.inner_result` by runId,
-  // server-gates the verdict, merges on APPROVE). `/code <task>` (and governed
-  // Ralph runs) create `code_trident_runs` rows that THIS loop drives end-to-end.
+  // The composer supplies the typed project launcher. The driver runs in Neutron;
+  // this outer loop harvests its durable result from inner_result by run ID.
   //
   // When no dispatch is threaded (Open dev / default), the module falls
   // back to `stubAdvanceDeps` (classify always "running") so the loop is
@@ -636,15 +629,8 @@ export function buildCoreModules(
           run_host: runHost,
           refs_ready: () => strandedSweepSettled,
         })
-        // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
-        // loop is one native CC Dynamic Workflow. The FIRER (`fire_inner_workflow`)
-        // invokes the `Workflow` tool on a WARM substrate and SETTLES the
-        // launching turn immediately (billing-exempt — no `claude -p`); the
-        // workflow runs detached and persists its TYPED result to
-        // `code_trident_runs.inner_result`. The orchestrator step fires it per
-        // run, then HARVESTS that typed result from the DB by runId (deterministic
-        // TS), server-gates the verdict, and merges on APPROVE.
-        const fire_workflow = buildWorkflowFirer({ fire: tridentWiring.fire_inner_workflow })
+        // Pass typed run context directly to the project launcher.
+        const fire_workflow = tridentWiring.fire_inner_workflow
         const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
           fire_workflow,
           db_path: input.db.path,

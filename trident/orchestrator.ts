@@ -1,3 +1,4 @@
+import { projectBuildPending } from './project-launcher.ts'
 import { createRecoveryLivenessStep, type SharedLauncherStandDownInput } from './recovery-liveness.ts'
 import { rebaseOntoObservedBase } from './replay.ts'
 import { publishFailureReason, redactPushError } from './publish-failure.ts'
@@ -4868,6 +4869,9 @@ export function buildTridentOrchestrator(
   })
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    if (!isTerminalPhase(run.phase) && projectBuildPending(run.inner_result)) {
+      return { run, changed: false, waiting: true, note: 'Project driver outcome unknown; preserving worker and step for reconciliation' }
+    }
     let worker = unknownWorkerObservation('worker observer unavailable', now())
     if (!isTerminalPhase(run.phase) && opts.observe_run_worker !== undefined) {
       try { worker = await opts.observe_run_worker(run) }

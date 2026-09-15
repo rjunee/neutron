@@ -1039,6 +1039,15 @@ export class TridentRunStore {
     return row === null ? null : rowToRun(row)
   }
 
+  /** Reserve and complete a host launch without overwriting another writer or a stopped run. */
+  async compareProjectBuildResult(id: string, expected: string | null, result: string): Promise<boolean> {
+    return this.db.transaction(tx => tx.runSync(
+      `UPDATE code_trident_runs SET inner_result = ?
+       WHERE id = ? AND inner_result IS ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+      [result, id, expected],
+    ).changes === 1)
+  }
+
   /** SQLite compares the last host-state event in the same statement as the append.
    * A stale host cannot overwrite a newer checkpoint or consume a task twice. */
   async appendBuildModeState(runId: string, expected: number | null, meta: string): Promise<number | null> {
