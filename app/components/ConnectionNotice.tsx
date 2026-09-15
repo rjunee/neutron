@@ -56,6 +56,13 @@ import { createThemedStyles, THEME, TYPOGRAPHY, SPACING } from '../lib/theme';
  */
 export const OFFLINE_NOTICE_AFTER_MS = 15_000;
 
+type OutageDeadline = (onElapsed: () => void, afterMs: number) => () => void;
+
+const scheduleOutageDeadline: OutageDeadline = (onElapsed, afterMs) => {
+  const handle = setTimeout(onElapsed, afterMs);
+  return () => clearTimeout(handle);
+};
+
 /** Statuses under which we simply ASSUME the connection is fine and say nothing:
  *  `open` (it is), and `idle` (nothing has been attempted yet — a surface that
  *  has not started connecting has no outage to report). */
@@ -106,6 +113,7 @@ export function connectionNotice(input: ConnectionNoticeInput): string | null {
 export function useExtendedOutage(
   status: ConnStatus,
   afterMs: number = OFFLINE_NOTICE_AFTER_MS,
+  scheduleDeadline: OutageDeadline = scheduleOutageDeadline,
 ): boolean {
   const healthy = isAssumedHealthy(status);
   const [elapsed, setElapsed] = useState(false);
@@ -114,9 +122,8 @@ export function useExtendedOutage(
       setElapsed(false);
       return;
     }
-    const handle = setTimeout(() => setElapsed(true), afterMs);
-    return () => clearTimeout(handle);
-  }, [healthy, afterMs]);
+    return scheduleDeadline(() => setElapsed(true), afterMs);
+  }, [healthy, afterMs, scheduleDeadline]);
   // Belt and braces against a latch: even if a stale `true` survived a render,
   // a healthy socket reports nothing.
   return elapsed && !healthy;
@@ -141,6 +148,9 @@ export interface ConnectionNoticeProps {
    * prove the notice ever appears, which in practice means nobody proves it.
    */
   offlineAfterMs?: number;
+  /** Test seam for driving the deadline inside React's `act`; the app never
+   * passes it, and production continues to use the real timer above. */
+  scheduleDeadline?: OutageDeadline;
 }
 
 export function ConnectionNotice({
@@ -148,8 +158,9 @@ export function ConnectionNotice({
   pendingCount,
   sendError,
   offlineAfterMs = OFFLINE_NOTICE_AFTER_MS,
+  scheduleDeadline = scheduleOutageDeadline,
 }: ConnectionNoticeProps): React.JSX.Element | null {
-  const outageElapsed = useExtendedOutage(status, offlineAfterMs);
+  const outageElapsed = useExtendedOutage(status, offlineAfterMs, scheduleDeadline);
   if (sendError !== null) {
     return (
       <View style={styles.statusStrip} testID="chat-send-error">
