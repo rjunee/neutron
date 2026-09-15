@@ -27,6 +27,7 @@ export type KnownDiagnosticKind =
   | 'js_error'
   | 'unhandled_rejection'
   | 'render_crash'
+  | 'native_crash'
   | 'lifecycle';
 
 export interface DiagnosticEvent {

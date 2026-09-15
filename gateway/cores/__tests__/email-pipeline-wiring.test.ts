@@ -269,6 +269,37 @@ describe('buildEmailPipelinePollHandler', () => {
       cleanup()
     }
   })
+
+  test('new mail rides the pipeline into scribe exactly once', async () => {
+    const fanned: Array<{ trigger: string; text: string; source: string }> = []
+    const gmail = buildSeededInMemoryGmailClient()
+    const { cfg, cleanup } = config({
+      gmail: gmail as GmailClient,
+      scribeFanOut: (trigger, text, source) => fanned.push({ trigger, text, source }),
+    })
+    try {
+      const handler = buildEmailPipelinePollHandler(cfg)
+      await handler(CTX)
+      gmail.seed({
+        id: 'memory-1',
+        subject: 'Logistics deal with Northwind',
+        from: 'Tomas <tomas@northwind.example.com>',
+        body_text: 'Following up on the Q3 logistics partnership and rollout timeline.',
+        internal_date: new Date(Date.now() + 5_000).toISOString(),
+        label_ids: ['INBOX'],
+      })
+
+      await handler(CTX)
+      await handler(CTX)
+
+      expect(fanned).toHaveLength(1)
+      expect(fanned[0]?.trigger).toBe('email')
+      expect(fanned[0]?.source).toBe('email:memory-1')
+      expect(fanned[0]?.text).toContain('Logistics deal with Northwind')
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('the tick reports every kind of work it does', () => {

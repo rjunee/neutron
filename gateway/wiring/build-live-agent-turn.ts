@@ -807,6 +807,8 @@ export interface BuildLiveAgentTurnInput {
   project_slug: string
   /** Absolute owner home — workspace files for `assembleSystemPrompt`. */
   owner_home: string
+  /** Resolve the owner's captured IANA timezone from durable metadata on every turn. */
+  ownerTimezone?: (project_slug: string) => string | null
   /** Default BEST_MODEL per memory feedback_default_to_opus.md. */
   model?: string
   max_tokens?: number
@@ -826,6 +828,29 @@ export interface BuildLiveAgentTurnInput {
 export interface LiveAgentTurnResult {
   outcome: 'replied' | 'failed'
   reply_prompt_id: string | null
+}
+
+/** Build the per-turn clock frame from one instant and the owner's IANA zone. */
+export function buildOwnerTimeFragment(nowMs: number, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'longOffset',
+  }).formatToParts(new Date(nowMs))
+  const value = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? ''
+  const localTime = `${value('year')}-${value('month')}-${value('day')} ${value('hour')}:${value('minute')}:${value('second')} ${value('timeZoneName')}`
+  return `<owner_time>\nOwner timezone: ${timezone}\nCurrent owner-local date and time: ${localTime}\nTreat an unlabelled date or time stated to the owner as being in this timezone. Label any other timezone explicitly.\n</owner_time>`
+}
+
+function buildOwnerTimeUnavailableFragment(): string {
+  return '<owner_time>\nOwner timezone and local time are unavailable. Do not infer them from the host clock or state an unlabelled local date or time.\n</owner_time>'
 }
 
 /**
@@ -1379,6 +1404,24 @@ export function buildLiveAgentTurn(
         })
       }
     }
+    // Resolve this on every turn, including warm turns: the browser can report a
+    // zone after composition, and a warm REPL otherwise keeps the old clock frame.
+    let ownerTimeFragment: string | null = null
+    if (input.ownerTimezone !== undefined) {
+      try {
+        const timezone = input.ownerTimezone(turn.project_slug)
+        ownerTimeFragment =
+          timezone === null
+            ? buildOwnerTimeUnavailableFragment()
+            : buildOwnerTimeFragment(now(), timezone)
+      } catch (err) {
+        moduleLog.warn('owner_timezone_read_failed', {
+          project: turn.project_slug,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        ownerTimeFragment = buildOwnerTimeUnavailableFragment()
+      }
+    }
     // Available-services awareness — resolve the project-scoped credential
     // picture ONCE for this turn (keyed on the real per-turn project_id, so
     // switching projects flips availability). Best-effort like the board.
@@ -1503,6 +1546,7 @@ export function buildLiveAgentTurn(
         turn,
         now(),
         onboardingPreamble,
+        ownerTimeFragment,
         workBoardFragment,
         onboardingContextFragment,
         availableServicesFragment,
@@ -1518,6 +1562,7 @@ export function buildLiveAgentTurn(
       // before the user's message — so the resolved doc/image paths sit adjacent
       // to the message they belong to (onboarding context precedes it).
       const warmPrefix = [
+        ownerTimeFragment,
         workBoardFragment,
         nexusFragment,
         reflectionFragment,
@@ -1990,6 +2035,7 @@ async function composeFirstTurnPrompt(
   turn: LiveAgentTurnRequest,
   wall_now: number,
   onboardingPreamble?: string | null,
+  ownerTimeFragment?: string | null,
   boardFragment?: string | null,
   onboardingContextFragment?: string | null,
   availableServicesFragmentRaw?: string | null,
@@ -2096,6 +2142,7 @@ async function composeFirstTurnPrompt(
     doctrineFragment,
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
+    ...(ownerTimeFragment !== null && ownerTimeFragment !== undefined ? [ownerTimeFragment] : []),
     ...(memoryIndex !== null ? [memoryIndex] : []),
     ...(workBoardFragment !== null ? [workBoardFragment] : []),
     ...(nexusFragment !== null ? [nexusFragment] : []),

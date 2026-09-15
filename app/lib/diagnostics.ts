@@ -13,15 +13,9 @@
  * wrong. Reports now go to the owner's OWN gateway — no Sentry, no third party,
  * no account — which is the only shape compatible with a self-hosted product.
  *
- * WHAT IT DOES NOT COVER — READ THIS BEFORE TRUSTING IT
- * ----------------------------------------------------
- * JavaScript errors ONLY. A NATIVE crash produces nothing here, because no JS
- * ever runs to catch it. Concretely: the crash that actually blocked the owner
- * this week — an Android provider dying during process start, before the JS
- * bundle loaded — would NOT have been captured by this code, and still needs
- * logcat or an emulator. This feature closes the JS blind spot. It does not
- * close the native one, and pretending otherwise would just move the wasted
- * hours somewhere else.
+ * Android process-start crashes are captured before JS by the generated native
+ * initializer and imported below on the next JS-capable launch. iOS native
+ * crashes remain outside this runtime.
  *
  * NO FLAG. There is no env gate, no "diagnostics enabled" setting, and no
  * second code path. It ships on, as the product.
@@ -45,6 +39,7 @@ import {
 } from './diagnostic-queue';
 import { buildClientReport, redactEvent, type ClientReport, type ReportAppContext, type ReportReason } from './diagnostic-report';
 import { DiagnosticsClient } from './diagnostics-client';
+import { readNativeCrashReport, type NativeCrashFileSystem } from './native-crash-import';
 import { tokenStorage } from './token-storage';
 
 const buffer = new DiagnosticRingBuffer();
@@ -165,6 +160,42 @@ export async function captureReport(reason: ReportReason): Promise<ClientReport 
 /** How many reports are waiting to be delivered. Surfaced in Settings. */
 export async function pendingReportCount(): Promise<number> {
   return (await readQueue(store())).length;
+}
+
+/** Move the pre-JS Android crash file into the ordinary authenticated queue. */
+export async function importNativeCrashReport(
+  origin: string,
+  fileSystem?: NativeCrashFileSystem,
+): Promise<ClientReport | null> {
+  let resolved = fileSystem;
+  if (resolved === undefined) {
+    try {
+      resolved = require('expo-file-system/legacy') as NativeCrashFileSystem;
+    } catch {
+      return null;
+    }
+  }
+  const staged = await readNativeCrashReport({
+    fileSystem: resolved,
+    origin,
+    app: resolveAppContext(),
+  });
+  if (staged === null) return null;
+  const queueStore = store();
+  const alreadyQueued = (await readQueue(queueStore)).some(
+    (candidate) => candidate.report_id === staged.report.report_id,
+  );
+  if (!alreadyQueued) await enqueueReport(queueStore, staged.report);
+  const persisted = (await readQueue(queueStore)).some(
+    (candidate) => candidate.report_id === staged.report.report_id,
+  );
+  if (!persisted) return null;
+  try {
+    await staged.remove();
+  } catch {
+    // The queue copy is durable. A repeated import is deduplicated above.
+  }
+  return staged.report;
 }
 
 export interface FlushInput {
