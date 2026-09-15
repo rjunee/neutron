@@ -157,3 +157,73 @@ Final repository checks: `bash scripts/ci/typecheck-all.sh` passed all 51 projec
 The leak gate reported zero findings from available rules, but returned INCOMPLETE
 because the external identity denylist was unavailable. Full leak certification
 remains with the orchestrator; no bypass was used.
+
+
+### 2026-09-15 shard 4/4 follow-up — stale migration fixture
+
+Reproduced the reported chunk with the runner's plan-only seam:
+`NEUTRON_TEST_PLAN_ONLY=1 NEUTRON_TEST_SHARD=4/4 bash scripts/run-tests.sh`.
+The plan prints general files first (scripts/run-tests.sh:584); its chunk runner
+slices indices 100..199 (scripts/run-tests.sh:612-617). Selected exactly those
+100 paths and ran `bun test <selected paths> --timeout=15000` with
+`--max-concurrency` set to `nproc`, matching the runner default
+(scripts/run-tests.sh:187). The boundaries were
+`gateway/composition/build-core-modules-ritual-planner.test.ts` and
+`onboarding/synthesis/__tests__/raw-store.test.ts`.
+
+Before the fix: 1112 pass, 1 fail, 1 error. The full captured output made the
+unnamed error legible: ENOENT from the module-level SQL read, formerly at
+migrations/__tests__/rail-device-marks.test.ts:8. The preceding migration rename
+left that fixture pointing to 0146. The current migration defines the marks at
+migrations/0152_rail_device_marks.sql:7. Corrected the fixture to read 0152 and
+moved the read inside each named test
+(migrations/__tests__/rail-device-marks.test.ts:12-13), so a future stale path
+fails with a test name instead of an empty failure list. Assertions are unchanged.
+
+The whole-tree search `rg -n --hidden '0146_rail_device_marks|0152_rail_device_marks'
+. --glob '!.git/**' --glob '!node_modules/**'` found the corrected fixture as its
+positive control and five old-path references in this record. Those references
+remain historical checkpoint evidence, including the recorded old git query;
+this section supersedes them for the current migration filename.
+
+### Frame-builder rejection audit
+
+Enumerated references with `rg -n 'buildProjectsChangedFrame|fanProjectsChanged|sendEach\('
+open channels`, including the declaration as a positive control. Production
+paths are:
+
+- Builder: metadata read can reject the async function; the device-store read
+  already degrades to unknown (open/composer.ts:4139-4151).
+- Registry: awaits each builder and propagates its rejection
+  (channels/adapters/app-ws/session-registry.ts:159-168).
+- Composer fan: passes the delivery promise directly to the sanctioned
+  `fireAndForget` wrapper (open/composer.ts:4178). Its existing vocabulary is
+  visible, nonfatal rejection with a counter and log (logger/fire-and-forget.ts:82-97).
+- Connect: awaits delivery (open/wiring/app-ws.ts:1202); the surface awaits the
+  hook and logs `on_session_open_failed` (gateway/http/app-ws-surface.ts:815-829).
+
+No production error outcome or invariant was added. No async catch or wrapper
+change is warranted by this reproduction. The existing migration tests now
+continuously check the actual file through their named execution boundary.
+
+### Follow-up mutation and validation
+
+| Behavior | Mutation and printed line | Red | Restored green |
+| --- | --- | --- | --- |
+| Read the renamed SQL inside the named tests | Substitute 0146 for 0152 at migrations/__tests__/rail-device-marks.test.ts:13 | Two named ENOENT failures, zero passes; confirms attribution as well as path sensitivity | Two passes, eight assertions |
+
+The identical 100-file chunk after restoration: **1114 pass, zero fail**, 3795
+assertions. The specific changed file also passed independently.
+`bun test open/__tests__/open-projects-changed-wiring.test.ts
+open/__tests__/open-wiring-app-ws.test.ts --timeout=15000` produced 21 passes and
+two failures: both real-listener cases fail at `Bun.serve` with EADDRINUSE for
+port 0 (open/__tests__/open-projects-changed-wiring.test.ts:109-110). The
+per-connection acceptance and app-ws wiring unit tests pass. These listener
+failures remain a local validation limitation, not an all-green claim.
+
+No tests were skipped or weakened. No whole-directory or full-runner execution,
+product decision change, SQL change, network operation, push, PR, or merge.
+
+Follow-up final checks: `bash scripts/ci/lint.sh` passed;
+`bash scripts/ci/typecheck-all.sh` passed all 51 projects; `git diff --check`
+passed. The record retains exactly one `## ` heading.

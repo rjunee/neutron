@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os'
 import { Database } from 'bun:sqlite'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 
-const migration = readFileSync(new URL('../0146_rail_device_marks.sql', import.meta.url), 'utf8')
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 for (const existingDeviceShape of [false, true]) {
   test(`migration seeds old aggregate; existing device shape: ${existingDeviceShape}`, () => {
+    const migration = readFileSync(new URL('../0152_rail_device_marks.sql', import.meta.url), 'utf8')
     const dir = mkdtempSync(join(tmpdir(), 'rail-migration-'))
     dirs.push(dir)
     const path = join(dir, 'db')
