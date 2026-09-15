@@ -45,8 +45,13 @@ const SCOPES = ['trident', 'gateway', 'open', 'runtime', 'agent-dispatch']
 const ASKING_BOUNDARY =
   /(?:failedRun|failure_reason|terminate|deliver[A-Za-z]*)\s*[(:][^\n]*\bquestion\b|\b(?:askOwner|askTheOwner|ownerQuestion|owner_question|questionForOwner|needsOwner|promptOwner)\b/
 
+// The boundary's HOME moved with the merge-approval cluster (#1021,
+// `orchestrator.ts` -> `merge-approval.ts`); the boundary itself did not change, and
+// the enumeration below still finds exactly one. Pinning the new path rather than
+// loosening the pattern: this guard's value is that it notices when the single
+// sanctioned asking site moves, which is precisely what it just did.
 const SANCTIONED =
-  /^trident\/orchestrator\.ts:\d+: *run: \{ \.\.\.failedRun\(doneRun, err\.question, true\), inner_verdict: 'APPROVE' \},$/
+  /^trident\/merge-approval\.ts:\d+: *run: \{ \.\.\.failedRun\(doneRun, err\.question, true\), inner_verdict: 'APPROVE' \},$/
 
 function* productionFiles(dir: string): Generator<string> {
   for (const entry of readdirSync(join(REPO, dir), { withFileTypes: true })) {
