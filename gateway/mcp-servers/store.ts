@@ -486,7 +486,7 @@ export class OwnerMcpServerStore {
         for (const row of manager.listPending(this.deps.project_slug)) {
           if (row.tool_name === tool_name) await manager.cancelPending(row.id)
         }
-        await manager.revokeApproved(this.deps.project_slug, tool_name)
+        await manager.revokeApprovedForTool(this.deps.project_slug, tool_name)
         // MARKED AT THE REVOKE, not after the spec write. This is the instant the grant
         // stops being in force, and everything below it can throw: the forget hits the
         // credential store, the spec write hits `instance_metadata`, and a throw in either
@@ -648,7 +648,7 @@ export class OwnerMcpServerStore {
     // rows survive as 'expired' with their decider intact, so the audit trail keeps
     // saying he once approved that command.
     if (decision === 'deny') {
-      await manager.revokeApproved(this.deps.project_slug, tool_name)
+      await manager.revokeApprovedForTool(this.deps.project_slug, tool_name)
       // A deny is a STOP, and a stop that leaves the subprocess running is not one. The
       // announcement itself happens in {@link decide}, once this critical section ends.
       markRevoked()

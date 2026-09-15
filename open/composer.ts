@@ -410,7 +410,7 @@ import {
   type ProjectScaffoldDeps,
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
-import { APPROVAL_DEFAULT_TTL_MS, type ApprovalManager } from '@neutronai/tools/approval.ts'
+import { APPROVAL_DEFAULT_TTL_MS } from '@neutronai/tools/approval.ts'
 import {
   createHostDeployService,
   HOST_DEPLOY_APPROVAL_SWEEP_INTERVAL_MS,
@@ -4166,7 +4166,11 @@ export function buildOpenGraphComposer(
     // manager exactly as it already reuses a caller-supplied `ChannelRouter`, so there
     // is ONE instance over `tool_approvals` — a second would have its own in-memory
     // waiter map and the two would disagree about which decisions are still pending.
-    const approvalNotifier = buildAppWsApprovalNotifier({ registry: appWsRegistry })
+    const approvalNotifier = buildAppWsApprovalNotifier({
+      registry: appWsRegistry,
+      announce_tools: new Set<string>(),
+      ttl_ms: APPROVAL_DEFAULT_TTL_MS,
+    })
     const approvalManager = new ApprovalManager(db, approvalNotifier)
 
     // The owner's installable MCP servers. Joins three stores — the installed list in

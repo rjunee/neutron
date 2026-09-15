@@ -643,9 +643,9 @@ describe('UNINSTALL REVOKES BEFORE IT DROPS, so a half-done uninstall is safe', 
     await approve('example-server')
     const order: string[] = []
     const tool_name = mcpServerApprovalToolName('example-server')
-    const realRevoke = approvals.revokeApproved.bind(approvals)
+    const realRevoke = approvals.revokeApprovedForTool.bind(approvals)
     const realRun = db.run.bind(db)
-    approvals.revokeApproved = async (slug: string, tool: string) => {
+    approvals.revokeApprovedForTool = async (slug: string, tool: string) => {
       order.push('revoke')
       return await realRevoke(slug, tool)
     }
@@ -656,7 +656,7 @@ describe('UNINSTALL REVOKES BEFORE IT DROPS, so a half-done uninstall is safe', 
     try {
       await store.remove('example-server')
     } finally {
-      approvals.revokeApproved = realRevoke
+      approvals.revokeApprovedForTool = realRevoke
       db.run = realRun
     }
 
