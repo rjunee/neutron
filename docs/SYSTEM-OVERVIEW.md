@@ -936,11 +936,23 @@ so a diagnostics pipeline that required a SaaS would not be the same product.
 Always on — no feature flag, no env gate, one code path.
 
 **What is covered:** JavaScript errors — an uncaught exception, an unhandled
-promise rejection, and a React render crash.
-**What is NOT covered:** **native crashes**. If the process dies before the JS
-bundle runs (e.g. an Android provider failing during process start), no JS
-executes to catch anything and there is no report. Those still need `adb
-logcat` or an emulator. This closes the JS blind spot only.
+promise rejection, and a React render crash — plus Android uncaught exceptions
+raised during process start before the JS bundle runs. The native handler stages
+the crash on the device; a later JS-capable launch puts it through the ordinary
+authenticated delivery path.
+
+- **Native process-start capture (`app/plugins/with-native-crash-reporting.js`).**
+  Expo prebuild registers an unexported `ContentProvider` at maximum init order,
+  ahead of ordinary providers and ahead of `Application.onCreate`. It installs a
+  native uncaught-exception handler that synchronously writes one bounded JSON
+  envelope to app-private files and then delegates to Android's previous handler.
+  The initializer is separate from the component that crashes, so provider
+  startup failure does not disable its own observer. `app/lib/native-crash-import.ts`
+  reads that file after server configuration hydrates, constructs a
+  `native_crash` member of the existing report vocabulary through
+  `buildClientReport` (including redaction), and removes the native file only
+  after the existing queue contains the report. The queue then delivers it with
+  the existing bearer. iOS native crashes remain outside this mechanism.
 
 - **Ring buffer (`app/lib/diagnostic-buffer.ts`).** A capped window of the last
   100 events — errors plus notable lifecycle markers — so a crash arrives with
