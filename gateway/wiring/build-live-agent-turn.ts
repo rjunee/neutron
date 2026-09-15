@@ -346,6 +346,7 @@ export const LIVE_AGENT_TOOL_NAMES = [
   'Edit',
   'Bash',
   'Skill',
+  'Task',
   'Workflow',
   'WebSearch',
   'WebFetch',
