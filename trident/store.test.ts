@@ -31,6 +31,22 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('latestHeartbeatAt', () => {
+  test('returns the newest heartbeat for this run and ignores ordinary stages', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'heartbeat', project_slug: 't1', repo_path: '/r', task: 't' })
+    const other = await store.create({ slug: 'other-heartbeat', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.latestHeartbeatAt(run.id)).toBeNull()
+    await store.recordStageEvent(run.id, 'codex-exec-alive')
+    const first = store.latestHeartbeatAt(run.id)
+    await store.recordStageEvent(run.id, 'codex-exec-end')
+    await store.recordStageEvent(other.id, 'codex-review-alive')
+    expect(store.latestHeartbeatAt(run.id)).toBe(first)
+    await store.recordStageEvent(run.id, 'codex-review-alive')
+    expect(store.latestHeartbeatAt(run.id)).not.toBeNull()
+  })
+})
+
 describe('claimAgentWake', () => {
   test('returns true exactly once for a terminal run', async () => {
     const store = new TridentRunStore(db)

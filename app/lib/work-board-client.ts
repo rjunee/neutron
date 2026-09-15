@@ -121,6 +121,9 @@ export interface RunProgress {
   ralph_round?: number;
   started_at: string;
   last_advanced_at: string;
+  /** Positive ALIVE evidence from the run's own wrapper; null when unestablished. */
+  heartbeat_at?: string | null;
+  heartbeat_fresh_until?: string | null;
   elapsed_ms: number;
   stalled: boolean;
   stalled_ms: number | null;
@@ -421,6 +424,9 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
     last_advanced_at:
       typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',
+    heartbeat_at: typeof r['heartbeat_at'] === 'string' ? (r['heartbeat_at'] as string) : null,
+    heartbeat_fresh_until:
+      typeof r['heartbeat_fresh_until'] === 'string' ? (r['heartbeat_fresh_until'] as string) : null,
     elapsed_ms: typeof r['elapsed_ms'] === 'number' ? (r['elapsed_ms'] as number) : 0,
     stalled: r['stalled'] === true,
     stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,

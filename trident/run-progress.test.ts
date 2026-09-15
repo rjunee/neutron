@@ -165,6 +165,19 @@ describe('deriveRunProgress — stall detection', () => {
 })
 
 describe('runProgressForItem', () => {
+  test('carries only the supplied per-run heartbeat into its bounded ALIVE window', () => {
+    const heartbeat = '2026-07-02T00:01:00.000Z'
+    const p = runProgressForItem(
+      { linked_run_id: 'run-x', project_slug: 'owner' },
+      lookup(run({ id: 'run-x' })),
+      T0,
+      undefined,
+      (id) => id === 'run-x' ? heartbeat : null,
+    )
+    expect(p?.heartbeat_at).toBe(heartbeat)
+    expect(p?.heartbeat_fresh_until).toBe('2026-07-02T00:06:00.000Z')
+  })
+
   const lookup = (r: TridentRun) => (id: string) => (id === r.id ? r : null)
 
   test('null when the item has no linked run', () => {
