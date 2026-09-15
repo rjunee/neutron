@@ -76,12 +76,16 @@ export function replaceMarkedBlock(existing: string, new_body: string): string {
   // Append. Make sure the existing content ends with a newline + a
   // blank line so the new block visually separates from preceding
   // narrative (or frontmatter).
-  const trimmed = existing.replace(/\s+$/u, '')
+  const trimmed = existing.trimEnd()
   const separator = trimmed.length === 0 ? '' : '\n\n'
   return `${trimmed}${separator}${block}\n`
 }
 
 function composeBlock(body: string): string {
-  const cleaned = body.replace(/^\n+/, '').replace(/\n+$/, '')
+  let start = 0
+  let end = body.length
+  while (start < end && body[start] === '\n') start++
+  while (end > start && body[end - 1] === '\n') end--
+  const cleaned = body.slice(start, end)
   return `${PROJECTION_BLOCK_START}\n\n${cleaned}\n\n${PROJECTION_BLOCK_END}`
 }
