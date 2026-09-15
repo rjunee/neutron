@@ -541,3 +541,67 @@ for (const at of ['worker', 'publication'] as const) {
     expect(f.events).not.toContain('merge')
   })
 }
+
+function localFixture() {
+  const f = fixture()
+  f.input.merge_mode = 'local'
+  let landed = false
+  f.deps.merge = async () => { f.events.push('local-merge'); landed = true }
+  f.deps.confirmLocalMerge = async () => landed ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
+  return f
+}
+
+test('local mode reaches merged with no PR and no publication effect', async () => {
+  const f = localFixture()
+  expect(await f.run()).toMatchObject({ kind: 'merged', snapshot: { pr: null } })
+  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'mergeGate', 'local-merge'])
+})
+
+test('local mode requires independent merge confirmation', async () => {
+  const f = localFixture()
+  f.deps.merge = async () => {}
+  expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator', on: 'not landed' })
+  f.deps.confirmLocalMerge = async () => ({ kind: 'unknown', detail: 'unreadable' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'merge' })
+  delete f.deps.confirmLocalMerge
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'Local merge confirmation source is missing' })
+})
+
+test('local mode preserves worker uncertainty and rejects invented trailers', async () => {
+  for (const unknown of [true, false]) {
+    const f = localFixture()
+    f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
+    expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
+    expect(f.events).not.toContain('local-merge')
+  }
+})
+
+test('local mode rejects PR identity and changed landing revision', async () => {
+  const bound = localFixture(); bound.input.mode = 'bound_pr'
+  expect(await bound.run()).toMatchObject({ kind: 'blocked', on: 'Bound PR cannot use local merge mode' })
+  const existing = localFixture(); existing.input.start = 'resume'
+  existing.deps.modes = { loadResume: async () => null } as NonNullable<BuildRunDeps['modes']>
+  existing.snapshot.pr = { number: 1, head: existing.snapshot.head, state: 'OPEN' }
+  expect(await existing.run()).toMatchObject({ kind: 'blocked', on: 'Local build has a PR' })
+  const moved = localFixture(); moved.deps.merge = async () => { moved.snapshot.head = 'b'.repeat(40) }
+  expect(await moved.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed during merge' })
+})
+
+test('PR mode still requires a real PR after publication', async () => {
+  const f = fixture(); f.deps.publish = async () => {}
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match reviewed revision' })
+  expect(f.events).not.toContain('merge')
+})
+
+
+test('local revision is pinned across the publication boundary', async () => {
+  const f = localFixture()
+  const measure = f.deps.measure
+  let reads = 0
+  f.deps.measure = async () => {
+    if (++reads === 7) f.snapshot.head = 'b'.repeat(40)
+    return measure()
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed before merge' })
+  expect(f.events).not.toContain('local-merge')
+})

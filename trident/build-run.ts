@@ -62,6 +62,7 @@ export interface BuildRunInput {
   run_id: string
   mode: 'pr' | 'ralph' | 'wave' | 'bound_pr'
   start: 'fresh' | 'resume'
+  merge_mode?: 'pr' | 'local'
   bound_pr?: number
   pinnedTaskId?: string
   ralphRound?: number
@@ -88,10 +89,12 @@ export interface BuildRunDeps {
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
-  publishGate(snapshot: BuildSnapshot): Promise<GateResult>
-  mergeGate(snapshot: BuildSnapshot): Promise<GateResult>
+  publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  mergeGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   publish(snapshot: BuildSnapshot): Promise<void>
+  /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
   merge(snapshot: BuildSnapshot): Promise<void>
+  confirmLocalMerge?(snapshot: BuildSnapshot): Promise<GateResult>
 }
 
 export type BuildRunOutcome =
@@ -144,6 +147,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const support = runner.supports(role, placementFor(runner.provider, input.repl_provider))
       if (!support.ok) return { kind: 'refused', reason: 'worker-unsupported', detail: `${role}: ${support.reason}: ${support.detail}` }
     }
+    const local = input.merge_mode === 'local'
+    if (local && input.mode === 'bound_pr') return blocked('Bound PR cannot use local merge mode')
+    if (local && !deps.confirmLocalMerge) return unknown('Local merge confirmation source is missing')
     const admission = gateStop(await deps.admissionGate(input))
     if (admission) return admission
 
@@ -160,6 +166,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     const initial = await deps.measure()
     if (initial.kind === 'unknown') return unknown(initial.detail)
     snapshot = initial.value
+    if (local && snapshot.pr !== null) return blocked('Local build has a PR')
     if (input.mode === 'bound_pr') {
       if (!Number.isSafeInteger(input.bound_pr) || snapshot.pr?.number !== input.bound_pr || snapshot.pr?.state !== 'OPEN') {
         return blocked('Bound PR is not the requested open PR')
@@ -321,30 +328,34 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (leak.head !== reviewed.head || !corroborates(reviewed, snapshot)) return blocked('Revision changed after review')
     const diff = deps.assessMergeDiff(snapshot.diff)
     if (!diff.allow) return blocked(diff.reason)
-    const publishGate = gateStop(await deps.publishGate(snapshot))
+    const publishGate = gateStop(await deps.publishGate(snapshot, input.merge_mode))
     if (publishGate) return publishGate
     const beforePublish = await deps.measure()
     if (beforePublish.kind === 'unknown') return unknown(beforePublish.detail)
     if (!corroborates(snapshot, beforePublish.value)) return blocked('Revision changed during publication gates')
-    await deps.publish(snapshot)
+    if (!local) await deps.publish(snapshot)
 
     phase = 'merge'
     const published = await deps.measure()
     if (published.kind === 'unknown') return unknown(published.detail)
     snapshot = published.value
-    if ((input.mode === 'bound_pr' && snapshot.pr?.number !== input.bound_pr) || snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
-      return blocked('Published PR does not match reviewed revision')
+    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : (input.mode === 'bound_pr' && snapshot.pr?.number !== input.bound_pr) || snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
+      return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
     }
-    const mergeGate = gateStop(await deps.mergeGate(snapshot))
+    const mergeGate = gateStop(await deps.mergeGate(snapshot, input.merge_mode))
     if (mergeGate) return mergeGate
     const beforeMerge = await deps.measure()
     if (beforeMerge.kind === 'unknown') return unknown(beforeMerge.detail)
     if (!corroborates(snapshot, beforeMerge.value)) return blocked('Revision changed during merge gates')
-    // The merge implementation must atomically enforce snapshot.pr.head.
+    // The merge effect must atomically enforce the reviewed head and assessed base.
     await deps.merge(snapshot)
     const merged = await deps.measure()
     if (merged.kind === 'unknown') return unknown(merged.detail)
-    if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr.number || merged.value.pr.head !== reviewed.head) {
+    if (local) {
+      if (merged.value.head !== reviewed.head || merged.value.pr !== null) return blocked('Local revision changed during merge')
+      const confirmation = gateStop(await deps.confirmLocalMerge!(reviewed))
+      if (confirmation) return confirmation
+    } else if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr!.number || merged.value.pr.head !== reviewed.head) {
       return blocked('Merge not confirmed for reviewed PR')
     }
     return { kind: 'merged', snapshot: merged.value }

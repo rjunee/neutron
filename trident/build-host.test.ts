@@ -349,3 +349,102 @@ test('host propagates G084 refusals after proof and readiness allow', async () =
   f.options.mutation.run_host = baseRun
   expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
 })
+
+test('local host gates use local evidence without remote publication or CI', async () => {
+  const f = await fixture(); f.prose()
+  f.options.local = { baseBranch: 'base', worktree: f.options.leak.repo_path }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  f.options.local.worktree = join(f.options.leak.repo_path, 'isolated')
+  f.options.mutation.run_host = async (argv, cwd) => {
+    if (argv.includes('--show-toplevel')) return commandResult(f.options.local!.worktree)
+    if (argv.includes('--git-common-dir')) return commandResult('common')
+    return baseRun(argv, cwd)
+  }
+  f.options.observeCi = async () => { throw new Error('local mode queried remote CI') }
+  const composed = f.make()
+  const { deps } = composed
+  expect(await deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toEqual({ kind: 'allow' })
+  expect(await deps.publishGate(snapshot, 'local')).toEqual({ kind: 'allow' })
+  expect(await deps.mergeGate(snapshot, 'local')).toEqual({ kind: 'allow' })
+  expect(f.calls.some(argv => argv.includes('ls-remote') || argv.includes('gh') || argv.includes('fetch'))).toBe(false)
+  f.setDrift('overlap')
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'blocked', on: 'Local base drift overlaps reviewed changes' })
+  f.setDrift('unreadable')
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'unknown' })
+  delete f.options.local
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'unknown', detail: 'Local merge configuration is missing' })
+  delete f.options.admission
+  expect(await deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toMatchObject({ kind: 'unknown', detail: 'Project admission observation source is missing' })
+})
+
+test('local host confirmation measures retained branch and base ancestry', async () => {
+  const f = await fixture()
+  f.options.local = { baseBranch: 'base', worktree: 'isolated' }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  for (const code of [0, 1, 128]) {
+    f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor') ? Promise.resolve(commandResult('', code)) : baseRun(argv, cwd)
+    expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: code === 0 ? 'allow' : code === 1 ? 'blocked' : 'unknown' })
+  }
+  f.options.mutation.run_host = async () => commandResult('b'.repeat(40))
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'blocked' })
+  f.options.mutation.run_host = async () => commandResult('', 128)
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Local branch confirmation could not be read' })
+  delete f.options.local
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Local merge configuration is missing' })
+})
+
+
+test('composed local host reaches merged with no PR', async () => {
+  const f = await fixture(); f.prose(); f.clean()
+  f.options.local = { baseBranch: 'base', worktree: join(f.options.leak.repo_path, 'isolated') }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  let landed = false
+  f.options.mutation.run_host = async (argv, cwd) => {
+    if (argv.includes('--show-toplevel')) return commandResult(f.options.local!.worktree)
+    if (argv.includes('--git-common-dir')) return commandResult('common')
+    if (argv.includes('--is-ancestor')) return commandResult('', landed ? 0 : 1)
+    return baseRun(argv, cwd)
+  }
+  const payload = { verdict: 'APPROVE', findings: [] }
+  const outcomes = new Map<string, import('@neutronai/runtime/bounded-work.ts').BoundedWorkOutcome>()
+  for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
+    outcomes.set(`test:${role}:${round}`, { kind: 'completed', result: { ...snapshot, payload },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null })
+  }
+  f.options.runners.pi = fakeRunner('pi', { outcomes })
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'test-model', role: 'core', enabled: true }],
+    readSeat: async () => ({ runId: 'test', head, round: 1, provider: 'pi', modelId: 'test-model', status: 'completed', payload }),
+    retrySeat: async () => {},
+    readSynthesis: async () => ({ runId: 'test', head, round: 1, checkpoint: 'argus-approved', payload }),
+  }
+  f.options.effects.merge = async () => { landed = true }
+  f.options.observeCi = async () => { throw new Error('unexpected remote CI') }
+  const composed = f.make()
+  expect(await buildRun({ ...f.input(composed), merge_mode: 'local' }, composed.deps, new AbortController().signal)).toMatchObject({ kind: 'merged', snapshot: { pr: null } })
+  expect(landed).toBe(true)
+})
+
+test('fresh local admission allows the host to provision its branch and worktree later', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'new-change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult('', 1) : baseRun(argv, cwd),
+  }
+  f.options.effects.measure = async () => { throw new Error('branch has not been provisioned yet') }
+  const composed = f.make()
+  expect(await composed.deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toEqual({ kind: 'allow' })
+})
