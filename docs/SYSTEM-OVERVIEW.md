@@ -7320,6 +7320,15 @@ block is idempotently replaced and never clobbers onboarding-authored SOUL.md
 content. (`NEUTRON_AGENT_NAME` is read once at boot but never composed into the
 prompt, so it is NOT the persistence target.)
 
+**Persona-file ownership and prompt order.** The owner-wide persona editor on
+mobile and web owns exactly `persona/SOUL.md`, `persona/USER.md`, and
+`persona/priority-map.md`; all three are read together by `PersonaPromptLoader`
+as the prompt's base-persona layer. The root-level `USER.md` is a different
+file: `assembleSystemPrompt` owns it as one of the instance context files and
+appends that context after the base persona. Therefore `persona/USER.md` shapes
+the owner-wide persona first, while `<owner_home>/USER.md` supplies later
+instance context; neither editor aliases or rewrites the root-level file.
+
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 
 The persistent-REPL substrate drives the interactive `claude` TUI over a single
