@@ -17,7 +17,7 @@
  * first and reference the token from the component.
  */
 
-import type { ImageStyle, TextStyle, ViewStyle } from 'react-native';
+import { StyleSheet, type ImageStyle, type TextStyle, type ViewStyle } from 'react-native';
 
 export interface NeutronTheme {
   /** Page background. */
@@ -291,9 +291,8 @@ export function createThemedStyles<T extends NamedStyles<T> | NamedStyles<unknow
         get: () => resolvePaletteValue(initial),
       });
     }
-    Object.freeze(style);
   }
-  return styles;
+  return StyleSheet.create(styles as NamedStyles<T>) as T;
 }
 
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */

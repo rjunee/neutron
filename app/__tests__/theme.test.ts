@@ -7,9 +7,13 @@
  * want a single failing test that forces a deliberate update.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 
-import {
+mock.module('react-native', () => ({
+  StyleSheet: { create: <T>(styles: T): T => styles },
+}));
+
+const {
   createThemedStyles,
   DARK_THEME,
   DENSITY,
@@ -22,7 +26,7 @@ import {
   THEME,
   TYPOGRAPHY,
   writeThemePreference,
-} from '../lib/theme';
+} = await import('../lib/theme');
 
 describe('THEME', () => {
   it('exports the locked P5.0 dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
