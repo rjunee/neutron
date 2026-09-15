@@ -56,25 +56,15 @@ export type { MemoryHealthSummary, MemoryHealthProvider } from './composition/ty
  * production-composer test PINS the set — a future silently-added dead loop, or
  * a silent deletion of one of these, breaks that test.
  *
- * D-7 (2026-07-02 Decisions Log): "Document as dormant now; add BOTH to SPEC.md
- * as post-window feature PRs." Wiring each requires real feature infrastructure
- * (ProjectBackupScheduler ← a per-instance `ProjectBackupStore` + git backup
- * plumbing from the P7.4 sprint; comments `AgentWatcher` ← the realmode LLM-call
- * composer + comment store + shared anchor-walker project lock) that belongs in
- * a feature PR, not this refactor unit — so F2 makes their dormancy EXPLICIT
- * rather than wiring or deleting them.
+ * D-7 (2026-07-02 Decisions Log) deferred both loops to feature PRs. Issue #533
+ * supplied the comments watcher's missing composition infrastructure, so only
+ * the backup scheduler remains deliberately dormant here.
  */
 export const DORMANT_LOOPS: readonly DormantLoop[] = [
   {
     name: 'project-backup-scheduler',
     reason:
       'built (gateway/git/project-backup-scheduler.ts) but never constructed in any composition; needs a wired ProjectBackupStore + project enumerator (P7.4 backup sprint).',
-    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
-  },
-  {
-    name: 'agent-watcher',
-    reason:
-      'built (gateway/comments/agent-watcher.ts) but never constructed in any composition; needs the realmode LLM-call composer + comment store + shared anchor-walker project lock.',
     deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
   },
 ]
