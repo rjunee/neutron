@@ -1,3 +1,4 @@
+import { makeTridentRun } from './testing/make-trident-run.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -462,3 +463,84 @@ test('review composition carries host re-plan usage independently of worker data
   expect(await deps.reviewGate(payload, snapshot, 1, 0)).toMatchObject({ kind: 're-plan' })
   expect(await deps.reviewGate(payload, snapshot, 1, 1)).toMatchObject({ kind: 'blocked' })
 })
+
+async function boundFixture(failure = false) {
+  const f = await fixture()
+  const effects: string[] = []
+  const commands: string[][] = []
+  let panels = 0
+  let current = structuredClone(snapshot)
+  const runner = fakeRunner('pi')
+  runner.run = async request => {
+    effects.push(request.role)
+    return { kind: 'completed', result: structuredClone(current), usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
+  f.options.runners = { pi: runner }
+  f.options.effects = {
+    prepareWork: async () => {},
+    measure: async () => ({ kind: 'known', value: structuredClone(current) }),
+    publish: async () => { effects.push('publish'); current = structuredClone(published) },
+    merge: async () => { effects.push('merge'); current.pr!.state = 'MERGED' },
+  }
+  f.options.boundReview = {
+    run: makeTridentRun({ id: 'test', bound_pr: 12, repo_path: f.options.leak.repo_path }),
+    deps: {
+      scratch_path: join(f.options.leak.repo_path, 'detached'),
+      run_host: async argv => {
+        commands.push(argv)
+        let stdout = ''
+        if (argv[0] === 'gh' && argv[2] === 'view') stdout = JSON.stringify({ headRefOid: head, headRefName: 'existing', baseRefName: 'main' })
+        if (argv[0] === 'gh' && argv[2] === 'diff') stdout = '+code'
+        if (argv.includes('merge-base')) stdout = 'b'.repeat(40)
+        return { ok: true, stdout, stderr: '', exit_code: 0 }
+      },
+      run_review_panel: async () => {
+        panels++
+        return { ok: !failure, verdict: failure ? null : 'APPROVE', findings: [], reviewed_sha: head, block_kind: null, terminal_cause: null }
+      },
+    },
+  }
+  const host = f.make()
+  // Reachable permissive build control: a routing regression must actually build,
+  // publish and merge, rather than stop at an unrelated admission or leak gate.
+  host.deps.admissionGate = async () => ({ kind: 'allow' })
+  host.deps.reviewGate = async () => ({ kind: 'approve' })
+  host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
+  host.deps.publishGate = async () => ({ kind: 'allow' })
+  host.deps.mergeGate = async () => ({ kind: 'allow' })
+  const input: BuildRunInput = { ...f.input(host), mode: 'bound_pr', bound_pr: 12 }
+  return { host, input, effects, commands, panels: () => panels }
+}
+
+for (const failure of [false, true]) {
+  test(`G019 host retained review ${failure ? 'failure' : 'success'} terminates without build publish or merge`, async () => {
+    const f = await boundFixture(failure)
+    const outcome = await f.host.run(f.input, new AbortController().signal)
+    expect(f.panels()).toBe(1)
+    expect(f.effects).toEqual([])
+    expect(outcome).toMatchObject({ status: failure ? 'failure' : 'success', pr: 12 })
+  })
+}
+
+test('G019 routing fixture positive control reaches build publish and merge for pr mode', async () => {
+  const f = await boundFixture()
+  expect(await f.host.run({ ...f.input, mode: 'pr' }, new AbortController().signal)).toMatchObject({ kind: 'merged' })
+  expect(f.effects).toEqual(['plan', 'build', 'review', 'publish', 'merge'])
+  expect(f.panels()).toBe(0)
+})
+
+for (const mismatch of ['missing', 'run', 'pr'] as const) {
+  test(`G019 host rejects ${mismatch} bound review context`, async () => {
+    const f = await boundFixture()
+    if (mismatch === 'run') f.input.run_id = 'different'
+    if (mismatch === 'pr') f.input.bound_pr = 13
+    if (mismatch === 'missing') {
+      const base = await fixture()
+      f.host = base.make()
+    }
+    expect(await f.host.run(f.input, new AbortController().signal)).toMatchObject({ kind: 'blocked', phase: 'review', on: 'Bound review context is missing or mismatched' })
+    expect(f.panels()).toBe(0)
+    expect(f.commands).toEqual([])
+    expect(f.effects).toEqual([])
+  })
+}

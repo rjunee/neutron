@@ -457,26 +457,23 @@ test('resume pending worker preserves phase and exact step without dispatch', as
   expect(f.cross.calls).toHaveLength(0)
 })
 
-test('bound PR builds reviews and merges only the requested open identity', async () => {
-  const f = modeFixture('bound_pr'); f.input.bound_pr = 1
-  f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
-  for (const role of ['plan', 'build', 'review']) f.outcomes.set(`run:${role}:${role === 'review' ? 1 : 0}`, f.completed())
-  expect((await f.run()).kind).toBe('merged')
-  expect(f.cross.calls).toHaveLength(1)
-  for (const pr of [null, { number: 2, head: 'a'.repeat(40), state: 'OPEN' as const }, { number: 1, head: 'a'.repeat(40), state: 'CLOSED' as const }]) {
-    const bad = modeFixture('bound_pr'); bad.input.bound_pr = 1; bad.snapshot.pr = pr
-    expect((await bad.run()).kind).toBe('blocked')
-    expect(bad.runner.calls).toHaveLength(0)
-  }
-})
+for (const start of ['fresh', 'resume'] as const) {
+  test(`G019 driver refuses bound_pr before any build or release effect on ${start}`, async () => {
+    const f = modeFixture('bound_pr')
+    f.input.start = start
+    // A valid build fixture makes removal of the refusal reach real effects.
+    if (start === 'resume') f.resume('approved')
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'bound_pr requires the retained review-only executor' })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).toEqual([])
+  })
+}
 
-for (const mode of ['ralph', 'wave', 'bound_pr'] as const) {
+for (const mode of ['ralph', 'wave'] as const) {
   test(`${mode} still corroborates worker trailers and preserves worker unknown`, async () => {
     for (const unknown of [false, true]) {
       const f = modeFixture(mode); f.input.pinnedTaskId = 'T1'
-      if (mode === 'bound_pr') {
-        f.input.bound_pr = 1; f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }; f.setPlan()
-      }
       f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
       expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: mode === 'ralph' ? 'run:task:0:build:0' : 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
       expect(f.cross.calls).toHaveLength(0)
@@ -524,24 +521,6 @@ test('resume rejection retains previous finding classes at round three', async (
   expect(f.runner.calls).toHaveLength(0)
 })
 
-for (const at of ['worker', 'publication'] as const) {
-  test(`bound PR identity cannot change during ${at}`, async () => {
-    const f = modeFixture('bound_pr'); f.input.bound_pr = 1
-    f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
-    f.setPlan()
-    for (const role of ['build', 'review']) f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed())
-    if (at === 'worker') {
-      const measure = f.deps.measure; let reads = 0
-      f.deps.measure = async () => { if (++reads === 3) f.snapshot.pr!.number = 2; return measure() }
-      f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, pr: { ...f.snapshot.pr, number: 2 } }))
-    } else {
-      f.deps.publish = async () => { f.snapshot.pr!.number = 2 }
-    }
-    expect(await f.run()).toMatchObject({ kind: 'blocked', on: at === 'worker' ? 'Worker changed the bound PR identity' : 'Published PR does not match reviewed revision' })
-    expect(f.events).not.toContain('merge')
-  })
-}
-
 function localFixture() {
   const f = fixture()
   f.input.merge_mode = 'local'
@@ -578,7 +557,7 @@ test('local mode preserves worker uncertainty and rejects invented trailers', as
 
 test('local mode rejects PR identity and changed landing revision', async () => {
   const bound = localFixture(); bound.input.mode = 'bound_pr'
-  expect(await bound.run()).toMatchObject({ kind: 'blocked', on: 'Bound PR cannot use local merge mode' })
+  expect(await bound.run()).toMatchObject({ kind: 'blocked', on: 'bound_pr requires the retained review-only executor' })
   const existing = localFixture(); existing.input.start = 'resume'
   existing.deps.modes = { loadResume: async () => null } as NonNullable<BuildRunDeps['modes']>
   existing.snapshot.pr = { number: 1, head: existing.snapshot.head, state: 'OPEN' }
