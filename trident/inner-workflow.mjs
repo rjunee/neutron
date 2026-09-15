@@ -656,6 +656,10 @@ function routeModel(label, tag) {
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
               ? ROLE_MODEL['ci-probe']
+            // The code-scanning probe has the same fixed-command/transcription shape
+            // as the CI probe and is likewise interpreted by workflow code.
+            : label.startsWith('code-scanning-probe-round-')
+              ? ROLE_MODEL['ci-probe']
               // The BASE probe is the same shape as the PR probe — one `gh api` read,
               // transcribed verbatim — so it rides the same seat. Spelled out rather
               // than folded into a looser prefix because `ci-probe-round-` is NOT a
