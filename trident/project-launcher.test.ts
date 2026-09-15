@@ -108,6 +108,29 @@ test('unconfirmable construction times out then settles; construction failure is
   expect(parseInnerResult(f.store.get(f.input.run.id)!.inner_result)?.checkpoint).toBe('inner-error')
 })
 
+test('a rejecting driver settles as inner-error rather than stranding the reservation forever', async () => {
+  const f = await fixture()
+  f.construct.mockImplementation(async () => ({ runners: {}, workers: {} as never, deps: {} as never,
+    run: async () => { throw Error('transport exploded') } }))
+  expect(await createProjectLauncher(f.options)(f.input)).toEqual({ status: 'fired', error: null })
+  await settle()
+  const run = f.store.get(f.input.run.id)!
+  // The reservation is GONE: a thrown error is not the driver's measured `unknown`.
+  expect(projectBuildPending(run.inner_result)).toBe(false)
+  expect(parseInnerResult(run.inner_result)?.checkpoint).toBe('inner-error')
+  expect(parseInnerResult(run.inner_result)?.ok).toBe(false)
+  // ...and the error is still reported, not swallowed by the settlement write.
+  expect(f.errors.map(String)).toEqual(['Error: transport exploded'])
+  // The harvest can now see it. Left pending, `step()` short-circuits ahead of the
+  // in-flight ceiling and the run is immortal.
+  const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
+    base_branch: 'main', run_host: honourDiffOutput(async () => ({ stdout: '', stderr: '', code: 0 })),
+    observe_run_worker: async () => ({ state: 'dead', detail: 'gone', observed_at: new Date().toISOString(), screen: '' }) })
+  const out = await orch.step(run)
+  expect(out.waiting).toBe(false)
+  expect(out.changed).toBe(true)
+})
+
 test('result mappings retain driver causes and wave/Ralph handoffs', async () => {
   const f = await fixture()
   for (const raw of [null, '', '{', 'null', '{}', '{"projectBuild":{"kind":"merged"}}']) expect(projectBuildPending(raw)).toBe(false)

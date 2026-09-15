@@ -57,9 +57,23 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
           ...(input.run.bound_pr !== null ? { bound_pr: input.run.bound_pr } : {}),
           ...(input.run.wave_task_id !== null ? { pinnedTaskId: input.run.wave_task_id } : {}),
         }, controller.signal)
+        // A REJECTION IS NOT THE DRIVER'S `unknown`, AND MUST NOT BE LEFT PENDING.
+        // The driver authors `unknown` when it MEASURED and could not find out; that
+        // outcome legitimately keeps the reservation, because `step()` short-circuits
+        // on `projectBuildPending` and the row is preserved for reconciliation. A
+        // thrown error is the other thing: nobody measured anything, and it is the
+        // same class as the construction failure the `catch` below already maps to
+        // `inner-error`. Without this rejection handler the reservation survives, and
+        // because the pending short-circuit runs BEFORE the in-flight ceiling in
+        // `step()`, the run is immortal — measured: a `dead` worker observation a full
+        // day past `maxInflightMs` still returned `waiting: true, changed: false`.
+        // The original error is rethrown either way so `onError` still reports it.
         fireAndForget('project-build-outcome', running.then(async outcome => {
           const written = await options.store.compareProjectBuildResult(input.run.id, reservation, projectBuildResult(outcome, { ...input, run: options.store.get(input.run.id) ?? input.run }))
           if (!written) throw Error('Project outcome write was not confirmed')
+        }, async error => {
+          await options.store.compareProjectBuildResult(input.run.id, reservation, JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: String(error) })).catch(options.onError)
+          throw error
         }), options.onError)
         return { status: 'fired', error: null }
       } catch (error) {
