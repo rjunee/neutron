@@ -14,8 +14,18 @@
  * firing, so a regression to the old `ci-${{ github.ref }}` form fails CI.
  */
 import { describe, expect, test } from 'bun:test'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -51,28 +61,30 @@ describe('#321 ci.yml test-gate always fires on PRs to main', () => {
  * The old gate ran only the root `tsc --noEmit`, whose include list never
  * reached trident/, app/, work-board/, project-credentials/, jwt-validator/,
  * landing/chat-react/, or their test files — so real type errors shipped
- * invisibly. The fix runs `tsc -p` for EVERY tsconfig on disk via
+ * invisibly. The fix runs `tsc -p` for every project-owned tsconfig on disk via
  * `scripts/ci/typecheck-all.sh`. These tests pin two invariants so the class of
  * "a package silently escapes typechecking" cannot regress:
  *
  *  1. CI invokes the matrix script (not a single bare `tsc --noEmit`), and the
- *     script's dynamic discovery covers EVERY tsconfig.json on disk — proven by
- *     an INDEPENDENT filesystem walk here, so a narrowed `find` in the script is
+ *     script's dynamic discovery covers EVERY project-owned tsconfig.json on
+ *     disk while excluding separate checkouts under `.claude` — proven by an
+ *     INDEPENDENT filesystem walk here, so a changed `find` in the script is
  *     caught even though the script uses `find` internally.
  *  2. Server configs (root + shared base) do NOT ship the DOM lib, so browser
  *     globals like `document` cannot typecheck inside server code; browser
  *     leaves (landing) still own DOM.
  */
-describe('G5 CI typechecks every tsconfig on disk', () => {
+describe('G5 CI typechecks every project-owned tsconfig on disk', () => {
   const MATRIX_SH = join(REPO_ROOT, 'scripts/ci/typecheck-all.sh')
 
-  // Independent enumeration: walk the repo ourselves, skipping node_modules,
-  // and collect every file literally named `tsconfig.json`.
+  // Independent enumeration: walk the repo ourselves, skipping dependencies,
+  // Git metadata, and tool-managed checkouts under `.claude`, then collect every
+  // project-owned file literally named `tsconfig.json`.
   function findTsconfigsOnDisk(): string[] {
     const out: string[] = []
     const walk = (abs: string) => {
       for (const ent of readdirSync(abs, { withFileTypes: true })) {
-        if (ent.name === 'node_modules' || ent.name === '.git') continue
+        if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === '.claude') continue
         const child = join(abs, ent.name)
         if (ent.isDirectory()) walk(child)
         else if (ent.name === 'tsconfig.json')
@@ -95,7 +107,7 @@ describe('G5 CI typechecks every tsconfig on disk', () => {
   // budget for it. Measured 4 failures across 5 runs under 10x CPU load, all
   // as ~5000ms timeouts rather than assertion failures. The assertion is
   // deterministic; only the wall-clock allowance was too tight.
-  test('the matrix (--list) covers every tsconfig.json on disk', () => {
+  test('the matrix (--list) covers every project-owned tsconfig.json on disk', () => {
     const listed = execFileSync('bash', [MATRIX_SH, '--list'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
@@ -123,6 +135,30 @@ describe('G5 CI typechecks every tsconfig on disk', () => {
       expect(listed).toContain(must)
     }
   }, 30_000)
+
+  test('the matrix excludes tsconfig files in tool-managed `.claude` worktrees', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'typecheck-all-'))
+    try {
+      mkdirSync(join(fixture, 'scripts', 'ci'), { recursive: true })
+      mkdirSync(join(fixture, 'app'), { recursive: true })
+      mkdirSync(join(fixture, '.claude', 'worktrees', 'other'), { recursive: true })
+      copyFileSync(MATRIX_SH, join(fixture, 'scripts', 'ci', 'typecheck-all.sh'))
+      writeFileSync(join(fixture, 'tsconfig.json'), '{}\n')
+      writeFileSync(join(fixture, 'app', 'tsconfig.json'), '{}\n')
+      writeFileSync(join(fixture, '.claude', 'worktrees', 'other', 'tsconfig.json'), '{}\n')
+
+      const listed = execFileSync('bash', [join(fixture, 'scripts', 'ci', 'typecheck-all.sh'), '--list'], {
+        cwd: fixture,
+        encoding: 'utf8',
+      })
+        .trim()
+        .split('\n')
+
+      expect(listed).toEqual(['app/tsconfig.json', 'tsconfig.json'])
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
 
   test('server configs (root + base) do NOT ship the DOM lib', () => {
     const readLib = (rel: string): string[] => {
