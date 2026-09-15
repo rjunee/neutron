@@ -17,6 +17,7 @@ import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan, buildSimMutationProofGa
 import { interpretFailure } from './delivery.ts'
 import {
   buildTridentOrchestrator,
+  INFRA_RETRY_BACKOFF_MS,
   isInfraDeath,
   isTridentHarvestTerminal,
   remoteAlreadyAtPublishHead,
@@ -145,6 +146,9 @@ function buildHarness(opts: {
   list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
   begin_crash_recovery?: boolean
+  /** Wire the publish-only credential retry claim. */
+  begin_publish_retry?: boolean
+  max_infra_retries?: number
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   /** #541 — the arbiter tier above that resolver. */
   arbitrate?: import('./arbiter.ts').TridentArbiter
@@ -291,6 +295,8 @@ function buildHarness(opts: {
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.list_stage_events !== undefined) o.list_stage_events = opts.list_stage_events
   if (opts.begin_crash_recovery === true) o.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
+  if (opts.begin_publish_retry === true) o.begin_publish_retry = (id) => store.beginPublishRetry(id)
+  if (opts.max_infra_retries !== undefined) o.max_infra_retries = opts.max_infra_retries
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   if (opts.arbitrate !== undefined) o.arbitrate = opts.arbitrate
   if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
@@ -2049,6 +2055,117 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // actually held, and the checkpoint carries the UNREBASED head.
     expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${stale}`))).toBe(true)
     expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a credential blink retries the SAME built sha after backoff without re-running Forge', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '4444444444444444444444444444444444444444'
+    const stale = '9'.repeat(40)
+    let clockMs = 0
+    let pushes = 0
+    let branchReads = 0
+    let plans = 0
+    const h = buildHarness({
+      begin_publish_retry: true,
+      now: () => new Date(clockMs).toISOString(),
+      plan: (input) => {
+        plans += 1
+        return plans === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          branchReads += 1
+          return ok(branchReads < 3 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes(' push ')) {
+          pushes += 1
+          if (pushes <= 3) {
+            return failWith("fatal: could not read Username for 'https://github.com': No such device or address")
+          }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    const waiting = store.get(run.id)!
+    expect(waiting.phase).not.toBe('failed')
+    expect(waiting.infra_retries).toBe(1)
+    expect(waiting.inner_result).not.toBeNull()
+    expect(h.inputs).toHaveLength(1)
+
+    await h.loop.runOnce()
+    expect(pushes).toBe(3)
+    clockMs = INFRA_RETRY_BACKOFF_MS[0] + 1
+    await h.loop.runOnce()
+    expect(pushes).toBe(4)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+    expect(h.inputs).toHaveLength(1)
+
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(2)
+    expect(h.inputs[1]?.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+    expect(plans).toBe(2)
+  })
+
+  test.each([
+    ['publish-ref-rejected', '! [rejected] feat-x -> feat-x (non-fast-forward)'],
+    ['publish-unknown', 'fatal: the remote end hung up unexpectedly'],
+  ])('%s never enters the credential retry path', async (_klass, stderr) => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      begin_publish_retry: true,
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${'4'.repeat(40)}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${'9'.repeat(40)}\trefs/heads/feat-x`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes(' push ')) return failWith(stderr)
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('failed')
+    expect(final.infra_retries).toBe(0)
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('an exhausted credential retry names the Integrations reconnect surface', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      begin_publish_retry: true,
+      max_infra_retries: 0,
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${'4'.repeat(40)}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${'9'.repeat(40)}\trefs/heads/feat-x`)
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        if (joined.includes(' push ')) return failWith('fatal: Authentication failed')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.failure_reason).toContain('Reconnect GitHub from the Integrations screen')
+    expect(final.failure_reason).not.toContain('git push')
   })
 
   test('a failed PR creation persists the underlying gh diagnostic', async () => {

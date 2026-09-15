@@ -823,6 +823,9 @@ export function buildCoreModules(
         // "An infrastructure failure must retry itself" — atomically spend the
         // durable executor/transport retry budget and release the run slot.
         orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
+        // A credential blink happens after Forge has completed. Preserve its
+        // harvested result and retry only the outer publish step.
+        orchestratorOpts.begin_publish_retry = (id) => store.beginPublishRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({
           store,
