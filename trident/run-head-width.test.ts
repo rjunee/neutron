@@ -15,6 +15,10 @@ const sites: Record<string, string[]> = {
     '.test(token)) return token.toLowerCase()',
     '.test(oid)) return oid.toLowerCase()',
     '    /^outer-published:',
+  ],
+  // The launch recognizers moved with G013–G018. The recognizer follows the
+  // code, not the old file, and the total remains unchanged.
+  'launch-preparation.ts': [
     '? resume_checkpoint.match(',
     '.test(recorded) &&',
     '.test(resume_live_head) &&',

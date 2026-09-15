@@ -874,6 +874,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    */
   const MODULES = [
     'orchestrator.ts',
+    'launch-preparation.ts',
     'replay.ts',
     'inner-workflow.mjs',
     'merge.ts',
@@ -1129,11 +1130,11 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       // exists to make every operand argued.
       { file: 'publication.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
       { file: 'publication.ts', base: 'seenPin', why: 'a recorded object name' },
-      { file: 'orchestrator.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
-      { file: 'orchestrator.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
+      { file: 'launch-preparation.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
+      { file: 'launch-preparation.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
     ]
     const seen: string[] = []
-    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'publication.ts', 'replay.ts'] as const) {
+    for (const file of ['launch-preparation.ts', 'merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'publication.ts', 'replay.ts'] as const) {
       const lines = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8').split('\n')
       for (let i = 0; i < lines.length; i += 1) {
         if (!(lines[i] ?? '').includes('gitRangeArgv(')) continue
