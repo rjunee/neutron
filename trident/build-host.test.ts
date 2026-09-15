@@ -32,6 +32,7 @@ async function fixture() {
   let leakCode = 3
   const options: BuildHostOptions = {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checks: [{ name: 'checks', state: 'passed' }] }) },
+    reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
     reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
@@ -608,16 +609,27 @@ for (const cap of [undefined, 2, 7]) {
     const f = await fixture()
     f.options.mutation.run.max_rounds = cap
     const calls: string[] = []
+    // G042 stops a fix round that leaves the measured head where it was, so this
+    // fixer moves the head the way a real one does. Without it the run ends on
+    // lost work instead of on the cap this test exists to count.
+    let landed = 0
+    const head = () => landed === 0 ? snapshot.head : `${'c'.repeat(39)}${landed % 10}`
     f.options.runners.pi = {
       ...fakeRunner('pi'),
       run: async request => {
         calls.push(request.step_id)
-        return { kind: 'completed', result: { ...snapshot, payload: { round: 0, max_rounds: 100 } },
+        if (request.role === 'fix') landed++
+        return { kind: 'completed', result: { ...snapshot, head: head(), payload: { round: 0, max_rounds: 100 } },
           usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
       },
     }
     const host = f.make()
     host.deps.admissionGate = async () => ({ kind: 'allow' })
+    host.deps.measure = async () => ({ kind: 'known', value: { ...snapshot, head: head() } })
+    // Readiness observes its own revision and refuses one that has moved; this
+    // test moves the head deliberately, so readiness is scripted here and is
+    // certified by its own tests instead.
+    host.deps.reviewReadiness = async () => ({ kind: 'allow' })
     // A real panel reports its findings to the host; this stub must too, or the
     // driver's progress gate has nothing to read and this test stops on that
     // instead of on the cap it exists to measure.
@@ -674,4 +686,20 @@ test('G100 composed host preserves a real Git branch before reporting conflict',
   expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
   expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
   expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+})
+
+test('G023 host derives branch assignment from the run', async () => {
+  const f = await fixture()
+  f.options.mutation.run.branch = 'assigned'
+  expect(f.make().deps.assignedBranch).toBe('assigned')
+  f.options.mutation.run.branch = null
+  expect(f.make().deps.assignedBranch).toBe(`trident/${f.options.mutation.run.slug}`)
+})
+
+test('G055 G056 host composes measured CI with its pinned base', async () => {
+  const f = await fixture()
+  f.options.reviewCi = { observe: async value => ({ kind: 'known', head: value.head, status: 'red', failing: ['unit'], base: { head: f.options.leak.base_sha, status: 'red', failing: ['unit'] } }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'known', findings: [{ advisory: true }] })
+  f.options.reviewCi = { observe: async () => ({ kind: 'unknown', detail: 'CI unavailable' }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'unknown' })
 })

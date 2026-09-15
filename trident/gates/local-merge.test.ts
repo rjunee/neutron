@@ -48,11 +48,13 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
   const worker = { runner, request }
   const deps: BuildRunDeps = {
     readReviewCap: async () => ({ kind: 'known' }),
+    assignedBranch: 'change',
     prepareWork: async () => {}, admissionGate: async () => f.check(),
     measure: async () => ({ kind: 'known', value: { ...snapshot, head: await f.git('rev-parse', 'change'), diff: await f.git('diff', 'base...change') } }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     reviewReadiness: async () => ({ kind: 'allow' }),
+    reviewCi: async () => ({ kind: 'known', findings: [] }),
     reviewSuite: async () => ({ kind: 'known', findings: [] }),
     reviewGate: async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }, publishGate: async () => f.check(), mergeGate: async () => f.check(),
     publish: async () => { throw new Error('local mode must not publish') },
