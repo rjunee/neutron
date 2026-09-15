@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildRunInput, BuildRunOutcome } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
+import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { createProductionHostEffects, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
 
@@ -30,7 +31,8 @@ export interface ProjectBuildHostOptions {
   /** Phase usage is a required write for the host, so the composition must supply
    * its store rather than let the driver run unmeasured. */
   phaseUsage: BuildHostOptions['phaseUsage']
-  policy: Pick<BuildHostOptions, 'review' | 'boundReview'> & {
+  policy: Pick<BuildHostOptions, 'boundReview'> & {
+    review?: Omit<ProjectReviewSourceOptions, 'runId' | 'projectSlug' | 'cwd' | 'replProvider'>
     leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
   }
@@ -75,8 +77,11 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   }
   const production = createProductionHostEffects(options.production)
   const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
+  const { review, ...policy } = options.policy
   const host = createBuildHost({
-    ...options.policy,
+    ...policy,
+    ...(review ? { review: createProjectReviewSource({ ...review,
+      runId: run.id, projectSlug: config.projectSlug, cwd: config.worktree, replProvider: options.substrate.provider }) } : {}),
     workers, runners, phaseUsage: options.phaseUsage,
     reviewed_head: run.inner_checkpoint_head,
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
