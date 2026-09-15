@@ -11,6 +11,7 @@ import type {
   WorkerRole,
   WorkerRunner,
 } from '../bounded-work.ts'
+import { unknownCause } from '../refusal-cause.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -48,7 +49,7 @@ type TrailerMapping = { kind: 'mapped'; result: TrailerClaim } | Extract<Bounded
 
 // The wrapper names a diff artifact, not inline diff text. Both remain claims;
 // only the driver can corroborate them with its independent measurement.
-async function mapTrailer(text: string, cwd: string): Promise<TrailerMapping> {
+async function mapTrailer(text: string, cwd: string, runId: string): Promise<TrailerMapping> {
   const fields = new Map<string, string>()
   for (const line of text.split('\n')) {
     if (line === '') continue
@@ -74,8 +75,8 @@ async function mapTrailer(text: string, cwd: string): Promise<TrailerMapping> {
   try {
     const diff = await readFile(resolve(cwd, diffPath), 'utf8')
     return { kind: 'mapped', result: { head, diff, pr: null } }
-  } catch {
-    return { kind: 'unknown', detail: 'Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable' }
+  } catch (error) {
+    return { kind: 'unknown', detail: unknownCause('Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable', error, runId) }
   }
 }
 
@@ -154,10 +155,10 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       let trailerText: string
       try {
         trailerText = await readFile(req.result.path, 'utf8')
-      } catch {
-        return { kind: 'unknown', detail: 'Codex wrapper exited successfully without a readable trailer' }
+      } catch (error) {
+        return { kind: 'unknown', detail: unknownCause('Codex wrapper exited successfully without a readable trailer', error, req.run_id) }
       }
-      const mapped = await mapTrailer(trailerText, req.cwd)
+      const mapped = await mapTrailer(trailerText, req.cwd, req.run_id)
       if (mapped.kind === 'unknown') return mapped
       return {
         kind: 'completed',

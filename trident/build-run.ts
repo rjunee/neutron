@@ -1,6 +1,9 @@
 import { applyReviewCi } from './gates/review-ci.ts'
 import { builderBranch, confirmedMerged, fixLanded } from './gates/build-transition.ts'
 import { createLogger } from '@neutronai/logger'
+// `blocked()` takes a STRING, so this uses the runtime helper rather than the gate
+// wrapper in `./gates/unknown-cause.ts`, which returns a `GateResult`.
+import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
 import {
   placementFor,
@@ -287,8 +290,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       try {
         outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
-        if (role === 'review') return { stop: blocked('infra-only: Review round threw before producing synthesis') }
-        if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
+        if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review round threw before producing synthesis', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
+        if (role === 'plan' && replansUsed > 0) return { stop: blocked(unknownCause('design-gap: re-plan-failed: planner threw before producing a revised execution spec', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
         throw error
       }
       switch (outcome.kind) {

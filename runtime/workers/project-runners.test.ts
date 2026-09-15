@@ -155,8 +155,20 @@ test('decoder rejects missing validator and accepts missing host observations', 
 test('decoder rejects malformed envelope and blocked reasons', async () => {
   const f = await fixture()
   for (const value of [null, [], 4, 'text']) expect(f.decode(value)).toEqual({ kind: 'unknown', detail: 'Trailer object missing.' })
-  expect(decodeProjectTrailer('{', f.request, f.options.trailer)).toEqual({ kind: 'unknown', detail: 'Trailer JSON or host validation could not be read.' })
+  expect(decodeProjectTrailer('{', f.request, f.options.trailer)).toEqual({
+    kind: 'unknown',
+    detail: "Trailer JSON or host validation could not be read.: SyntaxError: JSON Parse error: Expected '}'",
+  })
   for (const on of [undefined, '', ' ', 4]) expect(f.decode({ ...f.envelope, kind: 'blocked', on })).toEqual({ kind: 'unknown', detail: 'Trailer blocked reason missing.' })
+})
+
+test('decoder host exceptions retain their cause and stay unknown', async () => {
+  const f = await fixture()
+  f.options.trailer.schemas = new Map([['result-v1', () => { throw Error('validator process offline') }]])
+  expect(f.decode()).toEqual({
+    kind: 'unknown',
+    detail: 'Trailer JSON or host validation could not be read.: Error: validator process offline',
+  })
 })
 
 test('separate projects keep their topics and reservations isolated', async () => {

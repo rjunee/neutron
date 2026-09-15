@@ -69,6 +69,14 @@ import {
   type InnerEscalation,
 } from './escalation-evidence.ts'
 import { parseTerminalCause, type TerminalCause } from './terminal-cause.ts'
+/**
+ * How much of a terminal cause is persisted. The runtime-owned value is mirrored by
+ * `trident/inner-workflow.mjs`, which cannot import TS, and the two MUST agree.
+ * At 300 the round-1 unreadable-head cause lost its only actionable trailing clause.
+ */
+import { TERMINAL_CAUSE_MAX } from '@neutronai/runtime/refusal-cause.ts'
+
+export { TERMINAL_CAUSE_MAX } from '@neutronai/runtime/refusal-cause.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -813,16 +821,6 @@ Do EXACTLY this, nothing else:
 
 Settle your turn the instant the Workflow tool returns. The build continues in the background.`
 }
-
-/**
- * How much of a terminal cause is persisted. THE SAME NUMBER AS `TERMINAL_CAUSE_MAX` in
- * `trident/inner-workflow.mjs` — that file cannot import TS, so the constant is mirrored
- * rather than shared, and the two MUST agree: the workflow caps the sentence it composes,
- * this caps whatever arrives, and the smaller of the two is the one that actually decides.
- * At 300 the round-1 unreadable-head cause (331 chars with a real 43-character branch name)
- * lost its trailing "re-run when the read succeeds" — the only actionable clause in it.
- */
-export const TERMINAL_CAUSE_MAX = 500
 
 /**
  * Decode the workflow's escalation payload, or `null`.

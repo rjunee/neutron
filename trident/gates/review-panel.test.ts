@@ -49,6 +49,14 @@ test('G057 G060 missing panel facts are infrastructure blocks', async () => {
   const f = fixture(); expect(await f.check(null)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   f.synthesis.payload = null; expect(await f.check(approve)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
+test('review host exceptions retain their cause without changing the infrastructure classification', async () => {
+  const f = fixture()
+  f.source.readSynthesis = async () => { throw Error('synthesis transport offline') }
+  expect(await f.check()).toEqual({
+    kind: 'blocked',
+    on: 'infra-only: Review panel host observation failed: Error: synthesis transport offline',
+  })
+})
 test('review peer deferral or missing provider refuses by configured name and retries once', async () => {
   for (const status of ['deferred', 'unavailable', 'rate-limited'] as const) {
     const f = fixture()
