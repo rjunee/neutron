@@ -331,7 +331,7 @@ describe('the HTTP surface', () => {
     // shape, which made it assert that a review seat could not be switched off.
     // Every row still includes its own default — a row that omitted it could not
     // offer the model it already runs (pinned by the loop below).
-    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'claude', 'codex', 'kimi'])
+    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'claude', 'codex', 'kimi', 'api'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).not.toContain('none')
     for (const p of phases) expect(p.groups).toContain(p.group)
@@ -497,4 +497,32 @@ describe('the HTTP surface', () => {
     )
     expect(res).toBeNull()
   })
+
+  it('configured seats report their own credential and retired selections reach the build', async () => {
+    const oldRows = process.env['NEUTRON_REVIEW_SEATS']
+    const oldKey = process.env['REVIEW_TEST_KEY']
+    try {
+      process.env['NEUTRON_REVIEW_SEATS'] = JSON.stringify([{ tier: 'glm-review', provider: 'zai',
+        model: 'glm-model', endpoint: 'http://127.0.0.1/completions', credential: 'REVIEW_TEST_KEY' }])
+      delete process.env['REVIEW_TEST_KEY']
+      const surface = await surfaceFor()
+      const missing = await (await surface.handler(req('GET')))!.json() as { model_tiers: Array<Record<string, unknown>> }
+      expect(missing.model_tiers.find((seat) => seat['tier'] === 'glm-review')).toMatchObject({
+        available: false, unavailable_reason: 'review seat glm-model: needs REVIEW_TEST_KEY',
+      })
+      process.env['REVIEW_TEST_KEY'] = 'test-key'
+      const ready = await (await surface.handler(req('GET')))!.json() as { model_tiers: Array<Record<string, unknown>> }
+      expect(ready.model_tiers.find((seat) => seat['tier'] === 'glm-review')?.['available']).toBe(true)
+      expect(await writeTridentPhaseModels(db, SCOPE, { review_codex: { model: 'glm-review' } })).toEqual({ ok: true, errors: [] })
+      process.env['NEUTRON_REVIEW_SEATS'] = '[]'
+      expect(readTridentPhaseModels(db, SCOPE)).toEqual({ review_codex: { model: 'glm-review' } })
+      expect(readTridentPhaseModelsWithRejected(db, SCOPE).rejected).toEqual({ review_codex: { model: 'glm-review' } })
+    } finally {
+      if (oldRows === undefined) delete process.env['NEUTRON_REVIEW_SEATS']
+      else process.env['NEUTRON_REVIEW_SEATS'] = oldRows
+      if (oldKey === undefined) delete process.env['REVIEW_TEST_KEY']
+      else process.env['REVIEW_TEST_KEY'] = oldKey
+    }
+  })
+
 })

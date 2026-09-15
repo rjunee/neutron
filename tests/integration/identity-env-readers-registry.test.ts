@@ -397,6 +397,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at trident/codex-project-owner.ts:17 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/code-command.ts':
     'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/model-tiers.ts':
+    'Broad credential-name validation regex at trident/model-tiers.ts:256 matches identity-name candidates; registered conservatively. Its only env access reads NEUTRON_REVIEW_SEATS at trident/model-tiers.ts:239, not an identity variable.',
   'trident/mutation-prover.ts':
     'Broad regex literal at trident/mutation-prover.ts:1050 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/slugify-task.ts':

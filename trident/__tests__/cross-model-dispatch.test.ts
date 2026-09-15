@@ -21,7 +21,7 @@
  * reviewed with the wrong model.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,6 +37,20 @@ import {
 } from '../inner-loop.ts'
 import { classifyInnerFailure } from '../orchestrator.ts'
 import { TRIDENT_PHASES } from '../phase-models.ts'
+
+const savedSeats = process.env['NEUTRON_REVIEW_SEATS']
+const savedKey = process.env['REVIEW_TEST_KEY']
+afterEach(() => {
+  if (savedSeats === undefined) delete process.env['NEUTRON_REVIEW_SEATS']
+  else process.env['NEUTRON_REVIEW_SEATS'] = savedSeats
+  if (savedKey === undefined) delete process.env['REVIEW_TEST_KEY']
+  else process.env['REVIEW_TEST_KEY'] = savedKey
+})
+function configureSeat() {
+  process.env['NEUTRON_REVIEW_SEATS'] = JSON.stringify([{ tier: 'deep-review', provider: 'deepseek',
+    model: 'deepseek-review', endpoint: 'http://127.0.0.1/completions', credential: 'REVIEW_TEST_KEY' }])
+  process.env['REVIEW_TEST_KEY'] = 'test-key'
+}
 
 const SRC = readFileSync(fileURLToPath(new URL('../inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -456,7 +470,8 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
   })
 
   test('both generic seats dispatch every executor family they declare', async () => {
-    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3' } as const
+    configureSeat()
+    const tierForGroup = { none: 'none', claude: 'opus', codex: 'terra', kimi: 'k3', api: 'deep-review' } as const
 
     for (const [phase, label] of [
       ['review_codex', 'argus:codex'],
@@ -481,6 +496,11 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
             effort: 'high',
             cli: false,
           })
+        } else if (group === 'api') {
+          expect(seat?.prompt).toContain("api-review-cli.ts' 'deep-review'")
+          expect(seat?.prompt).toContain('deepseek-review')
+          expect(seat?.prompt).toContain(fileURLToPath(new URL('../api-review-cli.ts', import.meta.url)))
+          expect(seat?.prompt).not.toContain('test-key')
         } else {
           expect({ phase, group, cli: seat?.prompt.includes(group === 'kimi' ? 'KIMI K3 CROSS-MODEL REVIEW bridge' : 'CODEX CROSS-MODEL REVIEW bridge') }).toEqual({
             phase,
@@ -1709,20 +1729,31 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     phaseModels,
   })
 
-  test('a RETIRED tier keeps the phase default and names itself in the log', async () => {
-    expect(productionArgs({ review_codex: { model: 'gpt-5.7-nova' } })['phaseModels']).toBeUndefined()
-
-    const { captured, logs } = await runWorkflow(past({ review_codex: { model: 'gpt-5.7-nova' } }))
-    // FALLS BACK, never dispatches the unknown id: a value the registry cannot place
-    // carries no transport, so "send it anyway" means handing it to whichever
-    // executor happens to be wired.
-    const cmd = promptFor(captured, 'argus:codex')
-    expect(cmd).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
-    expect(cmd).not.toContain('gpt-5.7-nova')
-    expect(
-      logs.some((l) => l.includes('IGNORED') && l.includes('unknown-tier') && l.includes('gpt-5.7-nova')),
-    ).toBe(true)
+  test('a RETIRED tier refuses by name through the production launcher', async () => {
+    const args = productionArgs({ review_codex: { model: 'gpt-5.7-nova' } })
+    expect(args['phaseModels']).toEqual({ review_codex: { model: 'gpt-5.7-nova' } })
+    const { captured, result } = await runWorkflow(args)
+    expect(captured.some((call) => call.label === 'argus:codex')).toBe(false)
+    expect(captured.some((call) => call.label === 'argus:claude')).toBe(true)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain('gpt-5.7-nova')
   })
+
+  for (const [phase, label] of [['review_codex', 'argus:codex'], ['review_kimi', 'argus:kimi']] as const) {
+  test(`a configured model without its credential remains a named blocking panel seat: ${phase}`, async () => {
+    configureSeat()
+    delete process.env['REVIEW_TEST_KEY']
+    const args = productionArgs({ [phase]: { model: 'deep-review' } })
+    const { captured, result } = await runWorkflow(args)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain('deepseek-review')
+    expect(JSON.stringify(result)).toContain('missing credential')
+    expect(captured.find((call) => call.label === 'argus:synthesis')?.prompt).toContain('DEFERRED')
+    expect(captured.find((call) => call.label === 'argus:synthesis')?.prompt).toContain('deepseek-review')
+    expect(captured.some((call) => call.label === label)).toBe(false)
+    expect(captured.some((call) => call.label === 'argus:claude')).toBe(true)
+  })
+  }
 
   test('a tier from an executor this step cannot reach is refused, not handed to agent()', async () => {
     // The rubric reviewer has ONE dispatch, `agent({model})`, which resolves against
@@ -1745,4 +1776,27 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     const { logs } = await runWorkflow(past({ review_codex: { effort: 'max' } }))
     expect(logs.some((l) => l.includes('IGNORED') && l.includes('effort-not-settable'))).toBe(true)
   })
+})
+
+for (const [tier, model] of [['k3', 'kimi-k3'], ['sol', 'gpt-5.6-sol']]) {
+  test(`explicit ${tier} without credentials blocks by name`, async () => {
+    const args = productionArgs({ review_codex: { model: tier! } })
+    args['kimiConfigured'] = false
+    args['codexHome'] = null
+    const { result } = await runWorkflow(args)
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(result)).toContain(model!)
+  })
+}
+
+
+test('configured API seat refuses a missing harness wrapper path', async () => {
+  configureSeat()
+  const args = productionArgs({ review_codex: { model: 'deep-review' } })
+  delete args['apiReviewScript']
+  const { captured, result, logs } = await runWorkflow(args)
+  expect(result['verdict']).toBe('REQUEST_CHANGES')
+  expect(JSON.stringify(result)).toContain('deepseek-review')
+  expect(logs.some((line) => line.includes('missing apiReviewScript'))).toBe(true)
+  expect(captured.some((call) => call.label === 'argus:codex')).toBe(false)
 })
