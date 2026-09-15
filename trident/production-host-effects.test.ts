@@ -473,11 +473,16 @@ test('local-mode driver reaches merged through the real production effect', asyn
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
@@ -524,14 +529,24 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     cwd: f.worktree, writable: true, network: false, tools: 'edit-and-run',
     brief: { path, integrity: briefIntegrity(workContextPath(path)) }, result: { schema: 'test', path: join(f.dir, 'result') },
     thread: null, budget: { wall_ms: 1000 } }
-  const runner = fakeRunner('pi', { outcomes: new Map<string, BoundedWorkOutcome>(
-    ['fix', 'review', 'plan', 'build'].flatMap(role => Array.from({ length: 7 }, (_, n) => [
-      `${f.row.id}:${role}:${n}`, { kind: 'completed', result: { ...snapshot,
-        // A resumed run has a re-plan already spent, so G075 requires the planner
-        // to return a revised execution spec; the counters stay wrong on purpose,
-        // because the host's are the ones that must win.
-        payload: role === 'plan' ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 } : { round: 0, replansUsed: 0 },
-        round: 0, replansUsed: 0 } } as BoundedWorkOutcome] as const))) })
+  // Every role reports what the repository ACTUALLY holds at the moment it answers,
+  // because the fixer below commits for real and a trailer pinned to the fixture's
+  // opening snapshot would disagree with the host's measurement one round later.
+  // The counters stay wrong on purpose: the host's are the ones that must win, and
+  // a resumed run has a re-plan already spent, so G075 needs a revised spec.
+  const runner = fakeRunner('pi')
+  runner.run = async request => {
+    runner.calls.push(request)
+    if (request.role === 'fix') {
+      await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', `fix ${request.step_id}`])
+    }
+    const now = await measured(f)
+    const payload = request.role === 'plan'
+      ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 }
+      : { round: 0, replansUsed: 0 }
+    return { kind: 'completed', result: { ...now, payload, round: 0, replansUsed: 0 },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
   const restarted = createProductionHostEffects(f.options)
   const rounds: number[][] = []
   const deps: BuildRunDeps = { ...restarted.effects, modes: restarted.modes,
@@ -540,14 +555,22 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     reviewGate: async (_payload, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
-    runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
+    // The preflight reports the head it scanned, and the driver refuses to publish a
+    // revision the scan did not see. The fixer commits for real, so pinning this to
+    // the fixture's opening tip reads as the revision changing after review.
+    runLeakGatePreflight: async reviewed => ({ status: 'clean', head: reviewed.head, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     publishGate: async () => ({ kind: 'blocked', on: 'fixture stops before publication' }),
     mergeGate: async () => ({ kind: 'unknown', detail: 'not reached' }),
@@ -562,8 +585,12 @@ test('production resume reloads rejected state, inherits rounds, and ignores wor
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
   expect(f.rounds).toEqual([[4, 1]])
+  // The fix commits for real, so the approved head is the one the repository now
+  // holds, not the tip the fixture opened on — and it must not be that tip.
+  const landed = (await measured(f)).head
+  expect(landed).not.toBe(f.tip)
   expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({
-    stage: 'approved', round: 4, replansUsed: 1, head: f.tip,
+    stage: 'approved', round: 4, replansUsed: 1, head: landed,
   })
 })
 

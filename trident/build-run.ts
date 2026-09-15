@@ -1,3 +1,5 @@
+import { applyReviewCi } from './gates/review-ci.ts'
+import { builderBranch, confirmedMerged, fixLanded } from './gates/build-transition.ts'
 import { createLogger } from '@neutronai/logger'
 import { createHash } from 'node:crypto'
 import {
@@ -95,6 +97,7 @@ export interface BuildRunInput {
 export interface BuildRunDeps {
   /** Required host run-row reader; only an omitted field on a known row uses the stored default. */
   readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
+  assignedBranch?: string | undefined
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
   measure(): Promise<Measurement>
@@ -105,6 +108,7 @@ export interface BuildRunDeps {
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
   reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  reviewCi?(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
@@ -184,16 +188,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     const modes = deps.modes
     if ((input.mode === 'ralph' || input.start === 'resume') && !modes) return blocked('Mode host is required')
     const resume = input.start === 'resume' ? await modes!.loadResume() : null
+    phase = resume?.pending?.phase ?? phase
+    step_id = resume?.pending?.step_id ?? step_id
+    let snapshot: BuildSnapshot
+    const initial = await deps.measure()
+    if (initial.kind === 'unknown') return unknown(initial.detail)
+    snapshot = initial.value
+    if (!local && confirmedMerged(snapshot)) return { kind: 'merged', snapshot }
     if (resume?.pending) {
       phase = resume.pending.phase
       step_id = resume.pending.step_id
       return unknown('Resume awaits the existing worker observation')
     }
-
-    let snapshot: BuildSnapshot
-    const initial = await deps.measure()
-    if (initial.kind === 'unknown') return unknown(initial.detail)
-    snapshot = initial.value
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
     if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
 
@@ -290,6 +296,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
       const measured = observation.value
+      // G036 precedes trailer and lost-round checks: merging can remove the branch.
+      if (!local && confirmedMerged(measured, snapshot.pr)) return { stop: { kind: 'merged', snapshot: measured } }
+      if (role === 'build' || role === 'fix') {
+        const payload = outcome.result && typeof outcome.result === 'object' && 'payload' in outcome.result ? outcome.result.payload : undefined
+        const branch = gateStop(builderBranch(deps.assignedBranch, payload))
+        if (branch) return { stop: branch }
+      }
+      if (role === 'fix' && !fixLanded(snapshot.head, measured.head)) return { stop: failed('Fix round did not move the measured branch head', 'round-lost-work') }
       let result = outcome.result
       if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
           && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
@@ -396,19 +410,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!deps.reviewSuite) return unknown('Review suite host is missing')
       const suite = await deps.reviewSuite(snapshot, round)
       if (suite.kind === 'unknown') return unknown(suite.detail)
+      if (!deps.reviewCi) return unknown('Review CI host is missing')
+      const ciBefore = await deps.reviewCi(snapshot)
+      if (ciBefore.kind === 'unknown') return unknown(ciBefore.detail)
+      findings = [...findings, ...ciBefore.findings.map(f => `${f.title}: ${f.evidence}`)]
       findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
       const readyRevision = await deps.measure()
       if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
       if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
+      const ci = await deps.reviewCi(snapshot)
+      if (ci.kind === 'unknown') return unknown(ci.detail)
       let currentReview: ReviewProgress | undefined
       const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
         currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
       })
-      const decision = applyReviewSuite(panel, suite)
+      const suiteDecision = applyReviewSuite(panel, suite)
+      const decision = applyReviewCi(suiteDecision, ci)
       if (currentReview) {
-        const suiteBlockers = suite.findings.filter(f => !f.advisory)
+        const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
         currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
       }
       if (decision.kind === 'blocked') return blocked(decision.on)

@@ -1,3 +1,4 @@
+import { assessReviewCi, type ReviewCiSource } from './gates/review-ci.ts'
 import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
 import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
@@ -37,6 +38,7 @@ export interface BuildHostOptions {
   local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
   reviewReadiness?: ReviewReadinessSource
+  reviewCi?: ReviewCiSource
   reviewSuite?: ReviewSuiteSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
@@ -84,6 +86,9 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
       return { kind: 'known', max_rounds: row.max_rounds }
     },
+    // A missing run row is the cap reader's `unknown`, not a crash here: the same
+    // test deletes the row to exercise that refusal.
+    assignedBranch: options.mutation.run?.branch ?? (options.mutation.run?.slug ? `trident/${options.mutation.run.slug}` : undefined),
     ...(options.modes ? { modes: options.modes } : {}),
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
@@ -128,6 +133,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
       ? localReadiness(snapshot)
       : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
+    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
     reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
