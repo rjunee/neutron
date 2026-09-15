@@ -399,6 +399,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/mutation-prover.ts':
     'Broad regex literal at trident/mutation-prover.ts:1050 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/project-repos.ts':
+    'Broad repo-name regex at trident/project-repos.ts:16 allows underscores and therefore matches an identity-name candidate; registered conservatively. Project resolution takes projectDir as an input and does not read the environment.',
   'trident/slugify-task.ts':
     'Broad regex literal at trident/slugify-task.ts:20 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/wrong-base-remedy.ts':
